@@ -1,0 +1,2 @@
+https://en.wikipedia.org/wiki/Universal_approximation_theorem
+neural networks can represent a wide variety of interesting functions when given appropriate weights.
