@@ -1,0 +1,37 @@
+Humans: 10^11 neurons, 10^15 synapses
+Rat: 10^8 neurons, 10^12 synapses
+Bee: 10^5 neurons, 10^9 synapses
+
+10^3 synapses per neuron
+Let's compute space requirements for running a bee-size brain on this laptop, then move to EC2 for larger testing
+
+
+Scenario Gardens
+
+Living in Analog
+================
+A being may only receive information about the world and itself via analog-like inputs
+Goal: Being learns to replicate it's input to some degree
+Step 1A: Define an analog imitation filter or context limiter such as adding white noise to communications
+Step 1B: Create a real-life filter for output/input screen-camera, speaker-microphone
+Step 2: Feedback being's actions as new inputs so it can learn about how itself works
+
+
+Conversation
+============
+Small groups of beings must attempt to communicate with each other.
+Goal: create a language or framework on which communication of idea can take place
+Step 1: communication can only take place via some limited analog-like medium
+
+
+Survival of the Fittest
+======================
+Make beings compete for resources
+vDNA randomizer creates diversity of beings
+A new being regularly is spawned based on vDNA of healthiest beings
+Health must be obtained via food goals.
+Cooperation unlocks ability to harvest more food.
+Aggression steals food from others.
+
+Goal: beings optimized for risk-taking decision making
+
