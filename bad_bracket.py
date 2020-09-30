@@ -1,51 +1,24 @@
-import random
-#
-# players = ['tom', 'amps', 'trey', 'dew', 'tony', 'bua', 'emily', 'perry', 'maddie']
-#
-# max_matches_count = 100
-# teams = []
-# rand_players = players.copy()
-# random.shuffle(rand_players)
-# rev_rand_players = rand_players.copy()
-# rev_rand_players.reverse()
-#
-# print(f"\n\nBadminton players: {', '.join(rand_players)}")
-#
-# for p1 in rand_players[:6]:
-#     for p2 in rev_rand_players[:6]:
-#         if [p2,p1] not in teams and not p1==p2:
-#             if 4 < sum(players.index(p) for p in [p1,p2]) < 12:
-#                 teams.append([p1,p2])
-#
-# random.shuffle(teams)
-#
-# print(f"\n{len(teams)} possible teams. \nExamples:")
-# for team in teams[:5]:
-#     print('+'.join(team))
-#
-# matches = []
-# for team1 in teams:
-#     for team2 in teams:
-#         if len(matches) >= max_matches_count:
-#             break
-#         if [team2, team1] not in matches and not any(player in team2 for player in team1):
-#             matches.append([team1, team2])
-#
-# random.shuffle(matches)
-# matches = matches[:max_matches_count]
-# print(f"\n{len(matches)} matches. \n Examples")
-# for match in matches[:5]:
-#     print(f"{match[0][0]}+{match[0][1]} vs. {match[1][0]}+{match[1][1]}")
-#
 
-import numpy as np
+# toms_player_rank_tuples_set = {
+#     ('tom', 8), ('amps', 7), ('trey', 6),
+#     ('dew', 5), ('tony', 5),
+#     ('bua', 3), ('emily', 5), ('perry', 4), ('maddie', 2),
+# }
+# amps_player_rank_tuples_set = {
+#     ('tom', 9), ('amps', 8), ('trey', 8),
+#     ('emily', 7), ('dew', 6), ('bua', 6), ('tony', 4),
+#     ('perry', 4), ('maddie', 4),
+# }
+
+import random
 from itertools import combinations, permutations, product
 
 player_rank_tuples_set = {
-    ('tom', 8), ('amps', 7), ('trey', 6),
-    ('dew', 5), ('tony', 5),
-    ('bua', 3), ('emily', 3), ('perry', 2), ('maddie', 2),
+    ('tom', 9), ('amps', 8), ('trey', 7),
+    ('emily', 5), ('dew', 5), ('bua', 4), ('tony', 4),
+    ('perry', 3), ('maddie', 2),
 }
+
 player_rank_dict = dict(list(player_rank_tuples_set))
 player_names = [name for name, rank in player_rank_tuples_set]
 
