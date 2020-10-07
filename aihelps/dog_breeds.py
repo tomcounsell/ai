@@ -13,6 +13,10 @@ def parse_ncode(folder_name):
     return re.findall('.+/(n\d+)-[\w-]+$', folder_name)[0]
 
 BREED_NAMES = {parse_ncode(str(sub_dir)): parse_breed_name(str(sub_dir)) for sub_dir in DATASET_PATH.ls()}
+# print(f"Some dog breeds: {list(BREED_NAMES.values())[:5]}")
+
+def get_breed_from_filename(filename):
+    return BREED_NAMES[re.findall('(n\d+).+.jpg$', str(filename))[0]]
 
 Path.BASE_PATH = DATASET_PATH
 
@@ -20,15 +24,17 @@ dogs = DataBlock(
     blocks=(ImageBlock, CategoryBlock),
     get_items=get_image_files,
     splitter=RandomSplitter(seed=RANDOM_SEED),
-    get_y=lambda filename: BREED_NAMES[re.findall('(n\d+).+.jpg$', str(filename))[0]],
+    get_y=get_breed_from_filename,
     item_tfms=Resize(460),
     batch_tfms=aug_transforms(size=224, min_scale=0.75)
 )
 dataloaders = dogs.dataloaders(DATASET_PATH)
+# dataloaders.show_batch(nrows=2, ncols=4)
 
 from fastai.callback.fp16 import *
 learn = cnn_learner(dataloaders, resnet50, metrics=error_rate).to_fp16()
 learn.fine_tune(6, freeze_epochs=3)
+
 learn.export(AI_MODEL_FILENAME)
 
 # # LOAD AND USE LATER WITH
