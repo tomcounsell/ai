@@ -115,8 +115,8 @@ staticfiles/
 .DS_Store
 
 node_modules/
-bootstrap-theme/docs/
-bootstrap-theme/scss/
+static/vendor/bootstrap-theme/docs/
+static/vendor/bootstrap-theme/scss/
 *.rdb
 static/theme-dashboard.zip
 .idea/
