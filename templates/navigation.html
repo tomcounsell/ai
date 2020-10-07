@@ -1,0 +1,39 @@
+{% load static %}
+
+<nav class="sidebar-nav">
+  <div class="sidebar-header">
+    <button class="nav-toggler nav-toggler-md sidebar-toggler" type="button" data-toggle="collapse" data-target="#nav-toggleable-md">
+      <span class="sr-only">Toggle nav</span>
+    </button>
+    <a class="sidebar-brand img-responsive text-nowrap" href="/">
+      <img src="{{ STATIC_URL }}images/logo.png" style="margin: 40px 0 0 0px; max-width: 150px; max-height: 30px">
+    </a>
+  </div>
+
+  <div class="collapse nav-toggleable-md" id="nav-toggleable-md">
+    <form class="sidebar-form">
+      <input class="form-control" type="text" placeholder="Search...">
+      <button type="submit" class="btn-link">
+        <span class="fa fa-search"></span>
+      </button>
+    </form>
+
+    <hr class="visible-xs mt-3">
+
+    <ul class="nav nav-pills nav-stacked flex-column">
+
+      <li class="nav-item">
+{#        {% if request.GET.next %}#}
+{#          <a class="nav-link" href="{% url 'user:login' %}?next={{ request.GET.next }}">#}
+{#        {% else %}#}
+{#          <a class="nav-link" href="{% url 'user:login' %}">#}
+{#        {% endif %}#}
+            Sign In
+{#          </a>#}
+      </li>
+
+    </ul>
+
+    <hr class="visible-xs mt-3">
+  </div>
+</nav>

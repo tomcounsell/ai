@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  {% spaceless %}
+    <title>
+      {% block tab_title %}Service{% endblock tab_title %} | Sample Django Heroku App
+    </title>
+  {% endspaceless %}
+
+  {% block viewport %}
+    <meta name="viewport" content="width=480, maximum-scale=1.0, user-scalable=no" />
+  {% endblock viewport %}
+
+  <!---META TAGS--->
+  {% block additional_meta_tags %}
+  {% endblock additional_meta_tags %}
+
+  <!--FAVICON--> <!--iOS and Android icons-->
+  <!--{#  <link rel="apple-touch-icon-precomposed" href="{{ STATIC_URL }}images/apple-touch-icon-152x152.png">#}-->
+
+  {% if DEBUG %}
+    <link href="{{ STATIC_URL }}vendor/bootstrap/css/bootstrap.min.css" rel="stylesheet">
+    <link href="{{ STATIC_URL }}vendor/font-awesome/css/font-awesome.min.css" rel="stylesheet">
+    <script src="{{ STATIC_URL }}vendor/jquery/js/jquery-3.2.1.slim.js"></script>
+    <script src="{{ STATIC_URL }}vendor/bootstrap/js/tether.min.js"></script>
+    <script src="{{ STATIC_URL }}vendor/tether/js/bootstrap.min.js"></script>
+
+  {% else %}
+    <link href="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-alpha.6/css/bootstrap.min.css" rel="stylesheet"
+          integrity="sha384-rwoIResjU2yc3z8GV/NPeZWAv56rSmLldC3R/AZzGRnGxQQKnKkoFVhFQhNUwEyJ" crossorigin="anonymous">
+
+    <link href="https://maxcdn.bootstrapcdn.com/font-awesome/4.6.3/css/font-awesome.min.css" rel="stylesheet"
+          integrity="sha384-T8Gy5hrqNKT+hzMclPo118YTQO6cYprQmhrYwIiQ/3axmI1hQomh7Ud2hPOy8SP1" crossorigin="anonymous">
+
+    <script src="https://code.jquery.com/jquery-3.2.1.min.js" integrity="sha256-hwg4gsxgFZhOsEEamdOYGBf13FyQuiTwlAQgxVSNgt4" crossorigin="anonymous"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tether/1.4.0/js/tether.min.js" integrity="sha384-DztdAPBWPRXSA/3eYEEUWrWCy7G5KFbe8fFjk5JAIxUYHKkDx6Qin1DkWx51bBrb" crossorigin="anonymous"></script>
+
+    <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-alpha.6/js/bootstrap.min.js" integrity="sha384-vBWWzlZJ8ea9aCX4pEW3rVHjgjt7zpkNpZk+02D9phzyeVkE+jo0ieGizqPLForn" crossorigin="anonymous"></script>
+
+  {% endif %}
+
+  <link href="{{ STATIC_URL }}vendor/bootstrap-theme/compiled/toolkit-inverse.min.css" rel="stylesheet">
+  <link href="{{ STATIC_URL }}css/base.css?v=2" rel="stylesheet">
+  {% block css %}
+  {% endblock css %}
+</head>
+
+<body>
+
+  <div class="container-fluid mb-5">
+    <div class="row">
+
+{#      <div class="col-md-3 sidebar">#}
+{#        {% block navigation %}#}
+{#          {% include 'navigation.html' %}#}
+{#        {% endblock navigation %}#}
+{#      </div>#}
+
+      <div class="col-md-12 content" style="padding-top: 2.1rem;">
+
+        {% block messages %}
+          {% include 'messages.html' %}
+        {% endblock messages %}
+
+        <div class="dashhead">
+
+          <div class="dashhead-titles">
+            <h6 class="dashhead-subtitle">
+              {% block content_subtitle %}Sample Django Heroku App{% endblock %}
+            </h6>
+            <h3 class="dashhead-title">
+              {% block content_title %}&nbsp;{% endblock %}
+            </h3>
+          </div>
+
+          <div class="dashhead-toolbar">
+            {% block content_toolbar %}
+              <div class="btn-group dashhead-toolbar-item">
+                {% block content_toolbar_items %}{% endblock %}
+              </div>
+            {% endblock content_toolbar %}
+          </div>
+        </div>
+        <hr class="visible-xs mt-3">
+
+        {% block content %}
+          <p>Hello World</p>
+        {% endblock content %}
+
+      </div>
+    </div>
+  </div>
+
+  <nav class="navbar fixed-bottom navbar bg-faded">
+    {% block footer %}
+      {% include 'footer.html' %}
+    {% endblock footer %}
+  </nav>
+
+  <!--Javascript Placed at the end of the document. Pages load faster. -->
+  <script src="{{ STATIC_URL }}javascript/base.js"></script>
+  {% block javascript %}
+  {% endblock javascript %}
+
+</body>
+</html>
