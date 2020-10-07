@@ -1,7 +1,7 @@
 boto3==1.13.7
 celery==4.4.0
 celery-redbeat==0.11.1
-decorator==4.0.10
+decorator==4.4.2
 dj-database-url==0.4.1
 dj-static==0.0.6
 Django==3.0.7
@@ -22,6 +22,7 @@ django-user-agents==0.4.0
 django-widget-tweaks
 djangorestframework==3.11.0
 djangorestframework-simplejwt==4.4.0
+fastai==2.0.9
 ipython
 psycopg2 # for production
 # psycopg2-binary # for local dev
@@ -29,7 +30,7 @@ pytz==2020.1
 PyYAML
 redis==3.5.1
 requests-oauthlib==1.3.0
-requests==2.23.0
+requests==2.24.0
 schedule==0.6.0
 simplejson
 six
