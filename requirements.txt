@@ -22,11 +22,8 @@ django-user-agents==0.4.0
 django-widget-tweaks
 djangorestframework==3.12.1
 djangorestframework-simplejwt==4.4.0
-fastai==2.0.6
-fastai2==0.0.30
-fastcore==1.0.0
 ipython
-# psycopg2 # for production
+psycopg2 # for production
 # psycopg2-binary # for local dev
 pytz==2020.1
 PyYAML
@@ -38,3 +35,10 @@ simplejson
 six
 toolz
 waitress==1.4.4
+
+numpy
+pandas
+https://download.pytorch.org/whl/cpu/torch-1.6.0%2Bcpu-cp37-cp37m-linux_x86_64.whl
+fastai==2.0.6
+fastai2==0.0.30
+fastcore==1.0.0
