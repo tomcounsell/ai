@@ -2,11 +2,9 @@ import logging
 import requests
 
 from ai.agents.abstract_agent import Agent
-from ai.scripts.dog_breeds import AI_MODEL_FILENAME
-
 
 class DogBreedsAgent(Agent):
-    model_file = AI_MODEL_FILENAME
+    learner_filename = ""
 
     def name_breed_from_image_url(self, image_url: str) -> str:
 
