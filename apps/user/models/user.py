@@ -18,7 +18,6 @@ class User(AbstractUser, Timestampable, Locatable):
     # SERVICE SETTINGS
     email_is_verified = models.BooleanField(default=False)
     agreed_to_terms_at = models.DateTimeField(blank=True, null=True)
-    # timezone = TimeZoneField(blank=True, null=True)  # https://github.com/mfogel/django-timezone-field
     # notifications_enabled = models.BooleanField(default=False)
     # beta_tester_since = models.DateTimeField(blank=True, null=True)
 

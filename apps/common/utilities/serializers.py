@@ -1,5 +1,5 @@
+import six
 from rest_framework import serializers
-from django.utils import six
 from timezone_field import TimeZoneField as TimeZoneModelField
 
 

@@ -13,7 +13,6 @@ from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
 from apps.api.serializers.user import UserSerializer
-from apps.communication.views.email.email import SIBEmail
 from apps.user.models import User
 from settings import logger
 from django.core.validators import validate_email
@@ -102,14 +101,14 @@ class UserViewSet(mixins.CreateModelMixin,
             return Response(status=status.HTTP_401_UNAUTHORIZED, data={"status": "user already registered, please login"})
 
         # if this was an attempt to update an unverified email address
-        if "email" in request.data and not user.email_is_verified:
-
-            # send an email to the user with a four digit code:
-            email = SIBEmail(to_user=user, template_name="account-activate-mobile")
-            email.to_email = user.email # because email address is not yet validated, so force it
-            email.data['four_digit_code'] = user.four_digit_login_code
-            email.data['iOS_login_deep_link'] = user.iOS_login_deep_link
-            email.send()
+        # if "email" in request.data and not user.email_is_verified:
+        #
+        #     # send an email to the user with a four digit code:
+        #     email = SIBEmail(to_user=user, template_name="account-activate-mobile")
+        #     email.to_email = user.email # because email address is not yet validated, so force it
+        #     email.data['four_digit_code'] = user.four_digit_login_code
+        #     email.data['iOS_login_deep_link'] = user.iOS_login_deep_link
+        #     email.send()
 
         if "is_agreed_to_terms" in request.data:
             user.is_agreed_to_terms = True
@@ -134,29 +133,29 @@ class UserViewSet(mixins.CreateModelMixin,
         else:
             return User.objects.filter(id=self.request.user.id)
 
-    @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
-    def request_login_code(self, request, pk=None, *args, **kwargs):
-        """
-        use this endpoint to request a code sent to user to login to the app, equivalent to a one-time password
-        will fail if the user is not active or the email is not verified
-        """
-        if 'email' in request.data:
-            user = User.objects.filter(email=request.data['email'], email_is_verified=True).first()
-        elif 'username' in request.data:
-            user = User.objects.filter(username=request.data['username'], email__isnull=False, email_is_verified=True).first()
-        else:
-            user = User.objects.filter(id=pk, email__isnull=False, email_is_verified=True).first()
-
-        if user and user.is_active:
-            email = SIBEmail(to_user=user, template_name="account-login-code")
-            email.to_email = user.email  # because email address is not yet validated, so force it
-            email.data['four_digit_code'] = user.four_digit_login_code
-            email.data['iOS_login_deep_link'] = user.iOS_login_deep_link
-            email.send()
-            return Response(status=status.HTTP_202_ACCEPTED, data={"status": f"code sent to {user.email}"})
-        else:
-            return Response(status=status.HTTP_406_NOT_ACCEPTABLE,
-                            data={"status": f"nope. user either not found, not active, or unverified email"})
+    # @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
+    # def request_login_code(self, request, pk=None, *args, **kwargs):
+    #     """
+    #     use this endpoint to request a code sent to user to login to the app, equivalent to a one-time password
+    #     will fail if the user is not active or the email is not verified
+    #     """
+    #     if 'email' in request.data:
+    #         user = User.objects.filter(email=request.data['email'], email_is_verified=True).first()
+    #     elif 'username' in request.data:
+    #         user = User.objects.filter(username=request.data['username'], email__isnull=False, email_is_verified=True).first()
+    #     else:
+    #         user = User.objects.filter(id=pk, email__isnull=False, email_is_verified=True).first()
+    #
+    #     if user and user.is_active:
+    #         email = SIBEmail(to_user=user, template_name="account-login-code")
+    #         email.to_email = user.email  # because email address is not yet validated, so force it
+    #         email.data['four_digit_code'] = user.four_digit_login_code
+    #         email.data['iOS_login_deep_link'] = user.iOS_login_deep_link
+    #         email.send()
+    #         return Response(status=status.HTTP_202_ACCEPTED, data={"status": f"code sent to {user.email}"})
+    #     else:
+    #         return Response(status=status.HTTP_406_NOT_ACCEPTABLE,
+    #                         data={"status": f"nope. user either not found, not active, or unverified email"})
 
 
     @action(detail=True, methods=['post'], permission_classes=[IsAuthenticated])
