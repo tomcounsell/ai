@@ -23,7 +23,7 @@ DEBUG = LOCAL or STAGE
 WSGI_APPLICATION = 'settings.wsgi.application'
 
 ALLOWED_HOSTS = [
-    # '.mycompany.com',
+    '.aihelps.xyz',
     '.herokuapp.com',
     '.amazonaws.com',
     'localhost',
