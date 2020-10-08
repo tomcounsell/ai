@@ -3,6 +3,7 @@ from django.contrib import admin
 from django.urls import path
 from django.views.generic import TemplateView
 from settings import DEBUG
+from apps.api.urls import api_router
 
 urlpatterns = [
 
@@ -12,6 +13,8 @@ urlpatterns = [
     # route prefix for urlpatterns in apps/dashboard/urls.py
     # path('dashboard/', include('apps.dashboard.urls', namespace='dashboard')),
     # if using namespace, include app_name = "dashboard" in urls.py
+
+    url(r'^api/', include(api_router.urls)),
 
 ]
 
