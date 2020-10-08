@@ -1,11 +1,14 @@
-from fastai.vision.all import *
-import random
-RANDOM_SEED = 42  # random.randint(1,100)
-DATASET_PATH = Path('/Users/tomcounsell/src/ai/datasets/dogs/images/')
-EXAMPLE_IMAGE_FILEPATH = DATASET_PATH/'n02085782-Japanese_spaniel/n02085782_50.jpg'
 AI_MODEL_FILENAME = 'model_export.pkl'
 
+"""
 import re
+import random
+from fastai.vision.all import *
+
+RANDOM_SEED = 42  # random.randint(1,100)
+DATASET_PATH = Path('/Users/tomcounsell/src/ai/datasets/dogs/images/')
+EXAMPLE_IMAGE_FILEPATH = DATASET_PATH / 'n02085782-Japanese_spaniel/n02085782_50.jpg'
+
 def parse_breed_name(folder_name):
     return re.findall('.+/n\d+-([\w-]+)$', folder_name)[0].replace("_", " ").title()
 
@@ -42,3 +45,5 @@ learn.export(AI_MODEL_FILENAME)
 # customer_photo = PILImage.create('images/some_dog.jpg')
 # breed,_,probs = learn.predict(customer_photo)
 # print(f"{probs[1].item():.2f} sure this is a {breed}")
+
+"""
