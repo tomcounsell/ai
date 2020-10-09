@@ -2,7 +2,7 @@ from os import path
 from fastai2.learner import load_learner
 from abc import ABC
 
-from apps.common.utilities.s3 import download_file_from_s3, download_s3_file_to_local
+from apps.common.utilities.s3 import download_s3_file_to_local
 
 
 class Prediction(ABC):
