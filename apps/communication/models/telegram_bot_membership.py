@@ -33,13 +33,18 @@ class TelegramBotMembership(Timestampable, models.Model):
     # MODEL FUNCTIONS
     def respond_to(self, update: Update, context: CallbackContext):
 
-        for expectation in self.expectations_list:
-            try:
-                expectation_handlers[expectation](update, context)
-            except:
-                pass
-            else:
-                return
+        if len(self.expectations_list):
+            from apps.communication.telegram.commands.commands_index import expectation_handlers
+            for expectation_name in self.expectations_list[::-1]:
+                try:
+                    response = expectation_handlers[expectation_name](update, context)
+                    logging.debug(response)
+                except Exception as e:
+                    logging.debug(str(e))
+                else:
+                    self.expectations_list.remove(expectation_name)
+                    self.save()
+                    return response
 
         if update.message.video and isinstance(update.message.video, telegram.Video):
             logging.debug(update.message.video.__dict__)

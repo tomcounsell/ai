@@ -13,6 +13,9 @@ def hello(telegram_bot_membership, message: Message, context):
 def echo(telegram_bot_membership, message: Message, context):
     return "Thanks for the args: \n\n" + '\n'.join(context.args)
 
+@telegram_command('expectations', response_type='text')
+def expectations(telegram_bot_membership, message: Message, context):
+    return "Expecting the following: " + ",".join(telegram_bot_membership.expectations_list)
 
 # UNKNOWN COMMAND - CATCHES ALL ELSE
 def unknown_command(update, context):
@@ -33,6 +36,7 @@ public_commands = [
 commands = public_commands + [
     # TEST EXAMPLE COMMANDS
     hello,
+    expectations,
     echo,
 ]
 
