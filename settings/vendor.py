@@ -49,6 +49,7 @@ DATABASES = {'default': dj_database_url.config(), }
 DEFAULT_FROM_EMAIL = "info@example.com"  # if you don't already have this in settings
 SERVER_EMAIL = "info@example.com"  # ditto (default from-email for Django errors)
 
+TELEGRAM_BOT_API_TOKEN = os.environ.get('TELEGRAM_BOT_API_TOKEN')
 
 # ANALYTICS STAGE
 # MIXPANEL_API_TOKEN = os.environ.get('MIXPANEL_API_TOKEN')
