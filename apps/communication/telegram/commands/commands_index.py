@@ -1,16 +1,16 @@
 from telegram import Message
 from apps.communication.telegram.commands.decorator import telegram_command
-from apps.communication.telegram.commands import start, help, info
+from apps.communication.telegram.commands import start, help, info, dog_breeds
 
 
 # DEFAULT COMMANDS #
 @telegram_command("hello", response_type='text')
-def hello(message: Message, context):
+def hello(telegram_bot_membership, message: Message, context):
     return f"hello, {message.from_user.first_name}"
 
 
 @telegram_command('echo')
-def echo(message: Message, context):
+def echo(telegram_bot_membership, message: Message, context):
     return "Thanks for the args: \n\n" + '\n'.join(context.args)
 
 
@@ -24,17 +24,18 @@ def unknown_command(update, context):
 
 
 public_commands = [
-
     start.start,
     help.help_command_list,
-    info.info
-
+    info.info,
+    dog_breeds.dog_breed,
 ]
 
 commands = public_commands + [
-
     # TEST EXAMPLE COMMANDS
     hello,
     echo,
-
 ]
+
+expectation_handlers = {
+    'photo_for_dog_breed': dog_breeds.handle_photo_upload
+}
