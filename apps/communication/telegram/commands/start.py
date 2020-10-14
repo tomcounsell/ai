@@ -1,6 +1,4 @@
 import logging
-
-from apps.communication.models import TelegramBotMembership
 from apps.communication.telegram.commands.decorator import telegram_command
 from telegram import Message
 
@@ -15,12 +13,8 @@ def start(telegram_bot_membership, message: Message, context):
         (username, four_digit_login_code) = context.args[0].split(":", 1)
         user = User.objects.get(username=username)
         if user.four_digit_login_code == four_digit_login_code:
-            tbm, tbm_created = TelegramBotMembership.objects.get_or_create(
-                user=user,
-                telegram_user_id=message.from_user.id
-            )
-            tbm.telegram_user_dict = str({k: v for k, v in message.from_user.__dict__.items() if not k.startswith('_')})
-            tbm.save()
+            telegram_bot_membership.telegram_user_dict = str({k: v for k, v in message.from_user.__dict__.items() if not k.startswith('_')})
+            telegram_bot_membership.save()
 
             return "\n".join([
                 "Welcome to _company_ Bot!",
