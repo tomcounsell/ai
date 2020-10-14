@@ -12,12 +12,14 @@ from settings import AUTH_USER_MODEL
 
 class TelegramBotMembership(Timestampable, models.Model):
 
-    # all memberships are for the same bt atm
-    bot_username = models.CharField(max_length=31, null=True, blank=True, help_text="eg. MyShopBot")
-    user = models.ForeignKey(AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="telegram_bot_memberships")
+    user = models.ForeignKey(AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL, related_name="telegram_bot_memberships")
+    # all memberships are for the same bot atm
+    # bot_username = models.CharField(max_length=31, null=True, blank=True, help_text="eg. MyShopBot")
+
     telegram_user_id = models.BigIntegerField(unique=True, null=True)
     telegram_user_dict = models.JSONField(default=dict)
 
+    expectations_list = models.JSONField(default=list)
 
     @property
     def telegram_user(self):
@@ -31,10 +33,16 @@ class TelegramBotMembership(Timestampable, models.Model):
     # MODEL FUNCTIONS
     def respond_to(self, update: Update, context: CallbackContext):
 
+        for expectation in self.expectations_list:
+            try:
+                expectation_handlers[expectation](update, context)
+            except:
+                pass
+            else:
+                return
 
         if update.message.video and isinstance(update.message.video, telegram.Video):
             logging.debug(update.message.video.__dict__)
-            from telegram import Video, Bot
             file = update.message.video.get_file()
 
             upload = Upload.objects.create(

@@ -2,7 +2,7 @@ from apps.communication.telegram.commands.decorator import telegram_command
 from telegram import Message
 
 @telegram_command("help")
-def help_command_list(message: Message, context):
+def help_command_list(telegram_bot_membership, message: Message, context):
     from apps.communication.telegram.commands.commands_index import public_commands
 
     return '\n'.join(

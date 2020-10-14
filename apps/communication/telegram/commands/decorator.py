@@ -7,15 +7,22 @@ from telegram.ext import CallbackContext
 
 def telegram_command(execution_handle: str, response_type='text'):
     def telegram_command_decorator(get_response: Callable):
+        from apps.communication.models import TelegramBotMembership
 
         def command_wrapper(update: Update, context: CallbackContext, *args, **kwargs):
+            telegram_bot_membership, tbm_created = TelegramBotMembership.objects.get_or_create(
+                telegram_user_id=str(update.message.from_user.id)
+            )
 
             # run command with (or without) args and get response
-
-            response = get_response(message=update.message, context=context, *args)
+            response = get_response(
+                telegram_bot_membership=telegram_bot_membership,
+                message=update.message,
+                context=context,
+                *args,
+            )
 
             # send response back to user
-
             if response_type == 'text' or response_type.lower() in ['text', 'string']:
                 update.message.reply_text(response)
             

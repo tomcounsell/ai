@@ -16,25 +16,18 @@ class TelegramBotException(Exception):
 
 def handle_telegram_message(update: Update, context: CallbackContext):
     # get user membership
-    user_membership = TelegramBotMembership.objects.filter(
+    telegram_bot_membership, um_created = TelegramBotMembership.objects.get_or_create(
         telegram_user_id=str(update.message.from_user.id)
-    ).first()
-    # handle message within context of the user's membership
-    if user_membership:
-        response = user_membership.respond_to(update, context)
-        if response and isinstance(response, str):
-            update.message.reply_text(response)
-    else:
-        update.message.reply_text("\n".join([
-            "Sorry. In order to save your data,",
-            "please first connect your _company_ account at",
-            "_site_link_",
-        ]))
+    )
+    response = telegram_bot_membership.respond_to(update, context)
+    if response and isinstance(response, str):
+        update.message.reply_text(response)
 
-def send_photo(user):
-    bot, chat_id = user.bot, user.effective_chat_id
+
+def send_photo(telegram_bot_membership, local_file_path):
     # see https://github.com/python-telegram-bot/python-telegram-bot/wiki/Code-snippets#post-an-image-file-from-disk
-    bot.send_photo(chat_id=chat_id, photo=open('tests/test.png', 'rb'))
+    telegram_bot_membership.telegram_bot.send_photo(chat_id=telegram_bot_membership.telegram_user.effective_chat_id,
+                                                    photo=open(local_file_path, 'rb'))
 
 
 def send_cute_puppy_photo(self, update, context, caption=""):

@@ -8,7 +8,7 @@ from apps.user.models import User
 
 
 @telegram_command("start")
-def start(message: Message, context):
+def start(telegram_bot_membership, message: Message, context):
 
     logging.debug(context.__dict__)
     if len(context.args) == 1:
