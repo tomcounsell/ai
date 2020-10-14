@@ -14,7 +14,7 @@ class Prediction(ABC):
 
 
 class Agent(ABC):
-    learner_filename = ""
+    learner_file_s3_url = ""
     predictions = []
 
     def __init__(self):
@@ -26,7 +26,7 @@ class Agent(ABC):
         try:
             path.exists(local_learner_filename)
         except:
-            download_s3_file_to_local(self.learner_filename, local_learner_filename)
+            download_s3_file_to_local(self.learner_file_s3_url, local_learner_filename)
             self.learn = load_learner(local_learner_filename)
         return self.learn
 
