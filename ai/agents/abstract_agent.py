@@ -21,13 +21,14 @@ class Agent(ABC):
         self.learn = self.get_learner()
 
     def get_learner(self):
-        if not self.learn:
-            local_learner_filename = f"temp/agent_{self.__class__.__name__}_model_file.pkl"
-        try:
-            path.exists(local_learner_filename)
-        except:
+        if hasattr(self, 'learn'):
+            return self.learn
+
+        local_learner_filename = f"agent_{self.__class__.__name__}_model_file.pkl"
+        if not path.exists(local_learner_filename):
             download_s3_file_to_local(self.learner_file_s3_url, local_learner_filename)
-            self.learn = load_learner(local_learner_filename)
+
+        self.learn = load_learner(local_learner_filename)
         return self.learn
 
     def predict(self, input) -> Prediction:
