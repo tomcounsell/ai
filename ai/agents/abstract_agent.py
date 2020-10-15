@@ -1,7 +1,7 @@
+import logging
 from os import path
 from fastai2.learner import load_learner
 from abc import ABC
-
 from apps.common.utilities.s3 import download_s3_file_to_local
 
 
@@ -26,7 +26,10 @@ class Agent(ABC):
 
         local_learner_filename = f"agent_{self.__class__.__name__}_model_file.pkl"
         if not path.exists(local_learner_filename):
-            download_s3_file_to_local(self.learner_file_s3_url, local_learner_filename)
+            logging.info(f"downloading learner file from: {self.learner_file_s3_url}")
+            success = download_s3_file_to_local(self.learner_file_s3_url, local_learner_filename)
+            if not success:
+                raise Exception("could not find and download learner file")
 
         self.learn = load_learner(local_learner_filename)
         return self.learn

@@ -1,7 +1,7 @@
 import logging
 import requests
-
 from ai.agents.abstract_agent import Agent
+
 
 class DogBreedsAgent(Agent):
     learner_file_s3_url = "https://aihelps-production.s3.amazonaws.com/ML_model_exports/dog_breeds.pkl"
