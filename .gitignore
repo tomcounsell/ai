@@ -125,3 +125,4 @@ Pipfile
 
 *.dump
 settings/local.py
+*.pkl
