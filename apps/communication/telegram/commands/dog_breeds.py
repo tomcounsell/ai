@@ -23,7 +23,10 @@ def handle_photo_upload(update: Update, context: CallbackContext):
         return "problem with this photo"
 
     dog_breeds_agent = DogBreedsAgent()
-    telegram_file = update.message.photo.get_file()
+    if isinstance(update.message.photo, list) and len(update.message.photo) > 0:
+        telegram_file = update.message.photo[0].get_file()
+    else:
+        telegram_file = update.message.photo.get_file()
     image_local_path = telegram_file.download()
     breed = dog_breeds_agent.name_breed_from_image_local_path(image_local_path)
     confidence = dog_breeds_agent.get_confidence()

@@ -35,7 +35,8 @@ class Agent(ABC):
         return self.learn
 
     def predict(self, input) -> Prediction:
-        prediction = Prediction(self.learn.predict(input))
+        prediction, _, probs = self.learn.predict(input)
+        prediction = Prediction(prediction, _, probs)
         self.predictions.append(prediction)
         return prediction
 

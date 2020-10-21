@@ -36,15 +36,17 @@ class TelegramBotMembership(Timestampable, models.Model):
         if len(self.expectations_list):
             from apps.communication.telegram.commands.commands_index import expectation_handlers
             for expectation_name in self.expectations_list[::-1]:
-                try:
-                    response = expectation_handlers[expectation_name](update, context)
-                    logging.debug(response)
-                except Exception as e:
-                    logging.debug(str(e))
-                else:
-                    self.expectations_list.remove(expectation_name)
-                    self.save()
-                    return response
+                if expectation_name in expectation_handlers:
+                    logging.debug(f"attempting to run: {expectation_handlers[expectation_name].__name__}")
+                    try:
+                        response = expectation_handlers[expectation_name](update, context)
+                    except Exception as e:
+                        logging.debug(f"got exception: {str(e)}")
+                    else:
+                        logging.debug(f"got response: {response}")
+                        self.expectations_list.remove(expectation_name)
+                        self.save()
+                        return response
 
         if update.message.video and isinstance(update.message.video, telegram.Video):
             logging.debug(update.message.video.__dict__)
