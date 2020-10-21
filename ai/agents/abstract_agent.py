@@ -8,9 +8,11 @@ from apps.common.utilities.s3 import download_s3_file_to_local
 class Prediction(ABC):
     def __init__(self, prediction, _, probs):
         self.prediction, _, self.probabilities = prediction, _, probs
+        self.confidence = 0.5 + max(probs)/2
 
     def __repr__(self):
         return str(self.prediction)
+
 
 
 class Agent(ABC):
@@ -43,4 +45,5 @@ class Agent(ABC):
     def get_confidence(self, num_predictions_ago: int = 1) -> float:
         if not len(self.predictions):
             raise Exception("no predictions made yet")
-        return self.predictions[-num_predictions_ago].probabilities[1].item()
+        return self.predictions[-num_predictions_ago].confidence
+        # return self.predictions[-num_predictions_ago].probabilities[1].item()

@@ -5,8 +5,8 @@ from ai.scripts.dog_breeds import DogBreedsNN
 
 
 class DogBreedsAgent(Agent):
-    learner_file_s3_url = "https://aihelps-production.s3.amazonaws.com/ML_model_exports/dog_breeds.pkl"
-    learner_file_s3_url = "https://aihelps-production.s3.amazonaws.com/ML_model_exports/dog_breeds_nn_model_export.pkl"
+    learner_file_s3_url = "https://aihelps-production.s3.amazonaws.com/ML_model_exports/dog_breeds_old.pkl"
+    learner_file_s3_url = "https://aihelps-production.s3.amazonaws.com/ML_model_exports/dog_breeds_nn_model_export_6_3.pkl"
 
     def name_breed_from_image_local_path(self, image_local_path: str) -> str:
         from fastai.vision.core import PILImage

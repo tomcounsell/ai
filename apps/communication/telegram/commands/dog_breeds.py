@@ -31,7 +31,7 @@ def handle_photo_upload(update: Update, context: CallbackContext):
     breed = dog_breeds_agent.name_breed_from_image_local_path(image_local_path)
     confidence = dog_breeds_agent.get_confidence()
     logging.debug(f"{confidence} of {breed}")
-    return f"{confidence:.2f}% confident this is a {breed}"
+    return f"{100*confidence:.0f}% confident this is a {breed}"
 
 
 @telegram_command("dog_breed", response_type='text')

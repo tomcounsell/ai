@@ -60,7 +60,7 @@ class DogBreedsNN(ABC):
         self.learn = self.load_learner()
         customer_photo = PILImage.create(image_path)
         breed, _, probs = self.learn.predict(customer_photo)
-        print(f"{probs[1].item():.2f} sure this is a {breed}")
+        print(f"{max(probs)*100:.2f}% sure this is a {breed}")
 
 
 if __name__ == "__main__":
@@ -85,4 +85,5 @@ if __name__ == "__main__":
 
     # dog_breeds_nn.save()
     dog_breeds_nn.EXAMPLE_IMAGE_FILEPATH = dog_breeds_nn.DATASET_PATH / 'n02085782-Japanese_spaniel/n02085782_50.jpg'
-    # dog_breeds_nn.test()
+
+    # dog_breeds_nn.test(Path('random_dog.jpg'))
