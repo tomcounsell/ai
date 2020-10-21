@@ -40,8 +40,8 @@ waitress==1.4.4
 numpy
 pandas
 https://download.pytorch.org/whl/cpu/torch-1.6.0%2Bcpu-cp37-cp37m-linux_x86_64.whl # for production only
-torch
-torchvision
+# torch # for local dev only
+# torchvision # for local dev only
 fastai==2.0.6
 fastai2==0.0.30
 fastcore==1.0.0
