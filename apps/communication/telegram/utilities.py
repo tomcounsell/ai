@@ -30,9 +30,9 @@ def send_photo(telegram_bot_membership, local_file_path):
                                                     photo=open(local_file_path, 'rb'))
 
 
-def send_cute_puppy_photo(self, update, context, caption=""):
+def send_cute_puppy_photo(self, bot, chat_id, caption=""):
     doggy_response = requests.get(url="https://dog.ceo/api/breeds/image/random", params={})
     data = doggy_response.json()
     if data.get('status') == "success" and data.get('message', "").startswith("https://images.dog.ceo"):
         dog_photo_url = data['message']
-        context.bot.send_photo(chat_id=update.effective_chat.id, photo=dog_photo_url, caption=caption)
+        bot.send_photo(chat_id=chat_id, photo=dog_photo_url, caption=caption)

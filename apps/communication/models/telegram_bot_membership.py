@@ -65,8 +65,4 @@ class TelegramBotMembership(Timestampable, models.Model):
         if update.message.text:
             return "🆗👍"
 
-        from apps.communication.telegram.utilities import send_cute_puppy_photo
-        send_cute_puppy_photo(self, update, context,
-                              caption="actually, I didn't save that. Tom didn't finish building me. "
-                                      "In the meantime, here's a cute puppy.")
-        return
+        return "start with a commmand. \n see /help"

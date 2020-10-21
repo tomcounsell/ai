@@ -1,6 +1,6 @@
 from telegram import Message
 from apps.communication.telegram.commands.decorator import telegram_command
-from apps.communication.telegram.commands import start, help, info, dog_breeds
+from apps.communication.telegram.commands import start, help, info, random_dog, dog_breeds
 
 
 # DEFAULT COMMANDS #
@@ -30,6 +30,7 @@ public_commands = [
     start.start,
     help.help_command_list,
     info.info,
+    random_dog.random_dog,
     dog_breeds.dog_breed,
 ]
 
