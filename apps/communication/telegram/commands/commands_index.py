@@ -25,16 +25,20 @@ def unknown_command(update, context):
         text="Sorry, I didn't understand that command."
     )
 
-
-public_commands = [
+standard_commands = [
     start.start,
     help.help_command_list,
     info.info,
+]
+
+feature_commands = [
     random_dog.random_dog,
     dog_breeds.dog_breed,
 ]
 
-commands = public_commands + [
+public_commands = standard_commands + feature_commands
+
+commands = standard_commands + feature_commands + [
     # TEST EXAMPLE COMMANDS
     hello,
     expectations,

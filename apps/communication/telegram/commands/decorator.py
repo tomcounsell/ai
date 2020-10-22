@@ -5,7 +5,7 @@ from telegram import Update
 from telegram.ext import CallbackContext
 
 
-def telegram_command(execution_handle: str, response_type='text'):
+def telegram_command(execution_handle: str, response_type=None):
     def telegram_command_decorator(get_response: Callable):
         from apps.communication.models import TelegramBotMembership
 
