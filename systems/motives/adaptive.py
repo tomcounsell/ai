@@ -54,7 +54,18 @@ class Curiosity(AbstractMotive):
         super().__init__(zero=True)
 
 
-class Obedience():
+class Skepticism(AbstractMotive):
+    """
+    an attitude of doubt of the validity of knowledge (new or previously accepted)
+    + reduced confidence that one's own judgements are accurate
+    + resistance to new information that contradicts existing knowledge and wisdom (close-minded)
+    - openness to accommodate new ideas as better than existing knowledge (brain plasticity?)
+    """
+    def __init__(self):
+        super().__init__(zero=True)
+
+
+class Obedience(AbstractMotive):
     """
     + submission and subjection to authority
     - opposition to authoritarianism
@@ -64,3 +75,20 @@ class Obedience():
     """
     def __init__(self):
         super().__init__(zero=False)
+
+
+class Aggression(AbstractMotive):
+    """
+    Aggression is defines as behaviours that are intended to inflict harm (physical or emotional)
+    Passive-aggressive behavior is characterized by passive hostility and an avoidance of direct communication
+    In humans, aggressive behaviors evolved as adaptations to deal with competition, but
+    when expressed out of context, they can have destructive consequences.
+    science: a subset of hypothalamic and limbic brain areas tend to facilitate aggressive behaviour
+    aggressive behaviour is regulated by serotonin neurotransmission
+    """
+    def __init__(self):
+        super().__init__(zero=False)
+
+    def cycle(self):
+        self.goal = 0
+
