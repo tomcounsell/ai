@@ -8,7 +8,7 @@ import telegram
 from telegram import Message, Update, File, PhotoSize
 from telegram.ext import CallbackContext
 
-from ai.agents.dog_breeds import DogBreedsAgent
+from ai.skills.dog_breeds import DogBreedsSkill
 from apps.communication.models import TelegramBotMembership
 from apps.communication.telegram.commands.decorator import telegram_command
 
@@ -22,14 +22,14 @@ def handle_photo_upload(update: Update, context: CallbackContext):
     if not isinstance(photo, PhotoSize):
         return "problem with this photo"
 
-    dog_breeds_agent = DogBreedsAgent()
+    dog_breeds_skill = DogBreedsSkill()
     if isinstance(update.message.photo, list) and len(update.message.photo) > 0:
         telegram_file = update.message.photo[0].get_file()
     else:
         telegram_file = update.message.photo.get_file()
     image_local_path = telegram_file.download()
-    breed = dog_breeds_agent.name_breed_from_image_local_path(image_local_path)
-    confidence = dog_breeds_agent.get_confidence()
+    breed = dog_breeds_skill.name_breed_from_image_local_path(image_local_path)
+    confidence = dog_breeds_skill.get_confidence()
     logging.debug(f"{confidence} of {breed}")
     return f"{100*confidence:.0f}% confident this is a {breed}"
 

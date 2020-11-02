@@ -15,7 +15,7 @@ class Prediction(ABC):
 
 
 
-class Agent(ABC):
+class Skill(ABC):
     learner_file_s3_url = ""
     predictions = []
 

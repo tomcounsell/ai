@@ -1,10 +1,10 @@
 import logging
 import requests
-from ai.agents.abstract_agent import Agent
+from ai.skills.abstract_skill import Skill
 from ai.scripts.dog_breeds import DogBreedsNN
 
 
-class DogBreedsAgent(Agent):
+class DogBreedsSkill(Skill):
     learner_file_s3_url = "https://aihelps-production.s3.amazonaws.com/ML_model_exports/dog_breeds_old.pkl"
     learner_file_s3_url = "https://aihelps-production.s3.amazonaws.com/ML_model_exports/dog_breeds_nn_model_export_6_3.pkl"
 
