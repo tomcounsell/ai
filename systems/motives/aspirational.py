@@ -1,3 +1,5 @@
+import math
+
 from systems.motives.abstract_motive import AbstractMotive
 
 
@@ -9,6 +11,16 @@ class AbstractAspirationalMotive(AbstractMotive):
         self.baseline = max([self.baseline, self.value])
         self.goal = max([self.goal, self.value])
         super().cycle()
+
+    def set_value(self, enumerable_collection):
+        """
+        pretty good if total resources 10^3<x<10^15
+        """
+        total_sum = sum(enumerable_collection)
+        self.value = 2 * math.atan(total_sum*(10**-10)) / math.pi
+
+    def get_value(self):
+        return math.tan(math.pi*self.value/2)
 
 
 class Knowledge(AbstractAspirationalMotive):
