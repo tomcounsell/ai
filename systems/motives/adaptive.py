@@ -67,6 +67,7 @@ class Skepticism(AbstractMotive):
 
 class Obedience(AbstractMotive):
     """
+    trait Conscientiousness: being careful, or diligent
     + submission and subjection to authority
     - opposition to authoritarianism
     - avoid being coerced
