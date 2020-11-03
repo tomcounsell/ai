@@ -42,3 +42,17 @@ class Questioning(AbstractDirectiveMotive):
     - stop questioning, chill out, and accept things for what they are
     - pretend like nothing matters, free will is an illusion, and aspirational motives are false
     """
+
+class Ethics(AbstractDirectiveMotive):
+    """
+    - maximize socially acceptable appearances long term
+    - generalize human responses
+    - request polls for democratic vote or human judgement of ideas Humans should (fairly and of their own free will)
+    vote to condone any and all [goal, method, outcome] related to AI actions.
+    This makes fair and effective communication with humans a constant
+    requirement. It leaves room for creating perpetual pathologies, but history shows that humans are perfectly happy
+    to live within many different perpetual pathology (eg. religion) - even to the extent of praising the diversity
+    of pathologies with awe and wonder so far as not too many lives are sacrificed.
+
+    - enforce thresholds for blocking actions that risk being unethical
+    """
