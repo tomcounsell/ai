@@ -2,7 +2,7 @@ from rest_framework import authentication, permissions
 from rest_framework.viewsets import ViewSet
 from rest_framework.response import Response
 
-from ai.skills.dog_breeds import DogBreedsSkill
+from aihelps.skills.dog_breeds import DogBreedsSkill
 
 
 class DogBreedsViewSet(ViewSet):

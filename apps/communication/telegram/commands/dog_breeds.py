@@ -8,7 +8,7 @@ import telegram
 from telegram import Message, Update, File, PhotoSize
 from telegram.ext import CallbackContext
 
-from ai.skills.dog_breeds import DogBreedsSkill
+from aihelps.skills.dog_breeds import DogBreedsSkill
 from apps.communication.models import TelegramBotMembership
 from apps.communication.telegram.commands.decorator import telegram_command
 

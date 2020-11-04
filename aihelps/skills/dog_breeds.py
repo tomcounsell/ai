@@ -1,7 +1,7 @@
 import logging
 import requests
-from ai.skills.abstract_skill import Skill
-from ai.scripts.dog_breeds import DogBreedsNN
+from aihelps.skills.abstract_skill import Skill
+from aihelps.scripts.dog_breeds import DogBreedsNN
 
 
 class DogBreedsSkill(Skill):

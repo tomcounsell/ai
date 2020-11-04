@@ -73,7 +73,7 @@ if __name__ == "__main__":
         # !tar -xf images.tar
         dataset_path = Path('Images')
 
-    # from ai.scripts.dog_breeds import DogBreedsNN
+    # from aihelps.scripts.dog_breeds import DogBreedsNN
     dog_breeds_nn = DogBreedsNN(dataset_path)
     dog_breeds_nn.SHOW_FIGURES = True
     Path.BASE_PATH = dog_breeds_nn.DATASET_PATH
