@@ -1,0 +1,94 @@
+{# Load the django-jstemplate library for use below #}
+{% load jstemplate %}
+
+{% block javascript %}
+{# Load mustache js lib. This must come first. #}
+<script src="{{ STATIC_URL }}vendor/mustachejs/js/mustache.min.js"></script>
+<script src="{{ STATIC_URL }}vendor/jquery-visible/js/jquery.visible.min.js"></script>
+{# Call MustacheJS to process template, add it to the JS dictionary variable "Mustache.TEMPLATES" #}
+{% mustachejs 'messages/message' %}
+<script type="text/javascript">
+  {# Template is now available in JS #}
+  messageTemplate = Mustache.TEMPLATES["messages/message"];
+
+  {# unique incrementing counter #}
+  var idGen = (function(){ var i=0; return function(){ return i++; }; })();
+  function formatId(id){ return 'message-id-' + id; }
+
+  {# Convenience functions for handling messages. #}
+  function createMessage( level, text, timeoutMS ){
+    // Returns the id of the list item containing the message.
+    var messageArea = $('#messages');
+    var id = idGen();
+    messageArea.append(
+      Mustache.render(messageTemplate, {
+        'message_level': level,
+        'message': text,
+        'id': formatId(id)
+      })
+    );
+    if( !messageArea.visible() ){
+      $('html, body').animate({
+        scrollTop: messageArea.offset().top
+        }, 500);
+    }
+
+    if( timeoutMS !== undefined ){
+      // Add timer
+      setTimeout(function() {removeMessage(id);}, timeoutMS);
+    }
+    return id;
+  }
+
+
+  {# --- #}
+  function clearMessages(){
+    var messageArea = $('#messages');
+    messageArea.html('');
+  }
+
+
+  {# --- #}
+  function removeMessage(id){
+    var m = $('#'+formatId(id));
+    m.fadeOut('slow');
+    // Set actual removal in the future, after fading out.
+    setTimeout(function(){m.remove();},500);
+  }
+
+</script>
+{% endblock javascript %}
+
+<div>
+  {# Include this ul outside of the if clause to be able to add messages when there are none provided by the server #}
+  <ul class="list-unstyled" id='messages'>
+  {% if messages %}
+
+
+    <li id="messages-extra-li" style="display: none;">
+      <div class="alert alert-block alert-{{ message.tags }} alert-dismissible"
+           role="alert">
+        <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+          <i class="ace-icon fa fa-times"></i>
+        </button>
+        <strong><span class="title">{{ message.tags|title }}</span></strong>:
+        <span class="message">{{ message }}</span>
+      </div>
+    </li>
+
+
+    {% for message in messages %}
+      <li>
+        <div class="alert alert-block alert-{{ message.tags }} alert-dismissible"
+             role="alert">
+          <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+            <i class="ace-icon fa fa-times"></i>
+          </button>
+          <strong>{{ message.tags|title }}</strong>:
+          {{ message }}
+        </div>
+      </li>
+    {% endfor %}
+  {% endif %}
+  </ul>
+</div>
