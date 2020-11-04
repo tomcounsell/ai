@@ -16,7 +16,13 @@ class Command(BaseCommand):
     def handle(self, *args, **options):
         logger.info("Starting telegram bot and handlers")
 
+        # RUN MULTIPLE BOTS
+        # tokens = [bot.token for bot in TelegramBot.objects.filter(token__isnull=False).al()]
+        # tokens.append(TELEGRAM_BOT_API_TOKEN)  # main bot
+        # updaters = [Updater(token=token, use_context=True) for token in tokens]
+
         updater = Updater(token=TELEGRAM_BOT_API_TOKEN, use_context=True)
+
         dispatcher = updater.dispatcher
 
         # REGISTER HANDLERS FOR ALL COMMANDS
@@ -32,5 +38,9 @@ class Command(BaseCommand):
         dispatcher.add_handler(MessageHandler(Filters.all, handle_telegram_message))
         # Filters.video | Filters.photo | Filters.document | Filters.text | Filters.contact | Filters.location | Filters.sticker
 
+        # RUN MULTIPLE BOTS
+        # for updater in updaters:
+        #     updater.start_polling()
+        
         updater.start_polling()
         updater.idle()
