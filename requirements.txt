@@ -46,7 +46,7 @@ pandas
 # scikit_learn
 # scikit-image
 # keras
-# tensorflow
+tensorflow-cpu
 
 https://download.pytorch.org/whl/cpu/torch-1.6.0%2Bcpu-cp37-cp37m-linux_x86_64.whl # for production only
 # torch # for local dev only
