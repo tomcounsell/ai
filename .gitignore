@@ -127,4 +127,9 @@ Pipfile
 settings/local.py
 datasets/
 *.pkl
+*tar..gz
+
 learning/fast_ai/fastbook-master/
+
+rasa/credentials.yml
+rasa/rasa.db
