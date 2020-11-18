@@ -48,7 +48,6 @@ keras
 fastai==2.0.6
 fastai2==0.0.30
 fastcore==1.0.0
-nbdev>=0.2.12
 
 
 # LOCAL DEV
@@ -59,8 +58,9 @@ nbdev>=0.2.12
 
 # PRODUCTION ONLY
 psycopg2
-tensorflow-cpu
+# tensorflow-cpu
 https://download.pytorch.org/whl/cpu/torch-1.6.0%2Bcpu-cp37-cp37m-linux_x86_64.whl
+
 
 # OTHER
 # azure-cognitiveservices-search-imagesearch
