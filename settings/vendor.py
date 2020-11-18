@@ -51,6 +51,8 @@ SERVER_EMAIL = "info@example.com"  # ditto (default from-email for Django errors
 
 TELEGRAM_BOT_API_TOKEN = os.environ.get('TELEGRAM_BOT_API_TOKEN')
 
+BING_SUBSCRIPTION_KEY = os.environ.get('BING_SUBSCRIPTION_KEY')
+
 # ANALYTICS STAGE
 # MIXPANEL_API_TOKEN = os.environ.get('MIXPANEL_API_TOKEN')
 # MIXPANEL_API_KEY = os.environ.get('MIXPANEL_API_KEY')

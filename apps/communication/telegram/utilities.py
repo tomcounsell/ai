@@ -16,12 +16,13 @@ class TelegramBotException(Exception):
 
 def handle_telegram_message(update: Update, context: CallbackContext):
     # get user membership
-    telegram_bot_membership, um_created = TelegramBotMembership.objects.get_or_create(
-        telegram_user_id=str(update.message.from_user.id)
-    )
-    response = telegram_bot_membership.respond_to(update, context)
-    if response and isinstance(response, str):
-        update.message.reply_text(response)
+    if update.message:
+        telegram_bot_membership, um_created = TelegramBotMembership.objects.get_or_create(
+            telegram_user_id=str(update.message.from_user.id)
+        )
+        response = telegram_bot_membership.respond_to(update, context)
+        if response and isinstance(response, str):
+            update.message.reply_text(response)
 
 
 def send_photo(telegram_bot_membership, local_file_path):

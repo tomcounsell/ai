@@ -6,6 +6,7 @@ from telegram import Message, Update
 from telegram.ext import CallbackContext
 from apps.common.behaviors import Timestampable
 from apps.common.models import Upload
+from apps.search.bing import Bing
 from settings import AUTH_USER_MODEL, TELEGRAM_BOT_API_TOKEN, DEBUG, BASE_DIR
 
 
@@ -61,6 +62,9 @@ class TelegramBotMembership(Timestampable, models.Model):
 
         if update.message.text:
             #todo: save as historical context
-            return "🆗👍"
+
+            bing = Bing()
+            return bing.search(update.message.text)
+            # return "🆗👍"
 
         return "start with a commmand. \n see /help"
