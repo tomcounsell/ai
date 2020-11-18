@@ -2,6 +2,7 @@ import requests
 
 
 # Note: don't forget to turn on at https://dashboard.heroku.com/apps/aihelps-rasa/resources
+# API documentation: https://rasa.com/docs/rasa/pages/http-api
 
 class RasaAPIAgent:
     api_host = "https://aihelps-rasa.herokuapp.com"
