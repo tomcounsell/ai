@@ -1,14 +1,9 @@
-import rasa
 import telegram
 import logging
 from django.contrib.postgres.fields import JSONField
 from django.db import models
-from rasa.core.agent import Agent as RasaAgent
-from rasa.core.channels import CollectingOutputChannel, UserMessage
-from rasa.core.channels.telegram import TelegramOutput, TelegramInput
 from telegram import Message, Update
 from telegram.ext import CallbackContext
-import asyncio
 from apps.common.behaviors import Timestampable
 from apps.common.models import Upload
 from settings import AUTH_USER_MODEL, TELEGRAM_BOT_API_TOKEN, DEBUG, BASE_DIR
@@ -65,27 +60,7 @@ class TelegramBotMembership(Timestampable, models.Model):
             return f"saved as upload {upload.id}"
 
         if update.message.text:
-            rasa = RasaAgent.load(f"{BASE_DIR}/rasa/models/20201113-154024.tar.gz")
-
-            # rasa_message = UserMessage(
-            #     text=update.message.text,
-            #     output_channel=TelegramOutput(access_token=TELEGRAM_BOT_API_TOKEN),
-            #     sender_id=str(self.telegram_user_id),
-            #     # input_channel=TelegramInput(access_token=TELEGRAM_BOT_API_TOKEN, debug_mode=DEBUG),
-            #     metadata=self.__dict__,
-            # )
-            # return rasa.handle_message(rasa_message)
-
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(
-                rasa.handle_text(
-                    text_message=update.message.text,
-                    output_channel=TelegramOutput(access_token=TELEGRAM_BOT_API_TOKEN),
-                    sender_id=str(self.telegram_user_id),
-                )
-            )
-            return
-            # return "🆗👍"
+            #todo: save as historical context
+            return "🆗👍"
 
         return "start with a commmand. \n see /help"

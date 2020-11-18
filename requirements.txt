@@ -27,8 +27,6 @@ ipython
 ipywidgets
 matplotlib
 plotly
-psycopg2 # for production only
-# psycopg2-binary # for local dev only
 python-telegram-bot==13.0
 pytz==2020.4
 PyYAML
@@ -41,21 +39,29 @@ six
 toolz
 waitress==1.4.4
 
+# AI LIBRARIES
 numpy
 pandas
-# scikit_learn
-# scikit-image
-# keras
-tensorflow-cpu
-
-https://download.pytorch.org/whl/cpu/torch-1.6.0%2Bcpu-cp37-cp37m-linux_x86_64.whl # for production only
-# torch # for local dev only
-# torchvision # for local dev only
+scikit_learn
+scikit-image
+keras
 fastai==2.0.6
 fastai2==0.0.30
 fastcore==1.0.0
 nbdev>=0.2.12
-rasa
 
+
+# LOCAL DEV
+# psycopg2-binary
+# tensorflow
+# torch
+# torchvision
+
+# PRODUCTION ONLY
+psycopg2
+tensorflow-cpu
+https://download.pytorch.org/whl/cpu/torch-1.6.0%2Bcpu-cp37-cp37m-linux_x86_64.whl
+
+# OTHER
 # azure-cognitiveservices-search-imagesearch
 # sentencepiece
