@@ -25,6 +25,7 @@ djangorestframework-simplejwt==4.4.0
 graphviz
 ipython
 ipywidgets
+markdownify
 matplotlib
 plotly
 python-telegram-bot==13.0

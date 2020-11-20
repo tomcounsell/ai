@@ -1,7 +1,10 @@
 from textwrap import dedent
 from typing import Callable
-
+from io import BytesIO
 import requests
+from PIL import Image
+from django.core.exceptions import ValidationError
+from django.core.validators import URLValidator
 from telegram import Update, TelegramObject, ParseMode, Message
 from telegram.ext import CallbackContext
 from apps.common.utilities.multithreading import start_new_thread
@@ -21,9 +24,18 @@ def handle_telegram_message(update: Update, context: CallbackContext):
             telegram_user_id=str(update.message.from_user.id)
         )
         response = telegram_bot_membership.respond_to(update, context)
-        if response and isinstance(response, str):
-            update.message.reply_text(response)
+        if response:
+            try:
+                url_validator = URLValidator()
+                val = url_validator(response)
+            except ValidationError:
+                pass
+            else:
+                update.message.reply_photo(photo=response)
+                return
 
+            update.message.reply_markdown(response)
+            return
 
 def send_photo(telegram_bot_membership, local_file_path):
     # see https://github.com/python-telegram-bot/python-telegram-bot/wiki/Code-snippets#post-an-image-file-from-disk
