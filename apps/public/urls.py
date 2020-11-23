@@ -2,15 +2,17 @@ from django.conf.urls import url
 from django.urls import path
 from django.views.generic import TemplateView
 
-from apps.dashboard.views import subscribers, analytics, account, search
+from apps.public.views import bing
 
 app_name = "public"
 
 urlpatterns = [
 
     # USER ACCOUNT
-    url(r'^account$',
-        account.AccountView.as_view(),
-        name='account'),
+    # path('account', account.AccountView.as_view(), name='account'),
+
+
+    # THINGS THAT NEED A UI
+    path('bing', bing.BingView.as_view(), name='bing')
 
 ]

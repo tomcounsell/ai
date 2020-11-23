@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block tab_title %}
+  Bing
+{% endblock tab_title %}
+
+{% block css %}
+{% endblock css %}
+
+{% block javascript %}
+{% endblock javascript %}
+
+{% block content_title %}
+  Bing Search
+{% endblock content_title %}
+
+{% block content_toolbar_items %}
+
+{% endblock content_toolbar_items %}
+
+{% block content %}
+
+  <div class="row">
+    <div class="col-sm-2 col-md-4">
+      <form class="form-inline" method="get">
+        <div class="form-group">
+          <input type="text" class="form-control" id="search_terms" name="search_terms">
+        </div>
+        <button type="submit" class="btn btn-primary">Search</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col-auto">
+      <h1>
+        <small>results for: </small>
+        {{ search_terms }}
+      </h1>
+    </div>
+  </div>
+
+  <div class="row">
+    {% for image_result in images %}
+      <div class="col-auto">
+        <div class="card">
+{#          <div class="card-header">#}
+{#            <h2></h2>#}
+{#          </div>#}
+
+          <div class="card-body">
+            <div class="card-img">
+              <div class="thumbnail">
+                <div class="square-image">
+                  <img src="{{ image_result.thumbnail_url }}" style="object-fit: cover;">
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card-footer">
+            {{ image_result.name }}<br>
+            {% if image_result.image_url %}
+              original at
+              <a href="{{ image_result.image_url }}" target="_blank">
+                {{ image_result.image_url }}
+              </a>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+
+{% endblock %}
