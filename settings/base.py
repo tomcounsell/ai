@@ -92,6 +92,7 @@ APPS = [
     'apps.common',
     'apps.communication',
     'apps.user',
+    'apps.public',
     'apps.api',
     # 'apps.dashboard',
 ]

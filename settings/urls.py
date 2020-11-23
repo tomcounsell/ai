@@ -14,6 +14,7 @@ urlpatterns = [
     # path('dashboard/', include('apps.dashboard.urls', namespace='dashboard')),
     # if using namespace, include app_name = "dashboard" in urls.py
 
+    path('', include('apps.public.urls', namespace='public')),
     url(r'^', include(api_router.urls)),
 
 ]
