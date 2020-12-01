@@ -39,14 +39,21 @@ class Agent(object):
         action_tree.action()
         return
 
-
     def new_thread(action):
         thread = Thread(action, finished=False)
         queue(thread)
         return thread
 
-
     def main_cognitive_loop():
         perceive(self, environment)
         decide()
         act()
+
+
+    def learn_images(self, topic):
+        image_results = self.bing.get_images(str(topic))
+
+        # save as X
+        # run ML, 3+ epochs
+
+        return True  # done
