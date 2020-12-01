@@ -39,7 +39,6 @@ DATABASES = {'default': dj_database_url.config(), }
 # DATABASE_URL = f"postgresql://{username}:{password}@{host}:5432/{dbname}"
 
 
-
 # SENDINBLUE.COM EMAIL SERVICE
 # ANYMAIL = {
 #     # (exact settings here depend on your ESP...)
