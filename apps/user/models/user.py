@@ -5,7 +5,6 @@ from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
 from django.utils import timezone
 from datetime import datetime
-from rest_framework_simplejwt.tokens import RefreshToken
 
 from apps.common.behaviors import Timestampable, Locatable
 
@@ -32,9 +31,10 @@ class User(AbstractUser, Timestampable, Locatable):
 
     # MODEL PROPERTIES
 
-    @property
-    def jwt_token(self):
-        return str(RefreshToken.for_user(self).access_token)
+    # @property
+    # def jwt_token(self):
+    #     from rest_framework_simplejwt.tokens import RefreshToken
+    #     return str(RefreshToken.for_user(self).access_token)
 
     @property
     def four_digit_login_code(self):
