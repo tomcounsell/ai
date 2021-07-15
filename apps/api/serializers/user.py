@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from apps.common.utilities.serializers import WritableSerializerMethodField
+from apps.common.utilities.processing.serializers import WritableSerializerMethodField
 from apps.user.models import User
 
 

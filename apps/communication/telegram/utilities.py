@@ -1,13 +1,8 @@
-from textwrap import dedent
-from typing import Callable
-from io import BytesIO
 import requests
-from PIL import Image
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
-from telegram import Update, TelegramObject, ParseMode, Message
+from telegram import Update
 from telegram.ext import CallbackContext
-from apps.common.utilities.multithreading import start_new_thread
 from apps.communication.models import TelegramBotMembership
 
 

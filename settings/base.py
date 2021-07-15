@@ -52,10 +52,8 @@ else:
     except:
         HOSTNAME = 'localhost'
 
-
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY')
-
 
 # APPLICATIONS
 DJANGO_APPS = [
@@ -101,7 +99,7 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + APPS
 SITE_ID = 1
 
 MIDDLEWARE = [
-    'apps.common.utilities.django_middleware.APIHeaderMiddleware',
+    'apps.common.utilities.database.django_middleware.APIHeaderMiddleware',
     'django_user_agents.middleware.UserAgentMiddleware',
     'django.middleware.gzip.GZipMiddleware',
     'debug_toolbar.middleware.DebugToolbarMiddleware',
@@ -176,7 +174,6 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 50,
 }
 
-
 # SIMPLE_JWT = {
 #     'ACCESS_TOKEN_LIFETIME': timedelta(days=365),
 #     'REFRESH_TOKEN_LIFETIME': timedelta(days=365),
@@ -220,7 +217,6 @@ AUTH_PASSWORD_VALIDATORS = [
     },
 ]
 
-
 # https://django-request.readthedocs.io/en/latest/settings.html#request-ignore-paths
 REQUEST_IGNORE_PATHS = (
     r'^admin/',
@@ -238,7 +234,6 @@ AUTH_USER_MODEL = 'user.User'
 # Static files (CSS, JavaScript, Images)
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 STATIC_URL = '/static/'
-
 
 # Additional locations of static files
 STATICFILES_DIRS = [
