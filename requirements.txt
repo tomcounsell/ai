@@ -26,6 +26,8 @@ ipython
 ipywidgets
 # markdownify
 # matplotlib
+opencv-python
+Pillow
 plotly
 python-telegram-bot
 pytz
