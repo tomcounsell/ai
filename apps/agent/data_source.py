@@ -29,19 +29,22 @@ class Camera(DataSource):
         self.camera.release()
         cv2.destroyAllWindows()
 
-    def save_sample(self, in_color: bool = False, filename: str = 'sample.jpg'):
+    def get_sample(self, in_color: bool = False):
         import time
         time.sleep(2)
         ret, frame = self.camera.read()
 
         if in_color:
             rgb_array = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            image = Image.fromarray(rgb_array)
+            self.sample_image = Image.fromarray(rgb_array)
         else:
             greyscale_array = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
             # greyscale_array is numpy.array
-            image = Image.fromarray(greyscale_array)
+            self.sample_image = Image.fromarray(greyscale_array)
+        return self.sample_image
 
+    def save_sample(self, in_color: bool = False, filename: str = 'sample.jpg'):
+        image = self.get_sample(in_color=in_color)
         with open(f"static/temp/{filename}", 'wb') as file:
             image.save(file)
         print(f"{'color' if in_color else 'greyscale'} image save to static/temp/{filename}")
