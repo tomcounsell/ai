@@ -132,3 +132,4 @@ datasets/
 studies/fast_ai/fastbook-master/
 apps/finance/_legacy_/
 /apps/finance/test.py
+static/temp/*
