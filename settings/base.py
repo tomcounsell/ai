@@ -1,4 +1,4 @@
-from __future__ import absolute_import
+# from __future__ import absolute_import
 import os
 import socket
 from datetime import timedelta
@@ -68,18 +68,18 @@ DJANGO_APPS = [
 ]
 
 THIRD_PARTY_APPS = [
-    'corsheaders',
+    # 'corsheaders',
     'storages',
     'django_extensions',
-    'djmoney',
-    'request',
+    # 'djmoney',
+    # 'request',
     # 'analytical',
     # 'timezone_field',
     'widget_tweaks',
-    'django_user_agents',
+    # 'django_user_agents',
     'debug_toolbar',
-    'rest_framework',
-    'rest_framework.authtoken',
+    # 'rest_framework',
+    # 'rest_framework.authtoken',
     'django_filters',
     # 'simple_history',
     # 'anymail',
@@ -103,7 +103,7 @@ MIDDLEWARE = [
     'django_user_agents.middleware.UserAgentMiddleware',
     'django.middleware.gzip.GZipMiddleware',
     'debug_toolbar.middleware.DebugToolbarMiddleware',
-    'corsheaders.middleware.CorsMiddleware',
+    # 'corsheaders.middleware.CorsMiddleware',
 ] + [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -141,6 +141,7 @@ TEMPLATES = [{
     },
 }, ]
 
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 PASSWORD_RESET_TIMEOUT_DAYS = 7
 
 # PASSWORD VALIDATION
@@ -164,7 +165,7 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.BasicAuthentication',
         'rest_framework.authentication.SessionAuthentication',
         'rest_framework.authentication.TokenAuthentication',
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        # 'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAdminUser',

@@ -1,6 +1,6 @@
 import logging
 from os import path
-from fastai2.learner import load_learner
+# from fastai2.learner import load_learner
 from abc import ABC
 from apps.common.utilities.data.s3 import download_s3_file_to_local
 

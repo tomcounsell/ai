@@ -26,7 +26,6 @@ ipython
 ipywidgets
 # markdownify
 # matplotlib
-opencv-python
 Pillow
 plotly
 python-telegram-bot
@@ -57,6 +56,8 @@ pandas
 # psycopg2-binary
 
 # INSTALLED VIA ANACONDA ON LOCAL (in order):
+# -c apple tensorflow-deps
+# opencv
 # scikit_learn
 # scikit-image
 # keras

@@ -9,6 +9,8 @@ INTERNAL_IPS = [
     "127.0.0.1",
 ]
 
+LOGGING_CONFIG = None
+
 # DEFINE THE ENVIRONMENT TYPE
 PRODUCTION = STAGE = DEMO = LOCAL = False
 dt_key = os.environ.get('DEPLOYMENT_TYPE', "LOCAL")

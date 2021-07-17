@@ -2,7 +2,8 @@ import logging
 from io import BytesIO
 from PIL import Image
 import requests
-from markdownify import markdownify
+# from markdownify import markdownify
+def markdownify(string): return string
 
 from settings import BING_SUBSCRIPTION_KEY
 
