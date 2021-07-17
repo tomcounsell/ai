@@ -28,27 +28,3 @@ class Node(ABC):
         for e in self.graph_edges:
             redis_graph.add_edge(e)
         redis_graph.commit()
-
-
-
-class Concept(Node):
-
-    def set_correlate(self, context: dict, concept: 'Concept') -> None:
-        super()._set_relationship_to_graphnode(context, concept.graph_node)
-
-
-class Agent(Node):
-
-    stimulus_subscriptions = []
-
-    def set_partner(self, context: dict, agent: 'Agent') -> None:
-        super()._set_relationship_to_graphnode(context, agent.graph_node)
-
-    def publish_prediction(self):
-        pass
-
-    def subscribe_to_stimulus(self):
-        pass
-
-    def update_representation(self):
-        pass
