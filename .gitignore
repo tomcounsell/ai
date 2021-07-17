@@ -129,7 +129,7 @@ datasets/
 *.pkl
 *tar..gz
 
-studies/fast_ai/fastbook-master/
+_toms_studies_/fast_ai/fastbook-master/
 apps/finance/_legacy_/
 /apps/finance/test.py
 static/temp/*

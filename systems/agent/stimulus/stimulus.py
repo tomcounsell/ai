@@ -1,9 +1,7 @@
 import logging
 from abc import ABC
 
-import numpy as np
-
-from apps.agent.data_source import DataSource, Camera, Muscle, AgentPrediction
+from systems.data.data_source import DataSource, Camera, Muscle, AgentPrediction
 from apps.common.utilities.compression import image_compresssion
 
 logger = logging.getLogger(__name__)

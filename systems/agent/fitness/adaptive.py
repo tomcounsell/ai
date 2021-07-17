@@ -1,4 +1,4 @@
-from systems.motives.abstract_motive import AbstractMotive
+from systems.agent.fitness.abstract_motive import AbstractMotive
 
 
 class Fear(AbstractMotive):

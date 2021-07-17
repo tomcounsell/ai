@@ -1,6 +1,6 @@
 from abc import ABC
 
-from apps.agent.stimulus import Vision
+from systems.agent.stimulus.stimulus import Vision
 
 
 class Population(ABC):
