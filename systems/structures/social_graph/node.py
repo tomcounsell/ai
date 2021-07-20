@@ -5,16 +5,17 @@ from redisgraph import Graph, Path
 
 from settings.redis_db import redis_db
 
-class Node(ABC):
+class AbstractNode(ABC):
 
-    representation = bytes()
     graph_node = GraphNode()
     graph_edges = []
 
-    def __init__(self):
+
+    def __init__(self, name):
+        self.base_class = self.__class__.__name__
         self.graph_node = GraphNode(
             label='concept',
-            properties={'id': 'uuid', 'reprensentation': self.representation, 'importance': 1, 'active': True}
+            properties={'id': 'uuid', 'importance': 1, 'active': True}
         )
 
     def _set_relationship_to_graphnode(self, context: dict, graph_node: GraphNode) -> None:
@@ -28,3 +29,10 @@ class Node(ABC):
         for e in self.graph_edges:
             redis_graph.add_edge(e)
         redis_graph.commit()
+
+
+class GenericNode(AbstractNode):
+
+    def __init__(self, name):
+        self.parent_class = None
+        super(GenericNode, self).__init__(self, name)
