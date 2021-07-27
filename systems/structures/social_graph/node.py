@@ -5,13 +5,12 @@ from redisgraph import Graph, Path
 
 from settings.redis_db import redis_db
 
-class AbstractNode(ABC):
 
+class AbstractNode(ABC):
     graph_node = GraphNode()
     graph_edges = []
 
-
-    def __init__(self, name):
+    def __init__(self, name, *args, **kwargs):
         self.base_class = self.__class__.__name__
         self.graph_node = GraphNode(
             label='concept',

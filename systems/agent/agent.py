@@ -20,11 +20,12 @@ class Agent(AbstractNode, ReferenceFrame, KeyValueStorage):
 
     def __init__(self, name: str = "", *args, **kwargs):
         self.name = name or self._name_thy_self()
-        kwargs.update(dict(
-            key=self.__class__.__name__,
-            key_suffix=self.name,
-            value=str(self.describe())
-        ))
+        kwargs.update({
+            'name': self.name,
+            'key': self.__class__.__name__,
+            'key_suffix': self.name,
+            'value': str(self.describe())
+        })
         super().__init__(*args, **kwargs)
 
     def set_partner(self, context: dict, agent: 'Agent') -> None:
@@ -46,19 +47,20 @@ class Agent(AbstractNode, ReferenceFrame, KeyValueStorage):
     def describe(self):
         return self.__dict__
 
-    @property
     def _name_thy_self(self):
         import csv
         from settings.redis_db import redis_db
-        with open('/static/names.csv', newline='') as f:
+        with open('static/names.csv', newline='') as f:
             reader = csv.reader(f)
             all_names = list(reader)
         num_names = int(redis_db.llen(redis_keys['all_agents']))
         # get the next name, optionally add number if repeated. eg. Lisa5
-        self.name = f"{all_names[num_names % len(all_names)]}{num_names % len(all_names)}"
-        redis_db.lpush('all_agents', self.name)  # my name to the list, asap
+        self.name = f"{all_names[num_names % len(all_names)][0]}{num_names // len(all_names)}"
+        redis_db.lpush(redis_keys['all_agents'], self.name)  # my name to the list, asap
         return self.name
 
+    def save(self):
+        super(Agent, self).save()
 
 
 class Concept(AbstractNode):

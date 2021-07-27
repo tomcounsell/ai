@@ -24,4 +24,5 @@ if DEBUG:
     logger.info("Redis connection established for app database.")
     used_memory, maxmemory = int(redis_db.info()['used_memory']), int(redis_db.info()['maxmemory'])
     maxmemory_human = redis_db.info()['maxmemory_human']
-    logger.info(f"Redis currently consumes {round(100*used_memory/maxmemory, 2)}% out of {maxmemory_human}")
+    if maxmemory > 0:
+        logger.info(f"Redis currently consumes {round(100*used_memory/maxmemory, 2)}% out of {maxmemory_human}")
