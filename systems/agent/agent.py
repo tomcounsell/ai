@@ -85,4 +85,3 @@ class ThinkingFastAndSlow:
     - Hard-coded methods and grammars
     - goal to comprehend the governing laws of all nations
     """
-
