@@ -25,6 +25,8 @@ class KeyValueStorage(ABC):
     _db_key: str = ""  # default will be self.__class__.__name__
     _db_value: bytes = None
     _value: bytes = None
+    _key_prefix, _key, _key_suffix = "", "", ""
+    force_save = False
 
     # _value_type = None
 
@@ -36,6 +38,7 @@ class KeyValueStorage(ABC):
         self.force_save = kwargs.get('force_save', False)
         if 'value' in kwargs:
             self.value = kwargs.get('value')
+
 
     def __str__(self):
         return str(self.get_db_key())

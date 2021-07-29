@@ -14,19 +14,17 @@ redis_keys = {
     'discarded_agents': "list:Agents:discarded",  # redis list of agent keys
 }
 
-class Agent(AbstractNode, ReferenceFrame, KeyValueStorage):
+
+class Agent(AbstractNode, ReferenceFrame):
     stimulus_subscriptions = []
     representation = dict(name='empty')
 
     def __init__(self, name: str = "", *args, **kwargs):
         self.name = name or self._name_thy_self()
-        kwargs.update({
-            'name': self.name,
-            'key': self.__class__.__name__,
-            'key_suffix': self.name,
-            'value': str(self.describe())
-        })
-        super().__init__(*args, **kwargs)
+        self.storage = KeyValueStorage(key=self.__class__.__name__, key_suffix=self.name)
+        if isinstance(self.storage.value, dict):
+            for k, v in self.storage.value.items():
+                setattr(self, k, v)
 
     def set_partner(self, context: dict, agent: 'Agent') -> None:
         super()._set_relationship_to_graphnode(context, agent.graph_node)
@@ -60,7 +58,11 @@ class Agent(AbstractNode, ReferenceFrame, KeyValueStorage):
         return self.name
 
     def save(self):
-        super(Agent, self).save()
+        # try and filter out custom standard data types
+        self.storage.value = {k: self.describe().get(k, b'') for k in [
+            'name', 'stimulus_subscriptions',
+        ]}
+        self.storage.save()
 
 
 class Concept(AbstractNode):
