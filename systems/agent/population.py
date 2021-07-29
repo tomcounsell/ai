@@ -42,26 +42,34 @@ class Community(ABC):
 
 
 def bootstrap_population():
-    stimuli = [
+    all_stimuli = [
         {
             'class': Vision,
-            'parameters': { # param keyword: (min_value, max_value)
+            # range for unique init params: (min_value, max_value)
+            'static_params': {
                 'zoom': (0, 1),
-                'distance_from_center': (0, 1),
-                'angle_from_center': (0, 2*np.pi),
                 'noise_strength': (0, 1),
                 'compression_seed': (0, 32767),
             },
+            # for operational range of freedom: (min_value, max_value)
+            'motor_params': {
+                'distance_from_center': (0, 1),
+                'angle_from_center': (0, 2 * np.pi),
+            },
             'count': 0
-        }
+        },
     ]
 
 
     population = Population()
 
     for name, agent in population.active_agents.items():
+        pass
 
 
     for name, agent in population.yet_active_agents.items():
-
-        for key, (min_value, max_value) in parameters:
+        for stimulus in all_stimuli:
+            for key, (min_value, max_value) in stimulus['static_params']:
+                pass
+            for key, (min_value, max_value) in stimulus['motor_params']:
+                pass

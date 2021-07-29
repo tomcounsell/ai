@@ -13,7 +13,7 @@ class AbstractNode(ABC):
     def __init__(self, name, *args, **kwargs):
         self.base_class = self.__class__.__name__
         self.graph_node = GraphNode(
-            label='concept',
+            label=name,
             properties={'id': 'uuid', 'importance': 1, 'active': True}
         )
 
@@ -23,11 +23,12 @@ class AbstractNode(ABC):
         )
 
     def save(self):
-        redis_graph = Graph('concepts', redis_db)
-        redis_graph.add_node(self.graph_node)
-        for e in self.graph_edges:
-            redis_graph.add_edge(e)
-        redis_graph.commit()
+        pass
+        # redis_graph = Graph(self.base_class, redis_db)
+        # redis_graph.add_node(self.graph_node)
+        # for e in self.graph_edges:
+        #     redis_graph.add_edge(e)
+        # redis_graph.commit()
 
 
 class GenericNode(AbstractNode):
