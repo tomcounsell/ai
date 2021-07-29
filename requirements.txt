@@ -26,6 +26,7 @@ ipython
 ipywidgets
 # markdownify
 # matplotlib
+msgpack
 Pillow
 plotly
 python-telegram-bot
@@ -51,6 +52,7 @@ waitress
 # AI LIBRARIES
 numpy
 pandas
+openai
 
 # LOCAL DEV
 # psycopg2-binary
