@@ -1,7 +1,9 @@
 import ast
+import logging
 import random
 from collections import namedtuple
 
+from systems.agent.stimulus.stimulus import Vision
 from systems.structures.redis_storage.key_value import KeyValueStorage
 from systems.structures.reference_frame import ReferenceFrame
 from systems.structures.social_graph.node import AbstractNode
@@ -16,8 +18,8 @@ redis_keys = {
 
 
 class Agent(AbstractNode, ReferenceFrame):
-    stimulus_subscriptions = []
-    representation = dict(name='empty')
+    stimulus_subscriptions: list = []
+    representation: dict = dict(name='empty')
 
     def __init__(self, name: str = "", *args, **kwargs):
         self.name = name or self._name_thy_self()
@@ -26,13 +28,26 @@ class Agent(AbstractNode, ReferenceFrame):
             for k, v in self.storage.value.items():
                 setattr(self, k, v)
 
+
+        # for stimulus in self.stimulus_subscriptions:
+        #     pubsub.subscribe(
+        #         stimulus['class'],
+        #         motor_params=stimulus.get('motor_params', {}),
+        #         activation=self.stimulate
+        #     )
+
+    def stimulate(self, stimulus_class, data):
+        if stimulus_class.__name__ == Vision.__name__:
+            from PIL.Image import Image
+            image = data.get('image', None)
+            if isinstance(image, Image):
+                logging.debug(f"I can see an image with info {image.__dict__}")
+                self.last_seen = image
+
     def set_partner(self, context: dict, agent: 'Agent') -> None:
         super()._set_relationship_to_graphnode(context, agent.graph_node)
 
     def publish_prediction(self):
-        pass
-
-    def subscribe_to_stimulus(self):
         pass
 
     def update_representation(self):
