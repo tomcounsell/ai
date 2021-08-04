@@ -113,4 +113,3 @@ class KeyValueStorage(ABC):
     @classmethod
     def _get_db_value(cls, db_key: str = "", *args, **kwargs):
         return redis_db.get(db_key) if db_key else None  # also returns None if key not found
-

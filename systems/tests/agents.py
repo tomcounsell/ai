@@ -46,6 +46,7 @@ class test_agent(TestCase):
         self.rose = Agent("Rose")
 
     def test_can_stimulate(self):
+        self.lisa = Agent("Lisa")
         from systems.data.data_source import Camera
         with Camera() as webcam:
             vision = Vision(webcam)

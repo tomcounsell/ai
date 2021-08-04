@@ -37,7 +37,7 @@ class Agent(AbstractNode, ReferenceFrame):
         #         motor_params=stimulus.get('motor_params', {}),
         #         activation=self.stimulate
         #     )
-        if self.state is not "active":
+        if self.state != "active":
             self.state = "active"
             from settings.redis_db import redis_db
             redis_db.lpush(redis_keys['active_agents'], self.name)  # add name to the active list
@@ -89,7 +89,7 @@ class Agent(AbstractNode, ReferenceFrame):
     def save(self):
         # todo: filter out custom standard data types, eg. timestamps
         self.storage.value = {k: self.describe().get(k) for k in [
-            'name', 'stimulus_subscriptions', 'representation',
+            'name', 'stimulus_subscriptions', 'representation', 'state'
         ]}
         self.storage.save()
 

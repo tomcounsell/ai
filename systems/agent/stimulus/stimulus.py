@@ -65,8 +65,10 @@ class Vision(Stimulus):
 
     def __init__(self, source: DataSource, raw_input: bytes = b''):
         super().__init__(source, raw_input)
-        # if isinstance(source, Camera):
-        self.image = source.get_sample()
+        if isinstance(source, Camera):
+            camera = source
+            with camera:
+                self.image = camera.get_sample()
 
     def prepare_image(self, params: dict = {}):
         params = {**self.default_params, **params}
