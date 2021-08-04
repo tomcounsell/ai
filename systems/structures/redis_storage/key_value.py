@@ -103,6 +103,7 @@ class KeyValueStorage(ABC):
     @classmethod
     def compile_db_key(cls, key: str, key_prefix: str, key_suffix: str) -> str:
         key = key or cls.__name__
+        # logging.debug(f"{key}, {key_prefix}, {key_suffix}")
         return str(
             f'{key_prefix.strip(":")}:' +
             f'{key.strip(":")}' +

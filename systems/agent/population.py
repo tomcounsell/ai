@@ -1,3 +1,5 @@
+import logging
+import random
 from abc import ABC
 
 import numpy as np
@@ -13,24 +15,21 @@ class Population(ABC):
     """
     stimuli = [Vision, ]
     active_agents = {}
-    _yet_active_agents = None
+    yet_active_agents = {}
 
     def __init__(self, *args, **kwargs):
+        # refresh to compile dicts of all agent instances
+        self.refresh()
+
+    def refresh(self):
         # call redis to get names of all active agents
-        active_agent_names = redis_db.lrange(redis_keys['active_agents'], 0, -1)
-        # create dict of all agent instances
-        self.active_agents = {name: Agent(name) for name in active_agent_names}
+        self.active_agent_names = redis_db.lrange(redis_keys['active_agents'], 0, -1)
+        self.active_agents = {name.decode(): Agent(name.decode()) for name in self.active_agent_names}
 
-    @property
-    def yet_active_agents(self, rescan=False):
-        if rescan or self._yet_active_agents is None:
-            all_agent_names = redis_db.lrange(redis_keys['all_agents'], 0, -1)
-            active_agent_names = redis_db.lrange(redis_keys['active_agents'], 0, -1)
-            discarded_agent_names = redis_db.lrange(redis_keys['discarded_agents'], 0, -1)
-            yet_active_agent_names = set(all_agent_names) - set(active_agent_names) - set(discarded_agent_names)
-            self._yet_active_agents = {name: Agent(name) for name in yet_active_agent_names}
-        return self._yet_active_agents
-
+        all_agent_names = redis_db.lrange(redis_keys['all_agents'], 0, -1)
+        retired_agents_names = redis_db.lrange(redis_keys['retired_agents'], 0, -1)
+        self.yet_active_agent_names = set(all_agent_names) - set(self.active_agent_names) - set(retired_agents_names)
+        self.yet_active_agents = {name.decode(): Agent(name.decode()) for name in self.yet_active_agent_names}
 
 
 class Community(ABC):
@@ -41,13 +40,13 @@ class Community(ABC):
     pass
 
 
-def bootstrap_population():
+def bootstrap_population(max_num_agents: int = 0):
     all_stimuli = [
         {
             'class': Vision,
             # range for unique init params: (min_value, max_value)
             'static_params': {
-                'zoom': (0, 1),
+                'zoom': lambda: abs(random.normalvariate(0, 0.5)),  # between (0, 1),
                 'noise_strength': (0, 1),
                 'compression_seed': (0, 32767),
             },
@@ -60,16 +59,38 @@ def bootstrap_population():
         },
     ]
 
-
     population = Population()
+    active_count = len(population.active_agents)
+    new_required_count = max_num_agents - (active_count + len(population.yet_active_agents))
 
-    for name, agent in population.active_agents.items():
-        pass
+    if new_required_count > 0:
+        for i in range(0, new_required_count):
+            agent = Agent()  # will give themself a name
+            agent.save()
 
-
+    population.refresh()
     for name, agent in population.yet_active_agents.items():
-        for stimulus in all_stimuli:
-            for key, (min_value, max_value) in stimulus['static_params']:
-                pass
-            for key, (min_value, max_value) in stimulus['motor_params']:
-                pass
+
+        if active_count >= max_num_agents:
+            break
+
+        agent.stimulus_subscriptions = dict()
+        stimulus = all_stimuli[0]  # for stimulus in all_stimuli:
+        agent.stimulus_subscriptions[stimulus['class'].__name__] = {
+            'static_params': {
+                k: stimulus['class'].param_generators[k]()
+                for k in stimulus['static_params'].keys()
+            },
+            'motor_params': {
+                k: stimulus['class'].param_generators[k]()
+                for k in stimulus['static_params'].keys()
+            },
+        }
+        logging.debug(agent.storage.value)
+        agent.save()
+        active_count += 1
+
+
+    population.refresh()
+    for name, agent in population.active_agents.items():
+        agent.activate()
