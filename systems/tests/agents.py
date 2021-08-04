@@ -53,3 +53,8 @@ class test_agent(TestCase):
 
     def test_can_predict(self):
         pass
+
+    def tearDown(self) -> None:
+        from settings.redis_db import redis_db
+        redis_db.delete(self.lisa.storage.get_db_key())
+        redis_db.delete(self.rose.storage.get_db_key())

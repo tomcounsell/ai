@@ -44,3 +44,11 @@ class test_key_value(TestCase):
         self.specific_object_storage.save()
         self.retrieved_object = KeyValueStorage(key="Lisa", key_suffix='favorite:color')
         self.assertEqual(self.retrieved_object.value, "yellow")
+
+
+    def tearDown(self) -> None:
+        from settings.redis_db import redis_db
+        redis_db.delete(self.default_object_storage.storage.get_db_key())
+        redis_db.delete(self.basic_object_storage.storage.get_db_key())
+        redis_db.delete(self.general_object_storage.storage.get_db_key())
+        redis_db.delete(self.specific_object_storage.storage.get_db_key())
