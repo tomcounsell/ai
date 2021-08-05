@@ -4,7 +4,7 @@ from collections import namedtuple
 
 from settings import SITE_ROOT
 from settings.redis_db import redis_db
-from systems.data.subscriber import Subscriber
+from systems.data.pubsub import Subscriber
 from systems.stimulus.vision import Vision
 from systems.structures.redis_storage.key_value import KeyValueStorage
 from systems.structures.reference_frame import ReferenceFrame
@@ -25,6 +25,7 @@ class AgentStimulator(Subscriber):
         super().__init__(*args, **kwargs)
 
     def handle(self, channel, data, *args, **kwargs):  # for inherited Subscriber class
+        logging.debug("running handler, callable")
         self.callable(channel, data)
 
 
@@ -55,13 +56,12 @@ class Agent(AbstractNode, ReferenceFrame):
         redis_db.lpush(redis_keys['retired_agents'], self.name)
         self.save()
 
-    def stimulate(self, stimulus_class, data):
-        if stimulus_class.__name__ == Vision.__name__:
-            from PIL.Image import Image
-            if data.get('image', False):
-                image = Image.fromarray(data['image_data'])
-                logging.debug(f"I can see an image with info {image.__dict__}")
-                # self.last_seen = image
+    def stimulate(self, stimulus_class_name, data):
+        if stimulus_class_name == Vision.__name__:
+            from PIL import Image
+            image_data = data.get('image_data', [])
+            image = Image.fromarray(image_data)
+            logging.debug(f"I can see an image with info {image.__dict__}")
 
     def set_partner(self, context: dict, agent: 'Agent') -> None:
         super()._set_relationship_to_graphnode(context, agent.graph_node)

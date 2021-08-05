@@ -2,11 +2,12 @@ import logging
 from abc import ABC
 
 from systems.data.data_source import DataSource, Muscle, AgentPrediction
+from systems.data.pubsub import Publisher
 
 logger = logging.getLogger(__name__)
 
 
-class Stimulus(ABC):
+class Stimulus(Publisher):
     data = bytes()
     static_params: dict = {}
     motor_params: dict = {}
@@ -16,10 +17,6 @@ class Stimulus(ABC):
 
     def __init__(self, source: DataSource, raw_input: bytes, *args, **kwargs):
         self.source = source
-
-    def publish(self, *args, **kwargs):
-        # open kafka channel, push self.data
-        pass
 
     def prepare(self, *args, **kwargs):
         # overwrite me

@@ -2,10 +2,31 @@ from abc import ABC
 import logging
 
 import msgpack
+import msgpack_numpy as m
 
+m.patch()
+logger = logging.getLogger(__name__)
 from settings.redis_db import redis_db
 
-logger = logging.getLogger(__name__)
+class PublisherException(Exception):
+    pass
+
+
+class Publisher(ABC):
+    def __init__(self, *args, **kwargs):
+        self.publish_data = None
+
+    def publish(self, channel_name="", publish_data=None, *args, **kwargs):
+        # logger.debug(f"publish to {channel_name}: {publish_data}")
+        channel_name = channel_name or self.__class__.__name__
+        publish_data = publish_data or self.publish_data
+        if not publish_data:
+            return
+        elif not channel_name:
+            raise PublisherException("missing channel to publish to")
+        # do some transformations here?
+        subscriber_count = redis_db.publish(channel_name, msgpack.dumps(publish_data))
+        logger.debug(f"published data to `{channel_name}`, {subscriber_count} subscribers")
 
 
 class SubscriberException(Exception):
@@ -13,7 +34,7 @@ class SubscriberException(Exception):
 
 
 class Subscriber(ABC):
-    class_describer = "ticker_subscriber"
+    class_describer = "subscriber"
     classes_subscribing_to = [
         # ...
     ]
@@ -48,7 +69,7 @@ class Subscriber(ABC):
 
         try:
             channel_name = data_event.get('channel').decode("utf-8")
-            event_data = msgpack.loads(data_event.get('data').decode("utf-8"))
+            event_data = msgpack.loads(data_event.get('data'))
             logger.debug(f'handling event in {self.__class__.__name__}')
             self.pre_handle(channel_name, event_data)
             self.handle(channel_name, event_data)

@@ -51,12 +51,8 @@ class Camera(DataSource):
     #             out = cv2.imwrite(filename, frame)
     #             break
 
-    def publish_image(self):
-        ret, frame = self.camera.read()
-        if not ret:
-            return
-        greyscale_array = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
-        self.publish({'image_data': greyscale_array})
-        # add noise, so agents learn in a more analog style
-        # publish via stimulus
-        # it should do something with image like pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    def get_frame(self, *args, **kwargs):
+        ret = False
+        while not ret:
+            ret, frame = self.camera.read()
+        return frame

@@ -1,6 +1,8 @@
 import logging
 
+import cv2
 import numpy as np
+from PIL import Image
 
 from apps.common.utilities.compression import image_compresssion
 from systems.data.camera import Camera
@@ -30,12 +32,11 @@ class Vision(Stimulus):
         'angle_from_center': np.random.uniform(0, 2*np.pi),  # in radians between 0, 2*pi
     }
 
-    def __init__(self, source: DataSource, raw_input: bytes = b''):
-        super().__init__(source, raw_input)
-        if isinstance(source, Camera):
-            camera = source
-            with camera:
-                self.image = camera.get_image_sample()
+    def __init__(self, data_source: DataSource, raw_input: bytes = b''):
+        self.data_source = data_source
+        super().__init__(data_source, raw_input)
+        self.image = self.get_image()
+        self.sample = self.prepare_image(self.image)
 
     @classmethod
     def prepare_image(cls, image, params: dict = {}):
@@ -49,11 +50,22 @@ class Vision(Stimulus):
         image = image_compresssion.add_random_compression(image=image, random_seed=params['compression_seed'])
         return image
 
-    def prepare(self, params: dict = None):
-        return self._prepare_image(params, image=self.image)
-
     def show(self):
         self.image.show()
 
-    # def publish(self):
-    #     redis_db.publish(self.__class__.__name__, msgpack.dumps({'image': self.image }))
+    def get_image_data(self):
+        if isinstance(self.data_source, Camera):
+            with self.data_source:
+                frame = self.data_source.get_frame()
+                greyscale_array = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+                return greyscale_array
+
+    def get_image(self):
+        return Image.fromarray(self.get_image_data())
+
+    def publish_image_data(self, image_data=None):
+        image_data = image_data or self.get_image_data()
+        # add noise, so agents learn in a more analog style
+        # publish via stimulus
+        # it should do something with image like pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        self.publish(self.__class__.__name__, {'image_data': image_data})
