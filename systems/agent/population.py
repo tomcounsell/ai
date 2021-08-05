@@ -23,6 +23,18 @@ class Population(ABC):
         # refresh to compile dicts of all agent instances
         self.refresh()
 
+    def __enter__(self):
+        stimulators = {name: agent.stimulator for name, agent in self.active_agents.items()}
+        while True:
+            logger.debug(f'running {len(stimulators)} subscribers')
+            for agent_name, stimulator in stimulators.items():
+                try:
+                    stimulator()  # run agent's subscriber class to stimulate agent
+                except Exception as e:
+                    logger.error(str(e))
+                    logger.debug(stimulator.__dict__)
+            yield self
+
     def refresh(self):
         # call redis to get names of all active agents
         self.active_agent_names = redis_db.lrange(redis_keys['active_agents'], 0, -1)
@@ -33,18 +45,8 @@ class Population(ABC):
         self.yet_active_agent_names = set(all_agent_names) - set(self.active_agent_names) - set(retired_agents_names)
         self.yet_active_agents = {name.decode(): Agent(name.decode()) for name in self.yet_active_agent_names}
 
-    def run_agents(self):
-        stimulators = {name: agent.stimulator for name, agent in self.active_agents.items()}
-        while True:
-            for agent_name, stimulator in stimulators.items():
-                logger.debug(f'running subscriber {agent_name}: {stimulator}')
-                try:
-                    stimulator()  # run subscriber class
-                except Exception as e:
-                    logger.error(str(e))
-                    logger.debug(stimulator.__dict__)
-
-            time.sleep(0.001)  # be nice to the system :)
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
 
 
 class Community(ABC):
