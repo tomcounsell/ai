@@ -27,6 +27,7 @@ ipywidgets
 # markdownify
 # matplotlib
 msgpack
+msgpack-numpy
 Pillow
 plotly
 python-telegram-bot

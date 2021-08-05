@@ -1,10 +1,11 @@
 import ast
 import logging
-import random
 from collections import namedtuple
 
 from settings import SITE_ROOT
-from systems.agent.stimulus.stimulus import Vision
+from settings.redis_db import redis_db
+from systems.data.subscriber import Subscriber
+from systems.stimulus.vision import Vision
 from systems.structures.redis_storage.key_value import KeyValueStorage
 from systems.structures.reference_frame import ReferenceFrame
 from systems.structures.social_graph.node import AbstractNode
@@ -16,6 +17,15 @@ redis_keys = {
     'active_agents': "list:Agents:active",  # redis list of agent keys
     'retired_agents': "list:Agents:discarded",  # redis list of agent keys
 }
+
+class AgentStimulator(Subscriber):
+    def __init__(self, stimulus_subscriptions, callable, *args, **kwargs):
+        self.classes_subscribing_to = stimulus_subscriptions.keys()
+        self.callable = callable
+        super().__init__(*args, **kwargs)
+
+    def handle(self, channel, data, *args, **kwargs):  # for inherited Subscriber class
+        self.callable(channel, data)
 
 
 class Agent(AbstractNode, ReferenceFrame):
@@ -30,22 +40,17 @@ class Agent(AbstractNode, ReferenceFrame):
             for k, v in self.storage.value.items():
                 setattr(self, k, v)
 
+        self.pubsub = redis_db.pubsub()
+        self.stimulator = AgentStimulator(self.stimulus_subscriptions, callable=self.stimulate)
+
     def activate(self):
-        # for stimulus in self.stimulus_subscriptions:
-        #     pubsub.subscribe(
-        #         stimulus['class'],
-        #         motor_params=stimulus.get('motor_params', {}),
-        #         activation=self.stimulate
-        #     )
         if self.state != "active":
             self.state = "active"
-            from settings.redis_db import redis_db
             redis_db.lpush(redis_keys['active_agents'], self.name)  # add name to the active list
             self.save()
 
     def retire(self):
         self.state = "retired"
-        from settings.redis_db import redis_db
         redis_db.lrem(redis_keys['active_agents'], 0, self.name)
         redis_db.lpush(redis_keys['retired_agents'], self.name)
         self.save()
@@ -53,10 +58,10 @@ class Agent(AbstractNode, ReferenceFrame):
     def stimulate(self, stimulus_class, data):
         if stimulus_class.__name__ == Vision.__name__:
             from PIL.Image import Image
-            image = data.get('image', None)
-            if isinstance(image, Image):
+            if data.get('image', False):
+                image = Image.fromarray(data['image_data'])
                 logging.debug(f"I can see an image with info {image.__dict__}")
-                self.last_seen = image
+                # self.last_seen = image
 
     def set_partner(self, context: dict, agent: 'Agent') -> None:
         super()._set_relationship_to_graphnode(context, agent.graph_node)

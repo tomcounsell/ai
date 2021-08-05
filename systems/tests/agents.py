@@ -3,7 +3,7 @@ import sys
 from django.test import TestCase
 
 from systems.agent.agent import Agent
-from systems.agent.stimulus.stimulus import Vision
+from systems.stimulus.vision import Vision
 
 lisa_info_dict = {
     'generic': "mammal:human:woman",
@@ -47,7 +47,7 @@ class test_agent(TestCase):
 
     def test_can_stimulate(self):
         self.lisa = Agent("Lisa")
-        from systems.data.data_source import Camera
+        from systems.data.camera import Camera
         with Camera() as webcam:
             vision = Vision(webcam)
             self.lisa.stimulate(Vision, data={'image': vision.image})

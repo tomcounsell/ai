@@ -1,12 +1,14 @@
 import logging
 import random
 from abc import ABC
-
+import time
 import numpy as np
 
 from systems.agent.agent import Agent, redis_keys
-from systems.agent.stimulus.stimulus import Vision
+from systems.stimulus.vision import Vision
 from settings.redis_db import redis_db
+
+logger = logging.getLogger(__name__)
 
 
 class Population(ABC):
@@ -30,6 +32,19 @@ class Population(ABC):
         retired_agents_names = redis_db.lrange(redis_keys['retired_agents'], 0, -1)
         self.yet_active_agent_names = set(all_agent_names) - set(self.active_agent_names) - set(retired_agents_names)
         self.yet_active_agents = {name.decode(): Agent(name.decode()) for name in self.yet_active_agent_names}
+
+    def run_agents(self):
+        stimulators = {name: agent.stimulator for name, agent in self.active_agents.items()}
+        while True:
+            for agent_name, stimulator in stimulators.items():
+                logger.debug(f'running subscriber {agent_name}: {stimulator}')
+                try:
+                    stimulator()  # run subscriber class
+                except Exception as e:
+                    logger.error(str(e))
+                    logger.debug(stimulator.__dict__)
+
+            time.sleep(0.001)  # be nice to the system :)
 
 
 class Community(ABC):
