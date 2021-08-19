@@ -3,10 +3,6 @@ from abc import ABC
 import numpy as np
 from systems.data.pubsub import Publisher
 
-
-
-from settings.redis_db import redis_db
-
 logger = logging.getLogger(__name__)
 
 
