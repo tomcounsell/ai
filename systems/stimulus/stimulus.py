@@ -2,12 +2,18 @@ import logging
 from abc import ABC
 
 from systems.data.data_source import DataSource, Muscle, AgentPrediction
-from systems.data.pubsub import Publisher
+from popoto.pubsub import Publisher
 
 logger = logging.getLogger(__name__)
 
 
 class Stimulus(Publisher):
+    """
+    A Stimulus is a publisher that has a DataSource
+    For the use of activating or prompting a response from Agents
+    Optionally, it can do some transformations by default or upon request
+    Examples: vision, motor, audio, touch, predicted vision, predicted touch
+    """
     data = bytes()
     static_params: dict = {}
     motor_params: dict = {}

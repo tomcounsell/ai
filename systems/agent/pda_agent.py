@@ -1,5 +1,9 @@
 
-class Agent(object):
+class PDAAgent(object):
+    """
+    perceive, decide, act (in order, forever loop)
+    science agrees that this is NOT how human brains operate
+    """
 
     def __init__(self):
         self.alive = True

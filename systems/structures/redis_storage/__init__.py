@@ -9,13 +9,7 @@ deployment_type = os.environ.get('DEPLOYMENT_TYPE', 'LOCAL')
 if deployment_type == 'LOCAL':
     logging.basicConfig(level=logging.DEBUG)
 
-logger = logging.getLogger('core.apps.TA')
-
-
-class RedisStorageException(Exception):
-    def __init__(self, message):
-        self.message = message
-        logger.error(message)
+logger = logging.getLogger('AI-RedisStorage')
 
 class MuchException(Exception):
     def __init__(self, message):

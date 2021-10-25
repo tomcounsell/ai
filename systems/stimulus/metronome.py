@@ -7,7 +7,7 @@ from systems.stimulus.stimulus import Stimulus
 logger = logging.getLogger(__name__)
 
 
-class Time(Stimulus):
+class Metronome(Stimulus):
     static_params = {
         'ticks_per_second': 1
     }

@@ -4,13 +4,11 @@ from settings.redis_db import redis_db
 from abc import ABC
 import msgpack
 
-from systems.structures.redis_storage import RedisStorageException, MuchException
-
 logger = logging.getLogger(__name__)
 ENCODING = 'utf-8'
 
 
-class KeyValueException(RedisStorageException):
+class KeyValueException(Exception):
     pass
 
 

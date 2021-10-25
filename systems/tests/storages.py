@@ -1,6 +1,6 @@
 import sys
 
-from systems.structures.redis_storage.key_value import KeyValueStorage
+from systems.structures.redis_storage._archive_key_value import KeyValueStorage
 from django.test import TestCase
 
 lisa_info_dict = {
