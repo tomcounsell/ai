@@ -32,7 +32,7 @@ class Vision(Stimulus):
         'angle_from_center': np.random.uniform(0, 2*np.pi),  # in radians between 0, 2*pi
     }
 
-    def __init__(self, data_source: DataSource, raw_input: bytes = b''):
+    def __init__(self, data_source: DataSource, raw_input: bytes = b'', *args, **kwargs):
         self.data_source = data_source
         super().__init__(data_source, raw_input)
         self.image = self.get_image()
@@ -68,4 +68,4 @@ class Vision(Stimulus):
         # add noise, so agents learn in a more analog style
         # publish via stimulus
         # it should do something with image like pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        self.publish(self.__class__.__name__, {'image_data': image_data})
+        self.publish({'image_data': image_data})

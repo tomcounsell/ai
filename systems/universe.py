@@ -1,6 +1,33 @@
-from systems.agent.population import Population
-from systems.stimulus.environment import Environment
+import logging
 import time
+from abc import ABC
+
+from systems.agent.population import Population
+from systems.data.camera import Camera
+from systems.stimulus.vision import Vision
+
+logger = logging.getLogger(__name__)
+
+
+class Environment(ABC):
+    """
+    All the stimuli
+    """
+    stimuli = [Vision, ]
+
+    def __init__(self, *args, **kwargs):
+        # refresh to compile stimulus instances
+        pass
+
+    def __enter__(self):
+        with Camera() as webcam:
+            vision = Vision(webcam)
+            while True:
+                vision.publish_image_data()
+                yield self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
 
 
 class Universe:
@@ -11,4 +38,5 @@ class Universe:
                 for i in range(100):
                     next(environment)
                     next(population)
-                    time.sleep(0.1)  # be nice to the system :)
+                    input("Press Enter to continue...")
+                    # time.sleep(0.1)  # be nice to the system :)

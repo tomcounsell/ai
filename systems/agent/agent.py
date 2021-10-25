@@ -4,9 +4,8 @@ from collections import namedtuple
 
 from settings import SITE_ROOT
 from settings.redis_db import redis_db
-from systems.data.pubsub import Subscriber
-from systems.stimulus.vision import Vision
-from systems.structures.redis_storage.key_value import KeyValueStorage
+from popoto import models, pubsub, fields
+from systems.stimulus import Vision, Stimulus
 from systems.structures.reference_frame import ReferenceFrame
 from systems.structures.social_graph.node import AbstractNode
 
@@ -18,7 +17,7 @@ redis_keys = {
     'retired_agents': "list:Agents:discarded",  # redis list of agent keys
 }
 
-class AgentStimulator(Subscriber):
+class AgentStimulator(pubsub.Subscriber):
     def __init__(self, stimulus_subscriptions, callable, *args, **kwargs):
         self.classes_subscribing_to = stimulus_subscriptions.keys()
         self.callable = callable
@@ -29,29 +28,41 @@ class AgentStimulator(Subscriber):
         self.callable(channel, data)
 
 
-class Agent(AbstractNode, ReferenceFrame):
-    stimulus_subscriptions: dict = {}
-    representation: dict = dict(name='empty')
+class Agent(models.Model):
+    """
+    A subscriber to
+    - at least one Stimulus
+    A Publisher of
+    - predictions
+    With relationships to other Agents
+    All above can evolve but can and mostly do persist over generations.
+    The attributes above are as critical as the
+    """
+    # todo: inherit GraphModel or add NodeField
+
+    name = fields.KeyField(key_prefix="Agent")
+    # stimulus = fields.Field(type=Stimulus)
+    stimulus_subscriptions = fields.Field(type=dict)
+    reference_frame = fields.Field(type=ReferenceFrame)
+    state = fields.Field(type=str, default="yet")
 
     def __init__(self, name: str = "", *args, **kwargs):
+        super().__init__()
         self.name = name or self._name_thy_self()
-        self.storage = KeyValueStorage(key=self.__class__.__name__, key_suffix=self.name)
-        self.state = "yet"
-        if isinstance(self.storage.value, dict):
-            for k, v in self.storage.value.items():
-                setattr(self, k, v)
-
+        self.load_from_db()
         self.pubsub = redis_db.pubsub()
-        self.stimulator = AgentStimulator(self.stimulus_subscriptions, callable=self.stimulate)
+        self.stimulator = AgentStimulator(self.stimulus_subscriptions or {}, callable=self.stimulate)
 
     def activate(self):
         if self.state != "active":
             self.state = "active"
+            # todo: move this to feature in Field(index=True) (with choices?)
             redis_db.lpush(redis_keys['active_agents'], self.name)  # add name to the active list
             self.save()
 
     def retire(self):
         self.state = "retired"
+        # todo: move this to feature in Field(index=True) (with choices?)
         redis_db.lrem(redis_keys['active_agents'], 0, self.name)
         redis_db.lpush(redis_keys['retired_agents'], self.name)
         self.save()
@@ -63,13 +74,16 @@ class Agent(AbstractNode, ReferenceFrame):
             image = Image.fromarray(image_data)
             logging.debug(f"I can see an image with info {image.__dict__}")
 
-    def set_partner(self, context: dict, agent: 'Agent') -> None:
-        super()._set_relationship_to_graphnode(context, agent.graph_node)
+    # def set_partner(self, context: dict, agent: 'Agent') -> None:
+    #     super()._set_relationship_to_graphnode(context, agent.graph_node)
 
     def publish_prediction(self):
         pass
 
     def update_representation(self):
+        """
+
+        """
         pass
 
     @classmethod
@@ -90,13 +104,13 @@ class Agent(AbstractNode, ReferenceFrame):
         self.name = f"{all_names[num_names % len(all_names)][0]}{num_names // len(all_names)}"
         redis_db.lpush(redis_keys['all_agents'], self.name)  # add my name to the list, asap
         return self.name
-
-    def save(self):
-        # todo: filter out custom standard data types, eg. timestamps
-        self.storage.value = {k: self.describe().get(k) for k in [
-            'name', 'stimulus_subscriptions', 'representation', 'state'
-        ]}
-        self.storage.save()
+    #
+    # def save(self):
+    #     # todo: filter out custom standard data types, eg. timestamps
+    #     self.storage.value = {k: self.describe().get(k) for k in [
+    #         'name', 'stimulus_subscriptions', 'representation', 'state'
+    #     ]}
+    #     self.storage.save()
 
 
 class Concept(AbstractNode):
