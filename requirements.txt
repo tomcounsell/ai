@@ -4,7 +4,7 @@ boto3
 decorator
 dj-database-url
 dj-static
-Django==3.2.5
+Django==4.0.0
 # django-anymail[sendinblue]==7.1.0
 # django-cache-memoize
 # django-cors-headers
@@ -30,6 +30,7 @@ msgpack
 msgpack-numpy
 Pillow
 plotly
+popoto>=0.5.3
 python-telegram-bot
 pytz
 PyYAML
@@ -42,8 +43,6 @@ simplejson
 six
 toolz
 waitress
-
-popoto==0.1.0
 
 # FINANCE
 # backtrader

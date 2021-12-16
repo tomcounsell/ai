@@ -32,12 +32,17 @@ CACHES = {
 }
 
 
-# HEROKU DATABASE
-import dj_database_url
-DATABASES = {'default': dj_database_url.config(), }
-# Set DATABASE_URL in config if using other host
-# DATABASE_URL = f"postgresql://{username}:{password}@{host}:5432/{dbname}"
-
+# Database
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql_psycopg2',
+        'NAME':     os.environ.get('POSTGRES_DB_NAME'),
+        'USER':     os.environ.get('POSTGRES_DB_USERNAME'),
+        'PASSWORD': os.environ.get('POSTGRES_DB_PASSWORD'),
+        'HOST':     os.environ.get('POSTGRES_DB_HOST'),
+        'PORT':     os.environ.get('POSTGRES_DB_PORT'),
+    }
+}
 
 # SENDINBLUE.COM EMAIL SERVICE
 # ANYMAIL = {
