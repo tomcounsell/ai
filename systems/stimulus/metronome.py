@@ -8,6 +8,10 @@ logger = logging.getLogger(__name__)
 
 
 class Metronome(Stimulus):
+    """
+    A unit of time has passed. This is an internal clock for agents using a time map
+    """
+
     static_params = {
         'ticks_per_second': 1
     }

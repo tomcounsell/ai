@@ -4,7 +4,7 @@ from abc import ABC
 import time
 import numpy as np
 
-from systems.agent.agent import Agent, redis_keys
+from systems.agent.agent import Agent
 from systems.stimulus.vision import Vision
 from settings.redis_db import redis_db
 
@@ -37,13 +37,9 @@ class Population(ABC):
 
     def refresh(self):
         # call redis to get names of all active agents
-        self.active_agent_names = redis_db.lrange(redis_keys['active_agents'], 0, -1)
-        self.active_agents = {name.decode(): Agent(name.decode()) for name in self.active_agent_names}
-
-        all_agent_names = redis_db.lrange(redis_keys['all_agents'], 0, -1)
-        retired_agents_names = redis_db.lrange(redis_keys['retired_agents'], 0, -1)
-        self.yet_active_agent_names = set(all_agent_names) - set(self.active_agent_names) - set(retired_agents_names)
-        self.yet_active_agents = {name.decode(): Agent(name.decode()) for name in self.yet_active_agent_names}
+        self.active_agents = Agent.query.filter(status='active')
+        self.yet_active_agent = Agent.query.filter(status="yet")
+        self.retired_agents = Agent.query.filter(status="retired")
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         pass
@@ -110,4 +106,5 @@ def bootstrap_population(max_num_agents: int = 0):
 
     population.refresh()
     for name, agent in population.active_agents.items():
-        agent.activate()
+        agent.status = 'active'
+        agent.save()

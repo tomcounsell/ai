@@ -1,6 +1,6 @@
 import logging
 import numpy as np
-from popoto.pubsub import Publisher
+from popoto import Publisher
 
 logger = logging.getLogger(__name__)
 

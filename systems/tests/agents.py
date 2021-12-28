@@ -28,9 +28,8 @@ class test_agent(TestCase):
         self.assertEqual('utf-8', sys.getdefaultencoding())
 
     def test_can_create_agent(self):
-        self.lisa = Agent("Lisa")
-        self.lisa.save()
-        self.lisa.stimulus_subscriptions.append({
+        self.lisa = Agent(name="Lisa")
+        self.lisa.stimuli.append({
             'class': Vision,
             'static_params': {
                 'zoom': 0,
@@ -42,8 +41,9 @@ class test_agent(TestCase):
                 'angle_from_center': 0,
             },
         })
+        self.lisa.save()
 
-        self.rose = Agent("Rose")
+        # self.rose = Agent("Rose")
 
     def test_can_stimulate(self):
         self.lisa = Agent("Lisa")
@@ -56,6 +56,4 @@ class test_agent(TestCase):
         pass
 
     def tearDown(self) -> None:
-        from settings.redis_db import redis_db
-        redis_db.delete(self.lisa.storage.get_db_key())
-        redis_db.delete(self.rose.storage.get_db_key())
+        self.lisa.delete()

@@ -30,7 +30,7 @@ msgpack
 msgpack-numpy
 Pillow
 plotly
-popoto>=0.5.3
+popoto>=0.6.0
 python-telegram-bot
 pytz
 PyYAML

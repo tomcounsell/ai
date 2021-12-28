@@ -2,7 +2,7 @@ import logging
 from abc import ABC
 
 from systems.data.data_source import DataSource, Muscle, AgentPrediction
-from popoto.pubsub import Publisher
+from popoto import Publisher
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,7 @@ class Stimulus(Publisher):
 
     def __init__(self, source: DataSource, raw_input: bytes, *args, **kwargs):
         self.source = source
+        super().__init__(*args, **kwargs)
 
     def prepare(self, *args, **kwargs):
         # overwrite me
