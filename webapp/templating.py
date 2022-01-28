@@ -13,7 +13,7 @@ def configure_templating(
     """
     Configures server side templating engine for HTML views, using Jinja2.
     """
-    use_templates(application, PackageLoader("app", "views"))
+    use_templates(application, PackageLoader("webapp", "views"))
 
     def get_copy():
         now = datetime.now()

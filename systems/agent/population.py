@@ -1,12 +1,10 @@
 import logging
 import random
 from abc import ABC
-import time
 import numpy as np
 
 from systems.agent.agent import Agent
 from systems.stimulus.vision import Vision
-from settings.redis_db import redis_db
 
 logger = logging.getLogger(__name__)
 

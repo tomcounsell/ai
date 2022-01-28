@@ -13,7 +13,7 @@ from .docs import docs
 
 async def before_start(application: Application) -> None:
     application.services.add_instance(application)
-    application.services.add_alias("app", Application)
+    application.services.add_alias("webapp", Application)
 
 
 def configure_application(
@@ -36,7 +36,7 @@ def configure_application(
     configure_authentication(app)
     configure_templating(app, configuration)
 
-    app.serve_files("app/static")
+    app.serve_files("webapp/static")
 
     docs.bind_app(app)
     return app

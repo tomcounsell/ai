@@ -8,13 +8,13 @@ from systems.structures.reference_frame import ReferenceFrame
 
 import csv
 SITE_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), '..'))
-with open(SITE_ROOT + '/static/names.csv', newline='') as f:
+with open(SITE_ROOT + '/agent/names.csv', newline='') as f:
     reader = csv.reader(f)
     global FRIENDLY_NAMES_LIST
     FRIENDLY_NAMES_LIST = [row[0] for row in list(reader)]
 
 
-class Agent(Model, Publisher):
+class Agent(Model):  # Publisher
     """
     A unique entity for storing experiences and making predictions
     - Subscribes to Stimuli (via StimulusSubscriber object)

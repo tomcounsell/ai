@@ -1,4 +1,6 @@
 from uuid import UUID
+
+from systems.agents import AgentsList, CreateAgentInput, UpdateAgentInput
 from webapp.controllers.docs.agents import create_agent_docs, get_agent_docs, get_agents_docs
 from systems.agent import Agent
 
