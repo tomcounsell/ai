@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Any
 
 from essentials.exceptions import (
@@ -40,3 +41,9 @@ def configure_error_handlers(app: Application) -> None:
             AcceptedException: accepted,
         }
     )
+
+@dataclass
+class HttpError:
+    status: int
+    message: str
+    code: str

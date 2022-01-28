@@ -12,6 +12,7 @@ from blacksheep.server.openapi.common import (
     ResponseInfo,
 )
 
+from webapp.errors import HttpError
 
 get_agent_docs = EndpointDocs(
     summary="Gets a agent by id",
