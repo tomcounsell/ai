@@ -4,8 +4,8 @@
 # thanks to `roconfiguration` package.
 # Refer to https://github.com/RobertoPrevato/roconfiguration for more information.
 #
-app_name: BlackSheep Empty Project Template
-github_url: https://github.com/Neoteroi/BlackSheepMVC
+app_name: AI Agents
+github_url: https://github.com/tomcounsell/ai
 
 storage_connection_string: EXAMPLE
 
@@ -15,4 +15,4 @@ show_error_details: true
 
 # site information
 site:
-    copyright: Hello World # change with your own copyright notice
+    copyright: Tom Counsell, @aihelps
