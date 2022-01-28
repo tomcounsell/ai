@@ -1,8 +1,8 @@
 from uuid import UUID
-from app.controllers.docs.agents import create_agent_docs, get_agent_docs, get_agents_docs
+from webapp.controllers.docs.agents import create_agent_docs, get_agent_docs, get_agents_docs
 from systems.agent import Agent
 
-from app.docs import docs
+from webapp.docs import docs
 from blacksheep import Response
 from blacksheep.server.bindings import FromJson, FromQuery
 from blacksheep.server.controllers import ApiController, delete, get, patch, post
