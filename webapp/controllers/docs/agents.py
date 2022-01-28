@@ -1,16 +1,7 @@
 from datetime import datetime
-from systems.agents import (
-    Agent,
-)
+from systems.agents import Agent, AgentType, AgentsList, Foo, CreateAgentInput, CreateAgentOutput
 from uuid import UUID, uuid4
-from blacksheep.server.openapi.common import (
-    ContentInfo,
-    EndpointDocs,
-    HeaderInfo,
-    RequestBodyInfo,
-    ResponseExample,
-    ResponseInfo,
-)
+from blacksheep.server.openapi.common import ContentInfo, EndpointDocs, HeaderInfo, RequestBodyInfo, ResponseExample, ResponseInfo
 
 from webapp.errors import HttpError
 

@@ -1,4 +1,4 @@
-from settings import SITE_ROOT
+import os
 from popoto import Model, Field, SetField, KeyField, Publisher, Subscriber, Relationship
 import logging
 import uuid
@@ -7,6 +7,7 @@ from systems.stimulus import Vision, Stimulus
 from systems.structures.reference_frame import ReferenceFrame
 
 import csv
+SITE_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), '..'))
 with open(SITE_ROOT + '/static/names.csv', newline='') as f:
     reader = csv.reader(f)
     global FRIENDLY_NAMES_LIST
