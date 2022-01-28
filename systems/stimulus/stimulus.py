@@ -1,5 +1,4 @@
 import logging
-from abc import ABC
 
 from systems.data.data_source import DataSource, Muscle, AgentPrediction
 from popoto import Publisher
