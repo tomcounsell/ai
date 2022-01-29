@@ -1,4 +1,5 @@
 import hashlib
+from typing import Union
 
 from django.contrib.auth import login, authenticate
 from django.db.models import Q
@@ -12,9 +13,9 @@ from rest_framework.permissions import IsAuthenticated, BasePermission, IsAdminU
 from rest_framework.response import Response
 from rest_framework.viewsets import GenericViewSet
 
-from apps.api.serializers.user import UserSerializer
-from apps.user.models import User
-from settings import logger
+from _archive_.apps.api.serializers.user import UserSerializer
+from _archive_.apps.user.models import User
+from _archive_.settings import logger
 from django.core.validators import validate_email
 from django.core.exceptions import ValidationError
 
@@ -77,7 +78,7 @@ class UserViewSet(mixins.CreateModelMixin,
         - if username already exists, API returns `400` error with JSON `{"username": ["A user with that username already exists."]}`
 
     """
-    permission_classes = [CreateOnly | IsAuthenticated | IsAdminUser]
+    permission_classes = [Union[CreateOnly, IsAuthenticated, IsAdminUser]]
 
     queryset = User.objects.all()
     serializer_class = UserSerializer
