@@ -5,13 +5,13 @@ from blacksheep.messages import Response
 
 class Home(Controller):
     @get()
-    def index(self):
+    def home(self):
         # Since the @get() decorator is used without arguments, the URL path
         # is by default "/"
 
         # Since the view function is called without parameters, the name is
-        # obtained from the calling request handler: 'index',
-        # -> /views/home/index.html
+        # obtained from the calling request handler: 'home',
+        # -> /views/home/home.html
         return self.view()
 
     @get(None)
