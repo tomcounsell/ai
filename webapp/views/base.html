@@ -6,10 +6,10 @@
   <!--[if IE]><meta http-equiv="X-UA-Compatible" content="IE=edge,chrome=1"><![endif]-->
   <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
 
-  <title>{%- block title-%}Service{%- endblock -%}&nbsp;|&nbsp;AI</title>
+  <title>{% block title%}Service{% endblock %}&nbsp;|&nbsp;AI</title>
 
   <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
-  <meta name="description" content="{%- block description-%}{%- endblock -%}" />
+  <meta name="description" content="{% block description%}{% endblock %}" />
   <meta name="copyright" content="{{copy()}}" />
 
 {#  <link rel="icon" href="/blacksheep-favicon-white.png" type="image/x-icon" />#}
@@ -24,8 +24,8 @@
   <link href="vendor/fontawesome-free/css/all.min.css" rel="stylesheet" type="text/css">
   <link href="css/base.css?v=0" rel="stylesheet">
 
-  {%- block css -%}
-  {%- endblock css -%}
+  {% block css %}
+  {% endblock css %}
 </head>
 <body id="page-top">
 
@@ -34,43 +34,43 @@
 
       <div class="col-md-12 content" style="padding-top: 2.1rem;">
 
-{#        {%- block messages -%}#}
-{#          {%- include 'messages.html' -%}#}
-{#        {%- endblock messages -%}#}
+{#        {% block messages %}#}
+{#          {% include 'messages.html' %}#}
+{#        {% endblock messages %}#}
 
         <div class="dashhead">
 
           <div class="dashhead-titles">
             <h6 class="dashhead-subtitle">
-              {%- block content_subtitle -%}AI{%- endblock content_subtitle -%}
+              {% block content_subtitle %}AI{% endblock content_subtitle %}
             </h6>
             <h3 class="dashhead-title">
-              {%- block content_title -%}&nbsp;{%- endblock content_title -%}
+              {% block content_title %}&nbsp;{% endblock content_title %}
             </h3>
           </div>
 
           <div class="dashhead-toolbar">
-            {%- block content_toolbar -%}
+            {% block content_toolbar %}
               <div class="btn-group dashhead-toolbar-item">
-                {%- block content_toolbar_items -%}{%- endblock -%}
+                {% block content_toolbar_items %}{% endblock %}
               </div>
-            {%- endblock content_toolbar -%}
+            {% endblock content_toolbar %}
           </div>
         </div>
         <hr class="visible-xs mt-3">
 
-        {%- block content -%}
+        {% block content %}
           <p>Hello World</p>
-        {%- endblock content -%}
+        {% endblock content %}
 
       </div>
     </div>
   </div>
 
   <nav class="navbar fixed-bottom navbar bg-faded">
-    {% block footer -%}
+    {% block footer %}
       {% include "partial/footer.html" %}
-    {% endblock footer -%}
+    {% endblock footer %}
   </nav>
 
   <!--Javascript Placed at the end of the document. Pages load faster. -->
@@ -78,6 +78,6 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/tether/1.4.0/js/tether.min.js" integrity="sha384-DztdAPBWPRXSA/3eYEEUWrWCy7G5KFbe8fFjk5JAIxUYHKkDx6Qin1DkWx51bBrb" crossorigin="anonymous"></script>
   <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.0.0-alpha.6/js/bootstrap.min.js" integrity="sha384-vBWWzlZJ8ea9aCX4pEW3rVHjgjt7zpkNpZk+02D9phzyeVkE+jo0ieGizqPLForn" crossorigin="anonymous"></script>
   <script src="js/base.js?v=0"></script>
-  {%- block javascript -%}{%- endblock javascript -%}
+  {% block javascript %}{% endblock javascript %}
 </body>
 </html>
