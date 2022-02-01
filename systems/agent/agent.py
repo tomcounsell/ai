@@ -37,8 +37,9 @@ class Agent(Model):  # Publisher
     # (https://www.theproducthub.io/2019/10/20/agile-team-organisation-squads-chapters-tribes-and-guilds/)
     # groups = Relationship("Group", many=True)
 
-    def pre_save(self):
-        self.id = str(uuid.uuid5(uuid.NAMESPACE_URL, str(self.stimuli)))
+    def pre_save(self, *args, **kwargs):
+        self.id = str(uuid.uuid5(uuid.NAMESPACE_URL, str(self.stimuli))).replace("-","")
+        return super().pre_save(*args, **kwargs)
 
     def __init__(self, name: str = "", *args, **kwargs):
         super().__init__(*args, **kwargs)
