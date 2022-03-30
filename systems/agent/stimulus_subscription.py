@@ -20,7 +20,7 @@ class StimulusSubscription(Model):
 
 class StimulusSubscriber(Subscriber):
     def __init__(self, stimulus_subscriptions, callable, *args, **kwargs):
-        self.classes_subscribing_to = stimulus_subscriptions.keys()
+        self.classes_subscribing_to = [sub.stimulator_class for sub in stimulus_subscriptions]
         self.callable = callable
         super().__init__(*args, **kwargs)
 
