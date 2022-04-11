@@ -1,3 +1,4 @@
+from dataclasses import dataclass, asdict
 import random
 from abc import ABC
 from popoto.redis_db import POPOTO_REDIS_DB as REDIS
@@ -17,17 +18,17 @@ class Brain(ABC):
             Column(
                 order=column_index,
                 neurons={
-                    neuron_index: Neuron(
+                    neuron_index: asdict(Neuron(
                         synapses={
                             dendrite_index: [
-                                Synapse(
+                                asdict(Synapse(
                                     permanence=random.randint(0, 15)
-                                )
+                                ))
                                 for i in range(SYNAPSES_IN_A_DENDRITE_COUNT)
                             ]
                             for dendrite_index in range(DENDRITES_IN_A_NEURON_COUNT)
                         }
-                    )
+                    ))
                     for neuron_index in range(NEURONS_IN_A_COLUMN_COUNT)
                 }
             )
