@@ -7,7 +7,7 @@ information, used to generate OpenAPI documentation.
 from blacksheep.server.openapi.v3 import OpenAPIHandler
 from openapidocs.v3 import Info
 
-docs = OpenAPIHandler(info=Info(title="Cats API", version="0.0.1"))
+docs = OpenAPIHandler(info=Info(title="API", version="0.0.1"))
 
 # include only endpoints whose path starts with "/api/"
 docs.include = lambda path, _: path.startswith("/api/")

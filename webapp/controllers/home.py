@@ -1,30 +1,32 @@
-from blacksheep.server.application import Application
 from blacksheep.server.controllers import Controller, get
-from blacksheep.messages import Response
-
+from popoto import Model, KeyField, IntField
 from systems.agent import Agent
 
 
+class Counter(Model):
+    name = KeyField()
+    value = IntField(default=0, null=False)
+
+
 class Home(Controller):
-    @get()
+    @get()  # URL path = /
     def home(self):
-        # Since the @get() decorator is used without arguments, the URL path
-        # is by default "/"
+        # returns uses home.html and context dict
+        return self.view("home", {"agents": Agent.query.all(), "things": ["one", "two", "three", ]})
 
-        # Since the view function is called without parameters, the name is
-        # obtained from the calling request handler: 'home',
-        # -> /views/home/home.html
-        return self.view("home", {"agents": Agent.query.all(), "things": ["one", "two", "three",]})
-
-    @get(None)
-    def example(self):
-        # Since the @get() decorator is used explicitly with None, the URL path
-        # is obtained from the method name: "/example"
+    @get("/counter")  # URL path = /counter
+    def counter(self):
 
         # Since the view function is called without parameters, the name is
         # obtained from the calling request handler: 'example',
         # -> /views/home/example.html
-        return self.view()
+        counter = Counter.query.get(name="main counter")
+        if not counter:
+            counter = Counter.create(name="main counter")
+        counter.value += 1
+        counter.save()
+
+        return self.view("counter", {"count": counter.value})
 
     @get("/json")
     def json(self):
