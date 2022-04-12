@@ -1,4 +1,4 @@
-from settings import SITE_ROOT
+import os
 from popoto import Model, Field, SetField, KeyField, Publisher, Subscriber, Relationship
 import logging
 import uuid
@@ -7,13 +7,14 @@ from systems.stimulus import Vision, Stimulus
 from systems.structures.reference_frame import ReferenceFrame
 
 import csv
-with open(SITE_ROOT + '/static/names.csv', newline='') as f:
+SITE_ROOT = os.path.realpath(os.path.join(os.path.dirname(__file__), '..'))
+with open(SITE_ROOT + '/agent/names.csv', newline='') as f:
     reader = csv.reader(f)
     global FRIENDLY_NAMES_LIST
     FRIENDLY_NAMES_LIST = [row[0] for row in list(reader)]
 
 
-class Agent(Model, Publisher):
+class Agent(Model):  # Publisher
     """
     A unique entity for storing experiences and making predictions
     - Subscribes to Stimuli (via StimulusSubscriber object)
@@ -36,8 +37,9 @@ class Agent(Model, Publisher):
     # (https://www.theproducthub.io/2019/10/20/agile-team-organisation-squads-chapters-tribes-and-guilds/)
     # groups = Relationship("Group", many=True)
 
-    def pre_save(self):
-        self.id = str(uuid.uuid5(uuid.NAMESPACE_URL, str(self.stimuli)))
+    def pre_save(self, *args, **kwargs):
+        self.id = str(uuid.uuid5(uuid.NAMESPACE_URL, str(self.stimuli))).replace("-","")
+        return super().pre_save(*args, **kwargs)
 
     def __init__(self, name: str = "", *args, **kwargs):
         super().__init__(*args, **kwargs)

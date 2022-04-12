@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}
+  Home
+{% endblock %}
+{% block description %}
+  base home page
+{% endblock %}
+
+{% block content_title %}
+Home Page
+{% endblock content_title %}
+
+
+{% block content %}
+
+  <p>let's do something</p>
+
+  <ul>
+    {% for thing in things %}
+      <li>{{ thing }}</li>
+    {% endfor %}
+  </ul>
+
+  <table>
+    <tr>
+      {% for agent in agents %}
+        <td>{{ agent.name }}</td>
+      {% endfor %}
+      <td></td>
+    </tr>
+  </table>
+
+  <p>
+    New counter --> <a href="/counter">Try Me!</a>
+  </p>
+
+{% endblock content %}

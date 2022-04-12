@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 from PIL import Image
 
-from apps.common.utilities.compression import image_compresssion
+from utilities.compression import image_compresssion
 from systems.data.camera import Camera
 from systems.data.data_source import DataSource
 from systems.stimulus.stimulus import Stimulus

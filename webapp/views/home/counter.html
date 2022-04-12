@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}
+  BlackSheep MVC Counter
+{% endblock %}
+{% block description %}
+  Project template to create web applications with MVC architecture using BlackSheep web framework.
+{% endblock %}
+
+{% block content_title %}
+  Counter
+{% endblock content_title %}
+
+{% block content %}
+
+  <p>How many times has this page been loaded?</p>
+
+  <p><b>
+    {{ count }} times!
+  </b></p>
+
+{% endblock content %}
