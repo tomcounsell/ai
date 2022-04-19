@@ -3,8 +3,8 @@ import random
 from abc import ABC
 from popoto.redis_db import POPOTO_REDIS_DB as REDIS
 
-from systems.brain.column import Column
-from systems.brain.neuron import Neuron, Synapse
+from systems.numenta.column import Column
+from systems.numenta.neuron import Neuron, Synapse
 
 COLUMNS_IN_A_BRAIN_COUNT = 32  # increase to 2048, actually about 2*10^8 in human neocortex
 NEURONS_IN_A_COLUMN_COUNT = 32  # keep, actually about 100±20 in human neocortex

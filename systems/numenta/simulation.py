@@ -1,6 +1,6 @@
 import pandas as pd
 
-from systems.brain.brain import Brain
+from systems.numenta.brain import Brain
 from dataclasses import dataclass, asdict
 import random
 from abc import ABC
@@ -20,7 +20,4 @@ class Simulation(ABC):
 
     def feedforward(self):
 
-
-
         pass
-
