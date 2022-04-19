@@ -5,10 +5,12 @@ from popoto import Model, Relationship, IntField, KeyField, KeyField, GeoField
 # @dataclass
 # class Location:
 #
+from redis.client import Pipeline
 
 
 class Excitron(Model):
     """
+    inspired by biological neurons with feedforward, feedback, and contextual dendrites of synapses
     traversal is locked to Q+R+S == 0
     dQ+ => stimulates | dQ- => predicts | dQ= => contextualizes
     intersection(Q1.routes,Q2.routes) == {}
@@ -28,33 +30,12 @@ class Excitron(Model):
     class Meta:
         unique_together = ('up', 'down', 'fore', 'back', 'right', 'left', 'happy', 'sad')
 
-    @property
-    def state(self):
-        return 1 if sum(
-            [1 if unit.state else 0 for unit in self.stimuli] +
-            [1 if unit.state else 0 for unit in self.context] +
-            [1 if unit.state else 0 for unit in self.predictors]
-        ) > self.inhibition_threshold else 0
-
-    # def split(self):
-    #     self.inhibition_threshold += 1 if self.inhibition_threshold % 2 == 1 else 0
-    #     nong_a = Excitron(inhibition_threshold=self.inhibition_threshold/2)
-    #     nong_a.context = self.context
-    #     nong_a.predictors = self.predictors
-    #
-    #     nong_b = Excitron(inhibition_threshold=self.inhibition_threshold/2)
-    #     nong_b.context = self.context
-    #     nong_b.predictors = self.predictors
-    #
-    #     for s_count, unit in enumerate(self.stimuli):
-    #         if s_count % 2 == 0:
-    #             nong_a.stimuli.add(unit)
-    #         else:
-    #             nong_b.stimuli.add(unit)
-    #
-    #     nong_a.save()
-    #     nong_b.save()
-    #     self.delete()
+    def fire(self, pipeline: Pipeline) -> Pipeline:
+        from systems.theory.flection import Flection
+        for flection in Flection.query.filter(from_e=self):
+            pipeline = pipeline.hincrby(flection.to_e.db_key.redis_key, "energy", 1)
+        pipeline = pipeline.hset(self.db_key.redis_key, "energy", 0)
+        return pipeline
 
     def get_geohash(self, happy=0, sad=0):
         """
