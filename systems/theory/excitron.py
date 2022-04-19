@@ -30,13 +30,6 @@ class Excitron(Model):
     class Meta:
         unique_together = ('up', 'down', 'fore', 'back', 'right', 'left', 'happy', 'sad')
 
-    def fire(self, pipeline: Pipeline) -> Pipeline:
-        from systems.theory.flection import Flection
-        for flection in Flection.query.filter(from_e=self):
-            pipeline = pipeline.hincrby(flection.to_e.db_key.redis_key, "energy", 1)
-        pipeline = pipeline.hset(self.db_key.redis_key, "energy", 0)
-        return pipeline
-
     def get_geohash(self, happy=0, sad=0):
         """
         bitwise coordinate hash of Q, R, S
