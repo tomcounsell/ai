@@ -33,6 +33,7 @@ class Excitron(Model):
     def get_geohash(self, happy=0, sad=0):
         """
         bitwise coordinate hash of Q, R, S
+        ref: https://www.redblobgames.com/grids/hexagons/#coordinates-cube
         """
         return
 
