@@ -21,7 +21,7 @@ urlpatterns = [
 
 # Django Rest Framework API Docs
 from rest_framework.documentation import include_docs_urls
-API_TITLE, API_DESCRIPTION = "Company API", ""
+API_TITLE, API_DESCRIPTION = "AI Helps API", ""
 urlpatterns += [
     url(r'^docs/', include_docs_urls(title=API_TITLE, description=API_DESCRIPTION))
 ]
@@ -29,8 +29,8 @@ urlpatterns += [
 
 # Built-In AUTH and ADMIN
 admin.autodiscover()
-admin.site.site_header = "Company Content Database"
-admin.site.site_title = "Company"
+admin.site.site_header = "AI Helps Content Database"
+admin.site.site_title = "AI Helps"
 admin.site.site_url = None
 admin.site.index_title = "Content Database"
 

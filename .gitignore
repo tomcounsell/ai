@@ -130,9 +130,13 @@ datasets/
 *tar..gz
 
 _study_/fast_ai/fastbook-master/
+studies/fast_ai/fastbook-master/
+studies/fast_ai/old/
+
 apps/finance/_legacy_/
 /apps/finance/test.py
 static/temp/*
 
 _study_/*.pdf
 _study_/*/*.pdf
+
