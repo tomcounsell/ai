@@ -16,7 +16,10 @@ class Flection(Model):
     """
     inspired by biological axons and synapses passing signals between neurons
     -flect- comes from Latin, where it has the meaning "bend.'' It is related to -flex-.
-    deflection (acute deviation), genuflection (bow/honor), inflection (obtuse deviation), reflection (reversal)
+        reflection: reversal back
+        deflection: acute deviation
+        inflection: obtuse deviation
+        genuflection: pass forward, bow/honor
     """
     from_e = KeyRelationship(Excitron)
     to_e = KeyRelationship(Excitron)

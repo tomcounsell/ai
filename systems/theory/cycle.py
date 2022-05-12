@@ -16,7 +16,7 @@ def cycle(firing_excitrons: set):
     """
     next_firing_excitrons = set()
 
-    # 1. Excitrons fire and reset
+    # 1. Excitrons that fire are reset
     pipeline1 = POPOTO_REDIS_DB.pipeline()
     for excitron in firing_excitrons:
         pipeline1 = pipeline1.hset(excitron.db_key.redis_key, "energy", 0)
