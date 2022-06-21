@@ -1,11 +1,4 @@
-from dataclasses import dataclass
-
 from popoto import Model, Relationship, IntField, KeyField, KeyField, GeoField
-
-# @dataclass
-# class Location:
-#
-from redis.client import Pipeline
 
 
 class Excitron(Model):

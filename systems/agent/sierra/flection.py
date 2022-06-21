@@ -1,15 +1,7 @@
 from popoto import Model, Relationship, IntField, KeyField, KeyField, GeoField
-from popoto.fields.key_field_mixin import KeyFieldMixin
 from redis.client import Pipeline
 
-from systems.theory.excitron import Excitron
-
-
-class KeyRelationship(KeyFieldMixin, Relationship):
-    # todo: add to popoto shortcuts
-    def __init__(self, *args, **kwargs):
-        kwargs['key'] = True
-        super().__init__(**kwargs)
+from systems.agent.sierra.excitron import Excitron
 
 
 class Flection(Model):
@@ -21,8 +13,8 @@ class Flection(Model):
         inflection: obtuse deviation
         genuflection: pass forward, bow/honor
     """
-    from_e = KeyRelationship(Excitron)
-    to_e = KeyRelationship(Excitron)
+    from_e = Relationship(Excitron)
+    to_e = Relationship(Excitron)
     strength = IntField(default=0, max_value=15)
     # _angle? = IntField(default=91, max_value=180)  # odd number [1, .., 179]
 
