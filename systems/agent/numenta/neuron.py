@@ -1,6 +1,5 @@
 from collections import namedtuple
-from dataclasses import dataclass, asdict
-
+from dataclasses import dataclass
 
 NeuronState = namedtuple("NeuronState", "inactive, active, predictive")
 INACTIVE, PREDICTIVE, ACTIVE = 1, 2, 3

@@ -13,6 +13,7 @@ class Flection(Model):
         inflection: obtuse deviation
         genuflection: pass forward, bow/honor
     """
+
     from_e = Relationship(Excitron)
     to_e = Relationship(Excitron)
     strength = IntField(default=0, max_value=15)

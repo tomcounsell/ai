@@ -10,7 +10,7 @@ class Flection:
 
     @property
     def strength(self):
-        return math.e ** self._exp
+        return math.e**self._exp
 
     def strengthen(self):
         self._exp += 1

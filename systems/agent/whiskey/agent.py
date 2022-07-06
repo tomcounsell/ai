@@ -20,3 +20,6 @@ def calc_value_score():
     cost = agent.cost  # the cost of operation = the count of flections
     # maybe need to normalize first
     return utility - cost
+
+
+

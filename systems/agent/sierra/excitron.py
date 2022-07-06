@@ -8,6 +8,7 @@ class Excitron(Model):
     dQ+ => stimulates | dQ- => predicts | dQ= => contextualizes
     intersection(Q1.routes,Q2.routes) == {}
     """
+
     up = KeyField(type=int, unique=False)  # Q1
     down = KeyField(type=int, unique=False)  # Q2
     fore = KeyField(type=int, unique=False)  # R1
@@ -21,7 +22,16 @@ class Excitron(Model):
     inhibition_threshold = IntField(default=1)
 
     class Meta:
-        unique_together = ('up', 'down', 'fore', 'back', 'right', 'left', 'happy', 'sad')
+        unique_together = (
+            "up",
+            "down",
+            "fore",
+            "back",
+            "right",
+            "left",
+            "happy",
+            "sad",
+        )
 
     def get_geohash(self, happy=0, sad=0):
         """

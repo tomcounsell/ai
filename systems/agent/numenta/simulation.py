@@ -1,16 +1,16 @@
 import pandas as pd
 
-from systems.numenta.brain import Brain
 from dataclasses import dataclass, asdict
 import random
 from abc import ABC
+
+from systems.agent.numenta.brain import Brain
 
 
 class Simulation(ABC):
     def __init__(self):
         self.brain = Brain()
         self.brain_df = pd.DataFrame()
-
 
         self.data_df = pd.DataFrame()
 
