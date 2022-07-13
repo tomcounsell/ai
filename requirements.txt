@@ -11,6 +11,7 @@ msgpack-numpy
 mypy==0.782
 mypy-extensions==0.4.3
 numpy
+htm.core
 # openai
 pandas
 Pillow

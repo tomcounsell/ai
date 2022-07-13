@@ -2,7 +2,9 @@ from popoto import Model, Field, DictField, ListField, SortedField
 
 
 class Agent(Model):
-    perception_space = Field()  # Choice from ['vision', 'metronome', 'translators', ...]
+    perception_space = Field()
+    # Choice from ['vision', 'metronome', 'translators', ...]
+
     input_SDRs = DictField()
     output_SDRs = DictField()
     flections = ListField()
@@ -12,14 +14,9 @@ class Agent(Model):
     # vocabulary - communication limits nouns, verbs, adjectives
 
 
-
-
 def calc_value_score():
 
     utility = agent.utility_score  # the value as voted by other agents
     cost = agent.cost  # the cost of operation = the count of flections
     # maybe need to normalize first
     return utility - cost
-
-
-
