@@ -34,7 +34,7 @@ class Brain(ABC):
                     for neuron_index in range(NEURONS_IN_A_COLUMN_COUNT)
                 },
             )
-            for column_index in range(NEURONS_IN_A_COLUMN_COUNT)
+            for column_index in range(COLUMNS_IN_A_BRAIN_COUNT)
         ]
 
     def save(self):

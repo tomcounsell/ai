@@ -1,5 +1,6 @@
 import numpy
 import numpy as np
+import pandas as pd
 from popoto import (
     Model,
     Field,
@@ -56,8 +57,10 @@ class AgentBlueprint:
 class Agent(Model):
     """
     An Agent is a large collection of flections
-    number of potential flections  = 32 * excitron_count
-    because excitrons can have up to 32 potential flections going in or out
+    number of potential flections = input SDR size + (2^12 * excitron_count)
+    because excitrons can have up to 2^12 potential flections going to other excitrons
+    Do not allow backward connections within an agent.
+    Circular and backward connections can only exist outside the agent.
     """
 
     id = AutoKeyField()
@@ -92,5 +95,18 @@ class Agent(Model):
         self.value_score = utility - cost
         return self.value_score
 
-    input_SDR = DataFrameField()
-    output_SDR = DataFrameField()
+    def cycle(self, input_SDR: pd.DataFrame) -> pd.DataFrame:
+        # run 1 agent cycle
+        # accept an SDR input and create and SDR output
+        A = input_SDR
+        for l in range(1, L):
+            # get W from flections
+            A = np.dot(W, A) + b  # this is traditional NN
+
+            # get W
+            W = np.sum(A, W)  # this is excitrons gaining energy
+            A = [w % w.inhibition_threshold for w in W]  # get excitrons over threshold
+            W = W - A  # fired excitrons lose energy
+            self.update_flections(l, W)
+        output_SDR = A
+        return output_SDR
