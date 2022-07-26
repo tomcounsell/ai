@@ -11,12 +11,12 @@ msgpack-numpy
 mypy==0.782
 mypy-extensions==0.4.3
 numpy
-htm.core
+# htm.core
 # openai
 pandas
 Pillow
 plotly
-popoto>=0.7.3
+popoto>=0.8.3
 python-telegram-bot
 PyYAML
 redis==3.5.3

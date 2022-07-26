@@ -4,9 +4,9 @@ from dataclasses import dataclass, asdict
 
 @dataclass
 class Flection:
-    from_e: bytes
-    to_e: bytes
-    _exp: int
+    from_e: bytes  # coords as bytes
+    to_e: bytes  # coords as bytes
+    _exp: int  # exponent for the strength value
 
     @property
     def strength(self):
