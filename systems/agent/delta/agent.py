@@ -14,6 +14,11 @@ class Agent:
     thresholds: np.ndarray  # 1 dimensional
     mapping: np.ndarray  # 2 dimensional
 
+    def __init__(self, size: int):
+        self.state = np.zeros(size)
+        self.thresholds = np.ones(size)
+        self.mapping = np.random.random_integers(0, 16, size=size)
+
     def cycle(self, input: np.ndarray):
         # decay energy states by 1 unit per cell
         self.state -= np.ones_like(self.state)
