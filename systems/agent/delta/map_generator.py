@@ -2,11 +2,34 @@ import pandas as pd
 import numpy as np
 
 
-def generate_map(self, size, random_seed=42) -> np.ndarray:
-    np.random.seed(random_seed)
+def generate_map(
+    size: int,
+    sparsity: float,
+    random_seed: int = None,
+    distribution_type: str = "normal",
+) -> np.ndarray:
+    """
+    generate a square 2d matrix
+    size:  matrix width (== height)
+    sparsity: the avg ratio of values to zeros in the map
+    random_seed to use for deterministic map generation eg. 0
+    distribution_type: type of random number distribution
+
+    TODO:
+    1. create map of zeros for the given size
+    2. given sparsity, generate an amount of random numbers
+    3. insert those numbers into the map, excluding the diagonal and just above diagonal
+    4. check 50% threshold is close to 128
+
+    """
+    if random_seed:
+        np.random.seed(random_seed)
 
     # normal distribution random array
-    weights = np.random.normal(size=size * size, loc=128, scale=32)
+    if distribution_type == "normal":
+        weights = np.random.normal(size=size * size, loc=128, scale=48)
+    else:
+        raise Exception("what else do you want? zeros? random? inverted normal?")
 
     # set floor and ceiling for unsigned int8
     weights[weights > 255] = 255

@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 import numpy as np
 
+from systems.agent.delta.map_generator import generate_map
+
 
 @dataclass
 class Agent:
@@ -16,8 +18,17 @@ class Agent:
 
     def __init__(self, size: int):
         self.state = np.zeros(size)
+        self.mapping = generate_map(size)
+        non_zeros = self.mapping[self.mapping != 0]
+
+        std_dev = non_zeros.std()  # should be 24
+        mean = np.average(non_zeros)  # should be size/2 = 128
+
+        # z = (x – mean) / std_dev
+
+        # threshold should be where chance of a value being over the threshold is 1/size
+
         self.thresholds = np.ones(size)
-        self.mapping = np.random.random_integers(0, 16, size=size)
 
     def cycle(self, input: np.ndarray):
         # decay energy states by 1 unit per cell
