@@ -140,3 +140,4 @@ static/temp/*
 _study_/*.pdf
 _study_/*/*.pdf
 
+systems/structures/pretrained/llama/
