@@ -139,5 +139,6 @@ static/temp/*
 
 _study_/*.pdf
 _study_/*/*.pdf
+_archive_/
 
 systems/structures/pretrained/llama/
