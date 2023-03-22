@@ -1,24 +1,28 @@
-"""This module is where the application is configured.
+from fastapi import FastAPI
+from mangum import Mangum
+from api.v1.router import router as api_router
 
-To run with uvicorn cli, with hot reload:
-    $ uvicorn server:app --reload --log-level info
-"""
-import uvicorn
+from config.database import shutdown_database, startup_database
 
-try:
-    import uvloop
-except ModuleNotFoundError:
-    print("[*] Running without `uvloop`")
-    uvloop = ...
-from webapp.configuration import load_configuration
-from webapp.program import configure_application
-from webapp.services import configure_services
-
-if uvloop is not ...:
-    uvloop.install()
-
-app = configure_application(*configure_services(load_configuration()))
+app = FastAPI()
 
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="debug")
+@app.on_event("startup")
+async def startup_event():
+    print("app is starting up")
+    await startup_database(app)
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    print("app is shutting down")
+    shutdown_database(app)
+
+
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
+
+
+app.include_router(api_router, prefix="/api/v1")
+handler = Mangum(app, lifespan="off")
