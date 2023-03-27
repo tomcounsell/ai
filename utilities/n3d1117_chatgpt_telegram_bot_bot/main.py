@@ -3,8 +3,8 @@ import os
 
 from dotenv import load_dotenv
 
-from openai_helper import OpenAIHelper
-from telegram_bot import ChatGPT3TelegramBot
+from .openai_helper import OpenAIHelper
+from .telegram_bot import ChatGPT3TelegramBot
 
 
 def main():
