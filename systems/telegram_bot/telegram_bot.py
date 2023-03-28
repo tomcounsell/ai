@@ -23,8 +23,8 @@ from telegram.ext import (
 )
 
 from pydub import AudioSegment
-from .openai_helper import OpenAIHelper
-from .usage_tracker import UsageTracker
+from systems.telegram_bot.openai_helper import OpenAIHelper
+from systems.telegram_bot.usage_tracker import UsageTracker
 
 
 class ChatGPT3TelegramBot:
@@ -34,8 +34,8 @@ class ChatGPT3TelegramBot:
 
     def __init__(self, config: dict, openai: OpenAIHelper):
         """
-        Initializes the n3d1117_chatgpt_telegram_bot_bot with the given configuration and GPT n3d1117_chatgpt_telegram_bot_bot object.
-        :param config: A dictionary containing the n3d1117_chatgpt_telegram_bot_bot configuration
+        Initializes the telegram_bot with the given configuration and GPT telegram_bot object.
+        :param config: A dictionary containing the telegram_bot configuration
         :param openai: OpenAIHelper object
         """
         self.config = config
@@ -56,7 +56,7 @@ class ChatGPT3TelegramBot:
             ),
         ]
         self.disallowed_message = (
-            "Sorry, you are not allowed to use this n3d1117_chatgpt_telegram_bot_bot. You can check out the source code at "
+            "Sorry, you are not allowed to use this telegram_bot. You can check out the source code at "
             "https://github.com/n3d1117/chatgpt-telegram-bot"
         )
         self.budget_limit_message = "Sorry, you have reached your monthly usage limit."
@@ -70,7 +70,7 @@ class ChatGPT3TelegramBot:
             f"/{command.command} - {command.description}" for command in self.commands
         ]
         help_text = (
-            "I'm a ChatGPT n3d1117_chatgpt_telegram_bot_bot, talk to me!"
+            "I'm a ChatGPT telegram_bot, talk to me!"
             + "\n\n"
             + "\n".join(commands)
             + "\n\n"
@@ -382,7 +382,7 @@ class ChatGPT3TelegramBot:
         """
         if not await self.is_allowed(update):
             logging.warning(
-                f"User {update.message.from_user.name} is not allowed to use the n3d1117_chatgpt_telegram_bot_bot"
+                f"User {update.message.from_user.name} is not allowed to use the telegram_bot"
             )
             await self.send_disallowed_message(update, context)
             return
@@ -408,9 +408,7 @@ class ChatGPT3TelegramBot:
                     update.message.reply_to_message
                     and update.message.reply_to_message.from_user.id == context.bot.id
                 ):
-                    logging.info(
-                        "Message is a reply to the n3d1117_chatgpt_telegram_bot_bot, allowing..."
-                    )
+                    logging.info("Message is a reply to the telegram_bot, allowing...")
                 else:
                     logging.warning(
                         "Message does not start with trigger keyword, ignoring..."
@@ -629,7 +627,7 @@ class ChatGPT3TelegramBot:
         self, update: object, context: ContextTypes.DEFAULT_TYPE
     ) -> None:
         """
-        Handles errors in the n3d1117_chatgpt_telegram_bot_bot-python-n3d1117_chatgpt_telegram_bot_bot library.
+        Handles errors in the telegram_bot-python-telegram_bot library.
         """
         logging.error(f"Exception while handling an update: {context.error}")
 
@@ -655,7 +653,7 @@ class ChatGPT3TelegramBot:
 
     async def is_allowed(self, update: Update) -> bool:
         """
-        Checks if the user is allowed to use the n3d1117_chatgpt_telegram_bot_bot.
+        Checks if the user is allowed to use the telegram_bot.
         """
         if self.config["allowed_user_ids"] == "*":
             return True
@@ -682,7 +680,7 @@ class ChatGPT3TelegramBot:
 
     def is_admin(self, update: Update) -> bool:
         """
-        Checks if the user is the admin of the n3d1117_chatgpt_telegram_bot_bot.
+        Checks if the user is the admin of the telegram_bot.
         The first user in the user list is the admin.
         """
         if self.config["admin_user_ids"] == "-":
@@ -785,13 +783,13 @@ class ChatGPT3TelegramBot:
 
     async def post_init(self, application: Application) -> None:
         """
-        Post initialization hook for the n3d1117_chatgpt_telegram_bot_bot.
+        Post initialization hook for the telegram_bot.
         """
         await application.bot.set_my_commands(self.commands)
 
     def run(self):
         """
-        Runs the n3d1117_chatgpt_telegram_bot_bot indefinitely until the user presses Ctrl+C
+        Runs the telegram_bot indefinitely until the user presses Ctrl+C
         """
         application = (
             ApplicationBuilder()
@@ -832,3 +830,5 @@ class ChatGPT3TelegramBot:
         application.add_error_handler(self.error_handler)
 
         application.run_polling()
+
+        # updater.idle()

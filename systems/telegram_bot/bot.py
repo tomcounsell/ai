@@ -3,8 +3,8 @@ import os
 
 from dotenv import load_dotenv
 
-from .openai_helper import OpenAIHelper
-from .telegram_bot import ChatGPT3TelegramBot
+from systems.telegram_bot.openai_helper import OpenAIHelper
+from systems.telegram_bot.telegram_bot import ChatGPT3TelegramBot
 
 
 def main():
@@ -79,7 +79,3 @@ def main():
     openai_helper = OpenAIHelper(config=openai_config)
     telegram_bot = ChatGPT3TelegramBot(config=telegram_config, openai=openai_helper)
     telegram_bot.run()
-
-
-if __name__ == "__main__":
-    main()
