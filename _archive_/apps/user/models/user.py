@@ -11,7 +11,7 @@ from apps.common.behaviors import Timestampable, Locatable
 
 class User(AbstractUser, Timestampable, Locatable):
     REQUIRED_FIELDS = AbstractUser.REQUIRED_FIELDS
-    REQUIRED_FIELDS.remove('email')
+    REQUIRED_FIELDS.remove("email")
     phone_number = models.CharField(max_length=15, default="", blank=True)
 
     # SERVICE SETTINGS
@@ -24,10 +24,8 @@ class User(AbstractUser, Timestampable, Locatable):
     # FB_user_id = models.CharField(max_length=100, default="", blank=True)
     # FB_user_access_token = models.CharField(max_length=255, default="", blank=True)
 
-
     # HISTORY MANAGER
     # history = HistoricalRecords()  # requires django-simple-history
-
 
     # MODEL PROPERTIES
 
@@ -38,13 +36,18 @@ class User(AbstractUser, Timestampable, Locatable):
 
     @property
     def four_digit_login_code(self):
-        if self.email.endswith("@example.com"): return "1234"  # for test accounts
-        hash_object = hashlib.md5(bytes(f"{self.id}{self.email}{self.last_login}", encoding='utf-8'))
+        if self.email.endswith("@example.com"):
+            return "1234"  # for test accounts
+        hash_object = hashlib.md5(
+            bytes(f"{self.id}{self.email}{self.last_login}", encoding="utf-8")
+        )
         return str(int(hash_object.hexdigest(), 16))[-4:]
 
     @property
     def is_agreed_to_terms(self) -> bool:
-        if self.agreed_to_terms_at and self.agreed_to_terms_at > timezone.make_aware(datetime(2019, 11, 1)):
+        if self.agreed_to_terms_at and self.agreed_to_terms_at > timezone.make_aware(
+            datetime(2019, 11, 1)
+        ):
             return True
         return False
 
@@ -55,13 +58,12 @@ class User(AbstractUser, Timestampable, Locatable):
         elif value is False and self.is_agreed_to_terms:
             self.agreed_to_terms_at = None
 
-
     # MODEL FUNCTIONS
     def __str__(self):
         try:
             if self.first_name:
                 return self.first_name
-            if self.username and not "@" in self.username:
+            if self.username and "@" not in self.username:
                 return self.username
             if self.email_is_verified:
                 return self.email.split("@")[0]
