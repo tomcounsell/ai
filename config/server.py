@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from mangum import Mangum
 
-from apps.api import router as api_router
+from apps.api.v1.router import router as api_router
 from config.database import shutdown_database, startup_database
 
 # FastAPI Server
