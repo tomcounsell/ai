@@ -4,12 +4,10 @@ dog_breed - upload a dog photo and find out which dog breed it is
 """
 import logging
 
-import telegram
-from telegram import Message, Update, File, PhotoSize
+from telegram import Message, Update, PhotoSize
 from telegram.ext import CallbackContext
 
-from aihelps.skills.dog_breeds import DogBreedsSkill
-from apps.communication.models import TelegramBotMembership
+from apps.aihelps.skills.dog_breeds import DogBreedsSkill
 from apps.communication.telegram.commands.decorator import telegram_command
 
 
@@ -34,10 +32,11 @@ def handle_photo_upload(update: Update, context: CallbackContext):
     return f"{100*confidence:.0f}% confident this is a {breed}"
 
 
-@telegram_command("dog_breed", response_type='text')
+@telegram_command("dog_breed", response_type="text")
 def dog_breed(telegram_bot_membership, message: Message, context):
-    telegram_bot_membership.expectations_list.append('photo_for_dog_breed')
+    telegram_bot_membership.expectations_list.append("photo_for_dog_breed")
     telegram_bot_membership.save()
     return f"Upload a photo."
+
 
 dog_breed.help_text = "upload a dog photo and find out which dog breed it is"

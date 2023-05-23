@@ -141,5 +141,5 @@ _study_/*.pdf
 _study_/*/*.pdf
 _archive_/
 
-systems/structures/pretrained/llama/
+apps/structures/pretrained/llama/
 usage_logs/

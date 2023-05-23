@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from mangum import Mangum
 
-from api.v1.router import router as api_router
+from apps.api import router as api_router
 from config.database import shutdown_database, startup_database
 
 # FastAPI Server
@@ -17,7 +17,7 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     print("app is shutting down")
-    await shutdown_database(app)
+    shutdown_database(app)
 
 
 @app.get("/")
@@ -27,3 +27,6 @@ async def root():
 
 app.include_router(api_router, prefix="/api/v1")
 handler = Mangum(app, lifespan="off")
+
+# Run local server command
+# uvicorn config.server:app --reload

@@ -1,8 +1,8 @@
-from rest_framework import authentication, permissions
+from rest_framework import permissions
 from rest_framework.viewsets import ViewSet
 from rest_framework.response import Response
 
-from aihelps.skills.dog_breeds import DogBreedsSkill
+from apps.aihelps.skills.dog_breeds import DogBreedsSkill
 
 
 class DogBreedsViewSet(ViewSet):
@@ -18,10 +18,12 @@ class DogBreedsViewSet(ViewSet):
 
     def create(self, request):
         dog_breeds_agent = DogBreedsSkill()
-        breed = dog_breeds_agent.name_breed_from_image_url(request.data['image_url'])
+        breed = dog_breeds_agent.name_breed_from_image_url(request.data["image_url"])
         confidence = dog_breeds_agent.get_confidence()
-        return Response({
-            'prediction': f"{confidence:.2f}% confident this is a {breed}",
-            'breed': str(breed),
-            'confidence': float(confidence)
-        })
+        return Response(
+            {
+                "prediction": f"{confidence:.2f}% confident this is a {breed}",
+                "breed": str(breed),
+                "confidence": float(confidence),
+            }
+        )
