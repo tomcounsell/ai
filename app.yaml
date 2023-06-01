@@ -1,3 +1,0 @@
-runtime: python310
-entrypoint: gunicorn -w 4 -k uvicorn.workers.UvicornWorker config.server:app
-instance_class: F2
