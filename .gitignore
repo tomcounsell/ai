@@ -143,3 +143,4 @@ _archive_/
 
 apps/structures/pretrained/llama/
 usage_logs/
+.aider*
