@@ -1,0 +1,6 @@
+popoto
+python-telegram
+fastapi
+uvicorn[standard]
+pydantic
+pydanticai
