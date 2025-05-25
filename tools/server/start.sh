@@ -28,22 +28,11 @@ start_server() {
     echo "Starting FastAPI development server with hot reload..."
     cd "$(dirname "$0")/../.." || exit 1
     
-    # Check if main.py exists, create basic one if not
+    # Check if main.py exists
     if [ ! -f "main.py" ]; then
-        echo "Creating basic FastAPI app at main.py..."
-        cat > main.py << 'EOF'
-from fastapi import FastAPI
-
-app = FastAPI(title="AI Project API", version="1.0.0")
-
-@app.get("/")
-async def root():
-    return {"message": "AI Project API is running"}
-
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
-EOF
+        echo "Error: main.py not found in project root"
+        echo "Please create main.py first or run from the correct directory"
+        exit 1
     fi
     
     # Check if uvicorn is available
