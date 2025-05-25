@@ -1,19 +1,35 @@
 # AI
 
-continued research described as _Artificial Intelligence_, 
-_Synthetic Mind_, 
-_Autonomous Digital Agent_, 
+continued research described as _Artificial Intelligence_,
+_Synthetic Mind_,
+_Autonomous Digital Agent_,
 _Brain Emulation_
 
-#  learning
+#  agentic coding
 
-- fast.ai
-- kaggle.com/learn
-- learn.paperspace.com
+- programmable claude code
+- MCP and tools
+-
 
-## demonstrations
+## installation
 
-- [@aihelps](https://aihelps.substack.com/)
+To install dependencies:
+
+1. Compile dependencies from base requirements into a single file with resolved versions:
+   ```
+   uv pip compile requirements/base.txt -o requirements.txt
+   ```
+
+2. Create a new Python virtual environment using uv (faster alternative to venv/virtualenv):
+   ```
+   uv venv
+   ```
+
+3. Install all dependencies from the compiled requirements file:
+   ```
+   uv pip install -r requirements.txt
+   ```
+
 
 ## inspirations
 
@@ -24,7 +40,8 @@ _Brain Emulation_
 
 ## goals
 
-- pattern prediction 
+- long term planning
+- role-based cooperation
 - competitive cooperation
-- pass tests as AGI
-- capital management
+- product development
+- autonomous corporation
