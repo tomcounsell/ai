@@ -44,7 +44,7 @@ console = Console()
 
 def load_project_mapping():
     """Load project name to database ID mapping."""
-    mapping_file = Path(__file__).parent / "database_mapping.json"
+    mapping_file = Path(__file__).parent.parent / "integrations" / "notion" / "database_mapping.json"
     
     if not mapping_file.exists():
         return {}, {}
