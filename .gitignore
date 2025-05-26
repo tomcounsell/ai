@@ -151,3 +151,4 @@ usage_logs/
 
 # Chat history - contains conversation data
 chat_history.json
+logs/

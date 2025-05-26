@@ -3,6 +3,8 @@ pyrogram
 fastapi
 uvicorn[standard]
 pydantic
+pydantic-ai
 anthropic
 requests
 openai
+python-dotenv
