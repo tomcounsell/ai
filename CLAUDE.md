@@ -40,11 +40,17 @@ uv run agents/notion_scout.py --project psy "Quick status check"
 
 ### Testing
 ```bash
-# Run Valor conversation tests (requires OpenAI API key)
-cd tests && python run_tests.py
+# Run chat history and duplication tests
+python tests/test_chat_history.py
 
-# Or run tests directly
-cd tests && python test_valor_conversations.py
+# Run Valor conversation evaluation tests (requires OpenAI API key)
+python tests/test_valor_conversations.py
+
+# Run comprehensive end-to-end test suite with LLM evaluation
+python tests/run_e2e_tests.py
+
+# Run all tests
+cd tests && python run_tests.py
 ```
 
 ## Architecture Overview
