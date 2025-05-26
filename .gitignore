@@ -144,3 +144,10 @@ _archive_/
 apps/structures/pretrained/llama/
 usage_logs/
 .aider*
+
+# Telegram session files - keep these private!
+*.session
+*.session-journal
+
+# Chat history - contains conversation data
+chat_history.json

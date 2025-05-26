@@ -38,6 +38,15 @@ uv run agents/notion_scout.py --project FlexTrip "Show me project status"
 uv run agents/notion_scout.py --project psy "Quick status check"
 ```
 
+### Testing
+```bash
+# Run Valor conversation tests (requires OpenAI API key)
+cd tests && python run_tests.py
+
+# Or run tests directly
+cd tests && python test_valor_conversations.py
+```
+
 ## Architecture Overview
 
 ### UV Script Agent Pattern
@@ -74,6 +83,16 @@ External service integrations are organized under `/integrations/`:
 - `.env` file contains API keys (Anthropic, OpenAI, Notion)
 - `.env.example` provides template with proper placeholder formats
 - Environment variables drive MCP server configuration
+
+## Valor - AI Assistant Persona
+**Valor Engels** refers to the Telegram bot implementation with a complete persona:
+- Software engineer at Yudame with German/Californian background
+- Handles technical questions, Notion queries, and general conversation
+- Maintains persistent chat history across server restarts
+- Responds to @mentions in groups and all messages in direct chats
+- Smart catch-up handling for offline periods with batched responses
+- Context-aware priority checking using chat history and Notion data
+- Technical persona focused on implementation details and requirements clarification
 
 ## Agent Development Patterns
 

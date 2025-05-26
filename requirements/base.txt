@@ -1,6 +1,8 @@
 popoto
-python-telegram
+pyrogram
 fastapi
 uvicorn[standard]
 pydantic
-pydanticai
+anthropic
+requests
+openai
