@@ -1,22 +1,15 @@
-from django.core.mail import EmailMessage
-
-
 def email_to_string(e):
     # type: (EmailMessage) -> str
     def n(x):
-        x or 'Not specified'
+        x or "Not specified"
 
-    return """
-From: {}
-To: {}
-Subject: {}
-Reply-To: {}
-CC: {}
-BCC: {}
-Body: {}
-Attachments: {}
-""".format(
-        n(e.from_email),
-        n(e.to),
-        n(e.subject),
-        n(e.reply_to), n(e.cc), n(e.bcc), n(e.body), n(str(e.attachments)))
+    return f"""
+From: {n(e.from_email)}
+To: {n(e.to)}
+Subject: {n(e.subject)}
+Reply-To: {n(e.reply_to)}
+CC: {n(e.cc)}
+BCC: {n(e.bcc)}
+Body: {n(e.body)}
+Attachments: {n(str(e.attachments))}
+"""

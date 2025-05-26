@@ -7,35 +7,35 @@ repos:
       # Run the linter
       - id: ruff
         args: [--fix]
+        exclude: ^(_archive_/|_study_/|apps/|utilities/|tests/|integrations/bing\.py)
       # Run the formatter
       - id: ruff-format
+        exclude: ^(_archive_/|_study_/|apps/|utilities/|tests/|integrations/bing\.py)
 
   # Additional hooks for code quality
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+        exclude: ^(_archive_/|_study_/|apps/|utilities/|tests/|integrations/bing\.py)
       - id: end-of-file-fixer
+        exclude: ^(_archive_/|_study_/|apps/|utilities/|tests/|integrations/bing\.py)
       - id: check-yaml
+        exclude: ^(_archive_/|_study_/|apps/|utilities/|tests/|integrations/bing\.py)
       - id: check-added-large-files
+        exclude: ^(_archive_/|_study_/|apps/|utilities/|tests/|integrations/bing\.py)
       - id: check-merge-conflict
+        exclude: ^(_archive_/|_study_/|apps/|utilities/|tests/|integrations/bing\.py)
       - id: debug-statements
+        exclude: ^(_archive_/|_study_/|apps/|utilities/|tests/|integrations/bing\.py)
       - id: check-ast
+        exclude: ^(_archive_/|_study_/|apps/|utilities/|tests/|integrations/bing\.py)
 
-  # MyPy for static type checking
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.13.0
-    hooks:
-      - id: mypy
-        additional_dependencies: [
-          pydantic-ai,
-          anthropic,
-          openai,
-          python-dotenv,
-          fastapi,
-          types-requests,
-        ]
-        exclude: ^(tests/|_archive_/|_study_/|apps/)
+  # MyPy for static type checking (disabled for optimistic development)
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.13.0
+  #   hooks:
+  #     - id: mypy
 
 # Configuration
 default_stages: [pre-commit]

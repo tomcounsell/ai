@@ -27,28 +27,28 @@ check_server() {
 start_server() {
     echo "Starting FastAPI development server with hot reload..."
     cd "$(dirname "$0")/.." || exit 1
-    
+
     # Check if main.py exists
     if [ ! -f "main.py" ]; then
         echo "Error: main.py not found in project root"
         echo "Please create main.py first or run from the correct directory"
         exit 1
     fi
-    
+
     # Check if uvicorn is available
     if ! command -v uvicorn &> /dev/null; then
         echo "uvicorn not found. Installing..."
         pip install uvicorn[standard] fastapi
     fi
-    
+
     # Start server in background and save PID
     uvicorn main:app --host 0.0.0.0 --port $PORT --reload &
     SERVER_PID=$!
     echo $SERVER_PID > "$PID_FILE"
-    
+
     # Wait a moment for server to start
     sleep 3
-    
+
     # Check if server started successfully
     if ps -p $SERVER_PID > /dev/null 2>&1; then
         echo "Server started successfully on port $PORT (PID: $SERVER_PID)"

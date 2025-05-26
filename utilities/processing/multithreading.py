@@ -3,6 +3,7 @@
 # http://stackoverflow.com/questions/18420699/multithreading-for-python-django
 from threading import Thread
 
+
 def start_new_thread(function):
     """
     if running any database transactions,
@@ -12,10 +13,12 @@ def start_new_thread(function):
         connection.close()
         ```
     """
+
     def decorator(*args, **kwargs):
         t = Thread(target=function, args=args, kwargs=kwargs)
         t.daemon = True
         t.start()
+
     return decorator
 
 

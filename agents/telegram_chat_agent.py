@@ -14,36 +14,37 @@ PydanticAI chat agent for Telegram integration.
 Replaces direct Anthropic API calls with structured agent approach.
 """
 
-import os
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Any
+
+from dotenv import load_dotenv
 from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext
-from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
 # Import tools and converters
+from tools.claude_code_tool import spawn_claude_session
 from tools.search_tool import search_web
-from agents.message_history_converter import integrate_with_existing_telegram_chat
 
 
 class TelegramChatContext(BaseModel):
     """Context for Telegram chat interactions."""
+
     chat_id: int
-    username: Optional[str] = None
+    username: str | None = None
     is_group_chat: bool = False
-    chat_history: List[Dict[str, Any]] = []
-    notion_data: Optional[str] = None
+    chat_history: list[dict[str, Any]] = []
+    notion_data: str | None = None
     is_priority_question: bool = False
 
 
 def load_persona() -> str:
     """Load the Valor Engels persona from the persona document."""
     persona_file = Path(__file__).parent.parent / "integrations" / "persona.md"
-    with open(persona_file, 'r') as f:
+    with open(persona_file) as f:
         return f.read()
 
 
@@ -52,7 +53,7 @@ PERSONA_CONTENT = load_persona()
 
 # Create the main Telegram chat agent
 telegram_chat_agent = Agent(
-    'anthropic:claude-3-5-sonnet-20241022',
+    "anthropic:claude-3-5-sonnet-20241022",
     deps_type=TelegramChatContext,
     system_prompt=f"""Based on this persona document, respond naturally as Valor Engels:
 
@@ -63,7 +64,7 @@ Additional context for Telegram conversations:
 - Use the chat history and context provided to maintain conversation continuity
 - For priority questions, use Notion data when available to provide specific recommendations
 - Match the conversational style (casual vs technical) appropriately
-- Remember: you're a human software engineer, not an AI assistant"""
+- Remember: you're a human software engineer, not an AI assistant""",
 )
 
 
@@ -87,14 +88,49 @@ def search_current_info(ctx: RunContext[TelegramChatContext], query: str) -> str
     return search_web(query)
 
 
+@telegram_chat_agent.tool
+def delegate_coding_task(
+    ctx: RunContext[TelegramChatContext],
+    task_description: str,
+    target_directory: str,
+    specific_instructions: str = "",
+) -> str:
+    """
+    Spawn a new Claude Code session to handle complex coding tasks.
+    Use this when the user needs:
+    - New features or applications built
+    - Complex refactoring across multiple files
+    - Git workflows (branching, committing, etc.)
+    - File system operations in specific directories
+    - Tasks that require multiple tools and steps
+
+    Args:
+        task_description: High-level description of what needs to be done
+        target_directory: Directory where the work should be performed (use absolute paths)
+        specific_instructions: Additional detailed requirements or constraints
+
+    Returns:
+        Results from the Claude Code session execution
+    """
+    try:
+        result = spawn_claude_session(
+            task_description=task_description,
+            target_directory=target_directory,
+            specific_instructions=specific_instructions if specific_instructions else None,
+        )
+        return f"Claude Code session completed successfully:\n\n{result}"
+    except Exception as e:
+        return f"Error executing Claude Code session: {str(e)}"
+
+
 async def handle_telegram_message(
     message: str,
     chat_id: int,
-    username: Optional[str] = None,
+    username: str | None = None,
     is_group_chat: bool = False,
-    chat_history_obj = None,
-    notion_data: Optional[str] = None,
-    is_priority_question: bool = False
+    chat_history_obj=None,
+    notion_data: str | None = None,
+    is_priority_question: bool = False,
 ) -> str:
     """
     Handle a Telegram message using the PydanticAI agent with proper message history.
@@ -119,11 +155,11 @@ async def handle_telegram_message(
         is_group_chat=is_group_chat,
         chat_history=[],  # We'll use PydanticAI message history instead
         notion_data=notion_data,
-        is_priority_question=is_priority_question
+        is_priority_question=is_priority_question,
     )
 
     # Build system prompt with context
-    system_prompt = _build_system_prompt(context)
+    _build_system_prompt(context)
 
     # Add recent chat context to the message for continuity
     enhanced_message = message
@@ -176,12 +212,9 @@ Priority question: {context.is_priority_question}"""
 
 # Convenience functions for backward compatibility with existing handlers
 
+
 async def handle_user_priority_question(
-    question: str,
-    chat_id: int,
-    chat_history_obj,
-    notion_scout=None,
-    username: Optional[str] = None
+    question: str, chat_id: int, chat_history_obj, notion_scout=None, username: str | None = None
 ) -> str:
     """
     Handle user priority questions using PydanticAI agent with message history.
@@ -192,7 +225,10 @@ async def handle_user_priority_question(
     if chat_history_obj:
         context_messages = chat_history_obj.get_context(chat_id)
         for msg in context_messages[-5:]:
-            if any(keyword in msg['content'].lower() for keyword in ['project', 'task', 'working on', 'psyoptimal', 'flextrip']):
+            if any(
+                keyword in msg["content"].lower()
+                for keyword in ["project", "task", "working on", "psyoptimal", "flextrip"]
+            ):
                 context_has_project_info = True
                 break
 
@@ -208,15 +244,12 @@ async def handle_user_priority_question(
         username=username,
         chat_history_obj=chat_history_obj,
         notion_data=notion_data,
-        is_priority_question=True
+        is_priority_question=True,
     )
 
 
 async def handle_general_question(
-    question: str,
-    chat_id: int,
-    chat_history_obj,
-    username: Optional[str] = None
+    question: str, chat_id: int, chat_history_obj, username: str | None = None
 ) -> str:
     """
     Handle general questions using PydanticAI agent with message history.
@@ -227,7 +260,7 @@ async def handle_general_question(
         chat_id=chat_id,
         username=username,
         chat_history_obj=chat_history_obj,
-        is_priority_question=False
+        is_priority_question=False,
     )
 
 
@@ -237,9 +270,7 @@ if __name__ == "__main__":
 
     async def test():
         test_response = await handle_telegram_message(
-            message="How's it going?",
-            chat_id=12345,
-            username="test_user"
+            message="How's it going?", chat_id=12345, username="test_user"
         )
         print(f"Test response: {test_response}")
 

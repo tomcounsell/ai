@@ -6,29 +6,29 @@ import requests
 
 class NotionScout:
     """Simple Notion database query agent for Telegram integration."""
-    
+
     def __init__(self, notion_key: str, anthropic_key: str):
         self.notion_key = notion_key
         self.anthropic_client = anthropic.Anthropic(api_key=anthropic_key)
         self.db_filter = None
-    
+
     async def query_database_entries(self, database_id: str) -> dict:
         """Query actual entries from a specific Notion database."""
         headers = {
             "Authorization": f"Bearer {self.notion_key}",
             "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        
+
         try:
             query_url = f"https://api.notion.com/v1/databases/{database_id}/query"
             response = requests.post(query_url, headers=headers, json={})
-            
+
             if response.status_code != 200:
                 return {"error": f"Error querying database: {response.status_code}"}
-            
+
             return response.json()
-            
+
         except Exception as e:
             return {"error": f"Error querying database entries: {str(e)}"}
 
@@ -36,9 +36,9 @@ class NotionScout:
         """Extract readable value from Notion property."""
         if not prop_value:
             return ""
-            
+
         prop_type = prop_value.get("type", "")
-        
+
         if prop_type == "title":
             return "".join([t.get("plain_text", "") for t in prop_value.get("title", [])])
         elif prop_type == "rich_text":
@@ -66,55 +66,57 @@ class NotionScout:
         headers = {
             "Authorization": f"Bearer {self.notion_key}",
             "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
         }
-        
+
         try:
             search_url = "https://api.notion.com/v1/search"
             search_payload = {"filter": {"value": "database", "property": "object"}}
-            
+
             response = requests.post(search_url, headers=headers, json=search_payload)
-            
+
             if response.status_code != 200:
                 return f"Error accessing Notion API: {response.status_code}"
-            
+
             data = response.json()
             databases = data.get("results", [])
-            
+
             if self.db_filter:
-                databases = [db for db in databases if self.db_filter in db['id']]
+                databases = [db for db in databases if self.db_filter in db["id"]]
                 if not databases:
                     return f"No database found matching '{self.db_filter}'"
-            
+
             if not databases:
                 return "No databases found accessible to the integration."
-            
+
             all_entries = []
             for db in databases:
-                db_id = db['id']
+                db_id = db["id"]
                 db_title = "".join([t.get("plain_text", "") for t in db.get("title", [])])
-                
+
                 entries_data = await self.query_database_entries(db_id)
                 if "error" in entries_data:
                     continue
-                
+
                 entries = entries_data.get("results", [])
-                
+
                 for entry in entries:
                     entry_data = {
                         "database": db_title,
                         "id": entry["id"],
                         "url": entry.get("url", ""),
-                        "properties": {}
+                        "properties": {},
                     }
-                    
+
                     for prop_name, prop_value in entry.get("properties", {}).items():
-                        entry_data["properties"][prop_name] = self.extract_property_value(prop_value)
-                    
+                        entry_data["properties"][prop_name] = self.extract_property_value(
+                            prop_value
+                        )
+
                     all_entries.append(entry_data)
-            
+
             return self.analyze_entries_with_claude(all_entries, question)
-            
+
         except Exception as e:
             return f"Error querying Notion: {str(e)}"
 
@@ -122,30 +124,28 @@ class NotionScout:
         """Use Claude to analyze the database entries and answer the question."""
         if not entries:
             return "No database entries found to analyze."
-        
+
         entries_text = "NOTION DATABASE ENTRIES:\n\n"
         for i, entry in enumerate(entries[:20], 1):  # Limit for Telegram
             entries_text += f"Entry {i}:\n  Database: {entry['database']}\n"
-            for prop_name, prop_value in entry['properties'].items():
+            for prop_name, prop_value in entry["properties"].items():
                 if prop_value and prop_value.strip():
                     entries_text += f"  {prop_name}: {prop_value}\n"
             entries_text += "\n"
-        
+
         system_prompt = """You are analyzing Notion database entries to answer questions. Provide concise, specific answers suitable for Telegram messages (under 300 words). Focus on the most relevant and actionable information."""
-        
+
         try:
             response = self.anthropic_client.messages.create(
                 model="claude-3-5-sonnet-20241022",
                 max_tokens=400,
                 temperature=0.3,
                 system=system_prompt,
-                messages=[
-                    {"role": "user", "content": f"Question: {question}\n\n{entries_text}"}
-                ]
+                messages=[{"role": "user", "content": f"Question: {question}\n\n{entries_text}"}],
             )
-            
+
             return response.content[0].text
-            
+
         except Exception as e:
             return f"Error analyzing entries: {str(e)}"
 

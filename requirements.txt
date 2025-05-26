@@ -33,6 +33,8 @@ certifi==2025.4.26
     #   httpcore
     #   httpx
     #   requests
+cfgv==3.4.0
+    # via pre-commit
 charset-normalizer==3.4.2
     # via requests
 click==8.2.1
@@ -43,6 +45,8 @@ colorama==0.4.6
     # via griffe
 deprecated==1.2.18
     # via opentelemetry-api
+distlib==0.3.9
+    # via virtualenv
 distro==1.9.0
     # via
     #   anthropic
@@ -59,7 +63,9 @@ fastapi==0.115.12
 fastavro==1.11.1
     # via cohere
 filelock==3.18.0
-    # via huggingface-hub
+    # via
+    #   huggingface-hub
+    #   virtualenv
 fsspec==2025.5.1
     # via huggingface-hub
 google-auth==2.40.2
@@ -99,6 +105,8 @@ httpx-sse==0.4.0
     #   mcp
 huggingface-hub==0.32.1
     # via tokenizers
+identify==2.6.12
+    # via pre-commit
 idna==3.10
     # via
     #   anyio
@@ -126,6 +134,12 @@ mdurl==0.1.2
     # via markdown-it-py
 mistralai==1.7.1
     # via pydantic-ai-slim
+mypy==1.15.0
+    # via -r requirements/base.txt
+mypy-extensions==1.1.0
+    # via mypy
+nodeenv==1.9.1
+    # via pre-commit
 openai==1.82.0
     # via
     #   -r requirements/base.txt
@@ -136,7 +150,11 @@ opentelemetry-api==1.33.1
     #   pydantic-ai-slim
 packaging==25.0
     # via huggingface-hub
+platformdirs==4.3.8
+    # via virtualenv
 popoto==0.8.3
+    # via -r requirements/base.txt
+pre-commit==4.2.0
     # via -r requirements/base.txt
 prompt-toolkit==3.0.51
     # via pydantic-ai-slim
@@ -200,6 +218,7 @@ python-multipart==0.0.20
 pyyaml==6.0.2
     # via
     #   huggingface-hub
+    #   pre-commit
     #   pydantic-evals
     #   uvicorn
 requests==2.32.3
@@ -215,6 +234,8 @@ rich==14.0.0
     #   pydantic-evals
 rsa==4.9.1
     # via google-auth
+ruff==0.11.11
+    # via -r requirements/base.txt
 s3transfer==0.13.0
     # via boto3
 six==1.17.0
@@ -250,6 +271,7 @@ typing-extensions==4.13.2
     #   google-genai
     #   groq
     #   huggingface-hub
+    #   mypy
     #   openai
     #   pydantic
     #   pydantic-core
@@ -272,6 +294,8 @@ uvicorn==0.34.2
     #   mcp
 uvloop==0.21.0
     # via uvicorn
+virtualenv==20.31.2
+    # via pre-commit
 watchfiles==1.0.5
     # via uvicorn
 wcwidth==0.2.13

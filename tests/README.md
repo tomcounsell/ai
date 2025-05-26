@@ -27,7 +27,7 @@ See `comprehensive_architecture.md` for the complete system design, including:
 - Evaluates brevity and natural tone
 - Ensures no over-helping behavior
 
-### 2. Technical Discussion Test  
+### 2. Technical Discussion Test
 - Tests technical knowledge and communication
 - Evaluates clarifying questions and implementation focus
 - Checks for appropriate engineer-level expertise
@@ -93,7 +93,7 @@ Tests generate:
 🤖 VALOR: Good! Just debugging some auth issues. You?
 ✅ Message 1 passed evaluation (score: 8.5)
 
-👤 USER: What's today's date?  
+👤 USER: What's today's date?
 🤖 VALOR: Monday, May 26th
 ✅ Message 2 passed evaluation (score: 9.2)
 

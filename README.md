@@ -83,7 +83,7 @@ scripts/demo_agent.sh
 
 ### ✅ Implemented
 - **PydanticAI Integration**: Complete migration from direct API calls
-- **Intelligent Tool Selection**: LLM chooses appropriate tools automatically  
+- **Intelligent Tool Selection**: LLM chooses appropriate tools automatically
 - **Conversation Continuity**: Message history integration
 - **Web Search Tool**: Current information through Perplexity AI
 - **Valor Engels Persona**: Consistent character with technical expertise

@@ -2,13 +2,14 @@
 
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+
 import uvicorn
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
-from integrations.telegram.client import TelegramClient
 from integrations.notion.scout import NotionScout
+from integrations.telegram.client import TelegramClient
 
 load_dotenv()
 
@@ -27,21 +28,21 @@ class AuthPassword(BaseModel):
 async def start_telegram_client():
     """Initialize the Telegram client."""
     global telegram_client, notion_scout
-    
-    notion_key = os.getenv('NOTION_API_KEY')
-    anthropic_key = os.getenv('ANTHROPIC_API_KEY')
-    
+
+    notion_key = os.getenv("NOTION_API_KEY")
+    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+
     # Initialize Notion Scout if keys are available
     if notion_key and anthropic_key:
         notion_scout = NotionScout(notion_key, anthropic_key)
         print("Notion Scout initialized successfully")
     else:
         print("Notion Scout not initialized - missing API keys")
-    
+
     # Initialize Telegram client
     telegram_client = TelegramClient()
     success = await telegram_client.initialize(notion_scout)
-    
+
     if success:
         print("Telegram integration initialized successfully")
     else:
@@ -53,12 +54,12 @@ async def lifespan(app: FastAPI):
     """Handle startup and shutdown events"""
     # Startup
     await start_telegram_client()
-    
+
     yield
-    
+
     # Shutdown
     global telegram_client
-    
+
     if telegram_client:
         await telegram_client.stop()
 
@@ -73,7 +74,9 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    telegram_status = "connected" if telegram_client and telegram_client.is_connected else "disconnected"
+    telegram_status = (
+        "connected" if telegram_client and telegram_client.is_connected else "disconnected"
+    )
     return {"status": "healthy", "telegram": telegram_status}
 
 
@@ -83,7 +86,7 @@ async def telegram_status():
     if telegram_client:
         return {
             "telegram": "connected" if telegram_client.is_connected else "disconnected",
-            "client_id": telegram_client.session_name
+            "client_id": telegram_client.session_name,
         }
     return {"telegram": "disconnected"}
 
@@ -99,10 +102,4 @@ async def initialize_telegram():
 
 
 if __name__ == "__main__":
-    uvicorn.run(
-        "main:app", 
-        host="0.0.0.0", 
-        port=8000, 
-        reload=True,
-        log_level="info"
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_level="info")

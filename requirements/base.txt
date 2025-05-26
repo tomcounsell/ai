@@ -8,3 +8,8 @@ anthropic
 requests
 openai
 python-dotenv
+
+# Development tools
+ruff
+mypy
+pre-commit

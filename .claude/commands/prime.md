@@ -34,7 +34,7 @@ This is an AI research and development project focused on building programmable 
 - **Location**: `agents/notion_scout.py`
 - **Purpose**: Intelligent Notion database querying with Claude analysis
 - **Usage**: `uv run agents/notion_scout.py --project PsyOPTIMAL "What tasks are ready for dev?"`
-- **Features**: 
+- **Features**:
   - Project-based filtering (PsyOPTIMAL, FlexTrip)
   - Aliases support (psy, flex)
   - Claude-powered priority analysis
@@ -81,7 +81,7 @@ This is an AI research and development project focused on building programmable 
 ## 🚀 Current Capabilities
 
 - **Intelligent Querying**: Ask complex questions about project status
-- **Priority Analysis**: AI-powered task prioritization and recommendations  
+- **Priority Analysis**: AI-powered task prioritization and recommendations
 - **Project Isolation**: Query specific databases by friendly names
 - **Development Focus**: "What's the highest priority task ready for dev?"
 - **Status Tracking**: Monitor progress across multiple projects

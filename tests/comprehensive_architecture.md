@@ -17,10 +17,10 @@
 This document outlines a comprehensive architecture for a scalable multi-agent system where **Valor Engels** (human user) interacts with specialized AI agents through Telegram. The system is built on Pydantic models with strict typing, comprehensive testing, and production-ready monitoring.
 
 ### Current Implementation Status
-✅ **Working Telegram Integration** - Clean message handling with chat history  
-✅ **Notion Integration** - Project data queries and task management  
-✅ **Search Integration** - Perplexity AI for intelligent web search  
-✅ **Modular Architecture** - Clean separation in `/integrations/` structure  
+✅ **Working Telegram Integration** - Clean message handling with chat history
+✅ **Notion Integration** - Project data queries and task management
+✅ **Search Integration** - Perplexity AI for intelligent web search
+✅ **Modular Architecture** - Clean separation in `/integrations/` structure
 
 ### Key Components
 - **User Interface**: Valor Engels logs into Telegram as the primary interface
@@ -122,12 +122,12 @@ class Agent(BaseModel, ABC):
     last_used: Optional[datetime] = Field(None)
     usage_count: int = Field(default=0)
     error_count: int = Field(default=0)
-    
+
     @abstractmethod
     async def process_request(self, invocation: AgentInvocation) -> AgentResponse:
         """Process a user request and return response"""
         pass
-    
+
     @abstractmethod
     def can_handle(self, request: str) -> bool:
         """Check if agent can handle this type of request"""
@@ -138,7 +138,7 @@ class SystemOrchestrator(BaseModel):
     user_profile: UserProfile = Field(..., description="Valor's profile")
     agent_registry: AgentRegistry = Field(..., description="Available agents")
     active_conversations: Dict[int, ConversationContext] = Field(default_factory=dict)
-    
+
     async def process_user_message(self, message: UserMessage) -> List[AgentInvocationResult]:
         """Process message from Valor and coordinate agent responses"""
         # Agent detection, invocation, and response coordination
@@ -242,18 +242,18 @@ invocation = HGWellsInvocation(
 ```python
 class ClaudeCodeTool(Tool):
     """Tool for executing Claude Code CLI to perform development tasks"""
-    
+
     async def execute(self, input_data: Dict[str, Any]) -> ToolResult:
         """Execute Claude Code with given prompt and directory"""
         claude_input = ClaudeCodeInput(**input_data)
-        
+
         # Build and execute command
         cmd = self._build_command(claude_input)
         result = await self._execute_command(cmd, claude_input)
-        
+
         # Parse output and track file changes
         claude_output = self._parse_output(result, claude_input)
-        
+
         return ToolResult(
             success=claude_output.exit_code == 0,
             output=claude_output.response,
@@ -267,14 +267,14 @@ class ClaudeCodeTool(Tool):
 class ToolRegistry(BaseModel):
     """Registry for managing available tools"""
     tools: Dict[str, Tool] = Field(default_factory=dict)
-    
+
     def register_tool(self, tool: Tool) -> None:
         """Register a new tool"""
         self.tools[tool.config.name] = tool
-    
+
     def get_tools_with_capability(self, capability_name: str) -> List[Tool]:
         """Get all tools that have a specific capability"""
-        return [tool for tool in self.tools.values() 
+        return [tool for tool in self.tools.values()
                 if any(cap.name == capability_name for cap in tool.get_capabilities())]
 ```
 
@@ -326,7 +326,7 @@ class AgentTester(BaseModel):
     """Test runner for AI agents using Pydantic models"""
     agent_registry: AgentRegistry = Field(..., description="Registry of agents to test")
     evaluator: Optional[LLMEvaluator] = Field(None, description="LLM evaluator for subjective criteria")
-    
+
     async def test_agent(self, agent_name: str, scenarios: List[TestScenario]) -> TestSuiteResult:
         """Test a specific agent with given scenarios"""
         # Execute scenarios, collect results, generate reports
@@ -336,14 +336,14 @@ class AgentTester(BaseModel):
 
 **Chat History Tests**: 5/5 passed ✅
 - Basic message storage
-- Duplicate prevention  
+- Duplicate prevention
 - Context formatting
 - LLM message sequence
 - Chat history isolation
 
 **E2E Conversation Tests**: 3/4 passed (75% success rate)
 - **Persona Consistency**: 9.0/10 ✅
-- **Conversation Flow**: 9.0/10 ✅  
+- **Conversation Flow**: 9.0/10 ✅
 - **Casual Interaction**: 9.0/10 ✅
 - **Error Handling**: 6.0/10 (needs improvement)
 
@@ -386,7 +386,7 @@ Our current implementation uses a clean, modular integration pattern that serves
 ```
 /integrations/
 ├── telegram/          # Message handling, chat history, routing
-├── notion/           # Project data queries via NotionScout  
+├── notion/           # Project data queries via NotionScout
 └── search/           # Web search via Perplexity AI
 ```
 
@@ -407,7 +407,7 @@ else:
 
 **Benefits**:
 - ✅ Fast, reliable routing
-- ✅ Easy to test and debug  
+- ✅ Easy to test and debug
 - ✅ Production-ready
 - ✅ Clear separation of concerns
 
@@ -417,7 +417,7 @@ else:
 ```python
 class WebSearcher:
     """Clean web search integration using Perplexity API"""
-    
+
     async def search(self, query: str) -> Dict:
         # Uses OpenAI client with Perplexity base URL
         response = self.client.chat.completions.create(
@@ -430,7 +430,7 @@ class WebSearcher:
 ```python
 class NotionScout:
     """Project data queries with Claude analysis"""
-    
+
     async def answer_question(self, question: str) -> str:
         # Query Notion API + Claude analysis
         entries = await self.query_database_entries(db_id)
@@ -451,10 +451,10 @@ This incremental approach ensures we maintain working functionality while buildi
 
 ### Phase 1: Tool Registry Foundation (Week 1) ✅ IN PROGRESS
 
-**Goals**: 
+**Goals**:
 - ✅ **Current integrations working** (Telegram, Notion, Search with Perplexity)
 - 🔄 **Tool Registry Implementation** - Convert integrations to tools
-- 🔄 **Agent Base Classes** - Implement Pydantic agent framework  
+- 🔄 **Agent Base Classes** - Implement Pydantic agent framework
 - 🔄 **HG Wells Agent** - First intelligent agent prototype
 
 **Current Status**:
@@ -574,11 +574,11 @@ This incremental approach ensures we maintain working functionality while buildi
 system:
   user_profile:
     name: "Valor Engels"
-    telegram_username: "valor_engels" 
+    telegram_username: "valor_engels"
     telegram_user_id: 12345
     preferred_agents: ["HG Wells", "NotionScout", "TechnicalAdvisor"]
     active_projects: ["PsyOPTIMAL", "FlexTrip"]
-    
+
   agents:
     hg_wells:
       name: "HG Wells"

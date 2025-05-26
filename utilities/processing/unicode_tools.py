@@ -1,7 +1,7 @@
-import typing
-from typing import List, Callable
-import unicodedata
 import re
+import unicodedata
+from collections.abc import Callable
+
 import toolz
 from toolz import complement  # "flips" result of function, i.e. True == False
 
@@ -11,7 +11,7 @@ def clean_text(text: str) -> str:
     return filter_text(text, complement(is_control_char))
 
 
-def filter_text(text: str, filters: List[Callable[[str], bool]]) -> str:
+def filter_text(text: str, filters: list[Callable[[str], bool]]) -> str:
     # Applies the filters in the order given
     return "".join(list(filter(lambda c: toolz.pipe(c, filters), text)))
     # return "".join(list(filter(lambda x: ord(x) == 32 or 32 < ord(x) < 127,

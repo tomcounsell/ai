@@ -24,6 +24,9 @@ scripts/start.sh
 # Stop server and cleanup processes
 scripts/stop.sh
 
+# Quick server test (start, verify, stop) - for testing purposes
+python main.py & PID=$! && sleep 3 && curl -s http://localhost:8000/health && kill $PID
+
 # Update MCP configuration from .env
 scripts/update_mcp.sh
 ```
@@ -206,6 +209,20 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 - Comprehensive demos for full conversation testing
 - Background execution for long-running test scenarios
 - Log monitoring for test progress and debugging
+
+## Development Philosophy
+
+### Code Quality Standards
+- **Never support backward compatibility** - Always implement the latest, cleanest approach
+- **Never mock responses** - Use real integrations and services; if unavailable, fail gracefully
+- **Always write optimistic logic** - Implement the main successful path first and foremost
+- **Very crude exception handling** - Simple try/catch with basic error messages, no complex fallbacks
+- **Single main path** - Avoid multiple branches, fallbacks, or "defensive" programming patterns
+
+### Testing Approach
+- Focus on real integrations and end-to-end functionality
+- Test the happy path thoroughly; edge cases are secondary
+- Use actual services (Notion, Perplexity, Claude) rather than mocks when possible
 
 ## Important Notes
 - All AI interactions use PydanticAI agents with function tools

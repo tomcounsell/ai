@@ -1,8 +1,6 @@
-# tools/__init__.py
 """
-PydanticAI function tools for the AI agent system.
+Tools package for PydanticAI function tools.
+
+This package contains reusable function tools that can be used by PydanticAI agents
+for various capabilities like web search and Claude Code delegation.
 """
-
-from .search_tool import search_web, search_web_async
-
-__all__ = ['search_web', 'search_web_async']
