@@ -1,6 +1,16 @@
-# Valor Conversation Test Suite
+# Multi-Agent System Testing Suite
 
-This test suite evaluates Valor's conversation abilities using real LLM calls and GPT-based evaluation to ensure human-like responses.
+This comprehensive testing suite covers the full multi-agent system architecture, from individual agent capabilities to end-to-end workflows.
+
+## Architecture Overview
+
+See `comprehensive_architecture.md` for the complete system design, including:
+- Pydantic-based agent system with HG Wells, NotionScout, and TechnicalAdvisor
+- Claude Code tool integration for actual development work
+- LLM-based evaluation framework for objective quality measurement
+- Production-ready monitoring, configuration, and CI/CD integration
+
+## Current Test Coverage
 
 ## Features
 

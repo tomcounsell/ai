@@ -64,9 +64,17 @@ This codebase uses UV scripts as the primary pattern for creating self-contained
 
 ### Integration System
 External service integrations are organized under `/integrations/`:
-- `/integrations/notion/database_mapping.json` - Maps friendly project names to Notion database IDs
+- `/integrations/telegram/` - Complete Telegram bot architecture with message routing
+- `/integrations/notion/` - Project data queries with NotionScout + database mapping
+- `/integrations/search/` - Web search using Perplexity AI for intelligent responses
 - Supports aliases for convenient access (e.g., "psy" → "PsyOPTIMAL")
-- Separates integration configuration from agent logic
+- Clean separation between integrations and core logic
+
+#### Current Integration Capabilities:
+- **Telegram Bot**: Valor Engels persona with chat history and @mention support
+- **Notion Queries**: Project status, task management, database insights
+- **Web Search**: Perplexity AI integration for current information
+- **Keyword Routing**: Intelligent message routing to appropriate handlers
 
 ### Server Architecture
 - Minimal FastAPI server (`main.py`) with basic health endpoints
@@ -86,9 +94,21 @@ External service integrations are organized under `/integrations/`:
 - Supports Notion API integration out of the box
 
 ### Environment Configuration
-- `.env` file contains API keys (Anthropic, OpenAI, Notion)
+- `.env` file contains API keys (Anthropic, OpenAI, Notion, Telegram, Perplexity)
 - `.env.example` provides template with proper placeholder formats
 - Environment variables drive MCP server configuration
+
+#### Required API Keys:
+- `ANTHROPIC_API_KEY` - For Claude AI conversations and analysis
+- `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` - For Telegram bot functionality
+- `NOTION_API_KEY` - For project data integration
+- `PERPLEXITY_API_KEY` - For intelligent web search (optional)
+
+#### Search Integration:
+The Perplexity search integration provides intelligent web search through Telegram:
+- Trigger: `search [query]`, `find [info]`, `lookup [topic]`
+- Example: `search latest AI developments 2024`
+- Returns: AI-synthesized answers with current web information
 
 ## Valor - AI Assistant Persona
 **Valor Engels** refers to the Telegram bot implementation with a complete persona:
@@ -100,17 +120,37 @@ External service integrations are organized under `/integrations/`:
 - Context-aware priority checking using chat history and Notion data
 - Technical persona focused on implementation details and requirements clarification
 
-## Agent Development Patterns
+## Integration Development Patterns
 
-### Creating New Agents
-1. Use UV script format with inline dependencies
-2. Implement rich console output (no borders)
-3. Support project-based filtering where applicable
-4. Place integration configs in `/integrations/`
-5. Use Claude/Anthropic API for intelligent analysis
+### Current Architecture: Integrations → Tools → Agents
+The system evolves from direct integrations to a full agent system:
+
+**Phase 1 (Current)**: Direct integrations with keyword routing
+- Create integration classes in `/integrations/{service}/`
+- Implement detection functions (e.g., `is_search_query()`)
+- Add routing logic to Telegram handlers
+- Focus on reliable, working functionality
+
+**Phase 2 (Next)**: Tool registry system
+- Convert integrations to tools with capability definitions
+- Implement agent base classes with tool access
+- Build HG Wells as first intelligent agent
+
+**Phase 3 (Future)**: Multi-agent workflows
+- Agent collaboration and response aggregation
+- Advanced intent classification
+- Cross-conversation context management
+
+### Creating New Integrations
+1. Create integration directory: `/integrations/{service}/`
+2. Implement main integration class with async methods
+3. Add detection utilities in `utils.py`
+4. Update Telegram message handlers for routing
+5. Add environment configuration to `.env.example`
+6. Test integration independently before Telegram integration
 
 ### Integration Mappings
 When adding new integrations, create mapping files in `/integrations/{service}/` to translate user-friendly names to service-specific identifiers.
 
 ### Error Handling
-Agents should provide clear, actionable error messages and gracefully handle missing configuration or API connectivity issues.
+Integrations should provide clear, actionable error messages and gracefully handle missing configuration or API connectivity issues.
