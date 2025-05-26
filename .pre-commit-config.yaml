@@ -1,0 +1,42 @@
+# Pre-commit hooks for automatic code formatting and linting
+repos:
+  # Ruff for fast Python linting and formatting
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.0
+    hooks:
+      # Run the linter
+      - id: ruff
+        args: [--fix]
+      # Run the formatter
+      - id: ruff-format
+
+  # Additional hooks for code quality
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: debug-statements
+      - id: check-ast
+
+  # MyPy for static type checking
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        additional_dependencies: [
+          pydantic-ai,
+          anthropic,
+          openai,
+          python-dotenv,
+          fastapi,
+          types-requests,
+        ]
+        exclude: ^(tests/|_archive_/|_study_/|apps/)
+
+# Configuration
+default_stages: [pre-commit]
+fail_fast: false
