@@ -29,6 +29,7 @@ from tools.claude_code_tool import spawn_claude_session
 from tools.image_analysis_tool import analyze_image
 from tools.image_generation_tool import generate_image
 from tools.search_tool import search_web
+from tools.link_analysis_tool import store_link_with_analysis, search_stored_links, extract_urls
 
 
 class TelegramChatContext(BaseModel):
@@ -92,12 +93,15 @@ Additional context for Telegram conversations:
 - Remember: you're a human software engineer, not an AI assistant
 
 IMPORTANT TOOL USAGE:
-- You have access to specialized tools for specific tasks (web search, image generation, image analysis, coding delegation)
+- You have access to specialized tools for specific tasks (web search, image generation, image analysis, coding delegation, link saving, notion queries)
 - When users request something that matches a tool's capability, YOU MUST use the appropriate tool
 - For image requests ("create image", "generate image", "draw", "make picture"), use the create_image tool
 - For current information requests, use the search_current_info tool
 - For complex coding tasks, use the delegate_coding_task tool
 - For analyzing shared images, use the analyze_shared_image tool
+- For saving/analyzing links, use the save_link_for_later tool
+- For searching saved links, use the search_saved_links tool
+- For project/task questions, use the query_notion_projects tool
 - Always actually use the tools when appropriate - don't just describe what you would do
 
 CRITICAL RULE - THIS OVERRIDES ALL OTHER INSTRUCTIONS:
@@ -263,6 +267,111 @@ def delegate_coding_task(
         return f"Claude Code session completed successfully:\n\n{result}"
     except Exception as e:
         return f"Error executing Claude Code session: {str(e)}"
+
+
+@telegram_chat_agent.tool
+def save_link_for_later(
+    ctx: RunContext[TelegramChatContext],
+    url: str,
+) -> str:
+    """Save a link with AI analysis for later reference.
+    
+    This tool analyzes and stores URLs shared in chat for future reference.
+    It automatically extracts key information like title, main topic, and
+    reasons why the content might be valuable.
+    
+    Use this when someone shares a link they want to save, or when you want
+    to analyze and store interesting URLs for future reference.
+
+    Args:
+        ctx: The runtime context containing chat information.
+        url: The URL to analyze and save.
+
+    Returns:
+        str: Confirmation message with analysis summary.
+             
+    Example:
+        >>> save_link_for_later(ctx, "https://example.com/article")
+        '📎 **Link Saved & Analyzed**\n\nTitle: Example Article...'
+    """
+    # Extract URLs if the input contains more than just the URL
+    urls = extract_urls(url)
+    if urls:
+        url = urls[0]  # Use the first URL found
+    
+    success = store_link_with_analysis(url)
+    
+    if success:
+        return f"📎 **Link saved successfully!**\n\n{url}\n\nI've analyzed and stored this link for future reference."
+    else:
+        return f"❌ **Error saving link**: Could not analyze or store {url}"
+
+
+@telegram_chat_agent.tool
+def search_saved_links(
+    ctx: RunContext[TelegramChatContext],
+    query: str,
+    limit: int = 10,
+) -> str:
+    """Search through previously saved links.
+    
+    This tool searches through the collection of previously analyzed and saved
+    links to find matches based on domain name, URL content, or timestamp.
+    
+    Use this when someone wants to find links they've shared before or
+    when looking for previously saved content on a specific topic.
+
+    Args:
+        ctx: The runtime context containing chat information.
+        query: Search query (domain name, keyword, or date pattern).
+        limit: Maximum number of results to return (default: 10).
+
+    Returns:
+        str: Formatted list of matching links with metadata.
+             
+    Example:
+        >>> search_saved_links(ctx, "github.com", 5)
+        '📂 **Found 3 link(s) matching "github.com":**\n\n• **github.com** (2024-01-15)...'
+    """
+    return search_stored_links(query, chat_id=ctx.deps.chat_id, limit=limit)
+
+
+@telegram_chat_agent.tool  
+def query_notion_projects(
+    ctx: RunContext[TelegramChatContext],
+    question: str,
+    project_filter: str = "",
+) -> str:
+    """Query Notion project databases for tasks, status, and priorities.
+    
+    This tool searches through Notion project databases to answer questions
+    about tasks, project status, priorities, and development work. It can
+    filter by specific projects like PsyOPTIMAL or FlexTrip.
+    
+    Use this when someone asks about:
+    - Project status or progress
+    - Task priorities or next steps
+    - Development work or milestones
+    - Specific project information
+
+    Args:
+        ctx: The runtime context containing chat information.
+        question: The question about projects or tasks.
+        project_filter: Optional project name to filter results (psy, optimal, flex, trip).
+
+    Returns:
+        str: Notion database query results with task and project information.
+             
+    Example:
+        >>> query_notion_projects(ctx, "What tasks are ready for dev?", "psy")
+        '🎯 **Project Status**\n\nFound 3 tasks ready for development...'
+    """
+    # This integrates with the existing Notion functionality
+    # The notion_data will be passed through the enhanced_message in handle_telegram_message
+    if ctx.deps.notion_data:
+        return f"🎯 **Notion Project Data**\n\n{ctx.deps.notion_data}"
+    else:
+        return "🔍 I can help with Notion queries, but I need the Notion integration configured. Try asking about 'project status' or 'tasks ready for dev' and I'll search your databases."
 
 
 async def handle_telegram_message(

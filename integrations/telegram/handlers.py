@@ -4,12 +4,10 @@ from pyrogram.enums import ChatType
 
 from tools.link_analysis_tool import extract_urls, is_url_only_message, store_link_with_analysis
 
-# Search functionality now handled by PydanticAI agents
-from .response_handlers import handle_general_question, handle_user_priority_question
+# All functionality now handled by valor_agent (telegram_chat_agent)
 from .utils import (
     generate_catchup_response,
     is_message_too_old,
-    is_notion_question,
     is_user_priority_question,
 )
 
@@ -167,95 +165,115 @@ class MessageHandler:
         return is_mentioned, processed_text
 
     async def _route_message(self, message, chat_id: int, processed_text: str):
-        """Route message to appropriate handler based on content."""
-        text = processed_text.lower()
-
-        # Basic commands
+        """Route message to valor_agent for all text processing."""
+        text = processed_text.lower().strip()
+        
+        # Keep ping-pong for health check
         if text == "ping":
-            response = "pong"
-            await message.reply(response)
-            self.chat_history.add_message(chat_id, "assistant", response)
+            await self._handle_ping(message, chat_id)
+            return
+            
+        # Use valor_agent for all other message handling
+        await self._handle_with_valor_agent(message, chat_id, processed_text)
 
-        elif text == "status":
-            response = "AI Project API is running and listening!"
-            await message.reply(response)
-            self.chat_history.add_message(chat_id, "assistant", response)
-
-        elif text.startswith("help") or text == "":
-            response = """🤖 Available commands:
-
-• ping - Test bot responsiveness
-• status - Check API status
-• Ask any question - I can search the web for current info!
-• Ask about your Notion projects!
-• Request coding tasks - I can delegate to Claude Code!
-
-Examples:
-• "What tasks are ready for dev?"
-• "Show me project PsyOPTIMAL status"
-• "What's the latest AI news?"
-• "Create a todo app in /tmp"
-
-💡 In groups, just @mention me with your question!
-"""
-            await message.reply(response)
-            self.chat_history.add_message(chat_id, "assistant", response)
-
-        # User priority questions - check first for work-related queries
-        elif is_user_priority_question(processed_text):
-            await self._handle_priority_question(message, chat_id, processed_text)
-
-        # Notion integration - check for specific Notion keywords
-        elif self.notion_scout and is_notion_question(processed_text):
-            await self._handle_notion_question(message, chat_id, processed_text)
-
-        # General questions - use persona for any other meaningful text
-        elif len(processed_text.strip()) > 2:  # Ignore very short messages
-            await self._handle_general_question(message, chat_id, processed_text)
-
-        # Fallback for very short or unrecognized commands
-        else:
-            response = "🤔 Could you provide more details? I'm here to help with technical questions and Notion queries!"
-            await message.reply(response)
-            self.chat_history.add_message(chat_id, "assistant", response)
-
-    async def _handle_priority_question(self, message, chat_id: int, processed_text: str):
-        """Handle user priority questions."""
+    async def _handle_with_valor_agent(self, message, chat_id: int, processed_text: str):
+        """Handle all messages using valor_agent (telegram_chat_agent)."""
         try:
-            await message.reply("🎯 Checking your current priorities...")
+            # Use telegram_chat_agent directly for all message processing
+            from agents.telegram_chat_agent import handle_telegram_message
+            
+            # Determine if this might be a priority question for context
+            is_priority = is_user_priority_question(processed_text) if 'is_user_priority_question' in globals() else False
+            
+            # Get notion data if this seems like a priority question and we have notion_scout
+            notion_data = None
+            if is_priority and self.notion_scout:
+                try:
+                    # For priority questions, try to get relevant Notion data
+                    notion_data = await self._get_notion_context(processed_text)
+                except Exception as e:
+                    print(f"Warning: Could not get Notion context: {e}")
 
-            # Use specialized priority handler
-            answer = await handle_user_priority_question(
-                processed_text,
-                self.notion_scout.anthropic_client if self.notion_scout else None,
-                chat_id,
-                self.notion_scout,
-                self.chat_history,
+            answer = await handle_telegram_message(
+                message=processed_text,
+                chat_id=chat_id,
+                username=message.from_user.username if message.from_user else None,
+                is_group_chat=message.chat.type != ChatType.PRIVATE,
+                chat_history_obj=self.chat_history,
+                notion_data=notion_data,
+                is_priority_question=is_priority,
             )
 
-            # Check if response contains generated image, otherwise handle normally
-            if not await self._process_agent_response(message, chat_id, answer, prefix="🎯"):
-                # Standard text response handling
-                if len(answer) > 4000:
-                    parts = [answer[i : i + 4000] for i in range(0, len(answer), 4000)]
-                    for part in parts:
-                        await message.reply(f"🎯 {part}")
-                    self.chat_history.add_message(chat_id, "assistant", answer)
-                else:
-                    full_response = f"🎯 {answer}"
-                    await message.reply(full_response)
-                    self.chat_history.add_message(chat_id, "assistant", answer)
+            # Process the agent response (handles both images and text)
+            await self._process_agent_response(message, chat_id, answer)
 
         except Exception as e:
-            error_msg = f"❌ Error checking priorities: {str(e)}"
+            error_msg = f"❌ Error processing message: {str(e)}"
             await message.reply(error_msg)
             self.chat_history.add_message(chat_id, "assistant", error_msg)
 
-    async def _handle_notion_question(self, message, chat_id: int, processed_text: str):
-        """Handle Notion-related questions."""
+    async def _handle_ping(self, message, chat_id: int):
+        """Handle ping command with system health metrics."""
         try:
-            await message.reply("🔍 Searching your Notion databases...")
+            import psutil
+            import platform
+            from datetime import datetime
+            
+            # Get system metrics
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+            
+            # Format uptime
+            boot_time = datetime.fromtimestamp(psutil.boot_time())
+            uptime = datetime.now() - boot_time
+            
+            response = f"""🏓 **pong**
 
+📊 **System Health:**
+• CPU: {cpu_percent}%
+• Memory: {memory.percent}% ({memory.available // (1024**3)}GB free)
+• Disk: {disk.percent}% used
+• Uptime: {uptime.days}d {uptime.seconds//3600}h {(uptime.seconds//60)%60}m
+• Platform: {platform.system()} {platform.release()}
+
+🤖 **Bot Status:**
+• Agent: ✅ Active (valor_agent)
+• Tools: ✅ {len(self._get_available_tools())} available
+• Notion: {'✅ Connected' if self.notion_scout else '❌ Not configured'}"""
+            
+        except Exception as e:
+            # Fallback if psutil not available or error occurs
+            response = f"""🏓 **pong**
+
+🤖 **Bot Status:**
+• Agent: ✅ Active (valor_agent)
+• Notion: {'✅ Connected' if self.notion_scout else '❌ Not configured'}
+• Health: ✅ Running
+
+⚠️ Detailed metrics unavailable: {str(e)[:50]}"""
+            
+        await message.reply(response)
+        self.chat_history.add_message(chat_id, "assistant", response)
+    
+    def _get_available_tools(self) -> list[str]:
+        """Get list of available tools for health check."""
+        return [
+            "search_current_info",
+            "create_image", 
+            "analyze_shared_image",
+            "delegate_coding_task",
+            "save_link_for_later",
+            "search_saved_links",
+            "query_notion_projects"
+        ]
+
+    async def _get_notion_context(self, processed_text: str) -> str | None:
+        """Get Notion context for priority questions."""
+        try:
+            if not self.notion_scout:
+                return None
+                
             # Check if specific project mentioned
             text_lower = processed_text.lower()
             for project_name in ["psyoptimal", "flextrip", "psy", "flex"]:
@@ -272,45 +290,13 @@ Examples:
 
             # Reset filter for next query
             self.notion_scout.db_filter = None
-
-            # Split long messages for Telegram
-            if len(answer) > 4000:
-                parts = [answer[i : i + 4000] for i in range(0, len(answer), 4000)]
-                for part in parts:
-                    await message.reply(part)
-                full_response = "\n".join(parts)
-            else:
-                full_response = f"🎯 **Notion Scout Results**\n\n{answer}"
-                await message.reply(full_response)
-
-            self.chat_history.add_message(chat_id, "assistant", full_response)
+            
+            return answer
 
         except Exception as e:
-            error_msg = f"❌ Error querying Notion: {str(e)}"
-            await message.reply(error_msg)
-            self.chat_history.add_message(chat_id, "assistant", error_msg)
+            print(f"Error getting Notion context: {e}")
+            return None
 
-    async def _handle_general_question(self, message, chat_id: int, processed_text: str):
-        """Handle general questions using persona."""
-        try:
-            # Use the same anthropic client from notion_scout
-            if self.notion_scout and self.notion_scout.anthropic_client:
-                answer = await handle_general_question(
-                    processed_text, self.notion_scout.anthropic_client, chat_id, self.chat_history
-                )
-
-                # Check if response contains generated image
-                await self._process_agent_response(message, chat_id, answer)
-
-            else:
-                response = "💭 I'd love to help, but I need my AI capabilities configured first!"
-                await message.reply(response)
-                self.chat_history.add_message(chat_id, "assistant", response)
-
-        except Exception as e:
-            error_msg = f"❌ Error processing question: {str(e)}"
-            await message.reply(error_msg)
-            self.chat_history.add_message(chat_id, "assistant", error_msg)
 
     async def _handle_link_message(self, message, chat_id: int, processed_text: str):
         """Handle messages that contain only a URL - store with AI analysis."""
