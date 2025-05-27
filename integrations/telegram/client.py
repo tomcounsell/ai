@@ -24,6 +24,17 @@ class TelegramClient:
         try:
             self.bot_start_time = time.time()
 
+            # Check for performance optimizations
+            try:
+                import importlib.util
+
+                if importlib.util.find_spec("tgcrypto") is not None:
+                    print("🔐 TgCrypto detected - optimized cryptography enabled")
+                else:
+                    print("⚠️  TgCrypto not available - using slower pure Python cryptography")
+            except ImportError:
+                print("⚠️  TgCrypto not available - using slower pure Python cryptography")
+
             # Load existing chat history
             self.chat_history.load_history()
 

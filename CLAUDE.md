@@ -38,9 +38,16 @@ uv pip compile requirements/base.txt -o requirements.txt
 # Create virtual environment
 uv venv
 
-# Install dependencies
+# Install dependencies (includes performance optimizations)
 uv pip install -r requirements.txt
 ```
+
+### Performance Optimizations
+The system includes Pyrogram performance enhancements:
+- **TgCrypto**: Optimized cryptography library (2-4x faster than pure Python)
+- **uvloop**: High-performance asyncio event loop (2-4x faster than default)
+- Both are automatically detected and enabled when available
+- Graceful fallback to standard implementations if not installed
 
 ### Server Management
 ```bash

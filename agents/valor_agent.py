@@ -610,6 +610,17 @@ async def handle_general_question(
 # Test function and example usage
 if __name__ == "__main__":
     import asyncio
+    import sys
+
+    # Install uvloop for better async performance
+    if sys.platform != "win32":  # uvloop is not available on Windows
+        try:
+            import uvloop
+
+            uvloop.install()
+            print("🚀 uvloop installed for improved async performance")
+        except ImportError:
+            print("⚠️  uvloop not available, using default asyncio event loop")
 
     async def test_valor_agent():
         """Test the unified Valor agent with various types of queries.

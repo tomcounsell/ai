@@ -1,12 +1,23 @@
 """Clean FastAPI server with separated integrations."""
 
 import os
+import sys
 from contextlib import asynccontextmanager
 
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+
+# Install uvloop for better async performance
+if sys.platform != "win32":  # uvloop is not available on Windows
+    try:
+        import uvloop
+
+        uvloop.install()
+        print("🚀 uvloop installed for improved async performance")
+    except ImportError:
+        print("⚠️  uvloop not available, using default asyncio event loop")
 
 from integrations.notion.scout import NotionScout
 from integrations.telegram.client import TelegramClient

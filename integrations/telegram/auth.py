@@ -22,6 +22,16 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
+# Install uvloop for better async performance
+if sys.platform != "win32":  # uvloop is not available on Windows
+    try:
+        import uvloop
+
+        uvloop.install()
+        print("🚀 uvloop installed for improved async performance")
+    except ImportError:
+        print("⚠️  uvloop not available, using default asyncio event loop")
+
 from dotenv import load_dotenv
 from pyrogram import Client
 

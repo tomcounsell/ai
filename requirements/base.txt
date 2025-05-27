@@ -1,5 +1,7 @@
 popoto
 pyrogram
+tgcrypto
+uvloop
 fastapi
 uvicorn[standard]
 pydantic
