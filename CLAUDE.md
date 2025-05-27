@@ -231,3 +231,44 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 - Type safety enforced throughout the system
 - Tools are simple, testable Python functions
 - Agent behavior validated through comprehensive test batteries
+
+## Documentation References
+
+### Core System Documentation
+- **`docs/agent-architecture.md`** - PydanticAI foundation, current agent system, and development patterns
+- **`docs/tool-development.md`** - Complete guide for creating and integrating tools with best practices
+- **`docs/telegram-integration.md`** - Telegram interface, Valor Engels persona, and message handling
+- **`docs/system-operations.md`** - Development workflow, environment setup, and deployment guidance
+- **`docs/testing-strategy.md`** - Current testing infrastructure, frameworks, and validation methods
+- **`docs/teamwork-personas.md`** - Current persona implementation and collaboration framework
+
+### Strategic Planning
+- **`docs/future-plans.md`** - Comprehensive architectural vision for multi-agent system evolution
+
+### Key Integration Files
+- **`integrations/persona.md`** - Valor Engels persona definition with Claude Code tool usage guidelines
+- **`integrations/notion/database_mapping.json`** - Project name to database ID mappings for NotionScout
+
+These documents provide comprehensive guidance for understanding, developing, testing, and operating the AI agent system.
+
+## Quick Reference for Common Tasks
+
+### Understanding the System
+- Read `docs/agent-architecture.md` for overall system design
+- Check `docs/tool-development.md` for tool creation patterns
+- Review `integrations/persona.md` for Valor Engels behavioral guidelines
+
+### Development Tasks
+- Follow `docs/system-operations.md` for server management and environment setup
+- Use `docs/testing-strategy.md` for validation approaches
+- Reference `docs/telegram-integration.md` for message handling patterns
+
+### Planning and Architecture
+- Consult `docs/future-plans.md` for long-term system evolution plans
+- Review `docs/teamwork-personas.md` for multi-agent collaboration concepts
+
+# important-instruction-reminders
+Do what has been asked; nothing more, nothing less.
+NEVER create files unless they're absolutely necessary for achieving your goal.
+ALWAYS prefer editing an existing file to creating a new one.
+NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
