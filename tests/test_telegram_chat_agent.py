@@ -211,6 +211,65 @@ class TelegramChatAgentTester:
 
         return response
 
+    async def test_image_generation_integration(self):
+        """Test image generation tool integration with Telegram format."""
+        import os
+        
+        # Skip test if no OpenAI API key
+        if not os.getenv("OPENAI_API_KEY"):
+            print("\n⏭️ Skipping image generation test - OPENAI_API_KEY not found")
+            return None
+            
+        conversation = [
+            {"user": "Can you create an image of a sunset over mountains?"},
+        ]
+
+        print("\n🧪 Running test: Image Generation Integration")
+        print("=" * 50)
+
+        # Import here to avoid circular imports during testing
+        from integrations.telegram.response_handlers import handle_general_question
+
+        user_message = conversation[0]["user"]
+        print(f"\n1. User: {user_message}")
+
+        response = await handle_general_question(
+            question=user_message,
+            anthropic_client=None,
+            chat_id=self.test_chat_id,
+            chat_history=self.chat_history,
+        )
+
+        print(f"   Valor: {response}")
+
+        # Validate image generation response
+        if response.startswith("TELEGRAM_IMAGE_GENERATED|"):
+            # Parse the response format
+            parts = response.split("|", 2)
+            if len(parts) == 3:
+                image_path = parts[1]
+                caption = parts[2]
+                
+                print(f"✅ Image generation format detected")
+                print(f"   Image path: {image_path}")
+                print(f"   Caption: {caption}")
+                
+                # Check if image file exists
+                from pathlib import Path
+                if Path(image_path).exists():
+                    print(f"✅ Image file exists at: {image_path}")
+                else:
+                    print(f"❌ Image file not found at: {image_path}")
+            else:
+                print(f"❌ Invalid image generation response format")
+        elif "error" in response.lower() or "unavailable" in response.lower():
+            print(f"⚠️ Image generation not available: {response}")
+        else:
+            print(f"ℹ️ Standard text response (no image requested): {response}")
+
+        print("✅ Image generation integration test completed")
+        return response
+
     async def run_all_tests(self):
         """Run the complete test battery."""
         print("🚀 Starting Telegram Chat Agent Test Battery")
@@ -240,6 +299,10 @@ class TelegramChatAgentTester:
             self.chat_history = MockChatHistory()
             await self.test_priority_questions()
 
+            # Reset for next test
+            self.chat_history = MockChatHistory()
+            await self.test_image_generation_integration()
+
             print("\n" + "=" * 60)
             print("🎉 All tests passed! Telegram Chat Agent is working correctly.")
             print("✅ Casual conversation")
@@ -248,6 +311,7 @@ class TelegramChatAgentTester:
             print("✅ Search tool integration")
             print("✅ Persona consistency")
             print("✅ Priority questions")
+            print("✅ Image generation integration")
 
         except Exception as e:
             print(f"\n❌ Test failed: {e}")

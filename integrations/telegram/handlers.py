@@ -233,17 +233,18 @@ Examples:
                 self.chat_history,
             )
 
-            # Split long messages for Telegram
-            if len(answer) > 4000:
-                parts = [answer[i : i + 4000] for i in range(0, len(answer), 4000)]
-                for part in parts:
-                    await message.reply(part)
-                full_response = "\n".join(parts)
-            else:
-                full_response = f"🎯 {answer}"
-                await message.reply(full_response)
-
-            self.chat_history.add_message(chat_id, "assistant", answer)
+            # Check if response contains generated image, otherwise handle normally
+            if not await self._process_agent_response(message, chat_id, answer, prefix="🎯"):
+                # Standard text response handling
+                if len(answer) > 4000:
+                    parts = [answer[i : i + 4000] for i in range(0, len(answer), 4000)]
+                    for part in parts:
+                        await message.reply(f"🎯 {part}")
+                    self.chat_history.add_message(chat_id, "assistant", answer)
+                else:
+                    full_response = f"🎯 {answer}"
+                    await message.reply(full_response)
+                    self.chat_history.add_message(chat_id, "assistant", answer)
 
         except Exception as e:
             error_msg = f"❌ Error checking priorities: {str(e)}"
@@ -298,18 +299,9 @@ Examples:
                     processed_text, self.notion_scout.anthropic_client, chat_id, self.chat_history
                 )
 
-                # Split long messages for Telegram
-                if len(answer) > 4000:
-                    parts = [answer[i : i + 4000] for i in range(0, len(answer), 4000)]
-                    for part in parts:
-                        await message.reply(part)
-                    "\n".join(parts)
-                else:
-                    await message.reply(answer)
+                # Check if response contains generated image
+                await self._process_agent_response(message, chat_id, answer)
 
-                self.chat_history.add_message(
-                    chat_id, "assistant", answer
-                )  # Store without emoji prefix
             else:
                 response = "💭 I'd love to help, but I need my AI capabilities configured first!"
                 await message.reply(response)
@@ -408,15 +400,8 @@ Examples:
                     chat_history_obj=self.chat_history,
                 )
 
-                # Split long messages for Telegram
-                if len(answer) > 4000:
-                    parts = [answer[i : i + 4000] for i in range(0, len(answer), 4000)]
-                    for part in parts:
-                        await message.reply(part)
-                else:
-                    await message.reply(answer)
-
-                self.chat_history.add_message(chat_id, "assistant", answer)
+                # Process the response (handles both images and text)
+                await self._process_agent_response(message, chat_id, answer)
 
             else:
                 response = "👁️ I can see you shared an image, but I need my AI capabilities configured to analyze it!"
@@ -497,3 +482,75 @@ Examples:
         except Exception as e:
             error_msg = f"❌ Error processing video: {str(e)}"
             await message.reply(error_msg)
+
+    async def _process_agent_response(self, message, chat_id: int, answer: str, prefix: str = "") -> bool:
+        """
+        Process agent response, handling image generation and standard text responses.
+        
+        Args:
+            message: Telegram message object
+            chat_id: Chat ID for history storage
+            answer: Agent response text
+            prefix: Optional prefix for text responses
+            
+        Returns:
+            True if image was processed, False if standard text response was sent
+        """
+        import os
+        from pathlib import Path
+        
+        # Check if response contains generated image
+        if answer.startswith("TELEGRAM_IMAGE_GENERATED|"):
+            try:
+                # Parse the special format: TELEGRAM_IMAGE_GENERATED|path|caption
+                parts = answer.split("|", 2)
+                if len(parts) == 3:
+                    image_path = parts[1]
+                    caption = parts[2]
+                    
+                    # Verify image file exists
+                    if Path(image_path).exists():
+                        # Send the image with caption
+                        await self.client.send_photo(
+                            chat_id=chat_id,
+                            photo=image_path,
+                            caption=caption
+                        )
+                        
+                        # Store response in chat history (without the special format)
+                        self.chat_history.add_message(chat_id, "assistant", caption)
+                        
+                        # Clean up temporary file
+                        try:
+                            os.remove(image_path)
+                            print(f"Cleaned up temporary image: {image_path}")
+                        except Exception as cleanup_error:
+                            print(f"Warning: Failed to cleanup image {image_path}: {cleanup_error}")
+                        
+                        return True
+                    else:
+                        # Image file doesn't exist, send error message
+                        error_msg = "🎨 Image was generated but file not found. Please try again."
+                        await message.reply(error_msg)
+                        self.chat_history.add_message(chat_id, "assistant", error_msg)
+                        return True
+                        
+            except Exception as e:
+                error_msg = f"❌ Error sending image: {str(e)}"
+                await message.reply(error_msg)
+                self.chat_history.add_message(chat_id, "assistant", error_msg)
+                return True
+        
+        # Standard text response handling
+        if len(answer) > 4000:
+            parts = [answer[i : i + 4000] for i in range(0, len(answer), 4000)]
+            for part in parts:
+                response_text = f"{prefix} {part}".strip() if prefix else part
+                await message.reply(response_text)
+            self.chat_history.add_message(chat_id, "assistant", answer)
+        else:
+            response_text = f"{prefix} {answer}".strip() if prefix else answer
+            await message.reply(response_text)
+            self.chat_history.add_message(chat_id, "assistant", answer)
+        
+        return False

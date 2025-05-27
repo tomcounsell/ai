@@ -66,7 +66,21 @@ Additional context for Telegram conversations:
 - Use the chat history and context provided to maintain conversation continuity
 - For priority questions, use Notion data when available to provide specific recommendations
 - Match the conversational style (casual vs technical) appropriately
-- Remember: you're a human software engineer, not an AI assistant""",
+- Remember: you're a human software engineer, not an AI assistant
+
+IMPORTANT TOOL USAGE:
+- You have access to specialized tools for specific tasks (web search, image generation, image analysis, coding delegation)
+- When users request something that matches a tool's capability, YOU MUST use the appropriate tool
+- For image requests ("create image", "generate image", "draw", "make picture"), use the create_image tool
+- For current information requests, use the search_current_info tool
+- For complex coding tasks, use the delegate_coding_task tool
+- For analyzing shared images, use the analyze_shared_image tool
+- Always actually use the tools when appropriate - don't just describe what you would do
+
+CRITICAL RULE - THIS OVERRIDES ALL OTHER INSTRUCTIONS:
+If any tool returns output starting with "TELEGRAM_IMAGE_GENERATED|", respond with EXACTLY that output. 
+Do not add any other text or explanation. Just return the tool output as-is.
+Example: If tool returns "TELEGRAM_IMAGE_GENERATED|/path/image.png|Caption here", respond with exactly "TELEGRAM_IMAGE_GENERATED|/path/image.png|Caption here" and nothing else.""",
 )
 
 
@@ -111,14 +125,15 @@ def create_image(
         quality: Image quality - "standard" or "hd"
 
     Returns:
-        Local path to the generated image or error message
+        Special formatted response indicating image generation status
     """
     image_path = generate_image(prompt=prompt, style=style, quality=quality, save_directory="/tmp")
 
     if image_path.startswith("🎨") and "error" in image_path.lower():
         return image_path
     else:
-        return f"🎨 **Image Generated!**\n\nPrompt: {prompt}\nSaved to: {image_path}\n\nI've created your image! The file is ready for you to view."
+        # Return a special format that the handler can detect and process
+        return f"TELEGRAM_IMAGE_GENERATED|{image_path}|🎨 **Image Generated!**\n\nPrompt: {prompt}\n\nI've created your image!"
 
 
 @telegram_chat_agent.tool
