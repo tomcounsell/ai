@@ -10,6 +10,28 @@ Example tasks include:
 - exploring the repository
 - creating plans for future development
 - executing complex multi-step dev tasks that require reasoning and planning
+
+Tips & Recommendations:
+
+Memory Management:
+- Use /memory command to quickly edit CLAUDE.md files
+- Use # shortcut to add quick notes during sessions
+- Review your memory files periodically - they can get stale
+
+TDD Workflow Optimization:
+- Keep plan documents focused and specific
+- Update the "Current Work Status" section in CLAUDE.md as you switch between projects
+- Consider adding common test patterns to project-specific CLAUDE.md files
+
+Session Continuity:
+- Use claude -c to resume recent work
+- Always check TodoRead when continuing implementation work
+- Update plan documents if you discover new requirements mid-implementation
+
+Project Organization:
+- Create /docs/plan/ directories in projects that will use this TDD process
+- Consider adding test coverage requirements to project-specific CLAUDE.md files
+- Keep successful patterns documented for reuse
 """
 
 import os
@@ -23,7 +45,7 @@ def execute_claude_code(
     timeout: int | None = None,
 ) -> str:
     """Execute a Claude Code session with a specific prompt and context.
-    
+
     This function spawns a new Claude Code session with the provided prompt
     and configuration. It handles directory validation, tool permissions,
     and execution monitoring.
@@ -42,7 +64,7 @@ def execute_claude_code(
         FileNotFoundError: If working directory doesn't exist.
         NotADirectoryError: If working_directory path is not a directory.
         subprocess.TimeoutExpired: If execution exceeds timeout.
-        
+
     Example:
         >>> result = execute_claude_code(
         ...     "Create a simple Python script",
@@ -107,7 +129,7 @@ def spawn_claude_session(
     tools_needed: list[str] | None = None,
 ) -> str:
     """Spawn a new Claude Code session for a specific development task.
-    
+
     This is a higher-level wrapper that formats prompts appropriately
     for common development workflows. It creates comprehensive prompts
     with task descriptions, requirements, and best practices.
@@ -120,7 +142,7 @@ def spawn_claude_session(
 
     Returns:
         str: Result of Claude's execution including task completion status.
-        
+
     Example:
         >>> result = spawn_claude_session(
         ...     "Create a FastAPI application",
@@ -129,7 +151,7 @@ def spawn_claude_session(
         ... )
         >>> "FastAPI" in result
         True
-        
+
     Note:
         This function automatically includes common development requirements
         like following existing patterns, testing, and git workflows.
