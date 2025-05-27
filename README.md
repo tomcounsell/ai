@@ -5,17 +5,19 @@ A comprehensive AI agent system built with **PydanticAI** for intelligent tool o
 ## 🚀 Quick Start
 
 ```bash
-# Install dependencies
+# Setup environment
+uv venv
 uv pip install -r requirements.txt
 
-# Test the main Telegram chat agent
+# Start development server
+scripts/start.sh
+
+# Test agents directly
 uv run agents/telegram_chat_agent.py
+uv run agents/notion_scout.py --project psy "What tasks are ready for dev?"
 
-# Run comprehensive demo (background)
-scripts/demo_agent.sh
-
-# Monitor demo progress
-tail -f logs/agent_demo.log
+# Run comprehensive tests
+python tests/run_tests.py
 ```
 
 ## 🤖 Architecture
@@ -31,18 +33,26 @@ tail -f logs/agent_demo.log
 ```
 /agents/                    # PydanticAI agents
   ├── telegram_chat_agent.py # Main Telegram conversation agent
-  └── valor_agent.py         # Standalone agent example
+  └── notion_scout.py         # Notion database query agent
 
 /tools/                     # PydanticAI function tools
-  └── search_tool.py         # Web search using Perplexity AI
+  ├── search_tool.py         # Web search using Perplexity AI
+  └── models.py              # Tool infrastructure and base models
 
 /integrations/              # External service connections
-  ├── telegram/             # Telegram bot integration
-  └── notion/               # Project data queries
+  ├── telegram/             # Telegram bot with chat history
+  ├── notion/               # Project data queries and database mapping
+  └── persona.md            # Valor Engels persona and Claude Code guidelines
 
-/tests/                     # Agent testing and validation
-  ├── test_agent_quick.py   # Quick functionality tests
-  └── test_agent_demo.py    # Comprehensive conversation demos
+/tests/                     # Comprehensive testing suite
+  ├── test_chat_history.py  # Chat history management tests
+  ├── test_valor_conversations.py # Conversation flow tests
+  └── run_tests.py          # Test runner with environment setup
+
+/docs/                      # Architecture documentation
+  ├── agent-architecture.md # Current PydanticAI implementation
+  ├── tool-development.md   # Tool creation patterns
+  └── future-plans.md       # Multi-agent vision and roadmap
 ```
 
 ## 🛠️ Tool Development
@@ -69,32 +79,41 @@ def my_tool(ctx: RunContext[ContextType], param: str) -> str:
 ## 🧪 Testing
 
 ```bash
-# Quick agent functionality test
-python tests/test_agent_quick.py
+# Run all tests with environment setup
+python tests/run_tests.py
 
-# Comprehensive conversation demo
-python tests/test_agent_demo.py
+# Individual test suites
+python tests/test_chat_history.py          # Chat history management
+python tests/test_valor_conversations.py   # Conversation flow validation
+python tests/test_agent_quick.py          # Quick functionality tests
 
-# Background demo execution
-scripts/demo_agent.sh
+# Agent testing directly
+uv run agents/telegram_chat_agent.py      # Test Telegram agent
+uv run agents/notion_scout.py --project psy "Status check"  # Test Notion queries
+
+# Server testing
+scripts/start.sh                          # Start development server
+python main.py & PID=$! && sleep 3 && curl http://localhost:8000/health && kill $PID
 ```
 
 ## 📋 Features
 
 ### ✅ Implemented
-- **PydanticAI Integration**: Complete migration from direct API calls
-- **Intelligent Tool Selection**: LLM chooses appropriate tools automatically
-- **Conversation Continuity**: Message history integration
+- **PydanticAI Agent System**: Complete migration with function tools
+- **Telegram Integration**: Chat history, persona, and conversation continuity
+- **Notion Scout Agent**: Project data queries with database mapping
 - **Web Search Tool**: Current information through Perplexity AI
-- **Valor Engels Persona**: Consistent character with technical expertise
-- **Type Safety**: Full Pydantic validation throughout
-- **Comprehensive Testing**: Quick tests and full conversation demos
+- **Valor Engels Persona**: Consistent character with Claude Code tool usage
+- **Chat History Management**: Duplicate prevention and context formatting
+- **Type Safety**: Full Pydantic validation and tool infrastructure
+- **Comprehensive Testing**: Chat history, conversation flow, and agent validation
+- **Documentation Suite**: Architecture, tool development, and future planning
 
 ### 🔮 Next Steps
-- **Notion Tool**: Convert existing integration to PydanticAI function tool
-- **Code Execution Tool**: Integrate with development workflows
-- **Multi-Agent Workflows**: Agent collaboration and orchestration
-- **Enhanced Context**: Persistent conversation memory
+- **Tool Ecosystem Expansion**: Code execution, file operations, and development tools
+- **Multi-Agent Workflows**: Agent collaboration and orchestration (see docs/future-plans.md)
+- **Enhanced Context**: Persistent conversation memory across sessions
+- **Claude Code Integration**: Advanced tool delegation and workflow automation
 
 ## 🎯 Agent Capabilities
 

@@ -23,6 +23,10 @@ def check_dependencies():
 def check_environment():
     """Check if required environment variables are set"""
     import os
+    from dotenv import load_dotenv
+    
+    # Load environment variables from .env file
+    load_dotenv()
 
     required_vars = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
     missing = []

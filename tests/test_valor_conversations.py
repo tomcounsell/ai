@@ -22,12 +22,9 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
 
-from main import (
-    NotionScout,
-    add_to_chat_history,
-    handle_general_question,
-    handle_user_priority_question,
-)
+from integrations.notion.scout import NotionScout
+from integrations.telegram.chat_history import ChatHistoryManager
+from agents.telegram_chat_agent import handle_telegram_message
 
 load_dotenv()
 
@@ -54,6 +51,7 @@ class ConversationTester:
         self.notion_scout = None
         self.test_results = []
         self.test_chat_id = 99999  # Use unique chat ID for tests
+        self.chat_history = ChatHistoryManager()  # Initialize chat history
 
         # Initialize NotionScout if keys available
         notion_key = os.getenv("NOTION_API_KEY")
@@ -68,24 +66,21 @@ class ConversationTester:
         """Send a message to Valor and get response"""
         try:
             # Add user message to chat history
-            add_to_chat_history(self.test_chat_id, "user", message)
+            self.chat_history.add_message(self.test_chat_id, "user", message)
 
-            if message_type == "priority" and self.notion_scout:
-                response = await handle_user_priority_question(
-                    message,
-                    self.notion_scout.anthropic_client,
-                    self.test_chat_id,
-                    self.notion_scout,
-                )
-            elif self.notion_scout:
-                response = await handle_general_question(
-                    message, self.notion_scout.anthropic_client, self.test_chat_id
-                )
-            else:
-                response = "Error: No AI client available for testing"
+            # Use the new PydanticAI telegram chat agent
+            response = await handle_telegram_message(
+                message=message,
+                chat_id=self.test_chat_id,
+                username="test_user",
+                is_group_chat=False,
+                chat_history_obj=self.chat_history,
+                notion_data=None,
+                is_priority_question=(message_type == "priority")
+            )
 
             # Add Valor's response to chat history
-            add_to_chat_history(self.test_chat_id, "assistant", response)
+            self.chat_history.add_message(self.test_chat_id, "assistant", response)
 
             return response
 
