@@ -1,0 +1,30 @@
+[
+  {
+    "label": "Run server",
+    "command": "./scripts/start.sh",
+    "cwd": "${workspaceRoot}",
+    "env": {},
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "hide": "never",
+    "shell": "system",
+    "show_summary": true,
+    "show_output": true,
+    "tags": ["run", "server"]
+  },
+  {
+    "label": "Stop server",
+    "command": "./scripts/stop.sh",
+    "cwd": "${workspaceRoot}",
+    "env": {},
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "hide": "never",
+    "shell": "system",
+    "show_summary": true,
+    "show_output": true,
+    "tags": ["stop", "server"]
+  }
+]

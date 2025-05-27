@@ -5,6 +5,8 @@
 
 PORT=8000
 PID_FILE="/tmp/fastapi_server.pid"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Function to check if server is running
 check_server() {
@@ -26,11 +28,11 @@ check_server() {
 # Function to start server
 start_server() {
     echo "Starting FastAPI development server with hot reload..."
-    cd "$(dirname "$0")/.." || exit 1
-
+    cd "$PROJECT_ROOT" || exit 1
+    
     # Check if main.py exists
-    if [ ! -f "main.py" ]; then
-        echo "Error: main.py not found in project root"
+    if [ ! -f "$PROJECT_ROOT/main.py" ]; then
+        echo "Error: main.py not found in project root ($PROJECT_ROOT)"
         echo "Please create main.py first or run from the correct directory"
         exit 1
     fi
