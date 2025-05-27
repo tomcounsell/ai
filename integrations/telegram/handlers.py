@@ -28,10 +28,26 @@ class MessageHandler:
 
     async def handle_message(self, client, message):
         """Main message handling logic with routing to appropriate handlers."""
-        if not message.text:
+        chat_id = message.chat.id
+
+        # Handle different message types
+        if message.photo:
+            await self._handle_photo_message(client, message, chat_id)
+            return
+        elif message.document:
+            await self._handle_document_message(client, message, chat_id)
+            return
+        elif message.voice or message.audio:
+            await self._handle_audio_message(client, message, chat_id)
+            return
+        elif message.video or message.video_note:
+            await self._handle_video_message(client, message, chat_id)
+            return
+        elif not message.text:
+            # Other message types we don't handle yet
             return
 
-        chat_id = message.chat.id
+        # Continue with text message processing
 
         # Check if message is too old (catch-up from offline period)
         if is_message_too_old(message.date.timestamp()):
@@ -338,3 +354,146 @@ Examples:
             error_msg = f"❌ Error saving link: {str(e)}"
             await message.reply(error_msg)
             self.chat_history.add_message(chat_id, "assistant", error_msg)
+
+    async def _handle_photo_message(self, client, message, chat_id: int):
+        """Handle photo messages using PydanticAI agent with vision capabilities."""
+        try:
+            # Get bot's own info for mention processing
+            me = await client.get_me()
+            bot_username = me.username
+            bot_id = me.id
+
+            # Check if this is a direct message or if bot is mentioned in group
+            is_private_chat = message.chat.type == ChatType.PRIVATE
+            is_mentioned, caption_text = self._process_mentions(
+                message, bot_username, bot_id, is_private_chat
+            )
+
+            # Only respond in private chats or when mentioned in groups
+            if not (is_private_chat or is_mentioned):
+                # Still store the message for context, but don't respond
+                if message.caption:
+                    self.chat_history.add_message(chat_id, "user", f"[Photo] {message.caption}")
+                else:
+                    self.chat_history.add_message(chat_id, "user", "[Photo shared]")
+                return
+
+            # Download the photo
+            file_path = await message.download(in_memory=False)
+
+            # Store user message in chat history
+            if caption_text:
+                self.chat_history.add_message(chat_id, "user", f"[Photo] {caption_text}")
+            else:
+                self.chat_history.add_message(chat_id, "user", "[Photo shared]")
+
+            # Use PydanticAI agent to analyze the image
+            if self.notion_scout and self.notion_scout.anthropic_client:
+                from agents.telegram_chat_agent import handle_telegram_message
+
+                # Prepare message for the agent
+                if caption_text:
+                    agent_message = f"Please analyze this image: {caption_text}"
+                else:
+                    agent_message = "Please analyze this image and tell me what you see."
+
+                # Add image path context to the message so the agent can use the tool
+                agent_message += f"\n\n[Image downloaded to: {file_path}]"
+
+                answer = await handle_telegram_message(
+                    message=agent_message,
+                    chat_id=chat_id,
+                    username=message.from_user.username if message.from_user else None,
+                    is_group_chat=not is_private_chat,
+                    chat_history_obj=self.chat_history,
+                )
+
+                # Split long messages for Telegram
+                if len(answer) > 4000:
+                    parts = [answer[i : i + 4000] for i in range(0, len(answer), 4000)]
+                    for part in parts:
+                        await message.reply(part)
+                else:
+                    await message.reply(answer)
+
+                self.chat_history.add_message(chat_id, "assistant", answer)
+
+            else:
+                response = "👁️ I can see you shared an image, but I need my AI capabilities configured to analyze it!"
+                await message.reply(response)
+                self.chat_history.add_message(chat_id, "assistant", response)
+
+        except Exception as e:
+            error_msg = f"❌ Error processing image: {str(e)}"
+            await message.reply(error_msg)
+            self.chat_history.add_message(chat_id, "assistant", error_msg)
+
+    async def _handle_document_message(self, client, message, chat_id: int):
+        """Handle document messages - placeholder for future implementation."""
+        try:
+            # Get bot's own info for mention processing
+            me = await client.get_me()
+            is_private_chat = message.chat.type == ChatType.PRIVATE
+            is_mentioned = False
+
+            # Check mentions for groups (simplified)
+            if not is_private_chat and message.caption:
+                is_mentioned = f"@{me.username}" in message.caption
+
+            if is_private_chat or is_mentioned:
+                doc_name = message.document.file_name or "unknown file"
+                response = f"📄 I see you shared a document: {doc_name}. Document analysis isn't implemented yet, but I'm working on it!"
+                await message.reply(response)
+                self.chat_history.add_message(chat_id, "assistant", response)
+
+        except Exception as e:
+            error_msg = f"❌ Error processing document: {str(e)}"
+            await message.reply(error_msg)
+
+    async def _handle_audio_message(self, client, message, chat_id: int):
+        """Handle audio/voice messages - placeholder for future implementation."""
+        try:
+            # Get bot's own info for mention processing
+            me = await client.get_me()
+            is_private_chat = message.chat.type == ChatType.PRIVATE
+            is_mentioned = False
+
+            # Check mentions for groups (simplified)
+            if not is_private_chat and message.caption:
+                is_mentioned = f"@{me.username}" in message.caption
+
+            if is_private_chat or is_mentioned:
+                if message.voice:
+                    response = "🎙️ I hear you sent a voice message! Voice transcription isn't implemented yet, but it's on my roadmap."
+                else:
+                    response = "🎵 I see you shared an audio file! Audio analysis isn't implemented yet, but I'm working on it."
+                await message.reply(response)
+                self.chat_history.add_message(chat_id, "assistant", response)
+
+        except Exception as e:
+            error_msg = f"❌ Error processing audio: {str(e)}"
+            await message.reply(error_msg)
+
+    async def _handle_video_message(self, client, message, chat_id: int):
+        """Handle video messages - placeholder for future implementation."""
+        try:
+            # Get bot's own info for mention processing
+            me = await client.get_me()
+            is_private_chat = message.chat.type == ChatType.PRIVATE
+            is_mentioned = False
+
+            # Check mentions for groups (simplified)
+            if not is_private_chat and message.caption:
+                is_mentioned = f"@{me.username}" in message.caption
+
+            if is_private_chat or is_mentioned:
+                if message.video_note:
+                    response = "📹 I see you sent a video note! Video analysis isn't implemented yet, but it's planned."
+                else:
+                    response = "🎬 I see you shared a video! Video analysis isn't implemented yet, but I'm working on it."
+                await message.reply(response)
+                self.chat_history.add_message(chat_id, "assistant", response)
+
+        except Exception as e:
+            error_msg = f"❌ Error processing video: {str(e)}"
+            await message.reply(error_msg)

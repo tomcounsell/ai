@@ -27,6 +27,8 @@ load_dotenv()
 
 # Import tools and converters
 from tools.claude_code_tool import spawn_claude_session
+from tools.image_analysis_tool import analyze_image
+from tools.image_generation_tool import generate_image
 from tools.search_tool import search_web
 
 
@@ -86,6 +88,69 @@ def search_current_info(ctx: RunContext[TelegramChatContext], query: str) -> str
         Current information from web search formatted for conversation
     """
     return search_web(query)
+
+
+@telegram_chat_agent.tool
+def create_image(
+    ctx: RunContext[TelegramChatContext],
+    prompt: str,
+    style: str = "natural",
+    quality: str = "standard",
+) -> str:
+    """
+    Generate an AI-created image from a text description using DALL-E 3.
+    Use this when someone asks you to:
+    - Create, draw, or generate an image
+    - Make a picture or artwork
+    - Visualize something they describe
+    - Design graphics or illustrations
+
+    Args:
+        prompt: Detailed description of the image to generate
+        style: Image style - "natural" (realistic) or "vivid" (dramatic/artistic)
+        quality: Image quality - "standard" or "hd"
+
+    Returns:
+        Local path to the generated image or error message
+    """
+    image_path = generate_image(prompt=prompt, style=style, quality=quality, save_directory="/tmp")
+
+    if image_path.startswith("🎨") and "error" in image_path.lower():
+        return image_path
+    else:
+        return f"🎨 **Image Generated!**\n\nPrompt: {prompt}\nSaved to: {image_path}\n\nI've created your image! The file is ready for you to view."
+
+
+@telegram_chat_agent.tool
+def analyze_shared_image(
+    ctx: RunContext[TelegramChatContext],
+    image_path: str,
+    question: str = "",
+) -> str:
+    """
+    Analyze an image that was shared in the chat using AI vision capabilities.
+    Use this when someone shares a photo and you need to:
+    - Describe what's in the image
+    - Answer questions about the image content
+    - Read text from images (OCR)
+    - Identify objects, people, or scenes in photos
+
+    Args:
+        image_path: Local path to the downloaded image file
+        question: Optional specific question about the image content
+
+    Returns:
+        AI analysis and description of the image content
+    """
+    # Get recent chat context for more relevant analysis
+    chat_context = None
+    if ctx.deps.chat_history:
+        recent_messages = ctx.deps.chat_history[-3:]
+        chat_context = " ".join([msg.get("content", "") for msg in recent_messages])
+
+    return analyze_image(
+        image_path=image_path, question=question if question else None, context=chat_context
+    )
 
 
 @telegram_chat_agent.tool

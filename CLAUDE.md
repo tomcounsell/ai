@@ -80,11 +80,10 @@ This codebase uses **PydanticAI agents** as the primary AI interaction pattern:
   └── notion_scout.py        # Notion database query agent
 
 /tools/                     # PydanticAI function tools
-  ├── search_tool.py         # Web search using Perplexity AI
+  ├── models.py             # Base models for tool infrastructure
+  ├── search_tool.py        # Web search using Perplexity AI
+  ├── claude_code_tool.py   # Claude Code delegation
   └── __init__.py
-
-/models/                    # Base models for tools
-  └── tools.py              # Tool input/output base classes
 ```
 
 ### Tool Development Pattern
@@ -123,7 +122,7 @@ External service integrations support the agent system:
 
 ### Project Structure Philosophy
 - `/agents/` - PydanticAI agents for AI interactions
-- `/tools/` - Function tools for agent capabilities
+- `/tools/` - Function tools for agent capabilities and tool infrastructure models
 - `/integrations/` - External service configurations and connections
 - `/scripts/` - Development and automation scripts
 - `/tests/` - Agent testing and validation
