@@ -2,7 +2,7 @@
 
 from pyrogram.enums import ChatType
 
-from .link_tracker import LinkTracker
+from tools.link_analysis_tool import extract_urls, is_url_only_message, store_link_with_analysis
 
 # Search functionality now handled by PydanticAI agents
 from .response_handlers import handle_general_question, handle_user_priority_question
@@ -24,8 +24,7 @@ class MessageHandler:
         self.bot_start_time = bot_start_time
         self.missed_messages_per_chat = {}
         # Web search now handled by PydanticAI agents
-        # Initialize link tracker
-        self.link_tracker = LinkTracker()
+        # Link analysis now handled by link_analysis_tool
 
     async def handle_message(self, client, message):
         """Main message handling logic with routing to appropriate handlers."""
@@ -81,7 +80,7 @@ class MessageHandler:
         self.chat_history.add_message(chat_id, "user", processed_text)
 
         # Check if this is a single-link message for link tracking
-        if self.link_tracker.is_url_only_message(processed_text):
+        if is_url_only_message(processed_text):
             await self._handle_link_message(message, chat_id, processed_text)
             return
 
@@ -306,55 +305,34 @@ Examples:
             self.chat_history.add_message(chat_id, "assistant", error_msg)
 
     async def _handle_link_message(self, message, chat_id: int, processed_text: str):
-        """Handle messages that contain only a URL - track and store the link."""
+        """Handle messages that contain only a URL - store with AI analysis."""
         try:
             # Extract the URL from the message
-            urls = self.link_tracker.extract_urls(processed_text.strip())
+            urls = extract_urls(processed_text.strip())
             if not urls:
                 return  # Shouldn't happen if is_url_only_message returned True
 
             url = urls[0]
-
-            # Send immediate acknowledgment
-            await message.reply("🔗 Found an interesting link! Let me save it for you...")
 
             # Get user info for storage
             username = None
             if message.from_user:
                 username = message.from_user.username or message.from_user.first_name
 
-            # Store the link with metadata
-            link_entry = await self.link_tracker.store_link(
+            # Store the link with AI analysis
+            success = store_link_with_analysis(
                 url=url, chat_id=chat_id, message_id=message.id, username=username
             )
 
-            # Format response based on success of metadata fetch
-            metadata = link_entry.get("metadata", {})
-            title = metadata.get("title")
-            description = metadata.get("description")
-            domain = metadata.get("domain")
-            error = metadata.get("error")
-
-            if error:
-                response = f"🔗 **Link saved!**\n\n📍 {domain or 'Unknown domain'}\n⚠️ Could not fetch details: {error}"
+            if success:
+                response = "🔗 Thanks, I saved the link!"
             else:
-                response = "🔗 **Link saved!**\n\n"
-                if title:
-                    response += f"📄 **{title}**\n"
-                if domain:
-                    response += f"📍 {domain}\n"
-                if description:
-                    response += f"\n💭 {description}"
+                response = "🔗 Thanks! (Had trouble analyzing but saved the link)"
 
             await message.reply(response)
 
             # Store response in chat history
-            self.chat_history.add_message(chat_id, "assistant", "Link saved successfully")
-
-        except ValueError as e:
-            error_msg = f"❌ Invalid URL: {str(e)}"
-            await message.reply(error_msg)
-            self.chat_history.add_message(chat_id, "assistant", error_msg)
+            self.chat_history.add_message(chat_id, "assistant", response)
 
         except Exception as e:
             error_msg = f"❌ Error saving link: {str(e)}"

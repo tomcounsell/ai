@@ -8,8 +8,6 @@ anthropic
 requests
 openai
 python-dotenv
-aiohttp
-beautifulsoup4
 
 # Development tools
 ruff
