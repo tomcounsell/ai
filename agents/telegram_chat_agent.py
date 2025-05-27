@@ -33,7 +33,20 @@ from tools.search_tool import search_web
 
 
 class TelegramChatContext(BaseModel):
-    """Context for Telegram chat interactions."""
+    """Context for Telegram chat interactions.
+    
+    This class provides context information for Telegram conversations including
+    chat metadata, conversation history, and special flags for different types
+    of interactions like priority questions.
+    
+    Attributes:
+        chat_id: Unique identifier for the Telegram chat.
+        username: Optional Telegram username of the person chatting.
+        is_group_chat: Whether this is a group chat or direct message.
+        chat_history: List of previous chat messages for context.
+        notion_data: Optional Notion project data for priority questions.
+        is_priority_question: Whether this message is asking about work priorities.
+    """
 
     chat_id: int
     username: str | None = None
@@ -44,7 +57,18 @@ class TelegramChatContext(BaseModel):
 
 
 def load_persona() -> str:
-    """Load the Valor Engels persona from the persona document."""
+    """Load the Valor Engels persona from the persona document.
+    
+    Reads the persona.md file from the integrations directory to get the
+    complete Valor Engels persona definition for the chat agent.
+    
+    Returns:
+        str: The complete persona content as a string.
+        
+    Raises:
+        FileNotFoundError: If the persona.md file cannot be found.
+        IOError: If there's an error reading the file.
+    """
     persona_file = Path(__file__).parent.parent / "integrations" / "persona.md"
     with open(persona_file) as f:
         return f.read()
@@ -86,8 +110,12 @@ Example: If tool returns "TELEGRAM_IMAGE_GENERATED|/path/image.png|Caption here"
 
 @telegram_chat_agent.tool
 def search_current_info(ctx: RunContext[TelegramChatContext], query: str) -> str:
-    """
-    Search for current information on the web using Perplexity AI.
+    """Search for current information on the web using Perplexity AI.
+    
+    This tool enables the Telegram chat agent to access up-to-date information
+    from the web when users ask questions about current events, trends, or
+    recent developments that may not be in the agent's training data.
+    
     Use this when you need up-to-date information about:
     - Current events, news, or recent developments
     - Latest technology trends or releases
@@ -96,10 +124,15 @@ def search_current_info(ctx: RunContext[TelegramChatContext], query: str) -> str
     - Any information that might have changed recently
 
     Args:
-        query: The search query to find current information about
+        ctx: The runtime context containing chat information.
+        query: The search query to find current information about.
 
     Returns:
-        Current information from web search formatted for conversation
+        str: Current information from web search formatted for conversation.
+        
+    Example:
+        >>> search_current_info(ctx, "latest Python 3.12 features")
+        '🔍 **latest Python 3.12 features**\n\nPython 3.12 includes...'
     """
     return search_web(query)
 
@@ -111,8 +144,12 @@ def create_image(
     style: str = "natural",
     quality: str = "standard",
 ) -> str:
-    """
-    Generate an AI-created image from a text description using DALL-E 3.
+    """Generate an AI-created image from a text description using DALL-E 3.
+    
+    This tool creates custom images based on user descriptions and returns them
+    in a format that can be sent through Telegram. The generated images are
+    saved locally and the path is returned for transmission.
+    
     Use this when someone asks you to:
     - Create, draw, or generate an image
     - Make a picture or artwork
@@ -120,12 +157,18 @@ def create_image(
     - Design graphics or illustrations
 
     Args:
-        prompt: Detailed description of the image to generate
-        style: Image style - "natural" (realistic) or "vivid" (dramatic/artistic)
-        quality: Image quality - "standard" or "hd"
+        ctx: The runtime context containing chat information.
+        prompt: Detailed description of the image to generate.
+        style: Image style - "natural" (realistic) or "vivid" (dramatic/artistic).
+        quality: Image quality - "standard" or "hd".
 
     Returns:
-        Special formatted response indicating image generation status
+        str: Special formatted response starting with "TELEGRAM_IMAGE_GENERATED|"
+             followed by the image path and caption, or error message if failed.
+             
+    Example:
+        >>> create_image(ctx, "a cat wearing a wizard hat", "vivid", "hd")
+        'TELEGRAM_IMAGE_GENERATED|/tmp/generated_cat_wizard.png|🎨 **Image Generated!**...'
     """
     image_path = generate_image(prompt=prompt, style=style, quality=quality, save_directory="/tmp")
 
@@ -142,8 +185,12 @@ def analyze_shared_image(
     image_path: str,
     question: str = "",
 ) -> str:
-    """
-    Analyze an image that was shared in the chat using AI vision capabilities.
+    """Analyze an image that was shared in the chat using AI vision capabilities.
+    
+    This tool processes images shared in Telegram chats and provides AI-powered
+    analysis using vision-capable models. It can understand image content and
+    answer specific questions about what's shown.
+    
     Use this when someone shares a photo and you need to:
     - Describe what's in the image
     - Answer questions about the image content
@@ -151,11 +198,17 @@ def analyze_shared_image(
     - Identify objects, people, or scenes in photos
 
     Args:
-        image_path: Local path to the downloaded image file
-        question: Optional specific question about the image content
+        ctx: The runtime context containing chat information and history.
+        image_path: Local path to the downloaded image file.
+        question: Optional specific question about the image content.
 
     Returns:
-        AI analysis and description of the image content
+        str: AI analysis and description of the image content, formatted
+             for conversation display.
+             
+    Example:
+        >>> analyze_shared_image(ctx, "/tmp/photo.jpg", "What's in this image?")
+        '👁️ **Image Analysis**\n\nI can see a sunset over mountains...'
     """
     # Get recent chat context for more relevant analysis
     chat_context = None
@@ -175,8 +228,12 @@ def delegate_coding_task(
     target_directory: str,
     specific_instructions: str = "",
 ) -> str:
-    """
-    Spawn a new Claude Code session to handle complex coding tasks.
+    """Spawn a new Claude Code session to handle complex coding tasks.
+    
+    This tool creates a new Claude Code session with specialized coding capabilities
+    to handle complex development tasks that require multiple steps, file operations,
+    or git workflows. It's designed for tasks beyond simple conversation.
+    
     Use this when the user needs:
     - New features or applications built
     - Complex refactoring across multiple files
@@ -185,12 +242,18 @@ def delegate_coding_task(
     - Tasks that require multiple tools and steps
 
     Args:
-        task_description: High-level description of what needs to be done
-        target_directory: Directory where the work should be performed (use absolute paths)
-        specific_instructions: Additional detailed requirements or constraints
+        ctx: The runtime context containing chat information.
+        task_description: High-level description of what needs to be done.
+        target_directory: Directory where the work should be performed (use absolute paths).
+        specific_instructions: Additional detailed requirements or constraints.
 
     Returns:
-        Results from the Claude Code session execution
+        str: Results from the Claude Code session execution, including any
+             files created, modified, or error messages if the session failed.
+             
+    Example:
+        >>> delegate_coding_task(ctx, "Create a FastAPI app", "/home/user/projects", "Include tests")
+        'Claude Code session completed successfully:\n\nCreated new FastAPI application...'
     """
     try:
         result = spawn_claude_session(
@@ -212,20 +275,36 @@ async def handle_telegram_message(
     notion_data: str | None = None,
     is_priority_question: bool = False,
 ) -> str:
-    """
-    Handle a Telegram message using the PydanticAI agent with proper message history.
+    """Handle a Telegram message using the PydanticAI agent with proper message history.
+    
+    This is the main entry point for processing Telegram messages through the
+    Valor Engels AI agent. It manages conversation context, integrates chat history,
+    and orchestrates responses using the agent's available tools.
+    
+    The function:
+    1. Creates a TelegramChatContext with the provided information
+    2. Builds an enhanced message with recent conversation context
+    3. Processes the message through the PydanticAI agent
+    4. Returns the agent's response for sending back to Telegram
 
     Args:
-        message: The user's message
-        chat_id: Telegram chat ID
-        username: Optional username
-        is_group_chat: Whether this is a group chat
-        chat_history_obj: ChatHistoryManager instance for conversation history
-        notion_data: Optional Notion project data for priority questions
-        is_priority_question: Whether this is asking about work priorities
+        message: The user's message text to process.
+        chat_id: Unique Telegram chat identifier.
+        username: Optional Telegram username of the sender.
+        is_group_chat: Whether this message is from a group chat.
+        chat_history_obj: ChatHistoryManager instance for conversation history.
+        notion_data: Optional Notion project data for priority questions.
+        is_priority_question: Whether this is asking about work priorities.
 
     Returns:
-        Agent response as string
+        str: The agent's response message ready for sending to Telegram.
+        
+    Example:
+        >>> response = await handle_telegram_message(
+        ...     "What's the weather like?", 12345, "user123"
+        ... )
+        >>> type(response)
+        <class 'str'>
     """
     from .message_history_converter import merge_telegram_with_pydantic_history
 
@@ -281,7 +360,18 @@ async def handle_telegram_message(
 
 
 def _build_system_prompt(context: TelegramChatContext) -> str:
-    """Build system prompt with context for the agent."""
+    """Build system prompt with context for the agent.
+    
+    Constructs a comprehensive system prompt that includes the base Valor Engels
+    persona along with specific context for the current Telegram conversation.
+    This helps the agent respond appropriately based on the chat environment.
+    
+    Args:
+        context: The TelegramChatContext containing chat metadata and flags.
+        
+    Returns:
+        str: Complete system prompt including persona and contextual information.
+    """
 
     # Base persona content
     base_prompt = f"""Based on this persona document, respond naturally as Valor Engels:
@@ -317,8 +407,21 @@ Priority question: {context.is_priority_question}"""
 async def handle_user_priority_question(
     question: str, chat_id: int, chat_history_obj, notion_scout=None, username: str | None = None
 ) -> str:
-    """
-    Handle user priority questions using PydanticAI agent with message history.
+    """Handle user priority questions using PydanticAI agent with message history.
+    
+    This function provides backward compatibility for the previous handler system
+    while routing priority questions through the new PydanticAI agent. It checks
+    for project context and optionally integrates Notion data.
+    
+    Args:
+        question: The user's priority-related question.
+        chat_id: Telegram chat identifier.
+        chat_history_obj: ChatHistoryManager instance for context.
+        notion_scout: Optional NotionScout instance for project data.
+        username: Optional Telegram username.
+        
+    Returns:
+        str: Agent response addressing the priority question.
     """
 
     # Check if there's project context in recent conversation
@@ -352,8 +455,20 @@ async def handle_user_priority_question(
 async def handle_general_question(
     question: str, chat_id: int, chat_history_obj, username: str | None = None
 ) -> str:
-    """
-    Handle general questions using PydanticAI agent with message history.
+    """Handle general questions using PydanticAI agent with message history.
+    
+    This function provides backward compatibility for the previous handler system
+    while routing general questions through the new PydanticAI agent. It's used
+    for non-priority conversations and casual interactions.
+    
+    Args:
+        question: The user's general question or message.
+        chat_id: Telegram chat identifier.
+        chat_history_obj: ChatHistoryManager instance for context.
+        username: Optional Telegram username.
+        
+    Returns:
+        str: Agent response to the general question.
     """
 
     return await handle_telegram_message(

@@ -15,16 +15,31 @@ load_dotenv()
 
 
 def analyze_image(image_path: str, question: str | None = None, context: str | None = None) -> str:
-    """
-    Analyze an image using vision-capable AI and return description or answer.
+    """Analyze an image using vision-capable AI and return description or answer.
+    
+    This function uses OpenAI's GPT-4 Vision model to analyze images and provide
+    detailed descriptions or answer specific questions about image content.
+    It supports OCR, object recognition, and contextual analysis.
 
     Args:
-        image_path: Local path to the image file
-        question: Optional specific question about the image
-        context: Optional chat context to make analysis more relevant
+        image_path: Local path to the image file.
+        question: Optional specific question about the image.
+        context: Optional chat context to make analysis more relevant.
 
     Returns:
-        AI analysis of the image, formatted for messaging
+        str: AI analysis of the image, formatted for messaging.
+             Returns error message if API key is missing or analysis fails.
+             
+    Example:
+        >>> analyze_image("/path/to/photo.jpg", "What's in this image?")
+        '👁️ **Image Analysis**\n\nI can see a sunset over mountains...'
+        
+        >>> analyze_image("/path/to/screenshot.png")
+        '👁️ **What I see:**\n\nThis appears to be a code editor...'
+        
+    Note:
+        Requires OPENAI_API_KEY environment variable to be set.
+        Supports common image formats (JPEG, PNG, GIF, WebP).
     """
     api_key = os.getenv("OPENAI_API_KEY")
 
@@ -98,5 +113,21 @@ def analyze_image(image_path: str, question: str | None = None, context: str | N
 async def analyze_image_async(
     image_path: str, question: str | None = None, context: str | None = None
 ) -> str:
-    """Async wrapper for the image analysis tool function."""
+    """Async wrapper for the image analysis tool function.
+    
+    Provides an asynchronous interface for image analysis functionality
+    to maintain compatibility with async codebases.
+    
+    Args:
+        image_path: Local path to the image file.
+        question: Optional specific question about the image.
+        context: Optional chat context to make analysis more relevant.
+        
+    Returns:
+        str: Same result as analyze_image() function.
+        
+    Note:
+        This is a compatibility wrapper. The underlying analyze_image()
+        function is synchronous but wrapped for async contexts.
+    """
     return analyze_image(image_path, question, context)

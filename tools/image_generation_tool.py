@@ -22,18 +22,33 @@ def generate_image(
     style: str = "natural",
     save_directory: str | None = None,
 ) -> str:
-    """
-    Generate an image using DALL-E 3 and save it locally.
+    """Generate an image using DALL-E 3 and save it locally.
+    
+    This function creates custom images from text descriptions using OpenAI's
+    DALL-E 3 model. Generated images are downloaded and saved to the specified
+    directory for use in conversations or applications.
 
     Args:
-        prompt: Text description of the image to generate
-        size: Image size - "1024x1024", "1792x1024", or "1024x1792"
-        quality: Image quality - "standard" or "hd"
-        style: Image style - "natural" or "vivid"
-        save_directory: Optional directory to save image (defaults to /tmp)
+        prompt: Text description of the image to generate.
+        size: Image size - "1024x1024", "1792x1024", or "1024x1792".
+        quality: Image quality - "standard" or "hd".
+        style: Image style - "natural" (realistic) or "vivid" (dramatic/artistic).
+        save_directory: Optional directory to save image (defaults to /tmp).
 
     Returns:
-        Local path to the generated image file, or error message
+        str: Local path to the generated image file, or error message if generation fails.
+        
+    Example:
+        >>> path = generate_image("a cat wearing a wizard hat", style="vivid")
+        >>> path.endswith(".png")
+        True
+        
+        >>> generate_image("sunset over mountains", size="1792x1024", quality="hd")
+        '/tmp/generated_sunset_over_mountains.png'
+        
+    Note:
+        Requires OPENAI_API_KEY environment variable to be set.
+        Generated filenames are sanitized versions of the prompt.
     """
     api_key = os.getenv("OPENAI_API_KEY")
 
@@ -88,20 +103,49 @@ async def generate_image_async(
     style: str = "natural",
     save_directory: str | None = None,
 ) -> str:
-    """Async wrapper for the image generation tool function."""
+    """Async wrapper for the image generation tool function.
+    
+    Provides an asynchronous interface for image generation functionality
+    to maintain compatibility with async codebases.
+    
+    Args:
+        prompt: Text description of the image to generate.
+        size: Image size specification.
+        quality: Image quality setting.
+        style: Image style preference.
+        save_directory: Optional directory to save image.
+        
+    Returns:
+        str: Same result as generate_image() function.
+        
+    Note:
+        This is a compatibility wrapper. The underlying generate_image()
+        function is synchronous but wrapped for async contexts.
+    """
     return generate_image(prompt, size, quality, style, save_directory)
 
 
 def create_image_with_feedback(prompt: str, save_directory: str | None = None) -> tuple[str, str]:
-    """
-    Generate an image and return both the path and a user-friendly message.
+    """Generate an image and return both the path and a user-friendly message.
+    
+    This function combines image generation with user feedback formatting,
+    making it suitable for conversational interfaces that need both the
+    file path and a displayable message.
 
     Args:
-        prompt: Text description of the image to generate
-        save_directory: Optional directory to save image
+        prompt: Text description of the image to generate.
+        save_directory: Optional directory to save image.
 
     Returns:
-        Tuple of (image_path, user_message)
+        tuple[str, str]: Tuple of (image_path, user_message).
+                        If generation fails, image_path will be empty string.
+                        
+    Example:
+        >>> path, message = create_image_with_feedback("a red car")
+        >>> path.endswith(".png") if path else True
+        True
+        >>> "Generated Image" in message
+        True
     """
     image_path = generate_image(prompt, save_directory=save_directory)
 

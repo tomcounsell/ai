@@ -15,21 +15,35 @@ def execute_claude_code(
     allowed_tools: list[str] | None = None,
     timeout: int | None = None,
 ) -> str:
-    """
-    Execute a Claude Code session with a specific prompt and context.
+    """Execute a Claude Code session with a specific prompt and context.
+    
+    This function spawns a new Claude Code session with the provided prompt
+    and configuration. It handles directory validation, tool permissions,
+    and execution monitoring.
 
     Args:
-        prompt: Detailed instructions for Claude to execute
-        working_directory: Directory to run Claude in (defaults to current)
-        allowed_tools: List of tools Claude can use (defaults to common tools)
-        timeout: Maximum execution time in seconds (None for no timeout)
+        prompt: Detailed instructions for Claude to execute.
+        working_directory: Directory to run Claude in (defaults to current).
+        allowed_tools: List of tools Claude can use (defaults to common tools).
+        timeout: Maximum execution time in seconds (None for no timeout).
 
     Returns:
-        Claude's output from the execution
+        str: Claude's output from the execution.
 
     Raises:
-        subprocess.CalledProcessError: If Claude execution fails
-        FileNotFoundError: If working directory doesn't exist
+        subprocess.CalledProcessError: If Claude execution fails.
+        FileNotFoundError: If working directory doesn't exist.
+        NotADirectoryError: If working_directory path is not a directory.
+        subprocess.TimeoutExpired: If execution exceeds timeout.
+        
+    Example:
+        >>> result = execute_claude_code(
+        ...     "Create a simple Python script",
+        ...     "/tmp",
+        ...     ["Write", "Edit", "Read"]
+        ... )
+        >>> "script" in result.lower()
+        True
     """
     # Default allowed tools for coding tasks
     if allowed_tools is None:
@@ -85,20 +99,33 @@ def spawn_claude_session(
     specific_instructions: str | None = None,
     tools_needed: list[str] | None = None,
 ) -> str:
-    """
-    Spawn a new Claude Code session for a specific development task.
-
+    """Spawn a new Claude Code session for a specific development task.
+    
     This is a higher-level wrapper that formats prompts appropriately
-    for common development workflows.
+    for common development workflows. It creates comprehensive prompts
+    with task descriptions, requirements, and best practices.
 
     Args:
-        task_description: High-level description of what needs to be done
-        target_directory: Directory where the work should be performed
-        specific_instructions: Additional detailed instructions
-        tools_needed: Specific tools Claude should have access to
+        task_description: High-level description of what needs to be done.
+        target_directory: Directory where the work should be performed.
+        specific_instructions: Additional detailed instructions.
+        tools_needed: Specific tools Claude should have access to.
 
     Returns:
-        Result of Claude's execution
+        str: Result of Claude's execution including task completion status.
+        
+    Example:
+        >>> result = spawn_claude_session(
+        ...     "Create a FastAPI application",
+        ...     "/home/user/projects",
+        ...     "Include user authentication"
+        ... )
+        >>> "FastAPI" in result
+        True
+        
+    Note:
+        This function automatically includes common development requirements
+        like following existing patterns, testing, and git workflows.
     """
 
     # Build comprehensive prompt

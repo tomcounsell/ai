@@ -19,7 +19,21 @@ load_dotenv()
 
 
 def extract_urls(text: str) -> list[str]:
-    """Extract URLs from text using regex."""
+    """Extract URLs from text using regex.
+    
+    Finds all HTTP and HTTPS URLs in the provided text using a
+    comprehensive regex pattern that matches standard URL formats.
+    
+    Args:
+        text: Text content to search for URLs.
+        
+    Returns:
+        list[str]: List of URLs found in the text.
+        
+    Example:
+        >>> extract_urls("Visit https://example.com for more info")
+        ['https://example.com']
+    """
     url_pattern = re.compile(
         r"http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+"
     )
@@ -27,7 +41,23 @@ def extract_urls(text: str) -> list[str]:
 
 
 def is_url_only_message(text: str) -> bool:
-    """Check if message contains only a URL (and optional whitespace)."""
+    """Check if message contains only a URL (and optional whitespace).
+    
+    Determines whether a message consists solely of a single URL,
+    which is useful for triggering automatic link analysis in chat contexts.
+    
+    Args:
+        text: Message text to check.
+        
+    Returns:
+        bool: True if the message contains only a URL, False otherwise.
+        
+    Example:
+        >>> is_url_only_message("https://example.com")
+        True
+        >>> is_url_only_message("Check out https://example.com")
+        False
+    """
     if not text or not text.strip():
         return False
 
@@ -44,7 +74,23 @@ def is_url_only_message(text: str) -> bool:
 
 
 def validate_url(url: str) -> bool:
-    """Validate if a URL is properly formatted."""
+    """Validate if a URL is properly formatted.
+    
+    Checks whether a URL string has a valid format with both
+    scheme (http/https) and network location (domain).
+    
+    Args:
+        url: URL string to validate.
+        
+    Returns:
+        bool: True if URL is valid, False otherwise.
+        
+    Example:
+        >>> validate_url("https://example.com")
+        True
+        >>> validate_url("not-a-url")
+        False
+    """
     try:
         result = urlparse(url)
         return all([result.scheme, result.netloc])
@@ -53,14 +99,26 @@ def validate_url(url: str) -> bool:
 
 
 def analyze_url_content(url: str) -> dict[str, str]:
-    """
-    Analyze a URL and extract structured data using Perplexity.
+    """Analyze a URL and extract structured data using Perplexity.
+    
+    This function uses the Perplexity API to analyze web content at a given URL
+    and extract structured information including title, main topic, and reasons
+    why the content might be valuable or interesting.
 
     Args:
-        url: The URL to analyze
+        url: The URL to analyze.
 
     Returns:
-        Dict with title, main_topic, and reasons_to_care, or error info
+        dict[str, str]: Dict with 'title', 'main_topic', and 'reasons_to_care' keys,
+                       or 'error' key if analysis fails.
+                       
+    Example:
+        >>> result = analyze_url_content("https://example.com/article")
+        >>> 'title' in result or 'error' in result
+        True
+        
+    Note:
+        Requires PERPLEXITY_API_KEY environment variable to be set.
     """
     if not validate_url(url):
         return {"error": f"Invalid URL format: {url}"}
@@ -136,17 +194,28 @@ def analyze_url_content(url: str) -> dict[str, str]:
 def store_link_with_analysis(
     url: str, chat_id: int = None, message_id: int | None = None, username: str | None = None
 ) -> bool:
-    """
-    Store a link with timestamp and AI-generated analysis.
+    """Store a link with timestamp and AI-generated analysis.
+    
+    Saves a URL along with its AI-generated analysis to the links.json file
+    in the docs directory. Automatically analyzes the content and stores
+    structured metadata for later retrieval.
 
     Args:
-        url: The URL to store
-        chat_id: Unused, kept for compatibility
-        message_id: Unused, kept for compatibility
-        username: Unused, kept for compatibility
+        url: The URL to store.
+        chat_id: Unused parameter, kept for backward compatibility.
+        message_id: Unused parameter, kept for backward compatibility.
+        username: Unused parameter, kept for backward compatibility.
 
     Returns:
-        True if successful, False if failed
+        bool: True if storage was successful, False if it failed.
+        
+    Example:
+        >>> store_link_with_analysis("https://example.com")
+        True
+        
+    Note:
+        Automatically commits the links file to git if in a git repository.
+        Overwrites existing entries for the same URL.
     """
     if not validate_url(url):
         return False
@@ -206,7 +275,16 @@ def store_link_with_analysis(
 
 
 def _commit_links_file():
-    """Automatically commit the links.json file after updates."""
+    """Automatically commit the links.json file after updates.
+    
+    Internal function that automatically commits changes to the links.json
+    file using git. This helps maintain a history of link additions and
+    ensures the data is versioned.
+    
+    Note:
+        Silently ignores errors to avoid breaking the main functionality.
+        Only commits if there are actual changes to the file.
+    """
     import subprocess
 
     try:
@@ -247,16 +325,27 @@ def _commit_links_file():
 
 
 def search_stored_links(query: str, chat_id: int | None = None, limit: int = 10) -> str:
-    """
-    Search stored links by domain or timestamp.
+    """Search stored links by domain or timestamp.
+    
+    Searches through previously stored links to find matches based on
+    domain name, URL content, or timestamp. Returns formatted results
+    suitable for display in conversations.
 
     Args:
-        query: Search query (domain name or date)
-        chat_id: Optional chat ID filter
-        limit: Maximum results to return
+        query: Search query (domain name or date pattern).
+        chat_id: Optional chat ID filter (unused, kept for compatibility).
+        limit: Maximum number of results to return.
 
     Returns:
-        Formatted list of matching links
+        str: Formatted list of matching links with metadata,
+             or message indicating no matches found.
+             
+    Example:
+        >>> search_stored_links("github.com")
+        '📂 **Found 3 link(s) matching "github.com":**\n\n• **github.com** (2024-01-15)...'
+        
+        >>> search_stored_links("nonexistent")
+        '📂 No links found matching "nonexistent"'
     """
     storage_file = Path("docs/links.json")
     if not storage_file.exists():

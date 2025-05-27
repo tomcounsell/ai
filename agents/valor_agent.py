@@ -31,7 +31,16 @@ from tools.search_tool import search_web
 
 
 class ValorContext(BaseModel):
-    """Context for Valor Engels agent interactions."""
+    """Context for Valor Engels agent interactions.
+    
+    This class provides context information for conversations with the
+    standalone Valor Engels agent, including basic chat metadata.
+    
+    Attributes:
+        chat_id: Optional unique identifier for the chat session.
+        username: Optional username of the person chatting.
+        is_group_chat: Whether this is a group chat or direct conversation.
+    """
 
     chat_id: int | None = None
     username: str | None = None
@@ -65,8 +74,12 @@ You can also spawn new Claude Code sessions to handle complex coding tasks in sp
 
 @valor_agent.tool
 def search_current_info(ctx: RunContext[ValorContext], query: str) -> str:
-    """
-    Search for current information on the web using Perplexity AI.
+    """Search for current information on the web using Perplexity AI.
+    
+    This tool enables the Valor agent to access up-to-date information from
+    the web when answering questions about current events, trends, or recent
+    developments that may not be in the agent's training data.
+    
     Use this when you need up-to-date information about:
     - Current events, news, or recent developments
     - Latest technology trends or releases
@@ -75,10 +88,15 @@ def search_current_info(ctx: RunContext[ValorContext], query: str) -> str:
     - Any information that might have changed recently
 
     Args:
-        query: The search query to find current information about
+        ctx: The runtime context containing conversation information.
+        query: The search query to find current information about.
 
     Returns:
-        Current information from web search formatted for conversation
+        str: Current information from web search formatted for conversation.
+        
+    Example:
+        >>> search_current_info(ctx, "Python 3.12 new features")
+        '🔍 **Python 3.12 new features**\n\nPython 3.12 includes...'
     """
     return search_web(query)
 
@@ -90,8 +108,12 @@ def delegate_coding_task(
     target_directory: str,
     specific_instructions: str = "",
 ) -> str:
-    """
-    Spawn a new Claude Code session to handle complex coding tasks.
+    """Spawn a new Claude Code session to handle complex coding tasks.
+    
+    This tool creates a new Claude Code session with specialized development
+    capabilities to handle complex coding tasks that require multiple steps,
+    file operations, or git workflows.
+    
     Use this when the user needs:
     - New features or applications built
     - Complex refactoring across multiple files
@@ -100,12 +122,18 @@ def delegate_coding_task(
     - Tasks that require multiple tools and steps
 
     Args:
-        task_description: High-level description of what needs to be done
-        target_directory: Directory where the work should be performed (use absolute paths)
-        specific_instructions: Additional detailed requirements or constraints
+        ctx: The runtime context containing conversation information.
+        task_description: High-level description of what needs to be done.
+        target_directory: Directory where the work should be performed (use absolute paths).
+        specific_instructions: Additional detailed requirements or constraints.
 
     Returns:
-        Results from the Claude Code session execution
+        str: Results from the Claude Code session execution, including any
+             files created, modified, or error messages if the session failed.
+             
+    Example:
+        >>> delegate_coding_task(ctx, "Create a CLI tool", "/tmp", "Use Python")
+        'Claude Code session completed successfully:\n\nCreated new CLI application...'
     """
     try:
         result = spawn_claude_session(
@@ -119,15 +147,26 @@ def delegate_coding_task(
 
 
 async def run_valor_agent(message: str, context: ValorContext | None = None) -> str:
-    """
-    Run the Valor agent with a message and optional context.
+    """Run the Valor agent with a message and optional context.
+    
+    This is the main entry point for interacting with the standalone Valor
+    Engels agent. It processes user messages and returns responses using the
+    agent's available tools and persona.
 
     Args:
-        message: User message to process
-        context: Optional context about the conversation
+        message: User message to process.
+        context: Optional context about the conversation.
 
     Returns:
-        Agent response as string
+        str: Agent response as string.
+        
+    Raises:
+        Exception: If there's an error processing the request.
+        
+    Example:
+        >>> response = await run_valor_agent("Hello, how are you?")
+        >>> type(response)
+        <class 'str'>
     """
     if context is None:
         context = ValorContext()
@@ -144,7 +183,19 @@ if __name__ == "__main__":
     import asyncio
 
     async def test_valor_agent():
-        """Test the Valor agent with various types of queries."""
+        """Test the Valor agent with various types of queries.
+        
+        This function runs a series of test cases to validate that the Valor
+        agent is working correctly with different types of queries including
+        general questions and coding delegation tasks.
+        
+        The test cases cover:
+        - Technical advice questions
+        - Complex coding task delegation
+        
+        Raises:
+            Exception: If any test case fails unexpectedly.
+        """
 
         test_cases = [
             "How should I structure a FastAPI project for production?",

@@ -14,15 +14,26 @@ load_dotenv()
 
 
 def search_web(query: str, max_results: int = 3) -> str:
-    """
-    Search the web and return AI-synthesized answers using Perplexity.
+    """Search the web and return AI-synthesized answers using Perplexity.
+    
+    This function uses the Perplexity API to search for current web information
+    and return AI-synthesized answers. It's designed for conversational use
+    and provides concise, informative responses.
 
     Args:
-        query: The search query to execute
-        max_results: Maximum number of results (not used with Perplexity, kept for compatibility)
+        query: The search query to execute.
+        max_results: Maximum number of results (not used with Perplexity, kept for compatibility).
 
     Returns:
-        AI-synthesized answer based on current web information, formatted for messaging
+        str: AI-synthesized answer based on current web information, formatted for messaging.
+             Returns an error message if the API key is missing or if an error occurs.
+             
+    Example:
+        >>> search_web("latest Python features")
+        '🔍 **latest Python features**\n\nPython 3.12 introduces...'
+        
+    Note:
+        Requires PERPLEXITY_API_KEY environment variable to be set.
     """
     api_key = os.getenv("PERPLEXITY_API_KEY")
 
@@ -61,5 +72,21 @@ def search_web(query: str, max_results: int = 3) -> str:
 
 # Additional utility function for backward compatibility during transition
 async def search_web_async(query: str, max_results: int = 3) -> str:
-    """Async wrapper for the search tool function."""
+    """Async wrapper for the search tool function.
+    
+    Provides an asynchronous interface for web search functionality
+    to maintain compatibility with async codebases during the transition
+    to the new tool architecture.
+    
+    Args:
+        query: The search query to execute.
+        max_results: Maximum number of results (kept for compatibility).
+        
+    Returns:
+        str: Same result as search_web() function.
+        
+    Note:
+        This is a compatibility wrapper. The underlying search_web()
+        function is synchronous but wrapped for async contexts.
+    """
     return search_web(query, max_results)
