@@ -196,9 +196,54 @@ def store_link_with_analysis(
     try:
         with open(storage_file, "w", encoding="utf-8") as f:
             json.dump(links, f, indent=2, ensure_ascii=False)
+
+        # Auto-commit the links file after saving
+        _commit_links_file()
+
         return True
     except Exception:
         return False
+
+
+def _commit_links_file():
+    """Automatically commit the links.json file after updates."""
+    import subprocess
+
+    try:
+        # Get the project root directory
+        project_root = Path(__file__).parent.parent
+
+        # Check if we're in a git repository
+        if not (project_root / ".git").exists():
+            return
+
+        # Add the links file
+        result = subprocess.run(
+            ["git", "add", "docs/links.json"], cwd=project_root, capture_output=True, text=True
+        )
+
+        if result.returncode != 0:
+            return
+
+        # Check if there are changes to commit
+        result = subprocess.run(
+            ["git", "diff", "--cached", "--quiet", "docs/links.json"],
+            cwd=project_root,
+            capture_output=True,
+        )
+
+        # If returncode is 1, there are changes to commit
+        if result.returncode == 1:
+            subprocess.run(
+                ["git", "commit", "-m", "Auto-save link analysis data"],
+                cwd=project_root,
+                capture_output=True,
+                text=True,
+            )
+
+    except Exception:
+        # Silently ignore any errors to not break the main functionality
+        pass
 
 
 def search_stored_links(query: str, chat_id: int | None = None, limit: int = 10) -> str:

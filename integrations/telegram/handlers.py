@@ -325,9 +325,9 @@ Examples:
             )
 
             if success:
-                response = "🔗 Thanks, I saved the link!"
+                response = "thx, saved."
             else:
-                response = "🔗 Thanks! (Had trouble analyzing but saved the link)"
+                response = "thx, saved. (had trouble analyzing)"
 
             await message.reply(response)
 

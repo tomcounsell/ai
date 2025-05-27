@@ -14,5 +14,35 @@
       "main_topic": "",
       "reasons_to_care": "- Outlier detection is crucial for applications like fraud detection, network security, financial auditing, and medical diagnosis, making it highly relevant for data-driven industries[2][3].\n- The book provides hands-on techniques and clear Python examples, making it accessible for data scientists and analysts seeking practical skills[1][4].\n- Understanding outliers can reveal hidden insights, novel patterns, and potential problems in datasets, leading to better business decisions and improved data quality[3]."
     }
+  },
+  "https://github.com/AgentDeskAI/browser-tools-mcp?tab=readme-ov-file": {
+    "url": "https://github.com/AgentDeskAI/browser-tools-mcp?tab=readme-ov-file",
+    "domain": "github.com",
+    "timestamp": "2025-05-27T10:30:48.883741",
+    "analysis": {
+      "title": "AgentDeskAI/browser-tools-mcp - GitHub",
+      "main_topic": "A powerful browser monitoring and interaction tool that enables AI-powered applications via Anthropic's Model Context Protocol (MCP) to capture and analyze browser activities.",
+      "reasons_to_care": "- Allows AI tools to analyze and interact with your browser by capturing console logs, network requests, screenshots, and page elements\n- Includes built-in audit tools for accessibility, performance, SEO, and NextJS-specific optimizations\n- Features convenient functionality like screenshot auto-paste into Cursor and debugging tools to improve AI reasoning"
+    }
+  },
+  "https://graph.cubode.com/": {
+    "url": "https://graph.cubode.com/",
+    "domain": "graph.cubode.com",
+    "timestamp": "2025-05-27T10:32:41.058489",
+    "analysis": {
+      "title": "Cubode AI - Automated Data Visualization Platform",
+      "main_topic": "An AI-powered platform that allows users to upload data files and instantly generate insightful visualizations, streamlining the process of data analysis and presentation.",
+      "reasons_to_care": "- Enables quick and automated creation of data visualizations, saving time and effort for users with varying levels of data expertise[1].\n- Useful for professionals and part-time data analysts seeking to generate reliable, customizable charts without advanced technical skills[2].\n- Supports efficient data storytelling and decision-making by transforming raw data into clear, actionable insights."
+    }
+  },
+  "https://www.motiff.com/": {
+    "url": "https://www.motiff.com/",
+    "domain": "www.motiff.com",
+    "timestamp": "2025-05-27T10:34:39.417789",
+    "analysis": {
+      "title": "Motiff: AI-powered Professional Interface Design Tool",
+      "main_topic": "Motiff is an advanced AI-powered UI/UX design tool that combines artificial intelligence with professional design capabilities to streamline the interface design workflow.",
+      "reasons_to_care": "- Offers comprehensive AI features including generating designs from text/images, converting websites to editable designs, and creating UI elements with styling presets\n- Built with a self-developed rendering engine that supports million-layer canvas editing and seamless collaboration\n- Supports importing from other design tools like Sketch and Figma while maintaining layer integrity and component styles"
+    }
   }
 }
