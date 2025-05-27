@@ -166,7 +166,7 @@ async def main():
     if success:
         print("\n🎉 Authorization complete!")
         print("You can now run the Telegram bot with:")
-        print("  uv run agents/telegram_chat_agent.py")
+        print("  uv run agents/valor_agent.py")
         print("  scripts/start.sh")
     else:
         print("\n❌ Authorization failed!")

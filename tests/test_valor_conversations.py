@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 
 from integrations.notion.scout import NotionScout
 from integrations.telegram.chat_history import ChatHistoryManager
-from agents.telegram_chat_agent import handle_telegram_message
+from agents.valor_agent import handle_telegram_message
 
 load_dotenv()
 

@@ -7,7 +7,7 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent.parent))
 
 # Import the PydanticAI chat agent functions and alias them
-from agents.telegram_chat_agent import (
+from agents.valor_agent import (
     handle_general_question as handle_general_question_impl,
     handle_user_priority_question as handle_user_priority_question_impl,
 )

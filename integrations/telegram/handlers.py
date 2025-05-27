@@ -180,7 +180,7 @@ class MessageHandler:
         """Handle all messages using valor_agent (telegram_chat_agent)."""
         try:
             # Use telegram_chat_agent directly for all message processing
-            from agents.telegram_chat_agent import handle_telegram_message
+            from agents.valor_agent import handle_telegram_message
 
             # Determine if this might be a priority question for context
             is_priority = (
@@ -371,7 +371,7 @@ class MessageHandler:
 
             # Use PydanticAI agent to analyze the image
             if self.notion_scout and self.notion_scout.anthropic_client:
-                from agents.telegram_chat_agent import handle_telegram_message
+                from agents.valor_agent import handle_telegram_message
 
                 # Prepare message for the agent
                 if caption_text:

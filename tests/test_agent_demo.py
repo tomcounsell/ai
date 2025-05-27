@@ -11,7 +11,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 
-from agents.telegram_chat_agent import handle_telegram_message
+from agents.valor_agent import handle_telegram_message
 
 
 class MockChatHistory:
