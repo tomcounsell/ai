@@ -227,13 +227,14 @@ async def handle_telegram_message(
     Returns:
         Agent response as string
     """
+    from .message_history_converter import merge_telegram_with_pydantic_history
 
     # Prepare context
     context = TelegramChatContext(
         chat_id=chat_id,
         username=username,
         is_group_chat=is_group_chat,
-        chat_history=[],  # We'll use PydanticAI message history instead
+        chat_history=[],  # Legacy field, now handled by message_history
         notion_data=notion_data,
         is_priority_question=is_priority_question,
     )
@@ -241,20 +242,40 @@ async def handle_telegram_message(
     # Build system prompt with context
     _build_system_prompt(context)
 
-    # Add recent chat context to the message for continuity
+    # Add recent chat context to the message for continuity (enhanced message approach)
     enhanced_message = message
     if chat_history_obj:
-        telegram_messages = chat_history_obj.get_context(chat_id)
-        if telegram_messages:
-            # Include recent context in the message itself
-            recent_context = telegram_messages[-3:]  # Last 3 messages
-            context_text = "Recent conversation context:\n"
-            for msg in recent_context:
-                context_text += f"{msg['role']}: {msg['content']}\n"
-            enhanced_message = f"{context_text}\nCurrent message: {message}"
+        # Get recent Telegram messages using the legacy format for context
+        from .message_history_converter import integrate_with_existing_telegram_chat
+        recent_messages = integrate_with_existing_telegram_chat(
+            telegram_chat_history_obj=chat_history_obj,
+            chat_id=chat_id,
+            max_context_messages=3  # Just recent context, not full history
+        )
+        
+        if recent_messages:
+            # Convert back to simple format for context embedding
+            context_lines = []
+            for msg in recent_messages:
+                if hasattr(msg, 'parts') and msg.parts:
+                    # Extract content from ModelMessage objects
+                    content = ""
+                    for part in msg.parts:
+                        if hasattr(part, 'content'):
+                            content += part.content
+                    
+                    role = "User" if type(msg).__name__ == "ModelRequest" else "Valor"
+                    context_lines.append(f"{role}: {content}")
+            
+            if context_lines:
+                context_text = "Recent conversation:\n" + "\n".join(context_lines)
+                enhanced_message = f"{context_text}\n\nCurrent message: {message}"
 
-    # Run the agent (PydanticAI will manage its own message history)
-    result = await telegram_chat_agent.run(enhanced_message, deps=context)
+    # Run the agent without explicit message_history (let PydanticAI manage its own state)
+    result = await telegram_chat_agent.run(
+        user_prompt=enhanced_message, 
+        deps=context
+    )
 
     return result.output
 
