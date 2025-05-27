@@ -1,3 +1,0 @@
-{% load i18n %}
-
-Please continue here to verify you account: {{ activate_url }}
