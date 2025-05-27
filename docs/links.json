@@ -4,5 +4,15 @@
     "domain": "github.com",
     "timestamp": "2025-05-27T09:47:58.884219",
     "analysis": {}
+  },
+  "https://www.manning.com/books/outlier-detection-in-python?utm_source=social_media&utm_medium=int_influencer&utm_campaign=book_kennedy3_outlier_4_9_24": {
+    "url": "https://www.manning.com/books/outlier-detection-in-python?utm_source=social_media&utm_medium=int_influencer&utm_campaign=book_kennedy3_outlier_4_9_24",
+    "domain": "www.manning.com",
+    "timestamp": "2025-05-27T10:27:36.438480",
+    "analysis": {
+      "title": "Outlier Detection in Python",
+      "main_topic": "",
+      "reasons_to_care": "- Outlier detection is crucial for applications like fraud detection, network security, financial auditing, and medical diagnosis, making it highly relevant for data-driven industries[2][3].\n- The book provides hands-on techniques and clear Python examples, making it accessible for data scientists and analysts seeking practical skills[1][4].\n- Understanding outliers can reveal hidden insights, novel patterns, and potential problems in datasets, leading to better business decisions and improved data quality[3]."
+    }
   }
 }
