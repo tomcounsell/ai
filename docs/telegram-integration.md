@@ -48,7 +48,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 ### Persona Implementation
 
-The Valor Engels persona is loaded from `integrations/persona.md` and integrated into the PydanticAI agent system prompt:
+The Valor Engels persona is loaded from `agents/valor/persona.md` and integrated into the PydanticAI agent system prompt:
 
 ```python
 def load_persona() -> str:
@@ -58,7 +58,7 @@ def load_persona() -> str:
         return f.read()
 
 # Agent configuration
-telegram_chat_agent = Agent(
+valor_agent = Agent(
     "anthropic:claude-3-5-sonnet-20241022",
     deps_type=TelegramChatContext,
     system_prompt=f"""Based on this persona document, respond naturally as Valor Engels:
@@ -109,7 +109,7 @@ def is_search_request(text: str) -> bool:
 ```python
 async def handle_search_query(query: str, chat_id: int, context):
     """Handle web search requests via Perplexity integration."""
-    response = await telegram_chat_agent.run(
+    response = await valor_agent.run(
         message=query,
         deps=TelegramChatContext(
             chat_id=chat_id,
@@ -139,7 +139,7 @@ async def handle_notion_question(question: str, chat_id: int, context):
     # Integrate with NotionScout agent for project data
     notion_data = await get_notion_context(question)
 
-    response = await telegram_chat_agent.run(
+    response = await valor_agent.run(
         message=question,
         deps=TelegramChatContext(
             chat_id=chat_id,
@@ -214,7 +214,7 @@ async def handle_telegram_message(
             enhanced_message = f"{context_text}\nCurrent message: {message}"
 
     # Run agent with context
-    result = await telegram_chat_agent.run(enhanced_message, deps=context)
+    result = await valor_agent.run(enhanced_message, deps=context)
     return result.output
 ```
 

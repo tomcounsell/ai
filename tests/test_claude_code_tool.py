@@ -11,7 +11,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 
-from agents.valor_agent import ValorContext, run_valor_agent
+from agents.valor.agent import ValorContext, run_valor_agent
 from tools.claude_code_tool import execute_claude_code
 
 

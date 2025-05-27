@@ -13,7 +13,7 @@ from typing import Any
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 
-from agents.valor_agent import handle_telegram_message
+from agents.valor.handlers import handle_telegram_message
 
 
 class MockChatHistory:

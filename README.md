@@ -13,7 +13,7 @@ uv pip install -r requirements.txt
 scripts/start.sh
 
 # Test agents directly
-uv run agents/telegram_chat_agent.py
+uv run agents/valor_agent.py
 uv run agents/notion_scout.py --project psy "What tasks are ready for dev?"
 
 # Run comprehensive tests
@@ -23,8 +23,8 @@ python tests/run_tests.py
 ## 🤖 Architecture
 
 ### PydanticAI Agent System
-- **Telegram Chat Agent**: Main conversational AI with Valor Engels persona
-- **Function Tools**: Web search, Notion queries, and extensible tool ecosystem
+- **Valor Agent**: Main conversational AI with Valor Engels persona and comprehensive tool suite
+- **Function Tools**: Web search, Notion workspace queries, Claude Code delegation, image tools, and extensible ecosystem
 - **Message History**: Conversation continuity through context injection
 - **Type Safety**: Full Pydantic validation and schema generation
 
@@ -32,17 +32,23 @@ python tests/run_tests.py
 
 ```
 /agents/                    # PydanticAI agents
-  ├── telegram_chat_agent.py # Main Telegram conversation agent
-  └── notion_scout.py         # Notion database query agent
+  ├── valor_agent.py         # Entry point with test functions
+  ├── valor/                # MAIN: Valor agent structured module
+  │   ├── agent.py          # Core agent with ALL tools integrated
+  │   ├── handlers.py       # Telegram message handlers
+  │   └── persona.md        # Valor Engels persona definition
+  └── notion_scout.py        # Notion database query agent
 
 /tools/                     # PydanticAI function tools
   ├── search_tool.py         # Web search using Perplexity AI
+  ├── notion_tool.py         # Workspace-based Notion queries
+  ├── claude_code_tool.py    # Code delegation capabilities
+  ├── image_*.py             # Image generation and analysis
   └── models.py              # Tool infrastructure and base models
 
 /integrations/              # External service connections
   ├── telegram/             # Telegram bot with chat history
-  ├── notion/               # Project data queries and database mapping
-  └── persona.md            # Valor Engels persona and Claude Code guidelines
+  └── notion/               # Project data queries and database mapping
 
 /tests/                     # Comprehensive testing suite
   ├── test_chat_history.py  # Chat history management tests

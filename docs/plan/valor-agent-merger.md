@@ -16,7 +16,7 @@
   - `search_saved_links` - Link retrieval system
   - `query_notion_projects` - Project database queries
 - **TelegramChatContext**: Complete context with chat history, notion data, priority flags
-- **Full Valor persona integration**: Loads from `integrations/persona.md`
+- **Full Valor persona integration**: Loads from `agents/valor/persona.md`
 - **Telegram-specific features**: Image generation response format, message history
 - **Production-ready**: Used by all telegram handlers
 

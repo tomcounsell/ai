@@ -127,6 +127,34 @@ The tools in this directory implement the function tool pattern for PydanticAI a
   - Search and retrieval functionality
   - URL validation and sanitization
 
+### Project Management Tools
+
+#### `notion_tool.py`
+**Workspace-based Notion database queries with AI analysis**
+
+- **Purpose**: Query Notion project databases and provide intelligent task analysis
+- **Main Functions**:
+  - `query_notion_workspace()` - Core workspace querying function
+  - `query_psyoptimal_workspace()` - PsyOPTIMAL-specific wrapper
+- **APIs**: Notion API + Anthropic Claude for analysis
+- **Features**:
+  - Workspace-based configuration with hardcoded database mappings
+  - Complete property extraction for all Notion field types
+  - AI-powered analysis of project data for task recommendations
+  - Support for multiple workspace configurations
+  - Intelligent priority and status analysis
+
+- **Configuration**:
+  - Workspace settings dictionary with database IDs
+  - Alias support for flexible workspace naming
+  - Environment-based API key validation
+
+- **Use Cases**:
+  - Project status queries
+  - Task priority analysis
+  - Development workload assessment
+  - Milestone and deadline tracking
+
 ### Infrastructure Tools
 
 #### `models.py`
@@ -150,16 +178,16 @@ All tools follow the PydanticAI function tool pattern:
 ```python
 def tool_function(param1: str, param2: int = 10) -> str:
     """Tool description that helps LLM understand when to use this tool.
-    
+
     Detailed description of what the tool does and when to use it.
-    
+
     Args:
         param1: Description of first parameter.
         param2: Description of second parameter with default.
-        
+
     Returns:
         str: Description of return value.
-        
+
     Example:
         >>> tool_function("example", 5)
         'Expected output format'
@@ -191,7 +219,8 @@ Tools require various API keys and configuration:
 
 - `OPENAI_API_KEY` - Image generation and analysis
 - `PERPLEXITY_API_KEY` - Web search and link analysis
-- `ANTHROPIC_API_KEY` - Claude Code delegation
+- `ANTHROPIC_API_KEY` - Claude Code delegation and Notion analysis
+- `NOTION_API_KEY` - Notion workspace database access
 - File system access for local operations
 
 ## Usage Examples
@@ -258,6 +287,17 @@ analysis = analyze_url_content("https://example.com/article")
 
 # Store with analysis
 success = store_link_with_analysis("https://example.com/article")
+```
+
+### Notion Workspace Queries
+```python
+from tools.notion_tool import query_notion_workspace, query_psyoptimal_workspace
+
+# Query specific workspace
+result = query_notion_workspace("PsyOPTIMAL", "What tasks are ready for dev?")
+
+# Query PsyOPTIMAL workspace directly
+result = query_psyoptimal_workspace("Show me high priority tasks")
 ```
 
 ## Tool Architecture Benefits

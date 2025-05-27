@@ -152,7 +152,7 @@ response = await handle_telegram_message(
 
 ### Standalone Usage
 ```python
-from agents.valor_agent import run_valor_agent, ValorContext
+from agents.valor.agent import run_valor_agent, ValorContext
 
 context = ValorContext(chat_id=12345, username="user")
 response = await run_valor_agent("How do I deploy a FastAPI app?", context)
@@ -160,9 +160,12 @@ response = await run_valor_agent("How do I deploy a FastAPI app?", context)
 
 ### Notion Queries
 ```bash
-# Command line usage
+# Command line usage (standalone agent)
 uv run agents/notion_scout.py "What tasks are ready for development?"
 uv run agents/notion_scout.py --project FlexTrip "Show me current milestones"
+
+# Via Valor agent (integrated tool)
+# Just ask about project status naturally - the agent will use the notion tool automatically
 ```
 
 ## Configuration
@@ -175,7 +178,7 @@ uv run agents/notion_scout.py --project FlexTrip "Show me current milestones"
 
 ### Project Configuration
 - Notion project mappings in `integrations/notion/database_mapping.json`
-- Valor Engels persona definition in `integrations/persona.md`
+- Valor Engels persona definition in `agents/valor/persona.md`
 
 ## Dependencies
 

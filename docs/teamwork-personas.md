@@ -30,8 +30,8 @@ This document outlines the current persona implementation and future multi-agent
 **Tools Available**: Web search, Claude Code delegation, Notion integration
 
 **Current Implementation**:
-- Telegram chat interface (`agents/telegram_chat_agent.py`)
-- Persona loaded from `integrations/persona.md`
+- Telegram chat interface (`agents/valor/`)
+- Persona loaded from `agents/valor/persona.md`
 - Full PydanticAI agent with tool integration
 - Conversation continuity and context management
 
@@ -81,7 +81,7 @@ class TelegramChatContext(BaseModel):
 
 **Agent Implementation Pattern**:
 ```python
-telegram_chat_agent = Agent(
+valor_agent = Agent(
     "anthropic:claude-3-5-sonnet-20241022",
     deps_type=TelegramChatContext,
     system_prompt=f"""Based on this persona document, respond naturally as Valor Engels:
@@ -97,12 +97,12 @@ Additional context for Telegram conversations:
 
 **Tool Integration**:
 ```python
-@telegram_chat_agent.tool
+@valor_agent.tool
 def search_current_info(ctx: RunContext[TelegramChatContext], query: str) -> str:
     """Search for current information using Perplexity AI."""
     return search_web(query)
 
-@telegram_chat_agent.tool
+@valor_agent.tool
 def delegate_coding_task(
     ctx: RunContext[TelegramChatContext],
     task_description: str,

@@ -2,7 +2,7 @@
 
 ## Overview
 
-This AI system uses **intelligent valor_agent architecture** that completely eliminates keyword triggers in favor of LLM-driven tool selection. The system routes ALL interactions through the valor_agent (telegram_chat_agent) which uses natural language understanding to determine appropriate tool usage. The architecture emphasizes intelligent decision-making, context awareness, and zero rigid pattern matching.
+This AI system uses **intelligent valor_agent architecture** that completely eliminates keyword triggers in favor of LLM-driven tool selection. The system routes ALL interactions through the valor_agent (agents/valor/) which uses natural language understanding to determine appropriate tool usage. The architecture emphasizes intelligent decision-making, context awareness, and zero rigid pattern matching.
 
 ## Core Architecture
 
@@ -30,7 +30,7 @@ def tool_function(ctx: RunContext[ContextType], param: str) -> str:
 
 ### Valor Agent Intelligence System
 
-#### Valor Agent (`agents/telegram_chat_agent.py`)
+#### Valor Agent (`agents/valor/`)
 **Role**: SINGLE POINT of intelligent message routing - NO keyword triggers
 - **Context**: `TelegramChatContext` with comprehensive conversation history
 - **All Tools Integrated**:
@@ -56,7 +56,7 @@ def tool_function(ctx: RunContext[ContextType], param: str) -> str:
 ## Current Implementation Status
 
 **PRODUCTION-READY VALOR AGENT SYSTEM:**
-1. **Valor Agent (telegram_chat_agent)**: Complete intelligent routing system with ALL tools integrated
+1. **Valor Agent (agents/valor/)**: Complete intelligent routing system with ALL tools integrated
 2. **Notion Scout Agent**: UV script implementation for project data queries (supplementary)
 3. **Telegram Handlers**: Streamlined to ONLY handle ping health checks and valor_agent routing
 4. **Test Suite**: Comprehensive intelligence validation (zero keyword trigger tests remain)
@@ -110,12 +110,12 @@ result = await agent.run(
 Agents automatically select and execute tools based on conversation context:
 
 ```python
-@telegram_chat_agent.tool
+@valor_agent.tool
 def search_current_info(ctx: RunContext[TelegramChatContext], query: str) -> str:
     """Search for current information using Perplexity AI."""
     return search_web(query)
 
-@telegram_chat_agent.tool
+@valor_agent.tool
 def delegate_coding_task(
     ctx: RunContext[TelegramChatContext],
     task_description: str,

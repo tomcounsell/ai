@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 # Add the parent directory to Python path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 
-from agents.valor_agent import handle_telegram_message
+from agents.valor.handlers import handle_telegram_message
 
 
 class MockTelegramMessage:

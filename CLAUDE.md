@@ -76,7 +76,7 @@ uv run agents/notion_scout.py --project FlexTrip "Show me project status"
 uv run agents/notion_scout.py --project psy "Quick status check"
 
 # Test PydanticAI Telegram chat agent
-uv run agents/telegram_chat_agent.py
+uv run agents/valor_agent.py
 
 # Run comprehensive agent demo
 scripts/demo_agent.sh
@@ -102,7 +102,7 @@ cd tests && python run_tests.py
 ### Valor Agent Intelligence System
 This codebase uses **intelligent valor_agent architecture** that eliminates keyword triggers:
 
-- **Valor Agent (telegram_chat_agent)**: Main conversational AI with intelligent tool selection
+- **Valor Agent (agents/valor/)**: Main conversational AI with intelligent tool selection
 - **LLM-Driven Routing**: Natural language understanding determines tool usage
 - **NO Keyword Matching**: Completely eliminated rigid pattern matching
 - **Context-Aware Tools**: Tools selected based on conversation context and intent
@@ -111,8 +111,11 @@ This codebase uses **intelligent valor_agent architecture** that eliminates keyw
 ### Agent Architecture
 ```
 /agents/                    # Intelligent AI agents
-  ├── telegram_chat_agent.py # MAIN: Valor agent with ALL tools integrated
-  ├── valor_agent.py         # Standalone Valor agent example
+  ├── valor_agent.py         # Entry point with test functions
+  ├── valor/                 # MAIN: Valor agent structured module
+  │   ├── agent.py          # Core agent with ALL tools integrated
+  │   ├── handlers.py       # Telegram message handlers
+  │   └── persona.md        # Valor Engels persona definition
   └── notion_scout.py        # Notion database query agent
 
 /tools/                     # Comprehensive tool suite
@@ -122,6 +125,7 @@ This codebase uses **intelligent valor_agent architecture** that eliminates keyw
   ├── image_generation_tool.py # AI image creation
   ├── image_analysis_tool.py   # AI image analysis
   ├── link_analysis_tool.py    # URL analysis and storage
+  ├── notion_tool.py        # Workspace-based Notion queries
   └── documentation_tool.py    # Documentation generation
 
 /integrations/telegram/     # Streamlined handlers
@@ -153,7 +157,7 @@ External service integrations support the agent system:
 - `/integrations/search/` - Web search (replaced by PydanticAI tool)
 
 #### Current Integration Capabilities:
-- **Intelligent Message Routing**: All messages route through valor_agent (telegram_chat_agent)
+- **Intelligent Message Routing**: All messages route through valor_agent (agents/valor/)
 - **Ping Health System**: System metrics and bot status reporting
 - **Web Search Intelligence**: Automatic current information retrieval
 - **Image Generation**: DALL-E 3 integration with Telegram delivery
@@ -163,7 +167,7 @@ External service integrations support the agent system:
   - **Planning Phase**: Comprehensive analysis and implementation planning
   - **Implementation Phase**: TDD approach with step-by-step execution
   - **Plan Documentation**: Saved to /docs/plan/ for review and restart capability
-- **Notion Integration**: Project query intelligence with contextual filtering
+- **Notion Integration**: Workspace-based project query intelligence with AI-powered analysis
 - **Conversation Continuity**: Context-aware responses across exchanges
 
 ### Server Architecture
@@ -296,7 +300,7 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 
 ## Important Notes
 **VALOR_AGENT ARCHITECTURE FACTS:**
-- **ALL message routing uses valor_agent (telegram_chat_agent) - NO exceptions**
+- **ALL message routing uses valor_agent (agents/valor/) - NO exceptions**
 - **ZERO keyword matching remains in the system - completely eliminated**
 - **LLM intelligence drives ALL tool selection - context-aware decisions only**
 - **Ping command ONLY system bypass - everything else routes through valor_agent**
@@ -323,8 +327,10 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 ### Strategic Planning
 - **`docs/future-plans.md`** - Comprehensive architectural vision for multi-agent system evolution
 
-### Key Integration Files
-- **`integrations/persona.md`** - Valor Engels persona definition with Claude Code tool usage guidelines
+### Agent Configuration Files
+- **`agents/valor/persona.md`** - Valor Engels persona definition with Claude Code tool usage guidelines
+
+### Integration Configuration Files
 - **`integrations/notion/database_mapping.json`** - Project name to database ID mappings for NotionScout
 
 These documents provide comprehensive guidance for understanding, developing, testing, and operating the AI agent system.
@@ -334,7 +340,7 @@ These documents provide comprehensive guidance for understanding, developing, te
 ### Understanding the System
 - Read `docs/agent-architecture.md` for overall system design
 - Check `docs/tool-development.md` for tool creation patterns
-- Review `integrations/persona.md` for Valor Engels behavioral guidelines
+- Review `agents/valor/persona.md` for Valor Engels behavioral guidelines
 
 ### Development Tasks
 - Follow `docs/system-operations.md` for server management and environment setup
