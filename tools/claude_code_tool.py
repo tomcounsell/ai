@@ -1,8 +1,15 @@
 """
 Claude Code Tool - Allows spawning new Claude Code sessions with specific prompts and directories.
 
-This tool enables Valor to delegate complex coding tasks to new Claude sessions,
-providing directory context and detailed prompts for autonomous execution.
+This tool enables Valor to perform software engineering tasks.
+Detailed prompts must be provided for autonomous execution.
+Example tasks include:
+- running tests
+- commiting and pushing changes to GitHub
+- making changes to any file
+- exploring the repository
+- creating plans for future development
+- executing complex multi-step dev tasks that require reasoning and planning
 """
 
 import os
