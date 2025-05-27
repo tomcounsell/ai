@@ -14,7 +14,6 @@ PydanticAI chat agent for Telegram integration.
 Replaces direct Anthropic API calls with structured agent approach.
 """
 
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -77,7 +76,7 @@ def load_persona() -> str:
 # Load persona content for system prompt
 PERSONA_CONTENT = load_persona()
 
-# Create the main Telegram chat agent
+# Create the main Telegram chat agent with enhanced system prompt
 telegram_chat_agent = Agent(
     "anthropic:claude-3-5-sonnet-20241022",
     deps_type=TelegramChatContext,
@@ -225,7 +224,7 @@ def analyze_shared_image(
 def delegate_coding_task(
     ctx: RunContext[TelegramChatContext],
     task_description: str,
-    target_directory: str,
+    target_directory: str = ".",
     specific_instructions: str = "",
 ) -> str:
     """Spawn a new Claude Code session to handle complex coding tasks.
@@ -318,87 +317,33 @@ async def handle_telegram_message(
         is_priority_question=is_priority_question,
     )
 
-    # Build system prompt with context
-    _build_system_prompt(context)
-
-    # Add recent chat context to the message for continuity (enhanced message approach)
+    # Add contextual information to the user message if needed
     enhanced_message = message
-    if chat_history_obj:
-        # Get recent Telegram messages using the legacy format for context
-        from .message_history_converter import integrate_with_existing_telegram_chat
-        recent_messages = integrate_with_existing_telegram_chat(
-            telegram_chat_history_obj=chat_history_obj,
-            chat_id=chat_id,
-            max_context_messages=3  # Just recent context, not full history
-        )
-        
-        if recent_messages:
-            # Convert back to simple format for context embedding
-            context_lines = []
-            for msg in recent_messages:
-                if hasattr(msg, 'parts') and msg.parts:
-                    # Extract content from ModelMessage objects
-                    content = ""
-                    for part in msg.parts:
-                        if hasattr(part, 'content'):
-                            content += part.content
-                    
-                    role = "User" if type(msg).__name__ == "ModelRequest" else "Valor"
-                    context_lines.append(f"{role}: {content}")
-            
-            if context_lines:
-                context_text = "Recent conversation:\n" + "\n".join(context_lines)
-                enhanced_message = f"{context_text}\n\nCurrent message: {message}"
 
-    # Run the agent without explicit message_history (let PydanticAI manage its own state)
-    result = await telegram_chat_agent.run(
-        user_prompt=enhanced_message, 
-        deps=context
-    )
+    # Include Notion data for priority questions
+    if is_priority_question and notion_data and "Error" not in notion_data:
+        enhanced_message = (
+            f"Context - Current project data:\n{notion_data}\n\nUser question: {message}"
+        )
+
+    # Add recent chat context for continuity
+    elif chat_history_obj:
+        telegram_messages = chat_history_obj.get_context(chat_id)
+        if telegram_messages:
+            recent_context = telegram_messages[-2:]  # Last 2 messages for context
+            if recent_context:
+                context_text = "Recent conversation:\n"
+                for msg in recent_context:
+                    context_text += f"{msg['role']}: {msg['content']}\n"
+                enhanced_message = f"{context_text}\n{message}"
+
+    # Run the agent
+    result = await telegram_chat_agent.run(enhanced_message, deps=context)
 
     return result.output
 
 
-def _build_system_prompt(context: TelegramChatContext) -> str:
-    """Build system prompt with context for the agent.
-    
-    Constructs a comprehensive system prompt that includes the base Valor Engels
-    persona along with specific context for the current Telegram conversation.
-    This helps the agent respond appropriately based on the chat environment.
-    
-    Args:
-        context: The TelegramChatContext containing chat metadata and flags.
-        
-    Returns:
-        str: Complete system prompt including persona and contextual information.
-    """
-
-    # Base persona content
-    base_prompt = f"""Based on this persona document, respond naturally as Valor Engels:
-
-{PERSONA_CONTENT}
-
-Additional context for Telegram conversations:
-- Keep responses under 400 words for Telegram compatibility
-- For priority questions, use Notion data when available to provide specific recommendations
-- Match the conversational style (casual vs technical) appropriately
-- Remember: you're a human software engineer, not an AI assistant"""
-
-    # Add priority question context
-    if context.is_priority_question and context.notion_data:
-        if "Error" not in context.notion_data:
-            base_prompt += f"\n\nCurrent project priorities:\n{context.notion_data}"
-
-    # Add environment context
-    current_time = datetime.now()
-    env_context = f"""
-
-Environment: Telegram chat (chat_id: {context.chat_id})
-Time: {current_time.strftime('%Y-%m-%d %H:%M')}
-Group chat: {context.is_group_chat}
-Priority question: {context.is_priority_question}"""
-
-    return base_prompt + env_context
+# Removed _build_system_prompt - using streamlined approach with context in user message
 
 
 # Convenience functions for backward compatibility with existing handlers
