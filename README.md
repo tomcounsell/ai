@@ -93,7 +93,7 @@ uv run agents/notion_scout.py --project psy "Status check"  # Test Notion querie
 
 # Server testing
 scripts/start.sh                          # Start development server
-python main.py & PID=$! && sleep 3 && curl http://localhost:8000/health && kill $PID
+python main.py & PID=$! && sleep 3 && curl http://localhost:9000/health && kill $PID
 ```
 
 ## 📋 Features

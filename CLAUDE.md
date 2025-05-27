@@ -25,7 +25,7 @@ scripts/start.sh
 scripts/stop.sh
 
 # Quick server test (start, verify, stop) - for testing purposes
-python main.py & PID=$! && sleep 3 && curl -s http://localhost:8000/health && kill $PID
+python main.py & PID=$! && sleep 3 && curl -s http://localhost:9000/health && kill $PID
 
 # Update MCP configuration from .env
 scripts/update_mcp.sh

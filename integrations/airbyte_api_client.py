@@ -8,14 +8,14 @@ class AirbyteApiClient:
 
     def get_workspaces(self):
         """Get all workspaces."""
-        response = requests.get(f"{self.base_url}/workspaces", headers=self.headers)
+        response = requests.get(f"{self.base_url}/workspaces", headers=self.headers, timeout=180)
         response.raise_for_status()
         return response.json()
 
     def get_sources(self, workspace_id):
         """Get all sources for a workspace."""
         response = requests.get(
-            f"{self.base_url}/sources?workspaceId={workspace_id}", headers=self.headers
+            f"{self.base_url}/sources?workspaceId={workspace_id}", headers=self.headers, timeout=180
         )
         response.raise_for_status()
         return response.json()
@@ -23,7 +23,7 @@ class AirbyteApiClient:
     def get_destinations(self, workspace_id):
         """Get all destinations for a workspace."""
         response = requests.get(
-            f"{self.base_url}/destinations?workspaceId={workspace_id}", headers=self.headers
+            f"{self.base_url}/destinations?workspaceId={workspace_id}", headers=self.headers, timeout=180
         )
         response.raise_for_status()
         return response.json()
@@ -31,7 +31,7 @@ class AirbyteApiClient:
     def create_connection(self, connection_data):
         """Create a new connection."""
         response = requests.post(
-            f"{self.base_url}/connections", headers=self.headers, json=connection_data
+            f"{self.base_url}/connections", headers=self.headers, json=connection_data, timeout=180
         )
         response.raise_for_status()
         return response.json()
@@ -42,6 +42,7 @@ class AirbyteApiClient:
             f"{self.base_url}/connections/sync",
             headers=self.headers,
             json={"connectionId": connection_id},
+            timeout=180,
         )
         response.raise_for_status()
         return response.json()

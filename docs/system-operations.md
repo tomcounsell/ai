@@ -16,7 +16,7 @@ scripts/start.sh
 
 # What this does:
 # - Checks for existing server processes
-# - Starts uvicorn with hot reload on port 8000
+# - Starts uvicorn with hot reload on port 9000
 # - Saves PID for process management
 # - Provides immediate feedback on startup status
 ```
@@ -35,13 +35,13 @@ fi
 
 # Start server with hot reload
 echo "Starting FastAPI development server..."
-uvicorn main:app --reload --host 0.0.0.0 --port 8000 &
+uvicorn main:app --reload --host 0.0.0.0 --port 9000 &
 SERVER_PID=$!
 
 # Save PID for management
 echo $SERVER_PID > server.pid
 echo "Server started on PID $SERVER_PID"
-echo "Access at: http://localhost:8000"
+echo "Access at: http://localhost:9000"
 ```
 
 #### Stopping the Development Server
@@ -82,7 +82,7 @@ echo "Server stopped successfully"
 
 ```bash
 # Quick server test (start, verify, stop)
-python main.py & PID=$! && sleep 3 && curl -s http://localhost:8000/health && kill $PID
+python main.py & PID=$! && sleep 3 && curl -s http://localhost:9000/health && kill $PID
 
 # Use for:
 # - CI/CD health checks
@@ -494,10 +494,10 @@ COPY . .
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:9000/health || exit 1
 
 # Run application
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "9000"]
 ```
 
 ### Docker Compose
@@ -510,7 +510,7 @@ services:
   ai-agents:
     build: .
     ports:
-      - "8000:8000"
+      - "9000:9000"
     environment:
       - ENVIRONMENT=production
       - LOG_LEVEL=INFO
@@ -521,7 +521,7 @@ services:
       - ./data:/app/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
       interval: 30s
       timeout: 10s
       retries: 3

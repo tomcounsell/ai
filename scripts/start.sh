@@ -3,7 +3,7 @@
 # Server start script with hot reload
 # Checks if server is already running, starts it if not
 
-PORT=8000
+PORT=9000
 PID_FILE="/tmp/fastapi_server.pid"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

@@ -41,7 +41,7 @@ def generate_image(
         return "🎨 Image generation unavailable: Missing OPENAI_API_KEY configuration."
 
     try:
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(api_key=api_key, timeout=180)
 
         # Generate image using DALL-E 3
         response = client.images.generate(
@@ -52,7 +52,7 @@ def generate_image(
         image_url = response.data[0].url
 
         # Download the image
-        image_response = requests.get(image_url)
+        image_response = requests.get(image_url, timeout=180)
         image_response.raise_for_status()
 
         # Determine save path

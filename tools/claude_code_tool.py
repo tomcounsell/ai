@@ -13,7 +13,7 @@ def execute_claude_code(
     prompt: str,
     working_directory: str | None = None,
     allowed_tools: list[str] | None = None,
-    timeout: int = 300,
+    timeout: int | None = None,
 ) -> str:
     """
     Execute a Claude Code session with a specific prompt and context.
@@ -22,7 +22,7 @@ def execute_claude_code(
         prompt: Detailed instructions for Claude to execute
         working_directory: Directory to run Claude in (defaults to current)
         allowed_tools: List of tools Claude can use (defaults to common tools)
-        timeout: Maximum execution time in seconds
+        timeout: Maximum execution time in seconds (None for no timeout)
 
     Returns:
         Claude's output from the execution

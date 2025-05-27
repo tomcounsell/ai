@@ -30,7 +30,7 @@ def search_web(query: str, max_results: int = 3) -> str:
         return "🔍 Search unavailable: Missing PERPLEXITY_API_KEY configuration."
 
     try:
-        client = OpenAI(api_key=api_key, base_url="https://api.perplexity.ai")
+        client = OpenAI(api_key=api_key, base_url="https://api.perplexity.ai", timeout=180)
 
         messages = [
             {

@@ -22,7 +22,7 @@ class NotionScout:
 
         try:
             query_url = f"https://api.notion.com/v1/databases/{database_id}/query"
-            response = requests.post(query_url, headers=headers, json={})
+            response = requests.post(query_url, headers=headers, json={}, timeout=180)
 
             if response.status_code != 200:
                 return {"error": f"Error querying database: {response.status_code}"}
@@ -73,7 +73,7 @@ class NotionScout:
             search_url = "https://api.notion.com/v1/search"
             search_payload = {"filter": {"value": "database", "property": "object"}}
 
-            response = requests.post(search_url, headers=headers, json=search_payload)
+            response = requests.post(search_url, headers=headers, json=search_payload, timeout=180)
 
             if response.status_code != 200:
                 return f"Error accessing Notion API: {response.status_code}"
