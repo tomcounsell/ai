@@ -14,7 +14,6 @@ PydanticAI chat agent for Telegram integration.
 Replaces direct Anthropic API calls with structured agent approach.
 """
 
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +43,7 @@ class TelegramChatContext(BaseModel):
 
 
 def load_persona() -> str:
-    """Load the Valor Engels persona from the persona document."""
+    """Load the Valor Engels persona."""
     persona_file = Path(__file__).parent.parent / "integrations" / "persona.md"
     with open(persona_file) as f:
         return f.read()
@@ -53,39 +52,21 @@ def load_persona() -> str:
 # Load persona content for system prompt
 PERSONA_CONTENT = load_persona()
 
-# Create the main Telegram chat agent
+# Create the main Telegram chat agent with streamlined system prompt
 telegram_chat_agent = Agent(
     "anthropic:claude-3-5-sonnet-20241022",
     deps_type=TelegramChatContext,
-    system_prompt=f"""Based on this persona document, respond naturally as Valor Engels:
-
-{PERSONA_CONTENT}
-
-Additional context for Telegram conversations:
-- Keep responses under 200 words for Telegram compatibility
-- Use the chat history and context provided to maintain conversation continuity
-- For priority questions, use Notion data when available to provide specific recommendations
-- Match the conversational style (casual vs technical) appropriately
-- Remember: you're a human software engineer, not an AI assistant""",
+    system_prompt=PERSONA_CONTENT,
 )
 
 
 @telegram_chat_agent.tool
 def search_current_info(ctx: RunContext[TelegramChatContext], query: str) -> str:
     """
-    Search for current information on the web using Perplexity AI.
-    Use this when you need up-to-date information about:
-    - Current events, news, or recent developments
-    - Latest technology trends or releases
-    - Current market conditions or company information
-    - Recent research or publications
-    - Any information that might have changed recently
+    Search the web for current information using Perplexity AI.
+    Use when someone asks about recent events, technology updates, or current conditions.
 
-    Args:
-        query: The search query to find current information about
-
-    Returns:
-        Current information from web search formatted for conversation
+    Examples: "What's new with React?", "Latest news about OpenAI", "Current Python trends"
     """
     return search_web(query)
 
@@ -98,20 +79,10 @@ def create_image(
     quality: str = "standard",
 ) -> str:
     """
-    Generate an AI-created image from a text description using DALL-E 3.
-    Use this when someone asks you to:
-    - Create, draw, or generate an image
-    - Make a picture or artwork
-    - Visualize something they describe
-    - Design graphics or illustrations
+    Generate an image using DALL-E 3.
+    Use when someone asks to create, draw, or visualize something.
 
-    Args:
-        prompt: Detailed description of the image to generate
-        style: Image style - "natural" (realistic) or "vivid" (dramatic/artistic)
-        quality: Image quality - "standard" or "hd"
-
-    Returns:
-        Local path to the generated image or error message
+    Examples: "Draw a cat", "Create a logo", "Make an image of..."
     """
     image_path = generate_image(prompt=prompt, style=style, quality=quality, save_directory="/tmp")
 
@@ -128,19 +99,10 @@ def analyze_shared_image(
     question: str = "",
 ) -> str:
     """
-    Analyze an image that was shared in the chat using AI vision capabilities.
-    Use this when someone shares a photo and you need to:
-    - Describe what's in the image
-    - Answer questions about the image content
-    - Read text from images (OCR)
-    - Identify objects, people, or scenes in photos
+    Analyze images shared in chat using AI vision.
+    Use when someone shares a photo and asks about it or wants it described.
 
-    Args:
-        image_path: Local path to the downloaded image file
-        question: Optional specific question about the image content
-
-    Returns:
-        AI analysis and description of the image content
+    Examples: "What's in this image?", "Read the text", "Describe this photo"
     """
     # Get recent chat context for more relevant analysis
     chat_context = None
@@ -157,25 +119,14 @@ def analyze_shared_image(
 def delegate_coding_task(
     ctx: RunContext[TelegramChatContext],
     task_description: str,
-    target_directory: str,
+    target_directory: str = ".",
     specific_instructions: str = "",
 ) -> str:
     """
-    Spawn a new Claude Code session to handle complex coding tasks.
-    Use this when the user needs:
-    - New features or applications built
-    - Complex refactoring across multiple files
-    - Git workflows (branching, committing, etc.)
-    - File system operations in specific directories
-    - Tasks that require multiple tools and steps
+    Handle coding tasks using Claude Code.
+    Use for implementation requests: building features, fixing bugs, refactoring code.
 
-    Args:
-        task_description: High-level description of what needs to be done
-        target_directory: Directory where the work should be performed (use absolute paths)
-        specific_instructions: Additional detailed requirements or constraints
-
-    Returns:
-        Results from the Claude Code session execution
+    Examples: "Build a login page", "Fix the database error", "Add user authentication"
     """
     try:
         result = spawn_claude_session(
@@ -223,56 +174,33 @@ async def handle_telegram_message(
         is_priority_question=is_priority_question,
     )
 
-    # Build system prompt with context
-    _build_system_prompt(context)
-
-    # Add recent chat context to the message for continuity
+    # Add contextual information to the user message if needed
     enhanced_message = message
-    if chat_history_obj:
+
+    # Include Notion data for priority questions
+    if is_priority_question and notion_data and "Error" not in notion_data:
+        enhanced_message = (
+            f"Context - Current project data:\n{notion_data}\n\nUser question: {message}"
+        )
+
+    # Add recent chat context for continuity
+    elif chat_history_obj:
         telegram_messages = chat_history_obj.get_context(chat_id)
         if telegram_messages:
-            # Include recent context in the message itself
-            recent_context = telegram_messages[-3:]  # Last 3 messages
-            context_text = "Recent conversation context:\n"
-            for msg in recent_context:
-                context_text += f"{msg['role']}: {msg['content']}\n"
-            enhanced_message = f"{context_text}\nCurrent message: {message}"
+            recent_context = telegram_messages[-2:]  # Last 2 messages for context
+            if recent_context:
+                context_text = "Recent conversation:\n"
+                for msg in recent_context:
+                    context_text += f"{msg['role']}: {msg['content']}\n"
+                enhanced_message = f"{context_text}\n{message}"
 
-    # Run the agent (PydanticAI will manage its own message history)
+    # Run the agent
     result = await telegram_chat_agent.run(enhanced_message, deps=context)
 
     return result.output
 
 
-def _build_system_prompt(context: TelegramChatContext) -> str:
-    """Build system prompt with context for the agent."""
-
-    # Base persona content
-    base_prompt = f"""Based on this persona document, respond naturally as Valor Engels:
-
-{PERSONA_CONTENT}
-
-Additional context for Telegram conversations:
-- Keep responses under 400 words for Telegram compatibility
-- For priority questions, use Notion data when available to provide specific recommendations
-- Match the conversational style (casual vs technical) appropriately
-- Remember: you're a human software engineer, not an AI assistant"""
-
-    # Add priority question context
-    if context.is_priority_question and context.notion_data:
-        if "Error" not in context.notion_data:
-            base_prompt += f"\n\nCurrent project priorities:\n{context.notion_data}"
-
-    # Add environment context
-    current_time = datetime.now()
-    env_context = f"""
-
-Environment: Telegram chat (chat_id: {context.chat_id})
-Time: {current_time.strftime('%Y-%m-%d %H:%M')}
-Group chat: {context.is_group_chat}
-Priority question: {context.is_priority_question}"""
-
-    return base_prompt + env_context
+# Removed _build_system_prompt - using streamlined approach with context in user message
 
 
 # Convenience functions for backward compatibility with existing handlers
