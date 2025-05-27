@@ -167,12 +167,12 @@ class MessageHandler:
     async def _route_message(self, message, chat_id: int, processed_text: str):
         """Route message to valor_agent for all text processing."""
         text = processed_text.lower().strip()
-        
+
         # Keep ping-pong for health check
         if text == "ping":
             await self._handle_ping(message, chat_id)
             return
-            
+
         # Use valor_agent for all other message handling
         await self._handle_with_valor_agent(message, chat_id, processed_text)
 
@@ -181,10 +181,14 @@ class MessageHandler:
         try:
             # Use telegram_chat_agent directly for all message processing
             from agents.telegram_chat_agent import handle_telegram_message
-            
+
             # Determine if this might be a priority question for context
-            is_priority = is_user_priority_question(processed_text) if 'is_user_priority_question' in globals() else False
-            
+            is_priority = (
+                is_user_priority_question(processed_text)
+                if "is_user_priority_question" in globals()
+                else False
+            )
+
             # Get notion data if this seems like a priority question and we have notion_scout
             notion_data = None
             if is_priority and self.notion_scout:
@@ -215,19 +219,20 @@ class MessageHandler:
     async def _handle_ping(self, message, chat_id: int):
         """Handle ping command with system health metrics."""
         try:
-            import psutil
             import platform
             from datetime import datetime
-            
+
+            import psutil
+
             # Get system metrics
             cpu_percent = psutil.cpu_percent(interval=0.1)
             memory = psutil.virtual_memory()
-            disk = psutil.disk_usage('/')
-            
+            disk = psutil.disk_usage("/")
+
             # Format uptime
             boot_time = datetime.fromtimestamp(psutil.boot_time())
             uptime = datetime.now() - boot_time
-            
+
             response = f"""🏓 **pong**
 
 📊 **System Health:**
@@ -241,7 +246,7 @@ class MessageHandler:
 • Agent: ✅ Active (valor_agent)
 • Tools: ✅ {len(self._get_available_tools())} available
 • Notion: {'✅ Connected' if self.notion_scout else '❌ Not configured'}"""
-            
+
         except Exception as e:
             # Fallback if psutil not available or error occurs
             response = f"""🏓 **pong**
@@ -252,20 +257,20 @@ class MessageHandler:
 • Health: ✅ Running
 
 ⚠️ Detailed metrics unavailable: {str(e)[:50]}"""
-            
+
         await message.reply(response)
         self.chat_history.add_message(chat_id, "assistant", response)
-    
+
     def _get_available_tools(self) -> list[str]:
         """Get list of available tools for health check."""
         return [
             "search_current_info",
-            "create_image", 
+            "create_image",
             "analyze_shared_image",
             "delegate_coding_task",
             "save_link_for_later",
             "search_saved_links",
-            "query_notion_projects"
+            "query_notion_projects",
         ]
 
     async def _get_notion_context(self, processed_text: str) -> str | None:
@@ -273,7 +278,7 @@ class MessageHandler:
         try:
             if not self.notion_scout:
                 return None
-                
+
             # Check if specific project mentioned
             text_lower = processed_text.lower()
             for project_name in ["psyoptimal", "flextrip", "psy", "flex"]:
@@ -290,13 +295,12 @@ class MessageHandler:
 
             # Reset filter for next query
             self.notion_scout.db_filter = None
-            
+
             return answer
 
         except Exception as e:
             print(f"Error getting Notion context: {e}")
             return None
-
 
     async def _handle_link_message(self, message, chat_id: int, processed_text: str):
         """Handle messages that contain only a URL - store with AI analysis."""
@@ -469,22 +473,24 @@ class MessageHandler:
             error_msg = f"❌ Error processing video: {str(e)}"
             await message.reply(error_msg)
 
-    async def _process_agent_response(self, message, chat_id: int, answer: str, prefix: str = "") -> bool:
+    async def _process_agent_response(
+        self, message, chat_id: int, answer: str, prefix: str = ""
+    ) -> bool:
         """
         Process agent response, handling image generation and standard text responses.
-        
+
         Args:
             message: Telegram message object
             chat_id: Chat ID for history storage
             answer: Agent response text
             prefix: Optional prefix for text responses
-            
+
         Returns:
             True if image was processed, False if standard text response was sent
         """
         import os
         from pathlib import Path
-        
+
         # Check if response contains generated image
         if answer.startswith("TELEGRAM_IMAGE_GENERATED|"):
             try:
@@ -493,26 +499,24 @@ class MessageHandler:
                 if len(parts) == 3:
                     image_path = parts[1]
                     caption = parts[2]
-                    
+
                     # Verify image file exists
                     if Path(image_path).exists():
                         # Send the image with caption
                         await self.client.send_photo(
-                            chat_id=chat_id,
-                            photo=image_path,
-                            caption=caption
+                            chat_id=chat_id, photo=image_path, caption=caption
                         )
-                        
+
                         # Store response in chat history (without the special format)
                         self.chat_history.add_message(chat_id, "assistant", caption)
-                        
+
                         # Clean up temporary file
                         try:
                             os.remove(image_path)
                             print(f"Cleaned up temporary image: {image_path}")
                         except Exception as cleanup_error:
                             print(f"Warning: Failed to cleanup image {image_path}: {cleanup_error}")
-                        
+
                         return True
                     else:
                         # Image file doesn't exist, send error message
@@ -520,13 +524,13 @@ class MessageHandler:
                         await message.reply(error_msg)
                         self.chat_history.add_message(chat_id, "assistant", error_msg)
                         return True
-                        
+
             except Exception as e:
                 error_msg = f"❌ Error sending image: {str(e)}"
                 await message.reply(error_msg)
                 self.chat_history.add_message(chat_id, "assistant", error_msg)
                 return True
-        
+
         # Standard text response handling
         if len(answer) > 4000:
             parts = [answer[i : i + 4000] for i in range(0, len(answer), 4000)]
@@ -538,5 +542,5 @@ class MessageHandler:
             response_text = f"{prefix} {answer}".strip() if prefix else answer
             await message.reply(response_text)
             self.chat_history.add_message(chat_id, "assistant", answer)
-        
+
         return False

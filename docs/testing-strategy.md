@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document outlines the current testing implementations in our AI agent system. Our testing approach focuses on practical validation of agent functionality, tool integration, and conversation quality using PydanticAI's built-in testing capabilities.
+This document outlines the **INTELLIGENCE VALIDATION SYSTEM** for our valor_agent architecture. Our testing approach completely eliminates keyword trigger validation in favor of testing LLM contextual decision-making, intelligent tool selection, and end-to-end conversation flows. We validate that the valor_agent makes smart decisions based on natural language understanding, NOT rigid pattern matching.
 
 ## Current Testing Infrastructure
 
@@ -10,19 +10,49 @@ This document outlines the current testing implementations in our AI agent syste
 
 ```
 tests/
-├── README.md                     # Testing overview and guidelines
-├── run_tests.py                  # Main test runner
-├── run_e2e_tests.py             # End-to-end test execution
-├── test_agent_quick.py          # Quick agent functionality tests
-├── test_agent_demo.py           # Comprehensive agent demonstrations
-├── test_chat_history.py         # Chat history management tests
-├── test_claude_code_tool.py     # Claude Code tool integration tests
-├── test_telegram_chat_agent.py  # Telegram agent tests
-├── test_valor_conversations.py  # Valor persona conversation tests
-├── e2e_framework.py             # End-to-end testing framework
+├── README.md                        # Testing overview and guidelines
+├── run_tests.py                     # Main test runner
+├── run_e2e_tests.py                # End-to-end test execution
+├── test_telegram_chat_agent.py     # ★ INTELLIGENCE VALIDATION: Tool selection testing
+├── test_telegram_ping_health.py    # ★ PING HEALTH SYSTEM: Bypass validation
+├── test_telegram_image_integration.py # ★ IMAGE INTELLIGENCE: Complete flow testing
+├── test_agent_demo.py              # ★ COMPREHENSIVE DEMOS: Real-world scenarios
+├── test_agent_quick.py             # Quick agent functionality tests
+├── test_chat_history.py            # Chat history management tests
+├── test_claude_code_tool.py        # Claude Code tool integration tests
+├── test_valor_conversations.py     # Valor persona conversation tests
+├── e2e_framework.py                # End-to-end testing framework
 └── integrations/
-    └── telegram/                # Telegram-specific integration tests
+    └── telegram/                   # Telegram-specific integration tests
+
+★ = COMPLETELY REWRITTEN for valor_agent intelligence validation
 ```
+
+### Intelligence Testing Philosophy
+
+**CORE PRINCIPLE: Test Intelligence, Not Keywords**
+
+Our test suite validates that the valor_agent makes intelligent decisions based on:
+- **Natural Language Understanding**: Context and intent drive tool selection
+- **Conversation Awareness**: Previous exchanges influence current responses
+- **Tool Appropriateness**: Right tool selected for each type of request
+- **Persona Consistency**: Valor Engels identity maintained throughout
+- **End-to-End Flows**: Complete user journey from input to final output
+
+**What We Test:**
+- ✅ LLM correctly selects `search_current_info` for current information requests
+- ✅ LLM correctly selects `create_image` for visual/creative requests
+- ✅ LLM correctly selects `delegate_coding_task` for development tasks
+- ✅ LLM correctly selects `save_link_for_later` for URL sharing
+- ✅ LLM correctly selects `query_notion_projects` for work-related questions
+- ✅ LLM maintains conversation context across multiple exchanges
+- ✅ LLM maintains Valor Engels persona consistently
+
+**What We DON'T Test:**
+- ❌ Keyword matching (completely eliminated)
+- ❌ Pattern detection (no longer exists)
+- ❌ Static rule validation (replaced with intelligence)
+- ❌ Mock responses (real integrations preferred)
 
 ### Testing Frameworks in Use
 

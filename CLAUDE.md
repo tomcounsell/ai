@@ -2,6 +2,32 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Development Principles
+
+### Critical Architecture Standards
+
+**1. NO LEGACY CODE TOLERANCE**
+- **Never leave behind traces of legacy code or systems**
+- **Always overwrite, replace, and delete obsolete code completely**
+- When upgrading architectures, eliminate all remnants of old approaches
+- Clean removal of deprecated patterns, imports, and unused infrastructure
+- No commented-out code, no "temporary" bridges, no half-migrations
+
+**2. CRITICAL THINKING MANDATORY**
+- **Foolish optimism is not allowed - always think deeply**
+- **Question assumptions, validate decisions, anticipate consequences**
+- Analyze trade-offs critically before implementing changes
+- Consider edge cases, failure modes, and long-term maintenance
+- Prioritize robust solutions over quick fixes
+- Validate architectural decisions through comprehensive testing
+
+**3. INTELLIGENT SYSTEMS OVER RIGID PATTERNS**
+- **Use LLM intelligence instead of keyword matching**
+- **Context-aware decision making over static rule systems**
+- Natural language understanding drives system behavior
+- Flexible, adaptive responses based on conversation flow
+- Future-proof designs that leverage AI capabilities
+
 ## Development Commands
 
 ### Dependency Management
@@ -73,26 +99,35 @@ cd tests && python run_tests.py
 
 ## Architecture Overview
 
-### PydanticAI Agent System
-This codebase uses **PydanticAI agents** as the primary AI interaction pattern:
+### Valor Agent Intelligence System
+This codebase uses **intelligent valor_agent architecture** that eliminates keyword triggers:
 
-- **Telegram Chat Agent**: Main conversational AI with Valor Engels persona
-- **Tool Integration**: Function-based tools with automatic LLM selection
-- **Message History**: Conversation continuity through context injection
-- **Type Safety**: Full Pydantic validation and schema generation
+- **Valor Agent (telegram_chat_agent)**: Main conversational AI with intelligent tool selection
+- **LLM-Driven Routing**: Natural language understanding determines tool usage
+- **NO Keyword Matching**: Completely eliminated rigid pattern matching
+- **Context-Aware Tools**: Tools selected based on conversation context and intent
+- **Comprehensive Tool Suite**: All functionality unified under valor_agent intelligence
 
 ### Agent Architecture
 ```
-/agents/                    # PydanticAI agents
-  ├── telegram_chat_agent.py # Main Telegram conversation agent
+/agents/                    # Intelligent AI agents
+  ├── telegram_chat_agent.py # MAIN: Valor agent with ALL tools integrated
   ├── valor_agent.py         # Standalone Valor agent example
   └── notion_scout.py        # Notion database query agent
 
-/tools/                     # PydanticAI function tools
+/tools/                     # Comprehensive tool suite
   ├── models.py             # Base models for tool infrastructure
   ├── search_tool.py        # Web search using Perplexity AI
   ├── claude_code_tool.py   # Claude Code delegation
-  └── __init__.py
+  ├── image_generation_tool.py # AI image creation
+  ├── image_analysis_tool.py   # AI image analysis
+  ├── link_analysis_tool.py    # URL analysis and storage
+  └── documentation_tool.py    # Documentation generation
+
+/integrations/telegram/     # Streamlined handlers
+  ├── handlers.py          # Ping health check + valor_agent routing ONLY
+  ├── utils.py             # Message timing utilities
+  └── (NO keyword detection - ELIMINATED)
 ```
 
 ### Tool Development Pattern
@@ -118,10 +153,15 @@ External service integrations support the agent system:
 - `/integrations/search/` - Web search (replaced by PydanticAI tool)
 
 #### Current Integration Capabilities:
-- **Telegram Bot**: Valor Engels persona with conversation continuity
-- **Notion Queries**: Project status, task management, database insights
-- **Web Search**: Perplexity AI integration through PydanticAI tool
-- **Agent Routing**: LLM-driven tool selection and orchestration
+- **Intelligent Message Routing**: All messages route through valor_agent (telegram_chat_agent)
+- **Ping Health System**: System metrics and bot status reporting
+- **Web Search Intelligence**: Automatic current information retrieval
+- **Image Generation**: DALL-E 3 integration with Telegram delivery
+- **Image Analysis**: AI vision capabilities for shared photos
+- **Link Analysis**: Automatic URL analysis and storage with Perplexity
+- **Coding Delegation**: Claude Code session spawning for complex tasks
+- **Notion Integration**: Project query intelligence with contextual filtering
+- **Conversation Continuity**: Context-aware responses across exchanges
 
 ### Server Architecture
 - Minimal FastAPI server (`main.py`) with basic health endpoints
@@ -213,10 +253,29 @@ def tool_function(ctx: RunContext[ContextType], param: str) -> str:
 Service integrations use mapping files in `/integrations/{service}/` to translate user-friendly names to service-specific identifiers.
 
 ### Testing Strategy
-- Quick tests for basic functionality verification
-- Comprehensive demos for full conversation testing
-- Background execution for long-running test scenarios
-- Log monitoring for test progress and debugging
+**COMPREHENSIVE INTELLIGENCE VALIDATION SYSTEM**
+
+**Core Test Philosophy:**
+- **Test Intelligence, Not Keywords**: Validate LLM contextual decision-making over rigid patterns
+- **End-to-End Validation**: Complete flows from user input to tool execution and response
+- **Real Integration Testing**: Use actual agents and tools, not mocks, to validate intelligence
+
+**Test Suite Architecture:**
+- `test_telegram_chat_agent.py` - **Intelligent tool selection validation**
+- `test_telegram_ping_health.py` - **Health check system and ping bypass testing**
+- `test_telegram_image_integration.py` - **Complete image generation and delivery flow**
+- `test_agent_demo.py` - **Comprehensive capability demonstration with scenarios**
+
+**Intelligence Test Categories:**
+- **Web Search Intelligence**: Validates LLM triggers search for current information
+- **Image Generation Intelligence**: Validates LLM creates images for visual requests
+- **Coding Delegation Intelligence**: Validates LLM delegates complex development tasks
+- **Link Analysis Intelligence**: Validates LLM analyzes and stores shared URLs
+- **Notion Query Intelligence**: Validates LLM queries projects for work-related questions
+- **Conversation Continuity**: Validates context maintenance across multiple exchanges
+- **Persona Consistency**: Validates Valor Engels identity maintained throughout
+
+**ZERO Keyword Trigger Tests**: All old keyword matching tests completely eliminated
 
 ## Development Philosophy
 
@@ -233,12 +292,20 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 - Use actual services (Notion, Perplexity, Claude) rather than mocks when possible
 
 ## Important Notes
+**VALOR_AGENT ARCHITECTURE FACTS:**
+- **ALL message routing uses valor_agent (telegram_chat_agent) - NO exceptions**
+- **ZERO keyword matching remains in the system - completely eliminated**
+- **LLM intelligence drives ALL tool selection - context-aware decisions only**
+- **Ping command ONLY system bypass - everything else routes through valor_agent**
+- **Complete elimination of legacy keyword detection infrastructure**
+
+**TECHNICAL IMPLEMENTATION:**
 - All AI interactions use PydanticAI agents with function tools
-- LLM automatically selects and orchestrates tool usage
-- Conversation continuity maintained through context injection
-- Type safety enforced throughout the system
-- Tools are simple, testable Python functions
-- Agent behavior validated through comprehensive test batteries
+- LLM automatically selects and orchestrates tool usage based on conversation context
+- Conversation continuity maintained through enhanced message history
+- Type safety enforced throughout the system with comprehensive Pydantic validation
+- Tools are simple, testable Python functions with clear docstrings for LLM understanding
+- Agent intelligence validated through comprehensive test batteries (NOT keyword tests)
 
 ## Documentation References
 

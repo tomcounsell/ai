@@ -2,7 +2,7 @@
 
 ## Overview
 
-This AI system uses **PydanticAI agents** as the primary interface for LLM interactions, with specialized agents handling different domains through a Telegram interface. The architecture emphasizes type safety, tool integration, and conversation continuity.
+This AI system uses **intelligent valor_agent architecture** that completely eliminates keyword triggers in favor of LLM-driven tool selection. The system routes ALL interactions through the valor_agent (telegram_chat_agent) which uses natural language understanding to determine appropriate tool usage. The architecture emphasizes intelligent decision-making, context awareness, and zero rigid pattern matching.
 
 ## Core Architecture
 
@@ -28,25 +28,45 @@ def tool_function(ctx: RunContext[ContextType], param: str) -> str:
     return implementation(param)
 ```
 
-### Current Agent System
+### Valor Agent Intelligence System
 
-#### Telegram Chat Agent (`agents/telegram_chat_agent.py`)
-**Role**: Primary conversational interface with Valor Engels persona
-- **Context**: `TelegramChatContext` with chat history and Notion data
-- **Tools**: Web search, Claude Code delegation
-- **Features**: Group/DM handling, conversation continuity, priority detection
+#### Valor Agent (`agents/telegram_chat_agent.py`)
+**Role**: SINGLE POINT of intelligent message routing - NO keyword triggers
+- **Context**: `TelegramChatContext` with comprehensive conversation history
+- **All Tools Integrated**:
+  - `search_current_info` - Web search intelligence
+  - `create_image` - AI image generation
+  - `analyze_shared_image` - AI vision capabilities
+  - `delegate_coding_task` - Claude Code session spawning
+  - `save_link_for_later` - URL analysis and storage
+  - `search_saved_links` - Link retrieval system
+  - `query_notion_projects` - Project database queries
+- **Intelligence Features**:
+  - LLM-driven tool selection based on conversation context
+  - Zero keyword matching - purely contextual understanding
+  - Valor Engels persona maintained throughout all interactions
+  - Complete conversation continuity across tool usage
 
-#### Notion Scout Agent (`agents/notion_scout.py`)
-**Role**: Project data queries and task management
-- **Context**: Project-specific database access
-- **Tools**: Notion API integration, Claude analysis
-- **Features**: Project filtering, task prioritization, development recommendations
+#### Message Routing Logic (ELIMINATED KEYWORDS)
+- **Ping Command**: ONLY system bypass for health checks
+- **ALL Other Messages**: Route through valor_agent for intelligent processing
+- **NO Keyword Detection**: Completely removed from system
+- **NO Pattern Matching**: LLM intelligence determines tool usage
 
 ## Current Implementation Status
 
-The system currently operates with two main agents:
-1. **Telegram Chat Agent**: Production-ready with full PydanticAI integration
-2. **Notion Scout Agent**: UV script implementation for project data queries
+**PRODUCTION-READY VALOR AGENT SYSTEM:**
+1. **Valor Agent (telegram_chat_agent)**: Complete intelligent routing system with ALL tools integrated
+2. **Notion Scout Agent**: UV script implementation for project data queries (supplementary)
+3. **Telegram Handlers**: Streamlined to ONLY handle ping health checks and valor_agent routing
+4. **Test Suite**: Comprehensive intelligence validation (zero keyword trigger tests remain)
+
+**ARCHITECTURE BENEFITS ACHIEVED:**
+- **Zero Maintenance**: No keyword lists to maintain or update
+- **Natural Interaction**: Users communicate naturally without learning commands
+- **Context Awareness**: Tool selection based on conversation flow and intent
+- **Future-Proof**: LLM intelligence adapts to new tools automatically
+- **Unified Experience**: Single agent handles ALL functionality consistently
 
 Additional specialized agents are planned for future development (see `docs/future-plans.md`).
 
