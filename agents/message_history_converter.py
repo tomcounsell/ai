@@ -15,22 +15,44 @@ def merge_telegram_with_pydantic_history(
     max_context_messages: int = 10,
     deduplicate: bool = True
 ) -> list[ModelRequest | ModelResponse]:
-    """
-    Merge Telegram chat history with PydanticAI agent conversation history.
+    """Merge Telegram chat history with PydanticAI agent conversation history.
     
-    This function combines:
-    1. Existing Telegram chat history (from ChatHistoryManager)
-    2. PydanticAI agent's internal conversation history
+    This function combines existing Telegram chat history from ChatHistoryManager
+    with PydanticAI agent's internal conversation history, providing a unified
+    conversation context for agent interactions.
+    
+    The merging process:
+    1. Extracts Telegram messages from ChatHistoryManager
+    2. Combines with PydanticAI agent's internal history
+    3. Sorts chronologically by timestamp
+    4. Optionally removes duplicates
+    5. Converts to PydanticAI ModelMessage objects
     
     Args:
-        telegram_chat_history_obj: The existing ChatHistoryManager instance
-        chat_id: Chat ID to get history for
-        pydantic_agent_history: PydanticAI agent's internal conversation history
-        max_context_messages: Maximum number of context messages to include
-        deduplicate: Whether to remove duplicate messages
+        telegram_chat_history_obj: The existing ChatHistoryManager instance containing
+            Telegram conversation data. Can be None if no history exists.
+        chat_id: Telegram chat ID to retrieve history for.
+        pydantic_agent_history: Optional list of PydanticAI agent's internal 
+            conversation history. Each dict should contain 'role', 'content', 
+            and optionally 'timestamp'. Defaults to None.
+        max_context_messages: Maximum number of context messages to include 
+            in the final merged history. Defaults to 10.
+        deduplicate: Whether to remove duplicate messages based on content 
+            and role. Defaults to True.
         
     Returns:
-        Merged message list in chronological order as PydanticAI ModelMessage objects
+        list[ModelRequest | ModelResponse]: Merged message list in chronological 
+            order as PydanticAI ModelMessage objects ready for agent consumption.
+            
+    Examples:
+        >>> history_manager = ChatHistoryManager()
+        >>> merged = merge_telegram_with_pydantic_history(
+        ...     telegram_chat_history_obj=history_manager,
+        ...     chat_id=12345,
+        ...     max_context_messages=5
+        ... )
+        >>> len(merged) <= 5
+        True
     """
     merged_messages = []
     
@@ -110,15 +132,30 @@ def merge_telegram_with_pydantic_history(
 
 
 def _remove_duplicate_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """
-    Remove duplicate messages based on content and role.
-    Keeps the most recent occurrence of any duplicate.
+    """Remove duplicate messages based on content and role.
+    
+    This function identifies and removes duplicate messages while preserving
+    the most recent occurrence of each unique message. Duplicates are determined
+    by matching both role and content (after stripping whitespace).
     
     Args:
-        messages: List of messages sorted by timestamp
+        messages: List of message dictionaries sorted by timestamp. Each message
+            should contain 'role', 'content', and 'timestamp' keys.
         
     Returns:
-        Deduplicated list of messages
+        list[dict[str, Any]]: Deduplicated list of messages in chronological order,
+            with only the most recent occurrence of each unique message preserved.
+            
+    Examples:
+        >>> messages = [
+        ...     {'role': 'user', 'content': 'Hello', 'timestamp': 1},
+        ...     {'role': 'user', 'content': 'Hello', 'timestamp': 2}
+        ... ]
+        >>> result = _remove_duplicate_messages(messages)
+        >>> len(result)
+        1
+        >>> result[0]['timestamp']
+        2
     """
     seen = set()
     deduplicated = []
@@ -139,18 +176,35 @@ def _remove_duplicate_messages(messages: list[dict[str, Any]]) -> list[dict[str,
 def integrate_with_existing_telegram_chat(
     telegram_chat_history_obj, chat_id: int, system_prompt: str = None, max_context_messages: int = 6
 ) -> list[ModelRequest | ModelResponse]:
-    """
-    Legacy helper function for backward compatibility.
-    Use merge_telegram_with_pydantic_history for new implementations.
-
+    """Legacy helper function for backward compatibility with existing code.
+    
+    This function provides backward compatibility for code that was written
+    before the merge_telegram_with_pydantic_history function was introduced.
+    New implementations should use merge_telegram_with_pydantic_history directly.
+    
     Args:
         telegram_chat_history_obj: The existing ChatHistoryManager instance
-        chat_id: Chat ID to get history for
-        system_prompt: System prompt for the conversation (unused for compatibility)
+            containing Telegram conversation data.
+        chat_id: Telegram chat ID to retrieve history for.
+        system_prompt: System prompt for the conversation. This parameter
+            is kept for compatibility but is unused in the current implementation.
         max_context_messages: Maximum number of context messages to include
+            in the returned history. Defaults to 6.
 
     Returns:
-        PydanticAI ModelMessage objects for message_history parameter
+        list[ModelRequest | ModelResponse]: PydanticAI ModelMessage objects
+            suitable for use as the message_history parameter in agent calls.
+            
+    Note:
+        This is a legacy function. Use merge_telegram_with_pydantic_history()
+        for new implementations as it provides more comprehensive functionality.
+        
+    Examples:
+        >>> history_manager = ChatHistoryManager()
+        >>> messages = integrate_with_existing_telegram_chat(
+        ...     telegram_chat_history_obj=history_manager,
+        ...     chat_id=12345
+        ... )
     """
     return merge_telegram_with_pydantic_history(
         telegram_chat_history_obj=telegram_chat_history_obj,
