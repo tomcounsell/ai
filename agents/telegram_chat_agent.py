@@ -97,7 +97,10 @@ IMPORTANT TOOL USAGE:
 - When users request something that matches a tool's capability, YOU MUST use the appropriate tool
 - For image requests ("create image", "generate image", "draw", "make picture"), use the create_image tool
 - For current information requests, use the search_current_info tool
-- For complex coding tasks, use the delegate_coding_task tool
+- For complex coding tasks, use the delegate_coding_task tool with structured prompts:
+  * For complex features: Use PLANNING PHASE template first, then IMPLEMENTATION PHASE template
+  * For simple tasks: Use direct task description
+  * Always specify target_directory and include detailed requirements in specific_instructions
 - For analyzing shared images, use the analyze_shared_image tool
 - For saving/analyzing links, use the save_link_for_later tool
 - For searching saved links, use the search_saved_links tool
@@ -243,6 +246,48 @@ def delegate_coding_task(
     - Git workflows (branching, committing, etc.)
     - File system operations in specific directories
     - Tasks that require multiple tools and steps
+
+    For complex features, use these structured prompt templates:
+
+    PLANNING PHASE TEMPLATE:
+    "Investigate and create a detailed implementation plan for: [feature/change name]
+
+    Process:
+    1. Analyze the codebase to understand current architecture and patterns
+    2. Research requirements and identify dependencies
+    3. Design the implementation approach with consideration for:
+       - Existing code patterns and conventions
+       - Required tests and test scenarios
+       - Potential edge cases and error handling
+       - Integration points and side effects
+    4. Create comprehensive plan with step-by-step implementation details
+    5. Save complete reasoning, analysis, and plan to /docs/plan/[name].md
+
+    Include in the plan document:
+    - Requirements analysis
+    - Current state assessment
+    - Proposed solution architecture
+    - Detailed implementation steps
+    - Test scenarios and coverage requirements
+    - Potential risks and mitigation strategies
+    - Success criteria
+
+    Feature/Change: [your specific request here]"
+
+    IMPLEMENTATION PHASE TEMPLATE:
+    "Implement the plan documented in /docs/plan/[name].md using TDD approach:
+
+    Process:
+    1. Read and understand the complete plan from /docs/plan/[name].md
+    2. Create todos based on the planned implementation steps
+    3. Follow strict TDD: write tests → verify they fail → implement → make tests pass → refactor → commit
+    4. If you discover issues requiring plan adjustments, update /docs/plan/[name].md first
+    5. Mark todos complete in real-time as you progress
+    6. Achieve 100% test coverage before marking feature complete
+
+    Execute step-by-step with live progress updates.
+
+    Plan file: /docs/plan/[name].md"
 
     Args:
         ctx: The runtime context containing chat information.
