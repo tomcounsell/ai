@@ -31,6 +31,15 @@ python main.py & PID=$! && sleep 3 && curl -s http://localhost:8000/health && ki
 scripts/update_mcp.sh
 ```
 
+### Telegram Setup
+```bash
+# First-time Telegram authorization (interactive)
+scripts/telegram_login.sh
+
+# Check existing session status
+python integrations/telegram/auth.py
+```
+
 ### Agent Execution
 ```bash
 # Run UV script agents directly
