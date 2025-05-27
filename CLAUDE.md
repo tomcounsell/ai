@@ -159,7 +159,10 @@ External service integrations support the agent system:
 - **Image Generation**: DALL-E 3 integration with Telegram delivery
 - **Image Analysis**: AI vision capabilities for shared photos
 - **Link Analysis**: Automatic URL analysis and storage with Perplexity
-- **Coding Delegation**: Claude Code session spawning for complex tasks
+- **Coding Delegation**: Claude Code session spawning with structured prompt templates
+  - **Planning Phase**: Comprehensive analysis and implementation planning
+  - **Implementation Phase**: TDD approach with step-by-step execution
+  - **Plan Documentation**: Saved to /docs/plan/ for review and restart capability
 - **Notion Integration**: Project query intelligence with contextual filtering
 - **Conversation Continuity**: Context-aware responses across exchanges
 
