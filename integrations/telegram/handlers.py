@@ -23,10 +23,54 @@ class MessageHandler:
         self.missed_messages_per_chat = {}
         # Web search now handled by PydanticAI agents
         # Link analysis now handled by link_analysis_tool
+        
+        # Load chat filtering configuration from environment
+        self._load_chat_filters()
+
+    def _load_chat_filters(self):
+        """Load chat filtering configuration from environment variables."""
+        import os
+        
+        # Get allowed groups from environment (comma-separated list of group chat IDs)
+        allowed_groups_env = os.getenv("TELEGRAM_ALLOWED_GROUPS", "")
+        self.allowed_groups = set()
+        if allowed_groups_env.strip():
+            try:
+                # Parse comma-separated group chat IDs
+                group_ids = [int(group_id.strip()) for group_id in allowed_groups_env.split(",") if group_id.strip()]
+                self.allowed_groups = set(group_ids)
+                print(f"Group filtering enabled: Only handling groups {self.allowed_groups}")
+            except ValueError as e:
+                print(f"Error parsing TELEGRAM_ALLOWED_GROUPS: {e}. Handling no groups.")
+                self.allowed_groups = set()
+        else:
+            print("No groups specified in TELEGRAM_ALLOWED_GROUPS. Handling no groups.")
+        
+        # Get DM setting from environment (true/false)
+        allow_dms_env = os.getenv("TELEGRAM_ALLOW_DMS", "true").lower().strip()
+        self.allow_dms = allow_dms_env in ("true", "1", "yes", "on")
+        print(f"DM handling: {'Enabled' if self.allow_dms else 'Disabled'}")
+    
+    def _should_handle_chat(self, chat_id: int, is_private_chat: bool = False) -> bool:
+        """Check if this server instance should handle messages from the given chat."""
+        if is_private_chat:
+            # For DMs: either allow all or allow none
+            return self.allow_dms
+        else:
+            # For groups: whitelist only - if groups are specified, only handle those
+            # If no groups specified, handle none
+            return chat_id in self.allowed_groups if self.allowed_groups else False
 
     async def handle_message(self, client, message):
         """Main message handling logic with routing to appropriate handlers."""
         chat_id = message.chat.id
+        is_private_chat = message.chat.type == ChatType.PRIVATE
+        
+        # Check if this server instance should handle this chat
+        if not self._should_handle_chat(chat_id, is_private_chat):
+            chat_type = "DM" if is_private_chat else "group"
+            print(f"Ignoring message from {chat_type} {chat_id} (filtered by server configuration)")
+            return
 
         # Handle different message types
         if message.photo:
@@ -64,8 +108,7 @@ class MessageHandler:
         bot_username = me.username
         bot_id = me.id
 
-        # Check if this is a direct message or if bot is mentioned in group
-        is_private_chat = message.chat.type == ChatType.PRIVATE
+        # is_private_chat already determined above for filtering
 
         print(
             f"Processing message from chat {chat_id} (private: {is_private_chat}): '{message.text[:50]}...'"
@@ -219,12 +262,16 @@ class MessageHandler:
                 else False
             )
 
-            # Get notion data if this seems like a priority question and we have notion_scout
+            # Get notion data - prioritize group-specific database, fallback to priority question detection
             notion_data = None
-            if is_priority and self.notion_scout:
+            if self.notion_scout:
                 try:
-                    # For priority questions, try to get relevant Notion data
-                    notion_data = await self._get_notion_context(processed_text)
+                    # For group chats, use the group-specific Notion database
+                    if not is_private_chat:
+                        notion_data = await self._get_notion_context_for_group(chat_id, processed_text)
+                    # For DMs or if no group-specific database, check if it's a priority question
+                    elif is_priority:
+                        notion_data = await self._get_notion_context(processed_text)
                 except Exception as e:
                     print(f"Warning: Could not get Notion context: {e}")
 
@@ -302,6 +349,37 @@ class MessageHandler:
             "search_saved_links",
             "query_notion_projects",
         ]
+
+    async def _get_notion_context_for_group(self, chat_id: int, processed_text: str) -> str | None:
+        """Get Notion context for group-specific database."""
+        try:
+            if not self.notion_scout:
+                return None
+
+            # Get the project associated with this Telegram group
+            from ..notion.utils import get_telegram_group_project
+            
+            project_name, db_id = get_telegram_group_project(chat_id)
+            if not db_id:
+                print(f"No Notion database configured for group {chat_id}")
+                return None
+
+            print(f"Using Notion database for {project_name} (group {chat_id})")
+            
+            # Set the database filter for this specific project
+            self.notion_scout.db_filter = db_id[:8]
+
+            # Get answer from Notion Scout
+            answer = await self.notion_scout.answer_question(processed_text)
+
+            # Reset filter for next query
+            self.notion_scout.db_filter = None
+
+            return answer
+
+        except Exception as e:
+            print(f"Error getting group-specific Notion context: {e}")
+            return None
 
     async def _get_notion_context(self, processed_text: str) -> str | None:
         """Get Notion context for priority questions."""

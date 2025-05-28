@@ -199,6 +199,12 @@ External service integrations support the agent system:
 - `NOTION_API_KEY` - For project data integration
 - `PERPLEXITY_API_KEY` - For intelligent web search
 
+#### Optional Configuration (Multi-Server Deployments):
+- `TELEGRAM_ALLOWED_GROUPS` - Comma-separated group chat IDs to handle (whitelist)
+- `TELEGRAM_ALLOW_DMS` - Enable/disable DM handling (true/false)
+
+Each group chat can be mapped to a specific Notion database in `integrations/notion/database_mapping.json`
+
 ## Valor - AI Assistant Persona
 **Valor Engels** refers to the PydanticAI agent implementation with a complete persona:
 - Software engineer at Yudame with German/Californian background
@@ -325,7 +331,7 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 - **`docs/teamwork-personas.md`** - Current persona implementation and collaboration framework
 
 ### Strategic Planning
-- **`docs/future-plans.md`** - Comprehensive architectural vision for multi-agent system evolution
+- **`docs/plan/future-plans.md`** - Comprehensive architectural vision for multi-agent system evolution
 
 ### Agent Configuration Files
 - **`agents/valor/persona.md`** - Valor Engels persona definition with Claude Code tool usage guidelines
@@ -348,7 +354,7 @@ These documents provide comprehensive guidance for understanding, developing, te
 - Reference `docs/telegram-integration.md` for message handling patterns
 
 ### Planning and Architecture
-- Consult `docs/future-plans.md` for long-term system evolution plans
+- Consult `docs/plan/future-plans.md` for long-term system evolution plans
 - Review `docs/teamwork-personas.md` for multi-agent collaboration concepts
 
 # important-instruction-reminders

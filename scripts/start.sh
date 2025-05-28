@@ -43,8 +43,13 @@ start_server() {
         pip install uvicorn[standard] fastapi
     fi
 
-    # Start server in background and save PID
-    uvicorn main:app --host 0.0.0.0 --port $PORT --reload &
+    # Create logs directory if it doesn't exist
+    mkdir -p "$PROJECT_ROOT/logs"
+    LOG_FILE="$PROJECT_ROOT/logs/server.log"
+
+    # Start server in background and redirect output to log file
+    echo "Launching server in background (logs: logs/server.log)..."
+    nohup uvicorn main:app --host 0.0.0.0 --port $PORT --reload > "$LOG_FILE" 2>&1 &
     SERVER_PID=$!
     echo $SERVER_PID > "$PID_FILE"
 
@@ -53,14 +58,26 @@ start_server() {
 
     # Check if server started successfully
     if ps -p $SERVER_PID > /dev/null 2>&1; then
-        echo "Server started successfully on port $PORT (PID: $SERVER_PID)"
-        echo "Visit: http://localhost:$PORT/"
-        echo "API docs: http://localhost:$PORT/docs"
-        echo "Alternative docs: http://localhost:$PORT/redoc"
-        echo "Hot reload is enabled - code changes will be reflected automatically"
-        echo "To stop the server, run: scripts/stop.sh"
+        echo "✅ Server started successfully on port $PORT (PID: $SERVER_PID)"
+        echo ""
+        echo "🌐 URLs:"
+        echo "  Main:     http://localhost:$PORT/"
+        echo "  API docs: http://localhost:$PORT/docs"
+        echo "  Redoc:    http://localhost:$PORT/redoc"
+        echo ""
+        echo "📁 Logs:    tail -f logs/server.log"
+        echo "🛑 Stop:    scripts/stop.sh"
+        echo ""
+        echo "Hot reload enabled - code changes auto-refresh"
+        
+        # Show last few lines of log to confirm startup
+        echo ""
+        echo "📋 Recent startup logs:"
+        tail -n 5 "$LOG_FILE" 2>/dev/null || echo "  (logs not available yet)"
     else
-        echo "Failed to start server"
+        echo "❌ Failed to start server"
+        echo "📋 Check logs for details:"
+        cat "$LOG_FILE" 2>/dev/null || echo "  (no log file found)"
         rm -f "$PID_FILE"
         exit 1
     fi

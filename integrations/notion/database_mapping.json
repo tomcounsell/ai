@@ -18,5 +18,9 @@
     "flextrip": "FlexTrip",
     "flex": "FlexTrip",
     "trip": "FlexTrip"
+  },
+  "telegram_groups": {
+    "-1001234567890": "PsyOPTIMAL",
+    "-1009876543210": "FlexTrip"
   }
 }
