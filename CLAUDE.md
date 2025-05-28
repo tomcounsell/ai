@@ -326,6 +326,7 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 - **`docs/agent-architecture.md`** - PydanticAI foundation, current agent system, and development patterns
 - **`docs/tool-development.md`** - Complete guide for creating and integrating tools with best practices
 - **`docs/telegram-integration.md`** - Telegram interface, Valor Engels persona, and message handling
+- **`docs/message-handling.md`** - Complete step-by-step message processing flow and multi-server configuration
 - **`docs/system-operations.md`** - Development workflow, environment setup, and deployment guidance
 - **`docs/testing-strategy.md`** - Current testing infrastructure, frameworks, and validation methods
 - **`docs/teamwork-personas.md`** - Current persona implementation and collaboration framework
@@ -352,6 +353,7 @@ These documents provide comprehensive guidance for understanding, developing, te
 - Follow `docs/system-operations.md` for server management and environment setup
 - Use `docs/testing-strategy.md` for validation approaches
 - Reference `docs/telegram-integration.md` for message handling patterns
+- Review `docs/message-handling.md` for detailed message processing flow and multi-server setup
 
 ### Planning and Architecture
 - Consult `docs/plan/future-plans.md` for long-term system evolution plans

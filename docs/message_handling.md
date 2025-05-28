@@ -2,6 +2,13 @@
 
 This document provides a comprehensive overview of how Telegram messages are processed in the AI agent system, from initial receipt to final response.
 
+## Related Documentation
+
+- **[Telegram Integration](telegram-integration.md)** - Higher-level Telegram interface and persona overview
+- **[Agent Architecture](agent-architecture.md)** - PydanticAI agent system and tool integration
+- **[System Operations](system-operations.md)** - Environment setup and deployment guidance
+- **[Testing Strategy](testing-strategy.md)** - Message handling validation and testing approaches
+
 ## Overview
 
 The message handling system processes incoming Telegram messages through a multi-stage pipeline that includes filtering, mention processing, agent routing, and response generation. The system supports both direct messages (DMs) and group chats with different handling logic for each.
