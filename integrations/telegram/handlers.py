@@ -79,10 +79,16 @@ class MessageHandler:
         if chat_id in self.missed_messages_per_chat and self.missed_messages_per_chat[chat_id]:
             await self._handle_missed_messages(chat_id, message)
 
-        # Handle group mentions and process message
-        is_mentioned, processed_text = self._process_mentions(
-            message, bot_username, bot_id, is_private_chat
-        )
+        # Handle group mentions and process message with error handling
+        try:
+            is_mentioned, processed_text = self._process_mentions(
+                message, bot_username, bot_id, is_private_chat
+            )
+        except Exception as e:
+            print(f"Error processing mentions: {e}")
+            # Fallback: treat as regular message without mentions
+            is_mentioned = is_private_chat  # Only respond in private chats if error
+            processed_text = getattr(message, 'text', None) or getattr(message, 'caption', None) or ""
 
         # Only respond in private chats or when mentioned in groups
         if not (is_private_chat or is_mentioned):
@@ -125,42 +131,66 @@ class MessageHandler:
     ) -> tuple[bool, str]:
         """Process @mentions and return whether bot was mentioned and cleaned text."""
         is_mentioned = False
-        processed_text = message.text
+        
+        # Get text content from either message.text or message.caption (for photos/videos)
+        # Handle all possible None cases explicitly
+        text_content = getattr(message, 'text', None) or getattr(message, 'caption', None) or ""
+        processed_text = text_content
+
+        # Validate inputs
+        if not bot_username or not isinstance(bot_id, int):
+            return is_mentioned, processed_text
 
         # Check for @mentions in groups
-        if not is_private_chat:
+        if not is_private_chat and text_content:
             # Check if bot is mentioned with @username
-            if f"@{bot_username}" in message.text:
+            if f"@{bot_username}" in text_content:
                 is_mentioned = True
                 # Remove the @mention from the text for processing
-                processed_text = message.text.replace(f"@{bot_username}", "").strip()
+                processed_text = text_content.replace(f"@{bot_username}", "").strip()
 
             # Check if bot is mentioned via reply to bot's message
-            elif message.reply_to_message and message.reply_to_message.from_user.id == bot_id:
+            elif (hasattr(message, 'reply_to_message') and 
+                  message.reply_to_message and 
+                  hasattr(message.reply_to_message, 'from_user') and
+                  message.reply_to_message.from_user and
+                  message.reply_to_message.from_user.id == bot_id):
                 is_mentioned = True
 
             # Check if message has entities (mentions, text_mentions)
-            elif message.entities:
+            elif hasattr(message, 'entities') and message.entities:
                 for entity in message.entities:
-                    if entity.type == "mention":
-                        # Extract the mentioned username
-                        mentioned_text = message.text[entity.offset : entity.offset + entity.length]
-                        if mentioned_text == f"@{bot_username}":
+                    try:
+                        if entity.type == "mention":
+                            # Extract the mentioned username with bounds checking
+                            start_offset = max(0, entity.offset)
+                            end_offset = min(len(text_content), entity.offset + entity.length)
+                            mentioned_text = text_content[start_offset:end_offset]
+                            if mentioned_text == f"@{bot_username}":
+                                is_mentioned = True
+                                # Remove the mention from processed text
+                                processed_text = (
+                                    text_content[:start_offset]
+                                    + text_content[end_offset:]
+                                ).strip()
+                                break
+                        elif (entity.type == "text_mention" and 
+                              hasattr(entity, 'user') and 
+                              entity.user and 
+                              entity.user.id == bot_id):
                             is_mentioned = True
-                            # Remove the mention from processed text
+                            # Remove the mention from processed text with bounds checking
+                            start_offset = max(0, entity.offset)
+                            end_offset = min(len(text_content), entity.offset + entity.length)
                             processed_text = (
-                                message.text[: entity.offset]
-                                + message.text[entity.offset + entity.length :]
+                                text_content[:start_offset]
+                                + text_content[end_offset:]
                             ).strip()
                             break
-                    elif entity.type == "text_mention" and entity.user.id == bot_id:
-                        is_mentioned = True
-                        # Remove the mention from processed text
-                        processed_text = (
-                            message.text[: entity.offset]
-                            + message.text[entity.offset + entity.length :]
-                        ).strip()
-                        break
+                    except (AttributeError, IndexError, TypeError) as e:
+                        # Log entity processing error but continue
+                        print(f"Warning: Error processing entity {entity}: {e}")
+                        continue
 
         return is_mentioned, processed_text
 
@@ -347,9 +377,15 @@ class MessageHandler:
 
             # Check if this is a direct message or if bot is mentioned in group
             is_private_chat = message.chat.type == ChatType.PRIVATE
-            is_mentioned, caption_text = self._process_mentions(
-                message, bot_username, bot_id, is_private_chat
-            )
+            try:
+                is_mentioned, caption_text = self._process_mentions(
+                    message, bot_username, bot_id, is_private_chat
+                )
+            except Exception as e:
+                print(f"Error processing photo mentions: {e}")
+                # Fallback: treat as regular photo without mentions
+                is_mentioned = is_private_chat  # Only respond in private chats if error
+                caption_text = getattr(message, 'caption', None) or ""
 
             # Only respond in private chats or when mentioned in groups
             if not (is_private_chat or is_mentioned):
