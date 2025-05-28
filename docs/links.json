@@ -64,5 +64,15 @@
       "main_topic": "",
       "reasons_to_care": "- Claude Code can significantly boost developer productivity by automating repetitive coding and git tasks directly from the terminal[2].\n- It leverages advanced AI to understand and explain complex code, making it valuable for onboarding, code reviews, and collaborative development[2].\n- Integration with GitHub Actions allows for automated code reviews and workflow enhancements, streamlining software development processes[5]."
     }
+  },
+  "https://docs.anthropic.com/en/docs/claude-code/sdk": {
+    "url": "https://docs.anthropic.com/en/docs/claude-code/sdk",
+    "domain": "docs.anthropic.com",
+    "timestamp": "2025-05-28T22:29:25.736138",
+    "analysis": {
+      "title": "SDK - Anthropic API",
+      "main_topic": "The Claude Code SDK allows developers to programmatically integrate Claude Code, an agentic coding tool, into their applications, enabling them to run Claude Code as a subprocess.",
+      "reasons_to_care": "- Provides a way to incorporate Claude Code's capabilities directly into your own applications rather than just using it as a standalone terminal tool\n- Enables programmatic access to Claude Code's features like editing files, fixing bugs, and understanding codebases\n- Supports enterprise deployments through integration with Amazon Bedrock and Google Vertex AI"
+    }
   }
 }
