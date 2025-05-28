@@ -58,7 +58,7 @@ python tests/run_tests.py
 /docs/                      # Architecture documentation
   ├── agent-architecture.md # Current PydanticAI implementation
   ├── tool-development.md   # Tool creation patterns
-  └── future-plans.md       # Multi-agent vision and roadmap
+    └── future-plans.md     # Multi-agent vision and roadmap
 ```
 
 ## 🛠️ Tool Development
@@ -117,7 +117,7 @@ python main.py & PID=$! && sleep 3 && curl http://localhost:9000/health && kill 
 
 ### 🔮 Next Steps
 - **Tool Ecosystem Expansion**: Code execution, file operations, and development tools
-- **Multi-Agent Workflows**: Agent collaboration and orchestration (see docs/future-plans.md)
+- **Multi-Agent Workflows**: Agent collaboration and orchestration (see docs/plan/future-plans.md)
 - **Enhanced Context**: Persistent conversation memory across sessions
 - **Claude Code Integration**: Advanced tool delegation and workflow automation
 

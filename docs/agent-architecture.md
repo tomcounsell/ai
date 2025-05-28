@@ -68,7 +68,7 @@ def tool_function(ctx: RunContext[ContextType], param: str) -> str:
 - **Future-Proof**: LLM intelligence adapts to new tools automatically
 - **Unified Experience**: Single agent handles ALL functionality consistently
 
-Additional specialized agents are planned for future development (see `docs/future-plans.md`).
+Additional specialized agents are planned for future development (see `docs/plan/future-plans.md`).
 
 ## Agent Communication Patterns
 
@@ -140,7 +140,7 @@ async def handle_telegram_message(message, chat_id, **context):
 
 ### System Orchestration
 
-Current message routing uses simple keyword-based detection to route messages to appropriate handlers. Advanced multi-agent orchestration capabilities are planned for future development (see `docs/future-plans.md`).
+Current message routing uses simple keyword-based detection to route messages to appropriate handlers. Advanced multi-agent orchestration capabilities are planned for future development (see `docs/plan/future-plans.md`).
 
 ## Agent Development Patterns
 

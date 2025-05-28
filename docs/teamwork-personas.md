@@ -50,7 +50,7 @@ This document outlines the current persona implementation and future multi-agent
 **Communication Style**: Strategic, comprehensive, process-oriented
 **Tools Available**: Claude Code integration, project planning frameworks
 
-**Current Status**: Planned for future implementation (see `docs/future-plans.md`)
+**Current Status**: Planned for future implementation (see `docs/plan/future-plans.md`)
 
 ## Current Implementation Status
 
@@ -116,7 +116,7 @@ def delegate_coding_task(
 
 Additional specialized personas are planned for future development to provide diverse perspectives and domain expertise. The framework supports easy addition of new personas.
 
-*See `docs/future-plans.md` for detailed multi-persona collaboration visions including:*
+*See `docs/plan/future-plans.md` for detailed multi-persona collaboration visions including:*
 - PersonaOrchestrator for coordinating multiple agents
 - Sequential and parallel collaboration workflows
 - Inter-persona communication protocols
