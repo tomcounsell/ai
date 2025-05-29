@@ -333,6 +333,7 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 
 ### Strategic Planning
 - **`docs/plan/future-plans.md`** - Comprehensive architectural vision for multi-agent system evolution
+- **`docs/plan/unified-valor-claude-integration.md`** - Complete transformation plan for seamless Valor-Claude integration
 
 ### Agent Configuration Files
 - **`agents/valor/persona.md`** - Valor Engels persona definition with Claude Code tool usage guidelines
@@ -357,6 +358,7 @@ These documents provide comprehensive guidance for understanding, developing, te
 
 ### Planning and Architecture
 - Consult `docs/plan/future-plans.md` for long-term system evolution plans
+- Review `docs/plan/unified-valor-claude-integration.md` for the complete Valor-Claude transformation plan
 - Review `docs/teamwork-personas.md` for multi-agent collaboration concepts
 
 # important-instruction-reminders
