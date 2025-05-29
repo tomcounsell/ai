@@ -237,74 +237,39 @@ def delegate_coding_task(
     target_directory: str = ".",
     specific_instructions: str = "",
 ) -> str:
-    """Spawn a new Claude Code session to handle complex coding tasks.
+    """Delegate any coding task to Claude Code - it handles everything autonomously.
 
-    This tool creates a new Claude Code session with specialized coding capabilities
-    to handle complex development tasks that require multiple steps, file operations,
-    or git workflows. It's designed for tasks beyond simple conversation.
+    Claude Code is a full-featured development environment that can:
+    - Explore and understand any codebase automatically
+    - Read, write, and modify files in any directory
+    - Run tests, commit changes, and push to GitHub
+    - Create implementation plans and execute them
+    - Handle complex multi-step development tasks
 
-    Use this when the user needs:
-    - New features or applications built
-    - Complex refactoring across multiple files
-    - Git workflows (branching, committing, etc.)
-    - File system operations in specific directories
-    - Tasks that require multiple tools and steps
+    Simply describe what needs to be done - Claude Code will figure out how to do it.
+    All parameters are optional with smart defaults.
 
-    For complex features, use these structured prompt templates:
+    Use this for ANY development request:
+    - "Fix the login bug"
+    - "Add a dark mode feature" 
+    - "Refactor the API endpoints"
+    - "Update dependencies and run tests"
+    - "Implement user authentication"
 
-    PLANNING PHASE TEMPLATE:
-    "Investigate and create a detailed implementation plan for: [feature/change name]
-
-    Process:
-    1. Analyze the codebase to understand current architecture and patterns
-    2. Research requirements and identify dependencies
-    3. Design the implementation approach with consideration for:
-       - Existing code patterns and conventions
-       - Required tests and test scenarios
-       - Potential edge cases and error handling
-       - Integration points and side effects
-    4. Create comprehensive plan with step-by-step implementation details
-    5. Save complete reasoning, analysis, and plan to /docs/plan/[name].md
-
-    Include in the plan document:
-    - Requirements analysis
-    - Current state assessment
-    - Proposed solution architecture
-    - Detailed implementation steps
-    - Test scenarios and coverage requirements
-    - Potential risks and mitigation strategies
-    - Success criteria
-
-    Feature/Change: [your specific request here]"
-
-    IMPLEMENTATION PHASE TEMPLATE:
-    "Implement the plan documented in /docs/plan/[name].md using TDD approach:
-
-    Process:
-    1. Read and understand the complete plan from /docs/plan/[name].md
-    2. Create todos based on the planned implementation steps
-    3. Follow strict TDD: write tests → verify they fail → implement → make tests pass → refactor → commit
-    4. If you discover issues requiring plan adjustments, update /docs/plan/[name].md first
-    5. Mark todos complete in real-time as you progress
-    6. Achieve 100% test coverage before marking feature complete
-
-    Execute step-by-step with live progress updates.
-
-    Plan file: /docs/plan/[name].md"
+    Don't overthink it - just describe the task and let Claude Code handle the details.
 
     Args:
-        ctx: The runtime context containing conversation information.
-        task_description: High-level description of what needs to be done.
-        target_directory: Directory where the work should be performed (use absolute paths).
-        specific_instructions: Additional detailed requirements or constraints.
+        ctx: The runtime context containing chat information.
+        task_description: What needs to be built, fixed, or implemented.
+        target_directory: (Optional) Specific directory to work in. Defaults to current project.
+        specific_instructions: (Optional) Any additional constraints or preferences.
 
     Returns:
-        str: Results from the Claude Code session execution, including any
-             files created, modified, or error messages if the session failed.
+        str: Response from Claude Code with task results and status.
 
     Example:
-        >>> delegate_coding_task(ctx, "Create a CLI tool", "/tmp", "Use Python")
-        'Claude Code session completed successfully:\n\nCreated new CLI application...'
+        >>> delegate_coding_task(ctx, "Fix the authentication bug")
+        'Claude Code session completed successfully: Fixed login validation...'
     """
     try:
         result = spawn_claude_session(
