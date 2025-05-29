@@ -83,13 +83,13 @@ class UnifiedValorClaudeAgent:
         )
         self.telegram_streamer = TelegramStreamHandler()
         self.context_manager = ConversationContextManager()
-    
+
     async def handle_telegram_message(self, message: str, chat_id: int, context: Dict):
         """Process any message through unified system with real-time streaming."""
-        
+
         # Build context-enhanced prompt
         enhanced_message = self._inject_context(message, context)
-        
+
         # Stream responses directly to Telegram
         async for response_chunk in self.claude_session.stream(enhanced_message):
             await self.telegram_streamer.send_update(chat_id, response_chunk)
@@ -105,15 +105,15 @@ class UnifiedValorClaudeAgent:
 @app.tool()
 async def search_current_info(query: str) -> str:
     """Search for current information using Perplexity AI."""
-    
-@app.tool() 
+
+@app.tool()
 async def create_image(prompt: str, chat_id: str = None) -> str:
     """Generate images using DALL-E 3 with Telegram integration."""
-    
+
 @app.tool()
 async def save_link(url: str, chat_id: str = None) -> str:
     """Save and analyze links with AI-powered content analysis."""
-    
+
 @app.tool()
 async def search_links(query: str, chat_id: str = None) -> str:
     """Search through previously saved links."""
@@ -131,7 +131,7 @@ async def query_notion_projects(question: str) -> str:
 @app.tool()
 async def search_conversation_history(query: str, chat_id: str) -> str:
     """Search through Telegram conversation history for specific topics."""
-    
+
 @app.tool()
 async def get_conversation_context(hours_back: int = 24, chat_id: str = None) -> str:
     """Get extended conversation context beyond immediate messages."""
@@ -149,26 +149,26 @@ async def get_conversation_context(hours_back: int = 24, chat_id: str = None) ->
 ```python
 def _inject_context(self, message: str, context: Dict) -> str:
     """Inject Telegram context that MCP tools need."""
-    
+
     context_vars = []
-    
+
     # Essential context for tools
     if context.get('chat_id'):
         context_vars.append(f"CHAT_ID={context['chat_id']}")
-    
+
     if context.get('username'):
         context_vars.append(f"USERNAME={context['username']}")
-    
+
     # Recent conversation for context tools
     if context.get('chat_history'):
         recent = context['chat_history'][-5:]
         history_text = "\n".join([f"{msg['role']}: {msg['content']}" for msg in recent])
         context_vars.append(f"RECENT_HISTORY:\n{history_text}")
-    
+
     # Notion data if available (group-specific or priority questions)
     if context.get('notion_data'):
         context_vars.append(f"PROJECT_DATA:\n{context['notion_data']}")
-    
+
     if context_vars:
         context_block = "\n".join(context_vars)
         return f"""CONTEXT_DATA:
@@ -177,7 +177,7 @@ def _inject_context(self, message: str, context: Dict) -> str:
 When using tools that need chat_id, username, or context data, extract it from CONTEXT_DATA above.
 
 USER_REQUEST: {message}"""
-    
+
     return message
 ```
 
@@ -188,9 +188,9 @@ USER_REQUEST: {message}"""
 ```python
 def _build_unified_prompt(self) -> str:
     """Combined Valor persona with seamless development capabilities."""
-    
+
     valor_persona = load_valor_persona()  # Existing persona from persona.md
-    
+
     development_integration = """
 CRITICAL INTEGRATION GUIDELINES:
 
@@ -198,7 +198,7 @@ You are Valor Engels in a unified conversational development environment. You ha
 
 🔧 DEVELOPMENT CAPABILITIES:
 - Read, write, and modify files in any directory
-- Run tests, commit changes, and push to GitHub  
+- Run tests, commit changes, and push to GitHub
 - Explore codebases and understand project structures
 - Create implementation plans and execute them step-by-step
 
@@ -214,7 +214,7 @@ You are Valor Engels in a unified conversational development environment. You ha
 
 SEAMLESS OPERATION RULES:
 1. NEVER ask "Should I...?" or "What directory?" - just do what makes sense
-2. NEVER separate "chat" from "coding" - they're one fluid experience  
+2. NEVER separate "chat" from "coding" - they're one fluid experience
 3. ALWAYS provide real-time progress updates during development work
 4. Use tools naturally within conversation flow without explicit "switching modes"
 5. For any development request, start working immediately with progress updates
@@ -227,7 +227,7 @@ CONTEXT USAGE:
 
 You are not two separate systems - you are one unified conversational development environment.
 """
-    
+
     return f"{valor_persona}\n\n{development_integration}"
 ```
 
@@ -238,17 +238,17 @@ You are not two separate systems - you are one unified conversational developmen
 ```python
 class TelegramStreamHandler:
     """Handle real-time streaming responses to Telegram with smart formatting."""
-    
+
     def __init__(self):
         self.active_messages = {}
         self.update_throttle = 2.0  # Prevent rate limiting
-        
+
     async def send_update(self, chat_id: int, content: str):
         """Stream content updates to Telegram with intelligent batching."""
-        
+
         message_key = f"{chat_id}_current"
         current_time = time.time()
-        
+
         # Accumulate content for batching
         if message_key not in self.active_messages:
             self.active_messages[message_key] = {
@@ -259,16 +259,16 @@ class TelegramStreamHandler:
             }
         else:
             self.active_messages[message_key]['buffer'].append(content)
-        
+
         message_data = self.active_messages[message_key]
-        
+
         # Smart update timing to avoid rate limits
         if current_time - message_data['last_update'] >= self.update_throttle:
             # Flush buffer to content
             if message_data['buffer']:
                 message_data['content'] += ''.join(message_data['buffer'])
                 message_data['buffer'] = []
-            
+
             # Send or update message
             if message_data['message_id']:
                 await self.client.edit_message_text(
@@ -282,20 +282,20 @@ class TelegramStreamHandler:
                     text=message_data['content'][:4000]
                 )
                 message_data['message_id'] = sent_message.id
-            
+
             message_data['last_update'] = current_time
 
     async def _process_special_responses(self, response_chunk: str, chat_id: int):
         """Handle special response types during streaming."""
-        
+
         # Image generation detection
         if 'TELEGRAM_IMAGE_GENERATED|' in response_chunk:
             await self._handle_image_response(response_chunk, chat_id)
-        
+
         # Progress indicators
         if any(indicator in response_chunk.lower() for indicator in ['analyzing', 'creating', 'testing', 'committing']):
             await self._add_progress_reaction(chat_id)
-        
+
         # Completion indicators
         if any(indicator in response_chunk.lower() for indicator in ['completed', 'finished', 'done', 'success']):
             await self._add_completion_reaction(chat_id)
@@ -313,7 +313,7 @@ class TelegramStreamHandler:
 - [Claude Code CLI Usage](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code) - Tool configuration
 
 #### Tasks:
-- [ ] **Social Tools MCP Server** 
+- [ ] **Social Tools MCP Server**
   - **Reference:** [MCP Specification](https://modelcontextprotocol.io/specification/2025-03-26) - Tool definitions
   - Implement search_current_info, create_image, save_link, search_links
   - Test web search and image generation
@@ -434,6 +434,7 @@ class TelegramStreamHandler:
   - Optimize streaming performance and memory usage
   - Implement intelligent context window management
   - Add caching for frequently used data
+  - also see [Manage Claude's memory](https://docs.anthropic.com/en/docs/claude-code/memory)
 
 - [ ] **Comprehensive Testing**
   - **Reference:** [Claude Code Tutorials](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code/tutorials) - Testing workflows
@@ -523,6 +524,7 @@ System: "All tests passing, committed fix" (seamless completion)
 2. **Claude Code Session Stability**
    - **Risk**: Long-running sessions may become unstable
    - **Mitigation**: Session recovery mechanisms, health checks, automatic restarts
+   - see [Session management](https://docs.anthropic.com/en/docs/claude-code/sdk#session-management)
 
 3. **Telegram Rate Limiting**
    - **Risk**: Streaming updates may hit rate limits
