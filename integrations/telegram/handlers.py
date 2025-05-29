@@ -72,6 +72,18 @@ class MessageHandler:
             print(f"Ignoring message from {chat_type} {chat_id} (filtered by server configuration)")
             return
 
+        # Mark message as read (read receipt)
+        try:
+            await client.read_chat_history(chat_id, message.id)
+        except Exception as e:
+            print(f"Warning: Could not mark message as read: {e}")
+
+        # Add reaction to show message is being processed
+        try:
+            await client.send_reaction(chat_id, message.id, "👀")
+        except Exception as e:
+            print(f"Warning: Could not add reaction: {e}")
+
         # Handle different message types
         if message.photo:
             await self._handle_photo_message(client, message, chat_id)

@@ -31,6 +31,7 @@ from tools.image_generation_tool import generate_image
 from tools.link_analysis_tool import extract_urls, search_stored_links, store_link_with_analysis
 from tools.notion_tool import query_psyoptimal_workspace
 from tools.search_tool import search_web
+from tools.telegram_history_tool import search_telegram_history, get_telegram_context_summary
 
 
 class ValorContext(BaseModel):
@@ -53,6 +54,7 @@ class ValorContext(BaseModel):
     username: str | None = None
     is_group_chat: bool = False
     chat_history: list[dict[str, Any]] = []
+    chat_history_obj: Any = None  # ChatHistoryManager instance for search tools
     notion_data: str | None = None
     is_priority_question: bool = False
 
@@ -418,6 +420,86 @@ def query_notion_projects(
         return result
     except Exception as e:
         return f"❌ Error querying PsyOPTIMAL workspace: {str(e)}\n\nPlease ensure your Notion API integration is properly configured."
+
+
+@valor_agent.tool
+def search_conversation_history(
+    ctx: RunContext[ValorContext],
+    search_query: str,
+    max_results: int = 5,
+) -> str:
+    """Search through Telegram conversation history for specific information.
+
+    This tool searches through the full message history of the current chat to find
+    relevant previous conversations, references, or information that might not be
+    in the immediate recent context. Use this when you need to find specific topics,
+    links, or discussions that happened earlier.
+
+    Use this when:
+    - User references something from a previous conversation ("that link I sent", "what we discussed yesterday")
+    - You need to find specific information mentioned before
+    - Looking for previous decisions, recommendations, or solutions
+    - Finding context about ongoing projects or topics
+
+    Args:
+        ctx: The runtime context containing chat information and history manager.
+        search_query: Keywords or terms to search for in message history.
+        max_results: Maximum number of relevant messages to return (default 5).
+
+    Returns:
+        str: Formatted list of relevant historical messages or "No matches found".
+
+    Example:
+        >>> search_conversation_history(ctx, "authentication API", 3)
+        'Found 2 relevant message(s) for "authentication API":...'
+    """
+    if not ctx.deps.chat_history_obj or not ctx.deps.chat_id:
+        return "No chat history available for search"
+    
+    return search_telegram_history(
+        query=search_query,
+        chat_history_obj=ctx.deps.chat_history_obj,
+        chat_id=ctx.deps.chat_id,
+        max_results=max_results
+    )
+
+
+@valor_agent.tool
+def get_conversation_context(
+    ctx: RunContext[ValorContext],
+    hours_back: int = 24,
+) -> str:
+    """Get extended conversation context and summary.
+
+    This tool provides a broader view of the recent conversation beyond just
+    the last few messages. Use this when you need to understand the overall
+    flow and context of the conversation to provide better responses.
+
+    Use this when:
+    - You need more context to understand what's being discussed
+    - The conversation seems to reference earlier topics
+    - You want to see the full recent conversation flow
+    - Understanding the broader context would help provide better assistance
+
+    Args:
+        ctx: The runtime context containing chat information and history manager.
+        hours_back: How many hours of conversation history to summarize (default 24).
+
+    Returns:
+        str: Formatted conversation summary or "No recent activity".
+
+    Example:
+        >>> get_conversation_context(ctx, 12)
+        'Conversation summary (last 12 hours, 8 messages):...'
+    """
+    if not ctx.deps.chat_history_obj or not ctx.deps.chat_id:
+        return "No chat history available"
+    
+    return get_telegram_context_summary(
+        chat_history_obj=ctx.deps.chat_history_obj,
+        chat_id=ctx.deps.chat_id,
+        hours_back=hours_back
+    )
 
 
 async def run_valor_agent(message: str, context: ValorContext | None = None) -> str:

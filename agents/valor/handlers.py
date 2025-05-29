@@ -55,6 +55,7 @@ async def handle_telegram_message(
         username=username,
         is_group_chat=is_group_chat,
         chat_history=[],  # Legacy field, now handled by message_history
+        chat_history_obj=chat_history_obj,  # Pass the history manager for search tools
         notion_data=notion_data,
         is_priority_question=is_priority_question,
     )
@@ -62,22 +63,32 @@ async def handle_telegram_message(
     # Add contextual information to the user message if needed
     enhanced_message = message
 
-    # Include Notion data for priority questions
-    if is_priority_question and notion_data and "Error" not in notion_data:
-        enhanced_message = (
-            f"Context - Current project data:\n{notion_data}\n\nUser question: {message}"
+    # Build enhanced message with context - always include chat history when available
+    context_parts = []
+    
+    # Add recent chat context for continuity (always include if available)
+    if chat_history_obj:
+        telegram_messages = chat_history_obj.get_context(
+            chat_id, 
+            max_context_messages=8,  # Up to 8 messages total
+            max_age_hours=6,         # Only messages from last 6 hours
+            always_include_last=2    # Always include last 2 messages regardless of age
         )
-
-    # Add recent chat context for continuity
-    elif chat_history_obj:
-        telegram_messages = chat_history_obj.get_context(chat_id)
         if telegram_messages:
-            recent_context = telegram_messages[-2:]  # Last 2 messages for context
-            if recent_context:
-                context_text = "Recent conversation:\n"
-                for msg in recent_context:
-                    context_text += f"{msg['role']}: {msg['content']}\n"
-                enhanced_message = f"{context_text}\n{message}"
+            context_text = "Recent conversation:\n"
+            for msg in telegram_messages:
+                context_text += f"{msg['role']}: {msg['content']}\n"
+            context_parts.append(context_text)
+    
+    # Include Notion data for priority questions (in addition to chat context)
+    if is_priority_question and notion_data and "Error" not in notion_data:
+        context_parts.append(f"Current project data:\n{notion_data}")
+    
+    # Combine all context with the current message
+    if context_parts:
+        enhanced_message = "\n\n".join(context_parts) + f"\n\nCurrent message: {message}"
+    else:
+        enhanced_message = message
 
     # Run the agent
     result = await valor_agent.run(enhanced_message, deps=context)

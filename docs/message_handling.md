@@ -11,7 +11,13 @@ This document provides a comprehensive overview of how Telegram messages are pro
 
 ## Overview
 
-The message handling system processes incoming Telegram messages through a multi-stage pipeline that includes filtering, mention processing, agent routing, and response generation. The system supports both direct messages (DMs) and group chats with different handling logic for each.
+The message handling system processes incoming Telegram messages through a multi-stage pipeline that includes filtering, read receipts, processing reactions, mention processing, agent routing, and response generation. The system supports both direct messages (DMs) and group chats with different handling logic for each.
+
+**Key Features:**
+- **Immediate confirmation**: Read receipts and "👀" reactions provide instant feedback
+- **Multi-server filtering**: Environment-based chat filtering for horizontal scaling
+- **Intelligent routing**: Context-aware agent selection with Notion database integration
+- **Comprehensive error handling**: Graceful degradation at each processing stage
 
 ## Entry Point
 
@@ -33,7 +39,26 @@ is_private_chat = message.chat.type == ChatType.PRIVATE
 - **If filtered out**: Message is completely ignored, function returns early
 - **Logs**: `"Ignoring message from {DM|group} {chat_id} (filtered by server configuration)"`
 
-### 2. Message Type Detection
+### 2. Message Confirmation & Processing Indicators
+
+**Read Receipt:**
+```python
+await client.read_chat_history(chat_id, message.id)
+```
+- Marks the message as read in Telegram
+- Sends read receipt to the sender
+- Handled with try/catch to prevent processing interruption
+
+**Processing Reaction:**
+```python
+await client.send_reaction(chat_id, message.id, "👀")
+```
+- Adds "👀" emoji reaction to the incoming message
+- Provides immediate visual feedback that the bot is processing
+- Applied to ALL message types (text, photos, documents, etc.)
+- Handled with try/catch to prevent processing interruption
+
+### 3. Message Type Detection
 
 The system handles different message types with specialized handlers:
 
@@ -42,9 +67,9 @@ The system handles different message types with specialized handlers:
 - **Audio/Voice**: → `_handle_audio_message()`
 - **Video**: → `_handle_video_message()`
 - **No text content**: Message ignored
-- **Text messages**: Continue to step 3
+- **Text messages**: Continue to step 4
 
-### 3. Message Age Check & Catch-up Handling
+### 4. Message Age Check & Catch-up Handling
 
 ```python
 if is_message_too_old(message.date.timestamp()):
@@ -61,7 +86,7 @@ if is_message_too_old(message.date.timestamp()):
 - Generate catch-up response using AI if missed messages exist
 - Clear missed messages collection
 
-### 4. Bot Info & Mention Processing
+### 5. Bot Info & Mention Processing
 
 ```python
 me = await client.get_me()
@@ -85,7 +110,7 @@ bot_id = me.id
 **Error Handling:**
 - If mention processing fails, fallback to `is_mentioned = is_private_chat`
 
-### 5. Response Decision Gate
+### 6. Response Decision Gate
 
 ```python
 if not (is_private_chat or is_mentioned):
@@ -98,7 +123,7 @@ if not (is_private_chat or is_mentioned):
 - **Groups**: Only proceed if bot was mentioned
 - **Filtered messages**: Still stored in chat history for context
 
-### 6. Message Storage
+### 7. Message Storage
 
 ```python
 self.chat_history.add_message(chat_id, "user", processed_text)
@@ -106,7 +131,7 @@ self.chat_history.add_message(chat_id, "user", processed_text)
 
 Store the processed user message in chat history (with mentions removed).
 
-### 7. Special Content Handling
+### 8. Special Content Handling
 
 #### Link-Only Messages:
 ```python
@@ -122,7 +147,7 @@ if is_url_only_message(processed_text):
 - Store response in chat history
 - Return (don't continue to agent processing)
 
-### 8. Message Routing
+### 9. Message Routing
 
 ```python
 await self._route_message(message, chat_id, processed_text)
@@ -143,7 +168,7 @@ if text == "ping":
 #### Standard Processing:
 All other messages route to `_handle_with_valor_agent()`.
 
-### 9. Valor Agent Processing
+### 10. Valor Agent Processing
 
 ```python
 await self._handle_with_valor_agent(message, chat_id, processed_text)
@@ -153,6 +178,28 @@ await self._handle_with_valor_agent(message, chat_id, processed_text)
 ```python
 is_priority = is_user_priority_question(processed_text)
 ```
+
+#### Context Enhancement with Message History:
+
+**Recent Chat Context (Always Applied):**
+```python
+chat_history_obj.get_context(
+    chat_id, 
+    max_context_messages=8,  # Up to 8 messages total
+    max_age_hours=6,         # Only from last 6 hours  
+    always_include_last=2    # Always include last 2 messages regardless of age
+)
+```
+- **Guaranteed context**: Last 2 messages always included (supports overnight conversations)
+- **Soft time filtering**: Additional messages only from last 6 hours
+- **Count limiting**: Maximum 8 messages total for context
+- **Applied to**: All conversations (DMs and groups)
+- **Format**: "Recent conversation:" with role and content
+
+**Smart Filtering Logic:**
+1. **Always include** last 2 messages (even if older than 6 hours)
+2. **Fill remaining slots** (up to 8 total) with recent messages within 6 hours
+3. **Score by relevance + recency** for optimal context selection
 
 #### Notion Context Loading:
 
@@ -166,6 +213,48 @@ is_priority = is_user_priority_question(processed_text)
 - Only get Notion context if `is_priority = True`
 - Uses `_get_notion_context()` with project name detection from message text
 - Searches for keywords: "psyoptimal", "flextrip", "psy", "flex"
+
+#### Enhanced Message Construction:
+
+**Context Combination:**
+```python
+# Chat history + Notion data + current message
+enhanced_message = """
+Recent conversation:
+user: [previous message]
+assistant: [previous response]
+
+Current project data:
+[notion context if applicable]
+
+Current message: [new user message]
+"""
+```
+- **Chat context**: Always included when available (smart filtered with guaranteed recent messages)
+- **Notion context**: Added for priority questions or group-specific databases
+- **Current message**: Clearly separated as the primary request
+
+#### Agent Tools for Extended History Access:
+
+**Search Conversation History Tool:**
+```python
+@valor_agent.tool
+def search_conversation_history(ctx, search_query: str, max_results: int = 5)
+```
+- **Purpose**: Search full message history for specific topics or references
+- **Use cases**: "that link I sent", "what we discussed yesterday", finding previous decisions
+- **Search scope**: Last 30 days of conversation history
+- **Scoring**: Relevance + recency weighted algorithm
+
+**Get Conversation Context Tool:**
+```python
+@valor_agent.tool  
+def get_conversation_context(ctx, hours_back: int = 24)
+```
+- **Purpose**: Get extended conversation summary beyond immediate context
+- **Use cases**: Understanding broader conversation flow, seeing complete recent discussion
+- **Scope**: Configurable hours back (default 24 hours)
+- **Returns**: Formatted conversation summary with timestamps
 
 #### Agent Invocation:
 ```python
@@ -182,7 +271,7 @@ answer = await handle_telegram_message(
 )
 ```
 
-### 10. Response Processing
+### 11. Response Processing
 
 ```python
 await self._process_agent_response(message, chat_id, answer)
