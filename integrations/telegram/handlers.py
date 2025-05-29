@@ -262,40 +262,84 @@ class MessageHandler:
         await self._handle_with_valor_agent(message, chat_id, processed_text)
 
     async def _handle_with_valor_agent(self, message, chat_id: int, processed_text: str):
-        """Handle all messages using valor_agent (telegram_chat_agent)."""
+        """Handle all messages using unified valor-claude agent system."""
         try:
-            # Use telegram_chat_agent directly for all message processing
-            from agents.valor.handlers import handle_telegram_message
+            # Try unified agent first, with fallback to original valor agent
+            try:
+                from agents.unified_integration import process_message_unified
+                
+                # Determine if this might be a priority question for context
+                is_priority = (
+                    is_user_priority_question(processed_text)
+                    if "is_user_priority_question" in globals()
+                    else False
+                )
+                
+                # Get notion data - prioritize group-specific database, fallback to priority question detection
+                notion_data = None
+                if self.notion_scout:
+                    try:
+                        # For group chats, use the group-specific Notion database
+                        is_private_chat = message.chat.type == ChatType.PRIVATE
+                        if not is_private_chat:
+                            notion_data = await self._get_notion_context_for_group(chat_id, processed_text)
+                        # For DMs or if no group-specific database, check if it's a priority question
+                        elif is_priority:
+                            notion_data = await self._get_notion_context(processed_text)
+                    except Exception as e:
+                        print(f"Warning: Could not get Notion context: {e}")
+                
+                # Get chat history for context
+                chat_history = self.chat_history.get_context(chat_id, max_context_messages=10)
+                
+                # Process through unified system
+                answer = await process_message_unified(
+                    message=processed_text,
+                    chat_id=chat_id,
+                    username=message.from_user.username if message.from_user else None,
+                    is_group_chat=message.chat.type != ChatType.PRIVATE,
+                    chat_history=chat_history,
+                    chat_history_obj=self.chat_history,
+                    notion_data=notion_data
+                )
+                
+                print(f"✅ Processed message through unified agent system")
+                
+            except ImportError as e:
+                print(f"⚠️ Unified agent not available ({e}), falling back to original valor agent")
+                # Fallback to original valor agent
+                from agents.valor.handlers import handle_telegram_message
 
-            # Determine if this might be a priority question for context
-            is_priority = (
-                is_user_priority_question(processed_text)
-                if "is_user_priority_question" in globals()
-                else False
-            )
+                # Determine if this might be a priority question for context
+                is_priority = (
+                    is_user_priority_question(processed_text)
+                    if "is_user_priority_question" in globals()
+                    else False
+                )
 
-            # Get notion data - prioritize group-specific database, fallback to priority question detection
-            notion_data = None
-            if self.notion_scout:
-                try:
-                    # For group chats, use the group-specific Notion database
-                    if not is_private_chat:
-                        notion_data = await self._get_notion_context_for_group(chat_id, processed_text)
-                    # For DMs or if no group-specific database, check if it's a priority question
-                    elif is_priority:
-                        notion_data = await self._get_notion_context(processed_text)
-                except Exception as e:
-                    print(f"Warning: Could not get Notion context: {e}")
+                # Get notion data - prioritize group-specific database, fallback to priority question detection
+                notion_data = None
+                if self.notion_scout:
+                    try:
+                        # For group chats, use the group-specific Notion database
+                        is_private_chat = message.chat.type == ChatType.PRIVATE
+                        if not is_private_chat:
+                            notion_data = await self._get_notion_context_for_group(chat_id, processed_text)
+                        # For DMs or if no group-specific database, check if it's a priority question
+                        elif is_priority:
+                            notion_data = await self._get_notion_context(processed_text)
+                    except Exception as e:
+                        print(f"Warning: Could not get Notion context: {e}")
 
-            answer = await handle_telegram_message(
-                message=processed_text,
-                chat_id=chat_id,
-                username=message.from_user.username if message.from_user else None,
-                is_group_chat=message.chat.type != ChatType.PRIVATE,
-                chat_history_obj=self.chat_history,
-                notion_data=notion_data,
-                is_priority_question=is_priority,
-            )
+                answer = await handle_telegram_message(
+                    message=processed_text,
+                    chat_id=chat_id,
+                    username=message.from_user.username if message.from_user else None,
+                    is_group_chat=message.chat.type != ChatType.PRIVATE,
+                    chat_history_obj=self.chat_history,
+                    notion_data=notion_data,
+                    is_priority_question=is_priority,
+                )
 
             # Process the agent response (handles both images and text)
             await self._process_agent_response(message, chat_id, answer)
@@ -495,26 +539,46 @@ class MessageHandler:
             else:
                 self.chat_history.add_message(chat_id, "user", "[Photo shared]")
 
-            # Use PydanticAI agent to analyze the image
+            # Use unified agent system to analyze the image
             if self.notion_scout and self.notion_scout.anthropic_client:
-                from agents.valor.handlers import handle_telegram_message
+                try:
+                    # Try unified agent first
+                    from agents.unified_integration import process_image_unified
+                    
+                    # Get chat history for context
+                    chat_history = self.chat_history.get_context(chat_id, max_context_messages=5)
+                    
+                    answer = await process_image_unified(
+                        image_path=file_path,
+                        chat_id=chat_id,
+                        caption=caption_text if caption_text else "",
+                        username=message.from_user.username if message.from_user else None,
+                        chat_history=chat_history
+                    )
+                    
+                    print(f"✅ Processed image through unified agent system")
+                    
+                except ImportError as e:
+                    print(f"⚠️ Unified agent not available for images ({e}), falling back to original valor agent")
+                    # Fallback to original valor agent
+                    from agents.valor.handlers import handle_telegram_message
 
-                # Prepare message for the agent
-                if caption_text:
-                    agent_message = f"Please analyze this image: {caption_text}"
-                else:
-                    agent_message = "Please analyze this image and tell me what you see."
+                    # Prepare message for the agent
+                    if caption_text:
+                        agent_message = f"Please analyze this image: {caption_text}"
+                    else:
+                        agent_message = "Please analyze this image and tell me what you see."
 
-                # Add image path context to the message so the agent can use the tool
-                agent_message += f"\n\n[Image downloaded to: {file_path}]"
+                    # Add image path context to the message so the agent can use the tool
+                    agent_message += f"\n\n[Image downloaded to: {file_path}]"
 
-                answer = await handle_telegram_message(
-                    message=agent_message,
-                    chat_id=chat_id,
-                    username=message.from_user.username if message.from_user else None,
-                    is_group_chat=not is_private_chat,
-                    chat_history_obj=self.chat_history,
-                )
+                    answer = await handle_telegram_message(
+                        message=agent_message,
+                        chat_id=chat_id,
+                        username=message.from_user.username if message.from_user else None,
+                        is_group_chat=not is_private_chat,
+                        chat_history_obj=self.chat_history,
+                    )
 
                 # Process the response (handles both images and text)
                 await self._process_agent_response(message, chat_id, answer)
