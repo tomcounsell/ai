@@ -8,13 +8,13 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from integrations.notion.scout import NotionScout
+from integrations.notion.query_engine import get_notion_engine
 from integrations.telegram.client import TelegramClient
 
 load_dotenv()
 
 telegram_client = None
-notion_scout = None
+notion_engine = None
 
 
 class AuthCode(BaseModel):
@@ -27,21 +27,18 @@ class AuthPassword(BaseModel):
 
 async def start_telegram_client():
     """Initialize the Telegram client."""
-    global telegram_client, notion_scout
+    global telegram_client, notion_engine
 
-    notion_key = os.getenv("NOTION_API_KEY")
-    anthropic_key = os.getenv("ANTHROPIC_API_KEY")
-
-    # Initialize Notion Scout if keys are available
-    if notion_key and anthropic_key:
-        notion_scout = NotionScout(notion_key, anthropic_key)
-        print("Notion Scout initialized successfully")
+    # Initialize Notion query engine
+    notion_engine = get_notion_engine()
+    if notion_engine:
+        print("Notion query engine initialized successfully")
     else:
-        print("Notion Scout not initialized - missing API keys")
+        print("Notion query engine not initialized - missing API keys")
 
     # Initialize Telegram client
     telegram_client = TelegramClient()
-    success = await telegram_client.initialize(notion_scout)
+    success = await telegram_client.initialize(notion_engine)
 
     if success:
         print("Telegram integration initialized successfully")

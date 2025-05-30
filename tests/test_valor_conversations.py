@@ -22,7 +22,7 @@ sys.path.append(str(Path(__file__).parent.parent))
 
 from dotenv import load_dotenv
 
-from integrations.notion.scout import NotionScout
+from integrations.notion.query_engine import NotionQueryEngine
 from integrations.telegram.chat_history import ChatHistoryManager
 from agents.valor.handlers import handle_telegram_message
 
@@ -57,7 +57,7 @@ class ConversationTester:
         notion_key = os.getenv("NOTION_API_KEY")
         anthropic_key = os.getenv("ANTHROPIC_API_KEY")
         if notion_key and anthropic_key:
-            self.notion_scout = NotionScout(notion_key, anthropic_key)
+            self.notion_scout = NotionQueryEngine(notion_key, anthropic_key)
             print("✅ NotionScout initialized for testing")
         else:
             print("⚠️  NotionScout not available for testing")
