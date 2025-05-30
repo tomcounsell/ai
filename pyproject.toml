@@ -9,6 +9,7 @@ description = "PydanticAI agent system with intelligent tool orchestration"
 authors = [{name = "Valor Engels", email = "valor@yudame.com"}]
 readme = "README.md"
 requires-python = ">=3.11"
+
 dependencies = [
     "pydantic-ai",
     "anthropic",
@@ -19,7 +20,13 @@ dependencies = [
     "pyrogram",
     "requests",
     "popoto",
+    "mcp[cli]",
+    "pytest>=8.3.5",
 ]
+
+[tool.setuptools.packages.find]
+include = ["agents*", "tools*", "integrations*", "utilities*", "mcp_servers*"]
+exclude = ["tests*", "_archive_*", "_study_*", "logs*"]
 
 [tool.ruff]
 # Python version
