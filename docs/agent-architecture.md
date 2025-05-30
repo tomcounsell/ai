@@ -16,7 +16,7 @@ The system is built on **Claude Code** as the primary interface, enhanced with:
 
 ```python
 # Unified system architecture
-class UnifiedValorClaudeAgent:
+class ValorAgent:
     def __init__(self):
         self.claude_session = ClaudeCodeSession(
             system_prompt=self._build_unified_prompt(),

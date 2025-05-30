@@ -236,7 +236,7 @@ The system provides a unified conversational development environment through Cla
 **Unified System Pattern**:
 ```python
 # Claude Code integration with MCP servers
-class UnifiedValorClaudeAgent:
+class ValorAgent:
     def __init__(self):
         self.claude_session = ClaudeCodeSession(
             system_prompt=self._build_unified_prompt(),
