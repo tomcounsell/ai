@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test the Claude Code tool integration.
+Test the Valor delegation tool integration.
 """
 
 import asyncio
@@ -12,12 +12,12 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent.parent))
 
 from agents.valor.agent import ValorContext, run_valor_agent
-from tools.claude_code_tool import execute_claude_code
+from tools.valor_delegation_tool import execute_valor_delegation
 
 
-async def test_claude_code_tool_basic():
-    """Test basic Claude Code tool functionality."""
-    print("🧪 Testing Claude Code Tool - Basic Functionality")
+async def test_valor_delegation_tool_basic():
+    """Test basic Valor delegation tool functionality."""
+    print("🧪 Testing Valor Delegation Tool - Basic Functionality")
     print("=" * 50)
 
     # Create a temporary directory for testing
@@ -31,14 +31,14 @@ async def test_claude_code_tool_basic():
         """
 
         try:
-            result = execute_claude_code(
+            result = execute_valor_delegation(
                 prompt=prompt,
                 working_directory=temp_dir,
                 allowed_tools=["Write", "Read", "LS"],
                 timeout=30,
             )
 
-            print("✅ Claude Code execution completed")
+            print("✅ Valor delegation execution completed")
             print(f"Result: {result[:200]}..." if len(result) > 200 else f"Result: {result}")
 
             # Check if file was created
@@ -54,8 +54,8 @@ async def test_claude_code_tool_basic():
 
 
 async def test_valor_agent_delegation():
-    """Test Valor agent delegating tasks to Claude Code."""
-    print("\n🤖 Testing Valor Agent - Claude Code Delegation")
+    """Test Valor agent delegating tasks to specialized sessions."""
+    print("\n🤖 Testing Valor Agent - Session Delegation")
     print("=" * 50)
 
     # Create context
@@ -107,14 +107,14 @@ async def test_spacing_change_revert():
         """
 
         try:
-            result = execute_claude_code(
+            result = execute_valor_delegation(
                 prompt=prompt,
                 working_directory=temp_dir,
                 allowed_tools=["Write", "Bash", "Read"],
                 timeout=30,
             )
 
-            print("✅ Claude Code execution with linter test completed")
+            print("✅ Valor delegation execution with linter test completed")
             print(f"Result preview: {result[:300]}...")
 
             # Check if file exists and has been formatted
@@ -137,10 +137,10 @@ async def test_spacing_change_revert():
 
 async def main():
     """Run all tests."""
-    print("🚀 Starting Claude Code Tool Tests")
+    print("🚀 Starting Valor Delegation Tool Tests")
     print("=" * 60)
 
-    await test_claude_code_tool_basic()
+    await test_valor_delegation_tool_basic()
     await test_valor_agent_delegation()
     await test_spacing_change_revert()
 

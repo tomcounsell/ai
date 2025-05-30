@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "social-tools": {
+      "command": "python",
+      "args": ["mcp_servers/social_tools.py"],
+      "description": "Social tools for web search, image generation, and link analysis",
+      "dependencies": ["openai", "requests", "python-dotenv", "mcp"]
+    },
+    "notion-tools": {
+      "command": "python", 
+      "args": ["mcp_servers/notion_tools.py"],
+      "description": "Notion workspace querying and project analysis tools",
+      "dependencies": ["anthropic", "requests", "python-dotenv", "mcp"]
+    },
+    "telegram-tools": {
+      "command": "python",
+      "args": ["mcp_servers/telegram_tools.py"], 
+      "description": "Telegram conversation history search and context tools",
+      "dependencies": ["python-dotenv", "mcp"]
+    },
+    "development-tools": {
+      "command": "python",
+      "args": ["mcp_servers/development_tools.py"],
+      "description": "Comprehensive development tools including test generation, code linting, document analysis, and image processing",
+      "dependencies": ["openai", "anthropic", "requests", "python-dotenv", "mcp", "pydantic"]
+    }
+  }
+}

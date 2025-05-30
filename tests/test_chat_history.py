@@ -17,7 +17,7 @@ import os
 
 from dotenv import load_dotenv
 
-from integrations.notion.scout import NotionScout
+from integrations.notion.query_engine import NotionQueryEngine
 from integrations.telegram.chat_history import ChatHistoryManager
 
 load_dotenv()
@@ -35,7 +35,7 @@ class ChatHistoryTester:
         notion_key = os.getenv("NOTION_API_KEY")
         anthropic_key = os.getenv("ANTHROPIC_API_KEY")
         if notion_key and anthropic_key:
-            self.notion_scout = NotionScout(notion_key, anthropic_key)
+            self.notion_scout = NotionQueryEngine(notion_key, anthropic_key)
 
     def clear_test_chat(self):
         """Clear test chat history"""

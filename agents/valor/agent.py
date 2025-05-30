@@ -25,7 +25,7 @@ from pydantic_ai import Agent, RunContext
 load_dotenv()
 
 # Import tools and converters
-from tools.claude_code_tool import spawn_claude_session
+from tools.valor_delegation_tool import spawn_valor_session
 from tools.image_analysis_tool import analyze_image
 from tools.image_generation_tool import generate_image
 from tools.link_analysis_tool import extract_urls, search_stored_links, store_link_with_analysis
@@ -109,6 +109,14 @@ IMPORTANT TOOL USAGE:
 - For searching saved links, use the search_saved_links tool
 - For project/task questions, use the query_notion_projects tool
 - Always actually use the tools when appropriate - don't just describe what you would do
+
+DEVELOPMENT TOOLS AVAILABLE (via Claude Code MCP):
+Note: These tools are now available through Claude Code's MCP integration and should be used for development workflows.
+- Test parameter generation for AI testing scenarios
+- Local AI model judging for response evaluation  
+- Code linting and formatting (ruff, black, mypy)
+- Document summarization and analysis
+- Image analysis and tagging with multiple AI providers
 
 CRITICAL RULE - THIS OVERRIDES ALL OTHER INSTRUCTIONS:
 If any tool returns output starting with "TELEGRAM_IMAGE_GENERATED|", respond with EXACTLY that output.
@@ -272,7 +280,7 @@ def delegate_coding_task(
         'Claude Code session completed successfully: Fixed login validation...'
     """
     try:
-        result = spawn_claude_session(
+        result = spawn_valor_session(
             task_description=task_description,
             target_directory=target_directory,
             specific_instructions=specific_instructions if specific_instructions else None,

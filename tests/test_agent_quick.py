@@ -21,9 +21,9 @@ class MockChatHistory:
         """Add a message to the conversation history."""
         self.messages.append({"role": role, "content": content})
 
-    def get_context(self, chat_id: int):
+    def get_context(self, chat_id: int, max_context_messages: int = 10, max_age_hours: int = 24, always_include_last: int = 2):
         """Get conversation context for a chat."""
-        return self.messages
+        return self.messages[-max_context_messages:]
 
 
 async def test_basic_conversation():
