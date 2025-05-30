@@ -28,6 +28,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Flexible, adaptive responses based on conversation flow
 - Future-proof designs that leverage AI capabilities
 
+**4. MANDATORY COMMIT AND PUSH WORKFLOW**
+- **ALWAYS commit and push changes at the end of every task**
+- **Never leave work uncommitted in the repository**
+- Create clear, descriptive commit messages explaining the changes
+- Push to remote repository to ensure changes are preserved
+- Use `git add . && git commit -m "Description" && git push` pattern
+- This ensures all work is properly saved and available for future sessions
+
 ## Development Commands
 
 ### Dependency Management
