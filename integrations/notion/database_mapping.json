@@ -5,19 +5,37 @@
       "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
       "description": "PsyOPTIMAL project tasks and management"
     },
+    "PsyOPTIMAL Dev": {
+      "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
+      "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
+      "description": "PsyOPTIMAL development tasks and management"
+    },
     "FlexTrip": {
       "database_id": "1ed2bc89-4d10-80e5-89e9-feefe994dddd",
       "url": "https://www.notion.so/yudame/1ed2bc894d1080e589e9feefe994dddd",
       "description": "FlexTrip project tasks and management"
+    },
+    "DeckFusion Dev": {
+      "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
+      "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
+      "description": "DeckFusion development tasks and management"
     }
   },
   "aliases": {
     "psyoptimal": "PsyOPTIMAL",
     "psy": "PsyOPTIMAL",
     "optimal": "PsyOPTIMAL",
+    "psyoptimal dev": "PsyOPTIMAL Dev",
+    "psy dev": "PsyOPTIMAL Dev",
+    "optimal dev": "PsyOPTIMAL Dev",
     "flextrip": "FlexTrip",
     "flex": "FlexTrip",
-    "trip": "FlexTrip"
+    "trip": "FlexTrip",
+    "deckfusion": "DeckFusion Dev",
+    "deck": "DeckFusion Dev",
+    "fusion": "DeckFusion Dev",
+    "deckfusion dev": "DeckFusion Dev",
+    "deck dev": "DeckFusion Dev"
   },
   "telegram_groups": {
     "-1001234567890": "PsyOPTIMAL",
