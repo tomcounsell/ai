@@ -84,5 +84,15 @@
       "main_topic": null,
       "reasons_to_care": null
     }
+  },
+  "https://www.magicpath.ai/": {
+    "url": "https://www.magicpath.ai/",
+    "domain": "www.magicpath.ai",
+    "timestamp": "2025-05-30T10:11:33.564074",
+    "analysis": {
+      "title": "MagicPath AI",
+      "main_topic": "MagicPath AI is an AI-powered platform that enables users—especially experts and content creators—to effortlessly transform their knowledge or existing content into engaging, customizable online courses, using features like an AI learning designer and personalized learning paths[2][4][5].",
+      "reasons_to_care": "- Streamlines and simplifies the process of creating professional online courses, making it accessible for educators, trainers, and creators without technical expertise[2][5].\n- Offers advanced customization (duration, difficulty, tone) and personalized learning journeys, enhancing both creator flexibility and learner engagement[4][5].\n- Utilizes AI to optimize content delivery and course design, potentially saving time and improving the quality of educational experiences[4][5]."
+    }
   }
 }
