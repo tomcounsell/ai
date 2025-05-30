@@ -32,6 +32,11 @@ WORKSPACE_SETTINGS = {
         "url": "https://www.notion.so/yudame/1ed2bc894d1080e589e9feefe994dddd",
         "description": "FlexTrip project tasks and management",
     },
+    "DeckFusion Dev": {
+        "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
+        "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
+        "description": "DeckFusion development tasks and management",
+    },
 }
 
 # Workspace aliases for flexible input
@@ -42,6 +47,11 @@ WORKSPACE_ALIASES = {
     "flextrip": "FlexTrip",
     "flex": "FlexTrip",
     "trip": "FlexTrip",
+    "deckfusion": "DeckFusion Dev",
+    "deck": "DeckFusion Dev",
+    "fusion": "DeckFusion Dev",
+    "deckfusion dev": "DeckFusion Dev",
+    "deck dev": "DeckFusion Dev",
 }
 
 
