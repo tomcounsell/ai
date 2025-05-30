@@ -169,7 +169,7 @@ class MessageHandler:
                 catchup_response = await generate_catchup_response(
                     self.missed_messages_per_chat[chat_id], self.notion_scout.anthropic_client
                 )
-                await message.reply(f"📬 {catchup_response}")
+                await self._safe_reply(message, f"📬 {catchup_response}", "📬 Caught up on missed messages")
                 self.chat_history.add_message(chat_id, "assistant", catchup_response)
 
             # Clear missed messages for this chat
@@ -346,7 +346,7 @@ class MessageHandler:
 
         except Exception as e:
             error_msg = f"❌ Error processing message: {str(e)}"
-            await message.reply(error_msg)
+            await self._safe_reply(message, error_msg, "❌ Error processing message")
             self.chat_history.add_message(chat_id, "assistant", error_msg)
 
     async def _handle_ping(self, message, chat_id: int):
@@ -391,7 +391,7 @@ class MessageHandler:
 
 ⚠️ Detailed metrics unavailable: {str(e)[:50]}"""
 
-        await message.reply(response)
+        await self._safe_reply(message, response, "🏓 pong - Bot is running")
         self.chat_history.add_message(chat_id, "assistant", response)
 
     def _get_available_tools(self) -> list[str]:
@@ -491,14 +491,14 @@ class MessageHandler:
             else:
                 response = "thx, saved. (had trouble analyzing)"
 
-            await message.reply(response)
+            await self._safe_reply(message, response, "Link saved")
 
             # Store response in chat history
             self.chat_history.add_message(chat_id, "assistant", response)
 
         except Exception as e:
             error_msg = f"❌ Error saving link: {str(e)}"
-            await message.reply(error_msg)
+            await self._safe_reply(message, error_msg, "❌ Error saving link")
             self.chat_history.add_message(chat_id, "assistant", error_msg)
 
     async def _handle_photo_message(self, client, message, chat_id: int):
@@ -585,12 +585,12 @@ class MessageHandler:
 
             else:
                 response = "👁️ I can see you shared an image, but I need my AI capabilities configured to analyze it!"
-                await message.reply(response)
+                await self._safe_reply(message, response, "👁️ Image received")
                 self.chat_history.add_message(chat_id, "assistant", response)
 
         except Exception as e:
             error_msg = f"❌ Error processing image: {str(e)}"
-            await message.reply(error_msg)
+            await self._safe_reply(message, error_msg, "❌ Error processing image")
             self.chat_history.add_message(chat_id, "assistant", error_msg)
 
     async def _handle_document_message(self, client, message, chat_id: int):
@@ -608,12 +608,12 @@ class MessageHandler:
             if is_private_chat or is_mentioned:
                 doc_name = message.document.file_name or "unknown file"
                 response = f"📄 I see you shared a document: {doc_name}. Document analysis isn't implemented yet, but I'm working on it!"
-                await message.reply(response)
+                await self._safe_reply(message, response, "📄 Document received")
                 self.chat_history.add_message(chat_id, "assistant", response)
 
         except Exception as e:
             error_msg = f"❌ Error processing document: {str(e)}"
-            await message.reply(error_msg)
+            await self._safe_reply(message, error_msg, "❌ Error processing document")
 
     async def _handle_audio_message(self, client, message, chat_id: int):
         """Handle audio/voice messages - placeholder for future implementation."""
@@ -632,12 +632,12 @@ class MessageHandler:
                     response = "🎙️ I hear you sent a voice message! Voice transcription isn't implemented yet, but it's on my roadmap."
                 else:
                     response = "🎵 I see you shared an audio file! Audio analysis isn't implemented yet, but I'm working on it."
-                await message.reply(response)
+                await self._safe_reply(message, response, "🎵 Audio received")
                 self.chat_history.add_message(chat_id, "assistant", response)
 
         except Exception as e:
             error_msg = f"❌ Error processing audio: {str(e)}"
-            await message.reply(error_msg)
+            await self._safe_reply(message, error_msg, "❌ Error processing audio")
 
     async def _handle_video_message(self, client, message, chat_id: int):
         """Handle video messages - placeholder for future implementation."""
@@ -656,12 +656,12 @@ class MessageHandler:
                     response = "📹 I see you sent a video note! Video analysis isn't implemented yet, but it's planned."
                 else:
                     response = "🎬 I see you shared a video! Video analysis isn't implemented yet, but I'm working on it."
-                await message.reply(response)
+                await self._safe_reply(message, response, "🎬 Video received")
                 self.chat_history.add_message(chat_id, "assistant", response)
 
         except Exception as e:
             error_msg = f"❌ Error processing video: {str(e)}"
-            await message.reply(error_msg)
+            await self._safe_reply(message, error_msg, "❌ Error processing video")
 
     async def _process_agent_response(
         self, message, chat_id: int, answer: str, prefix: str = ""
@@ -681,6 +681,13 @@ class MessageHandler:
         import os
         from pathlib import Path
 
+        # Validate input parameters
+        if not isinstance(answer, str):
+            answer = str(answer) if answer is not None else ""
+        
+        if not isinstance(prefix, str):
+            prefix = str(prefix) if prefix is not None else ""
+
         # Check if response contains generated image
         if answer.startswith("TELEGRAM_IMAGE_GENERATED|"):
             try:
@@ -689,6 +696,9 @@ class MessageHandler:
                 if len(parts) == 3:
                     image_path = parts[1]
                     caption = parts[2]
+
+                    # Validate caption content
+                    caption = self._validate_message_content(caption, "🖼️ Generated image")
 
                     # Verify image file exists
                     if Path(image_path).exists():
@@ -711,26 +721,108 @@ class MessageHandler:
                     else:
                         # Image file doesn't exist, send error message
                         error_msg = "🎨 Image was generated but file not found. Please try again."
-                        await message.reply(error_msg)
+                        await self._safe_reply(message, error_msg, "🎨 Image generation error")
                         self.chat_history.add_message(chat_id, "assistant", error_msg)
                         return True
 
             except Exception as e:
                 error_msg = f"❌ Error sending image: {str(e)}"
-                await message.reply(error_msg)
+                await self._safe_reply(message, error_msg, "❌ Error sending image")
                 self.chat_history.add_message(chat_id, "assistant", error_msg)
                 return True
 
+        # Validate the answer content before processing
+        validated_answer = self._validate_message_content(answer, "🤔 I processed your message but didn't have a response.")
+
         # Standard text response handling
-        if len(answer) > 4000:
-            parts = [answer[i : i + 4000] for i in range(0, len(answer), 4000)]
+        if len(validated_answer) > 4000:
+            parts = [validated_answer[i : i + 4000] for i in range(0, len(validated_answer), 4000)]
             for part in parts:
                 response_text = f"{prefix} {part}".strip() if prefix else part
-                await message.reply(response_text)
-            self.chat_history.add_message(chat_id, "assistant", answer)
+                # Additional validation for each part
+                response_text = self._validate_message_content(response_text, "📝 Message part")
+                await self._safe_reply(message, response_text, "📝 Message part")
+            self.chat_history.add_message(chat_id, "assistant", validated_answer)
         else:
-            response_text = f"{prefix} {answer}".strip() if prefix else answer
-            await message.reply(response_text)
-            self.chat_history.add_message(chat_id, "assistant", answer)
+            response_text = f"{prefix} {validated_answer}".strip() if prefix else validated_answer
+            # Final validation before sending
+            response_text = self._validate_message_content(response_text, "📨 Response")
+            await self._safe_reply(message, response_text, "📨 Response")
+            self.chat_history.add_message(chat_id, "assistant", validated_answer)
 
         return False
+
+    def _validate_message_content(self, content: str, fallback_message: str = "📝 Message") -> str:
+        """
+        Validate message content before sending to Telegram API.
+        
+        Handles:
+        - Empty or whitespace-only content
+        - Character encoding issues
+        - Invalid characters that could cause Telegram API errors
+        
+        Args:
+            content: The message content to validate
+            fallback_message: Default message if content is invalid
+            
+        Returns:
+            str: Valid message content ready for Telegram API
+        """
+        # Handle None or non-string input
+        if not isinstance(content, str):
+            content = str(content) if content is not None else ""
+        
+        # Remove leading/trailing whitespace
+        content = content.strip()
+        
+        # Check for empty content
+        if not content:
+            return fallback_message
+        
+        # Check for whitespace-only content (including special characters)
+        if not content.replace('\n', '').replace('\t', '').replace(' ', '').replace('\r', ''):
+            return fallback_message
+        
+        # Validate character encoding - replace problematic characters
+        try:
+            # Ensure content can be encoded to UTF-8
+            content.encode('utf-8')
+        except UnicodeEncodeError:
+            # Replace problematic characters with safe alternatives
+            content = content.encode('utf-8', errors='replace').decode('utf-8')
+            print(f"Warning: Fixed character encoding issues in message content")
+        
+        # Remove control characters that might cause issues (except newlines and tabs)
+        import re
+        content = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', content)
+        
+        # Final check after cleaning
+        content = content.strip()
+        if not content:
+            return fallback_message
+        
+        # Ensure message isn't too long for Telegram (4096 character limit)
+        if len(content) > 4000:
+            content = content[:3997] + "..."
+        
+        return content
+
+    async def _safe_reply(self, message, content: str, fallback_message: str = "🤖 Message processed") -> None:
+        """
+        Safely send a reply with content validation to prevent MESSAGE_EMPTY errors.
+        
+        Args:
+            message: Telegram message object to reply to
+            content: Content to send
+            fallback_message: Fallback if content is invalid
+        """
+        validated_content = self._validate_message_content(content, fallback_message)
+        try:
+            await message.reply(validated_content)
+        except Exception as e:
+            print(f"Error sending reply: {e}")
+            # Try once more with a simple fallback
+            try:
+                await message.reply("🤖 Error sending response")
+            except Exception as e2:
+                print(f"Failed to send fallback reply: {e2}")
