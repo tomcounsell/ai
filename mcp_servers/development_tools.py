@@ -57,11 +57,43 @@ from tools.image_tagging_tool import (
     content_moderation_tags
 )
 
+# Add project root to path for workspace validation
+import sys
+from pathlib import Path
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
+
+from utilities.workspace_validator import get_workspace_validator, WorkspaceAccessError
+
 # Load environment variables
 load_dotenv()
 
 # Initialize MCP server
 mcp = FastMCP("Development Tools")
+
+
+def validate_directory_access(chat_id: str, file_path: str) -> Optional[str]:
+    """Validate directory access for a chat ID and file path.
+    
+    Args:
+        chat_id: Telegram chat ID making the request
+        file_path: File or directory path to validate
+        
+    Returns:
+        Error message if validation fails, None if access is allowed
+    """
+    if not chat_id:
+        # Allow access if no chat_id provided (direct usage)
+        return None
+        
+    try:
+        validator = get_workspace_validator()
+        validator.validate_directory_access(chat_id, file_path)
+        return None  # Access allowed
+    except WorkspaceAccessError as e:
+        return f"❌ Directory Access Denied: {str(e)}"
+    except Exception as e:
+        return f"❌ Directory Validation Error: {str(e)}"
 
 
 # ==================== TEST PARAMETER GENERATION TOOLS ====================
@@ -244,9 +276,10 @@ def lint_python_code(
     run_ruff: bool = True,
     run_black: bool = True,
     run_mypy: bool = False,
-    fix_issues: bool = False
+    fix_issues: bool = False,
+    chat_id: str = ""
 ) -> str:
-    """Run comprehensive Python code linting and formatting checks.
+    """Run comprehensive Python code linting and formatting checks with directory access controls.
     
     Executes multiple linting tools (ruff, black, mypy, flake8) and provides
     aggregated results with issue categorization and fix suggestions.
@@ -257,10 +290,16 @@ def lint_python_code(
         run_black: Whether to run black formatter check
         run_mypy: Whether to run mypy type checker (can be slow)
         fix_issues: Whether to automatically fix fixable issues
+        chat_id: Telegram chat ID for directory access validation (optional)
     
     Returns:
         JSON string containing linting results with issues and summary
     """
+    # Validate directory access
+    access_error = validate_directory_access(chat_id, project_path)
+    if access_error:
+        return access_error
+    
     try:
         config = LintConfig(
             run_ruff=run_ruff,
@@ -277,8 +316,8 @@ def lint_python_code(
 
 
 @mcp.tool()
-def lint_specific_files(file_paths: List[str], fix_formatting: bool = False) -> str:
-    """Lint specific Python files rather than entire project.
+def lint_specific_files(file_paths: List[str], fix_formatting: bool = False, chat_id: str = "") -> str:
+    """Lint specific Python files rather than entire project with directory access controls.
     
     Focused linting for specific files, useful for targeted code review
     or when working with individual modules.
@@ -286,10 +325,17 @@ def lint_specific_files(file_paths: List[str], fix_formatting: bool = False) -> 
     Args:
         file_paths: List of specific Python files to lint
         fix_formatting: Whether to automatically fix formatting issues
+        chat_id: Telegram chat ID for directory access validation (optional)
     
     Returns:
         JSON string containing linting results for specified files
     """
+    # Validate directory access for all file paths
+    for file_path in file_paths:
+        access_error = validate_directory_access(chat_id, file_path)
+        if access_error:
+            return access_error
+    
     try:
         config = LintConfig(fix_issues=fix_formatting)
         result = lint_files(file_paths, config)
@@ -300,18 +346,24 @@ def lint_specific_files(file_paths: List[str], fix_formatting: bool = False) -> 
 
 
 @mcp.tool()
-def quick_code_check(file_path: str) -> str:
-    """Quick pass/fail code quality check for a single file.
+def quick_code_check(file_path: str, chat_id: str = "") -> str:
+    """Quick pass/fail code quality check for a single file with directory access controls.
     
     Fast code quality validation, useful for CI/CD or rapid feedback
     during development.
     
     Args:
         file_path: Path to the Python file to check
+        chat_id: Telegram chat ID for directory access validation (optional)
     
     Returns:
         Simple pass/fail result with basic summary
     """
+    # Validate directory access
+    access_error = validate_directory_access(chat_id, file_path)
+    if access_error:
+        return access_error
+    
     try:
         passed = quick_lint_check(file_path)
         return f"✅ Code quality check: {'PASSED' if passed else 'FAILED'}"
@@ -321,18 +373,24 @@ def quick_code_check(file_path: str) -> str:
 
 
 @mcp.tool()
-def comprehensive_project_lint(project_path: str) -> str:
-    """Run comprehensive linting with all tools enabled.
+def comprehensive_project_lint(project_path: str, chat_id: str = "") -> str:
+    """Run comprehensive linting with all tools enabled and directory access controls.
     
     Strict linting analysis using all available tools for thorough
     code quality assessment.
     
     Args:
         project_path: Path to the Python project to analyze
+        chat_id: Telegram chat ID for directory access validation (optional)
     
     Returns:
         JSON string containing comprehensive linting results
     """
+    # Validate directory access
+    access_error = validate_directory_access(chat_id, project_path)
+    if access_error:
+        return access_error
+    
     try:
         result = strict_lint_check(project_path)
         return json.dumps(result.model_dump(), indent=2)
@@ -348,9 +406,10 @@ def summarize_code_documentation(
     document_path: str,
     max_section_words: int = 500,
     summary_style: str = "comprehensive",
-    focus_topics: Optional[List[str]] = None
+    focus_topics: Optional[List[str]] = None,
+    chat_id: str = ""
 ) -> str:
-    """Read and summarize large documents (markdown, code files, text).
+    """Read and summarize large documents (markdown, code files, text) with directory access controls.
     
     Automatically detects document type and creates structured summaries
     with section analysis, key insights, and reading time estimates.
@@ -360,10 +419,16 @@ def summarize_code_documentation(
         max_section_words: Maximum words per section summary
         summary_style: Style of summary - 'brief', 'comprehensive', or 'technical'
         focus_topics: Optional list of topics to focus on during analysis
+        chat_id: Telegram chat ID for directory access validation (optional)
     
     Returns:
         JSON string containing structured document summary
     """
+    # Validate directory access
+    access_error = validate_directory_access(chat_id, document_path)
+    if access_error:
+        return access_error
+    
     try:
         config = SummaryConfig(
             max_section_words=max_section_words,
@@ -404,9 +469,10 @@ def summarize_url_content(url: str, summary_style: str = "comprehensive") -> str
 @mcp.tool()
 def batch_summarize_documents(
     document_paths: List[str],
-    summary_style: str = "comprehensive"
+    summary_style: str = "comprehensive",
+    chat_id: str = ""
 ) -> str:
-    """Summarize multiple documents in batch for efficiency.
+    """Summarize multiple documents in batch for efficiency with directory access controls.
     
     Process multiple documents simultaneously, useful for analyzing
     entire documentation sets or code repositories.
@@ -414,10 +480,17 @@ def batch_summarize_documents(
     Args:
         document_paths: List of document paths to summarize
         summary_style: Style of summary for all documents
+        chat_id: Telegram chat ID for directory access validation (optional)
     
     Returns:
         JSON string containing summaries for all documents
     """
+    # Validate directory access for all document paths
+    for document_path in document_paths:
+        access_error = validate_directory_access(chat_id, document_path)
+        if access_error:
+            return access_error
+    
     try:
         config = SummaryConfig(summary_style=summary_style)
         summaries = batch_summarize_docs(document_paths, config)
@@ -434,18 +507,24 @@ def batch_summarize_documents(
 
 
 @mcp.tool()
-def quick_document_overview(file_path: str) -> str:
-    """Get a quick text overview of a document.
+def quick_document_overview(file_path: str, chat_id: str = "") -> str:
+    """Get a quick text overview of a document with directory access controls.
     
     Fast document analysis providing a brief summary, useful for
     quick document assessment or content verification.
     
     Args:
         file_path: Path to the document to analyze
+        chat_id: Telegram chat ID for directory access validation (optional)
     
     Returns:
         Brief text summary of the document
     """
+    # Validate directory access
+    access_error = validate_directory_access(chat_id, file_path)
+    if access_error:
+        return access_error
+    
     try:
         return quick_doc_summary(file_path)
         
@@ -461,9 +540,10 @@ def analyze_image_content(
     max_tags: int = 20,
     min_confidence: float = 0.3,
     api_provider: str = "openai",
-    use_local_model: bool = False
+    use_local_model: bool = False,
+    chat_id: str = ""
 ) -> str:
-    """Analyze image and generate comprehensive tags using AI vision models.
+    """Analyze image and generate comprehensive tags using AI vision models with directory access controls.
     
     Uses AI vision capabilities to identify objects, scenes, styles, colors,
     and mood in images with structured tag output and confidence scores.
@@ -474,10 +554,16 @@ def analyze_image_content(
         min_confidence: Minimum confidence threshold for tags (0.0-1.0)
         api_provider: API provider - 'openai', 'anthropic', or 'local'
         use_local_model: Whether to use local vision model (via Ollama)
+        chat_id: Telegram chat ID for directory access validation (optional)
     
     Returns:
         JSON string containing comprehensive image analysis
     """
+    # Validate directory access
+    access_error = validate_directory_access(chat_id, image_path)
+    if access_error:
+        return access_error
+    
     try:
         config = TaggingConfig(
             max_tags=max_tags,
@@ -494,8 +580,8 @@ def analyze_image_content(
 
 
 @mcp.tool()
-def get_simple_image_tags(image_path: str, max_tags: int = 10) -> str:
-    """Extract simple list of tags from an image.
+def get_simple_image_tags(image_path: str, max_tags: int = 10, chat_id: str = "") -> str:
+    """Extract simple list of tags from an image with directory access controls.
     
     Quick image tagging without detailed analysis, useful for basic
     content categorization or search indexing.
@@ -503,16 +589,53 @@ def get_simple_image_tags(image_path: str, max_tags: int = 10) -> str:
     Args:
         image_path: Path to the image file
         max_tags: Maximum number of tags to return
+        chat_id: Telegram chat ID for directory access validation (optional)
     
     Returns:
         JSON array of tag strings
     """
+    # Validate directory access
+    access_error = validate_directory_access(chat_id, image_path)
+    if access_error:
+        return access_error
+    
     try:
         tags = extract_simple_tags(image_path, max_tags)
         return json.dumps(tags)
         
     except Exception as e:
         return f"❌ Error extracting image tags: {str(e)}"
+
+
+@mcp.tool()
+def validate_directory_access_tool(chat_id: str, file_path: str) -> str:
+    """Validate if a chat has access to a specific directory or file path.
+    
+    Args:
+        chat_id: Telegram chat ID to validate
+        file_path: File or directory path to check access for
+        
+    Returns:
+        str: Validation result with access details
+    """
+    try:
+        validator = get_workspace_validator()
+        validator.validate_directory_access(chat_id, file_path)
+        
+        # Get workspace details
+        allowed_workspace = validator.get_workspace_for_chat(chat_id)
+        allowed_dirs = validator.get_allowed_directories(chat_id)
+        
+        return f"✅ **Directory Access Granted**\n\n" \
+               f"• Chat: {chat_id}\n" \
+               f"• File Path: {file_path}\n" \
+               f"• Workspace: {allowed_workspace}\n" \
+               f"• Allowed Directories: {', '.join(allowed_dirs)}"
+        
+    except WorkspaceAccessError as e:
+        return f"❌ **Directory Access Denied**: {str(e)}"
+    except Exception as e:
+        return f"❌ **Directory Validation Error**: {str(e)}"
 
 
 @mcp.tool()
