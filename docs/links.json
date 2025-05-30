@@ -94,5 +94,15 @@
       "main_topic": "MagicPath AI is an AI-powered platform that enables users—especially experts and content creators—to effortlessly transform their knowledge or existing content into engaging, customizable online courses, using features like an AI learning designer and personalized learning paths[2][4][5].",
       "reasons_to_care": "- Streamlines and simplifies the process of creating professional online courses, making it accessible for educators, trainers, and creators without technical expertise[2][5].\n- Offers advanced customization (duration, difficulty, tone) and personalized learning journeys, enhancing both creator flexibility and learner engagement[4][5].\n- Utilizes AI to optimize content delivery and course design, potentially saving time and improving the quality of educational experiences[4][5]."
     }
+  },
+  "https://www.context.inc/": {
+    "url": "https://www.context.inc/",
+    "domain": "www.context.inc",
+    "timestamp": "2025-05-30T10:12:54.854381",
+    "analysis": {
+      "title": "Context.inc",
+      "main_topic": "Context.inc offers a platform focused on data analysis and spreadsheets, enabling users to analyze financial models, trends, and datasets, automate calculations, generate insights, and visualize data instantly[1].",
+      "reasons_to_care": "- Streamlines complex data analysis and financial modeling tasks, saving time and reducing manual effort[1].\n- Provides instant insights and visualizations, which can enhance decision-making for businesses and individuals[1].\n- Automates calculations and integrates multiple data sources, making it valuable for professionals who rely on accurate, up-to-date analytics[1]."
+    }
   }
 }
