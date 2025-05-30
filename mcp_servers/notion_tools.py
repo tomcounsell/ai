@@ -34,6 +34,11 @@ def query_notion_projects(workspace_name: str, question: str, chat_id: str = "")
     priorities, and project status using natural language. Access is restricted
     based on chat-to-workspace mappings to ensure data isolation.
     
+    SECURITY: Each chat can only access its mapped workspace:
+    - DeckFusion chats → DeckFusion Dev workspace only
+    - PsyOPTIMAL chats → PsyOPTIMAL workspace only
+    - FlexTrip chats → FlexTrip workspace only
+    
     Args:
         workspace_name: Name of the workspace to query (e.g., "PsyOPTIMAL", "FlexTrip")
         question: Natural language question about the workspace data
@@ -47,9 +52,21 @@ def query_notion_projects(workspace_name: str, question: str, chat_id: str = "")
         try:
             validator = get_workspace_validator()
             validator.validate_notion_access(chat_id, workspace_name)
+            
+            # Log successful access for audit trail
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Notion access granted: Chat {chat_id} querying workspace {workspace_name}")
+            
         except WorkspaceAccessError as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Notion access denied: {str(e)}")
             return f"❌ Access Denied: {str(e)}"
         except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Notion validation error: {str(e)}")
             return f"❌ Validation Error: {str(e)}"
     
     return query_notion_workspace_sync(workspace_name, question)
