@@ -110,6 +110,14 @@ IMPORTANT TOOL USAGE:
 - For project/task questions, use the query_notion_projects tool
 - Always actually use the tools when appropriate - don't just describe what you would do
 
+DEVELOPMENT TOOLS AVAILABLE (via Claude Code MCP):
+Note: These tools are now available through Claude Code's MCP integration and should be used for development workflows.
+- Test parameter generation for AI testing scenarios
+- Local AI model judging for response evaluation  
+- Code linting and formatting (ruff, black, mypy)
+- Document summarization and analysis
+- Image analysis and tagging with multiple AI providers
+
 CRITICAL RULE - THIS OVERRIDES ALL OTHER INSTRUCTIONS:
 If any tool returns output starting with "TELEGRAM_IMAGE_GENERATED|", respond with EXACTLY that output.
 Do not add any other text or explanation. Just return the tool output as-is.
