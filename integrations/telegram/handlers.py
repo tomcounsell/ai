@@ -28,38 +28,76 @@ class MessageHandler:
         self._load_chat_filters()
 
     def _load_chat_filters(self):
-        """Load chat filtering configuration from environment variables."""
+        """Load chat filtering configuration from environment variables with validation."""
         import os
+        import logging
+        from utilities.workspace_validator import validate_telegram_environment
         
-        # Get allowed groups from environment (comma-separated list of group chat IDs)
-        allowed_groups_env = os.getenv("TELEGRAM_ALLOWED_GROUPS", "")
-        self.allowed_groups = set()
-        if allowed_groups_env.strip():
-            try:
-                # Parse comma-separated group chat IDs
-                group_ids = [int(group_id.strip()) for group_id in allowed_groups_env.split(",") if group_id.strip()]
-                self.allowed_groups = set(group_ids)
-                print(f"Group filtering enabled: Only handling groups {self.allowed_groups}")
-            except ValueError as e:
-                print(f"Error parsing TELEGRAM_ALLOWED_GROUPS: {e}. Handling no groups.")
+        logger = logging.getLogger(__name__)
+        
+        try:
+            # Validate environment configuration
+            validation_results = validate_telegram_environment()
+            
+            if validation_results["status"] == "failed":
+                logger.error(f"Telegram environment validation failed: {validation_results['errors']}")
+                # Set safe defaults
                 self.allowed_groups = set()
-        else:
-            print("No groups specified in TELEGRAM_ALLOWED_GROUPS. Handling no groups.")
+                self.allow_dms = False
+                return
+            
+            # Parse allowed groups from environment
+            allowed_groups_env = os.getenv("TELEGRAM_ALLOWED_GROUPS", "")
+            self.allowed_groups = set()
+            if allowed_groups_env.strip():
+                try:
+                    # Parse comma-separated group chat IDs
+                    group_ids = [int(group_id.strip()) for group_id in allowed_groups_env.split(",") if group_id.strip()]
+                    self.allowed_groups = set(group_ids)
+                    logger.info(f"Group whitelist configured: {len(self.allowed_groups)} groups allowed")
+                except ValueError as e:
+                    logger.error(f"Error parsing TELEGRAM_ALLOWED_GROUPS: {e}. Denying all groups.")
+                    self.allowed_groups = set()
+            else:
+                logger.info("No groups specified in TELEGRAM_ALLOWED_GROUPS. Denying all groups.")
+            
+            # Parse DM setting from environment
+            allow_dms_env = os.getenv("TELEGRAM_ALLOW_DMS", "true").lower().strip()
+            self.allow_dms = allow_dms_env in ("true", "1", "yes", "on")
+            logger.info(f"DM handling: {'Enabled' if self.allow_dms else 'Disabled'}")
+            
+            # Log validation warnings if present
+            if validation_results.get("errors"):
+                for error in validation_results["errors"]:
+                    logger.warning(f"Environment validation warning: {error}")
         
-        # Get DM setting from environment (true/false)
-        allow_dms_env = os.getenv("TELEGRAM_ALLOW_DMS", "true").lower().strip()
-        self.allow_dms = allow_dms_env in ("true", "1", "yes", "on")
-        print(f"DM handling: {'Enabled' if self.allow_dms else 'Disabled'}")
+        except Exception as e:
+            logger.error(f"Failed to load chat filters: {e}")
+            # Set safe defaults on error
+            self.allowed_groups = set()
+            self.allow_dms = False
     
     def _should_handle_chat(self, chat_id: int, is_private_chat: bool = False) -> bool:
-        """Check if this server instance should handle messages from the given chat."""
-        if is_private_chat:
-            # For DMs: either allow all or allow none
-            return self.allow_dms
-        else:
-            # For groups: whitelist only - if groups are specified, only handle those
-            # If no groups specified, handle none
-            return chat_id in self.allowed_groups if self.allowed_groups else False
+        """Check if this server instance should handle messages from the given chat with enhanced validation."""
+        import logging
+        from utilities.workspace_validator import validate_chat_whitelist_access
+        
+        logger = logging.getLogger(__name__)
+        
+        try:
+            # Use centralized validation function for consistency
+            is_allowed = validate_chat_whitelist_access(chat_id, is_private_chat)
+            
+            if not is_allowed:
+                chat_type = "DM" if is_private_chat else "group"
+                logger.warning(f"Chat access denied: {chat_type} {chat_id} not in whitelist")
+            
+            return is_allowed
+            
+        except Exception as e:
+            # Log error and deny access for safety
+            logger.error(f"Chat validation failed for {chat_id}: {e}")
+            return False
 
     async def handle_message(self, client, message):
         """Main message handling logic with routing to appropriate handlers."""
@@ -68,8 +106,22 @@ class MessageHandler:
         
         # Check if this server instance should handle this chat
         if not self._should_handle_chat(chat_id, is_private_chat):
+            import logging
+            logger = logging.getLogger(__name__)
+            
             chat_type = "DM" if is_private_chat else "group"
-            print(f"Ignoring message from {chat_type} {chat_id} (filtered by server configuration)")
+            username = message.from_user.username if message.from_user else "unknown"
+            message_preview = (message.text[:50] + "...") if message.text and len(message.text) > 50 else (message.text or "[no text]")
+            
+            # Enhanced logging for security audit trail
+            logger.warning(
+                f"MESSAGE REJECTED - Chat whitelist violation: "
+                f"{chat_type} {chat_id} from user @{username} - "
+                f"Message: '{message_preview}'"
+            )
+            
+            # Also log to console for immediate visibility during development
+            print(f"🚫 Rejected {chat_type} {chat_id} (@{username}): {message_preview}")
             return
 
         # Mark message as read (read receipt)
