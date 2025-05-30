@@ -54,6 +54,9 @@ class TelegramClient:
                 bot_start_time=self.bot_start_time,
             )
 
+            # Check for missed messages during startup
+            await self._check_startup_missed_messages(notion_scout)
+
             # Register message handler
             @self.client.on_message()
             async def handle_message(client, message):
@@ -90,3 +93,81 @@ class TelegramClient:
             if self.client
             else "disconnected"
         )
+
+    async def _check_startup_missed_messages(self, notion_scout=None):
+        """Check for missed messages during startup and process them."""
+        if not self.client or not self.message_handler:
+            return
+
+        print("🔍 Checking for missed messages during startup...")
+        
+        try:
+            from .utils import is_message_too_old
+            from pyrogram.enums import ChatType
+
+            missed_message_count = 0
+            processed_chats = []
+
+            # Get all dialogs (conversations) - this includes both DMs and groups
+            async for dialog in self.client.get_dialogs():
+                chat = dialog.chat
+                chat_id = chat.id
+                
+                # Check if this chat should be handled by this server instance
+                is_private_chat = chat.type == ChatType.PRIVATE
+                if not self.message_handler._should_handle_chat(chat_id, is_private_chat):
+                    continue
+
+                processed_chats.append(chat_id)
+                chat_missed_messages = []
+
+                # Get recent messages from this chat (last 50 messages, but we'll filter by time)
+                try:
+                    message_count = 0
+                    async for message in self.client.get_chat_history(chat_id, limit=50):
+                        message_count += 1
+                        
+                        # Skip non-text messages for startup check
+                        if not message.text:
+                            continue
+                            
+                        # Skip messages from before bot start time
+                        if message.date.timestamp() < self.bot_start_time:
+                            continue
+                            
+                        # Check if message is too old (using same 5-minute threshold)
+                        if is_message_too_old(message.date.timestamp()):
+                            # This is a missed message - collect it
+                            chat_missed_messages.append(message.text)
+                            missed_message_count += 1
+                            
+                            # Store the message in chat history for context
+                            self.chat_history.add_message(chat_id, "user", message.text)
+                            
+                            print(f"Found missed message in chat {chat_id}: {message.text[:50]}...")
+                        
+                        # Stop if we've gone too far back in time
+                        if message.date.timestamp() < (self.bot_start_time - 3600):  # 1 hour before startup
+                            break
+
+                except Exception as e:
+                    print(f"Warning: Could not check messages in chat {chat_id}: {e}")
+                    continue
+
+                # If we found missed messages for this chat, add them to the handler
+                if chat_missed_messages:
+                    if chat_id not in self.message_handler.missed_messages_per_chat:
+                        self.message_handler.missed_messages_per_chat[chat_id] = []
+                    
+                    # Add messages in chronological order (reverse the list since we got newest first)
+                    self.message_handler.missed_messages_per_chat[chat_id].extend(reversed(chat_missed_messages))
+
+            if missed_message_count > 0:
+                print(f"✅ Found {missed_message_count} missed messages across {len(processed_chats)} chats")
+                print(f"📬 Missed messages will be processed when users send new messages")
+            else:
+                print("✅ No missed messages found during startup")
+
+        except Exception as e:
+            print(f"❌ Error checking for missed messages during startup: {e}")
+            # Don't fail startup if missed message check fails
