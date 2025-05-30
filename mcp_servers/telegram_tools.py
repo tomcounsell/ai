@@ -217,5 +217,78 @@ def get_recent_history(chat_id: str = "", max_messages: int = 10) -> str:
         return f"❌ Error getting recent history: {str(e)}"
 
 
+@mcp.tool()
+def list_telegram_dialogs() -> str:
+    """List all active Telegram groups and DMs with their details.
+    
+    Use this tool to get an overview of all available Telegram conversations,
+    including groups, channels, and direct messages. Useful for understanding
+    which chats are available and their basic information like chat IDs, titles,
+    member counts, and unread message counts.
+
+    Returns:
+        Formatted string listing all groups and DMs with their details,
+        or error message if operation fails
+    """
+    try:
+        # Import required modules
+        import asyncio
+        from integrations.telegram.client import TelegramClient
+        from integrations.telegram.utils import format_dialogs_list, list_telegram_dialogs_safe
+        
+        async def get_dialogs():
+            """Async helper to get dialogs."""
+            # Create a temporary client instance for listing dialogs
+            # Note: This assumes the client can be initialized without starting
+            client = TelegramClient()
+            
+            # Check if there's an existing client session file
+            import os
+            session_file = os.path.join(client.workdir, "ai_project_bot.session")
+            if not os.path.exists(session_file):
+                return None, "❌ No active Telegram session found. Please authenticate first using scripts/telegram_login.sh"
+            
+            # Initialize the client
+            if not await client.initialize():
+                return None, "❌ Failed to initialize Telegram client"
+            
+            try:
+                # Get dialogs safely
+                dialogs_data, error = await list_telegram_dialogs_safe(client)
+                return dialogs_data, error
+            finally:
+                # Always stop the client after getting dialogs
+                await client.stop()
+        
+        # Run the async function
+        try:
+            dialogs_data, error = asyncio.run(get_dialogs())
+        except RuntimeError:
+            # If we're already in an event loop, use current loop
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # Schedule as a task in the current loop
+                import asyncio
+                task = loop.create_task(get_dialogs())
+                dialogs_data, error = task.result() if task.done() else (None, "❌ Failed to retrieve dialogs in current event loop")
+            else:
+                dialogs_data, error = loop.run_until_complete(get_dialogs())
+        
+        if error:
+            return error
+        
+        if not dialogs_data:
+            return "❌ No dialogs data received"
+        
+        # Format and return the results
+        formatted_result = format_dialogs_list(dialogs_data)
+        return formatted_result
+        
+    except ImportError as e:
+        return f"❌ Telegram integration not available: Missing required modules ({e})"
+    except Exception as e:
+        return f"❌ Error listing Telegram dialogs: {str(e)}"
+
+
 if __name__ == "__main__":
     mcp.run()

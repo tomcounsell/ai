@@ -80,6 +80,74 @@ class TelegramClient:
             except Exception as e:
                 print(f"Error stopping Telegram client: {e}")
 
+    async def list_active_dialogs(self) -> dict:
+        """List all active Telegram groups and DMs with their details.
+        
+        Returns:
+            dict: Dictionary with 'groups' and 'dms' keys, each containing
+                  list of chat details (id, title, type, member_count if applicable)
+        
+        Raises:
+            ConnectionError: If client is not connected
+            PermissionError: If lacking API permissions
+            Exception: For other API errors (rate limits, etc.)
+        """
+        if not self.client or not self.client.is_connected:
+            raise ConnectionError("Telegram client is not connected")
+
+        try:
+            from pyrogram.enums import ChatType
+            
+            groups = []
+            dms = []
+            
+            # Get all dialogs (conversations)
+            async for dialog in self.client.get_dialogs():
+                chat = dialog.chat
+                
+                chat_info = {
+                    'id': chat.id,
+                    'title': getattr(chat, 'title', None) or getattr(chat, 'first_name', 'Unknown'),
+                    'type': chat.type.name,
+                    'username': getattr(chat, 'username', None),
+                    'is_verified': getattr(chat, 'is_verified', False),
+                    'is_restricted': getattr(chat, 'is_restricted', False),
+                    'unread_count': dialog.unread_messages_count,
+                    'last_message_date': dialog.top_message.date if dialog.top_message else None
+                }
+                
+                # Categorize based on chat type
+                if chat.type in [ChatType.GROUP, ChatType.SUPERGROUP, ChatType.CHANNEL]:
+                    # Add group-specific information
+                    chat_info['member_count'] = getattr(chat, 'members_count', None)
+                    chat_info['description'] = getattr(chat, 'description', None)
+                    groups.append(chat_info)
+                elif chat.type == ChatType.PRIVATE:
+                    # Add DM-specific information
+                    chat_info['last_name'] = getattr(chat, 'last_name', None)
+                    chat_info['phone_number'] = getattr(chat, 'phone_number', None)
+                    chat_info['is_contact'] = getattr(chat, 'is_contact', False)
+                    dms.append(chat_info)
+                    
+            return {
+                'groups': groups,
+                'dms': dms,
+                'total_groups': len(groups),
+                'total_dms': len(dms),
+                'total_dialogs': len(groups) + len(dms)
+            }
+            
+        except Exception as e:
+            # Handle specific API errors
+            if "FLOOD_WAIT" in str(e):
+                raise Exception(f"Rate limit exceeded: {e}")
+            elif "AUTH_KEY" in str(e) or "SESSION" in str(e):
+                raise PermissionError(f"Authentication error: {e}")
+            elif "ACCESS_DENIED" in str(e):
+                raise PermissionError(f"Access denied: {e}")
+            else:
+                raise Exception(f"Failed to retrieve dialogs: {e}")
+
     @property
     def is_connected(self) -> bool:
         """Check if the client is connected."""
