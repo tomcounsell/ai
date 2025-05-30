@@ -1,7 +1,7 @@
 """
-Claude Code Tool - Allows spawning new Claude Code sessions with specific prompts and directories.
+Valor Delegation Tool - Allows spawning new Claude Code sessions for complex development tasks.
 
-This tool enables Valor to perform software engineering tasks.
+This tool enables Valor to delegate sophisticated software engineering tasks to specialized sessions.
 Detailed prompts must be provided for autonomous execution.
 Example tasks include:
 - running tests
@@ -38,13 +38,13 @@ import os
 import subprocess
 
 
-def execute_claude_code(
+def execute_valor_delegation(
     prompt: str,
     working_directory: str | None = None,
     allowed_tools: list[str] | None = None,
     timeout: int | None = None,
 ) -> str:
-    """Execute a Claude Code session with a specific prompt and context.
+    """Execute a delegated Claude Code session with a specific prompt and context.
 
     This function spawns a new Claude Code session with the provided prompt
     and configuration. It handles directory validation, tool permissions,
@@ -122,7 +122,7 @@ def execute_claude_code(
         os.chdir(original_cwd)
 
 
-def spawn_claude_session(
+def spawn_valor_session(
     task_description: str,
     target_directory: str,
     specific_instructions: str | None = None,
@@ -184,6 +184,6 @@ def spawn_claude_session(
 
     full_prompt = "\n".join(prompt_parts)
 
-    return execute_claude_code(
+    return execute_valor_delegation(
         prompt=full_prompt, working_directory=target_directory, allowed_tools=tools_needed
     )

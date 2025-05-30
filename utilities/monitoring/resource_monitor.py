@@ -667,3 +667,23 @@ class ResourceMonitor:
             "cleanup_working": self.total_sessions_cleaned > 0 or self.total_sessions_created < 10,
             "monitoring_active": self.monitoring_active
         }
+
+
+# Singleton instance for global use
+resource_monitor = ResourceMonitor()
+
+
+# Convenience functions
+def start_resource_monitoring():
+    """Start global resource monitoring."""
+    resource_monitor.start_monitoring()
+
+
+def get_resource_status() -> Dict[str, Any]:
+    """Get current resource status."""
+    return resource_monitor.get_system_status()
+
+
+def register_monitoring_session(session_id: str, chat_id: str, username: str) -> SessionInfo:
+    """Register session for resource monitoring."""
+    return resource_monitor.register_session(session_id, chat_id, username)

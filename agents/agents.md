@@ -1,196 +1,350 @@
-# Agents Directory
+# Tools Directory
 
-This directory contains PydanticAI conversational agents that provide intelligent AI interactions with tool integration capabilities.
+This directory contains PydanticAI function tools that provide specialized capabilities to AI agents, enabling them to perform complex tasks beyond conversation.
 
 ## Overview
 
-The agents in this directory implement the core conversational AI functionality using PydanticAI's structured agent framework. Each agent has a specific purpose and persona, with access to specialized tools for handling different types of requests.
+The tools in this directory implement the function tool pattern for PydanticAI agents. Each tool is a simple Python function that can be automatically selected and executed by language models based on conversation context and capability descriptions. Tools provide the "hands and eyes" for AI agents, allowing them to interact with external services, analyze content, and delegate complex tasks.
 
-## Agent Files
+## Tool Categories
 
-### Core Agents
+### Web and Search Tools
 
-#### `telegram_chat_agent.py`
-**Main Telegram conversation agent with Valor Engels persona**
+#### `search_tool.py`
+**Web search functionality using Perplexity AI**
 
-- **Purpose**: Primary AI agent for Telegram chat integration
-- **Persona**: Valor Engels - German-Californian software engineer at Yudame
-- **Key Features**:
-  - Conversational AI with persistent context
-  - Tool integration for web search, image generation/analysis, and coding
-  - Message history management and conversation continuity
-  - Special handling for priority questions with Notion data integration
-  - Group chat and direct message support
-
-- **Available Tools**:
-  - `search_current_info()` - Web search using Perplexity AI
-  - `create_image()` - Image generation with DALL-E 3
-  - `analyze_shared_image()` - AI vision analysis of shared images
-  - `delegate_coding_task()` - Spawn Claude Code sessions for complex tasks
-
-- **Context Model**: `TelegramChatContext` with chat metadata and conversation state
-
-#### `valor_agent.py`
-**Standalone Valor Engels agent for general use**
-
-- **Purpose**: Reusable Valor Engels agent for non-Telegram contexts
+- **Purpose**: Provides current web information to agents
+- **Main Function**: `search_web(query, max_results=3)`
+- **API**: Perplexity AI (sonar-pro model)
 - **Features**:
-  - Same persona as Telegram agent but context-agnostic
-  - Web search and Claude Code delegation capabilities
-  - Simplified context model for general conversations
-  - Test framework for validation
+  - AI-synthesized answers from current web content
+  - Optimized for messaging platforms (300-word responses)
+  - Error handling for missing API keys
+  - Async compatibility wrapper
 
-- **Available Tools**:
-  - `search_current_info()` - Web search functionality
-  - `delegate_coding_task()` - Code delegation to Claude Code sessions
-
-- **Context Model**: `ValorContext` with basic chat information
-
-#### `notion_scout.py`
-**Notion database query agent for project management**
-
-- **Purpose**: AI-powered analysis of Notion database content
-- **Key Features**:
-  - Direct Notion API integration
-  - Project-specific database filtering
-  - Natural language questions about tasks and priorities
-  - AI analysis of database entries using Claude
-  - Command-line interface with project name/alias support
-
-- **Main Functions**:
-  - `query_notion_directly()` - Query and analyze Notion databases
-  - `analyze_entries_with_claude()` - AI analysis of database content
-  - `extract_property_value()` - Parse Notion property types
-  - Project mapping and alias resolution
-
-- **Usage Examples**:
-  ```bash
-  uv run notion_scout.py "What tasks need attention?"
-  uv run notion_scout.py --project PsyOPTIMAL "Show current status"
-  uv run notion_scout.py --project psy "What are my priorities?"
+- **Usage Example**:
+  ```python
+  result = search_web("latest Python 3.12 features")
+  # Returns: "🔍 **latest Python 3.12 features**\n\nPython 3.12 includes..."
   ```
 
-### Utility Modules
+### Visual Content Tools
 
-#### `message_history_converter.py`
-**Message history integration for PydanticAI agents**
+#### `image_generation_tool.py`
+**AI image creation using DALL-E 3**
 
-- **Purpose**: Bridge between Telegram chat history and PydanticAI conversation context
+- **Purpose**: Generate custom images from text descriptions
+- **Main Function**: `generate_image(prompt, size, quality, style, save_directory)`
+- **API**: OpenAI DALL-E 3
+- **Features**:
+  - Multiple size options (1024x1024, 1792x1024, 1024x1792)
+  - Quality settings (standard, hd)
+  - Style options (natural, vivid)
+  - Local file saving with sanitized filenames
+  - Feedback formatting for conversational use
+
+- **Functions**:
+  - `generate_image()` - Core image generation
+  - `generate_image_async()` - Async wrapper
+  - `create_image_with_feedback()` - Returns path + user message
+
+#### `image_analysis_tool.py`
+**AI vision analysis using GPT-4 Vision**
+
+- **Purpose**: Analyze images shared in conversations
+- **Main Function**: `analyze_image(image_path, question, context)`
+- **API**: OpenAI GPT-4 Vision (gpt-4o model)
+- **Features**:
+  - Image description and content analysis
+  - Question-based analysis
+  - OCR capabilities
+  - Context-aware responses
+  - Support for common image formats
+
+- **Use Cases**:
+  - Photo description and analysis
+  - Text extraction from images (OCR)
+  - Object and scene recognition
+  - Question answering about image content
+
+### Development Tools
+
+#### `claude_code_tool.py`
+**Code delegation to Claude Code sessions**
+
+- **Purpose**: Handle complex coding tasks requiring specialized tools
+- **Main Functions**:
+  - `execute_claude_code()` - Low-level Claude execution
+  - `spawn_claude_session()` - High-level task delegation
+- **Features**:
+  - Directory context and validation
+  - Tool permission management
+  - Timeout handling
+  - Comprehensive prompt formatting
+  - Error handling and reporting
+
+- **Use Cases**:
+  - Feature development across multiple files
+  - Git workflows and repository management
+  - Complex refactoring tasks
+  - Project scaffolding and setup
+
+#### `documentation_tool.py`
+**Local documentation access using FileReader utility**
+
+- **Purpose**: Provide agents with access to project documentation
+- **Main Functions**:
+  - `read_documentation()` - Read specific documentation files
+  - `list_documentation_files()` - Discover available documentation
+  - `read_documentation_structured()` - Structured request/response
+- **Features**:
+  - Safe file reading with error handling
+  - Documentation discovery
+  - Encoding support
+  - Formatted responses for agent consumption
+
+- **Models**:
+  - `DocumentationRequest` - Structured request model
+  - `DocumentationResponse` - Structured response model
+
+### Link and Content Analysis
+
+#### `link_analysis_tool.py`
+**URL analysis and storage using Perplexity AI**
+
+- **Purpose**: Analyze shared links and maintain link archives
 - **Key Functions**:
-  - `merge_telegram_with_pydantic_history()` - Comprehensive history merging
-  - `integrate_with_existing_telegram_chat()` - Legacy compatibility wrapper
-  - `_remove_duplicate_messages()` - Deduplication logic
+  - `analyze_url_content()` - Extract structured data from URLs
+  - `store_link_with_analysis()` - Save links with AI analysis
+  - `search_stored_links()` - Search previously analyzed links
+  - `extract_urls()` - Find URLs in text
+  - `is_url_only_message()` - Detect URL-only messages
 
 - **Features**:
-  - Chronological message ordering
-  - Duplicate detection and removal
-  - Context size management
-  - Multiple source integration (Telegram + PydanticAI)
+  - Automatic content analysis (title, topic, reasons to care)
+  - Persistent storage in docs/links.json
+  - Automatic git commits for link data
+  - Search and retrieval functionality
+  - URL validation and sanitization
 
-#### `__init__.py`
-**Package initialization and documentation**
+### Project Management Tools
 
-- Contains package-level documentation
-- Describes the purpose and structure of the agents package
+#### `notion_tool.py`
+**Workspace-based Notion database queries with AI analysis**
 
-## Architecture Patterns
+- **Purpose**: Query Notion project databases and provide intelligent task analysis
+- **Main Functions**:
+  - `query_notion_workspace()` - Core workspace querying function
+  - `query_psyoptimal_workspace()` - PsyOPTIMAL-specific wrapper
+- **APIs**: Notion API + Anthropic Claude for analysis
+- **Features**:
+  - Workspace-based configuration with hardcoded database mappings
+  - Complete property extraction for all Notion field types
+  - AI-powered analysis of project data for task recommendations
+  - Support for multiple workspace configurations
+  - Intelligent priority and status analysis
 
-### PydanticAI Agent Structure
-All agents follow a consistent pattern:
+- **Configuration**:
+  - Workspace settings dictionary with database IDs
+  - Alias support for flexible workspace naming
+  - Environment-based API key validation
 
-1. **Context Model**: Pydantic BaseModel defining conversation context
-2. **Agent Creation**: PydanticAI Agent with model, context type, and system prompt
-3. **Tool Definitions**: Functions decorated with `@agent.tool` for capabilities
-4. **Handler Functions**: High-level functions for external integration
+- **Use Cases**:
+  - Project status queries
+  - Task priority analysis
+  - Development workload assessment
+  - Milestone and deadline tracking
 
-### Tool Integration
-Agents use PydanticAI's tool system for capabilities:
+### Infrastructure Tools
 
-- **Automatic Selection**: LLM chooses appropriate tools based on context
-- **Type Safety**: Full Pydantic validation for tool parameters
-- **Error Handling**: Graceful degradation when tools are unavailable
+#### `models.py`
+**Base models for tool infrastructure**
 
-### Context Management
-- **Enhanced Messages**: Recent conversation context embedded in messages
-- **State Persistence**: PydanticAI manages internal conversation state
-- **External Integration**: Chat history from external systems (Telegram)
+- **Purpose**: Provide common models for tool execution tracking
+- **Models**:
+  - `ToolStatus` - Enumeration of tool operational states
+  - `ToolResult` - Standardized result model for tool executions
+- **Features**:
+  - Execution time tracking
+  - Success/failure reporting
+  - Metadata support
+  - Timestamp recording
 
-## Development Guidelines
+## Tool Development Patterns
 
-### Creating New Agents
-1. Define a Pydantic context model
-2. Create PydanticAI Agent with appropriate system prompt
-3. Add tools using `@agent.tool` decorator
-4. Implement handler functions for external integration
-5. Add comprehensive Google-style docstrings
+### Function Tool Pattern
+All tools follow the PydanticAI function tool pattern:
 
-### Tool Development
-- Create tools as simple functions with proper type hints
-- Use descriptive docstrings that help LLM understand when to use tools
-- Handle errors gracefully and return user-friendly messages
-- Follow the patterns established in existing tools
-
-### Testing Strategy
-- Use real integrations rather than mocks when possible
-- Test main conversation flows and tool interactions
-- Validate persona consistency and response quality
-- Include examples in docstrings for documentation
-
-## Usage Patterns
-
-### Telegram Integration
 ```python
-from agents.telegram_chat_agent import handle_telegram_message
+def tool_function(param1: str, param2: int = 10) -> str:
+    """Tool description that helps LLM understand when to use this tool.
 
-response = await handle_telegram_message(
-    message="What's the weather like?",
-    chat_id=12345,
-    username="user123",
-    chat_history_obj=history_manager
+    Detailed description of what the tool does and when to use it.
+
+    Args:
+        param1: Description of first parameter.
+        param2: Description of second parameter with default.
+
+    Returns:
+        str: Description of return value.
+
+    Example:
+        >>> tool_function("example", 5)
+        'Expected output format'
+    """
+    # Tool implementation
+    return result
+```
+
+### Agent Integration
+Tools are integrated with agents using decorators:
+
+```python
+@agent.tool
+def agent_tool_wrapper(ctx: RunContext[ContextType], param: str) -> str:
+    """Agent-specific wrapper for the tool."""
+    return tool_function(param)
+```
+
+### Error Handling
+All tools implement consistent error handling:
+
+- Graceful degradation when APIs are unavailable
+- User-friendly error messages
+- Environment validation (API keys, file paths)
+- Exception catching and reporting
+
+### Environment Configuration
+Tools require various API keys and configuration:
+
+- `OPENAI_API_KEY` - Image generation and analysis
+- `PERPLEXITY_API_KEY` - Web search and link analysis
+- `ANTHROPIC_API_KEY` - Claude Code delegation and Notion analysis
+- `NOTION_API_KEY` - Notion workspace database access
+- File system access for local operations
+
+## Usage Examples
+
+### Web Search
+```python
+from tools.search_tool import search_web
+
+result = search_web("latest developments in AI")
+print(result)  # Formatted search results
+```
+
+### Image Generation
+```python
+from tools.image_generation_tool import generate_image
+
+image_path = generate_image(
+    "a sunset over mountains",
+    size="1792x1024",
+    quality="hd",
+    style="vivid"
 )
 ```
 
-### Standalone Usage
+### Image Analysis
 ```python
-from agents.valor.agent import run_valor_agent, ValorContext
+from tools.image_analysis_tool import analyze_image
 
-context = ValorContext(chat_id=12345, username="user")
-response = await run_valor_agent("How do I deploy a FastAPI app?", context)
+analysis = analyze_image(
+    "/path/to/image.jpg",
+    question="What objects are in this image?",
+    context="User asked about the contents"
+)
 ```
 
-### Notion Queries
-```bash
-# Command line usage (standalone agent)
-uv run agents/notion_scout.py "What tasks are ready for development?"
-uv run agents/notion_scout.py --project FlexTrip "Show me current milestones"
+### Code Delegation
+```python
+from tools.claude_code_tool import spawn_claude_session
 
-# Via Valor agent (integrated tool)
-# Just ask about project status naturally - the agent will use the notion tool automatically
+result = spawn_claude_session(
+    task_description="Create a FastAPI application",
+    target_directory="/home/user/projects",
+    specific_instructions="Include authentication and tests"
+)
 ```
 
-## Configuration
+### Documentation Access
+```python
+from tools.documentation_tool import read_documentation, list_documentation_files
 
-### Environment Variables
-- `ANTHROPIC_API_KEY` - For Claude AI conversations
-- `OPENAI_API_KEY` - For image generation and analysis
-- `PERPLEXITY_API_KEY` - For web search functionality
-- `NOTION_API_KEY` - For Notion database access (notion_scout)
+# List available docs
+docs = list_documentation_files()
 
-### Project Configuration
-- Notion project mappings in `integrations/notion/database_mapping.json`
-- Valor Engels persona definition in `agents/valor/persona.md`
+# Read specific documentation
+content = read_documentation("agent-architecture.md")
+```
 
-## Dependencies
+### Link Analysis
+```python
+from tools.link_analysis_tool import analyze_url_content, store_link_with_analysis
 
-### Core Dependencies
-- `pydantic-ai` - Agent framework and tool integration
-- `anthropic` - Claude AI API access
-- `openai` - DALL-E and GPT-4 Vision
-- `python-dotenv` - Environment variable management
+# Analyze a URL
+analysis = analyze_url_content("https://example.com/article")
 
-### Optional Dependencies
-- `requests` - HTTP operations for Notion API
-- `rich` - CLI formatting for notion_scout
-- Tool-specific dependencies as imported
+# Store with analysis
+success = store_link_with_analysis("https://example.com/article")
+```
 
-This directory represents the core conversational AI capabilities of the system, providing intelligent, tool-enabled agents for various use cases while maintaining consistent patterns and robust error handling.
+### Notion Workspace Queries
+```python
+from tools.notion_tool import query_notion_workspace, query_psyoptimal_workspace
+
+# Query specific workspace
+result = query_notion_workspace("PsyOPTIMAL", "What tasks are ready for dev?")
+
+# Query PsyOPTIMAL workspace directly
+result = query_psyoptimal_workspace("Show me high priority tasks")
+```
+
+## Tool Architecture Benefits
+
+### Automatic Selection
+- LLMs choose appropriate tools based on conversation context
+- No manual routing or keyword detection required
+- Intelligent orchestration of multiple tools
+
+### Type Safety
+- Full Pydantic validation for tool parameters
+- Clear interfaces and error handling
+- Documentation-driven development
+
+### Modularity
+- Tools are independent and reusable
+- Easy to test in isolation
+- Simple integration with new agents
+
+### Extensibility
+- Easy to add new tools following established patterns
+- Consistent error handling and response formatting
+- Environment-based configuration
+
+## Development Guidelines
+
+### Creating New Tools
+1. Implement core functionality as a simple Python function
+2. Add comprehensive Google-style docstrings
+3. Include type hints for all parameters and return values
+4. Implement error handling and validation
+5. Add usage examples in docstrings
+6. Create async wrappers if needed for compatibility
+7. Test the tool independently before agent integration
+
+### Tool Function Design
+- Keep functions focused on a single capability
+- Use descriptive names that indicate functionality
+- Return user-friendly strings formatted for conversation
+- Handle missing dependencies gracefully
+- Include helpful error messages
+
+### Documentation Standards
+- Use Google-style docstrings with examples
+- Document all parameters and return values
+- Include usage examples and common patterns
+- Explain when to use each tool
+- Note any required environment variables
+
+This directory provides the core capabilities that make AI agents useful beyond conversation, enabling them to interact with the real world through web search, content creation, code generation, and data analysis.

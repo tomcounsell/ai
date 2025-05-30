@@ -536,3 +536,34 @@ class TelegramStreamHandler:
             'average_update_rate': stream_data['update_count'] / duration if duration > 0 else 0,
             'total_content_size': stream_data['total_content_size']
         }
+
+
+# Singleton instance for global use
+streaming_optimizer = StreamingOptimizer()
+
+
+# Convenience functions for common use cases
+def get_optimal_streaming_interval(content: str, stream_id: Optional[str] = None) -> float:
+    """Get optimal streaming interval for content."""
+    return streaming_optimizer.optimize_streaming_rate(content, stream_id)
+
+
+async def wait_for_optimal_streaming(
+    stream_id: str, 
+    content: str, 
+    last_update_time: Optional[float] = None
+):
+    """Wait for optimal streaming timing."""
+    delay = await streaming_optimizer.adaptive_delay(stream_id, content, last_update_time)
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+
+def record_streaming_performance(stream_id: str, actual_interval: float):
+    """Record actual streaming interval for performance tracking."""
+    streaming_optimizer.record_actual_interval(stream_id, actual_interval)
+
+
+def get_streaming_performance_report() -> Dict[str, Any]:
+    """Get comprehensive streaming performance report."""
+    return streaming_optimizer.get_performance_summary()
