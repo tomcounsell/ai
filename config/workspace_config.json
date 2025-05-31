@@ -22,7 +22,8 @@
         "/Users/valorengels/src/ai/"
       ],
       "telegram_chat_ids": ["-4891178445"],
-      "aliases": ["yudame dev"]
+      "aliases": ["yudame dev"],
+      "is_dev_group": true
     },
     "Verkstad": {
       "database_id": "****",
@@ -58,7 +59,8 @@
         "/Users/valorengels/src/psyoptimal/"
       ],
       "telegram_chat_ids": ["-4897329503"],
-      "aliases": ["psyoptimal dev", "PO dev"]
+      "aliases": ["psyoptimal dev", "PO dev"],
+      "is_dev_group": true
     },
     "Tom's Team": {
       "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
@@ -82,7 +84,8 @@
         "/Users/valorengels/src/deckfusion/"
       ],
       "telegram_chat_ids": ["-4851227604"],
-      "aliases": ["deckfusion dev", "DF dev"]
+      "aliases": ["deckfusion dev", "DF dev"],
+      "is_dev_group": true
     },
     "FlexTrip": {
       "database_id": "****",
@@ -106,7 +109,8 @@
         "/Users/valorengels/src/flextrip/"
       ],
       "telegram_chat_ids": [],
-      "aliases": ["flextrip dev"]
+      "aliases": ["flextrip dev"],
+      "is_dev_group": true
     }
   },
   "telegram_groups": {

@@ -107,3 +107,29 @@ def get_telegram_group_project(chat_id: int) -> tuple[str | None, str | None]:
             return None, None
     except Exception:
         return None, None
+
+
+def is_dev_group(chat_id: int) -> bool:
+    """Check if a Telegram chat ID is a dev group that should handle all messages."""
+    config_file = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
+    if not config_file.exists():
+        return False
+    
+    try:
+        with open(config_file) as f:
+            data = json.load(f)
+            telegram_groups = data.get("telegram_groups", {})
+            workspaces = data.get("workspaces", {})
+            
+            # Convert chat_id to string for lookup
+            chat_id_str = str(chat_id)
+            
+            if chat_id_str in telegram_groups:
+                project_name = telegram_groups[chat_id_str]
+                if project_name in workspaces:
+                    workspace_data = workspaces[project_name]
+                    return workspace_data.get("is_dev_group", False)
+            
+            return False
+    except Exception:
+        return False

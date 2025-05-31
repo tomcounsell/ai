@@ -205,8 +205,12 @@ class MessageHandler:
         if hasattr(message, 'reply_to_message') and message.reply_to_message:
             reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
 
-        # Only respond in private chats or when mentioned in groups
-        if not (is_private_chat or is_mentioned):
+        # Check if this is a dev group that should handle all messages
+        from ..notion.utils import is_dev_group
+        is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+        
+        # Only respond in private chats, when mentioned in groups, or in dev groups
+        if not (is_private_chat or is_mentioned or is_dev_group_chat):
             # Still store the message for context, but don't respond
             self.chat_history.add_message(chat_id, "user", message.text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
             return
@@ -573,8 +577,12 @@ class MessageHandler:
             if hasattr(message, 'reply_to_message') and message.reply_to_message:
                 reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
 
-            # Only respond in private chats or when mentioned in groups
-            if not (is_private_chat or is_mentioned):
+            # Check if this is a dev group that should handle all messages
+            from ..notion.utils import is_dev_group
+            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+            
+            # Only respond in private chats, when mentioned in groups, or in dev groups
+            if not (is_private_chat or is_mentioned or is_dev_group_chat):
                 # Still store the message for context, but don't respond
                 if message.caption:
                     # Explicitly indicate this message contains BOTH text and image  
@@ -663,8 +671,12 @@ class MessageHandler:
             if hasattr(message, 'reply_to_message') and message.reply_to_message:
                 reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
 
+            # Check if this is a dev group that should handle all messages
+            from ..notion.utils import is_dev_group
+            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+            
             # Store message in chat history even if not responding
-            if not (is_private_chat or is_mentioned):
+            if not (is_private_chat or is_mentioned or is_dev_group_chat):
                 if message.caption:
                     self.chat_history.add_message(chat_id, "user", f"[Document+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 else:
@@ -677,7 +689,7 @@ class MessageHandler:
             else:
                 self.chat_history.add_message(chat_id, "user", "[Document]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
 
-            if is_private_chat or is_mentioned:
+            if is_private_chat or is_mentioned or is_dev_group_chat:
                 doc_name = message.document.file_name or "unknown file"
                 if message.caption:
                     response = f"📄 I see you shared a document '{doc_name}' with text: '{message.caption}'. Document analysis isn't implemented yet, but I'm working on it!"
@@ -707,8 +719,12 @@ class MessageHandler:
             if hasattr(message, 'reply_to_message') and message.reply_to_message:
                 reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
 
+            # Check if this is a dev group that should handle all messages
+            from ..notion.utils import is_dev_group
+            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+            
             # Store message in chat history even if not responding
-            if not (is_private_chat or is_mentioned):
+            if not (is_private_chat or is_mentioned or is_dev_group_chat):
                 if message.caption:
                     audio_type = "Voice" if message.voice else "Audio"
                     self.chat_history.add_message(chat_id, "user", f"[{audio_type}+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
@@ -725,7 +741,7 @@ class MessageHandler:
                 audio_type = "[Voice]" if message.voice else "[Audio]"
                 self.chat_history.add_message(chat_id, "user", audio_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
 
-            if is_private_chat or is_mentioned:
+            if is_private_chat or is_mentioned or is_dev_group_chat:
                 if message.voice:
                     if message.caption:
                         response = f"🎙️ I hear you sent a voice message with text: '{message.caption}'. Voice transcription isn't implemented yet, but it's on my roadmap."
@@ -760,8 +776,12 @@ class MessageHandler:
             if hasattr(message, 'reply_to_message') and message.reply_to_message:
                 reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
 
+            # Check if this is a dev group that should handle all messages
+            from ..notion.utils import is_dev_group
+            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+            
             # Store message in chat history even if not responding
-            if not (is_private_chat or is_mentioned):
+            if not (is_private_chat or is_mentioned or is_dev_group_chat):
                 if message.caption:
                     self.chat_history.add_message(chat_id, "user", f"[Video+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 else:
@@ -776,7 +796,7 @@ class MessageHandler:
                 video_type = "[VideoNote]" if message.video_note else "[Video]"
                 self.chat_history.add_message(chat_id, "user", video_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
 
-            if is_private_chat or is_mentioned:
+            if is_private_chat or is_mentioned or is_dev_group_chat:
                 if message.video_note:
                     if message.caption:
                         response = f"📹 I see you sent a video note with text: '{message.caption}'. Video analysis isn't implemented yet, but it's planned."
