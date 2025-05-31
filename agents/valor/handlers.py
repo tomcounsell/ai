@@ -18,26 +18,42 @@ def _detect_mixed_content(message: str) -> bool:
     Returns:
         bool: True if message contains both text and image indicators
     """
-    # Check for common patterns that indicate mixed text+image content
-    indicators = [
-        "[Photo + Text]",  # Our explicit marker
-        "BOTH TEXT AND AN IMAGE",  # Our enhanced message marker
-        "Please analyze this image:" and "[Image downloaded to:",  # Combined analysis request
-    ]
-    
+    if not message:
+        return False
+        
     message_upper = message.upper()
     
-    # Check for explicit markers
-    if "[PHOTO + TEXT]" in message_upper:
-        return True
-        
-    # Check for the enhanced message pattern
-    if "BOTH TEXT AND AN IMAGE" in message_upper:
-        return True
-        
-    # Check for image analysis with user text
-    if ("PLEASE ANALYZE THIS IMAGE:" in message_upper and 
-        "[IMAGE DOWNLOADED TO:" in message_upper):
+    # Check for explicit mixed content markers
+    mixed_content_indicators = [
+        "[IMAGE+TEXT]",  # New standardized marker for images
+        "[PHOTO + TEXT]",  # Legacy marker for images
+        "[DOCUMENT+TEXT]",  # Document with caption
+        "[VIDEO+TEXT]",  # Video with caption  
+        "[VOICE+TEXT]",  # Voice message with caption
+        "[AUDIO+TEXT]",  # Audio file with caption
+        "MIXED CONTENT MESSAGE",  # New enhanced marker
+        "BOTH TEXT AND AN IMAGE",  # Legacy enhanced marker
+    ]
+    
+    for indicator in mixed_content_indicators:
+        if indicator in message_upper:
+            return True
+    
+    # Check for image analysis with user text patterns
+    has_image_indicator = any(pattern in message_upper for pattern in [
+        "[IMAGE FILE PATH:",
+        "[IMAGE DOWNLOADED TO:",
+        "IMAGE MESSAGE:"
+    ])
+    
+    has_text_content = any(pattern in message_upper for pattern in [
+        "USER'S TEXT:",
+        "TEXT CONTENT",
+        "TEXT MESSAGE:"
+    ])
+    
+    # If we have both image indicators and text content, it's mixed
+    if has_image_indicator and has_text_content:
         return True
         
     return False
@@ -102,7 +118,8 @@ async def handle_telegram_message(
     # Detect if this message contains both text and image components
     has_mixed_content = _detect_mixed_content(message)
     if has_mixed_content:
-        print(f"🖼️📝 DETECTED: Message with both text and image components for chat {chat_id}")
+        print(f"🖼️📝 MIXED CONTENT DETECTED: Message contains both text and image for chat {chat_id}")
+        print(f"Message preview: {message[:100]}..." if len(message) > 100 else f"Message: {message}")
 
     # Build enhanced message with context - always include chat history when available
     context_parts = []
@@ -128,12 +145,12 @@ async def handle_telegram_message(
     # Combine all context with the current message
     if context_parts:
         if has_mixed_content:
-            enhanced_message = "\n\n".join(context_parts) + f"\n\n🖼️📝 CURRENT MESSAGE (contains both text and image): {message}"
+            enhanced_message = "\n\n".join(context_parts) + f"\n\n🖼️📝 CURRENT MESSAGE (MIXED CONTENT - text+image): {message}"
         else:
             enhanced_message = "\n\n".join(context_parts) + f"\n\nCurrent message: {message}"
     else:
         if has_mixed_content:
-            enhanced_message = f"🖼️📝 MESSAGE (contains both text and image): {message}"
+            enhanced_message = f"🖼️📝 MIXED CONTENT MESSAGE (text+image): {message}"
         else:
             enhanced_message = message
 

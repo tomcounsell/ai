@@ -578,9 +578,9 @@ class MessageHandler:
                 # Still store the message for context, but don't respond
                 if message.caption:
                     # Explicitly indicate this message contains BOTH text and image  
-                    self.chat_history.add_message(chat_id, "user", f"[Photo + Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                    self.chat_history.add_message(chat_id, "user", f"[Image+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 else:
-                    self.chat_history.add_message(chat_id, "user", "[Photo shared]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                    self.chat_history.add_message(chat_id, "user", "[Image]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 return
 
             # Download the photo
@@ -589,9 +589,9 @@ class MessageHandler:
             # Store user message in chat history with reply context
             if caption_text:
                 # Explicitly indicate this message contains BOTH text and image
-                self.chat_history.add_message(chat_id, "user", f"[Photo + Text] {caption_text}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                self.chat_history.add_message(chat_id, "user", f"[Image+Text] {caption_text}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
             else:
-                self.chat_history.add_message(chat_id, "user", "[Photo shared]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                self.chat_history.add_message(chat_id, "user", "[Image]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
 
             # Use valor agent system to analyze the image
             if self.notion_scout and self.notion_scout.anthropic_client:
@@ -613,12 +613,12 @@ class MessageHandler:
 
                     # Prepare message for the agent with explicit text+image indication
                     if caption_text:
-                        agent_message = f"IMPORTANT: This message contains BOTH TEXT AND AN IMAGE.\n\nUser's text message: {caption_text}\n\nPlease analyze both the text content above AND the image below. Respond to both the text and the visual content."
+                        agent_message = f"🖼️📝 MIXED CONTENT MESSAGE: This message contains BOTH TEXT AND AN IMAGE.\n\nUser's text: {caption_text}\n\nThe user has shared both text content (above) and an image. Please analyze and respond to BOTH components - the text message and the visual content in the image."
                     else:
-                        agent_message = "Please analyze this image and tell me what you see."
+                        agent_message = "🖼️ IMAGE MESSAGE: The user has shared an image. Please analyze the image and describe what you see."
 
                     # Add image path context to the message so the agent can use the tool
-                    agent_message += f"\n\n[Image downloaded to: {file_path}]"
+                    agent_message += f"\n\n[Image file path: {file_path}]"
 
                     answer = await handle_telegram_message(
                         message=agent_message,
@@ -658,9 +658,31 @@ class MessageHandler:
             if not is_private_chat and message.caption:
                 is_mentioned = f"@{me.username}" in message.caption
 
+            # Extract reply information for context building
+            reply_to_telegram_message_id = None
+            if hasattr(message, 'reply_to_message') and message.reply_to_message:
+                reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
+
+            # Store message in chat history even if not responding
+            if not (is_private_chat or is_mentioned):
+                if message.caption:
+                    self.chat_history.add_message(chat_id, "user", f"[Document+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                else:
+                    self.chat_history.add_message(chat_id, "user", "[Document]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                return
+
+            # Store user message in chat history
+            if message.caption:
+                self.chat_history.add_message(chat_id, "user", f"[Document+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+            else:
+                self.chat_history.add_message(chat_id, "user", "[Document]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+
             if is_private_chat or is_mentioned:
                 doc_name = message.document.file_name or "unknown file"
-                response = f"📄 I see you shared a document: {doc_name}. Document analysis isn't implemented yet, but I'm working on it!"
+                if message.caption:
+                    response = f"📄 I see you shared a document '{doc_name}' with text: '{message.caption}'. Document analysis isn't implemented yet, but I'm working on it!"
+                else:
+                    response = f"📄 I see you shared a document: {doc_name}. Document analysis isn't implemented yet, but I'm working on it!"
                 await self._safe_reply(message, response, "📄 Document received")
                 self.chat_history.add_message(chat_id, "assistant", response)
 
@@ -680,11 +702,40 @@ class MessageHandler:
             if not is_private_chat and message.caption:
                 is_mentioned = f"@{me.username}" in message.caption
 
+            # Extract reply information for context building
+            reply_to_telegram_message_id = None
+            if hasattr(message, 'reply_to_message') and message.reply_to_message:
+                reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
+
+            # Store message in chat history even if not responding
+            if not (is_private_chat or is_mentioned):
+                if message.caption:
+                    audio_type = "Voice" if message.voice else "Audio"
+                    self.chat_history.add_message(chat_id, "user", f"[{audio_type}+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                else:
+                    audio_type = "[Voice]" if message.voice else "[Audio]"
+                    self.chat_history.add_message(chat_id, "user", audio_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                return
+
+            # Store user message in chat history
+            if message.caption:
+                audio_type = "Voice" if message.voice else "Audio"
+                self.chat_history.add_message(chat_id, "user", f"[{audio_type}+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+            else:
+                audio_type = "[Voice]" if message.voice else "[Audio]"
+                self.chat_history.add_message(chat_id, "user", audio_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+
             if is_private_chat or is_mentioned:
                 if message.voice:
-                    response = "🎙️ I hear you sent a voice message! Voice transcription isn't implemented yet, but it's on my roadmap."
+                    if message.caption:
+                        response = f"🎙️ I hear you sent a voice message with text: '{message.caption}'. Voice transcription isn't implemented yet, but it's on my roadmap."
+                    else:
+                        response = "🎙️ I hear you sent a voice message! Voice transcription isn't implemented yet, but it's on my roadmap."
                 else:
-                    response = "🎵 I see you shared an audio file! Audio analysis isn't implemented yet, but I'm working on it."
+                    if message.caption:
+                        response = f"🎵 I see you shared an audio file with text: '{message.caption}'. Audio analysis isn't implemented yet, but I'm working on it."
+                    else:
+                        response = "🎵 I see you shared an audio file! Audio analysis isn't implemented yet, but I'm working on it."
                 await self._safe_reply(message, response, "🎵 Audio received")
                 self.chat_history.add_message(chat_id, "assistant", response)
 
@@ -704,11 +755,38 @@ class MessageHandler:
             if not is_private_chat and message.caption:
                 is_mentioned = f"@{me.username}" in message.caption
 
+            # Extract reply information for context building
+            reply_to_telegram_message_id = None
+            if hasattr(message, 'reply_to_message') and message.reply_to_message:
+                reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
+
+            # Store message in chat history even if not responding
+            if not (is_private_chat or is_mentioned):
+                if message.caption:
+                    self.chat_history.add_message(chat_id, "user", f"[Video+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                else:
+                    video_type = "[VideoNote]" if message.video_note else "[Video]"
+                    self.chat_history.add_message(chat_id, "user", video_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                return
+
+            # Store user message in chat history
+            if message.caption:
+                self.chat_history.add_message(chat_id, "user", f"[Video+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+            else:
+                video_type = "[VideoNote]" if message.video_note else "[Video]"
+                self.chat_history.add_message(chat_id, "user", video_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+
             if is_private_chat or is_mentioned:
                 if message.video_note:
-                    response = "📹 I see you sent a video note! Video analysis isn't implemented yet, but it's planned."
+                    if message.caption:
+                        response = f"📹 I see you sent a video note with text: '{message.caption}'. Video analysis isn't implemented yet, but it's planned."
+                    else:
+                        response = "📹 I see you sent a video note! Video analysis isn't implemented yet, but it's planned."
                 else:
-                    response = "🎬 I see you shared a video! Video analysis isn't implemented yet, but I'm working on it."
+                    if message.caption:
+                        response = f"🎬 I see you shared a video with text: '{message.caption}'. Video analysis isn't implemented yet, but I'm working on it."
+                    else:
+                        response = "🎬 I see you shared a video! Video analysis isn't implemented yet, but I'm working on it."
                 await self._safe_reply(message, response, "🎬 Video received")
                 self.chat_history.add_message(chat_id, "assistant", response)
 
