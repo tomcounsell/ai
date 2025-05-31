@@ -273,8 +273,25 @@ class MessageHandler:
                 is_mentioned = True
 
             # Check if message has entities (mentions, text_mentions)
-            elif hasattr(message, 'entities') and message.entities:
-                for entity in message.entities:
+            # Handle both regular entities and caption entities
+            entities_to_check = []
+            if hasattr(message, 'entities') and message.entities:
+                try:
+                    entities_to_check.extend(message.entities)
+                except TypeError:
+                    # Handle mock objects or non-iterable entities
+                    if message.entities is not None:
+                        entities_to_check.append(message.entities)
+            if hasattr(message, 'caption_entities') and message.caption_entities:
+                try:
+                    entities_to_check.extend(message.caption_entities)
+                except TypeError:
+                    # Handle mock objects or non-iterable caption_entities
+                    if message.caption_entities is not None:
+                        entities_to_check.append(message.caption_entities)
+            
+            if entities_to_check:
+                for entity in entities_to_check:
                     try:
                         if entity.type == "mention":
                             # Extract the mentioned username with bounds checking
