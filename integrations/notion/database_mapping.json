@@ -23,22 +23,18 @@
   },
   "aliases": {
     "psyoptimal": "PsyOPTIMAL",
-    "psy": "PsyOPTIMAL",
-    "optimal": "PsyOPTIMAL",
+    "PO": "PsyOPTIMAL",
     "psyoptimal dev": "PsyOPTIMAL Dev",
-    "psy dev": "PsyOPTIMAL Dev",
-    "optimal dev": "PsyOPTIMAL Dev",
+    "PO dev": "PsyOPTIMAL Dev",
     "flextrip": "FlexTrip",
-    "flex": "FlexTrip",
-    "trip": "FlexTrip",
-    "deckfusion": "DeckFusion Dev",
-    "deck": "DeckFusion Dev",
-    "fusion": "DeckFusion Dev",
+    "deckfusion": "DeckFusion",
+    "DF": "DeckFusion",
     "deckfusion dev": "DeckFusion Dev",
-    "deck dev": "DeckFusion Dev"
+    "DF dev": "DeckFusion Dev"
   },
   "telegram_groups": {
     "-1001234567890": "PsyOPTIMAL",
+    "-": "PsyOPTIMAL Dev",
     "-1009876543210": "FlexTrip",
     "-1008888888888": "DeckFusion Dev"
   }
