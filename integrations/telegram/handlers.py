@@ -163,10 +163,10 @@ class MessageHandler:
             self.missed_messages_per_chat[chat_id].append(message.text)
 
             # Still store old messages for context
-            reply_to_message_id = None
+            reply_to_telegram_message_id = None
             if hasattr(message, 'reply_to_message') and message.reply_to_message:
-                reply_to_message_id = getattr(message.reply_to_message, 'id', None)
-            self.chat_history.add_message(chat_id, "user", message.text, reply_to_message_id)
+                reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
+            self.chat_history.add_message(chat_id, "user", message.text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
             print(f"Collecting missed message from chat {chat_id}: {message.text[:50]}...")
             return
 
@@ -201,20 +201,18 @@ class MessageHandler:
             processed_text = getattr(message, 'text', None) or getattr(message, 'caption', None) or ""
 
         # Extract reply information for context building
-        reply_to_message_id = None
+        reply_to_telegram_message_id = None
         if hasattr(message, 'reply_to_message') and message.reply_to_message:
-            # Map Telegram message ID to our internal message ID
-            # This is a simplified mapping - in production you might want more sophisticated tracking
-            reply_to_message_id = getattr(message.reply_to_message, 'id', None)
+            reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
 
         # Only respond in private chats or when mentioned in groups
         if not (is_private_chat or is_mentioned):
             # Still store the message for context, but don't respond
-            self.chat_history.add_message(chat_id, "user", message.text, reply_to_message_id)
+            self.chat_history.add_message(chat_id, "user", message.text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
             return
 
         # Store user message in chat history with reply context
-        self.chat_history.add_message(chat_id, "user", processed_text, reply_to_message_id)
+        self.chat_history.add_message(chat_id, "user", processed_text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
 
         # Check if this is a single-link message for link tracking
         if is_url_only_message(processed_text):
@@ -222,7 +220,7 @@ class MessageHandler:
             return
 
         # Route to appropriate handler
-        await self._route_message(message, chat_id, processed_text)
+        await self._route_message(message, chat_id, processed_text, reply_to_telegram_message_id)
 
     async def _handle_missed_messages(self, chat_id: int, message):
         """Handle catch-up response for missed messages."""
@@ -311,7 +309,7 @@ class MessageHandler:
 
         return is_mentioned, processed_text
 
-    async def _route_message(self, message, chat_id: int, processed_text: str):
+    async def _route_message(self, message, chat_id: int, processed_text: str, reply_to_telegram_message_id: int = None):
         """Route message to valor_agent for all text processing."""
         text = processed_text.lower().strip()
 
@@ -321,97 +319,57 @@ class MessageHandler:
             return
 
         # Use valor_agent for all other message handling
-        await self._handle_with_valor_agent(message, chat_id, processed_text)
+        await self._handle_with_valor_agent(message, chat_id, processed_text, reply_to_telegram_message_id)
 
-    async def _handle_with_valor_agent(self, message, chat_id: int, processed_text: str):
-        """Handle all messages using unified valor-claude agent system."""
+    async def _handle_with_valor_agent(self, message, chat_id: int, processed_text: str, reply_to_telegram_message_id: int = None):
+        """Handle all messages using valor agent system."""
         try:
-            # Try unified agent first, with fallback to original valor agent
-            try:
-                from agents.unified_integration import process_message_unified
-                
-                # Determine if this might be a priority question for context
-                is_priority = (
-                    is_user_priority_question(processed_text)
-                    if "is_user_priority_question" in globals()
-                    else False
-                )
-                
-                # Get notion data - prioritize group-specific database, fallback to priority question detection
-                notion_data = None
-                if self.notion_scout:
-                    try:
-                        # For group chats, use the group-specific Notion database
-                        is_private_chat = message.chat.type == ChatType.PRIVATE
-                        if not is_private_chat:
-                            notion_data = await self._get_notion_context_for_group(chat_id, processed_text)
-                        # For DMs or if no group-specific database, check if it's a priority question
-                        elif is_priority:
-                            notion_data = await self._get_notion_context(processed_text)
-                    except Exception as e:
-                        print(f"Warning: Could not get Notion context: {e}")
-                
-                # Get chat history for context with reply priority
-                reply_to_message_id = None
-                if hasattr(message, 'reply_to_message') and message.reply_to_message:
-                    reply_to_message_id = getattr(message.reply_to_message, 'id', None)
-                
-                if reply_to_message_id:
-                    print(f"🔗 Using reply-aware context for message replying to {reply_to_message_id}")
-                    chat_history = self.chat_history.get_context_with_reply_priority(
-                        chat_id, reply_to_message_id, max_context_messages=10
-                    )
-                else:
-                    chat_history = self.chat_history.get_context(chat_id, max_context_messages=10)
-                
-                # Process through unified system
-                answer = await process_message_unified(
-                    message=processed_text,
-                    chat_id=chat_id,
-                    username=message.from_user.username if message.from_user else None,
-                    is_group_chat=message.chat.type != ChatType.PRIVATE,
-                    chat_history=chat_history,
-                    chat_history_obj=self.chat_history,
-                    notion_data=notion_data
-                )
-                
-                print(f"✅ Processed message through unified agent system")
-                
-            except ImportError as e:
-                print(f"⚠️ Unified agent not available ({e}), falling back to original valor agent")
-                # Fallback to original valor agent
-                from agents.valor.handlers import handle_telegram_message
+            # Use valor agent for message processing
+            from agents.valor.handlers import handle_telegram_message
 
-                # Determine if this might be a priority question for context
-                is_priority = (
-                    is_user_priority_question(processed_text)
-                    if "is_user_priority_question" in globals()
-                    else False
-                )
+            # Determine if this might be a priority question for context
+            is_priority = (
+                is_user_priority_question(processed_text)
+                if "is_user_priority_question" in globals()
+                else False
+            )
 
-                # Get notion data - prioritize group-specific database, fallback to priority question detection
-                notion_data = None
-                if self.notion_scout:
-                    try:
-                        # For group chats, use the group-specific Notion database
-                        is_private_chat = message.chat.type == ChatType.PRIVATE
-                        if not is_private_chat:
-                            notion_data = await self._get_notion_context_for_group(chat_id, processed_text)
-                        # For DMs or if no group-specific database, check if it's a priority question
-                        elif is_priority:
-                            notion_data = await self._get_notion_context(processed_text)
-                    except Exception as e:
-                        print(f"Warning: Could not get Notion context: {e}")
+            # Get notion data - prioritize group-specific database, fallback to priority question detection
+            notion_data = None
+            if self.notion_scout:
+                try:
+                    # For group chats, use the group-specific Notion database
+                    is_private_chat = message.chat.type == ChatType.PRIVATE
+                    if not is_private_chat:
+                        notion_data = await self._get_notion_context_for_group(chat_id, processed_text)
+                    # For DMs or if no group-specific database, check if it's a priority question
+                    elif is_priority:
+                        notion_data = await self._get_notion_context(processed_text)
+                except Exception as e:
+                    print(f"Warning: Could not get Notion context: {e}")
 
-                answer = await handle_telegram_message(
-                    message=processed_text,
-                    chat_id=chat_id,
-                    username=message.from_user.username if message.from_user else None,
-                    is_group_chat=message.chat.type != ChatType.PRIVATE,
-                    chat_history_obj=self.chat_history,
-                    notion_data=notion_data,
-                    is_priority_question=is_priority,
+            # Get chat history for context with reply priority
+            reply_internal_id = None
+            if reply_to_telegram_message_id:
+                reply_internal_id = self.chat_history.get_internal_message_id(chat_id, reply_to_telegram_message_id)
+            
+            if reply_internal_id:
+                print(f"🔗 Using reply-aware context for message replying to internal ID {reply_internal_id} (Telegram ID: {reply_to_telegram_message_id})")
+                chat_history = self.chat_history.get_context_with_reply_priority(
+                    chat_id, reply_internal_id, max_context_messages=10
                 )
+            else:
+                chat_history = self.chat_history.get_context(chat_id, max_context_messages=10)
+
+            answer = await handle_telegram_message(
+                message=processed_text,
+                chat_id=chat_id,
+                username=message.from_user.username if message.from_user else None,
+                is_group_chat=message.chat.type != ChatType.PRIVATE,
+                chat_history_obj=self.chat_history,
+                notion_data=notion_data,
+                is_priority_question=is_priority,
+            )
 
             # Process the agent response (handles both images and text)
             await self._process_agent_response(message, chat_id, answer)
@@ -594,17 +552,17 @@ class MessageHandler:
                 caption_text = getattr(message, 'caption', None) or ""
 
             # Extract reply information for context building
-            reply_to_message_id = None
+            reply_to_telegram_message_id = None
             if hasattr(message, 'reply_to_message') and message.reply_to_message:
-                reply_to_message_id = getattr(message.reply_to_message, 'id', None)
+                reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
 
             # Only respond in private chats or when mentioned in groups
             if not (is_private_chat or is_mentioned):
                 # Still store the message for context, but don't respond
                 if message.caption:
-                    self.chat_history.add_message(chat_id, "user", f"[Photo] {message.caption}", reply_to_message_id)
+                    self.chat_history.add_message(chat_id, "user", f"[Photo] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 else:
-                    self.chat_history.add_message(chat_id, "user", "[Photo shared]", reply_to_message_id)
+                    self.chat_history.add_message(chat_id, "user", "[Photo shared]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 return
 
             # Download the photo
@@ -612,39 +570,27 @@ class MessageHandler:
 
             # Store user message in chat history with reply context
             if caption_text:
-                self.chat_history.add_message(chat_id, "user", f"[Photo] {caption_text}", reply_to_message_id)
+                self.chat_history.add_message(chat_id, "user", f"[Photo] {caption_text}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
             else:
-                self.chat_history.add_message(chat_id, "user", "[Photo shared]", reply_to_message_id)
+                self.chat_history.add_message(chat_id, "user", "[Photo shared]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
 
-            # Use unified agent system to analyze the image
+            # Use valor agent system to analyze the image
             if self.notion_scout and self.notion_scout.anthropic_client:
                 try:
-                    # Try unified agent first
-                    from agents.unified_integration import process_image_unified
-                    
+                    from agents.valor.handlers import handle_telegram_message
+
                     # Get chat history for context with reply priority
-                    if reply_to_message_id:
-                        print(f"🔗 Using reply-aware context for photo message replying to {reply_to_message_id}")
+                    reply_internal_id = None
+                    if reply_to_telegram_message_id:
+                        reply_internal_id = self.chat_history.get_internal_message_id(chat_id, reply_to_telegram_message_id)
+                    
+                    if reply_internal_id:
+                        print(f"🔗 Using reply-aware context for photo message replying to internal ID {reply_internal_id} (Telegram ID: {reply_to_telegram_message_id})")
                         chat_history = self.chat_history.get_context_with_reply_priority(
-                            chat_id, reply_to_message_id, max_context_messages=5
+                            chat_id, reply_internal_id, max_context_messages=5
                         )
                     else:
                         chat_history = self.chat_history.get_context(chat_id, max_context_messages=5)
-                    
-                    answer = await process_image_unified(
-                        image_path=file_path,
-                        chat_id=chat_id,
-                        caption=caption_text if caption_text else "",
-                        username=message.from_user.username if message.from_user else None,
-                        chat_history=chat_history
-                    )
-                    
-                    print(f"✅ Processed image through unified agent system")
-                    
-                except ImportError as e:
-                    print(f"⚠️ Unified agent not available for images ({e}), falling back to original valor agent")
-                    # Fallback to original valor agent
-                    from agents.valor.handlers import handle_telegram_message
 
                     # Prepare message for the agent
                     if caption_text:
@@ -663,8 +609,13 @@ class MessageHandler:
                         chat_history_obj=self.chat_history,
                     )
 
-                # Process the response (handles both images and text)
-                await self._process_agent_response(message, chat_id, answer)
+                    # Process the response (handles both images and text)
+                    await self._process_agent_response(message, chat_id, answer)
+
+                except Exception as e:
+                    error_msg = f"❌ Error processing image with agent: {str(e)}"
+                    await self._safe_reply(message, error_msg, "❌ Error processing image")
+                    self.chat_history.add_message(chat_id, "assistant", error_msg)
 
             else:
                 response = "👁️ I can see you shared an image, but I need my AI capabilities configured to analyze it!"
