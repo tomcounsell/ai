@@ -159,3 +159,9 @@ def get_workspace_working_directory(chat_id: int) -> str | None:
             return None
     except Exception:
         return None
+
+
+def get_dm_working_directory(username: str) -> str:
+    """Get the working directory for a DM user based on their whitelist configuration."""
+    from utilities.workspace_validator import get_dm_user_working_directory
+    return get_dm_user_working_directory(username)

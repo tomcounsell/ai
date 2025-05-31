@@ -289,11 +289,18 @@ def delegate_coding_task(
         
         # If no target directory specified and we have a chat_id, use workspace directory
         if not working_dir and ctx.deps.chat_id:
-            from integrations.notion.utils import get_workspace_working_directory
+            from integrations.notion.utils import get_workspace_working_directory, get_dm_working_directory
+            
+            # Try group workspace directory first
             workspace_dir = get_workspace_working_directory(ctx.deps.chat_id)
             if workspace_dir:
                 working_dir = workspace_dir
                 print(f"🏢 Using workspace directory for chat {ctx.deps.chat_id}: {working_dir}")
+            elif ctx.deps.username and not ctx.deps.is_group_chat:
+                # For DMs, use user-specific working directory
+                dm_dir = get_dm_working_directory(ctx.deps.username)
+                working_dir = dm_dir
+                print(f"👤 Using DM working directory for user @{ctx.deps.username}: {working_dir}")
         
         # Fall back to current directory if still not set
         if not working_dir:

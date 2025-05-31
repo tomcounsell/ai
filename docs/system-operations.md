@@ -154,7 +154,7 @@ AGENT_TIMEOUT_SECONDS=30
 
 # Telegram Chat Filtering (Multi-Server Setup)
 TELEGRAM_ALLOWED_GROUPS=-1002600253717,-4897329503  # Comma-separated group IDs
-TELEGRAM_ALLOW_DMS=true  # Enable/disable DM handling
+TELEGRAM_ALLOW_DMS=false  # DMs now use user whitelist instead of global setting
 ```
 
 ### Environment Validation
@@ -263,6 +263,36 @@ Configure project workspaces and dev group behavior in `config/workspace_config.
 - Yudame Dev (-4891178445)
 - PsyOPTIMAL Dev (-4897329503) 
 - DeckFusion Dev (-4851227604)
+
+### DM User Whitelisting
+
+Direct messages are restricted to whitelisted users only. Configure DM access in the `dm_whitelist` section:
+
+```json
+{
+  "dm_whitelist": {
+    "description": "Users allowed to send direct messages to the bot",
+    "default_working_directory": "/Users/valorengels/src/ai",
+    "allowed_users": {
+      "tomcounsell": {
+        "username": "tomcounsell",
+        "description": "Tom Counsell - Owner and Boss",
+        "working_directory": "/Users/valorengels/src/ai"
+      }
+    }
+  }
+}
+```
+
+**DM Security Features:**
+- **User whitelisting**: Only specified usernames can send DMs
+- **Case-insensitive**: Username matching works regardless of case
+- **Working directory isolation**: Each user can have a specific working directory
+- **Default fallback**: Non-specified users get default working directory but are denied access
+- **Claude Code restriction**: DM users' coding tasks are restricted to their assigned working directory
+
+**Currently Whitelisted:**
+- **@tomcounsell** (Tom Counsell - Owner/Boss) → `/Users/valorengels/src/ai`
 
 ## Dependency Management
 

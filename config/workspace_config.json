@@ -95,6 +95,17 @@
     "-1002374450243": "Tom's Team",
     "-1002455228990": "Verkstad"
   },
+  "dm_whitelist": {
+    "description": "Users allowed to send direct messages to the bot",
+    "default_working_directory": "/Users/valorengels/src/ai",
+    "allowed_users": {
+      "tomcounsell": {
+        "username": "tomcounsell",
+        "description": "Tom Counsell - Owner and Boss",
+        "working_directory": "/Users/valorengels/src/ai"
+      }
+    }
+  },
   "deprecated_mappings": {
     "note": "Groups below were discovered but not mapped to workspaces yet",
     "-4503471217": "PsyOptimal (legacy)",

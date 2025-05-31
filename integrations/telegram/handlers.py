@@ -77,7 +77,7 @@ class MessageHandler:
             self.allowed_groups = set()
             self.allow_dms = False
     
-    def _should_handle_chat(self, chat_id: int, is_private_chat: bool = False) -> bool:
+    def _should_handle_chat(self, chat_id: int, is_private_chat: bool = False, username: str = None) -> bool:
         """Check if this server instance should handle messages from the given chat with enhanced validation."""
         import logging
         from utilities.workspace_validator import validate_chat_whitelist_access
@@ -86,11 +86,12 @@ class MessageHandler:
         
         try:
             # Use centralized validation function for consistency
-            is_allowed = validate_chat_whitelist_access(chat_id, is_private_chat)
+            is_allowed = validate_chat_whitelist_access(chat_id, is_private_chat, username)
             
             if not is_allowed:
                 chat_type = "DM" if is_private_chat else "group"
-                logger.warning(f"Chat access denied: {chat_type} {chat_id} not in whitelist")
+                user_info = f" from @{username}" if username else ""
+                logger.warning(f"Chat access denied: {chat_type} {chat_id}{user_info} not in whitelist")
             
             return is_allowed
             
@@ -103,25 +104,26 @@ class MessageHandler:
         """Main message handling logic with routing to appropriate handlers."""
         chat_id = message.chat.id
         is_private_chat = message.chat.type == ChatType.PRIVATE
+        username = message.from_user.username if message.from_user else None
         
         # Check if this server instance should handle this chat
-        if not self._should_handle_chat(chat_id, is_private_chat):
+        if not self._should_handle_chat(chat_id, is_private_chat, username):
             import logging
             logger = logging.getLogger(__name__)
             
             chat_type = "DM" if is_private_chat else "group"
-            username = message.from_user.username if message.from_user else "unknown"
+            username_display = username or "unknown"
             message_preview = (message.text[:50] + "...") if message.text and len(message.text) > 50 else (message.text or "[no text]")
             
             # Enhanced logging for security audit trail
             logger.warning(
                 f"MESSAGE REJECTED - Chat whitelist violation: "
-                f"{chat_type} {chat_id} from user @{username} - "
+                f"{chat_type} {chat_id} from user @{username_display} - "
                 f"Message: '{message_preview}'"
             )
             
             # Also log to console for immediate visibility during development
-            print(f"🚫 Rejected {chat_type} {chat_id} (@{username}): {message_preview}")
+            print(f"🚫 Rejected {chat_type} {chat_id} (@{username_display}): {message_preview}")
             return
 
         # Mark message as read (read receipt)

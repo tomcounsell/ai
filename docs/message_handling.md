@@ -406,11 +406,12 @@ TELEGRAM_ALLOW_DMS=true                                # true/false
 
 | Aspect | Direct Messages (DMs) | Regular Group Chats | Dev Groups (`is_dev_group: true`) |
 |--------|----------------------|-------------------|-----------------------------------|
-| **Filtering** | `TELEGRAM_ALLOW_DMS` (all or none) | `TELEGRAM_ALLOWED_GROUPS` (whitelist) | `TELEGRAM_ALLOWED_GROUPS` (whitelist) |
-| **Response Trigger** | Always respond | Only when mentioned | **Always respond** |
+| **Filtering** | **User whitelist** (specific usernames) | `TELEGRAM_ALLOWED_GROUPS` (whitelist) | `TELEGRAM_ALLOWED_GROUPS` (whitelist) |
+| **Response Trigger** | Always respond (if whitelisted) | Only when mentioned | **Always respond** |
 | **Mention Processing** | Skipped (always proceed) | Complex mention detection | Complex mention detection |
 | **Notion Context** | Only for priority questions | Automatic group-specific database | Automatic group-specific database |
 | **Text Processing** | `processed_text = message.text` | Mentions removed from text | Mentions removed from text |
+| **Working Directory** | User-specific or default | Workspace-specific | Workspace-specific |
 
 ### Dev Group Configuration
 
@@ -445,6 +446,35 @@ Dev groups are configured in `config/workspace_config.json` with the `is_dev_gro
 - **Yudame Dev** (-4891178445) - AI development team 
 - **PsyOPTIMAL Dev** (-4897329503) - PsyOPTIMAL development team
 - **DeckFusion Dev** (-4851227604) - DeckFusion development team
+
+### DM User Whitelisting
+
+Direct messages use a username-based whitelist system for security:
+
+```json
+{
+  "dm_whitelist": {
+    "description": "Users allowed to send direct messages to the bot",
+    "default_working_directory": "/Users/valorengels/src/ai",
+    "allowed_users": {
+      "tomcounsell": {
+        "username": "tomcounsell", 
+        "description": "Tom Counsell - Owner and Boss",
+        "working_directory": "/Users/valorengels/src/ai"
+      }
+    }
+  }
+}
+```
+
+**DM Access Control:**
+- **Username validation**: Only whitelisted usernames can send DMs
+- **Case-insensitive matching**: @TomCounsell, @tomcounsell, @TOMCOUNSELL all work
+- **Working directory isolation**: Each user gets their own Claude Code working directory
+- **Security logging**: All DM access attempts are logged for audit
+
+**Currently Whitelisted:**
+- **@tomcounsell** (Tom Counsell - Owner/Boss)
 
 ## Error Handling
 
