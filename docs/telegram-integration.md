@@ -478,6 +478,78 @@ def create_production_telegram_app() -> Application:
     return application
 ```
 
+## Mixed Content Message Handling
+
+### Overview
+The Telegram integration includes comprehensive support for messages containing both text and images (mixed content), enabling rich conversational interactions with visual elements.
+
+### Message Structure and Processing
+The system handles three primary message types:
+
+1. **Text-only messages**: Processed through standard text handling
+2. **Image-only messages**: Routed to specialized image processing
+3. **Mixed text+image messages**: Combined processing of both components
+
+### Processing Flow for Mixed Content
+
+```python
+# Message routing based on media presence
+async def handle_message(self, client, message, chat_id: int):
+    """Route messages with media-first priority."""
+    
+    if message.photo:  # Includes mixed content (photo + caption)
+        await self._handle_photo_message(client, message, chat_id)
+    elif message.text:  # Text-only messages
+        await self._handle_with_valor_agent(client, message, chat_id)
+
+# Text extraction from any message type
+def _process_mentions(self, message) -> tuple[bool, str]:
+    """Extract text from text OR caption with unified processing."""
+    
+    text_content = (
+        getattr(message, 'text', None) or 
+        getattr(message, 'caption', None) or 
+        ""
+    )
+    
+    # Process both message.entities AND message.caption_entities
+    return self._extract_mentions_and_text(text_content, message)
+```
+
+### Storage Format with Semantic Indicators
+
+| Message Type | Storage Format | AI Processing |
+|--------------|----------------|---------------|
+| Text only | `"Hello world"` | Standard text handling |
+| Image only | `"[Image]"` | Image analysis only |
+| Mixed content | `"[Image+Text] Check this screenshot"` | Enhanced: 🖼️📝 MIXED CONTENT |
+
+### Enhanced AI Integration
+
+Mixed content messages receive enhanced processing for comprehensive understanding:
+
+```python
+# Enhanced message for AI agent
+if has_mixed_content:
+    agent_message = f"""🖼️📝 MIXED CONTENT MESSAGE: This message contains BOTH TEXT AND AN IMAGE.
+
+User's text: {caption_text}
+
+Image analysis: {image_analysis_result}
+
+{context_information}"""
+```
+
+### Key Features
+
+- **Unified text extraction**: Works seamlessly with text messages, captions, or empty content
+- **Entity processing**: Handles @mentions in both regular text and image captions
+- **Semantic storage**: Clear format indicators for chat history and AI processing
+- **Context preservation**: Mixed content maintains full conversation context
+- **Error recovery**: Graceful fallbacks when image or text processing fails
+
+For detailed technical implementation, see [Telegram Mixed Content Message Handling Guide](telegram-image-text-analysis.md).
+
 ## Benefits of Current Architecture
 
 ### Production Readiness
@@ -485,17 +557,20 @@ def create_production_telegram_app() -> Application:
 - **Performance optimization**: 2.21s streaming intervals, 97-99% context compression
 - **Resource management**: Automatic cleanup, memory monitoring, session management
 - **Error recovery**: Graceful degradation with user-friendly messaging
+- **Mixed content support**: Robust handling of text+image combinations
 
 ### User Experience
 - **Natural interaction**: No command learning or mode switching required
 - **Real-time feedback**: Live streaming updates during development tasks
 - **Context intelligence**: Conversation optimization while preserving critical information
 - **Seamless integration**: Chat and development unified in single conversation flow
+- **Rich media support**: Text and images processed together for comprehensive understanding
 
 ### Technical Innovation
 - **Zero keyword matching**: Pure LLM intelligence for tool selection and routing
 - **Adaptive performance**: Real-time optimization based on content and usage patterns
 - **Production monitoring**: Enterprise-grade health management and resource optimization
 - **Context-aware intelligence**: Smart conversation management with 97-99% compression efficiency
+- **Mixed content intelligence**: Unified processing of text and visual components
 
-This integration represents a fundamental shift from traditional chatbot interfaces to a unified conversational development environment that provides production-grade performance, monitoring, and user experience while maintaining natural conversation flow.
+This integration represents a fundamental shift from traditional chatbot interfaces to a unified conversational development environment that provides production-grade performance, monitoring, and user experience while maintaining natural conversation flow and comprehensive mixed content support.
