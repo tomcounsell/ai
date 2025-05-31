@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Server start script with hot reload
-# Checks if server is already running, starts it if not
+# Unified server start script with Telegram authentication
+# This script ensures both the FastAPI server and Telegram client start together
 
 PORT=9000
 PID_FILE="/tmp/fastapi_server.pid"
@@ -68,7 +68,11 @@ start_server() {
         echo "📁 Logs:    tail -f logs/server.log"
         echo "🛑 Stop:    scripts/stop.sh"
         echo ""
-        echo "Hot reload enabled - code changes auto-refresh"
+        echo "🤖 Services running:"
+        echo "  ✅ FastAPI server (with hot reload)"
+        echo "  ✅ Telegram client (authenticated)"
+        echo ""
+        echo "Ready to receive Telegram messages!"
         
         # Show last few lines of log to confirm startup
         echo ""
@@ -83,9 +87,91 @@ start_server() {
     fi
 }
 
+# Function to check Telegram authentication
+check_telegram_auth() {
+    echo "🔍 Checking Telegram authentication..."
+    cd "$PROJECT_ROOT" || exit 1
+    
+    # Check if session file exists
+    if [ ! -f "ai_project_bot.session" ]; then
+        echo "⚠️  No Telegram session found"
+        return 1
+    fi
+    
+    # Test the session validity
+    python -c "
+import asyncio
+import sys
+from integrations.telegram.client import TelegramClient
+
+async def test_auth():
+    try:
+        client = TelegramClient()
+        success = await client.initialize()
+        if success and client.is_connected:
+            me = await client.client.get_me()
+            print(f'✅ Telegram authenticated as: {me.first_name} (@{me.username})')
+            await client.stop()
+            return True
+        else:
+            print('❌ Telegram session invalid')
+            await client.stop() if client else None
+            return False
+    except Exception as e:
+        print(f'❌ Telegram auth check failed: {e}')
+        return False
+
+result = asyncio.run(test_auth())
+sys.exit(0 if result else 1)
+" 2>/dev/null
+    
+    return $?
+}
+
+# Function to run Telegram authentication
+authenticate_telegram() {
+    echo ""
+    echo "🔐 Telegram authentication required"
+    echo "This will prompt for your phone number and verification code"
+    echo ""
+    
+    if [ -t 0 ]; then
+        # Interactive terminal available
+        "$SCRIPT_DIR/telegram_login.sh"
+        return $?
+    else
+        # Non-interactive environment
+        echo "❌ Telegram authentication requires interactive terminal"
+        echo ""
+        echo "Please run this command in an interactive terminal:"
+        echo "  scripts/telegram_login.sh"
+        echo ""
+        echo "Then start the server again with:"
+        echo "  scripts/start.sh"
+        return 1
+    fi
+}
+
 # Main logic
 if check_server; then
     exit 0
-else
-    start_server
 fi
+
+# Check Telegram authentication before starting server
+if ! check_telegram_auth; then
+    if ! authenticate_telegram; then
+        echo ""
+        echo "❌ Cannot start server without Telegram authentication"
+        echo ""
+        echo "To fix this:"
+        echo "1. Run: scripts/telegram_login.sh"
+        echo "2. Enter your phone number and verification code"
+        echo "3. Run: scripts/start.sh again"
+        exit 1
+    fi
+fi
+
+echo "✅ Telegram authentication verified"
+echo ""
+
+start_server

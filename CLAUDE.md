@@ -52,27 +52,33 @@ uv pip install -r requirements.txt
 
 ### Server Management
 ```bash
-# Start FastAPI development server with hot reload
+# Start the complete system (FastAPI server + Telegram client)
+# This is the primary way to start the system - handles authentication automatically
 scripts/start.sh
 
 # Stop server and cleanup processes
 scripts/stop.sh
 
-# Quick server test (start, verify, stop) - for testing purposes
-python main.py & PID=$! && sleep 3 && curl -s http://localhost:9000/health && kill $PID
-
 # Update MCP configuration from .env
 scripts/update_mcp.sh
 ```
 
-### Telegram Setup
+**Important:** `scripts/start.sh` is the **unified startup command** that:
+- Checks Telegram authentication status
+- Prompts for interactive login if needed (phone + verification code)
+- Starts both FastAPI server and Telegram client together
+- Ensures the system is fully operational before completing
+
+### Telegram Authentication (Manual)
 ```bash
-# First-time Telegram authorization (interactive)
+# Manual Telegram authentication (only needed if start.sh fails)
 scripts/telegram_login.sh
 
 # Check existing session status
 python integrations/telegram/auth.py
 ```
+
+**Note:** Telegram authentication is automatically handled by `scripts/start.sh`. Manual authentication is only needed for troubleshooting.
 
 ### Agent Execution
 ```bash
