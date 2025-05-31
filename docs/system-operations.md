@@ -232,7 +232,7 @@ Configure project workspaces and dev group behavior in `config/workspace_config.
       "database_id": "****",
       "description": "Yudame development team tasks and management",
       "workspace_type": "yudame",
-      "allowed_directories": ["/Users/valorengels/src/ai"],
+      "working_directory": "/Users/valorengels/src/ai",
       "telegram_chat_ids": ["-4891178445"],
       "aliases": ["yudame dev"],
       "is_dev_group": true
@@ -241,7 +241,7 @@ Configure project workspaces and dev group behavior in `config/workspace_config.
       "database_id": "****",
       "description": "PsyOPTIMAL team chat and project management",
       "workspace_type": "psyoptimal", 
-      "allowed_directories": ["/Users/valorengels/src/psyoptimal"],
+      "working_directory": "/Users/valorengels/src/psyoptimal",
       "telegram_chat_ids": ["-1002600253717"],
       "aliases": ["psyoptimal", "PO"]
     }
@@ -256,7 +256,7 @@ Configure project workspaces and dev group behavior in `config/workspace_config.
 **Dev Group Configuration:**
 - **`is_dev_group: true`**: Agent responds to ALL messages (no @mention required)
 - **`is_dev_group: false` or omitted**: Agent only responds to @mentions
-- **Directory isolation**: Each workspace restricts file operations to specific directories
+- **Working directory**: Each workspace specifies a single working directory for Claude Code execution
 - **Notion database mapping**: Automatic project-specific database access
 
 **Current Dev Groups:**

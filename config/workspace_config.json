@@ -5,10 +5,7 @@
       "url": "https://www.notion.so/yudame/****",
       "description": "Yudame team chat and project management",
       "workspace_type": "yudame",
-      "allowed_directories": [
-        "/Users/valorengels/src/ai",
-        "/Users/valorengels/src/ai/"
-      ],
+      "working_directory": "/Users/valorengels/src/ai",
       "telegram_chat_ids": ["-4719889199"],
       "aliases": ["yudame"]
     },
@@ -17,10 +14,7 @@
       "url": "https://www.notion.so/yudame/****",
       "description": "Yudame development team tasks and management",
       "workspace_type": "yudame",
-      "allowed_directories": [
-        "/Users/valorengels/src/ai",
-        "/Users/valorengels/src/ai/"
-      ],
+      "working_directory": "/Users/valorengels/src/ai",
       "telegram_chat_ids": ["-4891178445"],
       "aliases": ["yudame dev"],
       "is_dev_group": true
@@ -30,10 +24,7 @@
       "url": "https://www.notion.so/yudame/****",
       "description": "Verkstad project management",
       "workspace_type": "verkstad",
-      "allowed_directories": [
-        "/Users/valorengels/src/verkstad",
-        "/Users/valorengels/src/verkstad/"
-      ],
+      "working_directory": "/Users/valorengels/src/verkstad",
       "telegram_chat_ids": ["-1002455228990"],
       "aliases": ["verkstad"]
     },
@@ -42,10 +33,7 @@
       "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
       "description": "PsyOPTIMAL team chat and project management",
       "workspace_type": "psyoptimal",
-      "allowed_directories": [
-        "/Users/valorengels/src/psyoptimal",
-        "/Users/valorengels/src/psyoptimal/"
-      ],
+      "working_directory": "/Users/valorengels/src/psyoptimal",
       "telegram_chat_ids": ["-1002600253717"],
       "aliases": ["psyoptimal", "PO"]
     },
@@ -54,10 +42,7 @@
       "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
       "description": "PsyOPTIMAL development tasks and management",
       "workspace_type": "psyoptimal",
-      "allowed_directories": [
-        "/Users/valorengels/src/psyoptimal",
-        "/Users/valorengels/src/psyoptimal/"
-      ],
+      "working_directory": "/Users/valorengels/src/psyoptimal",
       "telegram_chat_ids": ["-4897329503"],
       "aliases": ["psyoptimal dev", "PO dev"],
       "is_dev_group": true
@@ -67,10 +52,7 @@
       "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
       "description": "DeckFusion team chat and project management",
       "workspace_type": "deckfusion",
-      "allowed_directories": [
-        "/Users/valorengels/src/deckfusion",
-        "/Users/valorengels/src/deckfusion/"
-      ],
+      "working_directory": "/Users/valorengels/src/deckfusion",
       "telegram_chat_ids": ["-1002374450243"],
       "aliases": ["deckfusion", "DF", "tom", "toms team"]
     },
@@ -79,10 +61,7 @@
       "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
       "description": "DeckFusion development tasks and management",
       "workspace_type": "deckfusion",
-      "allowed_directories": [
-        "/Users/valorengels/src/deckfusion",
-        "/Users/valorengels/src/deckfusion/"
-      ],
+      "working_directory": "/Users/valorengels/src/deckfusion",
       "telegram_chat_ids": ["-4851227604"],
       "aliases": ["deckfusion dev", "DF dev"],
       "is_dev_group": true
@@ -92,10 +71,7 @@
       "url": "https://www.notion.so/yudame/****",
       "description": "FlexTrip team chat and project management",
       "workspace_type": "flextrip",
-      "allowed_directories": [
-        "/Users/valorengels/src/flextrip",
-        "/Users/valorengels/src/flextrip/"
-      ],
+      "working_directory": "/Users/valorengels/src/flextrip",
       "telegram_chat_ids": [],
       "aliases": ["flextrip"]
     },
@@ -104,10 +80,7 @@
       "url": "https://www.notion.so/yudame/****",
       "description": "FlexTrip team development tasks and management",
       "workspace_type": "flextrip",
-      "allowed_directories": [
-        "/Users/valorengels/src/flextrip",
-        "/Users/valorengels/src/flextrip/"
-      ],
+      "working_directory": "/Users/valorengels/src/flextrip",
       "telegram_chat_ids": [],
       "aliases": ["flextrip dev"],
       "is_dev_group": true

@@ -243,11 +243,11 @@ chat_history_obj.get_context(
 - **Cross-workspace access is blocked** - DeckFusion chats cannot access PsyOPTIMAL data
 
 **Workspace Types:**
-- `psyoptimal` - PsyOPTIMAL project (restricted to `/Users/valorengels/src/psyoptimal/`)
-- `deckfusion` - DeckFusion project (restricted to `/Users/valorengels/src/deckfusion/`)
-- `flextrip` - FlexTrip project (restricted to `/Users/valorengels/src/flextrip/`)
-- `yudame` - Yudame project (restricted to `/Users/valorengels/src/ai/`)
-- `verkstad` - Verkstad project (restricted to `/Users/valorengels/src/verkstad/`)
+- `psyoptimal` - PsyOPTIMAL project (working directory: `/Users/valorengels/src/psyoptimal/`)
+- `deckfusion` - DeckFusion project (working directory: `/Users/valorengels/src/deckfusion/`)
+- `flextrip` - FlexTrip project (working directory: `/Users/valorengels/src/flextrip/`)
+- `yudame` - Yudame project (working directory: `/Users/valorengels/src/ai/`)
+- `verkstad` - Verkstad project (working directory: `/Users/valorengels/src/verkstad/`)
 
 #### Notion Context Loading:
 
@@ -370,10 +370,7 @@ TELEGRAM_ALLOW_DMS=true                                # true/false
       "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
       "description": "PsyOPTIMAL team chat and project management",
       "workspace_type": "psyoptimal",
-      "allowed_directories": [
-        "/Users/valorengels/src/psyoptimal",
-        "/Users/valorengels/src/psyoptimal/"
-      ],
+      "working_directory": "/Users/valorengels/src/psyoptimal",
       "telegram_chat_ids": ["-1002600253717"],
       "aliases": ["psyoptimal", "PO"]
     },
@@ -382,10 +379,7 @@ TELEGRAM_ALLOW_DMS=true                                # true/false
       "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
       "description": "DeckFusion development tasks and management",
       "workspace_type": "deckfusion",
-      "allowed_directories": [
-        "/Users/valorengels/src/deckfusion",
-        "/Users/valorengels/src/deckfusion/"
-      ],
+      "working_directory": "/Users/valorengels/src/deckfusion",
       "telegram_chat_ids": ["-4851227604"],
       "aliases": ["deckfusion dev", "DF dev"]
     }
@@ -404,7 +398,7 @@ TELEGRAM_ALLOW_DMS=true                                # true/false
 
 **Key Features:**
 - **Consolidated mapping**: Single file for all workspace configurations
-- **Directory isolation**: Each workspace has allowed directory restrictions
+- **Working directory isolation**: Each workspace has a single working directory for Claude Code execution
 - **Telegram integration**: Direct chat ID to workspace mapping
 - **Backward compatibility**: Legacy `integrations/notion/database_mapping.json` still supported
 

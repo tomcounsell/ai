@@ -160,6 +160,136 @@ async def handle_telegram_message(
     return result.output
 
 
+async def handle_telegram_message_with_intent(
+    message: str,
+    chat_id: int,
+    username: str | None = None,
+    is_group_chat: bool = False,
+    chat_history_obj=None,
+    notion_data: str | None = None,
+    is_priority_question: bool = False,
+    intent_result=None,
+) -> str:
+    """Handle a Telegram message with intent-based preprocessing and optimization.
+
+    This enhanced version of the message handler integrates intent classification
+    to optimize tool usage, system prompts, and response strategies.
+
+    Args:
+        message: The user's message text to process.
+        chat_id: Unique Telegram chat identifier.
+        username: Optional Telegram username of the sender.
+        is_group_chat: Whether this message is from a group chat.
+        chat_history_obj: ChatHistoryManager instance for conversation history.
+        notion_data: Optional Notion project data for priority questions.
+        is_priority_question: Whether this is asking about work priorities.
+        intent_result: IntentResult from intent classification.
+
+    Returns:
+        str: The agent's response message optimized for the detected intent.
+    """
+    from integrations.intent_tools import get_claude_code_configuration
+    from integrations.intent_prompts import get_intent_system_prompt
+
+    # Prepare enhanced context with intent information
+    context = ValorContext(
+        chat_id=chat_id,
+        username=username,
+        is_group_chat=is_group_chat,
+        chat_history=[],  # Legacy field, now handled by message_history
+        chat_history_obj=chat_history_obj,  # Pass the history manager for search tools
+        notion_data=notion_data,
+        is_priority_question=is_priority_question,
+        intent_result=intent_result,  # Add intent information to context
+    )
+
+    # Generate intent-specific system prompt
+    prompt_context = {
+        "chat_id": chat_id,
+        "username": username,
+        "is_group_chat": is_group_chat,
+        "has_image": "[Image" in message or "image file path:" in message.lower(),
+        "has_links": any(url in message.lower() for url in ["http://", "https://", "www."]),
+    }
+    
+    if intent_result:
+        intent_system_prompt = get_intent_system_prompt(intent_result, prompt_context)
+        print(f"🎯 Using intent-specific system prompt for {intent_result.intent.value}")
+    else:
+        intent_system_prompt = None
+
+    # Add contextual information to the user message if needed
+    enhanced_message = message
+    
+    # Detect if this message contains both text and image components
+    has_mixed_content = _detect_mixed_content(message)
+    if has_mixed_content:
+        print(f"🖼️📝 MIXED CONTENT DETECTED: Message contains both text and image for chat {chat_id}")
+        print(f"Message preview: {message[:100]}..." if len(message) > 100 else f"Message: {message}")
+
+    # Build enhanced message with context - always include chat history when available
+    context_parts = []
+    
+    # Add intent information to context
+    if intent_result:
+        intent_info = f"Detected Intent: {intent_result.intent.value} (confidence: {intent_result.confidence:.2f})"
+        if intent_result.reasoning:
+            intent_info += f"\nReasoning: {intent_result.reasoning}"
+        context_parts.append(intent_info)
+    
+    # Add recent chat context for continuity (always include if available)
+    if chat_history_obj:
+        telegram_messages = chat_history_obj.get_context(
+            chat_id, 
+            max_context_messages=8,  # Up to 8 messages total
+            max_age_hours=6,         # Only messages from last 6 hours
+            always_include_last=2    # Always include last 2 messages regardless of age
+        )
+        if telegram_messages:
+            context_text = "Recent conversation:\n"
+            for msg in telegram_messages:
+                context_text += f"{msg['role']}: {msg['content']}\n"
+            context_parts.append(context_text)
+    
+    # Include Notion data for priority questions (in addition to chat context)
+    if is_priority_question and notion_data and "Error" not in notion_data:
+        context_parts.append(f"Current project data:\n{notion_data}")
+    
+    # Combine all context with the current message
+    if context_parts:
+        if has_mixed_content:
+            enhanced_message = "\n\n".join(context_parts) + f"\n\n🖼️📝 CURRENT MESSAGE (MIXED CONTENT - text+image): {message}"
+        else:
+            enhanced_message = "\n\n".join(context_parts) + f"\n\nCurrent message: {message}"
+    else:
+        if has_mixed_content:
+            enhanced_message = f"🖼️📝 MIXED CONTENT MESSAGE (text+image): {message}"
+        else:
+            enhanced_message = message
+
+    # Modify agent behavior based on intent (if available)
+    if intent_result and intent_system_prompt:
+        # Store original system prompt
+        original_system_prompt = valor_agent.system_prompt
+        
+        try:
+            # Temporarily use intent-specific system prompt
+            valor_agent.system_prompt = intent_system_prompt
+            
+            # Run the agent with intent-optimized configuration
+            result = await valor_agent.run(enhanced_message, deps=context)
+            
+            return result.output
+            
+        finally:
+            # Restore original system prompt
+            valor_agent.system_prompt = original_system_prompt
+    else:
+        # Run with default configuration
+        result = await valor_agent.run(enhanced_message, deps=context)
+        return result.output
+
+
 # Convenience functions for backward compatibility with existing handlers
 
 

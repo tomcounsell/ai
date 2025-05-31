@@ -130,11 +130,12 @@ class MessageHandler:
         except Exception as e:
             print(f"Warning: Could not mark message as read: {e}")
 
-        # Add reaction to show message is being processed
+        # Add initial "received" reaction to show message was seen
+        from .reaction_manager import add_message_received_reaction
         try:
-            await client.send_reaction(chat_id, message.id, "👀")
+            await add_message_received_reaction(client, chat_id, message.id)
         except Exception as e:
-            print(f"Warning: Could not add reaction: {e}")
+            print(f"Warning: Could not add received reaction: {e}")
 
         # Handle different message types
         if message.photo:
@@ -223,8 +224,8 @@ class MessageHandler:
             await self._handle_link_message(message, chat_id, processed_text)
             return
 
-        # Route to appropriate handler
-        await self._route_message(message, chat_id, processed_text, reply_to_telegram_message_id)
+        # Perform intent classification before routing
+        await self._route_message_with_intent(client, message, chat_id, processed_text, reply_to_telegram_message_id)
 
     async def _handle_missed_messages(self, chat_id: int, message):
         """Handle catch-up response for missed messages."""
@@ -330,8 +331,138 @@ class MessageHandler:
 
         return is_mentioned, processed_text
 
+    async def _classify_message_intent(self, processed_text: str, message, chat_id: int):
+        """Classify message intent using Ollama-based classification."""
+        from ..ollama_intent import classify_message_intent
+        
+        # Prepare context for classification
+        context = {
+            "chat_id": chat_id,
+            "is_group_chat": message.chat.type != ChatType.PRIVATE,
+            "username": message.from_user.username if message.from_user else None,
+            "has_image": bool(message.photo),
+            "has_links": any(url in processed_text.lower() for url in ["http://", "https://", "www."]),
+        }
+        
+        try:
+            # Classify the message intent
+            intent_result = await classify_message_intent(processed_text, context)
+            
+            print(f"🧠 Intent classified: {intent_result.intent.value} "
+                  f"(confidence: {intent_result.confidence:.2f}) - {intent_result.reasoning}")
+            
+            return intent_result
+            
+        except Exception as e:
+            print(f"Warning: Intent classification failed: {e}")
+            # Fallback to unclear intent
+            from ..ollama_intent import IntentResult, MessageIntent
+            return IntentResult(
+                intent=MessageIntent.UNCLEAR,
+                confidence=0.5,
+                reasoning=f"Classification failed: {str(e)}",
+                suggested_emoji="🤔"
+            )
+
+    async def _handle_with_valor_agent_intent(self, message, chat_id: int, processed_text: str, 
+                                            reply_to_telegram_message_id: int = None, intent_result=None):
+        """Handle messages using valor agent system with intent-based configuration."""
+        try:
+            # Use valor agent for message processing with intent context
+            from agents.valor.handlers import handle_telegram_message_with_intent
+
+            # Determine if this might be a priority question for context
+            is_priority = (
+                is_user_priority_question(processed_text)
+                if "is_user_priority_question" in globals()
+                else False
+            )
+
+            # Get notion data - prioritize group-specific database, fallback to priority question detection
+            notion_data = None
+            if self.notion_scout:
+                try:
+                    # For group chats, use the group-specific Notion database
+                    is_private_chat = message.chat.type == ChatType.PRIVATE
+                    if not is_private_chat:
+                        notion_data = await self._get_notion_context_for_group(chat_id, processed_text)
+                    # For DMs or if no group-specific database, check if it's a priority question
+                    elif is_priority:
+                        notion_data = await self._get_notion_context(processed_text)
+                except Exception as e:
+                    print(f"Warning: Could not get Notion context: {e}")
+
+            # Get chat history for context with reply priority
+            reply_internal_id = None
+            if reply_to_telegram_message_id:
+                reply_internal_id = self.chat_history.get_internal_message_id(chat_id, reply_to_telegram_message_id)
+            
+            if reply_internal_id:
+                print(f"🔗 Using reply-aware context for message replying to internal ID {reply_internal_id} (Telegram ID: {reply_to_telegram_message_id})")
+                chat_history = self.chat_history.get_context_with_reply_priority(
+                    chat_id, reply_internal_id, max_context_messages=10
+                )
+            else:
+                chat_history = self.chat_history.get_context(chat_id, max_context_messages=10)
+
+            # Call the intent-aware handler
+            answer = await handle_telegram_message_with_intent(
+                message=processed_text,
+                chat_id=chat_id,
+                username=message.from_user.username if message.from_user else None,
+                is_group_chat=message.chat.type != ChatType.PRIVATE,
+                chat_history_obj=self.chat_history,
+                notion_data=notion_data,
+                is_priority_question=is_priority,
+                intent_result=intent_result,
+            )
+
+            # Process the agent response (handles both images and text)
+            await self._process_agent_response(message, chat_id, answer)
+
+        except Exception as e:
+            # Fallback to regular handler if intent-aware handler fails
+            print(f"Intent-aware handler failed, falling back to regular handler: {e}")
+            await self._handle_with_valor_agent(message, chat_id, processed_text, reply_to_telegram_message_id)
+
+    async def _route_message_with_intent(self, client, message, chat_id: int, processed_text: str, reply_to_telegram_message_id: int = None):
+        """Route message with intent classification and preprocessing."""
+        text = processed_text.lower().strip()
+
+        # Keep ping-pong for health check (skip intent classification for system commands)
+        if text == "ping":
+            await self._handle_ping(message, chat_id)
+            return
+
+        # Perform intent classification
+        intent_result = await self._classify_message_intent(processed_text, message, chat_id)
+        
+        # Add intent-specific reaction
+        from .reaction_manager import add_intent_based_reaction
+        try:
+            await add_intent_based_reaction(client, chat_id, message.id, intent_result)
+        except Exception as e:
+            print(f"Warning: Could not add intent reaction: {e}")
+
+        # Process message with intent-based configuration
+        success = False
+        try:
+            # Use valor_agent with intent-specific configuration
+            await self._handle_with_valor_agent_intent(message, chat_id, processed_text, reply_to_telegram_message_id, intent_result)
+            success = True
+        except Exception as e:
+            print(f"Error processing message with intent {intent_result.intent.value}: {e}")
+            success = False
+        
+        # Add completion/error reaction
+        from .reaction_manager import complete_reaction_sequence
+        try:
+            await complete_reaction_sequence(client, chat_id, message.id, intent_result, success)
+        except Exception as e:
+            print(f"Warning: Could not complete reaction sequence: {e}")
+
     async def _route_message(self, message, chat_id: int, processed_text: str, reply_to_telegram_message_id: int = None):
-        """Route message to valor_agent for all text processing."""
+        """Legacy route message method for backward compatibility."""
         text = processed_text.lower().strip()
 
         # Keep ping-pong for health check

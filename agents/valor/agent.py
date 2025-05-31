@@ -48,6 +48,7 @@ class ValorContext(BaseModel):
         chat_history: List of previous chat messages for context.
         notion_data: Optional Notion project data for priority questions.
         is_priority_question: Whether this message is asking about work priorities.
+        intent_result: Optional intent classification result for message optimization.
     """
 
     chat_id: int | None = None
@@ -57,6 +58,7 @@ class ValorContext(BaseModel):
     chat_history_obj: Any = None  # ChatHistoryManager instance for search tools
     notion_data: str | None = None
     is_priority_question: bool = False
+    intent_result: Any = None  # IntentResult instance for message optimization
 
 
 def load_persona() -> str:
@@ -242,7 +244,7 @@ def analyze_shared_image(
 def delegate_coding_task(
     ctx: RunContext[ValorContext],
     task_description: str,
-    target_directory: str = ".",
+    target_directory: str = "",
     specific_instructions: str = "",
 ) -> str:
     """Delegate any coding task to Claude Code - it handles everything autonomously.
@@ -266,10 +268,12 @@ def delegate_coding_task(
 
     Don't overthink it - just describe the task and let Claude Code handle the details.
 
+    For Telegram groups, Claude Code is automatically restricted to the group's workspace directory.
+
     Args:
         ctx: The runtime context containing chat information.
         task_description: What needs to be built, fixed, or implemented.
-        target_directory: (Optional) Specific directory to work in. Defaults to current project.
+        target_directory: (Optional) Specific directory to work in. If empty and chat_id provided, uses workspace directory.
         specific_instructions: (Optional) Any additional constraints or preferences.
 
     Returns:
@@ -280,9 +284,24 @@ def delegate_coding_task(
         'Claude Code session completed successfully: Fixed login validation...'
     """
     try:
+        # Determine the working directory
+        working_dir = target_directory
+        
+        # If no target directory specified and we have a chat_id, use workspace directory
+        if not working_dir and ctx.deps.chat_id:
+            from integrations.notion.utils import get_workspace_working_directory
+            workspace_dir = get_workspace_working_directory(ctx.deps.chat_id)
+            if workspace_dir:
+                working_dir = workspace_dir
+                print(f"🏢 Using workspace directory for chat {ctx.deps.chat_id}: {working_dir}")
+        
+        # Fall back to current directory if still not set
+        if not working_dir:
+            working_dir = "."
+            
         result = spawn_valor_session(
             task_description=task_description,
-            target_directory=target_directory,
+            target_directory=working_dir,
             specific_instructions=specific_instructions if specific_instructions else None,
         )
         return f"Claude Code session completed successfully:\n\n{result}"

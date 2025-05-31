@@ -127,16 +127,105 @@ else
     echo -e "\n${GREEN}🎉 All documentation files updated successfully!${NC}"
 fi
 
+# Update root-level documentation files
+echo -e "\n${BLUE}📄 Updating root-level documentation files...${NC}"
+
+# Update README.md
+echo -e "\n${YELLOW}📝 Updating: README.md${NC}"
+if claude "Review and update the README.md file in the project root to ensure it accurately reflects the current project state.
+
+Tasks to perform:
+1. **Project Overview**: Update the project description to reflect current capabilities and architecture
+2. **Installation & Setup**: Verify setup instructions match current requirements and scripts
+3. **Usage Examples**: Update examples to reflect current agent system and tools
+4. **Architecture Summary**: Ensure high-level architecture description is current
+5. **Recent Features**: Include information about recent enhancements like intent classification, dev group logic, and message handling improvements
+6. **Cross-References**: Ensure all references to documentation files in docs/ are accurate
+
+Key recent changes to incorporate:
+- Intent classification and message routing system
+- Dev group logic with automatic response handling
+- Enhanced Telegram message handling with reactions and read receipts
+- MCP server integration and Claude Code compatibility
+- Unified conversational development environment
+
+Make the README welcoming and informative for new users while accurately representing the current system capabilities."; then
+    echo -e "${GREEN}✅ Successfully updated: README.md${NC}"
+    successful_files+=("README.md")
+else
+    echo -e "${RED}❌ Failed to update: README.md${NC}"
+    failed_files+=("README.md")
+fi
+
+# Update CLAUDE.md
+echo -e "\n${YELLOW}📝 Updating: CLAUDE.md${NC}"
+if claude "Review and update the CLAUDE.md file in the project root to ensure it provides accurate guidance for Claude Code when working with this codebase.
+
+Tasks to perform:
+1. **Development Principles**: Verify principles still align with current development approach
+2. **Architecture Overview**: Update to reflect current system architecture and recent changes
+3. **Command References**: Ensure all scripts and commands are current and accurate
+4. **File Structure**: Update directory structure descriptions to match current layout
+5. **Integration Details**: Update information about MCP servers, tools, and agent capabilities
+6. **Recent Changes**: Incorporate recent enhancements and architectural improvements
+
+Key recent changes to incorporate:
+- Intent classification system with message routing
+- Enhanced dev group logic and automatic response handling  
+- Reaction management system for Telegram messages
+- Read receipt and message acknowledgment features
+- Updated message handling patterns with better context extraction
+- Improved cross-reference validation between documentation files
+
+Ensure CLAUDE.md serves as an accurate and comprehensive guide for Claude Code when working with this project, reflecting the current state of the codebase and development patterns."; then
+    echo -e "${GREEN}✅ Successfully updated: CLAUDE.md${NC}"
+    successful_files+=("CLAUDE.md")
+else
+    echo -e "${RED}❌ Failed to update: CLAUDE.md${NC}"
+    failed_files+=("CLAUDE.md")
+fi
+
 # Final cross-reference validation
 echo -e "\n${BLUE}🔗 Running final cross-reference validation...${NC}"
-claude "Please perform a final validation of all documentation files in the docs/ directory. Check that:
+claude "Please perform a final validation of all documentation files including docs/ directory, README.md, and CLAUDE.md. Check that:
 
 1. All cross-references between documentation files are working correctly
 2. File paths mentioned in docs match the actual project structure  
-3. The documentation set is internally consistent
+3. The documentation set is internally consistent across all files
 4. All references to code files, functions, and architectural components are accurate
 5. The documentation accurately reflects the current system architecture
+6. README.md provides an accurate project overview that aligns with detailed docs
+7. CLAUDE.md provides accurate guidance that reflects current development patterns
 
-Focus on ensuring the documentation set works together as a cohesive whole. Report any remaining inconsistencies or broken references that need manual attention."
+Focus on ensuring the entire documentation ecosystem works together as a cohesive whole. Report any remaining inconsistencies or broken references that need manual attention."
 
-echo -e "\n${GREEN}🏁 Documentation update process complete!${NC}"
+# Final summary report
+echo -e "\n${BLUE}📊 Final Documentation Update Summary${NC}"
+echo -e "${GREEN}✅ Successfully updated: ${#successful_files[@]} files total${NC}"
+
+if [[ ${#successful_files[@]} -gt 0 ]]; then
+    for file in "${successful_files[@]}"; do
+        if [[ "$file" == *"/"* ]]; then
+            echo -e "  ✅ ${file#$PROJECT_ROOT/}"
+        else
+            echo -e "  ✅ $file"
+        fi
+    done
+fi
+
+if [[ ${#failed_files[@]} -gt 0 ]]; then
+    echo -e "${RED}❌ Failed to update: ${#failed_files[@]} files${NC}"
+    for file in "${failed_files[@]}"; do
+        if [[ "$file" == *"/"* ]]; then
+            echo -e "  ❌ ${file#$PROJECT_ROOT/}"
+        else
+            echo -e "  ❌ $file"
+        fi
+    done
+    echo -e "\n${YELLOW}⚠️  Please review failed files manually${NC}"
+    exit 1
+else
+    echo -e "\n${GREEN}🎉 All documentation files updated successfully!${NC}"
+fi
+
+echo -e "\n${GREEN}🏁 Complete documentation update process finished!${NC}"

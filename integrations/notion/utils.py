@@ -133,3 +133,29 @@ def is_dev_group(chat_id: int) -> bool:
             return False
     except Exception:
         return False
+
+
+def get_workspace_working_directory(chat_id: int) -> str | None:
+    """Get the working directory for a specific chat ID's workspace."""
+    config_file = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
+    if not config_file.exists():
+        return None
+    
+    try:
+        with open(config_file) as f:
+            data = json.load(f)
+            telegram_groups = data.get("telegram_groups", {})
+            workspaces = data.get("workspaces", {})
+            
+            # Convert chat_id to string for lookup
+            chat_id_str = str(chat_id)
+            
+            if chat_id_str in telegram_groups:
+                project_name = telegram_groups[chat_id_str]
+                if project_name in workspaces:
+                    workspace_data = workspaces[project_name]
+                    return workspace_data.get("working_directory")
+            
+            return None
+    except Exception:
+        return None
