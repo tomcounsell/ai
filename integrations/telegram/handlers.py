@@ -6,7 +6,6 @@ from tools.link_analysis_tool import extract_urls, is_url_only_message, store_li
 
 # All functionality now handled by valor_agent (telegram_chat_agent)
 from .utils import (
-    generate_catchup_response,
     is_message_too_old,
     is_user_priority_question,
 )
@@ -188,9 +187,9 @@ class MessageHandler:
         current_history_count = len(self.chat_history.chat_histories.get(chat_id, []))
         print(f"Current chat history length: {current_history_count}")
 
-        # Check if we have missed messages for this chat and respond to them first
+        # Check if we have missed messages for this chat and process them through normal routing
         if chat_id in self.missed_messages_per_chat and self.missed_messages_per_chat[chat_id]:
-            await self._handle_missed_messages(chat_id, message)
+            await self._process_missed_messages_through_agent(client, chat_id, message, processed_text, reply_to_telegram_message_id)
 
         # Handle group mentions and process message with error handling
         try:
@@ -229,21 +228,23 @@ class MessageHandler:
         # Perform intent classification before routing
         await self._route_message_with_intent(client, message, chat_id, processed_text, reply_to_telegram_message_id)
 
-    async def _handle_missed_messages(self, chat_id: int, message):
-        """Handle catch-up response for missed messages."""
+    async def _process_missed_messages_through_agent(self, client, chat_id: int, message, processed_text: str, reply_to_telegram_message_id):
+        """Process missed messages through the normal agent routing system."""
         try:
-            if self.notion_scout and self.notion_scout.anthropic_client:
-                catchup_response = await generate_catchup_response(
-                    self.missed_messages_per_chat[chat_id], self.notion_scout.anthropic_client
-                )
-                await self._safe_reply(message, f"📬 {catchup_response}", "📬 Caught up on missed messages")
-                self.chat_history.add_message(chat_id, "assistant", catchup_response)
-
+            missed_messages = self.missed_messages_per_chat[chat_id]
+            print(f"Processing {len(missed_messages)} missed messages for chat {chat_id}")
+            
+            # Create a summary of missed messages and route through normal agent system
+            missed_summary = f"I was offline and missed {len(missed_messages)} messages. Recent messages were: " + "; ".join(missed_messages[-3:])
+            
+            # Route the missed message summary through normal agent processing
+            await self._route_message_with_intent(client, message, chat_id, missed_summary, reply_to_telegram_message_id)
+            
             # Clear missed messages for this chat
             del self.missed_messages_per_chat[chat_id]
-
+            
         except Exception as e:
-            print(f"Error sending catch-up response: {e}")
+            print(f"Error processing missed messages through agent: {e}")
             # Clear anyway to avoid getting stuck
             if chat_id in self.missed_messages_per_chat:
                 del self.missed_messages_per_chat[chat_id]
