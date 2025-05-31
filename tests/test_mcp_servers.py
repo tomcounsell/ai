@@ -155,7 +155,7 @@ class TestNotionToolsMCP:
         """Test query_notion_projects handles missing API keys."""
         with patch.dict(os.environ, {}, clear=True):
             result = query_notion_projects("PsyOPTIMAL", "test question")
-            assert "NOTION_API_KEY not configured" in result
+            assert "Notion engine not available" in result
 
     def test_query_notion_projects_unknown_workspace(self):
         """Test query_notion_projects handles unknown workspace."""

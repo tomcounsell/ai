@@ -1,10 +1,14 @@
 """Tests for token usage tracking system."""
 
 import os
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta
 from unittest.mock import patch
+
+# Add project root to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utilities.token_tracker import TokenTracker, log_token_usage, get_tracker
 

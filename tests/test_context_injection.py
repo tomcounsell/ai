@@ -14,7 +14,7 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from mcp_servers.social_tools import create_image, save_link, search_links
+from mcp_servers.social_tools import create_image, save_link, search_links, search_current_info
 from mcp_servers.notion_tools import query_notion_projects
 from mcp_servers.telegram_tools import search_conversation_history, get_conversation_context
 

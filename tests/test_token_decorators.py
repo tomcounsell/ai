@@ -1,11 +1,15 @@
 """Tests for token tracking decorators and integration helpers."""
 
 import os
+import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch, MagicMock
 from dataclasses import dataclass
 from typing import Optional
+
+# Add project root to Python path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utilities.token_decorators import (
     track_tokens, TokenTrackingContext, BatchTokenTracker,

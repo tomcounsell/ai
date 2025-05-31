@@ -47,6 +47,16 @@ def query_notion_projects(workspace_name: str, question: str, chat_id: str = "")
     Returns:
         str: AI-generated answer with specific task details and recommendations
     """
+    # Validate inputs
+    if not workspace_name or not workspace_name.strip():
+        return "❌ Workspace name cannot be empty."
+    
+    if not question or not question.strip():
+        return "❌ Question cannot be empty."
+    
+    if len(question) > 1000:
+        return "❌ Question too long (max 1000 characters)."
+    
     # Validate workspace access if chat_id is provided
     if chat_id:
         try:
@@ -69,7 +79,15 @@ def query_notion_projects(workspace_name: str, question: str, chat_id: str = "")
             logger.error(f"Notion validation error: {str(e)}")
             return f"❌ Validation Error: {str(e)}"
     
-    return query_notion_workspace_sync(workspace_name, question)
+    try:
+        return query_notion_workspace_sync(workspace_name, question)
+    except Exception as e:
+        error_type = type(e).__name__
+        if "API" in str(e) or "Notion" in str(e) or "NOTION_API_KEY" in str(e):
+            return f"❌ Notion API error: {str(e)} - Check API key and permissions"
+        if "timeout" in str(e).lower():
+            return f"❌ Notion timeout: Query took too long to process"
+        return f"❌ Notion query error ({error_type}): {str(e)}"
 
 
 @mcp.tool()

@@ -33,8 +33,18 @@ def search_conversation_history(query: str, chat_id: str = "", max_results: int 
     Returns:
         Formatted string of relevant historical messages or "No matches found"
     """
+    # Validate inputs
+    if not query or not query.strip():
+        return "❌ Search query cannot be empty."
+    
+    if len(query) > 200:
+        return "❌ Search query too long (max 200 characters)."
+    
     if not chat_id:
         return "❌ No chat ID provided for history search. Ensure CONTEXT_DATA includes CHAT_ID."
+    
+    if max_results < 1 or max_results > 50:
+        return "❌ max_results must be between 1 and 50."
 
     try:
         # Import chat history here to avoid import errors if not available

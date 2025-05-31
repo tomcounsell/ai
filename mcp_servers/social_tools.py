@@ -43,6 +43,13 @@ def search_current_info(query: str, max_results: int = 3) -> str:
     if not api_key:
         return "🔍 Search unavailable: Missing PERPLEXITY_API_KEY configuration."
 
+    # Validate inputs
+    if not query or not query.strip():
+        return "🔍 Search error: Query cannot be empty."
+    
+    if len(query) > 500:
+        return "🔍 Search error: Query too long (max 500 characters)."
+
     try:
         client = OpenAI(api_key=api_key, base_url="https://api.perplexity.ai", timeout=180)
 
@@ -69,8 +76,15 @@ def search_current_info(query: str, max_results: int = 3) -> str:
         answer = response.choices[0].message.content
         return f"🔍 **{query}**\n\n{answer}"
 
+    except requests.exceptions.RequestException as e:
+        return f"🔍 Search network error: Failed to connect to search service - {str(e)}"
     except Exception as e:
-        return f"🔍 Search error: {str(e)}"
+        error_type = type(e).__name__
+        if "API" in str(e) or "Perplexity" in str(e) or "401" in str(e):
+            return f"🔍 Search API error: {str(e)} - Check PERPLEXITY_API_KEY"
+        if "timeout" in str(e).lower():
+            return f"🔍 Search timeout: Query took too long to process"
+        return f"🔍 Search error ({error_type}): {str(e)}"
 
 
 @mcp.tool()
@@ -100,6 +114,22 @@ def create_image(
 
     if not api_key:
         return "🎨 Image generation unavailable: Missing OPENAI_API_KEY configuration."
+
+    # Validate inputs
+    if not prompt or not prompt.strip():
+        return "🎨 Image generation error: Prompt cannot be empty."
+    
+    valid_sizes = ["1024x1024", "1792x1024", "1024x1792"]
+    if size not in valid_sizes:
+        return f"🎨 Image generation error: Size must be one of {valid_sizes}. Got '{size}'."
+    
+    valid_qualities = ["standard", "hd"]
+    if quality not in valid_qualities:
+        return f"🎨 Image generation error: Quality must be one of {valid_qualities}. Got '{quality}'."
+    
+    valid_styles = ["natural", "vivid"]
+    if style not in valid_styles:
+        return f"🎨 Image generation error: Style must be one of {valid_styles}. Got '{style}'."
 
     try:
         client = OpenAI(api_key=api_key, timeout=180)
@@ -137,8 +167,15 @@ def create_image(
         else:
             return str(image_path)
 
+    except requests.exceptions.RequestException as e:
+        return f"🎨 Image download error: Failed to download generated image - {str(e)}"
+    except OSError as e:
+        return f"🎨 Image save error: Failed to save image file - {str(e)}"
     except Exception as e:
-        return f"🎨 Image generation error: {str(e)}"
+        error_type = type(e).__name__
+        if "API" in str(e) or "OpenAI" in str(e):
+            return f"🎨 OpenAI API error: {str(e)}"
+        return f"🎨 Image generation error ({error_type}): {str(e)}"
 
 
 def _extract_urls(text: str) -> list[str]:
