@@ -73,16 +73,16 @@ class OllamaIntentClassifier:
         
         # Intent-specific emoji mapping
         self.intent_emojis = {
-            MessageIntent.CASUAL_CHAT: "💬",
+            MessageIntent.CASUAL_CHAT: "😁",
             MessageIntent.QUESTION_ANSWER: "🤔",
-            MessageIntent.PROJECT_QUERY: "📋",
-            MessageIntent.DEVELOPMENT_TASK: "⚙️",
-            MessageIntent.IMAGE_GENERATION: "🎨",
-            MessageIntent.IMAGE_ANALYSIS: "👁️",
-            MessageIntent.WEB_SEARCH: "🔍",
-            MessageIntent.LINK_ANALYSIS: "🔗",
-            MessageIntent.SYSTEM_HEALTH: "🏓",
-            MessageIntent.UNCLEAR: "🤔",
+            MessageIntent.PROJECT_QUERY: "🕊️",
+            MessageIntent.DEVELOPMENT_TASK: "⚡",
+            MessageIntent.IMAGE_GENERATION: "🍓",
+            MessageIntent.IMAGE_ANALYSIS: "🙈",
+            MessageIntent.WEB_SEARCH: "🗿",
+            MessageIntent.LINK_ANALYSIS: "🍾",
+            MessageIntent.SYSTEM_HEALTH: "🤝",
+            MessageIntent.UNCLEAR: "🤨",
         }
         
         # System prompt for intent classification
