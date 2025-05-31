@@ -43,7 +43,7 @@ class TelegramReactionManager:
         # Intent-specific reaction emojis (from intent classification)
         self.intent_reactions = {
             MessageIntent.CASUAL_CHAT: "💬",
-            MessageIntent.QUESTION_ANSWER: "❓",
+            MessageIntent.QUESTION_ANSWER: "🤔",
             MessageIntent.PROJECT_QUERY: "📋",
             MessageIntent.DEVELOPMENT_TASK: "⚙️",
             MessageIntent.IMAGE_GENERATION: "🎨",

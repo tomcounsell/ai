@@ -59,7 +59,7 @@ class IntentResult:
 class OllamaIntentClassifier:
     """Local Ollama-based intent classification for message preprocessing."""
     
-    def __init__(self, model_name: str = "llama3.2:3b", ollama_url: str = "http://localhost:11434"):
+    def __init__(self, model_name: str = "granite3.2-vision:latest", ollama_url: str = "http://localhost:11434"):
         """
         Initialize the Ollama intent classifier.
         
@@ -74,7 +74,7 @@ class OllamaIntentClassifier:
         # Intent-specific emoji mapping
         self.intent_emojis = {
             MessageIntent.CASUAL_CHAT: "💬",
-            MessageIntent.QUESTION_ANSWER: "❓",
+            MessageIntent.QUESTION_ANSWER: "🤔",
             MessageIntent.PROJECT_QUERY: "📋",
             MessageIntent.DEVELOPMENT_TASK: "⚙️",
             MessageIntent.IMAGE_GENERATION: "🎨",
@@ -335,7 +335,7 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.QUESTION_ANSWER,
                 confidence=0.6,
                 reasoning="Question markers detected",
-                suggested_emoji="❓"
+                suggested_emoji="🤔"
             )
         
         # Default to casual chat
