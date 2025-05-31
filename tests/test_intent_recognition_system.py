@@ -38,7 +38,7 @@ class TestOllamaIntentClassifier:
     def mock_ollama_response(self):
         """Mock successful Ollama API response."""
         return {
-            "response": '{"intent": "development_task", "confidence": 0.85, "reasoning": "Code-related request", "emoji": "⚙️"}'
+            "response": '{"intent": "development_task", "confidence": 0.85, "reasoning": "Code-related request", "emoji": "⚡"}'
         }
 
     @pytest.mark.asyncio
@@ -46,13 +46,13 @@ class TestOllamaIntentClassifier:
         """Test classification of development tasks."""
         message = "Fix the bug in the login function"
         
-        with patch.object(classifier, '_make_ollama_request', return_value='{"intent": "development_task", "confidence": 0.9, "reasoning": "Bug fix request", "emoji": "⚙️"}'):
+        with patch.object(classifier, '_make_ollama_request', return_value='{"intent": "development_task", "confidence": 0.9, "reasoning": "Bug fix request", "emoji": "⚡"}'):
             result = await classifier.classify_intent(message)
             
             assert result.intent == MessageIntent.DEVELOPMENT_TASK
             assert result.confidence >= 0.8
             assert "bug" in result.reasoning.lower() or "development" in result.reasoning.lower()
-            assert result.suggested_emoji == "⚙️"
+            assert result.suggested_emoji == "⚡"
 
     @pytest.mark.asyncio
     async def test_classify_casual_chat(self, classifier):
@@ -175,7 +175,7 @@ class TestTelegramReactionManager:
             intent=MessageIntent.DEVELOPMENT_TASK,
             confidence=0.85,
             reasoning="Code-related request",
-            suggested_emoji="⚙️"
+            suggested_emoji="⚡"
         )
 
     @pytest.mark.asyncio
@@ -202,11 +202,11 @@ class TestTelegramReactionManager:
         )
         
         assert result is True
-        mock_client.send_reaction.assert_called_with(chat_id, message_id, "⚙️")
+        mock_client.send_reaction.assert_called_with(chat_id, message_id, "⚡")
         
         # Check tracking
         reactions = reaction_manager.get_message_reactions(chat_id, message_id)
-        assert "⚙️" in reactions
+        assert "⚡" in reactions
 
     @pytest.mark.asyncio
     async def test_complete_reaction_sequence(self, reaction_manager, mock_client, sample_intent_result):
@@ -229,7 +229,7 @@ class TestTelegramReactionManager:
         # Check final reactions
         reactions = reaction_manager.get_message_reactions(chat_id, message_id)
         assert "👀" in reactions  # Received
-        assert "⚙️" in reactions  # Intent
+        assert "⚡" in reactions  # Intent
         assert "✅" in reactions  # Success
 
     @pytest.mark.asyncio
@@ -269,6 +269,28 @@ class TestTelegramReactionManager:
         # Should have cleaned up to 1000 messages
         assert len(reaction_manager.message_reactions) == 1000
 
+    def test_all_emojis_are_valid_telegram_reactions(self, reaction_manager):
+        """Test that all configured emojis are valid Telegram reactions."""
+        # List of confirmed valid Telegram reaction emojis based on official list
+        valid_telegram_emojis = {
+            "👍", "👎", "❤️", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", 
+            "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊️", "🤡", 
+            "🥱", "🥴", "😍", "🐳", "❤️‍🔥", "🌚", "🌭", "💯", "🤣", "⚡", 
+            "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", 
+            "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨", 
+            "🤝", "✍️", "🤗", "🫡", "🎅", "🎄", "☃️", "💅", "🤪", "🗿", 
+            "🆒", "💘", "🙉", "😎", "👾", "🤷‍♂️", "🤷‍♀️", "😡", "✅", "❌"
+        }
+        
+        # Test all intent reaction emojis are valid
+        for intent, emoji in reaction_manager.intent_reactions.items():
+            assert emoji in valid_telegram_emojis, f"Emoji {emoji} for {intent.value} is not a valid Telegram reaction"
+        
+        # Test status reaction emojis are valid  
+        for status, emoji in reaction_manager.status_reactions.items():
+            if emoji:  # Skip None values
+                assert emoji in valid_telegram_emojis, f"Emoji {emoji} for {status.value} is not a valid Telegram reaction"
+
 
 class TestIntentToolManager:
     """Test the intent-based tool access control system."""
@@ -285,7 +307,7 @@ class TestIntentToolManager:
             intent=MessageIntent.DEVELOPMENT_TASK,
             confidence=0.85,
             reasoning="Code-related request",
-            suggested_emoji="⚙️"
+            suggested_emoji="⚡"
         )
 
     @pytest.fixture
@@ -381,7 +403,7 @@ class TestIntentPromptManager:
             intent=MessageIntent.DEVELOPMENT_TASK,
             confidence=0.85,
             reasoning="Code-related request",
-            suggested_emoji="⚙️"
+            suggested_emoji="⚡"
         )
 
     @pytest.fixture
@@ -482,7 +504,7 @@ class TestIntegrationFlows:
                 intent=MessageIntent.DEVELOPMENT_TASK,
                 confidence=0.85,
                 reasoning="Bug fix request",
-                suggested_emoji="⚙️"
+                suggested_emoji="⚡"
             )
             
             # Classify intent
@@ -525,7 +547,7 @@ class TestIntegrationFlows:
             # Verify reactions were added
             reactions = reaction_manager.get_message_reactions(12345, 67890)
             assert "👀" in reactions  # received
-            assert "⚙️" in reactions  # intent
+            assert "⚡" in reactions  # intent
             assert "✅" in reactions  # success
 
     @pytest.mark.asyncio
@@ -552,7 +574,7 @@ class TestIntegrationFlows:
             intent=MessageIntent.DEVELOPMENT_TASK,
             confidence=0.85,
             reasoning="Test",
-            suggested_emoji="⚙️"
+            suggested_emoji="⚡"
         )
         
         import time

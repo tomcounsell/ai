@@ -139,6 +139,20 @@ await complete_reaction_sequence(client, chat_id, message_id, intent_result, suc
 - Duplicate reaction prevention
 - Error handling and fallback reactions
 - Automatic cleanup of old reaction tracking
+- Uses only valid Telegram reaction emojis to prevent REACTION_INVALID errors
+
+**Current Emoji Mappings:**
+- 😁 CASUAL_CHAT (beaming face)
+- 🤔 QUESTION_ANSWER (thinking face) 
+- 🕊️ PROJECT_QUERY (dove - peaceful project planning)
+- ⚡ DEVELOPMENT_TASK (lightning - fast dev work)
+- 🍓 IMAGE_GENERATION (strawberry - sweet creations)
+- 🙈 IMAGE_ANALYSIS (see-no-evil monkey)
+- 🗿 WEB_SEARCH (moai - ancient wisdom seeking)
+- 🍾 LINK_ANALYSIS (champagne - celebrating discoveries)
+- 🤝 SYSTEM_HEALTH (handshake - systems working together)
+- 🤨 UNCLEAR (raised eyebrow - "what's that about?")
+- 💯 Reserved for future AGREEMENT_INTENT
 
 ### 3. Tool Access Control (`integrations/intent_tools.py`)
 
