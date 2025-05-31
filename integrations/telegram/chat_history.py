@@ -40,7 +40,7 @@ class ChatHistoryManager:
         except Exception as e:
             print(f"Error saving chat history: {e}")
 
-    def add_message(self, chat_id: int, role: str, content: str):
+    def add_message(self, chat_id: int, role: str, content: str, reply_to_message_id: int = None):
         """Add a message to chat history with automatic cleanup and persistence."""
         if chat_id not in self.chat_histories:
             self.chat_histories[chat_id] = []
@@ -60,10 +60,19 @@ class ChatHistoryManager:
             print(f"⚠️  DUPLICATE DETECTED: Same message being added twice: '{content[:50]}...'")
             return  # Don't add duplicate
 
-        # Add new message
-        self.chat_histories[chat_id].append(
-            {"role": role, "content": content, "timestamp": time.time()}
-        )
+        # Add new message with reply context
+        message_data = {
+            "role": role, 
+            "content": content, 
+            "timestamp": time.time(),
+            "message_id": len(self.chat_histories[chat_id]) + 1  # Simple incrementing ID
+        }
+        
+        if reply_to_message_id:
+            message_data["reply_to_message_id"] = reply_to_message_id
+            print(f"🔗 Message replies to message ID: {reply_to_message_id}")
+        
+        self.chat_histories[chat_id].append(message_data)
 
         print(f"✅ Message added. New count: {len(self.chat_histories[chat_id])}")
 
@@ -75,6 +84,135 @@ class ChatHistoryManager:
         total_messages = sum(len(history) for history in self.chat_histories.values())
         if total_messages % 5 == 0:
             self.save_history()
+
+    def get_reply_chain(self, chat_id: int, message_id: int, max_depth: int = 5) -> list[dict[str, Any]]:
+        """Get reply chain for a specific message, following reply_to_message_id links."""
+        if chat_id not in self.chat_histories:
+            return []
+        
+        all_messages = self.chat_histories[chat_id]
+        
+        # Build a lookup map for message_id to message
+        message_map = {}
+        for msg in all_messages:
+            if "message_id" in msg:
+                message_map[msg["message_id"]] = msg
+        
+        # Find the original message
+        if message_id not in message_map:
+            return []
+        
+        # Follow the reply chain upwards (to original message)
+        chain = []
+        current_msg = message_map[message_id]
+        depth = 0
+        
+        while current_msg and depth < max_depth:
+            chain.insert(0, current_msg)  # Insert at beginning to maintain chronological order
+            depth += 1
+            
+            # Follow reply_to_message_id if it exists
+            reply_to_id = current_msg.get("reply_to_message_id")
+            if reply_to_id and reply_to_id in message_map:
+                current_msg = message_map[reply_to_id]
+            else:
+                break
+        
+        print(f"🔗 Found reply chain of {len(chain)} messages for message {message_id}")
+        return chain
+
+    def get_context_with_reply_priority(self, chat_id: int, current_message_reply_to_id: int = None, 
+                                       max_context_messages: int = 10, max_age_hours: int = 24, 
+                                       always_include_last: int = 2) -> list[dict[str, str]]:
+        """
+        Get chat history context with priority for reply chains.
+        
+        If current_message_reply_to_id is provided, prioritize that reply chain
+        and supplement with recent temporal context.
+        """
+        if chat_id not in self.chat_histories:
+            print(f"🔍 No chat history found for chat {chat_id}")
+            return []
+
+        current_time = time.time()
+        max_age_seconds = max_age_hours * 3600
+        all_messages = self.chat_histories[chat_id]
+        
+        priority_messages = []
+        
+        # If we have a reply chain, prioritize it
+        if current_message_reply_to_id:
+            reply_chain = self.get_reply_chain(chat_id, current_message_reply_to_id)
+            priority_messages = reply_chain
+            print(f"🔗 Prioritizing reply chain: {len(priority_messages)} messages")
+        
+        # Calculate remaining slots for temporal context
+        remaining_slots = max_context_messages - len(priority_messages)
+        
+        # Get temporal context (avoiding duplicates from reply chain)
+        temporal_messages = []
+        if remaining_slots > 0:
+            # Get message IDs already included in priority messages
+            priority_message_ids = {msg.get("message_id") for msg in priority_messages if msg.get("message_id")}
+            
+            # Always include the last N messages regardless of age (soft threshold)
+            guaranteed_count = min(always_include_last, remaining_slots)
+            guaranteed_messages = []
+            
+            for msg in reversed(all_messages):  # Most recent first
+                if len(guaranteed_messages) >= guaranteed_count:
+                    break
+                # Skip if already in priority messages
+                if msg.get("message_id") not in priority_message_ids:
+                    guaranteed_messages.insert(0, msg)  # Insert at beginning for chronological order
+            
+            temporal_messages.extend(guaranteed_messages)
+            remaining_slots -= len(guaranteed_messages)
+            
+            # Add more recent messages within time limit
+            if remaining_slots > 0:
+                older_messages = [msg for msg in all_messages 
+                                if msg.get("message_id") not in priority_message_ids 
+                                and msg not in guaranteed_messages]
+                
+                for msg in reversed(older_messages):  # Start from most recent
+                    if len(temporal_messages) >= max_context_messages - len(priority_messages):
+                        break
+                    if current_time - msg.get("timestamp", 0) <= max_age_seconds:
+                        temporal_messages.insert(-len(guaranteed_messages), msg)  # Insert before guaranteed messages
+        
+        # Combine priority (reply chain) + temporal context
+        # Sort by timestamp to maintain chronological order
+        all_context_messages = priority_messages + temporal_messages
+        all_context_messages.sort(key=lambda x: x.get("timestamp", 0))
+        
+        # Remove duplicates while preserving order
+        seen_message_ids = set()
+        final_messages = []
+        for msg in all_context_messages:
+            msg_id = msg.get("message_id")
+            if msg_id not in seen_message_ids:
+                final_messages.append(msg)
+                seen_message_ids.add(msg_id)
+        
+        # Debug logging
+        reply_count = len(priority_messages)
+        temporal_count = len(final_messages) - reply_count
+        debug_info = []
+        for m in final_messages:
+            age_hours = (current_time - m.get("timestamp", 0)) / 3600
+            msg_type = "reply-chain" if m in priority_messages else "temporal"
+            debug_info.append(f"{m['role']}: {m['content'][:30]}... ({age_hours:.1f}h ago, {msg_type})")
+        
+        print(f"🔍 Context with reply priority ({len(final_messages)} total: {reply_count} reply-chain + {temporal_count} temporal): {debug_info}")
+
+        # Format for Claude API
+        formatted_messages = []
+        for msg in final_messages:
+            if msg["role"] in ["user", "assistant"]:
+                formatted_messages.append({"role": msg["role"], "content": msg["content"]})
+
+        return formatted_messages
 
     def get_context(self, chat_id: int, max_context_messages: int = 10, max_age_hours: int = 24, always_include_last: int = 2) -> list[dict[str, str]]:
         """Get recent chat history for context with guaranteed recent messages."""

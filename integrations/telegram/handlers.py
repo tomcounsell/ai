@@ -163,7 +163,10 @@ class MessageHandler:
             self.missed_messages_per_chat[chat_id].append(message.text)
 
             # Still store old messages for context
-            self.chat_history.add_message(chat_id, "user", message.text)
+            reply_to_message_id = None
+            if hasattr(message, 'reply_to_message') and message.reply_to_message:
+                reply_to_message_id = getattr(message.reply_to_message, 'id', None)
+            self.chat_history.add_message(chat_id, "user", message.text, reply_to_message_id)
             print(f"Collecting missed message from chat {chat_id}: {message.text[:50]}...")
             return
 
@@ -197,14 +200,21 @@ class MessageHandler:
             is_mentioned = is_private_chat  # Only respond in private chats if error
             processed_text = getattr(message, 'text', None) or getattr(message, 'caption', None) or ""
 
+        # Extract reply information for context building
+        reply_to_message_id = None
+        if hasattr(message, 'reply_to_message') and message.reply_to_message:
+            # Map Telegram message ID to our internal message ID
+            # This is a simplified mapping - in production you might want more sophisticated tracking
+            reply_to_message_id = getattr(message.reply_to_message, 'id', None)
+
         # Only respond in private chats or when mentioned in groups
         if not (is_private_chat or is_mentioned):
             # Still store the message for context, but don't respond
-            self.chat_history.add_message(chat_id, "user", message.text)
+            self.chat_history.add_message(chat_id, "user", message.text, reply_to_message_id)
             return
 
-        # Store user message in chat history
-        self.chat_history.add_message(chat_id, "user", processed_text)
+        # Store user message in chat history with reply context
+        self.chat_history.add_message(chat_id, "user", processed_text, reply_to_message_id)
 
         # Check if this is a single-link message for link tracking
         if is_url_only_message(processed_text):
@@ -341,8 +351,18 @@ class MessageHandler:
                     except Exception as e:
                         print(f"Warning: Could not get Notion context: {e}")
                 
-                # Get chat history for context
-                chat_history = self.chat_history.get_context(chat_id, max_context_messages=10)
+                # Get chat history for context with reply priority
+                reply_to_message_id = None
+                if hasattr(message, 'reply_to_message') and message.reply_to_message:
+                    reply_to_message_id = getattr(message.reply_to_message, 'id', None)
+                
+                if reply_to_message_id:
+                    print(f"🔗 Using reply-aware context for message replying to {reply_to_message_id}")
+                    chat_history = self.chat_history.get_context_with_reply_priority(
+                        chat_id, reply_to_message_id, max_context_messages=10
+                    )
+                else:
+                    chat_history = self.chat_history.get_context(chat_id, max_context_messages=10)
                 
                 # Process through unified system
                 answer = await process_message_unified(
@@ -573,23 +593,28 @@ class MessageHandler:
                 is_mentioned = is_private_chat  # Only respond in private chats if error
                 caption_text = getattr(message, 'caption', None) or ""
 
+            # Extract reply information for context building
+            reply_to_message_id = None
+            if hasattr(message, 'reply_to_message') and message.reply_to_message:
+                reply_to_message_id = getattr(message.reply_to_message, 'id', None)
+
             # Only respond in private chats or when mentioned in groups
             if not (is_private_chat or is_mentioned):
                 # Still store the message for context, but don't respond
                 if message.caption:
-                    self.chat_history.add_message(chat_id, "user", f"[Photo] {message.caption}")
+                    self.chat_history.add_message(chat_id, "user", f"[Photo] {message.caption}", reply_to_message_id)
                 else:
-                    self.chat_history.add_message(chat_id, "user", "[Photo shared]")
+                    self.chat_history.add_message(chat_id, "user", "[Photo shared]", reply_to_message_id)
                 return
 
             # Download the photo
             file_path = await message.download(in_memory=False)
 
-            # Store user message in chat history
+            # Store user message in chat history with reply context
             if caption_text:
-                self.chat_history.add_message(chat_id, "user", f"[Photo] {caption_text}")
+                self.chat_history.add_message(chat_id, "user", f"[Photo] {caption_text}", reply_to_message_id)
             else:
-                self.chat_history.add_message(chat_id, "user", "[Photo shared]")
+                self.chat_history.add_message(chat_id, "user", "[Photo shared]", reply_to_message_id)
 
             # Use unified agent system to analyze the image
             if self.notion_scout and self.notion_scout.anthropic_client:
@@ -597,8 +622,14 @@ class MessageHandler:
                     # Try unified agent first
                     from agents.unified_integration import process_image_unified
                     
-                    # Get chat history for context
-                    chat_history = self.chat_history.get_context(chat_id, max_context_messages=5)
+                    # Get chat history for context with reply priority
+                    if reply_to_message_id:
+                        print(f"🔗 Using reply-aware context for photo message replying to {reply_to_message_id}")
+                        chat_history = self.chat_history.get_context_with_reply_priority(
+                            chat_id, reply_to_message_id, max_context_messages=5
+                        )
+                    else:
+                        chat_history = self.chat_history.get_context(chat_id, max_context_messages=5)
                     
                     answer = await process_image_unified(
                         image_path=file_path,
