@@ -222,16 +222,41 @@ class MessageHandler:
         await self._route_message_with_intent(client, message, chat_id, processed_text, reply_to_telegram_message_id)
 
     async def _process_missed_messages_through_agent(self, client, chat_id: int, message, processed_text: str, reply_to_telegram_message_id):
-        """Process missed messages through the normal agent routing system."""
+        """Process missed messages through the normal agent routing system with context-aware filtering."""
         try:
             missed_messages = self.missed_messages_per_chat[chat_id]
             print(f"Processing {len(missed_messages)} missed messages for chat {chat_id}")
             
-            # Create a summary of missed messages and route through normal agent system
-            missed_summary = f"I was offline and missed {len(missed_messages)} messages. Recent messages were: " + "; ".join(missed_messages[-3:])
+            # Get bot info for mention detection
+            me = await client.get_me()
+            bot_username = me.username
             
-            # Route the missed message summary through normal agent processing
-            await self._route_message_with_intent(client, message, chat_id, missed_summary, reply_to_telegram_message_id)
+            # Determine chat type for filtering
+            is_private_chat = message.chat.type.name in ['PRIVATE', 'BOT']
+            
+            # Check if this is a dev group
+            from ..notion.utils import is_dev_group
+            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+            
+            # Filter messages based on chat type
+            if is_private_chat or is_dev_group_chat:
+                # DMs and dev groups: process all missed messages
+                messages_to_process = missed_messages
+                print(f"Chat type: {'DM' if is_private_chat else 'dev group'} - processing all {len(messages_to_process)} missed messages")
+            else:
+                # Non-dev groups: only process messages where bot was @mentioned
+                messages_to_process = [msg for msg in missed_messages if f"@{bot_username}" in msg]
+                print(f"Chat type: non-dev group - processing {len(messages_to_process)} of {len(missed_messages)} missed messages (mentions only)")
+            
+            # Only respond if we have relevant messages to process
+            if messages_to_process:
+                # Create a summary of relevant missed messages and route through normal agent system
+                missed_summary = f"I was offline and missed {len(messages_to_process)} relevant messages. Recent messages were: " + "; ".join(messages_to_process[-3:])
+                
+                # Route the missed message summary through normal agent processing
+                await self._route_message_with_intent(client, message, chat_id, missed_summary, reply_to_telegram_message_id)
+            else:
+                print(f"No relevant missed messages to process for chat {chat_id}")
             
             # Clear missed messages for this chat
             del self.missed_messages_per_chat[chat_id]
