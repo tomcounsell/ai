@@ -444,7 +444,15 @@ def validate_chat_whitelist_access(chat_id: int, is_private: bool = False, usern
     
     try:
         if is_private:
-            # For DMs: check DM user whitelist
+            # For DMs: first check if DMs are globally enabled, then check user whitelist
+            allow_dms_env = os.getenv("TELEGRAM_ALLOW_DMS", "true").lower().strip()
+            dms_globally_enabled = allow_dms_env in ("true", "1", "yes", "on")
+            
+            if not dms_globally_enabled:
+                logger.info(f"DM access denied for chat {chat_id} (DMs globally disabled)")
+                return False
+            
+            # DMs are globally enabled, now check user whitelist
             return validate_dm_user_access(username, chat_id)
         else:
             # For groups: check TELEGRAM_ALLOWED_GROUPS whitelist

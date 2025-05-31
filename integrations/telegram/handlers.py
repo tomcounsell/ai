@@ -42,7 +42,6 @@ class MessageHandler:
                 logger.error(f"Telegram environment validation failed: {validation_results['errors']}")
                 # Set safe defaults
                 self.allowed_groups = set()
-                self.allow_dms = False
                 return
             
             # Parse allowed groups from environment
@@ -60,11 +59,6 @@ class MessageHandler:
             else:
                 logger.info("No groups specified in TELEGRAM_ALLOWED_GROUPS. Denying all groups.")
             
-            # Parse DM setting from environment
-            allow_dms_env = os.getenv("TELEGRAM_ALLOW_DMS", "true").lower().strip()
-            self.allow_dms = allow_dms_env in ("true", "1", "yes", "on")
-            logger.info(f"DM handling: {'Enabled' if self.allow_dms else 'Disabled'}")
-            
             # Log validation warnings if present
             if validation_results.get("errors"):
                 for error in validation_results["errors"]:
@@ -74,7 +68,6 @@ class MessageHandler:
             logger.error(f"Failed to load chat filters: {e}")
             # Set safe defaults on error
             self.allowed_groups = set()
-            self.allow_dms = False
     
     def _should_handle_chat(self, chat_id: int, is_private_chat: bool = False, username: str = None) -> bool:
         """Check if this server instance should handle messages from the given chat with enhanced validation."""
