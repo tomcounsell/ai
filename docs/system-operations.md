@@ -151,6 +151,10 @@ ENVIRONMENT=development
 LOG_LEVEL=INFO
 MAX_CONVERSATION_HISTORY=50
 AGENT_TIMEOUT_SECONDS=30
+
+# Telegram Chat Filtering (Multi-Server Setup)
+TELEGRAM_ALLOWED_GROUPS=-1002600253717,-4897329503  # Comma-separated group IDs
+TELEGRAM_ALLOW_DMS=true  # Enable/disable DM handling
 ```
 
 ### Environment Validation
@@ -216,6 +220,49 @@ EOF
 
 echo "✅ MCP configuration updated"
 ```
+
+### Workspace Configuration
+
+Configure project workspaces and dev group behavior in `config/workspace_config.json`:
+
+```json
+{
+  "workspaces": {
+    "Yudame Dev": {
+      "database_id": "****",
+      "description": "Yudame development team tasks and management",
+      "workspace_type": "yudame",
+      "allowed_directories": ["/Users/valorengels/src/ai"],
+      "telegram_chat_ids": ["-4891178445"],
+      "aliases": ["yudame dev"],
+      "is_dev_group": true
+    },
+    "PsyOPTIMAL": {
+      "database_id": "****",
+      "description": "PsyOPTIMAL team chat and project management",
+      "workspace_type": "psyoptimal", 
+      "allowed_directories": ["/Users/valorengels/src/psyoptimal"],
+      "telegram_chat_ids": ["-1002600253717"],
+      "aliases": ["psyoptimal", "PO"]
+    }
+  },
+  "telegram_groups": {
+    "-4891178445": "Yudame Dev",
+    "-1002600253717": "PsyOPTIMAL"
+  }
+}
+```
+
+**Dev Group Configuration:**
+- **`is_dev_group: true`**: Agent responds to ALL messages (no @mention required)
+- **`is_dev_group: false` or omitted**: Agent only responds to @mentions
+- **Directory isolation**: Each workspace restricts file operations to specific directories
+- **Notion database mapping**: Automatic project-specific database access
+
+**Current Dev Groups:**
+- Yudame Dev (-4891178445)
+- PsyOPTIMAL Dev (-4897329503) 
+- DeckFusion Dev (-4851227604)
 
 ## Dependency Management
 

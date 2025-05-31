@@ -250,22 +250,29 @@ class TelegramContextManager:
 
 ## Group vs Direct Message Handling
 
-### Intelligent Context Differentiation
+### Dev Group Active Handling
+
+The system now includes **dev group active handling** - groups with "Dev" in their name have enhanced engagement:
 
 ```python
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle group messages with intelligent mention detection."""
+    """Handle group messages with dev group awareness and intelligent mention detection."""
     message = update.message
+    chat_id = message.chat_id
     
-    # Intelligent mention detection (no keyword patterns)
+    # Check if this is a dev group (handles ALL messages)
+    from integrations.notion.utils import is_dev_group
+    is_dev_group_chat = is_dev_group(chat_id)
+    
+    # Determine if bot should respond
     should_respond = (
-        # Direct reply to bot
+        # Dev groups: Handle ALL messages (no mention required)
+        is_dev_group_chat or
+        # Non-dev groups: Require mentions or replies
         (message.reply_to_message and 
          message.reply_to_message.from_user.id == context.bot.id) or
         # Explicit mention
-        any(entity.type == "mention" for entity in (message.entities or [])) or
-        # Context-aware engagement (LLM decides)
-        await should_engage_in_group_context(message.text, update.message.chat_id)
+        any(entity.type == "mention" for entity in (message.entities or []))
     )
     
     if should_respond:
@@ -276,6 +283,71 @@ async def handle_direct_message(update: Update, context: ContextTypes.DEFAULT_TY
     """Handle all direct messages through unified agent."""
     # Process ALL direct messages through valor_agent intelligence
     await process_telegram_message(update, context)
+```
+
+### Group Behavior Configuration
+
+Groups are configured in `config/workspace_config.json` with `is_dev_group` flags:
+
+```json
+{
+  "workspaces": {
+    "Yudame Dev": {
+      "database_id": "****",
+      "description": "Yudame development team tasks and management",
+      "telegram_chat_ids": ["-4891178445"],
+      "is_dev_group": true
+    },
+    "PsyOPTIMAL Dev": {
+      "database_id": "****", 
+      "description": "PsyOPTIMAL development tasks and management",
+      "telegram_chat_ids": ["-4897329503"],
+      "is_dev_group": true
+    },
+    "Yudame": {
+      "database_id": "****",
+      "description": "Yudame team chat and project management", 
+      "telegram_chat_ids": ["-4719889199"]
+    }
+  }
+}
+```
+
+### Message Handling Behavior
+
+| Chat Type | Behavior | Agent Response |
+|-----------|----------|----------------|
+| **Private chats** | All messages | ✅ Always responds |
+| **Dev groups** (`is_dev_group: true`) | All messages | ✅ Always responds |
+| **Regular groups** | @mentions only | ✅ Only when mentioned |
+
+### Dev Group Detection Utility
+
+```python
+def is_dev_group(chat_id: int) -> bool:
+    """Check if a Telegram chat ID is a dev group that should handle all messages."""
+    config_file = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
+    if not config_file.exists():
+        return False
+    
+    try:
+        with open(config_file) as f:
+            data = json.load(f)
+            telegram_groups = data.get("telegram_groups", {})
+            workspaces = data.get("workspaces", {})
+            
+            # Convert chat_id to string for lookup
+            chat_id_str = str(chat_id)
+            
+            if chat_id_str in telegram_groups:
+                project_name = telegram_groups[chat_id_str]
+                if project_name in workspaces:
+                    workspace_data = workspaces[project_name]
+                    return workspace_data.get("is_dev_group", False)
+            
+            return False
+    except Exception:
+        return False
 ```
 
 ### Enhanced Context Model

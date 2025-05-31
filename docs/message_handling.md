@@ -113,15 +113,48 @@ bot_id = me.id
 ### 6. Response Decision Gate
 
 ```python
-if not (is_private_chat or is_mentioned):
+# Check if this is a dev group that should handle all messages
+from ..notion.utils import is_dev_group
+is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+
+# Only respond in private chats, when mentioned in groups, or in dev groups
+if not (is_private_chat or is_mentioned or is_dev_group_chat):
     # Store message for context but don't respond
     self.chat_history.add_message(chat_id, "user", message.text)
     return
 ```
 
 - **DMs**: Always proceed (is_private_chat = True)
-- **Groups**: Only proceed if bot was mentioned
+- **Dev Groups**: Always proceed if `is_dev_group: true` in workspace config
+- **Regular Groups**: Only proceed if bot was mentioned
 - **Filtered messages**: Still stored in chat history for context
+
+#### Dev Group Detection
+
+Dev groups are identified by the `is_dev_group` flag in their workspace configuration:
+
+```python
+def is_dev_group(chat_id: int) -> bool:
+    """Check if a Telegram chat ID is a dev group that should handle all messages."""
+    config_file = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
+    
+    try:
+        with open(config_file) as f:
+            data = json.load(f)
+            telegram_groups = data.get("telegram_groups", {})
+            workspaces = data.get("workspaces", {})
+            
+            chat_id_str = str(chat_id)
+            if chat_id_str in telegram_groups:
+                project_name = telegram_groups[chat_id_str]
+                if project_name in workspaces:
+                    workspace_data = workspaces[project_name]
+                    return workspace_data.get("is_dev_group", False)
+            
+            return False
+    except Exception:
+        return False
+```
 
 ### 7. Message Storage
 
@@ -375,15 +408,49 @@ TELEGRAM_ALLOW_DMS=true                                # true/false
 - **Telegram integration**: Direct chat ID to workspace mapping
 - **Backward compatibility**: Legacy `integrations/notion/database_mapping.json` still supported
 
-## Key Differences: DMs vs Groups
+## Key Differences: DMs vs Groups vs Dev Groups
 
-| Aspect | Direct Messages (DMs) | Group Chats |
-|--------|----------------------|-------------|
-| **Filtering** | `TELEGRAM_ALLOW_DMS` (all or none) | `TELEGRAM_ALLOWED_GROUPS` (whitelist) |
-| **Response Trigger** | Always respond | Only when mentioned |
-| **Mention Processing** | Skipped (always proceed) | Complex mention detection |
-| **Notion Context** | Only for priority questions | Automatic group-specific database |
-| **Text Processing** | `processed_text = message.text` | Mentions removed from text |
+| Aspect | Direct Messages (DMs) | Regular Group Chats | Dev Groups (`is_dev_group: true`) |
+|--------|----------------------|-------------------|-----------------------------------|
+| **Filtering** | `TELEGRAM_ALLOW_DMS` (all or none) | `TELEGRAM_ALLOWED_GROUPS` (whitelist) | `TELEGRAM_ALLOWED_GROUPS` (whitelist) |
+| **Response Trigger** | Always respond | Only when mentioned | **Always respond** |
+| **Mention Processing** | Skipped (always proceed) | Complex mention detection | Complex mention detection |
+| **Notion Context** | Only for priority questions | Automatic group-specific database | Automatic group-specific database |
+| **Text Processing** | `processed_text = message.text` | Mentions removed from text | Mentions removed from text |
+
+### Dev Group Configuration
+
+Dev groups are configured in `config/workspace_config.json` with the `is_dev_group` flag:
+
+```json
+{
+  "workspaces": {
+    "Yudame Dev": {
+      "database_id": "****",
+      "description": "Yudame development team tasks and management",
+      "telegram_chat_ids": ["-4891178445"],
+      "is_dev_group": true
+    },
+    "PsyOPTIMAL Dev": {
+      "database_id": "****",
+      "description": "PsyOPTIMAL development tasks and management", 
+      "telegram_chat_ids": ["-4897329503"],
+      "is_dev_group": true
+    },
+    "DeckFusion Dev": {
+      "database_id": "****",
+      "description": "DeckFusion development tasks and management",
+      "telegram_chat_ids": ["-4851227604"], 
+      "is_dev_group": true
+    }
+  }
+}
+```
+
+**Current Dev Groups:**
+- **Yudame Dev** (-4891178445) - AI development team 
+- **PsyOPTIMAL Dev** (-4897329503) - PsyOPTIMAL development team
+- **DeckFusion Dev** (-4851227604) - DeckFusion development team
 
 ## Error Handling
 
