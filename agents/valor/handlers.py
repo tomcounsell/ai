@@ -8,6 +8,42 @@ with Telegram chat functionality, including context management and conversation 
 from .agent import ValorContext, valor_agent
 
 
+def _detect_mixed_content(message: str) -> bool:
+    """
+    Detect if a message contains both text and image components.
+    
+    Args:
+        message: The message content to analyze
+        
+    Returns:
+        bool: True if message contains both text and image indicators
+    """
+    # Check for common patterns that indicate mixed text+image content
+    indicators = [
+        "[Photo + Text]",  # Our explicit marker
+        "BOTH TEXT AND AN IMAGE",  # Our enhanced message marker
+        "Please analyze this image:" and "[Image downloaded to:",  # Combined analysis request
+    ]
+    
+    message_upper = message.upper()
+    
+    # Check for explicit markers
+    if "[PHOTO + TEXT]" in message_upper:
+        return True
+        
+    # Check for the enhanced message pattern
+    if "BOTH TEXT AND AN IMAGE" in message_upper:
+        return True
+        
+    # Check for image analysis with user text
+    if ("PLEASE ANALYZE THIS IMAGE:" in message_upper and 
+        "[IMAGE DOWNLOADED TO:" in message_upper):
+        return True
+        
+    return False
+
+
+
 async def handle_telegram_message(
     message: str,
     chat_id: int,
@@ -62,6 +98,11 @@ async def handle_telegram_message(
 
     # Add contextual information to the user message if needed
     enhanced_message = message
+    
+    # Detect if this message contains both text and image components
+    has_mixed_content = _detect_mixed_content(message)
+    if has_mixed_content:
+        print(f"🖼️📝 DETECTED: Message with both text and image components for chat {chat_id}")
 
     # Build enhanced message with context - always include chat history when available
     context_parts = []
@@ -86,9 +127,15 @@ async def handle_telegram_message(
     
     # Combine all context with the current message
     if context_parts:
-        enhanced_message = "\n\n".join(context_parts) + f"\n\nCurrent message: {message}"
+        if has_mixed_content:
+            enhanced_message = "\n\n".join(context_parts) + f"\n\n🖼️📝 CURRENT MESSAGE (contains both text and image): {message}"
+        else:
+            enhanced_message = "\n\n".join(context_parts) + f"\n\nCurrent message: {message}"
     else:
-        enhanced_message = message
+        if has_mixed_content:
+            enhanced_message = f"🖼️📝 MESSAGE (contains both text and image): {message}"
+        else:
+            enhanced_message = message
 
     # Run the agent
     result = await valor_agent.run(enhanced_message, deps=context)

@@ -577,7 +577,8 @@ class MessageHandler:
             if not (is_private_chat or is_mentioned):
                 # Still store the message for context, but don't respond
                 if message.caption:
-                    self.chat_history.add_message(chat_id, "user", f"[Photo] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                    # Explicitly indicate this message contains BOTH text and image  
+                    self.chat_history.add_message(chat_id, "user", f"[Photo + Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 else:
                     self.chat_history.add_message(chat_id, "user", "[Photo shared]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 return
@@ -587,7 +588,8 @@ class MessageHandler:
 
             # Store user message in chat history with reply context
             if caption_text:
-                self.chat_history.add_message(chat_id, "user", f"[Photo] {caption_text}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                # Explicitly indicate this message contains BOTH text and image
+                self.chat_history.add_message(chat_id, "user", f"[Photo + Text] {caption_text}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
             else:
                 self.chat_history.add_message(chat_id, "user", "[Photo shared]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
 
@@ -609,9 +611,9 @@ class MessageHandler:
                     else:
                         chat_history = self.chat_history.get_context(chat_id, max_context_messages=5)
 
-                    # Prepare message for the agent
+                    # Prepare message for the agent with explicit text+image indication
                     if caption_text:
-                        agent_message = f"Please analyze this image: {caption_text}"
+                        agent_message = f"IMPORTANT: This message contains BOTH TEXT AND AN IMAGE.\n\nUser's text message: {caption_text}\n\nPlease analyze both the text content above AND the image below. Respond to both the text and the visual content."
                     else:
                         agent_message = "Please analyze this image and tell me what you see."
 
