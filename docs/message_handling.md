@@ -33,11 +33,11 @@ is_private_chat = message.chat.type == ChatType.PRIVATE
 ```
 
 **Chat Filtering Check:**
-- Calls `_should_handle_chat(chat_id, is_private_chat)`
-- For **DMs**: Returns `self.allow_dms` (from `TELEGRAM_ALLOW_DMS` env var)
+- Calls `_should_handle_chat(chat_id, is_private_chat, username)`
+- For **DMs**: Returns `validate_dm_user_access(username, chat_id)` (username-based whitelist)
 - For **Groups**: Returns `chat_id in self.allowed_groups` (from `TELEGRAM_ALLOWED_GROUPS`)
 - **If filtered out**: Message is completely ignored, function returns early
-- **Logs**: `"Ignoring message from {DM|group} {chat_id} (filtered by server configuration)"`
+- **Logs**: `"Chat access denied: {DM|group} {chat_id} from @{username} not in whitelist"`
 
 ### 2. Message Confirmation & Processing Indicators
 
@@ -350,12 +350,12 @@ await self._process_agent_response(message, chat_id, answer)
 ```bash
 # Chat filtering for multi-server deployments
 TELEGRAM_ALLOWED_GROUPS=-1001234567890,-1009876543210  # Comma-separated group IDs
-TELEGRAM_ALLOW_DMS=true                                # true/false
+# Note: DMs now use username whitelist in workspace_config.json instead of TELEGRAM_ALLOW_DMS
 
 # Example configurations:
-# Server 1 (PsyOPTIMAL only): TELEGRAM_ALLOWED_GROUPS=-1001234567890 TELEGRAM_ALLOW_DMS=false
-# Server 2 (FlexTrip only):   TELEGRAM_ALLOWED_GROUPS=-1009876543210 TELEGRAM_ALLOW_DMS=false  
-# Server 3 (DMs only):        TELEGRAM_ALLOWED_GROUPS= TELEGRAM_ALLOW_DMS=true
+# Server 1 (PsyOPTIMAL only): TELEGRAM_ALLOWED_GROUPS=-1001234567890
+# Server 2 (FlexTrip only):   TELEGRAM_ALLOWED_GROUPS=-1009876543210  
+# Server 3 (DMs only):        TELEGRAM_ALLOWED_GROUPS= (DM users controlled by dm_whitelist)
 ```
 
 ### Workspace Configuration

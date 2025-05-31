@@ -317,7 +317,7 @@ Groups are configured in `config/workspace_config.json` with `is_dev_group` flag
 
 | Chat Type | Behavior | Agent Response |
 |-----------|----------|----------------|
-| **Private chats** | All messages | ✅ Always responds |
+| **Private chats** | **Whitelisted users only** | ✅ Always responds (if whitelisted) |
 | **Dev groups** (`is_dev_group: true`) | All messages | ✅ Always responds |
 | **Regular groups** | @mentions only | ✅ Only when mentioned |
 
@@ -348,6 +348,62 @@ def is_dev_group(chat_id: int) -> bool:
             return False
     except Exception:
         return False
+```
+
+### DM User Whitelisting Security
+
+Direct messages now use a strict username-based whitelist for enhanced security:
+
+```python
+def validate_dm_user_access(username: str, chat_id: int) -> bool:
+    """Validate if a user is allowed to send DMs based on DM whitelist."""
+    # Load DM whitelist from workspace config
+    config = load_workspace_config()
+    dm_whitelist = config.get("dm_whitelist", {})
+    allowed_users = dm_whitelist.get("allowed_users", {})
+    
+    if not username:
+        return False
+    
+    username_lower = username.lower()
+    return username_lower in allowed_users
+
+def get_dm_user_working_directory(username: str) -> str:
+    """Get the working directory for a whitelisted DM user."""
+    config = load_workspace_config()
+    dm_whitelist = config.get("dm_whitelist", {})
+    default_dir = dm_whitelist.get("default_working_directory", "/Users/valorengels/src/ai")
+    allowed_users = dm_whitelist.get("allowed_users", {})
+    
+    if username and username.lower() in allowed_users:
+        user_info = allowed_users[username.lower()]
+        return user_info.get("working_directory", default_dir)
+    
+    return default_dir
+```
+
+**DM Security Features:**
+- **Username-based access control**: Only whitelisted usernames can send DMs
+- **Case-insensitive matching**: @TomCounsell, @tomcounsell, @TOMCOUNSELL all work
+- **Working directory isolation**: Each user gets their own Claude Code working directory
+- **Comprehensive logging**: All DM access attempts logged for security audit
+- **Graceful rejection**: Non-whitelisted users receive clear access denial
+
+**Current DM Whitelist:**
+```json
+{
+  "dm_whitelist": {
+    "description": "Users allowed to send direct messages to the bot",
+    "default_working_directory": "/Users/valorengels/src/ai",
+    "allowed_users": {
+      "tomcounsell": {
+        "username": "tomcounsell",
+        "description": "Tom Counsell - Owner and Boss", 
+        "working_directory": "/Users/valorengels/src/ai"
+      }
+    }
+  }
+}
 ```
 
 ### Enhanced Context Model
