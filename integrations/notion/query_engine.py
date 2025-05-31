@@ -20,52 +20,77 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
-# Workspace settings - maps workspace names to database configurations
-WORKSPACE_SETTINGS = {
-    "PsyOPTIMAL": {
-        "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
-        "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
-        "description": "PsyOPTIMAL project tasks and management",
-    },
-    "FlexTrip": {
-        "database_id": "1ed2bc89-4d10-80e5-89e9-feefe994dddd",
-        "url": "https://www.notion.so/yudame/1ed2bc894d1080e589e9feefe994dddd",
-        "description": "FlexTrip project tasks and management",
-    },
-    "DeckFusion Dev": {
-        "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
-        "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
-        "description": "DeckFusion development tasks and management",
-    },
-}
+def load_workspace_settings() -> Tuple[Dict[str, Dict[str, str]], Dict[str, str]]:
+    """Load workspace settings and aliases from consolidated configuration."""
+    try:
+        # Try consolidated config first
+        config_file = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
+        if config_file.exists():
+            with open(config_file) as f:
+                data = json.load(f)
+                workspaces = data.get("workspaces", {})
+                
+                # Convert to workspace settings format
+                workspace_settings = {}
+                workspace_aliases = {}
+                
+                for workspace_name, workspace_data in workspaces.items():
+                    workspace_settings[workspace_name] = {
+                        "database_id": workspace_data["database_id"],
+                        "url": workspace_data.get("url", ""),
+                        "description": workspace_data.get("description", "")
+                    }
+                    
+                    # Add aliases
+                    for alias in workspace_data.get("aliases", []):
+                        workspace_aliases[alias.lower()] = workspace_name
+                
+                return workspace_settings, workspace_aliases
+    except Exception as e:
+        print(f"Warning: Could not load consolidated workspace config: {e}")
+    
+    # Fallback to hardcoded settings (for backward compatibility)
+    fallback_settings = {
+        "PsyOPTIMAL": {
+            "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
+            "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
+            "description": "PsyOPTIMAL project tasks and management",
+        },
+        "FlexTrip": {
+            "database_id": "1ed2bc89-4d10-80e5-89e9-feefe994dddd",
+            "url": "https://www.notion.so/yudame/1ed2bc894d1080e589e9feefe994dddd",
+            "description": "FlexTrip project tasks and management",
+        },
+        "DeckFusion Dev": {
+            "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
+            "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
+            "description": "DeckFusion development tasks and management",
+        },
+    }
+    
+    fallback_aliases = {
+        "psyoptimal": "PsyOPTIMAL",
+        "psy": "PsyOPTIMAL",
+        "optimal": "PsyOPTIMAL",
+        "flextrip": "FlexTrip",
+        "flex": "FlexTrip",
+        "trip": "FlexTrip",
+        "deckfusion": "DeckFusion Dev",
+        "deck": "DeckFusion Dev",
+        "fusion": "DeckFusion Dev",
+        "deckfusion dev": "DeckFusion Dev",
+        "deck dev": "DeckFusion Dev",
+    }
+    
+    return fallback_settings, fallback_aliases
 
-# Workspace aliases for flexible input
-WORKSPACE_ALIASES = {
-    "psyoptimal": "PsyOPTIMAL",
-    "psy": "PsyOPTIMAL",
-    "optimal": "PsyOPTIMAL",
-    "flextrip": "FlexTrip",
-    "flex": "FlexTrip",
-    "trip": "FlexTrip",
-    "deckfusion": "DeckFusion Dev",
-    "deck": "DeckFusion Dev",
-    "fusion": "DeckFusion Dev",
-    "deckfusion dev": "DeckFusion Dev",
-    "deck dev": "DeckFusion Dev",
-}
+
+# Load workspace settings from consolidated config
+WORKSPACE_SETTINGS, WORKSPACE_ALIASES = load_workspace_settings()
 
 
 def load_project_mapping() -> Dict[str, str]:
-    """Load project name to database ID mapping from configuration file."""
-    try:
-        mapping_file = Path(__file__).parent / "database_mapping.json"
-        if mapping_file.exists():
-            with open(mapping_file) as f:
-                return json.load(f)
-    except Exception as e:
-        print(f"Warning: Could not load database mapping: {e}")
-    
-    # Return workspace settings as fallback
+    """Load project name to database ID mapping from consolidated configuration."""
     return {name: config["database_id"] for name, config in WORKSPACE_SETTINGS.items()}
 
 

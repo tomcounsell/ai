@@ -12,6 +12,7 @@ python-jose[cryptography]
 passlib[bcrypt]
 python-multipart
 psutil
+aiohttp
 
 # Development tools
 ruff

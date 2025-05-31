@@ -77,7 +77,7 @@ class MessageHandler:
             self.allowed_groups = set()
             self.allow_dms = False
     
-    def _should_handle_chat(self, chat_id: int, is_private_chat: bool = False) -> bool:
+    def _should_handle_chat(self, chat_id: int, is_private_chat: bool = False, username: str = None) -> bool:
         """Check if this server instance should handle messages from the given chat with enhanced validation."""
         import logging
         from utilities.workspace_validator import validate_chat_whitelist_access
@@ -86,11 +86,12 @@ class MessageHandler:
         
         try:
             # Use centralized validation function for consistency
-            is_allowed = validate_chat_whitelist_access(chat_id, is_private_chat)
+            is_allowed = validate_chat_whitelist_access(chat_id, is_private_chat, username)
             
             if not is_allowed:
                 chat_type = "DM" if is_private_chat else "group"
-                logger.warning(f"Chat access denied: {chat_type} {chat_id} not in whitelist")
+                user_info = f" from @{username}" if username else ""
+                logger.warning(f"Chat access denied: {chat_type} {chat_id}{user_info} not in whitelist")
             
             return is_allowed
             
@@ -103,25 +104,26 @@ class MessageHandler:
         """Main message handling logic with routing to appropriate handlers."""
         chat_id = message.chat.id
         is_private_chat = message.chat.type == ChatType.PRIVATE
+        username = message.from_user.username if message.from_user else None
         
         # Check if this server instance should handle this chat
-        if not self._should_handle_chat(chat_id, is_private_chat):
+        if not self._should_handle_chat(chat_id, is_private_chat, username):
             import logging
             logger = logging.getLogger(__name__)
             
             chat_type = "DM" if is_private_chat else "group"
-            username = message.from_user.username if message.from_user else "unknown"
+            username_display = username or "unknown"
             message_preview = (message.text[:50] + "...") if message.text and len(message.text) > 50 else (message.text or "[no text]")
             
             # Enhanced logging for security audit trail
             logger.warning(
                 f"MESSAGE REJECTED - Chat whitelist violation: "
-                f"{chat_type} {chat_id} from user @{username} - "
+                f"{chat_type} {chat_id} from user @{username_display} - "
                 f"Message: '{message_preview}'"
             )
             
             # Also log to console for immediate visibility during development
-            print(f"🚫 Rejected {chat_type} {chat_id} (@{username}): {message_preview}")
+            print(f"🚫 Rejected {chat_type} {chat_id} (@{username_display}): {message_preview}")
             return
 
         # Mark message as read (read receipt)
@@ -130,11 +132,12 @@ class MessageHandler:
         except Exception as e:
             print(f"Warning: Could not mark message as read: {e}")
 
-        # Add reaction to show message is being processed
+        # Add initial "received" reaction to show message was seen
+        from .reaction_manager import add_message_received_reaction
         try:
-            await client.send_reaction(chat_id, message.id, "👀")
+            await add_message_received_reaction(client, chat_id, message.id)
         except Exception as e:
-            print(f"Warning: Could not add reaction: {e}")
+            print(f"Warning: Could not add received reaction: {e}")
 
         # Handle different message types
         if message.photo:
@@ -163,10 +166,10 @@ class MessageHandler:
             self.missed_messages_per_chat[chat_id].append(message.text)
 
             # Still store old messages for context
-            reply_to_message_id = None
+            reply_to_telegram_message_id = None
             if hasattr(message, 'reply_to_message') and message.reply_to_message:
-                reply_to_message_id = getattr(message.reply_to_message, 'id', None)
-            self.chat_history.add_message(chat_id, "user", message.text, reply_to_message_id)
+                reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
+            self.chat_history.add_message(chat_id, "user", message.text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
             print(f"Collecting missed message from chat {chat_id}: {message.text[:50]}...")
             return
 
@@ -201,28 +204,30 @@ class MessageHandler:
             processed_text = getattr(message, 'text', None) or getattr(message, 'caption', None) or ""
 
         # Extract reply information for context building
-        reply_to_message_id = None
+        reply_to_telegram_message_id = None
         if hasattr(message, 'reply_to_message') and message.reply_to_message:
-            # Map Telegram message ID to our internal message ID
-            # This is a simplified mapping - in production you might want more sophisticated tracking
-            reply_to_message_id = getattr(message.reply_to_message, 'id', None)
+            reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
 
-        # Only respond in private chats or when mentioned in groups
-        if not (is_private_chat or is_mentioned):
+        # Check if this is a dev group that should handle all messages
+        from ..notion.utils import is_dev_group
+        is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+        
+        # Only respond in private chats, when mentioned in groups, or in dev groups
+        if not (is_private_chat or is_mentioned or is_dev_group_chat):
             # Still store the message for context, but don't respond
-            self.chat_history.add_message(chat_id, "user", message.text, reply_to_message_id)
+            self.chat_history.add_message(chat_id, "user", message.text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
             return
 
         # Store user message in chat history with reply context
-        self.chat_history.add_message(chat_id, "user", processed_text, reply_to_message_id)
+        self.chat_history.add_message(chat_id, "user", processed_text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
 
         # Check if this is a single-link message for link tracking
         if is_url_only_message(processed_text):
             await self._handle_link_message(message, chat_id, processed_text)
             return
 
-        # Route to appropriate handler
-        await self._route_message(message, chat_id, processed_text)
+        # Perform intent classification before routing
+        await self._route_message_with_intent(client, message, chat_id, processed_text, reply_to_telegram_message_id)
 
     async def _handle_missed_messages(self, chat_id: int, message):
         """Handle catch-up response for missed messages."""
@@ -275,8 +280,25 @@ class MessageHandler:
                 is_mentioned = True
 
             # Check if message has entities (mentions, text_mentions)
-            elif hasattr(message, 'entities') and message.entities:
-                for entity in message.entities:
+            # Handle both regular entities and caption entities
+            entities_to_check = []
+            if hasattr(message, 'entities') and message.entities:
+                try:
+                    entities_to_check.extend(message.entities)
+                except TypeError:
+                    # Handle mock objects or non-iterable entities
+                    if message.entities is not None:
+                        entities_to_check.append(message.entities)
+            if hasattr(message, 'caption_entities') and message.caption_entities:
+                try:
+                    entities_to_check.extend(message.caption_entities)
+                except TypeError:
+                    # Handle mock objects or non-iterable caption_entities
+                    if message.caption_entities is not None:
+                        entities_to_check.append(message.caption_entities)
+            
+            if entities_to_check:
+                for entity in entities_to_check:
                     try:
                         if entity.type == "mention":
                             # Extract the mentioned username with bounds checking
@@ -311,8 +333,138 @@ class MessageHandler:
 
         return is_mentioned, processed_text
 
-    async def _route_message(self, message, chat_id: int, processed_text: str):
-        """Route message to valor_agent for all text processing."""
+    async def _classify_message_intent(self, processed_text: str, message, chat_id: int):
+        """Classify message intent using Ollama-based classification."""
+        from ..ollama_intent import classify_message_intent
+        
+        # Prepare context for classification
+        context = {
+            "chat_id": chat_id,
+            "is_group_chat": message.chat.type != ChatType.PRIVATE,
+            "username": message.from_user.username if message.from_user else None,
+            "has_image": bool(message.photo),
+            "has_links": any(url in processed_text.lower() for url in ["http://", "https://", "www."]),
+        }
+        
+        try:
+            # Classify the message intent
+            intent_result = await classify_message_intent(processed_text, context)
+            
+            print(f"🧠 Intent classified: {intent_result.intent.value} "
+                  f"(confidence: {intent_result.confidence:.2f}) - {intent_result.reasoning}")
+            
+            return intent_result
+            
+        except Exception as e:
+            print(f"Warning: Intent classification failed: {e}")
+            # Fallback to unclear intent
+            from ..ollama_intent import IntentResult, MessageIntent
+            return IntentResult(
+                intent=MessageIntent.UNCLEAR,
+                confidence=0.5,
+                reasoning=f"Classification failed: {str(e)}",
+                suggested_emoji="🤔"
+            )
+
+    async def _handle_with_valor_agent_intent(self, message, chat_id: int, processed_text: str, 
+                                            reply_to_telegram_message_id: int = None, intent_result=None):
+        """Handle messages using valor agent system with intent-based configuration."""
+        try:
+            # Use valor agent for message processing with intent context
+            from agents.valor.handlers import handle_telegram_message_with_intent
+
+            # Determine if this might be a priority question for context
+            is_priority = (
+                is_user_priority_question(processed_text)
+                if "is_user_priority_question" in globals()
+                else False
+            )
+
+            # Get notion data - prioritize group-specific database, fallback to priority question detection
+            notion_data = None
+            if self.notion_scout:
+                try:
+                    # For group chats, use the group-specific Notion database
+                    is_private_chat = message.chat.type == ChatType.PRIVATE
+                    if not is_private_chat:
+                        notion_data = await self._get_notion_context_for_group(chat_id, processed_text)
+                    # For DMs or if no group-specific database, check if it's a priority question
+                    elif is_priority:
+                        notion_data = await self._get_notion_context(processed_text)
+                except Exception as e:
+                    print(f"Warning: Could not get Notion context: {e}")
+
+            # Get chat history for context with reply priority
+            reply_internal_id = None
+            if reply_to_telegram_message_id:
+                reply_internal_id = self.chat_history.get_internal_message_id(chat_id, reply_to_telegram_message_id)
+            
+            if reply_internal_id:
+                print(f"🔗 Using reply-aware context for message replying to internal ID {reply_internal_id} (Telegram ID: {reply_to_telegram_message_id})")
+                chat_history = self.chat_history.get_context_with_reply_priority(
+                    chat_id, reply_internal_id, max_context_messages=10
+                )
+            else:
+                chat_history = self.chat_history.get_context(chat_id, max_context_messages=10)
+
+            # Call the intent-aware handler
+            answer = await handle_telegram_message_with_intent(
+                message=processed_text,
+                chat_id=chat_id,
+                username=message.from_user.username if message.from_user else None,
+                is_group_chat=message.chat.type != ChatType.PRIVATE,
+                chat_history_obj=self.chat_history,
+                notion_data=notion_data,
+                is_priority_question=is_priority,
+                intent_result=intent_result,
+            )
+
+            # Process the agent response (handles both images and text)
+            await self._process_agent_response(message, chat_id, answer)
+
+        except Exception as e:
+            # Fallback to regular handler if intent-aware handler fails
+            print(f"Intent-aware handler failed, falling back to regular handler: {e}")
+            await self._handle_with_valor_agent(message, chat_id, processed_text, reply_to_telegram_message_id)
+
+    async def _route_message_with_intent(self, client, message, chat_id: int, processed_text: str, reply_to_telegram_message_id: int = None):
+        """Route message with intent classification and preprocessing."""
+        text = processed_text.lower().strip()
+
+        # Keep ping-pong for health check (skip intent classification for system commands)
+        if text == "ping":
+            await self._handle_ping(message, chat_id)
+            return
+
+        # Perform intent classification
+        intent_result = await self._classify_message_intent(processed_text, message, chat_id)
+        
+        # Add intent-specific reaction
+        from .reaction_manager import add_intent_based_reaction
+        try:
+            await add_intent_based_reaction(client, chat_id, message.id, intent_result)
+        except Exception as e:
+            print(f"Warning: Could not add intent reaction: {e}")
+
+        # Process message with intent-based configuration
+        success = False
+        try:
+            # Use valor_agent with intent-specific configuration
+            await self._handle_with_valor_agent_intent(message, chat_id, processed_text, reply_to_telegram_message_id, intent_result)
+            success = True
+        except Exception as e:
+            print(f"Error processing message with intent {intent_result.intent.value}: {e}")
+            success = False
+        
+        # Add completion/error reaction
+        from .reaction_manager import complete_reaction_sequence
+        try:
+            await complete_reaction_sequence(client, chat_id, message.id, intent_result, success)
+        except Exception as e:
+            print(f"Warning: Could not complete reaction sequence: {e}")
+
+    async def _route_message(self, message, chat_id: int, processed_text: str, reply_to_telegram_message_id: int = None):
+        """Legacy route message method for backward compatibility."""
         text = processed_text.lower().strip()
 
         # Keep ping-pong for health check
@@ -321,97 +473,57 @@ class MessageHandler:
             return
 
         # Use valor_agent for all other message handling
-        await self._handle_with_valor_agent(message, chat_id, processed_text)
+        await self._handle_with_valor_agent(message, chat_id, processed_text, reply_to_telegram_message_id)
 
-    async def _handle_with_valor_agent(self, message, chat_id: int, processed_text: str):
-        """Handle all messages using unified valor-claude agent system."""
+    async def _handle_with_valor_agent(self, message, chat_id: int, processed_text: str, reply_to_telegram_message_id: int = None):
+        """Handle all messages using valor agent system."""
         try:
-            # Try unified agent first, with fallback to original valor agent
-            try:
-                from agents.unified_integration import process_message_unified
-                
-                # Determine if this might be a priority question for context
-                is_priority = (
-                    is_user_priority_question(processed_text)
-                    if "is_user_priority_question" in globals()
-                    else False
-                )
-                
-                # Get notion data - prioritize group-specific database, fallback to priority question detection
-                notion_data = None
-                if self.notion_scout:
-                    try:
-                        # For group chats, use the group-specific Notion database
-                        is_private_chat = message.chat.type == ChatType.PRIVATE
-                        if not is_private_chat:
-                            notion_data = await self._get_notion_context_for_group(chat_id, processed_text)
-                        # For DMs or if no group-specific database, check if it's a priority question
-                        elif is_priority:
-                            notion_data = await self._get_notion_context(processed_text)
-                    except Exception as e:
-                        print(f"Warning: Could not get Notion context: {e}")
-                
-                # Get chat history for context with reply priority
-                reply_to_message_id = None
-                if hasattr(message, 'reply_to_message') and message.reply_to_message:
-                    reply_to_message_id = getattr(message.reply_to_message, 'id', None)
-                
-                if reply_to_message_id:
-                    print(f"🔗 Using reply-aware context for message replying to {reply_to_message_id}")
-                    chat_history = self.chat_history.get_context_with_reply_priority(
-                        chat_id, reply_to_message_id, max_context_messages=10
-                    )
-                else:
-                    chat_history = self.chat_history.get_context(chat_id, max_context_messages=10)
-                
-                # Process through unified system
-                answer = await process_message_unified(
-                    message=processed_text,
-                    chat_id=chat_id,
-                    username=message.from_user.username if message.from_user else None,
-                    is_group_chat=message.chat.type != ChatType.PRIVATE,
-                    chat_history=chat_history,
-                    chat_history_obj=self.chat_history,
-                    notion_data=notion_data
-                )
-                
-                print(f"✅ Processed message through unified agent system")
-                
-            except ImportError as e:
-                print(f"⚠️ Unified agent not available ({e}), falling back to original valor agent")
-                # Fallback to original valor agent
-                from agents.valor.handlers import handle_telegram_message
+            # Use valor agent for message processing
+            from agents.valor.handlers import handle_telegram_message
 
-                # Determine if this might be a priority question for context
-                is_priority = (
-                    is_user_priority_question(processed_text)
-                    if "is_user_priority_question" in globals()
-                    else False
-                )
+            # Determine if this might be a priority question for context
+            is_priority = (
+                is_user_priority_question(processed_text)
+                if "is_user_priority_question" in globals()
+                else False
+            )
 
-                # Get notion data - prioritize group-specific database, fallback to priority question detection
-                notion_data = None
-                if self.notion_scout:
-                    try:
-                        # For group chats, use the group-specific Notion database
-                        is_private_chat = message.chat.type == ChatType.PRIVATE
-                        if not is_private_chat:
-                            notion_data = await self._get_notion_context_for_group(chat_id, processed_text)
-                        # For DMs or if no group-specific database, check if it's a priority question
-                        elif is_priority:
-                            notion_data = await self._get_notion_context(processed_text)
-                    except Exception as e:
-                        print(f"Warning: Could not get Notion context: {e}")
+            # Get notion data - prioritize group-specific database, fallback to priority question detection
+            notion_data = None
+            if self.notion_scout:
+                try:
+                    # For group chats, use the group-specific Notion database
+                    is_private_chat = message.chat.type == ChatType.PRIVATE
+                    if not is_private_chat:
+                        notion_data = await self._get_notion_context_for_group(chat_id, processed_text)
+                    # For DMs or if no group-specific database, check if it's a priority question
+                    elif is_priority:
+                        notion_data = await self._get_notion_context(processed_text)
+                except Exception as e:
+                    print(f"Warning: Could not get Notion context: {e}")
 
-                answer = await handle_telegram_message(
-                    message=processed_text,
-                    chat_id=chat_id,
-                    username=message.from_user.username if message.from_user else None,
-                    is_group_chat=message.chat.type != ChatType.PRIVATE,
-                    chat_history_obj=self.chat_history,
-                    notion_data=notion_data,
-                    is_priority_question=is_priority,
+            # Get chat history for context with reply priority
+            reply_internal_id = None
+            if reply_to_telegram_message_id:
+                reply_internal_id = self.chat_history.get_internal_message_id(chat_id, reply_to_telegram_message_id)
+            
+            if reply_internal_id:
+                print(f"🔗 Using reply-aware context for message replying to internal ID {reply_internal_id} (Telegram ID: {reply_to_telegram_message_id})")
+                chat_history = self.chat_history.get_context_with_reply_priority(
+                    chat_id, reply_internal_id, max_context_messages=10
                 )
+            else:
+                chat_history = self.chat_history.get_context(chat_id, max_context_messages=10)
+
+            answer = await handle_telegram_message(
+                message=processed_text,
+                chat_id=chat_id,
+                username=message.from_user.username if message.from_user else None,
+                is_group_chat=message.chat.type != ChatType.PRIVATE,
+                chat_history_obj=self.chat_history,
+                notion_data=notion_data,
+                is_priority_question=is_priority,
+            )
 
             # Process the agent response (handles both images and text)
             await self._process_agent_response(message, chat_id, answer)
@@ -594,17 +706,22 @@ class MessageHandler:
                 caption_text = getattr(message, 'caption', None) or ""
 
             # Extract reply information for context building
-            reply_to_message_id = None
+            reply_to_telegram_message_id = None
             if hasattr(message, 'reply_to_message') and message.reply_to_message:
-                reply_to_message_id = getattr(message.reply_to_message, 'id', None)
+                reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
 
-            # Only respond in private chats or when mentioned in groups
-            if not (is_private_chat or is_mentioned):
+            # Check if this is a dev group that should handle all messages
+            from ..notion.utils import is_dev_group
+            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+            
+            # Only respond in private chats, when mentioned in groups, or in dev groups
+            if not (is_private_chat or is_mentioned or is_dev_group_chat):
                 # Still store the message for context, but don't respond
                 if message.caption:
-                    self.chat_history.add_message(chat_id, "user", f"[Photo] {message.caption}", reply_to_message_id)
+                    # Explicitly indicate this message contains BOTH text and image  
+                    self.chat_history.add_message(chat_id, "user", f"[Image+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 else:
-                    self.chat_history.add_message(chat_id, "user", "[Photo shared]", reply_to_message_id)
+                    self.chat_history.add_message(chat_id, "user", "[Image]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 return
 
             # Download the photo
@@ -612,48 +729,37 @@ class MessageHandler:
 
             # Store user message in chat history with reply context
             if caption_text:
-                self.chat_history.add_message(chat_id, "user", f"[Photo] {caption_text}", reply_to_message_id)
+                # Explicitly indicate this message contains BOTH text and image
+                self.chat_history.add_message(chat_id, "user", f"[Image+Text] {caption_text}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
             else:
-                self.chat_history.add_message(chat_id, "user", "[Photo shared]", reply_to_message_id)
+                self.chat_history.add_message(chat_id, "user", "[Image]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
 
-            # Use unified agent system to analyze the image
+            # Use valor agent system to analyze the image
             if self.notion_scout and self.notion_scout.anthropic_client:
                 try:
-                    # Try unified agent first
-                    from agents.unified_integration import process_image_unified
-                    
+                    from agents.valor.handlers import handle_telegram_message
+
                     # Get chat history for context with reply priority
-                    if reply_to_message_id:
-                        print(f"🔗 Using reply-aware context for photo message replying to {reply_to_message_id}")
+                    reply_internal_id = None
+                    if reply_to_telegram_message_id:
+                        reply_internal_id = self.chat_history.get_internal_message_id(chat_id, reply_to_telegram_message_id)
+                    
+                    if reply_internal_id:
+                        print(f"🔗 Using reply-aware context for photo message replying to internal ID {reply_internal_id} (Telegram ID: {reply_to_telegram_message_id})")
                         chat_history = self.chat_history.get_context_with_reply_priority(
-                            chat_id, reply_to_message_id, max_context_messages=5
+                            chat_id, reply_internal_id, max_context_messages=5
                         )
                     else:
                         chat_history = self.chat_history.get_context(chat_id, max_context_messages=5)
-                    
-                    answer = await process_image_unified(
-                        image_path=file_path,
-                        chat_id=chat_id,
-                        caption=caption_text if caption_text else "",
-                        username=message.from_user.username if message.from_user else None,
-                        chat_history=chat_history
-                    )
-                    
-                    print(f"✅ Processed image through unified agent system")
-                    
-                except ImportError as e:
-                    print(f"⚠️ Unified agent not available for images ({e}), falling back to original valor agent")
-                    # Fallback to original valor agent
-                    from agents.valor.handlers import handle_telegram_message
 
-                    # Prepare message for the agent
+                    # Prepare message for the agent with explicit text+image indication
                     if caption_text:
-                        agent_message = f"Please analyze this image: {caption_text}"
+                        agent_message = f"🖼️📝 MIXED CONTENT MESSAGE: This message contains BOTH TEXT AND AN IMAGE.\n\nUser's text: {caption_text}\n\nThe user has shared both text content (above) and an image. Please analyze and respond to BOTH components - the text message and the visual content in the image."
                     else:
-                        agent_message = "Please analyze this image and tell me what you see."
+                        agent_message = "🖼️ IMAGE MESSAGE: The user has shared an image. Please analyze the image and describe what you see."
 
                     # Add image path context to the message so the agent can use the tool
-                    agent_message += f"\n\n[Image downloaded to: {file_path}]"
+                    agent_message += f"\n\n[Image file path: {file_path}]"
 
                     answer = await handle_telegram_message(
                         message=agent_message,
@@ -663,8 +769,13 @@ class MessageHandler:
                         chat_history_obj=self.chat_history,
                     )
 
-                # Process the response (handles both images and text)
-                await self._process_agent_response(message, chat_id, answer)
+                    # Process the response (handles both images and text)
+                    await self._process_agent_response(message, chat_id, answer)
+
+                except Exception as e:
+                    error_msg = f"❌ Error processing image with agent: {str(e)}"
+                    await self._safe_reply(message, error_msg, "❌ Error processing image")
+                    self.chat_history.add_message(chat_id, "assistant", error_msg)
 
             else:
                 response = "👁️ I can see you shared an image, but I need my AI capabilities configured to analyze it!"
@@ -688,9 +799,35 @@ class MessageHandler:
             if not is_private_chat and message.caption:
                 is_mentioned = f"@{me.username}" in message.caption
 
-            if is_private_chat or is_mentioned:
+            # Extract reply information for context building
+            reply_to_telegram_message_id = None
+            if hasattr(message, 'reply_to_message') and message.reply_to_message:
+                reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
+
+            # Check if this is a dev group that should handle all messages
+            from ..notion.utils import is_dev_group
+            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+            
+            # Store message in chat history even if not responding
+            if not (is_private_chat or is_mentioned or is_dev_group_chat):
+                if message.caption:
+                    self.chat_history.add_message(chat_id, "user", f"[Document+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                else:
+                    self.chat_history.add_message(chat_id, "user", "[Document]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                return
+
+            # Store user message in chat history
+            if message.caption:
+                self.chat_history.add_message(chat_id, "user", f"[Document+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+            else:
+                self.chat_history.add_message(chat_id, "user", "[Document]", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+
+            if is_private_chat or is_mentioned or is_dev_group_chat:
                 doc_name = message.document.file_name or "unknown file"
-                response = f"📄 I see you shared a document: {doc_name}. Document analysis isn't implemented yet, but I'm working on it!"
+                if message.caption:
+                    response = f"📄 I see you shared a document '{doc_name}' with text: '{message.caption}'. Document analysis isn't implemented yet, but I'm working on it!"
+                else:
+                    response = f"📄 I see you shared a document: {doc_name}. Document analysis isn't implemented yet, but I'm working on it!"
                 await self._safe_reply(message, response, "📄 Document received")
                 self.chat_history.add_message(chat_id, "assistant", response)
 
@@ -710,11 +847,44 @@ class MessageHandler:
             if not is_private_chat and message.caption:
                 is_mentioned = f"@{me.username}" in message.caption
 
-            if is_private_chat or is_mentioned:
-                if message.voice:
-                    response = "🎙️ I hear you sent a voice message! Voice transcription isn't implemented yet, but it's on my roadmap."
+            # Extract reply information for context building
+            reply_to_telegram_message_id = None
+            if hasattr(message, 'reply_to_message') and message.reply_to_message:
+                reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
+
+            # Check if this is a dev group that should handle all messages
+            from ..notion.utils import is_dev_group
+            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+            
+            # Store message in chat history even if not responding
+            if not (is_private_chat or is_mentioned or is_dev_group_chat):
+                if message.caption:
+                    audio_type = "Voice" if message.voice else "Audio"
+                    self.chat_history.add_message(chat_id, "user", f"[{audio_type}+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 else:
-                    response = "🎵 I see you shared an audio file! Audio analysis isn't implemented yet, but I'm working on it."
+                    audio_type = "[Voice]" if message.voice else "[Audio]"
+                    self.chat_history.add_message(chat_id, "user", audio_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                return
+
+            # Store user message in chat history
+            if message.caption:
+                audio_type = "Voice" if message.voice else "Audio"
+                self.chat_history.add_message(chat_id, "user", f"[{audio_type}+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+            else:
+                audio_type = "[Voice]" if message.voice else "[Audio]"
+                self.chat_history.add_message(chat_id, "user", audio_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+
+            if is_private_chat or is_mentioned or is_dev_group_chat:
+                if message.voice:
+                    if message.caption:
+                        response = f"🎙️ I hear you sent a voice message with text: '{message.caption}'. Voice transcription isn't implemented yet, but it's on my roadmap."
+                    else:
+                        response = "🎙️ I hear you sent a voice message! Voice transcription isn't implemented yet, but it's on my roadmap."
+                else:
+                    if message.caption:
+                        response = f"🎵 I see you shared an audio file with text: '{message.caption}'. Audio analysis isn't implemented yet, but I'm working on it."
+                    else:
+                        response = "🎵 I see you shared an audio file! Audio analysis isn't implemented yet, but I'm working on it."
                 await self._safe_reply(message, response, "🎵 Audio received")
                 self.chat_history.add_message(chat_id, "assistant", response)
 
@@ -734,11 +904,42 @@ class MessageHandler:
             if not is_private_chat and message.caption:
                 is_mentioned = f"@{me.username}" in message.caption
 
-            if is_private_chat or is_mentioned:
-                if message.video_note:
-                    response = "📹 I see you sent a video note! Video analysis isn't implemented yet, but it's planned."
+            # Extract reply information for context building
+            reply_to_telegram_message_id = None
+            if hasattr(message, 'reply_to_message') and message.reply_to_message:
+                reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
+
+            # Check if this is a dev group that should handle all messages
+            from ..notion.utils import is_dev_group
+            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+            
+            # Store message in chat history even if not responding
+            if not (is_private_chat or is_mentioned or is_dev_group_chat):
+                if message.caption:
+                    self.chat_history.add_message(chat_id, "user", f"[Video+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 else:
-                    response = "🎬 I see you shared a video! Video analysis isn't implemented yet, but I'm working on it."
+                    video_type = "[VideoNote]" if message.video_note else "[Video]"
+                    self.chat_history.add_message(chat_id, "user", video_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                return
+
+            # Store user message in chat history
+            if message.caption:
+                self.chat_history.add_message(chat_id, "user", f"[Video+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+            else:
+                video_type = "[VideoNote]" if message.video_note else "[Video]"
+                self.chat_history.add_message(chat_id, "user", video_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+
+            if is_private_chat or is_mentioned or is_dev_group_chat:
+                if message.video_note:
+                    if message.caption:
+                        response = f"📹 I see you sent a video note with text: '{message.caption}'. Video analysis isn't implemented yet, but it's planned."
+                    else:
+                        response = "📹 I see you sent a video note! Video analysis isn't implemented yet, but it's planned."
+                else:
+                    if message.caption:
+                        response = f"🎬 I see you shared a video with text: '{message.caption}'. Video analysis isn't implemented yet, but I'm working on it."
+                    else:
+                        response = "🎬 I see you shared a video! Video analysis isn't implemented yet, but I'm working on it."
                 await self._safe_reply(message, response, "🎬 Video received")
                 self.chat_history.add_message(chat_id, "assistant", response)
 

@@ -250,22 +250,29 @@ class TelegramContextManager:
 
 ## Group vs Direct Message Handling
 
-### Intelligent Context Differentiation
+### Dev Group Active Handling
+
+The system now includes **dev group active handling** - groups with "Dev" in their name have enhanced engagement:
 
 ```python
 async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle group messages with intelligent mention detection."""
+    """Handle group messages with dev group awareness and intelligent mention detection."""
     message = update.message
+    chat_id = message.chat_id
     
-    # Intelligent mention detection (no keyword patterns)
+    # Check if this is a dev group (handles ALL messages)
+    from integrations.notion.utils import is_dev_group
+    is_dev_group_chat = is_dev_group(chat_id)
+    
+    # Determine if bot should respond
     should_respond = (
-        # Direct reply to bot
+        # Dev groups: Handle ALL messages (no mention required)
+        is_dev_group_chat or
+        # Non-dev groups: Require mentions or replies
         (message.reply_to_message and 
          message.reply_to_message.from_user.id == context.bot.id) or
         # Explicit mention
-        any(entity.type == "mention" for entity in (message.entities or [])) or
-        # Context-aware engagement (LLM decides)
-        await should_engage_in_group_context(message.text, update.message.chat_id)
+        any(entity.type == "mention" for entity in (message.entities or []))
     )
     
     if should_respond:
@@ -276,6 +283,127 @@ async def handle_direct_message(update: Update, context: ContextTypes.DEFAULT_TY
     """Handle all direct messages through unified agent."""
     # Process ALL direct messages through valor_agent intelligence
     await process_telegram_message(update, context)
+```
+
+### Group Behavior Configuration
+
+Groups are configured in `config/workspace_config.json` with `is_dev_group` flags:
+
+```json
+{
+  "workspaces": {
+    "Yudame Dev": {
+      "database_id": "****",
+      "description": "Yudame development team tasks and management",
+      "telegram_chat_ids": ["-4891178445"],
+      "is_dev_group": true
+    },
+    "PsyOPTIMAL Dev": {
+      "database_id": "****", 
+      "description": "PsyOPTIMAL development tasks and management",
+      "telegram_chat_ids": ["-4897329503"],
+      "is_dev_group": true
+    },
+    "Yudame": {
+      "database_id": "****",
+      "description": "Yudame team chat and project management", 
+      "telegram_chat_ids": ["-4719889199"]
+    }
+  }
+}
+```
+
+### Message Handling Behavior
+
+| Chat Type | Behavior | Agent Response |
+|-----------|----------|----------------|
+| **Private chats** | **Whitelisted users only** | ✅ Always responds (if whitelisted) |
+| **Dev groups** (`is_dev_group: true`) | All messages | ✅ Always responds |
+| **Regular groups** | @mentions only | ✅ Only when mentioned |
+
+### Dev Group Detection Utility
+
+```python
+def is_dev_group(chat_id: int) -> bool:
+    """Check if a Telegram chat ID is a dev group that should handle all messages."""
+    config_file = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
+    if not config_file.exists():
+        return False
+    
+    try:
+        with open(config_file) as f:
+            data = json.load(f)
+            telegram_groups = data.get("telegram_groups", {})
+            workspaces = data.get("workspaces", {})
+            
+            # Convert chat_id to string for lookup
+            chat_id_str = str(chat_id)
+            
+            if chat_id_str in telegram_groups:
+                project_name = telegram_groups[chat_id_str]
+                if project_name in workspaces:
+                    workspace_data = workspaces[project_name]
+                    return workspace_data.get("is_dev_group", False)
+            
+            return False
+    except Exception:
+        return False
+```
+
+### DM User Whitelisting Security
+
+Direct messages now use a strict username-based whitelist for enhanced security:
+
+```python
+def validate_dm_user_access(username: str, chat_id: int) -> bool:
+    """Validate if a user is allowed to send DMs based on DM whitelist."""
+    # Load DM whitelist from workspace config
+    config = load_workspace_config()
+    dm_whitelist = config.get("dm_whitelist", {})
+    allowed_users = dm_whitelist.get("allowed_users", {})
+    
+    if not username:
+        return False
+    
+    username_lower = username.lower()
+    return username_lower in allowed_users
+
+def get_dm_user_working_directory(username: str) -> str:
+    """Get the working directory for a whitelisted DM user."""
+    config = load_workspace_config()
+    dm_whitelist = config.get("dm_whitelist", {})
+    default_dir = dm_whitelist.get("default_working_directory", "/Users/valorengels/src/ai")
+    allowed_users = dm_whitelist.get("allowed_users", {})
+    
+    if username and username.lower() in allowed_users:
+        user_info = allowed_users[username.lower()]
+        return user_info.get("working_directory", default_dir)
+    
+    return default_dir
+```
+
+**DM Security Features:**
+- **Username-based access control**: Only whitelisted usernames can send DMs
+- **Case-insensitive matching**: @TomCounsell, @tomcounsell, @TOMCOUNSELL all work
+- **Working directory isolation**: Each user gets their own Claude Code working directory
+- **Comprehensive logging**: All DM access attempts logged for security audit
+- **Graceful rejection**: Non-whitelisted users receive clear access denial
+
+**Current DM Whitelist:**
+```json
+{
+  "dm_whitelist": {
+    "description": "Users allowed to send direct messages to the bot",
+    "default_working_directory": "/Users/valorengels/src/ai",
+    "allowed_users": {
+      "tomcounsell": {
+        "username": "tomcounsell",
+        "description": "Tom Counsell - Owner and Boss", 
+        "working_directory": "/Users/valorengels/src/ai"
+      }
+    }
+  }
+}
 ```
 
 ### Enhanced Context Model
@@ -478,6 +606,78 @@ def create_production_telegram_app() -> Application:
     return application
 ```
 
+## Mixed Content Message Handling
+
+### Overview
+The Telegram integration includes comprehensive support for messages containing both text and images (mixed content), enabling rich conversational interactions with visual elements.
+
+### Message Structure and Processing
+The system handles three primary message types:
+
+1. **Text-only messages**: Processed through standard text handling
+2. **Image-only messages**: Routed to specialized image processing
+3. **Mixed text+image messages**: Combined processing of both components
+
+### Processing Flow for Mixed Content
+
+```python
+# Message routing based on media presence
+async def handle_message(self, client, message, chat_id: int):
+    """Route messages with media-first priority."""
+    
+    if message.photo:  # Includes mixed content (photo + caption)
+        await self._handle_photo_message(client, message, chat_id)
+    elif message.text:  # Text-only messages
+        await self._handle_with_valor_agent(client, message, chat_id)
+
+# Text extraction from any message type
+def _process_mentions(self, message) -> tuple[bool, str]:
+    """Extract text from text OR caption with unified processing."""
+    
+    text_content = (
+        getattr(message, 'text', None) or 
+        getattr(message, 'caption', None) or 
+        ""
+    )
+    
+    # Process both message.entities AND message.caption_entities
+    return self._extract_mentions_and_text(text_content, message)
+```
+
+### Storage Format with Semantic Indicators
+
+| Message Type | Storage Format | AI Processing |
+|--------------|----------------|---------------|
+| Text only | `"Hello world"` | Standard text handling |
+| Image only | `"[Image]"` | Image analysis only |
+| Mixed content | `"[Image+Text] Check this screenshot"` | Enhanced: 🖼️📝 MIXED CONTENT |
+
+### Enhanced AI Integration
+
+Mixed content messages receive enhanced processing for comprehensive understanding:
+
+```python
+# Enhanced message for AI agent
+if has_mixed_content:
+    agent_message = f"""🖼️📝 MIXED CONTENT MESSAGE: This message contains BOTH TEXT AND AN IMAGE.
+
+User's text: {caption_text}
+
+Image analysis: {image_analysis_result}
+
+{context_information}"""
+```
+
+### Key Features
+
+- **Unified text extraction**: Works seamlessly with text messages, captions, or empty content
+- **Entity processing**: Handles @mentions in both regular text and image captions
+- **Semantic storage**: Clear format indicators for chat history and AI processing
+- **Context preservation**: Mixed content maintains full conversation context
+- **Error recovery**: Graceful fallbacks when image or text processing fails
+
+For detailed technical implementation, see [Telegram Mixed Content Message Handling Guide](telegram-image-text-analysis.md).
+
 ## Benefits of Current Architecture
 
 ### Production Readiness
@@ -485,17 +685,20 @@ def create_production_telegram_app() -> Application:
 - **Performance optimization**: 2.21s streaming intervals, 97-99% context compression
 - **Resource management**: Automatic cleanup, memory monitoring, session management
 - **Error recovery**: Graceful degradation with user-friendly messaging
+- **Mixed content support**: Robust handling of text+image combinations
 
 ### User Experience
 - **Natural interaction**: No command learning or mode switching required
 - **Real-time feedback**: Live streaming updates during development tasks
 - **Context intelligence**: Conversation optimization while preserving critical information
 - **Seamless integration**: Chat and development unified in single conversation flow
+- **Rich media support**: Text and images processed together for comprehensive understanding
 
 ### Technical Innovation
 - **Zero keyword matching**: Pure LLM intelligence for tool selection and routing
 - **Adaptive performance**: Real-time optimization based on content and usage patterns
 - **Production monitoring**: Enterprise-grade health management and resource optimization
 - **Context-aware intelligence**: Smart conversation management with 97-99% compression efficiency
+- **Mixed content intelligence**: Unified processing of text and visual components
 
-This integration represents a fundamental shift from traditional chatbot interfaces to a unified conversational development environment that provides production-grade performance, monitoring, and user experience while maintaining natural conversation flow.
+This integration represents a fundamental shift from traditional chatbot interfaces to a unified conversational development environment that provides production-grade performance, monitoring, and user experience while maintaining natural conversation flow and comprehensive mixed content support.

@@ -151,6 +151,10 @@ ENVIRONMENT=development
 LOG_LEVEL=INFO
 MAX_CONVERSATION_HISTORY=50
 AGENT_TIMEOUT_SECONDS=30
+
+# Telegram Chat Filtering (Multi-Server Setup)
+TELEGRAM_ALLOWED_GROUPS=-1002600253717,-4897329503  # Comma-separated group IDs
+TELEGRAM_ALLOW_DMS=false  # DMs now use user whitelist instead of global setting
 ```
 
 ### Environment Validation
@@ -216,6 +220,79 @@ EOF
 
 echo "✅ MCP configuration updated"
 ```
+
+### Workspace Configuration
+
+Configure project workspaces and dev group behavior in `config/workspace_config.json`:
+
+```json
+{
+  "workspaces": {
+    "Yudame Dev": {
+      "database_id": "****",
+      "description": "Yudame development team tasks and management",
+      "workspace_type": "yudame",
+      "working_directory": "/Users/valorengels/src/ai",
+      "telegram_chat_ids": ["-4891178445"],
+      "aliases": ["yudame dev"],
+      "is_dev_group": true
+    },
+    "PsyOPTIMAL": {
+      "database_id": "****",
+      "description": "PsyOPTIMAL team chat and project management",
+      "workspace_type": "psyoptimal", 
+      "working_directory": "/Users/valorengels/src/psyoptimal",
+      "telegram_chat_ids": ["-1002600253717"],
+      "aliases": ["psyoptimal", "PO"]
+    }
+  },
+  "telegram_groups": {
+    "-4891178445": "Yudame Dev",
+    "-1002600253717": "PsyOPTIMAL"
+  }
+}
+```
+
+**Dev Group Configuration:**
+- **`is_dev_group: true`**: Agent responds to ALL messages (no @mention required)
+- **`is_dev_group: false` or omitted**: Agent only responds to @mentions
+- **Working directory**: Each workspace specifies a single working directory for Claude Code execution
+- **Notion database mapping**: Automatic project-specific database access
+
+**Current Dev Groups:**
+- Yudame Dev (-4891178445)
+- PsyOPTIMAL Dev (-4897329503) 
+- DeckFusion Dev (-4851227604)
+
+### DM User Whitelisting
+
+Direct messages are restricted to whitelisted users only. Configure DM access in the `dm_whitelist` section:
+
+```json
+{
+  "dm_whitelist": {
+    "description": "Users allowed to send direct messages to the bot",
+    "default_working_directory": "/Users/valorengels/src/ai",
+    "allowed_users": {
+      "tomcounsell": {
+        "username": "tomcounsell",
+        "description": "Tom Counsell - Owner and Boss",
+        "working_directory": "/Users/valorengels/src/ai"
+      }
+    }
+  }
+}
+```
+
+**DM Security Features:**
+- **User whitelisting**: Only specified usernames can send DMs
+- **Case-insensitive**: Username matching works regardless of case
+- **Working directory isolation**: Each user can have a specific working directory
+- **Default fallback**: Non-specified users get default working directory but are denied access
+- **Claude Code restriction**: DM users' coding tasks are restricted to their assigned working directory
+
+**Currently Whitelisted:**
+- **@tomcounsell** (Tom Counsell - Owner/Boss) → `/Users/valorengels/src/ai`
 
 ## Dependency Management
 

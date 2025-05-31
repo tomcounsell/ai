@@ -19,6 +19,8 @@ class WorkspaceType(Enum):
     DECKFUSION = "deckfusion"
     PSYOPTIMAL = "psyoptimal"
     FLEXTRIP = "flextrip"
+    YUDAME = "yudame"
+    VERKSTAD = "verkstad"
 
 
 @dataclass
@@ -52,10 +54,10 @@ class WorkspaceValidator:
         
     def _get_default_config_path(self) -> str:
         """Get default path to workspace configuration"""
-        return str(Path(__file__).parent.parent / "integrations" / "notion" / "database_mapping.json")
+        return str(Path(__file__).parent.parent / "config" / "workspace_config.json")
     
     def _load_workspace_config(self) -> Dict[str, WorkspaceConfig]:
-        """Load workspace configuration from mapping file"""
+        """Load workspace configuration from consolidated config file"""
         try:
             with open(self.config_path, 'r') as f:
                 config = json.load(f)
@@ -64,65 +66,37 @@ class WorkspaceValidator:
         
         workspaces = {}
         
-        # Define strict workspace mappings with isolated environments
-        workspace_mappings = {
-            # DeckFusion workspace - strict isolation to DeckFusion DB and ~/src/deckfusion/
-            "DeckFusion Dev": WorkspaceConfig(
-                name="DeckFusion Dev",
-                workspace_type=WorkspaceType.DECKFUSION,
-                notion_database_id=config["projects"]["DeckFusion Dev"]["database_id"],
-                allowed_directories=[
-                    "/Users/valorengels/src/deckfusion",
-                    "/Users/valorengels/src/deckfusion/"
-                ],
-                telegram_chat_ids=set(),  # Will be populated from config
-                aliases=["deckfusion", "deck", "fusion", "deckfusion dev", "deck dev"]
-            ),
-            # PsyOPTIMAL workspace - strict isolation to PsyOPTIMAL DB and ~/src/psyoptimal/
-            "PsyOPTIMAL": WorkspaceConfig(
-                name="PsyOPTIMAL",
-                workspace_type=WorkspaceType.PSYOPTIMAL,
-                notion_database_id=config["projects"]["PsyOPTIMAL"]["database_id"],
-                allowed_directories=[
-                    "/Users/valorengels/src/psyoptimal",
-                    "/Users/valorengels/src/psyoptimal/"
-                ],
-                telegram_chat_ids=set(),  # Will be populated from config
-                aliases=["psyoptimal", "psy", "optimal"]
-            ),
-            # PsyOPTIMAL Dev workspace - same isolation as PsyOPTIMAL
-            "PsyOPTIMAL Dev": WorkspaceConfig(
-                name="PsyOPTIMAL Dev", 
-                workspace_type=WorkspaceType.PSYOPTIMAL,
-                notion_database_id=config["projects"]["PsyOPTIMAL Dev"]["database_id"],
-                allowed_directories=[
-                    "/Users/valorengels/src/psyoptimal",
-                    "/Users/valorengels/src/psyoptimal/"
-                ],
-                telegram_chat_ids=set(),  # Will be populated from config
-                aliases=["psyoptimal dev", "psy dev", "optimal dev"]
-            ),
-            # FlexTrip workspace - isolated to FlexTrip DB and ~/src/flextrip/
-            "FlexTrip": WorkspaceConfig(
-                name="FlexTrip",
-                workspace_type=WorkspaceType.FLEXTRIP,
-                notion_database_id=config["projects"]["FlexTrip"]["database_id"],
-                allowed_directories=[
-                    "/Users/valorengels/src/flextrip", 
-                    "/Users/valorengels/src/flextrip/"
-                ],
-                telegram_chat_ids=set(),  # Will be populated from config
-                aliases=["flextrip", "flex", "trip"]
+        # Load workspaces from the new consolidated config format
+        for workspace_name, workspace_data in config.get("workspaces", {}).items():
+            # Map workspace_type string to enum
+            workspace_type_str = workspace_data.get("workspace_type", "").lower()
+            if workspace_type_str == "deckfusion":
+                workspace_type = WorkspaceType.DECKFUSION
+            elif workspace_type_str == "psyoptimal":
+                workspace_type = WorkspaceType.PSYOPTIMAL
+            elif workspace_type_str == "flextrip":
+                workspace_type = WorkspaceType.FLEXTRIP
+            elif workspace_type_str == "yudame":
+                workspace_type = WorkspaceType.YUDAME
+            elif workspace_type_str == "verkstad":
+                workspace_type = WorkspaceType.VERKSTAD
+            else:
+                # Skip unknown workspace types
+                continue
+            
+            # Convert telegram_chat_ids list to set of strings
+            telegram_chat_ids = set(str(chat_id) for chat_id in workspace_data.get("telegram_chat_ids", []))
+            
+            workspaces[workspace_name] = WorkspaceConfig(
+                name=workspace_name,
+                workspace_type=workspace_type,
+                notion_database_id=workspace_data["database_id"],
+                allowed_directories=workspace_data.get("allowed_directories", []),
+                telegram_chat_ids=telegram_chat_ids,
+                aliases=workspace_data.get("aliases", [])
             )
-        }
         
-        # Add telegram chat mappings if available
-        if "telegram_groups" in config:
-            for chat_id, workspace_name in config["telegram_groups"].items():
-                if workspace_name in workspace_mappings:
-                    workspace_mappings[workspace_name].telegram_chat_ids.add(chat_id)
-        
-        return workspace_mappings
+        return workspaces
     
     def _build_chat_mapping(self) -> Dict[str, str]:
         """Build mapping from chat IDs to workspace names"""
@@ -250,24 +224,22 @@ class WorkspaceValidator:
         # Define forbidden paths for each workspace type
         forbidden_paths = []
         
-        if current_workspace.workspace_type == WorkspaceType.DECKFUSION:
-            # DeckFusion chats cannot access PsyOPTIMAL or FlexTrip directories
-            forbidden_paths = [
-                "/Users/valorengels/src/psyoptimal",
-                "/Users/valorengels/src/flextrip"
-            ]
-        elif current_workspace.workspace_type == WorkspaceType.PSYOPTIMAL:
-            # PsyOPTIMAL chats cannot access DeckFusion or FlexTrip directories  
-            forbidden_paths = [
-                "/Users/valorengels/src/deckfusion",
-                "/Users/valorengels/src/flextrip"
-            ]
-        elif current_workspace.workspace_type == WorkspaceType.FLEXTRIP:
-            # FlexTrip chats cannot access DeckFusion or PsyOPTIMAL directories
-            forbidden_paths = [
-                "/Users/valorengels/src/deckfusion", 
-                "/Users/valorengels/src/psyoptimal"
-            ]
+        # Get all workspace directories except current one
+        all_workspace_dirs = [
+            "/Users/valorengels/src/deckfusion",
+            "/Users/valorengels/src/psyoptimal", 
+            "/Users/valorengels/src/flextrip",
+            "/Users/valorengels/src/ai",
+            "/Users/valorengels/src/verkstad"
+        ]
+        
+        # Remove directories allowed for current workspace
+        for allowed_dir in current_workspace.allowed_directories:
+            allowed_normalized = os.path.abspath(allowed_dir)
+            if allowed_normalized in all_workspace_dirs:
+                all_workspace_dirs.remove(allowed_normalized)
+        
+        forbidden_paths = all_workspace_dirs
         
         # Check if normalized path starts with any forbidden path
         for forbidden_path in forbidden_paths:
@@ -454,12 +426,13 @@ def validate_telegram_environment() -> Dict[str, str]:
         raise WorkspaceAccessError(f"Environment validation failed: {str(e)}")
 
 
-def validate_chat_whitelist_access(chat_id: int, is_private: bool = False) -> bool:
+def validate_chat_whitelist_access(chat_id: int, is_private: bool = False, username: str = None) -> bool:
     """Validate if a chat ID is allowed based on environment whitelist configuration
     
     Args:
         chat_id: Telegram chat ID to validate
         is_private: Whether this is a private/DM chat
+        username: Username for DM validation (optional)
         
     Returns:
         True if chat is allowed, False if rejected
@@ -471,16 +444,8 @@ def validate_chat_whitelist_access(chat_id: int, is_private: bool = False) -> bo
     
     try:
         if is_private:
-            # For DMs: check TELEGRAM_ALLOW_DMS setting
-            allow_dms = os.getenv("TELEGRAM_ALLOW_DMS", "true").lower().strip()
-            is_allowed = allow_dms in ("true", "1", "yes", "on")
-            
-            if is_allowed:
-                logger.info(f"DM access granted for chat {chat_id}")
-            else:
-                logger.info(f"DM access denied for chat {chat_id} (DMs disabled)")
-            
-            return is_allowed
+            # For DMs: check DM user whitelist
+            return validate_dm_user_access(username, chat_id)
         else:
             # For groups: check TELEGRAM_ALLOWED_GROUPS whitelist
             allowed_groups_env = os.getenv("TELEGRAM_ALLOWED_GROUPS", "").strip()
@@ -507,3 +472,85 @@ def validate_chat_whitelist_access(chat_id: int, is_private: bool = False) -> bo
     except Exception as e:
         logger.error(f"Chat whitelist validation failed for chat {chat_id}: {e}")
         return False
+
+
+def validate_dm_user_access(username: str, chat_id: int) -> bool:
+    """Validate if a user is allowed to send DMs based on DM whitelist
+    
+    Args:
+        username: Telegram username of the user
+        chat_id: Chat ID for logging purposes
+        
+    Returns:
+        True if user is whitelisted for DMs, False if rejected
+    """
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    try:
+        # Load DM whitelist from workspace config
+        validator = get_workspace_validator()
+        config_path = validator.config_path
+        
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        dm_whitelist = config.get("dm_whitelist", {})
+        allowed_users = dm_whitelist.get("allowed_users", {})
+        
+        if not username:
+            logger.warning(f"DM access denied for chat {chat_id} (no username provided)")
+            return False
+        
+        username_lower = username.lower()
+        
+        if username_lower in allowed_users:
+            user_info = allowed_users[username_lower]
+            logger.info(f"DM access granted for user @{username} (chat {chat_id}): {user_info.get('description', 'Whitelisted user')}")
+            return True
+        else:
+            logger.warning(f"DM access denied for user @{username} (chat {chat_id}): not in whitelist")
+            return False
+            
+    except Exception as e:
+        logger.error(f"DM user validation failed for @{username} (chat {chat_id}): {e}")
+        return False
+
+
+def get_dm_user_working_directory(username: str) -> str:
+    """Get the working directory for a whitelisted DM user
+    
+    Args:
+        username: Telegram username of the user
+        
+    Returns:
+        Working directory path for the user, or default if not specified
+    """
+    try:
+        # Load DM whitelist from workspace config
+        validator = get_workspace_validator()
+        config_path = validator.config_path
+        
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        dm_whitelist = config.get("dm_whitelist", {})
+        default_dir = dm_whitelist.get("default_working_directory", "/Users/valorengels/src/ai")
+        allowed_users = dm_whitelist.get("allowed_users", {})
+        
+        if not username:
+            return default_dir
+        
+        username_lower = username.lower()
+        
+        if username_lower in allowed_users:
+            user_info = allowed_users[username_lower]
+            return user_info.get("working_directory", default_dir)
+        else:
+            # User not whitelisted, but return default for consistency
+            return default_dir
+            
+    except Exception:
+        # Fallback to default AI directory
+        return "/Users/valorengels/src/ai"

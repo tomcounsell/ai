@@ -156,6 +156,9 @@ class TestMessageHandlerReplyIntegration:
         self.mock_chat_history.get_context_with_reply_priority = Mock(return_value=[])
         self.mock_chat_history.get_context = Mock(return_value=[])
         self.mock_chat_history.add_message = Mock()
+        self.mock_chat_history.get_internal_message_id = Mock(return_value=None)
+        # Mock chat_histories as a proper dict to prevent len() errors
+        self.mock_chat_history.chat_histories = {}
         
         self.handler = MessageHandler(
             client=self.mock_client,
@@ -178,6 +181,7 @@ class TestMessageHandlerReplyIntegration:
         message.video = None
         message.video_note = None
         message.date.timestamp.return_value = time.time()
+        message.id = 12345  # Add telegram message ID
         
         # Mock reply_to_message
         reply_msg = Mock()
@@ -191,28 +195,29 @@ class TestMessageHandlerReplyIntegration:
         self.mock_client.read_chat_history = AsyncMock()
         self.mock_client.send_reaction = AsyncMock()
         
-        # Mock the unified integration to avoid import errors
-        with patch('agents.unified_integration.process_message_unified') as mock_unified:
-            mock_unified.return_value = "Test response"
+        # Mock the valor agent handler
+        with patch('agents.valor.handlers.handle_telegram_message') as mock_valor:
+            mock_valor.return_value = "Test response"
             
             # Process the message
             import asyncio
             asyncio.run(self.handler.handle_message(self.mock_client, message))
         
-        # Verify add_message was called with reply_to_message_id
+        # Verify add_message was called with reply_to_telegram_message_id and telegram_message_id
         calls = self.mock_chat_history.add_message.call_args_list
         assert len(calls) >= 1
         
-        # Find the call that should include reply_to_message_id
+        # Find the call that should include reply and telegram message IDs
         found_reply_call = False
         for call in calls:
             args, kwargs = call
-            if len(args) >= 4:  # chat_id, role, content, reply_to_message_id
+            if len(args) >= 5:  # chat_id, role, content, reply_to_telegram_message_id, telegram_message_id
                 found_reply_call = True
-                assert args[3] == 98765  # reply_to_message_id
+                assert args[3] == 98765  # reply_to_telegram_message_id
+                # args[4] should be the current message's telegram_message_id
                 break
         
-        assert found_reply_call, "add_message should have been called with reply_to_message_id"
+        assert found_reply_call, "add_message should have been called with reply_to_telegram_message_id and telegram_message_id"
 
     @pytest.mark.asyncio
     async def test_reply_aware_context_used_for_text_messages(self):
@@ -230,6 +235,7 @@ class TestMessageHandlerReplyIntegration:
         message.video = None
         message.video_note = None
         message.date.timestamp.return_value = time.time()
+        message.id = 12345  # Add telegram message ID
         
         # Mock reply_to_message
         reply_msg = Mock()
@@ -243,17 +249,26 @@ class TestMessageHandlerReplyIntegration:
         self.mock_client.read_chat_history = AsyncMock()
         self.mock_client.send_reaction = AsyncMock()
         
-        # Mock the unified integration
-        with patch('agents.unified_integration.process_message_unified') as mock_unified:
-            mock_unified.return_value = "Test response"
+        # Mock the ID mapping method to return an internal ID BEFORE processing
+        self.mock_chat_history.get_internal_message_id.return_value = 2  # Mock internal ID
+        
+        # Mock the valor agent handler
+        with patch('agents.valor.handlers.handle_telegram_message') as mock_valor:
+            mock_valor.return_value = "Test response"
             
             # Process the message
             await self.handler.handle_message(self.mock_client, message)
         
-        # Verify reply-aware context method was called
-        self.mock_chat_history.get_context_with_reply_priority.assert_called_once()
-        args, kwargs = self.mock_chat_history.get_context_with_reply_priority.call_args
-        assert args[1] == 54321  # reply_to_message_id
+        # Verify get_internal_message_id was called with Telegram message ID
+        self.mock_chat_history.get_internal_message_id.assert_called_with(12345, 54321)
+        
+        # Verify reply-aware context method was called with internal ID
+        self.mock_chat_history.get_context_with_reply_priority.assert_called()
+        # Check if it was called with the internal ID (2) instead of Telegram ID (54321)
+        calls = self.mock_chat_history.get_context_with_reply_priority.call_args_list
+        if calls:
+            args, kwargs = calls[-1]  # Get the last call
+            assert args[1] == 2  # Should use internal ID, not Telegram ID
         
         # Verify regular context method was NOT called in this case
         self.mock_chat_history.get_context.assert_not_called()
@@ -274,6 +289,7 @@ class TestMessageHandlerReplyIntegration:
         message.video = None
         message.video_note = None
         message.date.timestamp.return_value = time.time()
+        message.id = 12346  # Add telegram message ID (different from previous test)
         message.reply_to_message = None
         
         # Mock client
@@ -283,9 +299,9 @@ class TestMessageHandlerReplyIntegration:
         self.mock_client.read_chat_history = AsyncMock()
         self.mock_client.send_reaction = AsyncMock()
         
-        # Mock the unified integration
-        with patch('agents.unified_integration.process_message_unified') as mock_unified:
-            mock_unified.return_value = "Test response"
+        # Mock the valor agent handler
+        with patch('agents.valor.handlers.handle_telegram_message') as mock_valor:
+            mock_valor.return_value = "Test response"
             
             # Process the message
             await self.handler.handle_message(self.mock_client, message)
@@ -308,6 +324,7 @@ class TestMessageHandlerReplyIntegration:
         message.from_user.username = "testuser"
         message.download = AsyncMock(return_value="/tmp/test_image.jpg")
         message.date.timestamp.return_value = time.time()
+        message.id = 12347  # Add telegram message ID
         
         # Mock reply_to_message
         reply_msg = Mock()
@@ -321,17 +338,28 @@ class TestMessageHandlerReplyIntegration:
         self.mock_client.read_chat_history = AsyncMock()
         self.mock_client.send_reaction = AsyncMock()
         
-        # Mock the unified integration for images
-        with patch('agents.unified_integration.process_image_unified') as mock_image_unified:
-            mock_image_unified.return_value = "Image analysis response"
+        # Mock the valor agent handler for images
+        with patch('agents.valor.handlers.handle_telegram_message') as mock_valor:
+            mock_valor.return_value = "Image analysis response"
             
             # Process the photo message
             await self.handler.handle_message(self.mock_client, message)
         
-        # Verify reply-aware context was used for image processing
+        # Mock the ID mapping method for photo test
+        self.mock_chat_history.get_internal_message_id.return_value = 3  # Mock internal ID
+        
+        # Process the photo message again to test with mocked ID mapping
+        await self.handler.handle_message(self.mock_client, message)
+        
+        # Verify get_internal_message_id was called with Telegram message ID
+        self.mock_chat_history.get_internal_message_id.assert_called_with(12345, 11111)
+        
+        # Verify reply-aware context was used for image processing with internal ID
         self.mock_chat_history.get_context_with_reply_priority.assert_called()
-        args, kwargs = self.mock_chat_history.get_context_with_reply_priority.call_args
-        assert args[1] == 11111  # reply_to_message_id
+        calls = self.mock_chat_history.get_context_with_reply_priority.call_args_list
+        if calls:
+            args, kwargs = calls[-1]  # Get the last call
+            assert args[1] == 3  # Should use internal ID, not Telegram ID
 
 
 class TestReplyChainEdgeCases:

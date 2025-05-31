@@ -13,6 +13,8 @@ class ChatHistoryManager:
         self.history_file = Path(history_file)
         self.max_messages = max_messages
         self.chat_histories: dict[int, list[dict[str, Any]]] = {}
+        # Mapping from Telegram message ID to internal message ID for each chat
+        self.telegram_to_internal_id: dict[int, dict[int, int]] = {}
 
     def load_history(self):
         """Load chat history from persistent storage."""
@@ -40,7 +42,7 @@ class ChatHistoryManager:
         except Exception as e:
             print(f"Error saving chat history: {e}")
 
-    def add_message(self, chat_id: int, role: str, content: str, reply_to_message_id: int = None):
+    def add_message(self, chat_id: int, role: str, content: str, reply_to_message_id: int = None, telegram_message_id: int = None, is_telegram_id: bool = False):
         """Add a message to chat history with automatic cleanup and persistence."""
         if chat_id not in self.chat_histories:
             self.chat_histories[chat_id] = []
@@ -61,16 +63,37 @@ class ChatHistoryManager:
             return  # Don't add duplicate
 
         # Add new message with reply context
+        internal_message_id = len(self.chat_histories[chat_id]) + 1
         message_data = {
             "role": role, 
             "content": content, 
             "timestamp": time.time(),
-            "message_id": len(self.chat_histories[chat_id]) + 1  # Simple incrementing ID
+            "message_id": internal_message_id  # Simple incrementing ID
         }
         
+        # Store Telegram message ID if provided
+        if telegram_message_id:
+            message_data["telegram_message_id"] = telegram_message_id
+            # Update mapping
+            if chat_id not in self.telegram_to_internal_id:
+                self.telegram_to_internal_id[chat_id] = {}
+            self.telegram_to_internal_id[chat_id][telegram_message_id] = internal_message_id
+            print(f"📱 Telegram message {telegram_message_id} mapped to internal ID {internal_message_id}")
+        
+        # Handle reply context with proper ID mapping
         if reply_to_message_id:
-            message_data["reply_to_message_id"] = reply_to_message_id
-            print(f"🔗 Message replies to message ID: {reply_to_message_id}")
+            if is_telegram_id:
+                # Convert Telegram message ID to internal message ID
+                internal_reply_id = self.get_internal_message_id(chat_id, reply_to_message_id)
+                if internal_reply_id:
+                    message_data["reply_to_message_id"] = internal_reply_id
+                    print(f"🔗 Message replies to internal message ID: {internal_reply_id} (Telegram ID: {reply_to_message_id})")
+                else:
+                    print(f"⚠️ Could not find internal ID for Telegram message {reply_to_message_id}")
+            else:
+                # Direct internal message ID (for backward compatibility)
+                message_data["reply_to_message_id"] = reply_to_message_id
+                print(f"🔗 Message replies to internal message ID: {reply_to_message_id}")
         
         self.chat_histories[chat_id].append(message_data)
 
@@ -84,6 +107,12 @@ class ChatHistoryManager:
         total_messages = sum(len(history) for history in self.chat_histories.values())
         if total_messages % 5 == 0:
             self.save_history()
+
+    def get_internal_message_id(self, chat_id: int, telegram_message_id: int) -> int | None:
+        """Convert Telegram message ID to internal message ID."""
+        if chat_id not in self.telegram_to_internal_id:
+            return None
+        return self.telegram_to_internal_id[chat_id].get(telegram_message_id)
 
     def get_reply_chain(self, chat_id: int, message_id: int, max_depth: int = 5) -> list[dict[str, Any]]:
         """Get reply chain for a specific message, following reply_to_message_id links."""

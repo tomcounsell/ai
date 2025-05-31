@@ -48,7 +48,8 @@ def execute_valor_delegation(
 
     This function spawns a new Claude Code session with the provided prompt
     and configuration. It handles directory validation, tool permissions,
-    and execution monitoring.
+    and execution monitoring. Claude Code is executed in the specified working
+    directory to maintain workspace isolation.
 
     Args:
         prompt: Detailed instructions for Claude to execute.
@@ -85,22 +86,25 @@ def execute_valor_delegation(
         if not os.path.isdir(working_directory):
             raise NotADirectoryError(f"Path is not a directory: {working_directory}")
 
-    # Build Claude command
-    command = ["claude", "-p", prompt]
+    # Build Claude command - execute in working directory using cd
+    if working_directory:
+        # Use shell command to change directory and run Claude Code
+        command = f'cd "{working_directory}" && claude code "{prompt}"'
+        shell = True
+    else:
+        # Run in current directory
+        command = ["claude", "code", prompt]
+        shell = False
 
-    # Add allowed tools
-    if allowed_tools:
-        command.extend(["--allowedTools"] + allowed_tools)
-
-    # Change to working directory if specified
-    original_cwd = os.getcwd()
     try:
-        if working_directory:
-            os.chdir(working_directory)
-
         # Execute Claude Code
         process = subprocess.run(
-            command, check=True, capture_output=True, text=True, timeout=timeout
+            command, 
+            check=True, 
+            capture_output=True, 
+            text=True, 
+            timeout=timeout,
+            shell=shell
         )
 
         return process.stdout
@@ -117,9 +121,6 @@ def execute_valor_delegation(
         if e.stderr:
             error_msg += f"STDERR: {e.stderr}"
         raise subprocess.CalledProcessError(e.returncode, command, error_msg)
-    finally:
-        # Always restore original directory
-        os.chdir(original_cwd)
 
 
 def spawn_valor_session(
