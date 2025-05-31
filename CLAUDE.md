@@ -122,13 +122,21 @@ This codebase implements a **production-ready unified system** with Claude Code 
   ├── valor_agent.py         # Entry point with test functions
   ├── valor/                 # MAIN: Valor agent module
   │   ├── agent.py          # Core conversational AI with tool integration
-  │   ├── handlers.py       # Telegram message handlers
+  │   ├── handlers.py       # Telegram message handlers with intent preprocessing
   │   └── persona.md        # Valor Engels persona definition
   ├── context_window_manager.py    # Intelligent conversation optimization
   ├── streaming_optimizer.py       # Performance-optimized streaming
   ├── resource_monitor.py          # Production monitoring and cleanup
   ├── integrated_monitoring.py     # Unified system orchestration
   └── notion_scout.py              # Notion database query agent
+
+/integrations/              # Enhanced with intent recognition
+  ├── ollama_intent.py       # Ollama-based intent classification
+  ├── intent_tools.py        # Intent-based tool access control
+  ├── intent_prompts.py      # Intent-specific system prompts
+  └── telegram/
+      ├── handlers.py        # Message handlers with intent preprocessing
+      └── reaction_manager.py # Visual reaction feedback system
 
 /mcp_servers/              # MCP tool servers for Claude Code
   ├── social_tools.py       # Web search, image generation, link analysis
@@ -181,6 +189,7 @@ External service integrations support the agent system:
 - **Production Performance**: 2.21s streaming intervals, <1ms integration processing, 97% health scores
 - **Intelligent Context Management**: 97-99% conversation compression while preserving critical information
 - **Real-time Streaming**: Live progress updates during development tasks with adaptive rate control
+- **Intent Recognition**: Ollama-based message classification with visual reaction feedback and optimized tool access
 - **Web Search Intelligence**: Automatic current information retrieval through Perplexity AI
 - **Image Generation**: DALL-E 3 integration with Telegram delivery
 - **Image Analysis**: AI vision capabilities for shared photos
@@ -351,6 +360,7 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 - **`docs/tool-development.md`** - Complete guide for creating and integrating tools with best practices
 - **`docs/telegram-integration.md`** - Telegram interface, Valor Engels persona, and message handling
 - **`docs/message-handling.md`** - Complete step-by-step message processing flow and multi-server configuration
+- **`docs/ollama-intent-recognition.md`** - Comprehensive guide to the intent recognition system with examples and flows
 - **`docs/system-operations.md`** - Development workflow, environment setup, and deployment guidance
 - **`docs/testing-strategy.md`** - Current testing infrastructure, frameworks, and validation methods
 - **`docs/teamwork-personas.md`** - Current persona implementation and collaboration framework
