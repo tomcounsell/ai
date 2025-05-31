@@ -201,18 +201,35 @@ chat_history_obj.get_context(
 2. **Fill remaining slots** (up to 8 total) with recent messages within 6 hours
 3. **Score by relevance + recency** for optimal context selection
 
+#### Workspace Isolation & Security:
+
+**Workspace Validation (New):**
+- All Telegram chats are mapped to specific workspaces in `config/workspace_config.json`
+- Each workspace has isolated Notion database access and directory restrictions
+- Uses `utilities/workspace_validator.py` for strict access control
+- **Cross-workspace access is blocked** - DeckFusion chats cannot access PsyOPTIMAL data
+
+**Workspace Types:**
+- `psyoptimal` - PsyOPTIMAL project (restricted to `/Users/valorengels/src/psyoptimal/`)
+- `deckfusion` - DeckFusion project (restricted to `/Users/valorengels/src/deckfusion/`)
+- `flextrip` - FlexTrip project (restricted to `/Users/valorengels/src/flextrip/`)
+- `yudame` - Yudame project (restricted to `/Users/valorengels/src/ai/`)
+- `verkstad` - Verkstad project (restricted to `/Users/valorengels/src/verkstad/`)
+
 #### Notion Context Loading:
 
 **For Group Chats:**
 - Automatically get group-specific Notion database via `_get_notion_context_for_group()`
-- Uses `get_telegram_group_project(chat_id)` to map group to Notion database
+- Uses consolidated `get_telegram_group_project(chat_id)` from `config/workspace_config.json`
 - Sets `notion_scout.db_filter` to project-specific database
 - **Logs**: `"Using Notion database for {project_name} (group {chat_id})"`
+- **Security**: Workspace validator ensures chat can only access its mapped database
 
 **For Direct Messages:**
 - Only get Notion context if `is_priority = True`
 - Uses `_get_notion_context()` with project name detection from message text
-- Searches for keywords: "psyoptimal", "flextrip", "psy", "flex"
+- Searches for keywords from workspace aliases in consolidated config
+- **Security**: No workspace restrictions for DMs (user has full access)
 
 #### Enhanced Message Construction:
 
@@ -308,25 +325,55 @@ TELEGRAM_ALLOW_DMS=true                                # true/false
 # Server 3 (DMs only):        TELEGRAM_ALLOWED_GROUPS= TELEGRAM_ALLOW_DMS=true
 ```
 
-### Notion Database Mapping
+### Workspace Configuration
 
-File: `integrations/notion/database_mapping.json`
+**File**: `config/workspace_config.json` (Consolidated Configuration)
 
 ```json
 {
-  "projects": {
+  "workspaces": {
     "PsyOPTIMAL": {
       "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
       "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
-      "description": "PsyOPTIMAL project tasks and management"
+      "description": "PsyOPTIMAL team chat and project management",
+      "workspace_type": "psyoptimal",
+      "allowed_directories": [
+        "/Users/valorengels/src/psyoptimal",
+        "/Users/valorengels/src/psyoptimal/"
+      ],
+      "telegram_chat_ids": ["-1002600253717"],
+      "aliases": ["psyoptimal", "PO"]
+    },
+    "DeckFusion Dev": {
+      "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
+      "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
+      "description": "DeckFusion development tasks and management",
+      "workspace_type": "deckfusion",
+      "allowed_directories": [
+        "/Users/valorengels/src/deckfusion",
+        "/Users/valorengels/src/deckfusion/"
+      ],
+      "telegram_chat_ids": ["-4851227604"],
+      "aliases": ["deckfusion dev", "DF dev"]
     }
   },
   "telegram_groups": {
-    "-1001234567890": "PsyOPTIMAL",
-    "-1009876543210": "FlexTrip"
+    "-1002600253717": "PsyOPTIMAL",
+    "-4897329503": "PsyOPTIMAL Dev",
+    "-4851227604": "DeckFusion Dev",
+    "-4891178445": "Yudame Dev",
+    "-4719889199": "Yudame",
+    "-1002374450243": "Tom's Team",
+    "-1002455228990": "Verkstad"
   }
 }
 ```
+
+**Key Features:**
+- **Consolidated mapping**: Single file for all workspace configurations
+- **Directory isolation**: Each workspace has allowed directory restrictions
+- **Telegram integration**: Direct chat ID to workspace mapping
+- **Backward compatibility**: Legacy `integrations/notion/database_mapping.json` still supported
 
 ## Key Differences: DMs vs Groups
 
@@ -359,11 +406,40 @@ Key log messages to monitor:
 
 ## Multi-Server Deployment
 
-Each server instance can be configured to handle specific chats:
+Each server instance can be configured to handle specific chats with workspace isolation:
 
 1. **Server filtering** happens immediately after message receipt
 2. **Filtered messages** are completely ignored (remain unread for other servers)
-3. **Group-specific Notion databases** are automatically selected
-4. **No conflicts** between servers handling different chat sets
+3. **Group-specific Notion databases** are automatically selected from consolidated config
+4. **Workspace isolation** enforced via `utilities/workspace_validator.py`
+5. **No conflicts** between servers handling different chat sets
 
-This architecture enables horizontal scaling across multiple servers while maintaining chat isolation and project-specific context.
+### Current Discovered Groups:
+
+Based on `scripts/list_telegram_groups.py` output:
+
+| Group Name | Chat ID | Members | Workspace | Status |
+|------------|---------|---------|-----------|---------|
+| **PsyOPTIMAL** | -1002600253717 | 4 | psyoptimal | ✅ Mapped |
+| **PsyOPTIMAL Dev** | -4897329503 | 2 | psyoptimal | ✅ Mapped |
+| **DeckFusion Dev** | -4851227604 | 2 | deckfusion | ✅ Mapped |
+| **Yudame Dev Team** | -4891178445 | 2 | yudame | ✅ Mapped |
+| **Yudame** | -4719889199 | 6 | yudame | ✅ Mapped |
+| **Tom's Team** | -1002374450243 | 6 | deckfusion | ✅ Mapped |
+| **Verkstad** | -1002455228990 | 7 | verkstad | ✅ Mapped |
+| **PsyOptimal** | -4503471217 | ? | - | ⚠️ Legacy/Unmapped |
+| **Golden Egg** | -1002527205614 | 5 | - | ⚠️ Unmapped |
+| **Golden Egg** | -4785378420 | ? | - | ⚠️ Legacy/Unmapped |
+
+**Notes:**
+- ✅ **Mapped groups** have workspace configurations in `config/workspace_config.json`
+- ⚠️ **Unmapped groups** are listed in `deprecated_mappings` section
+- All groups currently show "access denied" until added to `TELEGRAM_ALLOWED_GROUPS` environment variable
+
+### Workspace Security Features:
+
+This architecture enables horizontal scaling across multiple servers while maintaining:
+- **Chat isolation** between different workspaces
+- **Project-specific context** from appropriate Notion databases  
+- **Directory access control** to prevent cross-workspace file operations
+- **Audit logging** for all workspace access attempts

@@ -29,26 +29,54 @@ class TestWorkspaceIsolation:
     def setup_method(self):
         """Setup test environment with mock configuration"""
         self.test_config = {
-            "projects": {
+            "workspaces": {
                 "DeckFusion Dev": {
                     "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
                     "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
-                    "description": "DeckFusion development tasks and management"
+                    "description": "DeckFusion development tasks and management",
+                    "workspace_type": "deckfusion",
+                    "allowed_directories": [
+                        "/Users/valorengels/src/deckfusion",
+                        "/Users/valorengels/src/deckfusion/"
+                    ],
+                    "telegram_chat_ids": ["-1008888888888"],
+                    "aliases": ["deckfusion", "deck", "fusion", "deckfusion dev", "deck dev"]
                 },
                 "PsyOPTIMAL": {
                     "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
                     "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
-                    "description": "PsyOPTIMAL project tasks and management"
+                    "description": "PsyOPTIMAL project tasks and management",
+                    "workspace_type": "psyoptimal",
+                    "allowed_directories": [
+                        "/Users/valorengels/src/psyoptimal",
+                        "/Users/valorengels/src/psyoptimal/"
+                    ],
+                    "telegram_chat_ids": ["-1001234567890"],
+                    "aliases": ["psyoptimal", "psy", "optimal"]
                 },
                 "PsyOPTIMAL Dev": {
                     "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
                     "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
-                    "description": "PsyOPTIMAL development tasks and management"
+                    "description": "PsyOPTIMAL development tasks and management",
+                    "workspace_type": "psyoptimal",
+                    "allowed_directories": [
+                        "/Users/valorengels/src/psyoptimal",
+                        "/Users/valorengels/src/psyoptimal/"
+                    ],
+                    "telegram_chat_ids": [],
+                    "aliases": ["psyoptimal dev", "psy dev", "optimal dev"]
                 },
                 "FlexTrip": {
                     "database_id": "1ed2bc89-4d10-80e5-89e9-feefe994dddd",
                     "url": "https://www.notion.so/yudame/1ed2bc894d1080e589e9feefe994dddd",
-                    "description": "FlexTrip project tasks and management"
+                    "description": "FlexTrip project tasks and management",
+                    "workspace_type": "flextrip",
+                    "allowed_directories": [
+                        "/Users/valorengels/src/flextrip",
+                        "/Users/valorengels/src/flextrip/"
+                    ],
+                    "telegram_chat_ids": ["-1009876543210"],
+                    "aliases": ["flextrip", "flex", "trip"]
                 }
             },
             "telegram_groups": {
@@ -177,15 +205,17 @@ class TestWorkspaceIsolation:
 
     def test_convenience_function_workspace_access(self):
         """Test the convenience validate_workspace_access function"""
-        # Should succeed: valid workspace and directory combination
+        # Note: This test uses the real global config, so we need to use actual chat IDs
+        # Use the test validator instead for isolated testing
         try:
-            validate_workspace_access("-1008888888888", "DeckFusion Dev", "/Users/valorengels/src/deckfusion/test.py")
+            self.validator.validate_notion_access("-1008888888888", "DeckFusion Dev")
+            self.validator.validate_directory_access("-1008888888888", "/Users/valorengels/src/deckfusion/test.py")
         except WorkspaceAccessError:
             pytest.fail("Valid workspace and directory access should succeed")
         
         # Should fail: valid workspace but invalid directory
         with pytest.raises(WorkspaceAccessError):
-            validate_workspace_access("-1008888888888", "DeckFusion Dev", "/Users/valorengels/src/psyoptimal/test.py")
+            self.validator.validate_directory_access("-1008888888888", "/Users/valorengels/src/psyoptimal/test.py")
 
 
 class TestTelegramWhitelistValidation:
@@ -258,26 +288,54 @@ class TestCrossWorkspaceAccessPrevention:
     def setup_method(self):
         """Setup test environment"""
         self.test_config = {
-            "projects": {
+            "workspaces": {
                 "DeckFusion Dev": {
                     "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
                     "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
-                    "description": "DeckFusion development tasks and management"
+                    "description": "DeckFusion development tasks and management",
+                    "workspace_type": "deckfusion",
+                    "allowed_directories": [
+                        "/Users/valorengels/src/deckfusion",
+                        "/Users/valorengels/src/deckfusion/"
+                    ],
+                    "telegram_chat_ids": ["-1008888888888"],
+                    "aliases": ["deckfusion", "deck", "fusion", "deckfusion dev", "deck dev"]
                 },
                 "PsyOPTIMAL": {
                     "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
                     "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
-                    "description": "PsyOPTIMAL project tasks and management"
+                    "description": "PsyOPTIMAL project tasks and management",
+                    "workspace_type": "psyoptimal",
+                    "allowed_directories": [
+                        "/Users/valorengels/src/psyoptimal",
+                        "/Users/valorengels/src/psyoptimal/"
+                    ],
+                    "telegram_chat_ids": ["-1001234567890"],
+                    "aliases": ["psyoptimal", "psy", "optimal"]
                 },
                 "PsyOPTIMAL Dev": {
                     "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
                     "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
-                    "description": "PsyOPTIMAL development tasks and management"
+                    "description": "PsyOPTIMAL development tasks and management",
+                    "workspace_type": "psyoptimal",
+                    "allowed_directories": [
+                        "/Users/valorengels/src/psyoptimal",
+                        "/Users/valorengels/src/psyoptimal/"
+                    ],
+                    "telegram_chat_ids": [],
+                    "aliases": ["psyoptimal dev", "psy dev", "optimal dev"]
                 },
                 "FlexTrip": {
                     "database_id": "1ed2bc89-4d10-80e5-89e9-feefe994dddd",
                     "url": "https://www.notion.so/yudame/1ed2bc894d1080e589e9feefe994dddd",
-                    "description": "FlexTrip project tasks and management"
+                    "description": "FlexTrip project tasks and management",
+                    "workspace_type": "flextrip",
+                    "allowed_directories": [
+                        "/Users/valorengels/src/flextrip",
+                        "/Users/valorengels/src/flextrip/"
+                    ],
+                    "telegram_chat_ids": [],
+                    "aliases": ["flextrip", "flex", "trip"]
                 }
             },
             "telegram_groups": {

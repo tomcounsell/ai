@@ -5,9 +5,36 @@ from pathlib import Path
 
 
 def load_project_mapping():
-    """Load project name to database ID mapping."""
+    """Load project name to database ID mapping from consolidated config."""
+    # Try new consolidated config first
+    config_file = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
+    if config_file.exists():
+        try:
+            with open(config_file) as f:
+                data = json.load(f)
+                workspaces = data.get("workspaces", {})
+                
+                # Convert to old format for backward compatibility
+                projects = {}
+                aliases = {}
+                
+                for workspace_name, workspace_data in workspaces.items():
+                    projects[workspace_name] = {
+                        "database_id": workspace_data["database_id"],
+                        "url": workspace_data.get("url", ""),
+                        "description": workspace_data.get("description", "")
+                    }
+                    
+                    # Add aliases
+                    for alias in workspace_data.get("aliases", []):
+                        aliases[alias.lower()] = workspace_name
+                
+                return projects, aliases
+        except Exception:
+            pass
+    
+    # Fallback to old config file
     mapping_file = Path(__file__).parent / "database_mapping.json"
-
     if not mapping_file.exists():
         return {}, {}
 
@@ -37,8 +64,29 @@ def resolve_project_name(project_input: str) -> tuple[str | None, str | None]:
 
 def get_telegram_group_project(chat_id: int) -> tuple[str | None, str | None]:
     """Get the Notion project associated with a Telegram group chat ID."""
-    mapping_file = Path(__file__).parent / "database_mapping.json"
+    # Try new consolidated config first
+    config_file = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
+    if config_file.exists():
+        try:
+            with open(config_file) as f:
+                data = json.load(f)
+                telegram_groups = data.get("telegram_groups", {})
+                workspaces = data.get("workspaces", {})
+                
+                # Convert chat_id to string for lookup
+                chat_id_str = str(chat_id)
+                
+                if chat_id_str in telegram_groups:
+                    project_name = telegram_groups[chat_id_str]
+                    if project_name in workspaces:
+                        return project_name, workspaces[project_name]["database_id"]
+                
+                return None, None
+        except Exception:
+            pass
     
+    # Fallback to old config file
+    mapping_file = Path(__file__).parent / "database_mapping.json"
     if not mapping_file.exists():
         return None, None
     

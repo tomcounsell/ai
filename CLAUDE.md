@@ -224,7 +224,7 @@ External service integrations support the agent system:
 - `TELEGRAM_ALLOWED_GROUPS` - Comma-separated group chat IDs to handle (whitelist)
 - `TELEGRAM_ALLOW_DMS` - Enable/disable DM handling (true/false)
 
-Each group chat can be mapped to a specific Notion database in `integrations/notion/database_mapping.json`
+Each group chat can be mapped to a specific Notion database in `config/workspace_config.json`
 
 ## Valor - Unified Conversational Development Environment
 **Valor Engels** represents the unified system with a complete technical persona:
@@ -362,7 +362,7 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 - **`agents/valor/persona.md`** - Valor Engels persona definition with Claude Code tool usage guidelines
 
 ### Integration Configuration Files
-- **`integrations/notion/database_mapping.json`** - Project name to database ID mappings for NotionScout
+- **`config/workspace_config.json`** - Consolidated workspace configuration with project mappings, Telegram groups, and directory restrictions
 
 These documents provide comprehensive guidance for understanding, developing, testing, and operating the AI agent system.
 
