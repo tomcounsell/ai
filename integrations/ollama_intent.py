@@ -73,16 +73,16 @@ class OllamaIntentClassifier:
         
         # Intent-specific emoji mapping using valid Telegram reaction emojis
         self.intent_emojis = {
-            MessageIntent.CASUAL_CHAT: "😄",
+            MessageIntent.CASUAL_CHAT: "😁",
             MessageIntent.QUESTION_ANSWER: "🤔",
-            MessageIntent.PROJECT_QUERY: "📋",
-            MessageIntent.DEVELOPMENT_TASK: "💻",
+            MessageIntent.PROJECT_QUERY: "🙏",
+            MessageIntent.DEVELOPMENT_TASK: "👨‍💻",
             MessageIntent.IMAGE_GENERATION: "🎨",
             MessageIntent.IMAGE_ANALYSIS: "👀",
-            MessageIntent.WEB_SEARCH: "🔍",
-            MessageIntent.LINK_ANALYSIS: "🔗",
-            MessageIntent.SYSTEM_HEALTH: "❤",
-            MessageIntent.UNCLEAR: "❓",
+            MessageIntent.WEB_SEARCH: "🗿",
+            MessageIntent.LINK_ANALYSIS: "🍾",
+            MessageIntent.SYSTEM_HEALTH: "❤️",
+            MessageIntent.UNCLEAR: "🤨",
         }
         
         # System prompt for intent classification
@@ -267,7 +267,7 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.SYSTEM_HEALTH,
                 confidence=1.0,
                 reasoning="System health keyword detected",
-                suggested_emoji="🏓"
+                suggested_emoji="❤️"
             )
         
         # Image analysis (check for image markers)
@@ -276,7 +276,7 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.IMAGE_ANALYSIS,
                 confidence=0.9,
                 reasoning="Image content markers detected",
-                suggested_emoji="👁️"
+                suggested_emoji="👀"
             )
         
         # Link analysis (check for URLs)
@@ -285,7 +285,7 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.LINK_ANALYSIS,
                 confidence=0.9,
                 reasoning="URL detected in message",
-                suggested_emoji="🔗"
+                suggested_emoji="🍾"
             )
         
         # Image generation requests
@@ -305,7 +305,7 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.DEVELOPMENT_TASK,
                 confidence=0.7,
                 reasoning="Development keywords detected",
-                suggested_emoji="⚙️"
+                suggested_emoji="👨‍💻"
             )
         
         # Project queries
@@ -315,7 +315,7 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.PROJECT_QUERY,
                 confidence=0.7,
                 reasoning="Project keywords detected",
-                suggested_emoji="📋"
+                suggested_emoji="🙏"
             )
         
         # Web search indicators
@@ -325,7 +325,7 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.WEB_SEARCH,
                 confidence=0.6,
                 reasoning="Current information keywords detected",
-                suggested_emoji="🔍"
+                suggested_emoji="🗿"
             )
         
         # Question indicators
@@ -343,7 +343,7 @@ Be decisive and pick the most likely intent even if uncertain."""
             intent=MessageIntent.CASUAL_CHAT,
             confidence=0.5,
             reasoning="No specific intent markers detected, defaulting to casual chat",
-            suggested_emoji="💬"
+            suggested_emoji="😁"
         )
 
     async def check_ollama_availability(self) -> bool:
