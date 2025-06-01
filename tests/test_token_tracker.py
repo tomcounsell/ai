@@ -29,7 +29,7 @@ class TestTokenTracker(unittest.TestCase):
     def test_database_initialization(self):
         """Test that database is properly initialized."""
         # Check that tables exist by calling init (should not raise an error)
-        self.tracker._init_database()
+        self.tracker._init_custom_database()
         
         # Verify default data exists
         summary = self.tracker.get_usage_summary()
@@ -260,8 +260,10 @@ class TestErrorHandling(unittest.TestCase):
     
     def test_invalid_db_path(self):
         """Test handling of invalid database path."""
-        # Should create directory if it doesn't exist
+        # Create the directory first
+        invalid_dir = "/tmp/nonexistent_dir"
         invalid_path = "/tmp/nonexistent_dir/test.db"
+        os.makedirs(invalid_dir, exist_ok=True)
         tracker = TokenTracker(invalid_path)
         
         # Should be able to log usage

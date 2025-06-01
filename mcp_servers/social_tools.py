@@ -19,6 +19,11 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from openai import OpenAI
 
+# Import shared database utilities
+import sys
+sys.path.append('..')
+from utilities.database import get_database_connection, init_database
+
 # Load environment variables
 load_dotenv()
 
@@ -265,37 +270,6 @@ def _analyze_url_content(url: str) -> dict[str, str]:
         return {"error": str(e)}
 
 
-def _get_links_db_path() -> Path:
-    """Get the path to the links database."""
-    return Path("links.db")
-
-
-def _init_links_database() -> None:
-    """Initialize the links database with required tables."""
-    db_path = _get_links_db_path()
-    
-    with sqlite3.connect(db_path) as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS links (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                url TEXT UNIQUE NOT NULL,
-                domain TEXT NOT NULL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                analysis_result TEXT,  -- JSON blob
-                analysis_status TEXT DEFAULT 'pending',  -- 'success', 'error', 'pending'
-                title TEXT,
-                main_topic TEXT,
-                reasons_to_care TEXT,
-                error_message TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_links_url ON links(url);
-            CREATE INDEX IF NOT EXISTS idx_links_domain ON links(domain);
-            CREATE INDEX IF NOT EXISTS idx_links_timestamp ON links(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_links_status ON links(analysis_status);
-        """)
 
 
 @mcp.tool()
@@ -317,7 +291,7 @@ def save_link(url: str, chat_id: str = "", username: str = "") -> str:
         return f"❌ Invalid URL format: {url}"
 
     # Initialize database if it doesn't exist
-    _init_links_database()
+    init_database()
     
     # Get AI analysis of the URL
     analysis = _analyze_url_content(url)
@@ -341,8 +315,7 @@ def save_link(url: str, chat_id: str = "", username: str = "") -> str:
         error_message = None
 
     try:
-        db_path = _get_links_db_path()
-        with sqlite3.connect(db_path) as conn:
+        with get_database_connection() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO links 
                 (url, domain, timestamp, analysis_result, analysis_status, 
@@ -381,14 +354,10 @@ def search_links(query: str, chat_id: str = "", limit: int = 10) -> str:
         Formatted list of matching links or message indicating no matches
     """
     # Initialize database if it doesn't exist
-    _init_links_database()
-    
-    db_path = _get_links_db_path()
-    if not db_path.exists():
-        return "📂 No links stored yet."
+    init_database()
 
     try:
-        with sqlite3.connect(db_path) as conn:
+        with get_database_connection() as conn:
             conn.row_factory = sqlite3.Row
             
             # Search in domain, URL, title, and main_topic

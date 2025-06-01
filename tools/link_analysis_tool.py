@@ -1,6 +1,6 @@
 # tools/link_analysis_tool.py
 """
-Link analysis and storage tool using SQLite database.
+Link analysis and storage tool using shared SQLite database.
 Provides URL analysis, storage, and retrieval functionality.
 """
 
@@ -15,41 +15,10 @@ from typing import Optional, List, Dict, Any
 from dotenv import load_dotenv
 from openai import OpenAI
 
+from utilities.database import get_database_connection, init_database
+
 # Ensure environment variables are loaded
 load_dotenv()
-
-
-def get_links_db_path() -> Path:
-    """Get the path to the links database."""
-    return Path("links.db")
-
-
-def init_links_database() -> None:
-    """Initialize the links database with required tables."""
-    db_path = get_links_db_path()
-    
-    with sqlite3.connect(db_path) as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS links (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                url TEXT UNIQUE NOT NULL,
-                domain TEXT NOT NULL,
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                analysis_result TEXT,  -- JSON blob
-                analysis_status TEXT DEFAULT 'pending',  -- 'success', 'error', 'pending'
-                title TEXT,
-                main_topic TEXT,
-                reasons_to_care TEXT,
-                error_message TEXT,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_links_url ON links(url);
-            CREATE INDEX IF NOT EXISTS idx_links_domain ON links(domain);
-            CREATE INDEX IF NOT EXISTS idx_links_timestamp ON links(timestamp);
-            CREATE INDEX IF NOT EXISTS idx_links_status ON links(analysis_status);
-        """)
 
 
 def extract_urls(text: str) -> List[str]:
@@ -229,7 +198,7 @@ def store_link_with_analysis(
 ) -> bool:
     """Store a link with timestamp and AI-generated analysis.
     
-    Saves a URL along with its AI-generated analysis to the SQLite database.
+    Saves a URL along with its AI-generated analysis to the shared SQLite database.
     Automatically analyzes the content and stores structured metadata for later retrieval.
 
     Args:
@@ -251,8 +220,8 @@ def store_link_with_analysis(
     if not validate_url(url):
         return False
 
-    # Initialize database if it doesn't exist
-    init_links_database()
+    # Initialize shared database if it doesn't exist
+    init_database()
     
     # Get AI analysis of the URL
     analysis = analyze_url_content(url)
@@ -276,8 +245,7 @@ def store_link_with_analysis(
         error_message = None
 
     try:
-        db_path = get_links_db_path()
-        with sqlite3.connect(db_path) as conn:
+        with get_database_connection() as conn:
             conn.execute("""
                 INSERT OR REPLACE INTO links 
                 (url, domain, timestamp, analysis_result, analysis_status, 
@@ -316,15 +284,11 @@ def search_stored_links(query: str, chat_id: int | None = None, limit: int = 10)
         >>> search_stored_links("nonexistent")
         '📂 No links found matching "nonexistent"'
     """
-    # Initialize database if it doesn't exist
-    init_links_database()
-    
-    db_path = get_links_db_path()
-    if not db_path.exists():
-        return "📂 No links stored yet."
+    # Initialize shared database if it doesn't exist
+    init_database()
 
     try:
-        with sqlite3.connect(db_path) as conn:
+        with get_database_connection() as conn:
             conn.row_factory = sqlite3.Row
             
             # Search in domain, URL, title, and main_topic
@@ -372,15 +336,11 @@ def get_recent_links(days: int = 7, limit: int = 20) -> str:
     Returns:
         str: Formatted list of recent links.
     """
-    # Initialize database if it doesn't exist
-    init_links_database()
-    
-    db_path = get_links_db_path()
-    if not db_path.exists():
-        return "📂 No links stored yet."
+    # Initialize shared database if it doesn't exist
+    init_database()
 
     try:
-        with sqlite3.connect(db_path) as conn:
+        with get_database_connection() as conn:
             conn.row_factory = sqlite3.Row
             
             results = conn.execute("""
@@ -421,15 +381,11 @@ def get_links_by_domain(domain: str, limit: int = 10) -> List[Dict[str, Any]]:
     Returns:
         List[Dict[str, Any]]: List of link records.
     """
-    # Initialize database if it doesn't exist
-    init_links_database()
-    
-    db_path = get_links_db_path()
-    if not db_path.exists():
-        return []
+    # Initialize shared database if it doesn't exist
+    init_database()
 
     try:
-        with sqlite3.connect(db_path) as conn:
+        with get_database_connection() as conn:
             conn.row_factory = sqlite3.Row
             
             results = conn.execute("""
@@ -454,15 +410,11 @@ def cleanup_old_links(days: int = 90) -> int:
     Returns:
         int: Number of links removed.
     """
-    # Initialize database if it doesn't exist
-    init_links_database()
-    
-    db_path = get_links_db_path()
-    if not db_path.exists():
-        return 0
+    # Initialize shared database if it doesn't exist
+    init_database()
 
     try:
-        with sqlite3.connect(db_path) as conn:
+        with get_database_connection() as conn:
             cursor = conn.execute("""
                 DELETE FROM links 
                 WHERE timestamp < datetime('now', '-{} days')

@@ -155,4 +155,4 @@ logs/
 
 # SQLite databases - data files not for version control
 *.db
-links.db
+system.db

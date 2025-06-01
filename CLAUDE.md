@@ -124,6 +124,7 @@ This codebase implements a **production-ready unified system** with Claude Code 
 - **Intelligent Context Management**: Smart conversation optimization with 97-99% compression
 - **Performance Optimization**: Real-time streaming, resource monitoring, automatic cleanup
 - **Production-Ready**: Comprehensive testing, monitoring, and error recovery
+- **Unified Database**: Single SQLite database (`system.db`) for all persistent data storage
 
 ### System Architecture
 ```

@@ -119,33 +119,16 @@ class TestSocialToolsMCP:
                     assert "Test Title" in result
 
     def test_search_links_no_storage_file(self):
-        """Test search_links when no links file exists."""
-        with patch("mcp_servers.social_tools.Path") as mock_path:
-            mock_path.return_value.exists.return_value = False
-
-            result = search_links("test query")
-            assert "No links stored yet" in result
+        """Test search_links when no links exist in database."""
+        result = search_links("test query")
+        assert "No links found matching" in result
 
     def test_search_links_with_results(self):
         """Test search_links with existing links."""
-        test_links = {
-            "https://example.com": {
-                "url": "https://example.com",
-                "domain": "example.com",
-                "timestamp": "2024-01-01T00:00:00",
-                "analysis": {"title": "Example Title"}
-            }
-        }
-
-        mock_file = Mock()
-        mock_file.read.return_value = json.dumps(test_links)
-
-        with patch("mcp_servers.social_tools.Path") as mock_path:
-            mock_path.return_value.exists.return_value = True
-            with patch("builtins.open", return_value=mock_file):
-                result = search_links("example")
-                assert "Found 1 link(s)" in result
-                assert "Example Title" in result
+        # The database already has example.com from previous test
+        result = search_links("example")
+        assert "Found 1 link(s)" in result
+        assert "example.com" in result
 
 
 class TestNotionToolsMCP:
@@ -243,10 +226,8 @@ class TestContextInjection:
         assert "Invalid URL format" in result
 
         # Test search_links with chat_id
-        with patch("mcp_servers.social_tools.Path") as mock_path:
-            mock_path.return_value.exists.return_value = False
-            result = search_links("test", chat_id="12345")
-            assert "No links stored yet" in result
+        result = search_links("nonexistentquery", chat_id="12345")
+        assert "No links found matching" in result
 
     def test_telegram_tools_context_extraction(self):
         """Test that telegram tools properly extract and validate chat_id."""

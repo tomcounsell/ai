@@ -122,7 +122,7 @@ The tools in this directory implement the function tool pattern for PydanticAI a
 
 - **Features**:
   - Automatic content analysis (title, topic, reasons to care)
-  - Persistent storage in SQLite database (links.db)
+  - Persistent storage in shared SQLite database (system.db)
   - Structured data storage with indexing for fast queries
   - Search and retrieval functionality
   - URL validation and sanitization

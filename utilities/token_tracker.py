@@ -1,7 +1,7 @@
 """Token usage tracking system for AI model interactions.
 
 This module provides comprehensive token usage tracking and reporting
-functionality with SQLite backend storage.
+functionality with shared SQLite backend storage.
 """
 
 import sqlite3
@@ -11,6 +11,8 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Tuple, Union
 from dataclasses import dataclass
 from pathlib import Path
+
+from .database import get_database_connection, init_database
 
 logger = logging.getLogger(__name__)
 
@@ -31,19 +33,20 @@ class TokenUsage:
 
 
 class TokenTracker:
-    """SQLite-based token usage tracking system."""
+    """SQLite-based token usage tracking system using shared database."""
     
     def __init__(self, db_path: Optional[str] = None):
-        """Initialize token tracker with database path."""
+        """Initialize token tracker with database."""
+        self.db_path = db_path
         if db_path is None:
-            db_path = os.path.join(os.getcwd(), "token_usage.db")
-        
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_database()
+            # Use shared database
+            init_database()
+        else:
+            # Use custom database for testing
+            self._init_custom_database()
     
-    def _init_database(self) -> None:
-        """Initialize SQLite database with required tables."""
+    def _init_custom_database(self) -> None:
+        """Initialize custom database with required tables (for testing)."""
         try:
             with sqlite3.connect(self.db_path) as conn:
                 conn.executescript("""
@@ -100,15 +103,15 @@ class TokenTracker:
                     CREATE INDEX IF NOT EXISTS idx_token_usage_request ON token_usage(request_id);
                 """)
                 
-                # Insert default hosts
-                self._insert_default_data(conn)
+                # Insert default hosts for testing
+                self._insert_default_data_custom(conn)
                 
         except sqlite3.Error as e:
             logger.error(f"Database initialization error: {e}")
             raise
     
-    def _insert_default_data(self, conn: sqlite3.Connection) -> None:
-        """Insert default hosts and models."""
+    def _insert_default_data_custom(self, conn: sqlite3.Connection) -> None:
+        """Insert default hosts and models for testing."""
         default_hosts = [
             ("Anthropic", "https://api.anthropic.com"),
             ("OpenAI", "https://api.openai.com"),
@@ -153,9 +156,16 @@ class TokenTracker:
                     VALUES (?, ?, ?, ?)
                 """, (model_name, host_id[0], input_cost, output_cost))
     
+    def _get_connection(self) -> sqlite3.Connection:
+        """Get database connection (shared or custom)."""
+        if self.db_path is None:
+            return get_database_connection()
+        else:
+            return sqlite3.connect(self.db_path)
+    
     def _ensure_project_exists(self, project_name: str) -> int:
         """Ensure project exists and return its ID."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             # Try to get existing project
             result = conn.execute(
                 "SELECT id FROM projects WHERE name = ?", (project_name,)
@@ -172,7 +182,7 @@ class TokenTracker:
     
     def _ensure_model_exists(self, model_name: str, host_name: str) -> int:
         """Ensure model exists and return its ID."""
-        with sqlite3.connect(self.db_path) as conn:
+        with self._get_connection() as conn:
             # Try to get existing model
             result = conn.execute("""
                 SELECT m.id FROM models m
@@ -227,7 +237,7 @@ class TokenTracker:
             # Calculate cost if model pricing is available
             cost_usd = self._calculate_cost(model_id, input_tokens, output_tokens)
             
-            with sqlite3.connect(self.db_path) as conn:
+            with self._get_connection() as conn:
                 cursor = conn.execute("""
                     INSERT INTO token_usage 
                     (timestamp, project_id, model_id, input_tokens, output_tokens, 
@@ -249,7 +259,7 @@ class TokenTracker:
     def _calculate_cost(self, model_id: int, input_tokens: int, output_tokens: int) -> Optional[float]:
         """Calculate cost based on model pricing."""
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._get_connection() as conn:
                 result = conn.execute("""
                     SELECT input_cost_per_1k, output_cost_per_1k 
                     FROM models WHERE id = ?
@@ -320,7 +330,7 @@ class TokenTracker:
         """
         
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._get_connection() as conn:
                 result = conn.execute(query, params).fetchone()
                 
                 return {
@@ -369,7 +379,7 @@ class TokenTracker:
         """
         
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 results = conn.execute(query, params).fetchall()
                 
@@ -422,7 +432,7 @@ class TokenTracker:
         """
         
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 results = conn.execute(query, params).fetchall()
                 
@@ -473,7 +483,7 @@ class TokenTracker:
         """
         
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 results = conn.execute(query, params).fetchall()
                 
@@ -532,7 +542,7 @@ class TokenTracker:
         """
         
         try:
-            with sqlite3.connect(self.db_path) as conn:
+            with self._get_connection() as conn:
                 conn.row_factory = sqlite3.Row
                 results = conn.execute(query, params).fetchall()
                 
