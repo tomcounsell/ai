@@ -6,12 +6,13 @@ Provides web search, image generation, and link analysis tools for Claude Code i
 Converts existing tools from tools/ directory to MCP server format.
 """
 
-import json
 import os
 import re
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
+from typing import Dict, Any
 
 import requests
 from dotenv import load_dotenv
@@ -264,39 +265,37 @@ def _analyze_url_content(url: str) -> dict[str, str]:
         return {"error": str(e)}
 
 
-def _commit_links_file():
-    """Automatically commit the links.json file after updates."""
-    import subprocess
+def _get_links_db_path() -> Path:
+    """Get the path to the links database."""
+    return Path("links.db")
 
-    try:
-        project_root = Path(__file__).parent.parent
 
-        if not (project_root / ".git").exists():
-            return
-
-        result = subprocess.run(
-            ["git", "add", "docs/links.json"], cwd=project_root, capture_output=True, text=True
-        )
-
-        if result.returncode != 0:
-            return
-
-        result = subprocess.run(
-            ["git", "diff", "--cached", "--quiet", "docs/links.json"],
-            cwd=project_root,
-            capture_output=True,
-        )
-
-        if result.returncode == 1:
-            subprocess.run(
-                ["git", "commit", "-m", "Auto-save link analysis data"],
-                cwd=project_root,
-                capture_output=True,
-                text=True,
-            )
-
-    except Exception:
-        pass
+def _init_links_database() -> None:
+    """Initialize the links database with required tables."""
+    db_path = _get_links_db_path()
+    
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT UNIQUE NOT NULL,
+                domain TEXT NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                analysis_result TEXT,  -- JSON blob
+                analysis_status TEXT DEFAULT 'pending',  -- 'success', 'error', 'pending'
+                title TEXT,
+                main_topic TEXT,
+                reasons_to_care TEXT,
+                error_message TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_links_url ON links(url);
+            CREATE INDEX IF NOT EXISTS idx_links_domain ON links(domain);
+            CREATE INDEX IF NOT EXISTS idx_links_timestamp ON links(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_links_status ON links(analysis_status);
+        """)
 
 
 @mcp.tool()
@@ -317,61 +316,50 @@ def save_link(url: str, chat_id: str = "", username: str = "") -> str:
     if not _validate_url(url):
         return f"❌ Invalid URL format: {url}"
 
-    # Use docs directory for storage
-    storage_file = Path("docs/links.json")
-
-    # Load existing links dictionary
-    links = {}
-    if storage_file.exists():
-        try:
-            with open(storage_file, encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, list):
-                    # Handle migration from old list format
-                    links = {}
-                    for item in data:
-                        if "url" in item:
-                            clean_item = {
-                                "url": item["url"],
-                                "domain": item.get("domain", urlparse(item["url"]).netloc),
-                                "timestamp": item.get("timestamp", datetime.now().isoformat()),
-                                "analysis": item.get("analysis", {}),
-                            }
-                            links[item["url"]] = clean_item
-                else:
-                    links = data
-        except (OSError, json.JSONDecodeError):
-            links = {}
-
+    # Initialize database if it doesn't exist
+    _init_links_database()
+    
     # Get AI analysis of the URL
     analysis = _analyze_url_content(url)
-
-    # Create link entry
+    
+    # Parse URL for domain
     parsed = urlparse(url)
-    link_entry = {
-        "url": url,
-        "domain": parsed.netloc,
-        "timestamp": datetime.now().isoformat(),
-        "analysis": analysis,
-    }
-
-    # Store with URL as key (automatically overwrites duplicates)
-    links[url] = link_entry
+    domain = parsed.netloc
+    
+    # Determine analysis status and extract fields
+    if "error" in analysis:
+        status = "error"
+        title = None
+        main_topic = None
+        reasons_to_care = None
+        error_message = analysis["error"]
+    else:
+        status = "success"
+        title = analysis.get("title")
+        main_topic = analysis.get("main_topic")
+        reasons_to_care = analysis.get("reasons_to_care")
+        error_message = None
 
     try:
-        with open(storage_file, "w", encoding="utf-8") as f:
-            json.dump(links, f, indent=2, ensure_ascii=False)
-
-        # Auto-commit the links file after saving
-        _commit_links_file()
+        db_path = _get_links_db_path()
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO links 
+                (url, domain, timestamp, analysis_result, analysis_status, 
+                 title, main_topic, reasons_to_care, error_message, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                url, domain, datetime.now().isoformat(), str(analysis), status,
+                title, main_topic, reasons_to_care, error_message, datetime.now().isoformat()
+            ))
 
         # Format response with analysis summary
         if "error" in analysis:
-            return f"🔗 **Link Saved**: {parsed.netloc}\n\n⚠️ Analysis error: {analysis['error']}"
+            return f"🔗 **Link Saved**: {domain}\n\n⚠️ Analysis error: {analysis['error']}"
         else:
-            title = analysis.get("title", "Unknown")
-            topic = analysis.get("main_topic", "No topic available")
-            return f"🔗 **Link Saved**: {title}\n\n📝 **Topic**: {topic}\n🌐 **Domain**: {parsed.netloc}"
+            display_title = title or "Unknown"
+            display_topic = main_topic or "No topic available"
+            return f"🔗 **Link Saved**: {display_title}\n\n📝 **Topic**: {display_topic}\n🌐 **Domain**: {domain}"
 
     except Exception as e:
         return f"❌ Error saving link: {str(e)}"
@@ -392,50 +380,46 @@ def search_links(query: str, chat_id: str = "", limit: int = 10) -> str:
     Returns:
         Formatted list of matching links or message indicating no matches
     """
-    storage_file = Path("docs/links.json")
-    if not storage_file.exists():
+    # Initialize database if it doesn't exist
+    _init_links_database()
+    
+    db_path = _get_links_db_path()
+    if not db_path.exists():
         return "📂 No links stored yet."
 
     try:
-        with open(storage_file, encoding="utf-8") as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                links = data
-            else:
-                links = list(data.values())
-    except (OSError, json.JSONDecodeError):
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            
+            # Search in domain, URL, title, and main_topic
+            query_lower = query.lower()
+            results = conn.execute("""
+                SELECT * FROM links 
+                WHERE LOWER(domain) LIKE ? 
+                   OR LOWER(url) LIKE ? 
+                   OR LOWER(title) LIKE ?
+                   OR LOWER(main_topic) LIKE ?
+                   OR date(timestamp) LIKE ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (f"%{query_lower}%", f"%{query_lower}%", f"%{query_lower}%", 
+                  f"%{query_lower}%", f"%{query_lower}%", limit)).fetchall()
+            
+    except Exception:
         return "📂 Error reading stored links."
 
-    # Search in domain and URL
-    query_lower = query.lower()
-    matching_links = []
-    for link in links:
-        if (
-            query_lower in link.get("domain", "").lower()
-            or query_lower in link["url"].lower()
-            or query_lower in link.get("timestamp", "")
-        ):
-            matching_links.append(link)
-
-    # Sort by timestamp (newest first) and limit
-    matching_links.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-    matching_links = matching_links[:limit]
-
-    if not matching_links:
+    if not results:
         return f"📂 No links found matching '{query}'"
 
     # Format results
-    result = f"📂 **Found {len(matching_links)} link(s) matching '{query}':**\n\n"
-    for link in matching_links:
-        timestamp = link.get("timestamp", "Unknown")[:10]  # Just date part
-        domain = link.get("domain", "Unknown")
+    result = f"📂 **Found {len(results)} link(s) matching '{query}':**\n\n"
+    for link in results:
+        timestamp = link["timestamp"][:10] if link["timestamp"] else "Unknown"  # Just date part
+        domain = link["domain"] or "Unknown"
+        title = link["title"] or domain or "No title"
+        status = "✅" if link["analysis_status"] == "success" else "❌"
         
-        # Include title from analysis if available
-        title = "Unknown"
-        if "analysis" in link and isinstance(link["analysis"], dict):
-            title = link["analysis"].get("title", domain)
-        
-        result += f"• **{title}** ({timestamp})\n  {link['url']}\n\n"
+        result += f"• **{title}** ({timestamp}) {status}\n  {link['url']}\n\n"
 
     return result.strip()
 

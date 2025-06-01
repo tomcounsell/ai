@@ -122,8 +122,8 @@ The tools in this directory implement the function tool pattern for PydanticAI a
 
 - **Features**:
   - Automatic content analysis (title, topic, reasons to care)
-  - Persistent storage in docs/links.json
-  - Automatic git commits for link data
+  - Persistent storage in SQLite database (links.db)
+  - Structured data storage with indexing for fast queries
   - Search and retrieval functionality
   - URL validation and sanitization
 

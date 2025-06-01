@@ -1,15 +1,16 @@
 # tools/link_analysis_tool.py
 """
-PydanticAI function tool for link analysis and summarization using Perplexity AI.
-This replaces integrations/telegram/link_tracker.py with a proper tool implementation.
+Link analysis and storage tool using SQLite database.
+Provides URL analysis, storage, and retrieval functionality.
 """
 
-import json
 import os
 import re
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
+from typing import Optional, List, Dict, Any
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -18,7 +19,40 @@ from openai import OpenAI
 load_dotenv()
 
 
-def extract_urls(text: str) -> list[str]:
+def get_links_db_path() -> Path:
+    """Get the path to the links database."""
+    return Path("links.db")
+
+
+def init_links_database() -> None:
+    """Initialize the links database with required tables."""
+    db_path = get_links_db_path()
+    
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS links (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                url TEXT UNIQUE NOT NULL,
+                domain TEXT NOT NULL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                analysis_result TEXT,  -- JSON blob
+                analysis_status TEXT DEFAULT 'pending',  -- 'success', 'error', 'pending'
+                title TEXT,
+                main_topic TEXT,
+                reasons_to_care TEXT,
+                error_message TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            
+            CREATE INDEX IF NOT EXISTS idx_links_url ON links(url);
+            CREATE INDEX IF NOT EXISTS idx_links_domain ON links(domain);
+            CREATE INDEX IF NOT EXISTS idx_links_timestamp ON links(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_links_status ON links(analysis_status);
+        """)
+
+
+def extract_urls(text: str) -> List[str]:
     """Extract URLs from text using regex.
     
     Finds all HTTP and HTTPS URLs in the provided text using a
@@ -28,7 +62,7 @@ def extract_urls(text: str) -> list[str]:
         text: Text content to search for URLs.
         
     Returns:
-        list[str]: List of URLs found in the text.
+        List[str]: List of URLs found in the text.
         
     Example:
         >>> extract_urls("Visit https://example.com for more info")
@@ -98,7 +132,7 @@ def validate_url(url: str) -> bool:
         return False
 
 
-def analyze_url_content(url: str) -> dict[str, str]:
+def analyze_url_content(url: str) -> Dict[str, Any]:
     """Analyze a URL and extract structured data using Perplexity.
     
     This function uses the Perplexity API to analyze web content at a given URL
@@ -109,8 +143,7 @@ def analyze_url_content(url: str) -> dict[str, str]:
         url: The URL to analyze.
 
     Returns:
-        dict[str, str]: Dict with 'title', 'main_topic', and 'reasons_to_care' keys,
-                       or 'error' key if analysis fails.
+        Dict[str, Any]: Dict with analysis results or error information.
                        
     Example:
         >>> result = analyze_url_content("https://example.com/article")
@@ -196,9 +229,8 @@ def store_link_with_analysis(
 ) -> bool:
     """Store a link with timestamp and AI-generated analysis.
     
-    Saves a URL along with its AI-generated analysis to the links.json file
-    in the docs directory. Automatically analyzes the content and stores
-    structured metadata for later retrieval.
+    Saves a URL along with its AI-generated analysis to the SQLite database.
+    Automatically analyzes the content and stores structured metadata for later retrieval.
 
     Args:
         url: The URL to store.
@@ -214,125 +246,62 @@ def store_link_with_analysis(
         True
         
     Note:
-        Automatically commits the links file to git if in a git repository.
         Overwrites existing entries for the same URL.
     """
     if not validate_url(url):
         return False
 
-    # Use docs directory for storage
-    storage_file = Path("docs/links.json")
-
-    # Load existing links dictionary
-    links = {}
-    if storage_file.exists():
-        try:
-            with open(storage_file, encoding="utf-8") as f:
-                data = json.load(f)
-                # Handle migration from old list format to new dict format
-                if isinstance(data, list):
-                    links = {}
-                    for item in data:
-                        if "url" in item:
-                            # Clean up old entries during migration
-                            clean_item = {
-                                "url": item["url"],
-                                "domain": item.get("domain", urlparse(item["url"]).netloc),
-                                "timestamp": item.get("timestamp", datetime.now().isoformat()),
-                                "analysis": item.get("analysis", {}),
-                            }
-                            links[item["url"]] = clean_item
-                else:
-                    links = data
-        except (OSError, json.JSONDecodeError):
-            links = {}
-
+    # Initialize database if it doesn't exist
+    init_links_database()
+    
     # Get AI analysis of the URL
     analysis = analyze_url_content(url)
-
-    # Create link entry
+    
+    # Parse URL for domain
     parsed = urlparse(url)
-    link_entry = {
-        "url": url,
-        "domain": parsed.netloc,
-        "timestamp": datetime.now().isoformat(),
-        "analysis": analysis,
-    }
-
-    # Store with URL as key (automatically overwrites duplicates)
-    links[url] = link_entry
+    domain = parsed.netloc
+    
+    # Determine analysis status and extract fields
+    if "error" in analysis:
+        status = "error"
+        title = None
+        main_topic = None
+        reasons_to_care = None
+        error_message = analysis["error"]
+    else:
+        status = "success"
+        title = analysis.get("title")
+        main_topic = analysis.get("main_topic")
+        reasons_to_care = analysis.get("reasons_to_care")
+        error_message = None
 
     try:
-        with open(storage_file, "w", encoding="utf-8") as f:
-            json.dump(links, f, indent=2, ensure_ascii=False)
-
-        # Auto-commit the links file after saving
-        _commit_links_file()
+        db_path = get_links_db_path()
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO links 
+                (url, domain, timestamp, analysis_result, analysis_status, 
+                 title, main_topic, reasons_to_care, error_message, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                url, domain, datetime.now().isoformat(), str(analysis), status,
+                title, main_topic, reasons_to_care, error_message, datetime.now().isoformat()
+            ))
 
         return True
     except Exception:
         return False
 
 
-def _commit_links_file():
-    """Automatically commit the links.json file after updates.
-    
-    Internal function that automatically commits changes to the links.json
-    file using git. This helps maintain a history of link additions and
-    ensures the data is versioned.
-    
-    Note:
-        Silently ignores errors to avoid breaking the main functionality.
-        Only commits if there are actual changes to the file.
-    """
-    import subprocess
-
-    try:
-        # Get the project root directory
-        project_root = Path(__file__).parent.parent
-
-        # Check if we're in a git repository
-        if not (project_root / ".git").exists():
-            return
-
-        # Add the links file
-        result = subprocess.run(
-            ["git", "add", "docs/links.json"], cwd=project_root, capture_output=True, text=True
-        )
-
-        if result.returncode != 0:
-            return
-
-        # Check if there are changes to commit
-        result = subprocess.run(
-            ["git", "diff", "--cached", "--quiet", "docs/links.json"],
-            cwd=project_root,
-            capture_output=True,
-        )
-
-        # If returncode is 1, there are changes to commit
-        if result.returncode == 1:
-            subprocess.run(
-                ["git", "commit", "-m", "Auto-save link analysis data"],
-                cwd=project_root,
-                capture_output=True,
-                text=True,
-            )
-
-    except Exception:
-        # Silently ignore any errors to not break the main functionality
-        pass
-
-
 def search_stored_links(query: str, chat_id: int | None = None, limit: int = 10) -> str:
-    """Search stored links by domain or timestamp.
+    """Search stored links by domain, title, or timestamp.
     
     Searches through previously stored links to find matches based on
-    domain name, URL content, or timestamp. Returns formatted results
+    domain name, URL content, title, or timestamp. Returns formatted results
     suitable for display in conversations.
 
     Args:
-        query: Search query (domain name or date pattern).
+        query: Search query (domain name, title, or date pattern).
         chat_id: Optional chat ID filter (unused, kept for compatibility).
         limit: Maximum number of results to return.
 
@@ -347,46 +316,159 @@ def search_stored_links(query: str, chat_id: int | None = None, limit: int = 10)
         >>> search_stored_links("nonexistent")
         '📂 No links found matching "nonexistent"'
     """
-    storage_file = Path("docs/links.json")
-    if not storage_file.exists():
+    # Initialize database if it doesn't exist
+    init_links_database()
+    
+    db_path = get_links_db_path()
+    if not db_path.exists():
         return "📂 No links stored yet."
 
     try:
-        with open(storage_file, encoding="utf-8") as f:
-            data = json.load(f)
-            # Handle both old list format and new dict format
-            if isinstance(data, list):
-                links = data
-            else:
-                links = list(data.values())
-    except (OSError, json.JSONDecodeError):
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            
+            # Search in domain, URL, title, and main_topic
+            query_lower = query.lower()
+            results = conn.execute("""
+                SELECT * FROM links 
+                WHERE LOWER(domain) LIKE ? 
+                   OR LOWER(url) LIKE ? 
+                   OR LOWER(title) LIKE ?
+                   OR LOWER(main_topic) LIKE ?
+                   OR date(timestamp) LIKE ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (f"%{query_lower}%", f"%{query_lower}%", f"%{query_lower}%", 
+                  f"%{query_lower}%", f"%{query_lower}%", limit)).fetchall()
+            
+    except Exception:
         return "📂 Error reading stored links."
 
-    # chat_id filtering removed since we no longer store chat_id
-
-    # Search in domain and URL
-    query_lower = query.lower()
-    matching_links = []
-    for link in links:
-        if (
-            query_lower in link.get("domain", "").lower()
-            or query_lower in link["url"].lower()
-            or query_lower in link.get("timestamp", "")
-        ):
-            matching_links.append(link)
-
-    # Sort by timestamp (newest first) and limit
-    matching_links.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
-    matching_links = matching_links[:limit]
-
-    if not matching_links:
+    if not results:
         return f"📂 No links found matching '{query}'"
 
     # Format results
-    result = f"📂 **Found {len(matching_links)} link(s) matching '{query}':**\n\n"
-    for link in matching_links:
-        timestamp = link.get("timestamp", "Unknown")[:10]  # Just date part
-        domain = link.get("domain", "Unknown")
-        result += f"• **{domain}** ({timestamp})\n  {link['url']}\n\n"
+    result = f"📂 **Found {len(results)} link(s) matching '{query}':**\n\n"
+    for link in results:
+        timestamp = link["timestamp"][:10] if link["timestamp"] else "Unknown"  # Just date part
+        domain = link["domain"] or "Unknown"
+        title = link["title"] or "No title"
+        status = "✅" if link["analysis_status"] == "success" else "❌"
+        
+        result += f"• **{domain}** ({timestamp}) {status}\n"
+        result += f"  {title}\n"
+        result += f"  {link['url']}\n\n"
 
     return result.strip()
+
+
+def get_recent_links(days: int = 7, limit: int = 20) -> str:
+    """Get recently stored links.
+    
+    Args:
+        days: Number of days to look back.
+        limit: Maximum number of results to return.
+        
+    Returns:
+        str: Formatted list of recent links.
+    """
+    # Initialize database if it doesn't exist
+    init_links_database()
+    
+    db_path = get_links_db_path()
+    if not db_path.exists():
+        return "📂 No links stored yet."
+
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            
+            results = conn.execute("""
+                SELECT * FROM links 
+                WHERE timestamp >= datetime('now', '-{} days')
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """.format(days), (limit,)).fetchall()
+            
+    except Exception:
+        return "📂 Error reading stored links."
+
+    if not results:
+        return f"📂 No links found in the last {days} days"
+
+    # Format results
+    result = f"📂 **Recent links (last {days} days):**\n\n"
+    for link in results:
+        timestamp = link["timestamp"][:10] if link["timestamp"] else "Unknown"
+        domain = link["domain"] or "Unknown"
+        title = link["title"] or "No title"
+        status = "✅" if link["analysis_status"] == "success" else "❌"
+        
+        result += f"• **{domain}** ({timestamp}) {status}\n"
+        result += f"  {title}\n"
+        result += f"  {link['url']}\n\n"
+
+    return result.strip()
+
+
+def get_links_by_domain(domain: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Get all links for a specific domain.
+    
+    Args:
+        domain: Domain to search for.
+        limit: Maximum number of results.
+        
+    Returns:
+        List[Dict[str, Any]]: List of link records.
+    """
+    # Initialize database if it doesn't exist
+    init_links_database()
+    
+    db_path = get_links_db_path()
+    if not db_path.exists():
+        return []
+
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            
+            results = conn.execute("""
+                SELECT * FROM links 
+                WHERE domain = ?
+                ORDER BY timestamp DESC
+                LIMIT ?
+            """, (domain, limit)).fetchall()
+            
+            return [dict(row) for row in results]
+            
+    except Exception:
+        return []
+
+
+def cleanup_old_links(days: int = 90) -> int:
+    """Remove links older than specified days.
+    
+    Args:
+        days: Number of days to keep.
+        
+    Returns:
+        int: Number of links removed.
+    """
+    # Initialize database if it doesn't exist
+    init_links_database()
+    
+    db_path = get_links_db_path()
+    if not db_path.exists():
+        return 0
+
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.execute("""
+                DELETE FROM links 
+                WHERE timestamp < datetime('now', '-{} days')
+            """.format(days))
+            
+            return cursor.rowcount
+            
+    except Exception:
+        return 0

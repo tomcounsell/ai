@@ -152,3 +152,7 @@ usage_logs/
 # Chat history - contains conversation data
 chat_history.json
 logs/
+
+# SQLite databases - data files not for version control
+*.db
+links.db
