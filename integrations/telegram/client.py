@@ -67,6 +67,9 @@ class TelegramClient:
             async def handle_message(client, message):
                 await self.message_handler.handle_message(client, message)
 
+            # Test message handling with self-ping
+            await self._test_message_handling()
+
             return True
 
         except Exception as e:
@@ -244,3 +247,42 @@ class TelegramClient:
         except Exception as e:
             print(f"❌ Error checking for missed messages during startup: {e}")
             # Don't fail startup if missed message check fails
+
+    async def _test_message_handling(self):
+        """Test message handling by sending a self-ping to verify the system works end-to-end."""
+        if not self.client or not self.message_handler:
+            return
+        
+        print("🔄 Testing message handling with self-ping...")
+        
+        try:
+            # Get own user info
+            me = await self.client.get_me()
+            my_user_id = me.id
+            
+            # Send a test message to ourselves
+            test_message = "🔄 System test: ping"
+            await self.client.send_message("me", test_message)
+            
+            # Wait a moment for the message to be processed
+            import asyncio
+            await asyncio.sleep(2)
+            
+            # Check if the message was processed by looking at chat history
+            if my_user_id in self.chat_history.chat_histories:
+                recent_messages = self.chat_history.chat_histories[my_user_id]
+                
+                # Look for our test message in recent history
+                test_found = any(test_message in msg.get("content", "") for msg in recent_messages[-3:])
+                
+                if test_found:
+                    print("✅ Self-ping test successful - message handling is operational")
+                else:
+                    print("⚠️  Self-ping test: message sent but not processed (check whitelist)")
+            else:
+                print("⚠️  Self-ping test: no chat history found (check whitelist configuration)")
+                
+        except Exception as e:
+            print(f"⚠️  Self-ping test failed: {e}")
+            print("   This indicates message handling may not be working properly")
+            # Don't fail startup, but warn the user
