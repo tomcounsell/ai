@@ -103,6 +103,11 @@
         "username": "tomcounsell",
         "description": "Tom Counsell - Owner and Boss",
         "working_directory": "/Users/valorengels/src/ai"
+      },
+      "valorengels": {
+        "username": "valorengels",
+        "description": "Bot self - for self-ping tests and system validation",
+        "working_directory": "/Users/valorengels/src/ai"
       }
     },
     "allowed_user_ids": {

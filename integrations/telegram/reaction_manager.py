@@ -35,8 +35,8 @@ class TelegramReactionManager:
         self.status_reactions = {
             ReactionStatus.RECEIVED: "👀",      # Eyes - message seen
             ReactionStatus.PROCESSING: None,    # Will use intent-specific emoji
-            ReactionStatus.COMPLETED: "✅",     # Check mark - completed
-            ReactionStatus.ERROR: "❌",         # X mark - error
+            ReactionStatus.COMPLETED: "👍",     # Thumbs up - completed (valid Telegram reaction)
+            ReactionStatus.ERROR: "👎",         # Thumbs down - error (valid Telegram reaction)
             ReactionStatus.IGNORED: None,       # No reaction for ignored messages
         }
         
