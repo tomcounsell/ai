@@ -41,17 +41,18 @@ class TelegramReactionManager:
         }
         
         # Intent-specific reaction emojis (from intent classification)
+        # Using only valid Telegram reaction emojis
         self.intent_reactions = {
-            MessageIntent.CASUAL_CHAT: "😁",
+            MessageIntent.CASUAL_CHAT: "😄",
             MessageIntent.QUESTION_ANSWER: "🤔",
-            MessageIntent.PROJECT_QUERY: "🕊️",
-            MessageIntent.DEVELOPMENT_TASK: "⚡",
-            MessageIntent.IMAGE_GENERATION: "🍓",
-            MessageIntent.IMAGE_ANALYSIS: "🙈",
-            MessageIntent.WEB_SEARCH: "🗿",
-            MessageIntent.LINK_ANALYSIS: "🍾",
-            MessageIntent.SYSTEM_HEALTH: "🤝",
-            MessageIntent.UNCLEAR: "🤨",
+            MessageIntent.PROJECT_QUERY: "📋",
+            MessageIntent.DEVELOPMENT_TASK: "💻",
+            MessageIntent.IMAGE_GENERATION: "🎨",
+            MessageIntent.IMAGE_ANALYSIS: "👀",
+            MessageIntent.WEB_SEARCH: "🔍",
+            MessageIntent.LINK_ANALYSIS: "🔗",
+            MessageIntent.SYSTEM_HEALTH: "❤",
+            MessageIntent.UNCLEAR: "❓",
         }
         
         # Track reactions added to messages to avoid duplicates

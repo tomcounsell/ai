@@ -375,13 +375,14 @@ class MessageHandler:
             return intent_result
             
         except Exception as e:
-            print(f"Warning: Intent classification failed: {e}")
+            error_msg = str(e) if str(e).strip() else f"{type(e).__name__}: {repr(e)}"
+            print(f"Warning: Intent classification failed: {error_msg}")
             # Fallback to unclear intent
             from ..ollama_intent import IntentResult, MessageIntent
             return IntentResult(
                 intent=MessageIntent.UNCLEAR,
                 confidence=0.5,
-                reasoning=f"Classification failed: {str(e)}",
+                reasoning=f"Classification failed: {error_msg}",
                 suggested_emoji="🤔"
             )
 
@@ -625,14 +626,8 @@ class MessageHandler:
 
             print(f"Using Notion database for {project_name} (group {chat_id})")
             
-            # Set the database filter for this specific project
-            self.notion_scout.db_filter = db_id[:8]
-
-            # Get answer from Notion Scout
-            answer = await self.notion_scout.answer_question(processed_text)
-
-            # Reset filter for next query
-            self.notion_scout.db_filter = None
+            # Get answer from Notion Scout using the query_all_accessible_databases method
+            answer = await self.notion_scout.query_all_accessible_databases(processed_text, db_filter=db_id[:8])
 
             return answer
 
@@ -646,22 +641,20 @@ class MessageHandler:
             if not self.notion_scout:
                 return None
 
-            # Check if specific project mentioned
+            # Check if specific project mentioned and get db_filter
             text_lower = processed_text.lower()
+            db_filter = None
             for project_name in ["psyoptimal", "flextrip", "psy", "flex"]:
                 if project_name in text_lower:
                     from ..notion.utils import resolve_project_name
 
                     resolved_name, db_id = resolve_project_name(project_name)
                     if db_id:
-                        self.notion_scout.db_filter = db_id[:8]
+                        db_filter = db_id[:8]
                         break
 
-            # Get answer from Notion Scout
-            answer = await self.notion_scout.answer_question(processed_text)
-
-            # Reset filter for next query
-            self.notion_scout.db_filter = None
+            # Get answer from Notion Scout using the query_all_accessible_databases method
+            answer = await self.notion_scout.query_all_accessible_databases(processed_text, db_filter=db_filter)
 
             return answer
 
