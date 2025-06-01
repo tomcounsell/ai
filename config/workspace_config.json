@@ -104,6 +104,12 @@
         "description": "Tom Counsell - Owner and Boss",
         "working_directory": "/Users/valorengels/src/ai"
       }
+    },
+    "allowed_user_ids": {
+      "179144806": {
+        "description": "Tom Counsell - User ID fallback (no public username)",
+        "working_directory": "/Users/valorengels/src/ai"
+      }
     }
   },
   "deprecated_mappings": {

@@ -507,9 +507,17 @@ def validate_dm_user_access(username: str, chat_id: int) -> bool:
         dm_whitelist = config.get("dm_whitelist", {})
         allowed_users = dm_whitelist.get("allowed_users", {})
         
+        # If no username, check if user ID is whitelisted instead
         if not username:
-            logger.warning(f"DM access denied for chat {chat_id} (no username provided)")
-            return False
+            # Check if chat_id (which is user_id for DMs) is in allowed users by ID
+            allowed_user_ids = dm_whitelist.get("allowed_user_ids", {})
+            if str(chat_id) in allowed_user_ids:
+                user_info = allowed_user_ids[str(chat_id)]
+                logger.info(f"DM access granted for user ID {chat_id}: {user_info.get('description', 'Whitelisted user ID')}")
+                return True
+            else:
+                logger.warning(f"DM access denied for chat {chat_id} (no username provided and user ID not whitelisted)")
+                return False
         
         username_lower = username.lower()
         
