@@ -343,6 +343,42 @@ await self._process_agent_response(message, chat_id, answer)
 - Send error message: `"❌ Error processing message: {error}"`
 - Store error in chat history
 
+### 12. Post-Response Log Review and Anomaly Detection
+
+After sending the final response, the system performs an automated log review to identify and fix any anomalies:
+
+```python
+await self._review_server_logs_for_anomalies(chat_id)
+```
+
+#### Log Review Process:
+- **Scan recent server logs** (last 5 minutes) for error messages, warnings, and anomalies
+- **Identify patterns** that might indicate systemic issues requiring fixes
+- **Common anomaly types detected:**
+  - Empty error messages from intent classification
+  - Invalid Telegram reaction emojis causing "REACTION_INVALID" errors
+  - Database lock issues and session conflicts
+  - NotionQueryEngine API method errors
+  - Missing user ID fallback scenarios
+  - Startup validation failures
+
+#### Automated Fix Implementation:
+- **Apply immediate fixes** for known issues (e.g., session cleanup, reaction emoji updates)
+- **Update error handling** to prevent similar issues in future messages
+- **Document all fixes** in `docs/logs-bugfixes.md` with:
+  - Error description and frequency
+  - Root cause analysis
+  - Applied fix details
+  - Prevention measures implemented
+
+#### Prevention and Monitoring:
+- **Real-time monitoring** for recurring error patterns
+- **Proactive session cleanup** to prevent database locks
+- **Enhanced error logging** with detailed context for future debugging
+- **Automatic system health validation** after applying fixes
+
+This final step ensures continuous system improvement and prevents accumulation of unresolved anomalies.
+
 ## Configuration
 
 ### Environment Variables

@@ -66,6 +66,9 @@ scripts/update_mcp.sh
 **Important:** `scripts/start.sh` is the **unified startup command** that:
 - Checks Telegram authentication status
 - Prompts for interactive login if needed (phone + verification code)
+- **Prevents database locks** with proactive session cleanup
+- **Validates system health** with self-ping end-to-end testing
+- **Enhanced error handling** with detailed logging and diagnostics
 - Starts both FastAPI server and Telegram client together
 - Ensures the system is fully operational before completing
 
@@ -195,7 +198,7 @@ External service integrations support the agent system:
 - **Production Performance**: 2.21s streaming intervals, <1ms integration processing, 97% health scores
 - **Intelligent Context Management**: 97-99% conversation compression while preserving critical information
 - **Real-time Streaming**: Live progress updates during development tasks with adaptive rate control
-- **Intent Recognition**: Ollama-based message classification with visual reaction feedback and optimized tool access
+- **Intent Recognition**: Ollama-based message classification with **valid Telegram reaction emojis** and optimized tool access
 - **Web Search Intelligence**: Automatic current information retrieval through Perplexity AI
 - **Image Generation**: DALL-E 3 integration with Telegram delivery
 - **Image Analysis**: AI vision capabilities for shared photos
@@ -240,6 +243,11 @@ External service integrations support the agent system:
 - `TELEGRAM_ALLOW_DMS` - Enable/disable DM handling (true/false)
 
 Each group chat can be mapped to a specific Notion database in `config/workspace_config.json`
+
+#### Enhanced Whitelist System:
+- **Dual Whitelist Support**: Both username and user ID-based access control in `config/workspace_config.json`
+- **Fallback Handling**: User ID support for users without public usernames
+- **Self-Ping Capability**: Bot can message itself for end-to-end system validation
 
 ## Valor - Unified Conversational Development Environment
 **Valor Engels** represents the unified system with a complete technical persona:
@@ -357,6 +365,10 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 - **Intelligent optimization** with context window management, streaming rate control, and resource monitoring
 - **Production monitoring** with automatic cleanup, health scoring, and comprehensive metrics
 - **Multi-user reliability** with concurrent session support and error recovery
+- **Database lock prevention** with proactive session cleanup and concurrent transmission limits
+- **Enhanced error handling** with detailed logging and empty error message fixes
+- **Valid Telegram reactions** using only confirmed working emoji reactions
+- **Self-ping validation** for end-to-end system health verification
 - **Performance validation** through comprehensive test suites covering all production requirements
 
 ## Documentation References

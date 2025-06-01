@@ -350,46 +350,62 @@ def is_dev_group(chat_id: int) -> bool:
         return False
 ```
 
-### DM User Whitelisting Security
+### Enhanced DM User Whitelisting Security
 
-Direct messages now use a strict username-based whitelist for enhanced security:
+Direct messages now use **dual whitelist support** with both username and user ID-based access control:
 
 ```python
 def validate_dm_user_access(username: str, chat_id: int) -> bool:
-    """Validate if a user is allowed to send DMs based on DM whitelist."""
-    # Load DM whitelist from workspace config
+    """Validate if a user is allowed to send DMs based on enhanced dual whitelist."""
     config = load_workspace_config()
     dm_whitelist = config.get("dm_whitelist", {})
     allowed_users = dm_whitelist.get("allowed_users", {})
+    allowed_user_ids = dm_whitelist.get("allowed_user_ids", {})
     
+    # Check username whitelist first
+    if username:
+        username_lower = username.lower()
+        if username_lower in allowed_users:
+            return True
+    
+    # Fallback to user ID whitelist (for users without public usernames)
     if not username:
-        return False
+        if str(chat_id) in allowed_user_ids:
+            return True
     
-    username_lower = username.lower()
-    return username_lower in allowed_users
+    return False
 
-def get_dm_user_working_directory(username: str) -> str:
-    """Get the working directory for a whitelisted DM user."""
+def get_dm_user_working_directory(username: str, user_id: int) -> str:
+    """Get the working directory for a whitelisted DM user with dual lookup."""
     config = load_workspace_config()
     dm_whitelist = config.get("dm_whitelist", {})
     default_dir = dm_whitelist.get("default_working_directory", "/Users/valorengels/src/ai")
     allowed_users = dm_whitelist.get("allowed_users", {})
+    allowed_user_ids = dm_whitelist.get("allowed_user_ids", {})
     
+    # Check username first
     if username and username.lower() in allowed_users:
         user_info = allowed_users[username.lower()]
+        return user_info.get("working_directory", default_dir)
+    
+    # Fallback to user ID
+    if str(user_id) in allowed_user_ids:
+        user_info = allowed_user_ids[str(user_id)]
         return user_info.get("working_directory", default_dir)
     
     return default_dir
 ```
 
-**DM Security Features:**
-- **Username-based access control**: Only whitelisted usernames can send DMs
+**Enhanced DM Security Features:**
+- **Dual whitelist support**: Both username and user ID-based access control
+- **Username fallback**: User ID support for users without public usernames
+- **Self-ping capability**: Bot can message itself for end-to-end system validation
 - **Case-insensitive matching**: @TomCounsell, @tomcounsell, @TOMCOUNSELL all work
 - **Working directory isolation**: Each user gets their own Claude Code working directory
 - **Comprehensive logging**: All DM access attempts logged for security audit
 - **Graceful rejection**: Non-whitelisted users receive clear access denial
 
-**Current DM Whitelist:**
+**Current Enhanced DM Whitelist:**
 ```json
 {
   "dm_whitelist": {
@@ -398,7 +414,22 @@ def get_dm_user_working_directory(username: str) -> str:
     "allowed_users": {
       "tomcounsell": {
         "username": "tomcounsell",
-        "description": "Tom Counsell - Owner and Boss", 
+        "description": "Tom Counsell - Owner and Boss",
+        "working_directory": "/Users/valorengels/src/ai"
+      },
+      "valorengels": {
+        "username": "valorengels",
+        "description": "Bot self - for self-ping tests and system validation",
+        "working_directory": "/Users/valorengels/src/ai"
+      }
+    },
+    "allowed_user_ids": {
+      "179144806": {
+        "description": "Tom Counsell - User ID fallback (no public username)",
+        "working_directory": "/Users/valorengels/src/ai"
+      },
+      "66968934582": {
+        "description": "Bot self (valorengels) - for self-ping tests",
         "working_directory": "/Users/valorengels/src/ai"
       }
     }

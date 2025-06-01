@@ -11,12 +11,15 @@ This guide covers running, monitoring, and maintaining the AI agent system in de
 #### Starting the Development Server
 
 ```bash
-# Start FastAPI development server with hot reload
+# Start complete system (FastAPI server + Telegram client)
 scripts/start.sh
 
 # What this does:
 # - Checks for existing server processes
-# - Starts uvicorn with hot reload on port 9000
+# - Prevents database locks with proactive session cleanup
+# - Checks Telegram authentication status
+# - Starts both FastAPI server and Telegram client
+# - Validates system health with self-ping end-to-end testing
 # - Saves PID for process management
 # - Provides immediate feedback on startup status
 ```
@@ -53,6 +56,7 @@ scripts/stop.sh
 # What this does:
 # - Terminates main server process
 # - Cleans up orphaned uvicorn processes
+# - Cleans up Telegram session files to prevent database locks
 # - Removes PID files
 # - Confirms successful shutdown
 ```
@@ -264,9 +268,9 @@ Configure project workspaces and dev group behavior in `config/workspace_config.
 - PsyOPTIMAL Dev (-4897329503) 
 - DeckFusion Dev (-4851227604)
 
-### DM User Whitelisting
+### Enhanced DM User Whitelisting
 
-Direct messages are restricted to whitelisted users only. Configure DM access in the `dm_whitelist` section:
+Direct messages are restricted to whitelisted users with **dual whitelist support**. Configure DM access in the `dm_whitelist` section:
 
 ```json
 {
@@ -278,14 +282,31 @@ Direct messages are restricted to whitelisted users only. Configure DM access in
         "username": "tomcounsell",
         "description": "Tom Counsell - Owner and Boss",
         "working_directory": "/Users/valorengels/src/ai"
+      },
+      "valorengels": {
+        "username": "valorengels",
+        "description": "Bot self - for self-ping tests and system validation",
+        "working_directory": "/Users/valorengels/src/ai"
+      }
+    },
+    "allowed_user_ids": {
+      "179144806": {
+        "description": "Tom Counsell - User ID fallback (no public username)",
+        "working_directory": "/Users/valorengels/src/ai"
+      },
+      "66968934582": {
+        "description": "Bot self (valorengels) - for self-ping tests",
+        "working_directory": "/Users/valorengels/src/ai"
       }
     }
   }
 }
 ```
 
-**DM Security Features:**
-- **User whitelisting**: Only specified usernames can send DMs
+**Enhanced DM Security Features:**
+- **Dual whitelist support**: Both username and user ID-based access control
+- **Username fallback**: User ID support for users without public usernames
+- **Self-ping capability**: Bot can message itself for end-to-end system validation
 - **Case-insensitive**: Username matching works regardless of case
 - **Working directory isolation**: Each user can have a specific working directory
 - **Default fallback**: Non-specified users get default working directory but are denied access
@@ -293,6 +314,9 @@ Direct messages are restricted to whitelisted users only. Configure DM access in
 
 **Currently Whitelisted:**
 - **@tomcounsell** (Tom Counsell - Owner/Boss) → `/Users/valorengels/src/ai`
+- **@valorengels** (Bot Self - System Validation) → `/Users/valorengels/src/ai`
+- **User ID 179144806** (Tom Counsell - Fallback) → `/Users/valorengels/src/ai`
+- **User ID 66968934582** (Bot Self - Fallback) → `/Users/valorengels/src/ai`
 
 ## Dependency Management
 
