@@ -171,7 +171,39 @@ if ! check_telegram_auth; then
     fi
 fi
 
+# Function to prevent database locks by cleaning up stale processes
+prevent_database_locks() {
+    echo "🔧 Checking for potential database lock issues..."
+    
+    # Clean up any processes holding the Telegram session file
+    SESSION_FILE="$PROJECT_ROOT/ai_project_bot.session"
+    if [ -f "$SESSION_FILE" ]; then
+        LOCKING_PIDS=$(lsof "$SESSION_FILE" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)
+        if [ -n "$LOCKING_PIDS" ]; then
+            echo "⚠️  Found processes holding Telegram session file, cleaning up..."
+            echo "$LOCKING_PIDS" | xargs kill -9 2>/dev/null
+            sleep 1
+            echo "✅ Session file cleanup complete"
+        fi
+    fi
+    
+    # Check for orphaned Python processes that might interfere
+    ORPHANED_PYTHON=$(pgrep -f "python.*main.py" 2>/dev/null)
+    if [ -n "$ORPHANED_PYTHON" ]; then
+        echo "⚠️  Found orphaned Python processes, cleaning up..."
+        echo "$ORPHANED_PYTHON" | xargs kill -9 2>/dev/null
+        sleep 1
+        echo "✅ Orphaned process cleanup complete"
+    fi
+    
+    echo "✅ Database lock prevention check complete"
+}
+
 echo "✅ Telegram authentication verified"
+echo ""
+
+# Prevent database locks before starting
+prevent_database_locks
 echo ""
 
 start_server

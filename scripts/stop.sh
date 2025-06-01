@@ -55,8 +55,23 @@ cleanup_orphaned_processes() {
     fi
 }
 
+# Clean up any processes holding Telegram session file
+cleanup_telegram_session() {
+    SESSION_FILE="ai_project_bot.session"
+    if [ -f "$SESSION_FILE" ]; then
+        LOCKING_PIDS=$(lsof "$SESSION_FILE" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)
+        if [ -n "$LOCKING_PIDS" ]; then
+            echo "Found processes holding Telegram session, cleaning up..."
+            echo "$LOCKING_PIDS" | xargs kill -9 2>/dev/null
+            sleep 1
+            echo "Telegram session cleanup complete"
+        fi
+    fi
+}
+
 # Main logic
 stop_server
 cleanup_orphaned_processes
+cleanup_telegram_session
 
 echo "All FastAPI server processes stopped"

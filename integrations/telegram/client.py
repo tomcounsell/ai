@@ -38,8 +38,13 @@ class TelegramClient:
                 print("Telegram credentials not found in environment variables")
                 return False
 
+            # Create client with better session handling to prevent database locks
             self.client = Client(
-                "ai_project_bot", api_id=int(api_id), api_hash=api_hash, workdir=self.workdir
+                "ai_project_bot", 
+                api_id=int(api_id), 
+                api_hash=api_hash, 
+                workdir=self.workdir,
+                max_concurrent_transmissions=1  # Reduce concurrent transmissions to prevent locks
             )
 
             # Start the client
