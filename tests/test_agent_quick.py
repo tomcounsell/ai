@@ -30,7 +30,7 @@ async def test_basic_conversation():
     """Test basic conversation with context."""
     print("🧪 Testing basic conversation with context...")
 
-    from integrations.telegram.response_handlers import handle_general_question
+    from agents.valor.handlers import handle_general_question
 
     # Create mock chat history
     chat_history = MockChatHistory()
@@ -70,7 +70,7 @@ async def test_search_tool():
     """Test that search tool can be triggered."""
     print("\n🧪 Testing search tool integration...")
 
-    from integrations.telegram.response_handlers import handle_general_question
+    from agents.valor.handlers import handle_general_question
 
     chat_history = MockChatHistory()
 

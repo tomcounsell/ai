@@ -40,6 +40,17 @@ class TelegramReactionManager:
             ReactionStatus.IGNORED: None,       # No reaction for ignored messages
         }
         
+        # Valid Telegram reaction emojis (confirmed working)
+        self.valid_telegram_emojis = {
+            "👍", "👎", "❤️", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", 
+            "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳", "❤️‍🔥", 
+            "🌚", "🌭", "💯", "🤣", "⚡", "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", 
+            "💋", "🖕", "😈", "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", 
+            "😨", "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿", "🆒", 
+            "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷‍♂", "🤷", "🤷‍♀", 
+            "😡", "🎨"
+        }
+        
         # Intent-specific reaction emojis (from intent classification)
         # Using only valid Telegram reaction emojis
         self.intent_reactions = {
@@ -90,10 +101,11 @@ class TelegramReactionManager:
         Returns:
             bool: True if reaction was added successfully
         """
-        # Use suggested emoji from classification if available, otherwise use default
+        # Use suggested emoji from classification if available and valid, otherwise use default
         emoji = intent_result.suggested_emoji
-        if not emoji or len(emoji) != 1:
+        if not emoji or len(emoji) != 1 or emoji not in self.valid_telegram_emojis:
             emoji = self.intent_reactions.get(intent_result.intent, "🤔")
+            logger.debug(f"Invalid suggested emoji '{intent_result.suggested_emoji}', using default: {emoji}")
             
         success = await self._add_reaction(
             client, chat_id, message_id, emoji, ReactionStatus.PROCESSING

@@ -57,7 +57,13 @@ class IntentResult:
 
 
 class OllamaIntentClassifier:
-    """Local Ollama-based intent classification for message preprocessing."""
+    """
+    Multi-tier intent classification system with intelligent fallbacks:
+    
+    1. Primary: Ollama (granite3.2-vision) - Local, fast, privacy-preserving
+    2. Fallback: GPT-3.5 Turbo - Requires OPENAI_API_KEY in environment
+    3. Last resort: Rule-based classification - Always available
+    """
     
     def __init__(self, model_name: str = "granite3.2-vision:latest", ollama_url: str = "http://localhost:11434"):
         """
@@ -161,9 +167,11 @@ Be decisive and pick the most likely intent even if uncertain."""
             return result
             
         except Exception as e:
-            logger.error(f"Intent classification failed: {e}")
-            # Fallback to rule-based classification
-            return self._fallback_classification(message, context)
+            error_msg = str(e) if e else "Unknown error"
+            logger.error(f"Intent classification failed: {error_msg}")
+            logger.debug(f"Message that failed: '{message[:100]}...'")
+            # Fallback to GPT-3.5 Turbo classification
+            return await self._gpt_fallback_classification(message, context)
 
     async def _make_ollama_request(self, prompt: str) -> str:
         """Make a request to the Ollama API."""
@@ -188,7 +196,8 @@ Be decisive and pick the most likely intent even if uncertain."""
             json=payload
         ) as response:
             if response.status != 200:
-                raise Exception(f"Ollama API error: {response.status}")
+                error_text = await response.text()
+                raise Exception(f"Ollama API error: {response.status} - {error_text}")
                 
             result = await response.json()
             return result.get("response", "")
@@ -222,8 +231,17 @@ Be decisive and pick the most likely intent even if uncertain."""
             # Validate confidence
             confidence = max(0.0, min(1.0, confidence))
             
-            # Use default emoji if not provided
-            if not suggested_emoji or len(suggested_emoji) != 1:
+            # Use default emoji if not provided or invalid for Telegram
+            valid_telegram_emojis = {
+                "👍", "👎", "❤️", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", 
+                "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳", "❤️‍🔥", 
+                "🌚", "🌭", "💯", "🤣", "⚡", "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", 
+                "💋", "🖕", "😈", "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", 
+                "😨", "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿", "🆒", 
+                "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷‍♂", "🤷", "🤷‍♀", 
+                "😡", "🎨"
+            }
+            if not suggested_emoji or len(suggested_emoji) != 1 or suggested_emoji not in valid_telegram_emojis:
                 suggested_emoji = self.intent_emojis.get(intent, "🤔")
             
             return IntentResult(
@@ -234,8 +252,9 @@ Be decisive and pick the most likely intent even if uncertain."""
             )
             
         except (json.JSONDecodeError, KeyError, ValueError) as e:
-            logger.warning(f"Failed to parse Ollama response: {e}")
-            logger.debug(f"Raw response: {response}")
+            error_msg = str(e) if e else "Unknown parsing error"
+            logger.warning(f"Failed to parse Ollama response: {error_msg}")
+            logger.debug(f"Raw response: {response[:200]}...")
             
             # Fallback to rule-based classification
             return self._fallback_classification(original_message)
@@ -345,6 +364,57 @@ Be decisive and pick the most likely intent even if uncertain."""
             reasoning="No specific intent markers detected, defaulting to casual chat",
             suggested_emoji="😁"
         )
+
+    async def _gpt_fallback_classification(self, message: str, context: Optional[Dict[str, Any]] = None) -> IntentResult:
+        """Fallback to GPT-3.5 Turbo when Ollama fails."""
+        try:
+            import openai
+            import os
+            
+            # Check if OpenAI API key is available
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                logger.warning("OPENAI_API_KEY not found, falling back to rule-based classification")
+                return self._fallback_classification(message, context)
+            
+            # Initialize OpenAI client
+            client = openai.OpenAI(api_key=api_key)
+            
+            # Prepare the classification prompt
+            user_prompt = f"Message to classify: '{message.strip()}'"
+            
+            # Add context if available
+            if context:
+                if context.get("has_image"):
+                    user_prompt += "\n[Note: This message contains an image]"
+                if context.get("has_links"):
+                    user_prompt += "\n[Note: This message contains URLs]"
+                if context.get("is_group_chat"):
+                    user_prompt += "\n[Note: This is from a group chat]"
+            
+            # Make request to GPT-3.5 Turbo
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.1,
+                max_tokens=200
+            )
+            
+            result_text = response.choices[0].message.content
+            
+            # Parse the response using the same parsing logic
+            result = self._parse_classification_response(result_text, message)
+            
+            logger.info(f"GPT-3.5 fallback classified: {result.intent.value} (confidence: {result.confidence:.2f})")
+            return result
+            
+        except Exception as e:
+            logger.error(f"GPT-3.5 fallback also failed: {e}")
+            # Last resort: rule-based classification
+            return self._fallback_classification(message, context)
 
     async def check_ollama_availability(self) -> bool:
         """Check if Ollama server is available."""

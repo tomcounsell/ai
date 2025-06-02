@@ -157,6 +157,22 @@ def spawn_valor_session(
         This function automatically includes common development requirements
         like following existing patterns, testing, and git workflows.
     """
+    
+    # IMPORTANT: Prevent recursive Claude Code sessions that cause hanging
+    # Check if we're already in a Claude Code session by looking for environment indicators
+    if os.getenv('CLAUDE_CODE_SESSION') or 'claude' in os.getenv('SHELL', '').lower():
+        return """⚠️ **Development Tool Currently Unavailable**
+
+I cannot spawn new Claude Code sessions while already running within one (this prevents recursive execution issues).
+
+However, I can help you with this task in other ways:
+- Answer questions about implementation approaches
+- Provide code examples and patterns
+- Review code if you share it
+- Suggest testing strategies
+- Explain best practices
+
+What specific aspect of your development task would you like help with?"""
 
     # Build comprehensive prompt
     prompt_parts = [
@@ -185,6 +201,19 @@ def spawn_valor_session(
 
     full_prompt = "\n".join(prompt_parts)
 
-    return execute_valor_delegation(
-        prompt=full_prompt, working_directory=target_directory, allowed_tools=tools_needed
-    )
+    try:
+        return execute_valor_delegation(
+            prompt=full_prompt, working_directory=target_directory, allowed_tools=tools_needed
+        )
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+        return f"""❌ **Development Tool Error**
+
+The Claude Code delegation failed: {str(e)}
+
+I can help you with this task directly instead. What specifically do you need assistance with?
+
+For "{task_description}", I can:
+- Provide implementation guidance
+- Share code examples
+- Explain the approach step-by-step
+- Review existing code if you share it"""

@@ -528,6 +528,8 @@ async def run_valor_agent(message: str, context: ValorContext | None = None) -> 
 
     try:
         result = await valor_agent.run(message, deps=context)
-        return result.data
+        if not result or not hasattr(result, 'output'):
+            return "Error: Agent returned invalid result"
+        return result.output
     except Exception as e:
         return f"Error processing request: {str(e)}"

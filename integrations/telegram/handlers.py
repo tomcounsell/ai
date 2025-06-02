@@ -93,132 +93,205 @@ class MessageHandler:
             return False
 
     async def handle_message(self, client, message):
-        """Main message handling logic with routing to appropriate handlers."""
+        """
+        Main message handling entry point - orchestrates the complete message lifecycle.
+        
+        This is the primary entry point for all incoming Telegram messages. It performs:
+        1. Message validation and access control
+        2. Message type detection and routing
+        3. Read receipts and reaction management
+        4. Error handling and logging
+        
+        Args:
+            client: Telegram client instance
+            message: Incoming Telegram message object
+        """
+        # === STEP 1: EXTRACT MESSAGE METADATA ===
         chat_id = message.chat.id
         is_private_chat = message.chat.type == ChatType.PRIVATE
         username = message.from_user.username if message.from_user else None
+        user_id = message.from_user.id if message.from_user else None
+        message_id = message.id
         
-        # Check if this server instance should handle this chat
+        # Create message identifier for logging
+        chat_type = "DM" if is_private_chat else "group"
+        username_display = f"@{username}" if username else f"ID:{user_id}"
+        message_preview = (message.text[:50] + "...") if message.text and len(message.text) > 50 else (message.text or "[no text]")
+        
+        print(f"📨 INCOMING MESSAGE: {chat_type} {chat_id} from {username_display} (msg_id: {message_id})")
+        print(f"   Content preview: {message_preview}")
+        
+        # === STEP 2: ACCESS CONTROL VALIDATION ===
+        print(f"🔒 Checking access permissions for {chat_type} {chat_id}...")
         if not self._should_handle_chat(chat_id, is_private_chat, username):
             import logging
             logger = logging.getLogger(__name__)
             
-            chat_type = "DM" if is_private_chat else "group"
-            username_display = username or "unknown"
-            message_preview = (message.text[:50] + "...") if message.text and len(message.text) > 50 else (message.text or "[no text]")
-            
             # Enhanced logging for security audit trail
             logger.warning(
                 f"MESSAGE REJECTED - Chat whitelist violation: "
-                f"{chat_type} {chat_id} from user @{username_display} - "
+                f"{chat_type} {chat_id} from user {username_display} - "
                 f"Message: '{message_preview}'"
             )
             
-            # Also log to console for immediate visibility during development
-            print(f"🚫 Rejected {chat_type} {chat_id} (@{username_display}): {message_preview}")
+            # Console logging for immediate visibility during development
+            print(f"🚫 ACCESS DENIED: {chat_type} {chat_id} ({username_display}) not in whitelist")
+            print(f"   Rejected message: {message_preview}")
             return
+        
+        print(f"✅ Access granted for {chat_type} {chat_id} ({username_display})")
 
-        # Mark message as read (read receipt)
+        # === STEP 3: MESSAGE ACKNOWLEDGMENT ===
+        print(f"📖 Marking message {message_id} as read...")
         try:
             await client.read_chat_history(chat_id, message.id)
+            print(f"✅ Message marked as read")
         except Exception as e:
-            print(f"Warning: Could not mark message as read: {e}")
+            print(f"⚠️  Could not mark message as read: {e}")
 
-        # Add initial "received" reaction to show message was seen
+        # === STEP 4: INITIAL REACTION (USER FEEDBACK) ===
+        print(f"👀 Adding 'received' reaction to message {message_id}...")
         from .reaction_manager import add_message_received_reaction
         try:
             await add_message_received_reaction(client, chat_id, message.id)
+            print(f"✅ Received reaction added")
         except Exception as e:
-            print(f"Warning: Could not add received reaction: {e}")
+            print(f"⚠️  Could not add received reaction: {e}")
 
-        # Handle different message types
+        # === STEP 5: MESSAGE TYPE DETECTION AND ROUTING ===
+        print(f"🔍 Detecting message type for {message_id}...")
+        
         if message.photo:
+            print(f"📸 PHOTO MESSAGE detected - routing to photo handler")
             await self._handle_photo_message(client, message, chat_id)
             return
         elif message.document:
+            print(f"📄 DOCUMENT MESSAGE detected - routing to document handler")
             await self._handle_document_message(client, message, chat_id)
             return
         elif message.voice or message.audio:
+            audio_type = "voice" if message.voice else "audio"
+            print(f"🎵 {audio_type.upper()} MESSAGE detected - routing to audio handler")
             await self._handle_audio_message(client, message, chat_id)
             return
         elif message.video or message.video_note:
+            video_type = "video_note" if message.video_note else "video"
+            print(f"🎬 {video_type.upper()} MESSAGE detected - routing to video handler")
             await self._handle_video_message(client, message, chat_id)
             return
         elif not message.text:
-            # Other message types we don't handle yet
+            print(f"❓ UNSUPPORTED MESSAGE TYPE detected - skipping (no text content)")
+            print(f"   Message type: {type(message).__name__}")
             return
 
-        # Continue with text message processing
+        # === STEP 6: TEXT MESSAGE PROCESSING ===
+        print(f"💬 TEXT MESSAGE detected - proceeding with text processing pipeline")
+        print(f"   Message length: {len(message.text)} characters")
 
-        # Check if message is too old (catch-up from offline period)
-        if is_message_too_old(message.date.timestamp()):
+        # === STEP 7: MESSAGE AGE VALIDATION ===
+        from .utils import is_message_too_old
+        message_timestamp = message.date.timestamp()
+        print(f"⏰ Checking message age (timestamp: {message_timestamp})...")
+        
+        if is_message_too_old(message_timestamp):
+            print(f"⏰ MESSAGE TOO OLD - collecting as missed message for batch processing")
+            
             # Collect missed messages for later batch response
             if chat_id not in self.missed_messages_per_chat:
                 self.missed_messages_per_chat[chat_id] = []
+                print(f"📝 Created new missed message queue for chat {chat_id}")
+            
             self.missed_messages_per_chat[chat_id].append(message.text)
+            print(f"📝 Added to missed messages queue (total: {len(self.missed_messages_per_chat[chat_id])})")
 
             # Still store old messages for context
             reply_to_telegram_message_id = None
             if hasattr(message, 'reply_to_message') and message.reply_to_message:
                 reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
+                print(f"🔗 Message is replying to Telegram message {reply_to_telegram_message_id}")
+            
             self.chat_history.add_message(chat_id, "user", message.text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
-            print(f"Collecting missed message from chat {chat_id}: {message.text[:50]}...")
+            print(f"💾 Stored missed message in chat history: {message.text[:50]}...")
             return
 
-        # Get bot's own info
+        print(f"✅ Message is recent - proceeding with real-time processing")
+
+        # === STEP 8: BOT METADATA RETRIEVAL ===
+        print(f"🤖 Retrieving bot information...")
         me = await client.get_me()
         bot_username = me.username
         bot_id = me.id
+        print(f"   Bot username: @{bot_username}")
+        print(f"   Bot ID: {bot_id}")
 
-        # is_private_chat already determined above for filtering
-
-        print(
-            f"Processing message from chat {chat_id} (private: {is_private_chat}): '{message.text[:50]}...'"
-        )
-
-        # Debug: Check current chat history length to detect duplication
+        # === STEP 9: CHAT HISTORY CONTEXT CHECK ===
         current_history_count = len(self.chat_history.chat_histories.get(chat_id, []))
-        print(f"Current chat history length: {current_history_count}")
+        print(f"📚 Current chat history length for {chat_id}: {current_history_count} messages")
 
-        # Check if we have missed messages for this chat and process them through normal routing
+        print(f"🔄 Processing message from {chat_type} {chat_id}: '{message.text[:50]}...'")
+
+        # === STEP 10: MISSED MESSAGES PROCESSING ===
         if chat_id in self.missed_messages_per_chat and self.missed_messages_per_chat[chat_id]:
+            missed_count = len(self.missed_messages_per_chat[chat_id])
+            print(f"📬 Found {missed_count} missed messages for chat {chat_id} - processing batch")
             await self._process_missed_messages_through_agent(client, chat_id, message, processed_text, reply_to_telegram_message_id)
 
-        # Handle group mentions and process message with error handling
+        # === STEP 11: MENTION DETECTION AND TEXT PROCESSING ===
+        print(f"🏷️  Processing mentions and cleaning message text...")
         try:
             is_mentioned, processed_text = self._process_mentions(
                 message, bot_username, bot_id, is_private_chat
             )
+            print(f"   Is mentioned: {is_mentioned}")
+            print(f"   Processed text: '{processed_text[:50]}...'")
         except Exception as e:
-            print(f"Error processing mentions: {e}")
+            print(f"❌ Error processing mentions: {e}")
             # Fallback: treat as regular message without mentions
             is_mentioned = is_private_chat  # Only respond in private chats if error
             processed_text = getattr(message, 'text', None) or getattr(message, 'caption', None) or ""
+            print(f"   Fallback - is_mentioned: {is_mentioned}, text: '{processed_text[:50]}...'")
 
-        # Extract reply information for context building
+        # === STEP 12: REPLY CONTEXT EXTRACTION ===
         reply_to_telegram_message_id = None
         if hasattr(message, 'reply_to_message') and message.reply_to_message:
             reply_to_telegram_message_id = getattr(message.reply_to_message, 'id', None)
+            print(f"🔗 Message is replying to Telegram message {reply_to_telegram_message_id}")
+        else:
+            print(f"📝 Message is not a reply")
 
-        # Check if this is a dev group that should handle all messages
+        # === STEP 13: SPECIAL GROUP HANDLING ===
         from ..notion.utils import is_dev_group
         is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+        print(f"🛠️  Is dev group: {is_dev_group_chat}")
         
-        # Only respond in private chats, when mentioned in groups, or in dev groups
-        if not (is_private_chat or is_mentioned or is_dev_group_chat):
-            # Still store the message for context, but don't respond
+        # === STEP 14: RESPONSE DECISION LOGIC ===
+        should_respond = is_private_chat or is_mentioned or is_dev_group_chat
+        print(f"🎯 Response decision:")
+        print(f"   Private chat: {is_private_chat}")
+        print(f"   Mentioned: {is_mentioned}")
+        print(f"   Dev group: {is_dev_group_chat}")
+        print(f"   Will respond: {should_respond}")
+        
+        if not should_respond:
+            print(f"💾 Storing message for context but not responding")
             self.chat_history.add_message(chat_id, "user", message.text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
             return
 
-        # Store user message in chat history with reply context
+        # === STEP 15: CHAT HISTORY STORAGE ===
+        print(f"💾 Storing user message in chat history...")
         self.chat_history.add_message(chat_id, "user", processed_text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+        new_history_count = len(self.chat_history.chat_histories.get(chat_id, []))
+        print(f"   Chat history updated: {current_history_count} → {new_history_count} messages")
 
-        # Check if this is a single-link message for link tracking
+        # === STEP 16: SPECIAL MESSAGE TYPE DETECTION ===
+        print(f"🔍 Checking for special message types...")
         if is_url_only_message(processed_text):
+            print(f"🔗 LINK-ONLY MESSAGE detected - routing to link handler")
             await self._handle_link_message(message, chat_id, processed_text)
             return
 
-        # Perform intent classification before routing
+        # === STEP 17: INTENT CLASSIFICATION AND AGENT ROUTING ===
+        print(f"🧠 Starting intent classification and agent routing...")
         await self._route_message_with_intent(client, message, chat_id, processed_text, reply_to_telegram_message_id)
 
     async def _process_missed_messages_through_agent(self, client, chat_id: int, message, processed_text: str, reply_to_telegram_message_id):
@@ -353,10 +426,27 @@ class MessageHandler:
         return is_mentioned, processed_text
 
     async def _classify_message_intent(self, processed_text: str, message, chat_id: int):
-        """Classify message intent using Ollama-based classification."""
+        """
+        Classify message intent using multi-tier classification system.
+        
+        Classification hierarchy:
+        1. Primary: Ollama (granite3.2-vision) - Local, privacy-preserving
+        2. Fallback: GPT-3.5 Turbo - High quality when Ollama fails
+        3. Last resort: Rule-based classification - Always available
+        
+        Args:
+            processed_text: Cleaned message text for classification
+            message: Telegram message object for context extraction
+            chat_id: Chat identifier for logging
+            
+        Returns:
+            IntentResult with intent, confidence, reasoning, and suggested emoji
+        """
+        print(f"🧠 INTENT CLASSIFICATION START for chat {chat_id}")
         from ..ollama_intent import classify_message_intent
         
-        # Prepare context for classification
+        # === STEP 17.2.1: CONTEXT PREPARATION ===
+        print(f"📋 Preparing classification context...")
         context = {
             "chat_id": chat_id,
             "is_group_chat": message.chat.type != ChatType.PRIVATE,
@@ -365,69 +455,135 @@ class MessageHandler:
             "has_links": any(url in processed_text.lower() for url in ["http://", "https://", "www."]),
         }
         
+        print(f"   Context prepared:")
+        print(f"   - Chat type: {'group' if context['is_group_chat'] else 'private'}")
+        print(f"   - Username: {context['username'] or 'unknown'}")
+        print(f"   - Has image: {context['has_image']}")
+        print(f"   - Has links: {context['has_links']}")
+        print(f"   - Text length: {len(processed_text)} chars")
+        
+        # === STEP 17.2.2: INTENT CLASSIFICATION EXECUTION ===
+        print(f"🔮 Executing intent classification (Ollama → GPT-3.5 → Rule-based)...")
         try:
-            # Classify the message intent
             intent_result = await classify_message_intent(processed_text, context)
             
-            print(f"🧠 Intent classified: {intent_result.intent.value} "
-                  f"(confidence: {intent_result.confidence:.2f}) - {intent_result.reasoning}")
+            print(f"✅ Intent classification successful:")
+            print(f"   Intent: {intent_result.intent.value}")
+            print(f"   Confidence: {intent_result.confidence:.2f}")
+            print(f"   Reasoning: {intent_result.reasoning}")
+            print(f"   Suggested emoji: {intent_result.suggested_emoji}")
             
             return intent_result
             
         except Exception as e:
+            # === STEP 17.2.3: ERROR HANDLING AND LOGGING ===
             error_msg = str(e) if str(e).strip() else f"{type(e).__name__}: {repr(e)}"
-            print(f"Warning: Intent classification failed: {error_msg}")
-            # Fallback to unclear intent
+            if not error_msg.strip():
+                error_msg = f"Unknown {type(e).__name__} exception occurred"
+            
+            print(f"❌ Intent classification failed: {error_msg}")
+            import traceback
+            print(f"Full error traceback:")
+            print(traceback.format_exc())
+            
+            # === STEP 17.2.4: FALLBACK INTENT RESULT ===
+            print(f"🔄 Creating fallback intent result...")
             from ..ollama_intent import IntentResult, MessageIntent
-            return IntentResult(
+            fallback_result = IntentResult(
                 intent=MessageIntent.UNCLEAR,
                 confidence=0.5,
                 reasoning=f"Classification failed: {error_msg}",
                 suggested_emoji="🤔"
             )
+            
+            print(f"   Fallback intent: {fallback_result.intent.value}")
+            print(f"   Fallback confidence: {fallback_result.confidence}")
+            
+            return fallback_result
 
     async def _handle_with_valor_agent_intent(self, message, chat_id: int, processed_text: str, 
                                             reply_to_telegram_message_id: int = None, intent_result=None):
-        """Handle messages using valor agent system with intent-based configuration."""
+        """
+        Process message through Valor agent with intent-specific configuration.
+        
+        This method handles the complete agent processing pipeline:
+        1. Priority question detection
+        2. Notion context retrieval (group-specific or priority-based)
+        3. Chat history preparation with reply context
+        4. Agent execution with intent context
+        5. Response processing and delivery
+        
+        Args:
+            message: Telegram message object
+            chat_id: Chat identifier
+            processed_text: Cleaned message text
+            reply_to_telegram_message_id: Optional ID of replied message
+            intent_result: Intent classification result
+        """
+        print(f"🤖 VALOR AGENT PROCESSING START for chat {chat_id}")
+        print(f"   Intent: {intent_result.intent.value if intent_result else 'unknown'}")
+        print(f"   Confidence: {intent_result.confidence if intent_result else 'N/A'}")
+        
         try:
-            # Use valor agent for message processing with intent context
             from agents.valor.handlers import handle_telegram_message_with_intent
 
-            # Determine if this might be a priority question for context
+            # === STEP 17.4.1: PRIORITY QUESTION DETECTION ===
+            print(f"🎯 Checking if message is a priority question...")
             is_priority = (
                 is_user_priority_question(processed_text)
                 if "is_user_priority_question" in globals()
                 else False
             )
+            print(f"   Is priority question: {is_priority}")
 
-            # Get notion data - prioritize group-specific database, fallback to priority question detection
+            # === STEP 17.4.2: NOTION CONTEXT RETRIEVAL ===
+            print(f"📝 Retrieving Notion context...")
             notion_data = None
             if self.notion_scout:
                 try:
-                    # For group chats, use the group-specific Notion database
                     is_private_chat = message.chat.type == ChatType.PRIVATE
                     if not is_private_chat:
+                        print(f"   Group chat detected - fetching group-specific Notion data...")
                         notion_data = await self._get_notion_context_for_group(chat_id, processed_text)
-                    # For DMs or if no group-specific database, check if it's a priority question
                     elif is_priority:
+                        print(f"   Priority question in DM - fetching Notion data...")
                         notion_data = await self._get_notion_context(processed_text)
+                    else:
+                        print(f"   No Notion context needed for this message")
+                    
+                    if notion_data:
+                        print(f"   ✅ Notion context retrieved ({len(notion_data)} chars)")
+                    else:
+                        print(f"   ⚪ No Notion context available")
+                        
                 except Exception as e:
-                    print(f"Warning: Could not get Notion context: {e}")
+                    print(f"   ⚠️  Could not get Notion context: {e}")
 
-            # Get chat history for context with reply priority
+            # === STEP 17.4.3: CHAT HISTORY PREPARATION ===
+            print(f"📚 Preparing chat history context...")
             reply_internal_id = None
             if reply_to_telegram_message_id:
                 reply_internal_id = self.chat_history.get_internal_message_id(chat_id, reply_to_telegram_message_id)
+                print(f"   Reply detected - Telegram ID {reply_to_telegram_message_id} → Internal ID {reply_internal_id}")
             
             if reply_internal_id:
-                print(f"🔗 Using reply-aware context for message replying to internal ID {reply_internal_id} (Telegram ID: {reply_to_telegram_message_id})")
+                print(f"   Using reply-aware context prioritizing message {reply_internal_id}")
                 chat_history = self.chat_history.get_context_with_reply_priority(
                     chat_id, reply_internal_id, max_context_messages=10
                 )
             else:
+                print(f"   Using standard context (no reply)")
                 chat_history = self.chat_history.get_context(chat_id, max_context_messages=10)
+            
+            history_count = len(chat_history) if chat_history else 0
+            print(f"   Chat history prepared: {history_count} messages")
 
-            # Call the intent-aware handler
+            # === STEP 17.4.4: AGENT EXECUTION ===
+            print(f"🚀 Executing Valor agent with intent context...")
+            print(f"   Message length: {len(processed_text)} chars")
+            print(f"   Username: {message.from_user.username if message.from_user else 'unknown'}")
+            print(f"   Chat type: {'group' if message.chat.type != ChatType.PRIVATE else 'private'}")
+            
             answer = await handle_telegram_message_with_intent(
                 message=processed_text,
                 chat_id=chat_id,
@@ -439,44 +595,87 @@ class MessageHandler:
                 intent_result=intent_result,
             )
 
-            # Process the agent response (handles both images and text)
+            # === STEP 17.4.5: RESPONSE VALIDATION AND PROCESSING ===
+            print(f"📤 Processing agent response...")
+            if answer:
+                print(f"   ✅ Agent returned response ({len(answer)} chars)")
+                print(f"   Response preview: {answer[:100]}..." if len(answer) > 100 else f"   Response: {answer}")
+            else:
+                print(f"   ⚠️  Agent returned empty response")
+            
             await self._process_agent_response(message, chat_id, answer)
+            print(f"✅ VALOR AGENT PROCESSING COMPLETE for chat {chat_id}")
 
         except Exception as e:
-            # Fallback to regular handler if intent-aware handler fails
-            print(f"Intent-aware handler failed, falling back to regular handler: {e}")
+            print(f"❌ Intent-aware agent processing failed: {e}")
+            import traceback
+            print(f"Full error traceback:")
+            print(traceback.format_exc())
+            print(f"🔄 Falling back to regular handler...")
             await self._handle_with_valor_agent(message, chat_id, processed_text, reply_to_telegram_message_id)
 
     async def _route_message_with_intent(self, client, message, chat_id: int, processed_text: str, reply_to_telegram_message_id: int = None):
-        """Route message with intent classification and preprocessing."""
+        """
+        Route message through intent classification pipeline.
+        
+        This method orchestrates the complete message processing workflow:
+        1. System command detection (ping, etc.)
+        2. Intent classification via Ollama/GPT-3.5/rule-based fallback
+        3. Intent-specific reaction addition
+        4. Message processing via Valor agent with intent context
+        5. Completion/error reaction management
+        
+        Args:
+            client: Telegram client instance
+            message: Telegram message object
+            chat_id: Chat identifier
+            processed_text: Cleaned message text (mentions removed)
+            reply_to_telegram_message_id: Optional ID of message being replied to
+        """
+        print(f"🚦 INTENT ROUTING PIPELINE START for chat {chat_id}")
         text = processed_text.lower().strip()
 
-        # Keep ping-pong for health check (skip intent classification for system commands)
+        # === STEP 17.1: SYSTEM COMMAND DETECTION ===
+        print(f"⚡ Checking for system commands...")
         if text == "ping":
+            print(f"🏓 PING COMMAND detected - routing to ping handler")
             await self._handle_ping(message, chat_id)
             return
 
-        # Perform intent classification
+        # === STEP 17.2: INTENT CLASSIFICATION ===
+        print(f"🧠 Starting intent classification for: '{processed_text[:50]}...'")
         intent_result = await self._classify_message_intent(processed_text, message, chat_id)
         
-        # Add intent-specific reaction
+        print(f"🎯 Intent classification result:")
+        print(f"   Intent: {intent_result.intent.value}")
+        print(f"   Confidence: {intent_result.confidence:.2f}")
+        print(f"   Reasoning: {intent_result.reasoning}")
+        print(f"   Suggested emoji: {intent_result.suggested_emoji}")
+        
+        # === STEP 17.3: INTENT REACTION ADDITION ===
+        print(f"😊 Adding intent-specific reaction ({intent_result.suggested_emoji})...")
         from .reaction_manager import add_intent_based_reaction
         try:
             await add_intent_based_reaction(client, chat_id, message.id, intent_result)
+            print(f"✅ Intent reaction added successfully")
         except Exception as e:
-            print(f"Warning: Could not add intent reaction: {e}")
+            print(f"⚠️  Could not add intent reaction: {e}")
 
-        # Process message with intent-based configuration
+        # === STEP 17.4: AGENT PROCESSING WITH INTENT CONTEXT ===
+        print(f"🤖 Starting Valor agent processing with intent context...")
         success = False
         try:
-            # Use valor_agent with intent-specific configuration
             await self._handle_with_valor_agent_intent(message, chat_id, processed_text, reply_to_telegram_message_id, intent_result)
             success = True
+            print(f"✅ Agent processing completed successfully")
         except Exception as e:
-            print(f"Error processing message with intent {intent_result.intent.value}: {e}")
+            print(f"❌ Agent processing failed for intent {intent_result.intent.value}: {e}")
+            import traceback
+            print(f"Full traceback: {traceback.format_exc()}")
             success = False
         
-        # Add completion/error reaction
+        # === STEP 17.5: COMPLETION REACTION MANAGEMENT ===
+        print(f"🏁 Adding completion reaction (success: {success})...")
         from .reaction_manager import complete_reaction_sequence
         try:
             await complete_reaction_sequence(client, chat_id, message.id, intent_result, success)

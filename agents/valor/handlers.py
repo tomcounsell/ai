@@ -59,178 +59,37 @@ def _detect_mixed_content(message: str) -> bool:
     return False
 
 
-
-async def handle_telegram_message(
+def _build_enhanced_message_context(
     message: str,
     chat_id: int,
-    username: str | None = None,
-    is_group_chat: bool = False,
-    chat_history_obj=None,
-    notion_data: str | None = None,
-    is_priority_question: bool = False,
+    chat_history_obj,
+    notion_data: str | None,
+    is_priority_question: bool,
+    intent_result=None
 ) -> str:
-    """Handle a Telegram message using the PydanticAI agent with proper message history.
-
-    This is the main entry point for processing Telegram messages through the
-    Valor Engels AI agent. It manages conversation context, integrates chat history,
-    and orchestrates responses using the agent's available tools.
-
-    The function:
-    1. Creates a ValorContext with the provided information
-    2. Builds an enhanced message with recent conversation context
-    3. Processes the message through the PydanticAI agent
-    4. Returns the agent's response for sending back to Telegram
-
-    Args:
-        message: The user's message text to process.
-        chat_id: Unique Telegram chat identifier.
-        username: Optional Telegram username of the sender.
-        is_group_chat: Whether this message is from a group chat.
-        chat_history_obj: ChatHistoryManager instance for conversation history.
-        notion_data: Optional Notion project data for priority questions.
-        is_priority_question: Whether this is asking about work priorities.
-
-    Returns:
-        str: The agent's response message ready for sending to Telegram.
-
-    Example:
-        >>> response = await handle_telegram_message(
-        ...     "What's the weather like?", 12345, "user123"
-        ... )
-        >>> type(response)
-        <class 'str'>
     """
-
-    # Prepare context
-    context = ValorContext(
-        chat_id=chat_id,
-        username=username,
-        is_group_chat=is_group_chat,
-        chat_history=[],  # Legacy field, now handled by message_history
-        chat_history_obj=chat_history_obj,  # Pass the history manager for search tools
-        notion_data=notion_data,
-        is_priority_question=is_priority_question,
-    )
-
-    # Add contextual information to the user message if needed
-    enhanced_message = message
+    Build enhanced message with context information.
     
-    # Detect if this message contains both text and image components
+    Args:
+        message: Original user message
+        chat_id: Chat identifier
+        chat_history_obj: Chat history manager
+        notion_data: Optional Notion project data
+        is_priority_question: Whether this is a priority question
+        intent_result: Optional intent classification result
+        
+    Returns:
+        str: Enhanced message with context
+    """
+    # Detect mixed content
     has_mixed_content = _detect_mixed_content(message)
     if has_mixed_content:
         print(f"🖼️📝 MIXED CONTENT DETECTED: Message contains both text and image for chat {chat_id}")
         print(f"Message preview: {message[:100]}..." if len(message) > 100 else f"Message: {message}")
 
-    # Build enhanced message with context - always include chat history when available
     context_parts = []
     
-    # Add recent chat context for continuity (always include if available)
-    if chat_history_obj:
-        telegram_messages = chat_history_obj.get_context(
-            chat_id, 
-            max_context_messages=8,  # Up to 8 messages total
-            max_age_hours=6,         # Only messages from last 6 hours
-            always_include_last=2    # Always include last 2 messages regardless of age
-        )
-        if telegram_messages:
-            context_text = "Recent conversation:\n"
-            for msg in telegram_messages:
-                context_text += f"{msg['role']}: {msg['content']}\n"
-            context_parts.append(context_text)
-    
-    # Include Notion data for priority questions (in addition to chat context)
-    if is_priority_question and notion_data and "Error" not in notion_data:
-        context_parts.append(f"Current project data:\n{notion_data}")
-    
-    # Combine all context with the current message
-    if context_parts:
-        if has_mixed_content:
-            enhanced_message = "\n\n".join(context_parts) + f"\n\n🖼️📝 CURRENT MESSAGE (MIXED CONTENT - text+image): {message}"
-        else:
-            enhanced_message = "\n\n".join(context_parts) + f"\n\nCurrent message: {message}"
-    else:
-        if has_mixed_content:
-            enhanced_message = f"🖼️📝 MIXED CONTENT MESSAGE (text+image): {message}"
-        else:
-            enhanced_message = message
-
-    # Run the agent
-    result = await valor_agent.run(enhanced_message, deps=context)
-
-    return result.output
-
-
-async def handle_telegram_message_with_intent(
-    message: str,
-    chat_id: int,
-    username: str | None = None,
-    is_group_chat: bool = False,
-    chat_history_obj=None,
-    notion_data: str | None = None,
-    is_priority_question: bool = False,
-    intent_result=None,
-) -> str:
-    """Handle a Telegram message with intent-based preprocessing and optimization.
-
-    This enhanced version of the message handler integrates intent classification
-    to optimize tool usage, system prompts, and response strategies.
-
-    Args:
-        message: The user's message text to process.
-        chat_id: Unique Telegram chat identifier.
-        username: Optional Telegram username of the sender.
-        is_group_chat: Whether this message is from a group chat.
-        chat_history_obj: ChatHistoryManager instance for conversation history.
-        notion_data: Optional Notion project data for priority questions.
-        is_priority_question: Whether this is asking about work priorities.
-        intent_result: IntentResult from intent classification.
-
-    Returns:
-        str: The agent's response message optimized for the detected intent.
-    """
-    from integrations.intent_tools import get_claude_code_configuration
-    from integrations.intent_prompts import get_intent_system_prompt
-
-    # Prepare enhanced context with intent information
-    context = ValorContext(
-        chat_id=chat_id,
-        username=username,
-        is_group_chat=is_group_chat,
-        chat_history=[],  # Legacy field, now handled by message_history
-        chat_history_obj=chat_history_obj,  # Pass the history manager for search tools
-        notion_data=notion_data,
-        is_priority_question=is_priority_question,
-        intent_result=intent_result,  # Add intent information to context
-    )
-
-    # Generate intent-specific system prompt
-    prompt_context = {
-        "chat_id": chat_id,
-        "username": username,
-        "is_group_chat": is_group_chat,
-        "has_image": "[Image" in message or "image file path:" in message.lower(),
-        "has_links": any(url in message.lower() for url in ["http://", "https://", "www."]),
-    }
-    
-    if intent_result:
-        intent_system_prompt = get_intent_system_prompt(intent_result, prompt_context)
-        print(f"🎯 Using intent-specific system prompt for {intent_result.intent.value}")
-    else:
-        intent_system_prompt = None
-
-    # Add contextual information to the user message if needed
-    enhanced_message = message
-    
-    # Detect if this message contains both text and image components
-    has_mixed_content = _detect_mixed_content(message)
-    if has_mixed_content:
-        print(f"🖼️📝 MIXED CONTENT DETECTED: Message contains both text and image for chat {chat_id}")
-        print(f"Message preview: {message[:100]}..." if len(message) > 100 else f"Message: {message}")
-
-    # Build enhanced message with context - always include chat history when available
-    context_parts = []
-    
-    # Add intent information to context
+    # Add intent information to context if available
     if intent_result:
         intent_info = f"Detected Intent: {intent_result.intent.value} (confidence: {intent_result.confidence:.2f})"
         if intent_result.reasoning:
@@ -258,78 +117,164 @@ async def handle_telegram_message_with_intent(
     # Combine all context with the current message
     if context_parts:
         if has_mixed_content:
-            enhanced_message = "\n\n".join(context_parts) + f"\n\n🖼️📝 CURRENT MESSAGE (MIXED CONTENT - text+image): {message}"
+            return "\n\n".join(context_parts) + f"\n\n🖼️📝 CURRENT MESSAGE (MIXED CONTENT - text+image): {message}"
         else:
-            enhanced_message = "\n\n".join(context_parts) + f"\n\nCurrent message: {message}"
+            return "\n\n".join(context_parts) + f"\n\nCurrent message: {message}"
     else:
         if has_mixed_content:
-            enhanced_message = f"🖼️📝 MIXED CONTENT MESSAGE (text+image): {message}"
+            return f"🖼️📝 MIXED CONTENT MESSAGE (text+image): {message}"
         else:
-            enhanced_message = message
+            return message
 
-    # Modify agent behavior based on intent (if available)
-    if intent_result and intent_system_prompt:
-        # Store original system prompt
-        original_system_prompt = valor_agent.system_prompt
-        
-        try:
-            # Temporarily use intent-specific system prompt
-            valor_agent.system_prompt = intent_system_prompt
-            
-            # Run the agent with intent-optimized configuration
-            result = await valor_agent.run(enhanced_message, deps=context)
-            
-            return result.output
-            
-        finally:
-            # Restore original system prompt
-            valor_agent.system_prompt = original_system_prompt
+
+
+async def handle_telegram_message(
+    message: str,
+    chat_id: int,
+    username: str | None = None,
+    is_group_chat: bool = False,
+    chat_history_obj=None,
+    notion_data: str | None = None,
+    is_priority_question: bool = False,
+    intent_result=None,
+) -> str:
+    """Handle a Telegram message using the PydanticAI agent with proper message history.
+
+    This is the unified entry point for processing Telegram messages through the
+    Valor Engels AI agent. It manages conversation context, integrates chat history,
+    and orchestrates responses using the agent's available tools.
+
+    The function:
+    1. Creates a ValorContext with the provided information
+    2. Builds an enhanced message with recent conversation context
+    3. Processes the message through the PydanticAI agent with optional intent optimization
+    4. Returns the agent's response for sending back to Telegram
+
+    Args:
+        message: The user's message text to process.
+        chat_id: Unique Telegram chat identifier.
+        username: Optional Telegram username of the sender.
+        is_group_chat: Whether this message is from a group chat.
+        chat_history_obj: ChatHistoryManager instance for conversation history.
+        notion_data: Optional Notion project data for priority questions.
+        is_priority_question: Whether this is asking about work priorities.
+        intent_result: Optional IntentResult from intent classification for optimization.
+
+    Returns:
+        str: The agent's response message ready for sending to Telegram.
+
+    Example:
+        >>> response = await handle_telegram_message(
+        ...     "What's the weather like?", 12345, "user123"
+        ... )
+        >>> type(response)
+        <class 'str'>
+    """
+    
+    # Log intent information if available
+    if intent_result:
+        print(f"🔧 INTENT-AWARE HANDLER START for chat {chat_id}")
+        print(f"   Intent: {intent_result.intent.value}")
+        print(f"   Confidence: {intent_result.confidence:.2f}")
     else:
-        # Run with default configuration
+        print(f"🤖 STANDARD HANDLER START for chat {chat_id}")
+
+    # Prepare context
+    context = ValorContext(
+        chat_id=chat_id,
+        username=username,
+        is_group_chat=is_group_chat,
+        chat_history=[],  # Legacy field, now handled by message_history
+        chat_history_obj=chat_history_obj,  # Pass the history manager for search tools
+        notion_data=notion_data,
+        is_priority_question=is_priority_question,
+        intent_result=intent_result,  # Add intent information to context
+    )
+
+    # Build enhanced message with context
+    enhanced_message = _build_enhanced_message_context(
+        message, chat_id, chat_history_obj, notion_data, is_priority_question, intent_result
+    )
+    
+    # Handle intent-specific system prompt if available
+    intent_system_prompt = None
+    if intent_result:
+        try:
+            print(f"📦 Importing intent-specific modules...")
+            from integrations.intent_tools import get_claude_code_configuration
+            from integrations.intent_prompts import get_intent_system_prompt
+            print(f"✅ Intent modules imported successfully")
+            
+            print(f"🎯 Generating intent-specific system prompt...")
+            prompt_context = {
+                "chat_id": chat_id,
+                "username": username,
+                "is_group_chat": is_group_chat,
+                "has_image": "[Image" in message or "image file path:" in message.lower(),
+                "has_links": any(url in message.lower() for url in ["http://", "https://", "www."]),
+            }
+            intent_system_prompt = get_intent_system_prompt(intent_result, prompt_context)
+            print(f"🎯 Using intent-specific system prompt for {intent_result.intent.value}")
+        except Exception as e:
+            print(f"⚠️ Failed to load intent-specific prompt: {e}")
+            intent_system_prompt = None
+
+    # Run the agent with error handling and optional intent optimization
+    original_system_prompt = None
+    try:
+        # Handle intent-specific system prompt if available
+        if intent_result and intent_system_prompt:
+            print(f"🚀 Starting Valor agent execution with intent-specific prompt...")
+            original_system_prompt = valor_agent.system_prompt
+            valor_agent.system_prompt = intent_system_prompt
+        else:
+            print(f"🚀 Starting Valor agent execution with default prompt...")
+        
+        print(f"⏳ Executing agent.run() with enhanced message ({len(enhanced_message)} chars)...")
         result = await valor_agent.run(enhanced_message, deps=context)
+        print(f"✅ Agent execution completed successfully")
+        
+        if not result or not hasattr(result, 'output') or not result.output:
+            print(f"⚠️ Agent returned empty result for chat {chat_id}")
+            return "I processed your message but didn't generate a response. Please try again."
+        
+        print(f"📤 Agent response length: {len(result.output)} chars")
         return result.output
+        
+    except Exception as e:
+        error_msg = f"Error running valor_agent: {str(e)}"
+        print(f"❌ {error_msg}")
+        import traceback
+        traceback.print_exc()
+        return f"I encountered an error processing your message: {str(e)}"
+    
+    finally:
+        # Restore original system prompt if it was modified
+        if original_system_prompt is not None:
+            valor_agent.system_prompt = original_system_prompt
 
 
-# Convenience functions for backward compatibility with existing handlers
+# Backward compatibility alias - now points to the unified handler
+handle_telegram_message_with_intent = handle_telegram_message
 
+
+# Backward compatibility functions - simplified wrappers around unified handler
 
 async def handle_user_priority_question(
     question: str, chat_id: int, chat_history_obj, notion_scout=None, username: str | None = None
 ) -> str:
-    """Handle user priority questions using PydanticAI agent with message history.
-
-    This function provides backward compatibility for the previous handler system
-    while routing priority questions through the new PydanticAI agent. It checks
-    for project context and optionally integrates Notion data.
-
-    Args:
-        question: The user's priority-related question.
-        chat_id: Telegram chat identifier.
-        chat_history_obj: ChatHistoryManager instance for context.
-        notion_scout: Optional NotionScout instance for project data.
-        username: Optional Telegram username.
-
-    Returns:
-        str: Agent response addressing the priority question.
-    """
-
+    """Handle user priority questions - wrapper for backward compatibility."""
     # Check if there's project context in recent conversation
-    context_has_project_info = False
-    if chat_history_obj:
-        context_messages = chat_history_obj.get_context(chat_id)
-        for msg in context_messages[-5:]:
-            if any(
-                keyword in msg["content"].lower()
-                for keyword in ["project", "task", "working on", "psyoptimal", "flextrip"]
-            ):
-                context_has_project_info = True
-                break
-
-    # Get Notion data if needed and available
     notion_data = None
-    if notion_scout and not context_has_project_info:
-        # Note: Notion scout calls would need to be converted to async
-        notion_data = "Notion data unavailable in current implementation"
+    if notion_scout and chat_history_obj:
+        context_messages = chat_history_obj.get_context(chat_id)
+        context_has_project_info = any(
+            keyword in msg["content"].lower()
+            for msg in context_messages[-5:]
+            for keyword in ["project", "task", "working on", "psyoptimal", "flextrip"]
+        )
+        if not context_has_project_info:
+            notion_data = "Notion data unavailable in current implementation"
 
     return await handle_telegram_message(
         message=question,
@@ -344,22 +289,7 @@ async def handle_user_priority_question(
 async def handle_general_question(
     question: str, chat_id: int, chat_history_obj, username: str | None = None
 ) -> str:
-    """Handle general questions using PydanticAI agent with message history.
-
-    This function provides backward compatibility for the previous handler system
-    while routing general questions through the new PydanticAI agent. It's used
-    for non-priority conversations and casual interactions.
-
-    Args:
-        question: The user's general question or message.
-        chat_id: Telegram chat identifier.
-        chat_history_obj: ChatHistoryManager instance for context.
-        username: Optional Telegram username.
-
-    Returns:
-        str: Agent response to the general question.
-    """
-
+    """Handle general questions - wrapper for backward compatibility."""
     return await handle_telegram_message(
         message=question,
         chat_id=chat_id,
