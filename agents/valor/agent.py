@@ -480,7 +480,25 @@ def query_notion_projects(
         result = query_psyoptimal_workspace(question)
         return result
     except Exception as e:
-        return f"❌ Error querying PsyOPTIMAL workspace: {str(e)}\n\nPlease ensure your Notion API integration is properly configured."
+        error_str = str(e)
+        
+        # Handle specific error types with user-friendly messages
+        if "Connection" in error_str or "connection" in error_str:
+            return "❌ Connection error: Cannot reach Notion API. Check internet connection."
+        elif "timeout" in error_str.lower() or "timed out" in error_str.lower():
+            return "❌ Timeout error: Notion query took too long. Try a simpler question."
+        elif "NOTION_API_KEY" in error_str or "api key" in error_str.lower():
+            return "❌ Authentication error: Check NOTION_API_KEY configuration."
+        elif "ANTHROPIC_API_KEY" in error_str or "anthropic" in error_str.lower():
+            return "❌ AI Analysis error: Check ANTHROPIC_API_KEY configuration."
+        elif "Unknown workspace" in error_str:
+            return f"❌ Workspace error: {error_str}"
+        else:
+            # Log unexpected errors for debugging
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Unexpected notion query error: {error_str}")
+            return f"❌ Error querying PsyOPTIMAL workspace: {error_str}\n\nPlease ensure your Notion API integration is properly configured."
 
 
 @valor_agent.tool

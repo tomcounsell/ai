@@ -150,7 +150,7 @@ class TestNotionToolsMCP:
     def test_query_notion_projects_workspace_alias(self):
         """Test query_notion_projects resolves workspace aliases."""
         with patch.dict(os.environ, {"NOTION_API_KEY": "test_key", "ANTHROPIC_API_KEY": "test_key"}):
-            with patch("mcp_servers.notion_tools.NotionQueryEngine") as mock_engine:
+            with patch("integrations.notion.query_engine.NotionQueryEngine") as mock_engine:
                 mock_instance = Mock()
                 mock_instance.query_workspace.return_value = "Mocked response"
                 mock_engine.return_value = mock_instance
