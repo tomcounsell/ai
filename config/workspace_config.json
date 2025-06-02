@@ -62,7 +62,7 @@
       "description": "DeckFusion development tasks and management",
       "workspace_type": "deckfusion",
       "working_directory": "/Users/valorengels/src/deckfusion",
-      "telegram_chat_ids": ["-4851227604"],
+      "telegram_chat_ids": ["-1002553869320"],
       "aliases": ["deckfusion dev", "DF dev"],
       "is_dev_group": true
     },
@@ -89,7 +89,7 @@
   "telegram_groups": {
     "-1002600253717": "PsyOPTIMAL",
     "-4897329503": "PsyOPTIMAL Dev",
-    "-4851227604": "DeckFusion Dev",
+    "-1002553869320": "DeckFusion Dev",
     "-4891178445": "Yudame Dev",
     "-4719889199": "Yudame",
     "-1002374450243": "Tom's Team",
