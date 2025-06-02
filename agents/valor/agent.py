@@ -128,7 +128,7 @@ Example: If tool returns "TELEGRAM_IMAGE_GENERATED|/path/image.png|Caption here"
 
 
 @valor_agent.tool
-def search_current_info(ctx: RunContext[ValorContext], query: str) -> str:
+def search_current_info(ctx: RunContext[ValorContext], query: str, max_results: int = 3) -> str:
     """Search for current information on the web using Perplexity AI.
 
     This tool enables the Valor agent to access up-to-date information from
@@ -142,18 +142,31 @@ def search_current_info(ctx: RunContext[ValorContext], query: str) -> str:
     - Recent research or publications
     - Any information that might have changed recently
 
+    Common error scenarios:
+    - Returns "Search unavailable" if PERPLEXITY_API_KEY is not configured
+    - Returns "Search error" for network issues or API problems  
+    - Returns "Search timeout" if query takes too long to process
+
     Args:
         ctx: The runtime context containing conversation information.
         query: The search query to find current information about.
+        max_results: Maximum number of results (kept for compatibility, not used by Perplexity).
 
     Returns:
-        str: Current information from web search formatted for conversation.
+        str: Current information from web search formatted for conversation, or error message if search fails.
 
     Example:
         >>> search_current_info(ctx, "Python 3.12 new features")
         '🔍 **Python 3.12 new features**\n\nPython 3.12 includes...'
     """
-    return search_web(query)
+    # Add input validation
+    if not query or not query.strip():
+        return "🔍 Search error: Please provide a search query."
+    
+    if len(query) > 500:
+        return "🔍 Search error: Query too long (maximum 500 characters)."
+    
+    return search_web(query, max_results)
 
 
 @valor_agent.tool
