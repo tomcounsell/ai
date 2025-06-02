@@ -126,12 +126,18 @@ def search_current_info(ctx: RunContext[ValorContext], query: str) -> str:
 - **Integration Testing**: Tool works within the agent ecosystem
 - **Performance Testing**: Tool performs within acceptable time limits
 
-**Testing Approaches** (choose what fits):
-- Unit tests for core logic
-- Integration tests with live services
-- Mock tests for external dependencies
-- Manual testing scenarios
-- Automated test suites
+**Testing Approaches** (prioritized by effectiveness):
+1. **Real Integration Tests**: Use actual database, file system, and internal services
+2. **Minimal External Mocking**: Only mock external API calls (Perplexity, OpenAI, etc.)
+3. **Unit Tests for Utilities**: Test isolated functions with real implementations
+4. **Manual Testing Scenarios**: End-to-end validation with actual usage
+5. **Automated Test Suites**: Comprehensive coverage with fast execution
+
+**Testing Philosophy**: 
+- **Mock only when absolutely necessary** - external APIs and services outside our control
+- **Use real implementations** for databases, file operations, and internal logic
+- **Test the actual code paths** that will run in production
+- **Validate integration points** with real data and real database operations
 
 ### 3.2 Agent Integration Testing
 
@@ -148,14 +154,27 @@ def search_current_info(ctx: RunContext[ValorContext], query: str) -> str:
 
 **Testing Approach for Agent Tools**:
 ```python
-# Create mock RunContext for testing agent tools
-class MockRunContext:
-    def __init__(self, deps):
-        self.deps = deps
+# Use lightweight mock only for RunContext - everything else should be real
+from unittest.mock import MagicMock
 
-mock_context = MockRunContext(ValorContext(chat_id=12345, username="test"))
-result = agent_tool_function(mock_context, "test input")
+def test_agent_tool_integration():
+    """Test agent tool with minimal mocking."""
+    # Only mock the RunContext - use real implementations for everything else
+    mock_ctx = MagicMock()
+    mock_ctx.deps.chat_id = 12345
+    mock_ctx.deps.username = "test_user"
+    
+    # Test calls real database, real file operations, real business logic
+    result = agent_tool_function(mock_ctx, "test input")
+    
+    # Verify results using real database queries
+    assert "expected content" in result
 ```
+
+**What to Mock vs. What to Keep Real**:
+- ✅ **Mock**: External APIs (OpenAI, Perplexity), RunContext for agent tools
+- ✅ **Keep Real**: Databases, file operations, internal business logic, utility functions
+- ✅ **Keep Real**: Error handling, validation, formatting, data processing
 
 ### 3.3 Regression Testing
 
@@ -451,12 +470,20 @@ Priority: [Critical/High/Medium/Low]
 - **Test for hanging/blocking issues** especially with external processes
 
 ### Testing
-- Test both happy path and error conditions
-- Include integration testing with agent
-- Test with realistic data and scenarios
-- Validate performance under load
+- **Use real implementations wherever possible** - databases, file operations, business logic
+- **Mock only external APIs** - OpenAI, Perplexity, and services outside our control
+- **Mock lightweight interfaces** - RunContext for agent integration tests
+- Test both happy path and error conditions with real data flows
+- Include integration testing with actual database operations
+- Test with realistic data and scenarios using production-like setup
+- Validate performance under load with real systems
 - **Add specific tests for recently fixed issues** to prevent regressions
-- **Test agent integration with mock RunContext** when needed
+
+### Testing Anti-Patterns to Avoid
+- ❌ **Over-mocking**: Don't mock database connections, file operations, or internal logic
+- ❌ **Complex mock setups**: If your mock setup is complicated, use the real thing instead
+- ❌ **Mocking what you own**: Mock external services, not your own code
+- ❌ **Mock-heavy tests**: Tests with more mock setup than actual testing are red flags
 
 ### Documentation
 - Write for both agent and human audiences
@@ -466,7 +493,42 @@ Priority: [Critical/High/Medium/Low]
 - **Document architectural decisions** especially for recent fixes
 - **Update docstrings immediately** when implementation changes
 
-### Audit Process Lessons
+### Recent Audit Lessons (save_link_for_later - December 2024)
+
+**Key Learning: Mock Only When Absolutely Necessary**
+
+During the `save_link_for_later` audit, we discovered that excessive mocking made tests fragile and didn't validate real functionality:
+
+**What Worked Well:**
+- ✅ **Mocking only external APIs** (Perplexity) while using real database operations
+- ✅ **Testing with actual SQLite database** to validate storage and retrieval
+- ✅ **Using real utility functions** to test URL extraction and validation
+- ✅ **Lightweight RunContext mocking** for agent integration tests
+
+**What We Avoided:**
+- ❌ Complex database connection mocking that didn't test real behavior
+- ❌ Over-engineered context manager mocking that obscured actual issues
+- ❌ Mocking internal business logic that needed real validation
+
+**Testing Pattern That Emerged:**
+```python
+@patch('tools.link_analysis_tool.analyze_url_content')  # External API only
+def test_store_link_with_analysis_success(self, mock_analyze):
+    # Mock external API response
+    mock_analyze.return_value = {'title': 'Test', 'main_topic': 'Testing'}
+    
+    # Use real database, real validation, real business logic
+    result = store_link_with_analysis("https://example.com")
+    self.assertTrue(result)
+    
+    # Verify with real database query
+    search_result = search_stored_links("example.com")
+    self.assertIn("Test", search_result)
+```
+
+**Result**: 15/15 tests passing with confidence that real functionality works correctly.
+
+### Historical Audit Lessons
 - **Check git history first** for recently fixed tools to understand context
 - **Update documentation immediately** when behavior changes
 - **Create comprehensive tests** for new functionality

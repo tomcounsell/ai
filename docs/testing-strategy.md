@@ -76,7 +76,13 @@ Our test suite validates that the valor_agent makes intelligent decisions based 
 - ❌ Keyword matching (completely eliminated)
 - ❌ Pattern detection (no longer exists)
 - ❌ Static rule validation (replaced with intelligence)
-- ❌ Mock responses (real integrations preferred)
+- ❌ Over-mocked scenarios (real integrations strongly preferred)
+
+**Testing Philosophy - Mock Minimally:**
+- ✅ **Mock only external APIs** - OpenAI, Perplexity, services outside our control
+- ✅ **Use real implementations** - databases, file operations, business logic
+- ✅ **Test actual code paths** - validate what will run in production
+- ❌ **Avoid complex mocking** - if setup is complex, use the real thing
 
 ### Testing Frameworks in Use
 
@@ -125,20 +131,31 @@ class TestTelegramChatAgent:
 
 #### Standard Python Testing
 
-**Pytest Integration**:
+**Pytest Integration - Minimal Mocking Pattern**:
 ```python
-# Current test execution pattern
+# Recommended test pattern - mock only external APIs
 def test_search_tool_basic():
-    """Test search tool functionality."""
-    # Mock external API calls
+    """Test search tool functionality with minimal mocking."""
+    # Mock only the external API call (Perplexity)
     with patch('tools.search_tool.OpenAI') as mock_openai:
         mock_response = Mock()
         mock_response.choices = [Mock(message=Mock(content="Test response"))]
         mock_openai.return_value.chat.completions.create.return_value = mock_response
 
+        # Everything else uses real implementations
         result = search_web("test query")
         assert "🔍" in result
         assert "test query" in result
+
+# Example of what NOT to do - over-mocking
+def test_link_storage_overmocked():
+    """Example of excessive mocking (avoid this pattern)."""
+    # ❌ Don't mock database connections, file operations, etc.
+    with patch('sqlite3.connect'), \
+         patch('pathlib.Path.exists'), \
+         patch('tools.link_analysis_tool.validate_url'):
+        # This test doesn't validate real functionality
+        pass
 ```
 
 ### Current Test Suites

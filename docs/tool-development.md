@@ -191,12 +191,18 @@ from pydantic_ai.models.test import TestModel, FunctionModel
 import pytest
 
 def test_search_tool():
-    """Test search tool with mock responses."""
-
-    # Test the tool function directly
-    result = search_web("test query")
-    assert "🔍" in result
-    assert "test query" in result
+    """Test search tool with minimal external mocking."""
+    
+    # Mock only external API - everything else should be real
+    with patch('tools.search_tool.OpenAI') as mock_openai:
+        mock_response = Mock()
+        mock_response.choices = [Mock(message=Mock(content="Test search result"))]
+        mock_openai.return_value.chat.completions.create.return_value = mock_response
+        
+        # Test the real function with real business logic
+        result = search_web("test query")
+        assert "🔍" in result
+        assert "test query" in result
 
 def test_agent_with_tool():
     """Test agent tool integration."""
@@ -223,6 +229,45 @@ def test_tool_error_handling():
     with patch.dict(os.environ, {}, clear=True):
         result = search_web("test")
         assert "unavailable" in result.lower()
+```
+
+## Testing Best Practices
+
+### Mock Minimally - Test Real Functionality
+
+**Golden Rule**: Only mock external services you don't control. Everything else should use real implementations.
+
+**What to Mock:**
+- ✅ External APIs (OpenAI, Perplexity, GitHub API)
+- ✅ Network requests to third-party services  
+- ✅ RunContext for agent integration tests
+
+**What NOT to Mock:**
+- ❌ Database connections (use real SQLite)
+- ❌ File operations (use real files/temp directories)
+- ❌ Internal business logic and utility functions
+- ❌ Your own modules and functions
+
+### Recommended Testing Pattern
+
+```python
+# ✅ Good: Minimal mocking, real functionality
+@patch('tools.search_tool.OpenAI')  # Only mock external API
+def test_search_tool_complete(self, mock_openai):
+    # Mock external service
+    mock_openai.return_value.chat.completions.create.return_value = mock_response
+    
+    # Use real business logic, real validation, real formatting
+    result = search_web("test query")
+    assert "🔍" in result
+    
+# ❌ Bad: Over-mocking, doesn't test real functionality  
+@patch('tools.link_tool.get_database_connection')
+@patch('tools.link_tool.validate_url')
+@patch('tools.link_tool.datetime')
+def test_link_tool_overmocked(self, mock_datetime, mock_validate, mock_db):
+    # This doesn't test that your actual code works
+    pass
 ```
 
 ### Integration Testing
