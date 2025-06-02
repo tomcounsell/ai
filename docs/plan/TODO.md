@@ -39,9 +39,9 @@ This section tracks the comprehensive audit of all PydanticAI tools in the syste
 - [x] **image_generation_tool.py** ✅ - DALL-E 3 implementation (HIGH - supports create_image)
 - [x] **image_analysis_tool.py** ✅ - AI vision implementation (HIGH - supports analyze_shared_image)
 - [x] **valor_delegation_tool.py** ✅ - Delegation implementation (CRITICAL - recently fixed)
-- [ ] **notion_tool.py** 🔴 - Notion workspace integration (HIGH - supports query_notion_projects)
-- [ ] **link_analysis_tool.py** 🔴 - URL analysis implementation (MEDIUM - supports link tools)
-- [ ] **telegram_history_tool.py** 🔴 - Conversation history implementation (MEDIUM - supports conversation tools)
+- [x] **notion_tool.py** ✅ - Notion workspace integration (HIGH - supports query_notion_projects)
+- [x] **link_analysis_tool.py** ✅ - URL analysis implementation (MEDIUM - supports link tools)
+- [ ] **telegram_history_tool.py** 🟡 - Conversation history implementation (MEDIUM - supports conversation tools)
 
 #### Development & Quality Tools
 - [ ] **documentation_tool.py** 🔴 - Document analysis functionality (MEDIUM)
