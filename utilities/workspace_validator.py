@@ -460,7 +460,7 @@ def validate_chat_whitelist_access(chat_id: int, is_private: bool = False, usern
             
             if not allowed_groups_env:
                 # No groups configured = no groups allowed
-                logger.info(f"Group access denied for chat {chat_id} (no groups configured)")
+                logger.debug(f"Group access denied for chat {chat_id} (no groups configured)")
                 return False
             
             try:
@@ -468,9 +468,9 @@ def validate_chat_whitelist_access(chat_id: int, is_private: bool = False, usern
                 is_allowed = chat_id in allowed_group_ids
                 
                 if is_allowed:
-                    logger.info(f"Group access granted for chat {chat_id} (whitelisted)")
+                    logger.debug(f"Group access granted for chat {chat_id} (whitelisted)")
                 else:
-                    logger.warning(f"Group access denied for chat {chat_id} (not whitelisted)")
+                    logger.debug(f"Group access denied for chat {chat_id} (not whitelisted)")
                 
                 return is_allowed
             except ValueError as e:
@@ -516,7 +516,7 @@ def validate_dm_user_access(username: str, chat_id: int) -> bool:
                 logger.info(f"DM access granted for user ID {chat_id}: {user_info.get('description', 'Whitelisted user ID')}")
                 return True
             else:
-                logger.warning(f"DM access denied for chat {chat_id} (no username provided and user ID not whitelisted)")
+                logger.debug(f"DM access denied for chat {chat_id} (no username provided and user ID not whitelisted)")
                 return False
         
         username_lower = username.lower()
@@ -526,7 +526,7 @@ def validate_dm_user_access(username: str, chat_id: int) -> bool:
             logger.info(f"DM access granted for user @{username} (chat {chat_id}): {user_info.get('description', 'Whitelisted user')}")
             return True
         else:
-            logger.warning(f"DM access denied for user @{username} (chat {chat_id}): not in whitelist")
+            logger.debug(f"DM access denied for user @{username} (chat {chat_id}): not in whitelist")
             return False
             
     except Exception as e:
