@@ -202,6 +202,28 @@ class TestAgentIntegration(unittest.TestCase):
         self.assertIn("https://example.com", result)
         mock_store.assert_called_once_with("https://example.com")
 
+    @patch('agents.valor.agent.search_stored_links')
+    def test_search_saved_links_agent_tool(self, mock_search):
+        """Test search_saved_links agent tool functionality."""
+        try:
+            from agents.valor.agent import search_saved_links
+        except ImportError:
+            self.skipTest("Agent dependencies not available")
+
+        # Mock backend response
+        mock_search.return_value = "📂 **Found 2 link(s) matching 'test':**\n\n• **example.com** (2024-01-15) ✅"
+
+        # Create mock context
+        mock_ctx = MagicMock()
+        mock_ctx.deps = MagicMock()
+        mock_ctx.deps.chat_id = 12345
+
+        result = search_saved_links(mock_ctx, "test", 5)
+        
+        self.assertIn("Found 2 link(s)", result)
+        self.assertIn("example.com", result)
+        mock_search.assert_called_once_with("test", chat_id=12345, limit=5)
+
 
 if __name__ == '__main__':
     unittest.main()

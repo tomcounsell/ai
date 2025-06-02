@@ -412,6 +412,7 @@ def search_saved_links(
 
     This tool searches through the collection of previously analyzed and saved
     links to find matches based on domain name, URL content, title, or timestamp.
+    Typical response time is under 100ms for database queries.
 
     Use this when someone wants to find links they've shared before or
     when looking for previously saved content on a specific topic.
