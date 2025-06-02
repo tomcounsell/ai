@@ -46,6 +46,17 @@ def analyze_image(image_path: str, question: str | None = None, context: str | N
     if not api_key:
         return "👁️ Image analysis unavailable: Missing OPENAI_API_KEY configuration."
 
+    # Validate inputs
+    if not image_path or not image_path.strip():
+        return "👁️ Image analysis error: Image path cannot be empty."
+    
+    # Validate image format first (before file operations)
+    from pathlib import Path
+    valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
+    file_extension = Path(image_path).suffix.lower()
+    if file_extension not in valid_extensions:
+        return f"👁️ Image analysis error: Unsupported format '{file_extension}'. Supported: {', '.join(valid_extensions)}"
+
     try:
         # Read and encode image
         with open(image_path, "rb") as image_file:
@@ -104,9 +115,16 @@ def analyze_image(image_path: str, question: str | None = None, context: str | N
             return f"👁️ **What I see:**\n\n{answer}"
 
     except FileNotFoundError:
-        return "👁️ Error: Image file not found."
+        return "👁️ Image analysis error: Image file not found."
+    except OSError as e:
+        return f"👁️ Image file error: Failed to read image file - {str(e)}"
     except Exception as e:
-        return f"👁️ Image analysis error: {str(e)}"
+        error_type = type(e).__name__
+        if "API" in str(e) or "OpenAI" in str(e):
+            return f"👁️ OpenAI API error: {str(e)}"
+        if "base64" in str(e).lower() or "encoding" in str(e).lower():
+            return f"👁️ Image encoding error: Failed to process image format - {str(e)}"
+        return f"👁️ Image analysis error ({error_type}): {str(e)}"
 
 
 # Async wrapper for compatibility with existing async patterns
