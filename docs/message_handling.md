@@ -137,20 +137,20 @@ Dev groups are identified by the `is_dev_group` flag in their workspace configur
 def is_dev_group(chat_id: int) -> bool:
     """Check if a Telegram chat ID is a dev group that should handle all messages."""
     config_file = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
-    
+
     try:
         with open(config_file) as f:
             data = json.load(f)
             telegram_groups = data.get("telegram_groups", {})
             workspaces = data.get("workspaces", {})
-            
+
             chat_id_str = str(chat_id)
             if chat_id_str in telegram_groups:
                 project_name = telegram_groups[chat_id_str]
                 if project_name in workspaces:
                     workspace_data = workspaces[project_name]
                     return workspace_data.get("is_dev_group", False)
-            
+
             return False
     except Exception:
         return False
@@ -217,9 +217,9 @@ is_priority = is_user_priority_question(processed_text)
 **Recent Chat Context (Always Applied):**
 ```python
 chat_history_obj.get_context(
-    chat_id, 
+    chat_id,
     max_context_messages=8,  # Up to 8 messages total
-    max_age_hours=6,         # Only from last 6 hours  
+    max_age_hours=6,         # Only from last 6 hours
     always_include_last=2    # Always include last 2 messages regardless of age
 )
 ```
@@ -298,7 +298,7 @@ def search_conversation_history(ctx, search_query: str, max_results: int = 5)
 
 **Get Conversation Context Tool:**
 ```python
-@valor_agent.tool  
+@valor_agent.tool
 def get_conversation_context(ctx, hours_back: int = 24)
 ```
 - **Purpose**: Get extended conversation summary beyond immediate context
@@ -390,7 +390,7 @@ TELEGRAM_ALLOWED_GROUPS=-1001234567890,-1009876543210  # Comma-separated group I
 
 # Example configurations:
 # Server 1 (PsyOPTIMAL only): TELEGRAM_ALLOWED_GROUPS=-1001234567890
-# Server 2 (FlexTrip only):   TELEGRAM_ALLOWED_GROUPS=-1009876543210  
+# Server 2 (FlexTrip only):   TELEGRAM_ALLOWED_GROUPS=-1009876543210
 # Server 3 (DMs only):        TELEGRAM_ALLOWED_GROUPS= (DM users controlled by dm_whitelist)
 ```
 
@@ -422,12 +422,8 @@ TELEGRAM_ALLOWED_GROUPS=-1001234567890,-1009876543210  # Comma-separated group I
   },
   "telegram_groups": {
     "-1002600253717": "PsyOPTIMAL",
-    "-4897329503": "PsyOPTIMAL Dev",
     "-4851227604": "DeckFusion Dev",
-    "-4891178445": "Yudame Dev",
-    "-4719889199": "Yudame",
-    "-1002374450243": "Tom's Team",
-    "-1002455228990": "Verkstad"
+    ...
   }
 }
 ```
@@ -464,14 +460,14 @@ Dev groups are configured in `config/workspace_config.json` with the `is_dev_gro
     },
     "PsyOPTIMAL Dev": {
       "database_id": "****",
-      "description": "PsyOPTIMAL development tasks and management", 
+      "description": "PsyOPTIMAL development tasks and management",
       "telegram_chat_ids": ["-4897329503"],
       "is_dev_group": true
     },
     "DeckFusion Dev": {
       "database_id": "****",
       "description": "DeckFusion development tasks and management",
-      "telegram_chat_ids": ["-4851227604"], 
+      "telegram_chat_ids": ["-4851227604"],
       "is_dev_group": true
     }
   }
@@ -479,7 +475,7 @@ Dev groups are configured in `config/workspace_config.json` with the `is_dev_gro
 ```
 
 **Current Dev Groups:**
-- **Yudame Dev** (-4891178445) - AI development team 
+- **Yudame Dev** (-4891178445) - AI development team
 - **PsyOPTIMAL Dev** (-4897329503) - PsyOPTIMAL development team
 - **DeckFusion Dev** (-4851227604) - DeckFusion development team
 
@@ -494,7 +490,7 @@ Direct messages use a username-based whitelist system for security:
     "default_working_directory": "/Users/valorengels/src/ai",
     "allowed_users": {
       "tomcounsell": {
-        "username": "tomcounsell", 
+        "username": "tomcounsell",
         "description": "Tom Counsell - Owner and Boss",
         "working_directory": "/Users/valorengels/src/ai"
       }
@@ -567,6 +563,6 @@ Based on `scripts/list_telegram_groups.py` output:
 
 This architecture enables horizontal scaling across multiple servers while maintaining:
 - **Chat isolation** between different workspaces
-- **Project-specific context** from appropriate Notion databases  
+- **Project-specific context** from appropriate Notion databases
 - **Directory access control** to prevent cross-workspace file operations
 - **Audit logging** for all workspace access attempts

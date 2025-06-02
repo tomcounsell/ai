@@ -273,7 +273,16 @@ Be concise but informative. Focus on the most relevant and actionable informatio
             
             # Apply database filter if provided
             if db_filter:
-                databases = [db for db in databases if db_filter in db["id"]]
+                print(f"DEBUG: Applying database filter '{db_filter}'")
+                print(f"DEBUG: Found {len(databases)} total databases before filtering")
+                for i, db in enumerate(databases):
+                    db_title = "".join([t.get("plain_text", "") for t in db.get("title", [])])
+                    print(f"DEBUG: Database {i+1}: {db['id']} (title: {db_title})")
+                
+                filtered_databases = [db for db in databases if db_filter in db["id"]]
+                print(f"DEBUG: Found {len(filtered_databases)} databases after filtering")
+                databases = filtered_databases
+                
                 if not databases:
                     return f"No database found matching '{db_filter}'"
             

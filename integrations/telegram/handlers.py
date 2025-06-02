@@ -880,6 +880,8 @@ class MessageHandler:
                 return None
 
             print(f"Using Notion database for {project_name} (group {chat_id})")
+            print(f"   Full Database ID: {db_id}")
+            print(f"   Database Filter (first 8 chars): {db_id[:8]}")
             
             # Get answer from Notion Scout using the query_all_accessible_databases method
             answer = await self.notion_scout.query_all_accessible_databases(processed_text, db_filter=db_id[:8])

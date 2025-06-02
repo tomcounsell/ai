@@ -28,63 +28,33 @@ class TestWorkspaceIsolation:
     
     def setup_method(self):
         """Setup test environment with mock configuration"""
+        # Load actual configuration and create test variant
+        from pathlib import Path
+        import json
+        
+        actual_config_path = Path(__file__).parent.parent / "config" / "workspace_config.json"
+        with open(actual_config_path) as f:
+            actual_config = json.load(f)
+        
+        # Create test config based on actual config but with test chat IDs
         self.test_config = {
-            "workspaces": {
-                "DeckFusion Dev": {
-                    "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
-                    "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
-                    "description": "DeckFusion development tasks and management",
-                    "workspace_type": "deckfusion",
-                    "allowed_directories": [
-                        "/Users/valorengels/src/deckfusion",
-                        "/Users/valorengels/src/deckfusion/"
-                    ],
-                    "telegram_chat_ids": ["-1008888888888"],
-                    "aliases": ["deckfusion", "deck", "fusion", "deckfusion dev", "deck dev"]
-                },
-                "PsyOPTIMAL": {
-                    "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
-                    "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
-                    "description": "PsyOPTIMAL project tasks and management",
-                    "workspace_type": "psyoptimal",
-                    "allowed_directories": [
-                        "/Users/valorengels/src/psyoptimal",
-                        "/Users/valorengels/src/psyoptimal/"
-                    ],
-                    "telegram_chat_ids": ["-1001234567890"],
-                    "aliases": ["psyoptimal", "psy", "optimal"]
-                },
-                "PsyOPTIMAL Dev": {
-                    "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
-                    "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
-                    "description": "PsyOPTIMAL development tasks and management",
-                    "workspace_type": "psyoptimal",
-                    "allowed_directories": [
-                        "/Users/valorengels/src/psyoptimal",
-                        "/Users/valorengels/src/psyoptimal/"
-                    ],
-                    "telegram_chat_ids": [],
-                    "aliases": ["psyoptimal dev", "psy dev", "optimal dev"]
-                },
-                "FlexTrip": {
-                    "database_id": "1ed2bc89-4d10-80e5-89e9-feefe994dddd",
-                    "url": "https://www.notion.so/yudame/1ed2bc894d1080e589e9feefe994dddd",
-                    "description": "FlexTrip project tasks and management",
-                    "workspace_type": "flextrip",
-                    "allowed_directories": [
-                        "/Users/valorengels/src/flextrip",
-                        "/Users/valorengels/src/flextrip/"
-                    ],
-                    "telegram_chat_ids": ["-1009876543210"],
-                    "aliases": ["flextrip", "flex", "trip"]
-                }
-            },
-            "telegram_groups": {
-                "-1008888888888": "DeckFusion Dev",
-                "-1001234567890": "PsyOPTIMAL",
-                "-1009876543210": "FlexTrip"
-            }
+            "workspaces": {},
+            "telegram_groups": {}
         }
+        
+        # Copy workspace configurations but use test chat IDs
+        test_chat_counter = 1008888888888
+        for workspace_name, workspace_data in actual_config["workspaces"].items():
+            # Create test chat ID for this workspace
+            test_chat_id = f"-{test_chat_counter}"
+            test_chat_counter += 1
+            
+            # Copy workspace config with test chat ID
+            test_workspace = workspace_data.copy()
+            test_workspace["telegram_chat_ids"] = [test_chat_id]
+            
+            self.test_config["workspaces"][workspace_name] = test_workspace
+            self.test_config["telegram_groups"][test_chat_id] = workspace_name
         
         # Create temp config file
         self.temp_config_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
@@ -287,62 +257,33 @@ class TestCrossWorkspaceAccessPrevention:
     
     def setup_method(self):
         """Setup test environment"""
+        # Load actual configuration and create test variant
+        from pathlib import Path
+        import json
+        
+        actual_config_path = Path(__file__).parent.parent / "config" / "workspace_config.json"
+        with open(actual_config_path) as f:
+            actual_config = json.load(f)
+        
+        # Create test config based on actual config but with test chat IDs
         self.test_config = {
-            "workspaces": {
-                "DeckFusion Dev": {
-                    "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
-                    "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
-                    "description": "DeckFusion development tasks and management",
-                    "workspace_type": "deckfusion",
-                    "allowed_directories": [
-                        "/Users/valorengels/src/deckfusion",
-                        "/Users/valorengels/src/deckfusion/"
-                    ],
-                    "telegram_chat_ids": ["-1008888888888"],
-                    "aliases": ["deckfusion", "deck", "fusion", "deckfusion dev", "deck dev"]
-                },
-                "PsyOPTIMAL": {
-                    "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
-                    "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
-                    "description": "PsyOPTIMAL project tasks and management",
-                    "workspace_type": "psyoptimal",
-                    "allowed_directories": [
-                        "/Users/valorengels/src/psyoptimal",
-                        "/Users/valorengels/src/psyoptimal/"
-                    ],
-                    "telegram_chat_ids": ["-1001234567890"],
-                    "aliases": ["psyoptimal", "psy", "optimal"]
-                },
-                "PsyOPTIMAL Dev": {
-                    "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
-                    "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
-                    "description": "PsyOPTIMAL development tasks and management",
-                    "workspace_type": "psyoptimal",
-                    "allowed_directories": [
-                        "/Users/valorengels/src/psyoptimal",
-                        "/Users/valorengels/src/psyoptimal/"
-                    ],
-                    "telegram_chat_ids": [],
-                    "aliases": ["psyoptimal dev", "psy dev", "optimal dev"]
-                },
-                "FlexTrip": {
-                    "database_id": "1ed2bc89-4d10-80e5-89e9-feefe994dddd",
-                    "url": "https://www.notion.so/yudame/1ed2bc894d1080e589e9feefe994dddd",
-                    "description": "FlexTrip project tasks and management",
-                    "workspace_type": "flextrip",
-                    "allowed_directories": [
-                        "/Users/valorengels/src/flextrip",
-                        "/Users/valorengels/src/flextrip/"
-                    ],
-                    "telegram_chat_ids": [],
-                    "aliases": ["flextrip", "flex", "trip"]
-                }
-            },
-            "telegram_groups": {
-                "-1008888888888": "DeckFusion Dev",
-                "-1001234567890": "PsyOPTIMAL"
-            }
+            "workspaces": {},
+            "telegram_groups": {}
         }
+        
+        # Copy workspace configurations but use test chat IDs
+        test_chat_counter = 2008888888888
+        for workspace_name, workspace_data in actual_config["workspaces"].items():
+            # Create test chat ID for this workspace
+            test_chat_id = f"-{test_chat_counter}"
+            test_chat_counter += 1
+            
+            # Copy workspace config with test chat ID
+            test_workspace = workspace_data.copy()
+            test_workspace["telegram_chat_ids"] = [test_chat_id]
+            
+            self.test_config["workspaces"][workspace_name] = test_workspace
+            self.test_config["telegram_groups"][test_chat_id] = workspace_name
         
         # Create temp config file
         self.temp_config_file = tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False)
