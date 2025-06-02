@@ -143,6 +143,19 @@ def search_current_info(ctx: RunContext[ValorContext], query: str) -> str:
 - Tool doesn't interfere with other agent capabilities
 - Tool handles context information appropriately
 - Error messages are user-friendly
+- **No hanging or blocking issues** during tool execution
+- **Context parameter handling** works with mock RunContext objects
+
+**Testing Approach for Agent Tools**:
+```python
+# Create mock RunContext for testing agent tools
+class MockRunContext:
+    def __init__(self, deps):
+        self.deps = deps
+
+mock_context = MockRunContext(ValorContext(chat_id=12345, username="test"))
+result = agent_tool_function(mock_context, "test input")
+```
 
 ### 3.3 Regression Testing
 
@@ -218,29 +231,59 @@ def search_current_info(ctx: RunContext[ValorContext], query: str) -> str:
 
 ## Audit Execution Order
 
-### Phase 1: Quick Assessment (30 minutes)
-1. Review tool function signature and purpose
-2. Check basic architectural patterns
-3. Identify obvious design issues
-4. Determine if full audit is needed
+### Phase 1: Tool Selection and Setup (5-10 minutes)
+1. **Identify target tool**: Read TODO.md and find next 🔴 tool
+2. **Update tracking**: Change status to 🟡 In Progress in TODO.md  
+3. **Create workspace**: `mkdir -p docs/audits/` (if not exists)
+4. **Locate tool files**: Find both agent tool and implementation files
+5. **Check git history**: Look for recent commits related to the tool (especially "recently fixed" tools)
 
-### Phase 2: Deep Review (2-3 hours)
-1. Complete design review checklist
-2. Perform thorough code review
-3. Validate documentation quality
-4. Identify testing gaps
+### Phase 2: Comprehensive 4-Phase Audit (60-90 minutes)
 
-### Phase 3: Testing Validation (1-2 hours)
-1. Run existing tests (if any)
-2. Perform manual testing of key scenarios
-3. Test agent integration
-4. Validate error handling
+#### 2.1 Design Review (15-20 minutes)
+1. **Read tool source code** - Both agent wrapper and implementation
+2. **Analyze architecture** - Separation of concerns, single responsibility
+3. **Validate interface design** - Parameters, return types, context usage
+4. **Check dependencies** - External services, imports, coupling
+5. **Review recent changes** - Git commits, architectural decisions
 
-### Phase 4: Documentation & Recommendations (1 hour)
-1. Document findings and recommendations
-2. Prioritize issues by impact and effort
-3. Create improvement plan
-4. Update tool documentation if needed
+#### 2.2 Implementation Review (20-30 minutes)
+1. **Code quality assessment** - Style, error handling, performance
+2. **PydanticAI integration** - Decoration, context usage, return formatting
+3. **Security validation** - Input sanitization, safe API calls
+4. **Dependency management** - API keys, timeouts, rate limiting
+5. **Performance considerations** - Response times, resource usage
+
+#### 2.3 Testing Validation (15-25 minutes)
+1. **Locate existing tests** - Find test files for the tool
+2. **Run existing tests** - Validate current functionality
+3. **Identify testing gaps** - Happy path, errors, edge cases, integration
+4. **Check agent integration** - Tool selection, conversation formatting
+5. **Performance validation** - Execution times, hanging prevention
+
+#### 2.4 Documentation Review (10-15 minutes)
+1. **Agent documentation** - Docstring clarity, usage examples, parameters
+2. **Developer documentation** - Architecture notes, maintenance guidance
+3. **Integration documentation** - Dependencies, configuration, errors
+4. **Historical context** - Document any recent fixes or architectural changes
+
+### Phase 3: Generate Deliverables (15-20 minutes)
+1. **Create audit report** - `docs/audits/[tool_name]_audit_report.md`
+2. **Create recommendations TODO** - `docs/audits/[tool_name]_recommendations.md`
+3. **Prioritize action items** - Critical/High/Medium/Low with effort estimates
+4. **Plan implementation order** - Dependencies, risks, impact
+
+### Phase 4: Implement Critical Improvements (30-120 minutes)
+1. **Address critical items** - Blocking issues, documentation updates
+2. **Implement high priority fixes** - Testing gaps, code quality issues
+3. **Validate changes** - Run tests, check agent integration
+4. **Update documentation** - Reflect any changes made
+
+### Phase 5: Completion and Cleanup (10-15 minutes)
+1. **Update audit report** - Mark as "Approved" with final status
+2. **Clean up workspace** - Delete recommendations.md file
+3. **Update TODO.md** - Mark tool as ✅ Approved
+4. **Commit and push** - Comprehensive commit with all improvements
 
 ## Audit Deliverables
 
@@ -398,24 +441,37 @@ Priority: [Critical/High/Medium/Low]
 - Use clear, descriptive parameter names
 - Provide sensible defaults for optional parameters
 - Return conversation-friendly formatted strings
+- **Avoid subprocess spawning** that can cause hanging issues
 
 ### Implementation
 - Follow Python type hints throughout
 - Implement comprehensive error handling
 - Use appropriate logging for debugging
 - Validate inputs and sanitize outputs
+- **Test for hanging/blocking issues** especially with external processes
 
 ### Testing
 - Test both happy path and error conditions
 - Include integration testing with agent
 - Test with realistic data and scenarios
 - Validate performance under load
+- **Add specific tests for recently fixed issues** to prevent regressions
+- **Test agent integration with mock RunContext** when needed
 
 ### Documentation
 - Write for both agent and human audiences
 - Include clear examples and use cases
 - Document all configuration requirements
 - Explain error conditions and handling
+- **Document architectural decisions** especially for recent fixes
+- **Update docstrings immediately** when implementation changes
+
+### Audit Process Lessons
+- **Check git history first** for recently fixed tools to understand context
+- **Update documentation immediately** when behavior changes
+- **Create comprehensive tests** for new functionality
+- **Use TodoWrite tool** to track audit progress
+- **Commit and push improvements** to preserve audit work
 
 ## Deliverable Workflow
 
@@ -436,7 +492,36 @@ Priority: [Critical/High/Medium/Low]
 1. **Final report**: Update audit report with "Approved" status
 2. **Cleanup**: Delete temporary recommendations.md file
 3. **Update TODO.md**: Mark tool as ✅ Approved in main TODO list
-4. **Archive results**: Move audit report to `docs/audits/completed/`
+4. **Commit and push**: Ensure all improvements are preserved in git
+5. **Optional archiving**: Move audit report to `docs/audits/completed/` for organization
+
+## Special Audit Considerations
+
+### Recently Fixed Tools
+Tools marked as "recently fixed" in TODO.md require extra attention:
+
+1. **Validate the fix** - Understand what was broken and how it was fixed
+2. **Test the fix thoroughly** - Ensure the issue is completely resolved
+3. **Update documentation** - Reflect any behavioral changes
+4. **Add regression tests** - Prevent the issue from recurring
+5. **Document architectural decisions** - Explain why the fix was implemented that way
+
+**Example**: delegate_coding_task was fixed to prevent hanging by returning guidance instead of spawning subprocesses. The audit must validate this approach works and update documentation accordingly.
+
+### Tool Pairs (Agent + Implementation)
+Some tools have both an agent wrapper and implementation file:
+- **Agent tool**: Focus on PydanticAI integration, context usage, conversation formatting
+- **Implementation**: Focus on core logic, external APIs, error handling
+- **Audit both together** when they're closely related
+- **Ensure consistency** between agent interface and implementation behavior
+
+### External API Tools
+Tools that integrate with external services need special consideration:
+- **API key validation** - Proper environment variable handling
+- **Rate limiting** - Respect service limits, implement delays
+- **Timeout handling** - Prevent hanging on slow/unresponsive APIs
+- **Fallback behavior** - Graceful degradation when services unavailable
+- **Error mapping** - Convert API errors to user-friendly messages
 
 ## Integration with Development Workflow
 
@@ -454,6 +539,12 @@ Priority: [Critical/High/Medium/Low]
 - Schedule periodic re-audits for critical tools
 - Use audit findings to improve overall tool patterns
 - Share best practices across tool development
+
+### Audit Workflow Integration
+- **Use TodoWrite tool** to track audit progress and implementation tasks
+- **Commit frequently** during implementation to preserve incremental progress
+- **Push final results** to ensure audit work is preserved
+- **Update TODO.md immediately** when tools are approved
 
 ## Conclusion
 
