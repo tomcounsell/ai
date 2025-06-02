@@ -1,37 +1,88 @@
 """
-Valor Delegation Tool - Allows spawning new Claude Code sessions for complex development tasks.
+Valor Delegation Tool - Provides development guidance instead of spawning Claude Code sessions.
 
-This tool enables Valor to delegate sophisticated software engineering tasks to specialized sessions.
-Detailed prompts must be provided for autonomous execution.
-Example tasks include:
-- running tests
-- commiting and pushing changes to GitHub
-- making changes to any file
-- exploring the repository
-- creating plans for future development
-- executing complex multi-step dev tasks that require reasoning and planning
+## Architecture Decision: Guidance Over Delegation
 
-Tips & Recommendations:
+This tool was redesigned in commit 05c9323 to prevent agent hanging issues caused by recursive 
+Claude Code spawning. Instead of executing tasks directly, it now provides comprehensive 
+development guidance.
 
-Memory Management:
-- Use /memory command to quickly edit CLAUDE.md files
-- Use # shortcut to add quick notes during sessions
-- Review your memory files periodically - they can get stale
+### Historical Context: The Hanging Issue
 
-TDD Workflow Optimization:
-- Keep plan documents focused and specific
-- Update the "Current Work Status" section in CLAUDE.md as you switch between projects
-- Consider adding common test patterns to project-specific CLAUDE.md files
+**Problem**: The original implementation attempted to spawn subprocess Claude Code sessions 
+from within a PydanticAI agent tool. This caused:
+- Agent hanging during tool selection 
+- Infinite recursion when Claude Code spawned more Claude Code sessions
+- Process deadlocks and unresponsive agent behavior
+- Poor user experience with delayed/missing responses
 
-Session Continuity:
-- Use claude -c to resume recent work
-- Always check TodoRead when continuing implementation work
-- Update plan documents if you discover new requirements mid-implementation
+**Root Cause**: PydanticAI agents running subprocess commands that spawn the same tool 
+created circular dependencies and resource contention.
 
-Project Organization:
-- Create /docs/plan/ directories in projects that will use this TDD process
-- Consider adding test coverage requirements to project-specific CLAUDE.md files
-- Keep successful patterns documented for reuse
+**Solution**: Replace subprocess delegation with intelligent guidance responses that:
+- Provide step-by-step implementation approaches
+- Share relevant code examples and patterns
+- Offer testing strategies and best practices
+- Include architecture and integration advice
+
+### Current Implementation
+
+The tool now returns structured guidance responses containing:
+- Task-specific implementation approaches
+- Code structure and architecture advice
+- Testing and validation strategies  
+- Integration patterns and best practices
+- Working directory context for user reference
+
+This approach provides equivalent value to users while eliminating:
+- Hanging and deadlock issues
+- Recursive spawning problems
+- Process management complexity
+- Security concerns with subprocess execution
+
+### Benefits of Guidance Approach
+
+1. **Reliability**: No hanging, deadlocks, or subprocess issues
+2. **Performance**: Instant responses without subprocess overhead
+3. **Security**: No arbitrary command execution or process spawning
+4. **Flexibility**: Guidance adapts to user context and preferences
+5. **Maintainability**: Simpler architecture without process management
+
+### Integration Notes
+
+Tools or systems expecting delegation results should handle the new guidance format:
+- Response starts with "💡 **Development Guidance Available**"
+- Contains structured sections for implementation approaches
+- Includes working directory context
+- Provides actionable next steps and questions
+
+Example response structure:
+```
+💡 **Development Guidance Available**
+
+For the task: **[task_description]**
+
+**Implementation Approach:**
+- Step-by-step guidance...
+
+**Specific Help I Can Provide:**
+- Architecture advice...
+
+**Working Directory:** `/path/to/project`
+
+What specific aspect would you like me to help you with first?
+```
+
+### Migration Notes for Developers
+
+If you need actual code execution (the original delegation behavior):
+1. Use Claude Code directly from command line instead of through agent tools
+2. Consider MCP tools for specific development tasks
+3. Use the guidance provided to implement solutions manually
+4. For complex automation, consider CI/CD pipelines instead of agent delegation
+
+This architectural change prioritizes system reliability and user experience over 
+convenience features that caused critical stability issues.
 """
 
 import os

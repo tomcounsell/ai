@@ -247,17 +247,17 @@ def delegate_coding_task(
     target_directory: str = "",
     specific_instructions: str = "",
 ) -> str:
-    """Delegate any coding task to Claude Code - it handles everything autonomously.
+    """Provide development guidance and implementation advice for coding tasks.
 
-    Claude Code is a full-featured development environment that can:
-    - Explore and understand any codebase automatically
-    - Read, write, and modify files in any directory
-    - Run tests, commit changes, and push to GitHub
-    - Create implementation plans and execute them
-    - Handle complex multi-step development tasks
+    This tool provides comprehensive development guidance instead of executing tasks directly.
+    It offers detailed implementation approaches, code examples, and best practices to help
+    with any software development challenge.
 
-    Simply describe what needs to be done - Claude Code will figure out how to do it.
-    All parameters are optional with smart defaults.
+    The tool provides structured guidance including:
+    - Step-by-step implementation approaches
+    - Relevant code examples and patterns  
+    - Testing strategies and best practices
+    - Architecture and integration advice
 
     Use this for ANY development request:
     - "Fix the login bug"
@@ -266,22 +266,21 @@ def delegate_coding_task(
     - "Update dependencies and run tests"
     - "Implement user authentication"
 
-    Don't overthink it - just describe the task and let Claude Code handle the details.
-
-    For Telegram groups, Claude Code is automatically restricted to the group's workspace directory.
+    Simply describe what needs to be done and receive detailed technical guidance.
+    For Telegram groups, working directory context is automatically provided.
 
     Args:
         ctx: The runtime context containing chat information.
         task_description: What needs to be built, fixed, or implemented.
-        target_directory: (Optional) Specific directory to work in. If empty and chat_id provided, uses workspace directory.
+        target_directory: (Optional) Specific directory context. If empty and chat_id provided, uses workspace directory.
         specific_instructions: (Optional) Any additional constraints or preferences.
 
     Returns:
-        str: Response from Claude Code with task results and status.
+        str: Comprehensive development guidance with implementation approaches and examples.
 
     Example:
         >>> delegate_coding_task(ctx, "Fix the authentication bug")
-        'Claude Code session completed successfully: Fixed login validation...'
+        'Development Guidance Available\\n\\nFor the task: Fix the authentication bug...'
     """
     try:
         # Determine the working directory
@@ -311,9 +310,9 @@ def delegate_coding_task(
             target_directory=working_dir,
             specific_instructions=specific_instructions if specific_instructions else None,
         )
-        return f"Claude Code session completed successfully:\n\n{result}"
+        return result
     except Exception as e:
-        return f"Error executing Claude Code session: {str(e)}"
+        return f"Error providing development guidance: {str(e)}"
 
 
 @valor_agent.tool

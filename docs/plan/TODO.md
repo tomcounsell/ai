@@ -1,5 +1,58 @@
 # Development TODO
 
+## Tool Audit TODO
+
+This section tracks the comprehensive audit of all PydanticAI tools in the system. Each tool will be audited according to the standards defined in [tool_auditing.md](./tool_auditing.md).
+
+### Overview
+
+**Total Tools Identified**: 18
+- **Agent Tools** (integrated with valor_agent): 9
+- **Standalone Tools** (in /tools/ directory): 9
+
+**Audit Status Legend**:
+- 🔴 **Not Started** - No audit performed
+- 🟡 **In Progress** - Audit partially completed  
+- 🟢 **Completed** - Full audit completed and approved
+- ⚠️ **Issues Found** - Audit completed, issues need resolution
+- ✅ **Approved** - Audit completed, tool approved for production
+
+### Agent Tools (PydanticAI @valor_agent.tool)
+
+- [ ] **search_current_info** 🔴 - Web search using Perplexity AI (HIGH PRIORITY)
+- [ ] **create_image** 🔴 - DALL-E 3 image generation with Telegram integration (HIGH)
+- [ ] **analyze_shared_image** 🔴 - AI vision analysis of uploaded images (HIGH)
+- [x] **delegate_coding_task** ✅ - Development task delegation (CRITICAL - recently fixed)
+- [ ] **save_link_for_later** 🔴 - URL analysis and storage (MEDIUM)
+- [ ] **search_saved_links** 🔴 - Search through saved links (MEDIUM)
+- [ ] **query_notion_projects** 🔴 - PsyOPTIMAL workspace queries (HIGH)
+- [ ] **search_conversation_history** 🔴 - Search Telegram conversation history (MEDIUM)
+- [ ] **get_conversation_context** 🔴 - Extended conversation context (MEDIUM)
+
+### Standalone Tools (/tools/ directory)
+
+- [ ] **search_tool.py** 🔴 - Web search implementation (HIGH - supports search_current_info)
+- [ ] **image_generation_tool.py** 🔴 - DALL-E 3 implementation (HIGH - supports create_image)
+- [ ] **image_analysis_tool.py** 🔴 - AI vision implementation (HIGH - supports analyze_shared_image)
+- [x] **valor_delegation_tool.py** ✅ - Delegation implementation (CRITICAL - recently fixed)
+- [ ] **notion_tool.py** 🔴 - Notion workspace integration (HIGH - supports query_notion_projects)
+- [ ] **link_analysis_tool.py** 🔴 - URL analysis implementation (MEDIUM - supports link tools)
+- [ ] **telegram_history_tool.py** 🔴 - Conversation history implementation (MEDIUM)
+- [ ] **image_tagging_tool.py** 🔴 - Image tagging functionality (LOW)
+- [ ] **doc_summary_tool.py** 🔴 - Document summarization (LOW)
+
+### Sprint 1: Critical & High Priority (Week 1)
+**Focus**: Recently fixed tools and core user-facing functionality
+
+1. **delegate_coding_task** (agent tool) - CRITICAL
+2. **valor_delegation_tool.py** - CRITICAL  
+3. **search_current_info** (agent tool) - HIGH
+4. **search_tool.py** - HIGH
+5. **create_image** (agent tool) - HIGH
+6. **image_generation_tool.py** - HIGH
+
+**Estimated Effort**: 15-18 hours
+
 ## Test Coverage & Quality Improvements
 
 ### Critical Test Infrastructure Fixes
