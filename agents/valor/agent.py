@@ -480,7 +480,25 @@ def query_notion_projects(
         result = query_psyoptimal_workspace(question)
         return result
     except Exception as e:
-        return f"❌ Error querying PsyOPTIMAL workspace: {str(e)}\n\nPlease ensure your Notion API integration is properly configured."
+        error_str = str(e)
+        
+        # Handle specific error types with user-friendly messages
+        if "Connection" in error_str or "connection" in error_str:
+            return "❌ Connection error: Cannot reach Notion API. Check internet connection."
+        elif "timeout" in error_str.lower() or "timed out" in error_str.lower():
+            return "❌ Timeout error: Notion query took too long. Try a simpler question."
+        elif "NOTION_API_KEY" in error_str or "api key" in error_str.lower():
+            return "❌ Authentication error: Check NOTION_API_KEY configuration."
+        elif "ANTHROPIC_API_KEY" in error_str or "anthropic" in error_str.lower():
+            return "❌ AI Analysis error: Check ANTHROPIC_API_KEY configuration."
+        elif "Unknown workspace" in error_str:
+            return f"❌ Workspace error: {error_str}"
+        else:
+            # Log unexpected errors for debugging
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Unexpected notion query error: {error_str}")
+            return f"❌ Error querying PsyOPTIMAL workspace: {error_str}\n\nPlease ensure your Notion API integration is properly configured."
 
 
 @valor_agent.tool
@@ -538,21 +556,30 @@ def get_conversation_context(
 
     Use this when:
     - You need more context to understand what's being discussed
-    - The conversation seems to reference earlier topics
-    - You want to see the full recent conversation flow
+    - The conversation seems to reference earlier topics (e.g., "like we discussed before")
+    - You want to see the full recent conversation flow to maintain continuity
     - Understanding the broader context would help provide better assistance
+    - User asks about recent conversation history ("what were we talking about earlier?")
+    - You need to understand the evolution of a discussion over several hours
 
     Args:
         ctx: The runtime context containing chat information and history manager.
-        hours_back: How many hours of conversation history to summarize (default 24).
+        hours_back: How many hours of conversation history to summarize (1-168, default 24).
 
     Returns:
-        str: Formatted conversation summary or "No recent activity".
+        str: Formatted conversation summary with timestamps and roles,
+             or "No recent activity" if no messages found.
 
     Example:
         >>> get_conversation_context(ctx, 12)
-        'Conversation summary (last 12 hours, 8 messages):...'
+        'Conversation summary (last 12 hours, 8 messages):
+         1. user: Started discussing the new project requirements...
+         2. assistant: I can help you break down those requirements...'
     """
+    # Validate parameters
+    if hours_back < 1 or hours_back > 168:  # 1 hour to 1 week
+        return "❌ hours_back must be between 1 and 168 hours (1 week)"
+    
     if not ctx.deps.chat_history_obj or not ctx.deps.chat_id:
         return "No chat history available"
     

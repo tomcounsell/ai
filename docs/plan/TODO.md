@@ -25,9 +25,9 @@ This section tracks the comprehensive audit of all PydanticAI tools in the syste
 - [x] **delegate_coding_task** ✅ - Development task delegation (CRITICAL - recently fixed)
 - [x] **save_link_for_later** ✅ - URL analysis and storage (MEDIUM)
 - [x] **search_saved_links** ✅ - Search through saved links (MEDIUM)
-- [ ] **query_notion_projects** 🔴 - PsyOPTIMAL workspace queries (HIGH)
-- [ ] **search_conversation_history** 🔴 - Search Telegram conversation history (MEDIUM)
-- [ ] **get_conversation_context** 🔴 - Extended conversation context (MEDIUM)
+- [x] **query_notion_projects** ✅ - PsyOPTIMAL workspace queries (HIGH)
+- [x] **search_conversation_history** ✅ - Search Telegram conversation history (MEDIUM)
+- [x] **get_conversation_context** ✅ - Extended conversation context (MEDIUM)
 
 ### Standalone Tools (/tools/ directory)
 
