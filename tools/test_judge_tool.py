@@ -30,7 +30,7 @@ class TestJudgment(BaseModel):
 
 class JudgeConfig(BaseModel):
     """Configuration for test judging."""
-    model: str = Field(default="gemma2:3b", description="Local model to use for judging")
+    model: str = Field(default="gemma3:12b-it-qat", description="Local model to use for judging")
     temperature: float = Field(default=0.1, description="Model temperature for consistency")
     strict_mode: bool = Field(default=True, description="Whether to use strict pass/fail criteria")
     custom_criteria: Optional[List[str]] = Field(default=None, description="Additional evaluation criteria")
@@ -176,24 +176,16 @@ Respond with ONLY the JSON, no additional text."""
 def _execute_local_judgment(prompt: str, config: JudgeConfig) -> str:
     """Execute judgment using local Ollama model."""
     try:
-        # Write prompt to temporary file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write(prompt)
-            prompt_file = f.name
-        
-        # Execute Ollama command
-        cmd = [
-            "ollama", "run", config.model,
-            "--temperature", str(config.temperature),
-            f"$(cat {prompt_file})"
-        ]
+        # Execute Ollama command directly with prompt as input
+        cmd = ["ollama", "run", config.model]
         
         result = subprocess.run(
             cmd,
+            input=prompt,
             capture_output=True,
             text=True,
             timeout=60,  # 60 second timeout
-            shell=True
+            shell=False
         )
         
         if result.returncode != 0:
@@ -212,14 +204,29 @@ def _execute_local_judgment(prompt: str, config: JudgeConfig) -> str:
 def _parse_judgment_result(raw_result: str, test_id: str) -> TestJudgment:
     """Parse raw judgment result into structured format."""
     try:
+        # Clean up markdown code blocks if present
+        cleaned_result = raw_result
+        if "```json" in cleaned_result:
+            # Extract content between ```json and ```
+            start_marker = cleaned_result.find("```json") + 7
+            end_marker = cleaned_result.find("```", start_marker)
+            if end_marker != -1:
+                cleaned_result = cleaned_result[start_marker:end_marker].strip()
+        elif "```" in cleaned_result:
+            # Handle generic code blocks
+            start_marker = cleaned_result.find("```") + 3
+            end_marker = cleaned_result.find("```", start_marker)
+            if end_marker != -1:
+                cleaned_result = cleaned_result[start_marker:end_marker].strip()
+        
         # Try to extract JSON from the response
-        json_start = raw_result.find('{')
-        json_end = raw_result.rfind('}') + 1
+        json_start = cleaned_result.find('{')
+        json_end = cleaned_result.rfind('}') + 1
         
         if json_start == -1 or json_end == 0:
             raise ValueError("No JSON found in response")
         
-        json_str = raw_result[json_start:json_end]
+        json_str = cleaned_result[json_start:json_end]
         parsed = json.loads(json_str)
         
         return TestJudgment(
