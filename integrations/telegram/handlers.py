@@ -23,6 +23,10 @@ class MessageHandler:
         # Web search now handled by PydanticAI agents
         # Link analysis now handled by link_analysis_tool
         
+        # Access denial tracking for aggregated logging
+        self.access_denials = {}
+        self.last_denial_log = 0
+        
         # Load chat filtering configuration from environment
         self._load_chat_filters()
 
@@ -69,26 +73,89 @@ class MessageHandler:
             # Set safe defaults on error
             self.allowed_groups = set()
     
-    def _should_handle_chat(self, chat_id: int, is_private_chat: bool = False, username: str = None) -> bool:
-        """Check if this server instance should handle messages from the given chat with enhanced validation."""
+    def _track_access_denial(self, chat_id: int, is_private_chat: bool, username: str, message_preview: str):
+        """Track access denials for aggregated logging to reduce log spam."""
+        import time
         import logging
-        from utilities.workspace_validator import validate_chat_whitelist_access
         
         logger = logging.getLogger(__name__)
+        current_time = time.time()
+        
+        # Detailed audit logging (for security/forensics)
+        chat_type = "DM" if is_private_chat else "group"
+        username_display = f"@{username}" if username else f"ID:{chat_id}"
+        logger.warning(
+            f"MESSAGE REJECTED - Chat whitelist violation: "
+            f"{chat_type} {chat_id} from user {username_display} - "
+            f"Message: '{message_preview}'"
+        )
+        
+        # Track for aggregated console logging
+        denial_key = f"{chat_type}_{chat_id}"
+        if denial_key not in self.access_denials:
+            self.access_denials[denial_key] = {
+                "chat_id": chat_id,
+                "chat_type": chat_type,
+                "username": username,
+                "count": 0,
+                "first_seen": current_time,
+                "last_seen": current_time
+            }
+        
+        self.access_denials[denial_key]["count"] += 1
+        self.access_denials[denial_key]["last_seen"] = current_time
+        
+        # Log aggregated summary every 30 seconds to avoid spam
+        if current_time - self.last_denial_log > 30:
+            self._log_access_denial_summary()
+            self.last_denial_log = current_time
+    
+    def _log_access_denial_summary(self):
+        """Log aggregated summary of access denials to reduce console spam."""
+        if not self.access_denials:
+            return
+        
+        # Group by chat type
+        groups = [d for d in self.access_denials.values() if d["chat_type"] == "group"]
+        dms = [d for d in self.access_denials.values() if d["chat_type"] == "DM"]
+        
+        summary_parts = []
+        
+        if groups:
+            total_group_messages = sum(d["count"] for d in groups)
+            unique_groups = len(groups)
+            summary_parts.append(f"group chat access denied for {unique_groups} chats ({total_group_messages} messages)")
+        
+        if dms:
+            total_dm_messages = sum(d["count"] for d in dms)
+            unique_users = len(dms)
+            summary_parts.append(f"DM access denied for {unique_users} users ({total_dm_messages} messages)")
+        
+        if summary_parts:
+            print(f"🚫 ACCESS SUMMARY: {' | '.join(summary_parts)} (not whitelisted)")
+            
+            # Clear old entries (keep last hour)
+            import time
+            current_time = time.time()
+            cutoff_time = current_time - 3600  # 1 hour
+            self.access_denials = {
+                k: v for k, v in self.access_denials.items() 
+                if v["last_seen"] > cutoff_time
+            }
+    
+    def _should_handle_chat(self, chat_id: int, is_private_chat: bool = False, username: str = None) -> bool:
+        """Check if this server instance should handle messages from the given chat with enhanced validation."""
+        from utilities.workspace_validator import validate_chat_whitelist_access
         
         try:
-            # Use centralized validation function for consistency
+            # Use centralized validation function for consistency (it handles all logging)
             is_allowed = validate_chat_whitelist_access(chat_id, is_private_chat, username)
-            
-            if not is_allowed:
-                chat_type = "DM" if is_private_chat else "group"
-                user_info = f" from @{username}" if username else ""
-                logger.warning(f"Chat access denied: {chat_type} {chat_id}{user_info} not in whitelist")
-            
             return is_allowed
             
         except Exception as e:
             # Log error and deny access for safety
+            import logging
+            logger = logging.getLogger(__name__)
             logger.error(f"Chat validation failed for {chat_id}: {e}")
             return False
 
@@ -124,19 +191,8 @@ class MessageHandler:
         # === STEP 2: ACCESS CONTROL VALIDATION ===
         print(f"🔒 Checking access permissions for {chat_type} {chat_id}...")
         if not self._should_handle_chat(chat_id, is_private_chat, username):
-            import logging
-            logger = logging.getLogger(__name__)
-            
-            # Enhanced logging for security audit trail
-            logger.warning(
-                f"MESSAGE REJECTED - Chat whitelist violation: "
-                f"{chat_type} {chat_id} from user {username_display} - "
-                f"Message: '{message_preview}'"
-            )
-            
-            # Console logging for immediate visibility during development
-            print(f"🚫 ACCESS DENIED: {chat_type} {chat_id} ({username_display}) not in whitelist")
-            print(f"   Rejected message: {message_preview}")
+            # Track denied access for aggregated logging
+            self._track_access_denial(chat_id, is_private_chat, username, message_preview)
             return
         
         print(f"✅ Access granted for {chat_type} {chat_id} ({username_display})")

@@ -159,20 +159,30 @@ def spawn_valor_session(
     """
     
     # IMPORTANT: Prevent recursive Claude Code sessions that cause hanging
-    # Check if we're already in a Claude Code session by looking for environment indicators
-    if os.getenv('CLAUDE_CODE_SESSION') or 'claude' in os.getenv('SHELL', '').lower():
-        return """⚠️ **Development Tool Currently Unavailable**
+    # For safety, always avoid spawning Claude Code when running as an agent tool
+    # This prevents infinite recursion and hanging issues
+    return f"""💡 **Development Guidance Available**
 
-I cannot spawn new Claude Code sessions while already running within one (this prevents recursive execution issues).
+For the task: **{task_description}**
 
-However, I can help you with this task in other ways:
-- Answer questions about implementation approaches
-- Provide code examples and patterns
-- Review code if you share it
-- Suggest testing strategies
-- Explain best practices
+I can help you with this directly instead of delegating to another session:
 
-What specific aspect of your development task would you like help with?"""
+**Implementation Approach:**
+- I can provide step-by-step guidance for this task
+- Share relevant code examples and patterns
+- Review your implementation if you share code
+- Suggest testing strategies and best practices
+
+**Specific Help I Can Provide:**
+- Code structure and architecture advice
+- Implementation details and examples
+- Testing and validation approaches
+- Integration patterns and best practices
+
+**Working Directory:** `{target_directory}`
+{f"**Additional Requirements:** {specific_instructions}" if specific_instructions else ""}
+
+What specific aspect would you like me to help you with first? I can provide detailed technical guidance to accomplish this task."""
 
     # Build comprehensive prompt
     prompt_parts = [

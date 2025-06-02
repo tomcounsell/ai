@@ -383,7 +383,7 @@ def search_saved_links(
     return search_stored_links(query, chat_id=ctx.deps.chat_id, limit=limit)
 
 
-@valor_agent.tool
+@valor_agent.tool  
 def query_notion_projects(
     ctx: RunContext[ValorContext],
     question: str,
