@@ -2,6 +2,30 @@
 
 This comprehensive testing suite covers the full multi-agent system architecture, from individual agent capabilities to end-to-end workflows.
 
+## Test Evaluation Approach
+
+**Use simple assertions for most tests (90%):**
+```python
+assert response.status_code == 200
+assert len(results) == expected_count
+assert "success" in response.text
+```
+
+**Use AI judges only for subjective evaluation (10%):**
+```python
+from tools.minimal_judge import judge_text, judge_screenshot
+
+# Response quality evaluation
+result = judge_text(ai_response, "Is this response helpful and accurate?")
+assert result["pass"], result["feedback"]
+
+# UI testing with screenshots  
+result = judge_screenshot("login.png", "Is the login button visible?")
+assert result["pass"], result["feedback"]
+```
+
+See [`docs/minimal-judge-guide.md`](../docs/minimal-judge-guide.md) for complete usage guide.
+
 ## Architecture Overview
 
 See `comprehensive_architecture.md` for the complete system design, including:

@@ -28,6 +28,30 @@ tests/
 ★ = COMPLETELY REWRITTEN for valor_agent intelligence validation
 ```
 
+### Test Evaluation Methods
+
+**Most tests (90%) use simple assertions:**
+```python
+assert response.status_code == 200
+assert len(data) > 0  
+assert "expected_text" in output
+```
+
+**Some tests (10%) use AI judges for subjective evaluation:**
+```python
+from tools.minimal_judge import judge_text, judge_screenshot
+
+# For response quality
+result = judge_text(response, "Is this response helpful?")
+assert result["pass"], result["feedback"]
+
+# For UI testing with screenshots
+result = judge_screenshot("page.png", "Is the login button visible?")
+assert result["pass"], result["feedback"]
+```
+
+See [Minimal Judge Guide](./minimal-judge-guide.md) for detailed usage.
+
 ### Intelligence Testing Philosophy
 
 **CORE PRINCIPLE: Test Intelligence, Not Keywords**
