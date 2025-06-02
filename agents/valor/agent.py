@@ -556,21 +556,30 @@ def get_conversation_context(
 
     Use this when:
     - You need more context to understand what's being discussed
-    - The conversation seems to reference earlier topics
-    - You want to see the full recent conversation flow
+    - The conversation seems to reference earlier topics (e.g., "like we discussed before")
+    - You want to see the full recent conversation flow to maintain continuity
     - Understanding the broader context would help provide better assistance
+    - User asks about recent conversation history ("what were we talking about earlier?")
+    - You need to understand the evolution of a discussion over several hours
 
     Args:
         ctx: The runtime context containing chat information and history manager.
-        hours_back: How many hours of conversation history to summarize (default 24).
+        hours_back: How many hours of conversation history to summarize (1-168, default 24).
 
     Returns:
-        str: Formatted conversation summary or "No recent activity".
+        str: Formatted conversation summary with timestamps and roles,
+             or "No recent activity" if no messages found.
 
     Example:
         >>> get_conversation_context(ctx, 12)
-        'Conversation summary (last 12 hours, 8 messages):...'
+        'Conversation summary (last 12 hours, 8 messages):
+         1. user: Started discussing the new project requirements...
+         2. assistant: I can help you break down those requirements...'
     """
+    # Validate parameters
+    if hours_back < 1 or hours_back > 168:  # 1 hour to 1 week
+        return "❌ hours_back must be between 1 and 168 hours (1 week)"
+    
     if not ctx.deps.chat_history_obj or not ctx.deps.chat_id:
         return "No chat history available"
     
