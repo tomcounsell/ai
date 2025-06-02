@@ -50,6 +50,13 @@ def generate_image(
         Requires OPENAI_API_KEY environment variable to be set.
         Generated filenames are sanitized versions of the prompt.
     """
+    # Add input validation to match agent implementation
+    if not prompt or not prompt.strip():
+        return "🎨 Image generation error: Please provide a description for the image."
+    
+    if len(prompt) > 1000:
+        return "🎨 Image generation error: Description too long (maximum 1000 characters)."
+
     api_key = os.getenv("OPENAI_API_KEY")
 
     if not api_key:
