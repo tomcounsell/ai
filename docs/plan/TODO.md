@@ -41,11 +41,11 @@ This section tracks the comprehensive audit of all PydanticAI tools in the syste
 - [x] **valor_delegation_tool.py** ✅ - Delegation implementation (CRITICAL - recently fixed)
 - [x] **notion_tool.py** ✅ - Notion workspace integration (HIGH - supports query_notion_projects)
 - [x] **link_analysis_tool.py** ✅ - URL analysis implementation (MEDIUM - supports link tools)
-- [ ] **telegram_history_tool.py** 🟡 - Conversation history implementation (MEDIUM - supports conversation tools)
+- [x] **telegram_history_tool.py** ✅ - Conversation history implementation (MEDIUM - supports conversation tools)
 
 #### Development & Quality Tools
 - [ ] **documentation_tool.py** 🔴 - Document analysis functionality (MEDIUM)
-- [ ] **linting_tool.py** 🔴 - Code quality/linting tools (HIGH)
+- [x] **linting_tool.py** ✅ - Code quality/linting tools (HIGH)
 - [ ] **test_judge_tool.py** 🔴 - AI-powered test evaluation (MEDIUM)
 - [ ] **test_params_tool.py** 🔴 - Test parameter generation (MEDIUM)
 - [ ] **minimal_judge.py** 🔴 - Simple AI evaluation utility (LOW)

@@ -251,14 +251,14 @@ def _run_mypy(project_path: Path, config: LintConfig) -> List[LintIssue]:
         if result.stdout:
             lines = result.stdout.strip().split('\n')
             for line in lines:
-                if ':' in line and '(' in line and ')' in line:
+                if ':' in line and line.strip():
                     try:
                         # Parse mypy output format: file:line:column: severity: message [code]
                         parts = line.split(':', 3)
                         if len(parts) >= 4:
                             file_path = parts[0]
                             line_num = int(parts[1])
-                            col_num = int(parts[2]) if parts[2].isdigit() else 1
+                            col_num = int(parts[2]) if parts[2].strip().isdigit() else 1
                             
                             rest = parts[3].strip()
                             if rest.startswith('error:'):
@@ -274,9 +274,11 @@ def _run_mypy(project_path: Path, config: LintConfig) -> List[LintIssue]:
                             # Extract error code if present
                             code = "mypy"
                             if '[' in message and ']' in message:
-                                code_match = message[message.rfind('['):message.rfind(']')+1]
-                                code = code_match.strip('[]')
-                                message = message[:message.rfind('[')].strip()
+                                code_start = message.rfind('[')
+                                code_end = message.rfind(']')
+                                if code_start < code_end:
+                                    code = message[code_start+1:code_end]
+                                    message = message[:code_start].strip()
                             
                             issues.append(LintIssue(
                                 file_path=file_path,

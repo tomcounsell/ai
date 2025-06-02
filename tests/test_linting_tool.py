@@ -23,6 +23,55 @@ from tools.linting_tool import (
 )
 
 
+@pytest.fixture
+def temp_python_file():
+    """Create a temporary Python file for testing."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        f.write('''def hello_world():
+    print("Hello, World!")
+
+if __name__ == "__main__":
+    hello_world()
+''')
+        temp_file = f.name
+    
+    yield temp_file
+    
+    # Cleanup
+    if os.path.exists(temp_file):
+        os.unlink(temp_file)
+
+
+@pytest.fixture 
+def temp_project_dir():
+    """Create a temporary project directory structure for testing."""
+    temp_dir = tempfile.mkdtemp()
+    
+    # Create some Python files in the project
+    test_file_1 = Path(temp_dir) / "module1.py"
+    test_file_1.write_text('''def function_one():
+    return "test"
+
+class TestClass:
+    def method(self):
+        pass
+''')
+    
+    test_file_2 = Path(temp_dir) / "module2.py"
+    test_file_2.write_text('''import os
+import sys
+
+def function_two():
+    print("hello")
+''')
+    
+    yield temp_dir
+    
+    # Cleanup
+    import shutil
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 class TestLintSeverity:
     """Test LintSeverity enum."""
     
