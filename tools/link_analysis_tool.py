@@ -22,10 +22,10 @@ load_dotenv()
 
 
 def extract_urls(text: str) -> List[str]:
-    """Extract URLs from text using regex.
+    """Extract URLs from text using optimized regex.
     
-    Finds all HTTP and HTTPS URLs in the provided text using a
-    comprehensive regex pattern that matches standard URL formats.
+    Finds all HTTP and HTTPS URLs in the provided text using an
+    optimized regex pattern that efficiently matches standard URL formats.
     
     Args:
         text: Text content to search for URLs.
@@ -37,8 +37,10 @@ def extract_urls(text: str) -> List[str]:
         >>> extract_urls("Visit https://example.com for more info")
         ['https://example.com']
     """
+    # Optimized regex pattern - more efficient and focused on common URL patterns
     url_pattern = re.compile(
-        r"http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+"
+        r"https?://(?:[-\w.])+(?:[:\d]+)?(?:/(?:[\w/_.])*(?:\?(?:[\w&=%.])*)?(?:#(?:[\w.])*)?)?",
+        re.IGNORECASE
     )
     return url_pattern.findall(text)
 
@@ -200,6 +202,7 @@ def store_link_with_analysis(
     
     Saves a URL along with its AI-generated analysis to the shared SQLite database.
     Automatically analyzes the content and stores structured metadata for later retrieval.
+    Includes caching to avoid re-analyzing the same URL.
 
     Args:
         url: The URL to store.
@@ -215,7 +218,7 @@ def store_link_with_analysis(
         True
         
     Note:
-        Overwrites existing entries for the same URL.
+        Uses cached analysis if URL was previously analyzed successfully.
     """
     if not validate_url(url):
         return False
@@ -223,7 +226,28 @@ def store_link_with_analysis(
     # Initialize shared database if it doesn't exist
     init_database()
     
-    # Get AI analysis of the URL
+    # Check if we already have a successful analysis for this URL (caching)
+    try:
+        with get_database_connection() as conn:
+            cursor = conn.execute("""
+                SELECT analysis_status, title, main_topic, reasons_to_care 
+                FROM links 
+                WHERE url = ? AND analysis_status = 'success'
+            """, (url,))
+            existing = cursor.fetchone()
+            
+            if existing:
+                # URL already exists with successful analysis - just update timestamp
+                conn.execute("""
+                    UPDATE links 
+                    SET updated_at = ?
+                    WHERE url = ?
+                """, (datetime.now().isoformat(), url))
+                return True
+    except Exception:
+        pass  # Continue with new analysis if cache check fails
+    
+    # Get AI analysis of the URL (only if not cached)
     analysis = analyze_url_content(url)
     
     # Parse URL for domain

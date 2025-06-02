@@ -363,7 +363,8 @@ def save_link_for_later(
 
     This tool analyzes and stores URLs shared in chat for future reference.
     It automatically extracts key information like title, main topic, and
-    reasons why the content might be valuable.
+    reasons why the content might be valuable. Uses caching to avoid
+    re-analyzing previously saved URLs.
 
     Use this when someone shares a link they want to save, or when you want
     to analyze and store interesting URLs for future reference.
@@ -375,9 +376,18 @@ def save_link_for_later(
     Returns:
         str: Confirmation message with analysis summary.
 
-    Example:
+    Examples:
         >>> save_link_for_later(ctx, "https://example.com/article")
         '📎 **Link Saved & Analyzed**\n\nTitle: Example Article...'
+        
+        >>> save_link_for_later(ctx, "Save this: https://github.com/user/repo")
+        '📎 **Link saved successfully!**\n\nhttps://github.com/user/repo...'
+
+    Troubleshooting:
+        - If analysis fails, the URL is still saved but marked with error status
+        - Invalid URLs (missing http/https) will return an error message
+        - Previously analyzed URLs are retrieved from cache for faster response
+        - If Perplexity API is unavailable, the tool will save URL without analysis
     """
     # Extract URLs if the input contains more than just the URL
     urls = extract_urls(url)
@@ -401,7 +411,7 @@ def search_saved_links(
     """Search through previously saved links.
 
     This tool searches through the collection of previously analyzed and saved
-    links to find matches based on domain name, URL content, or timestamp.
+    links to find matches based on domain name, URL content, title, or timestamp.
 
     Use this when someone wants to find links they've shared before or
     when looking for previously saved content on a specific topic.
@@ -414,9 +424,22 @@ def search_saved_links(
     Returns:
         str: Formatted list of matching links with metadata.
 
-    Example:
+    Examples:
         >>> search_saved_links(ctx, "github.com", 5)
         '📂 **Found 3 link(s) matching "github.com":**\n\n• **github.com** (2024-01-15)...'
+        
+        >>> search_saved_links(ctx, "python tutorial")
+        '📂 **Found 2 link(s) matching "python tutorial":**...'
+        
+        >>> search_saved_links(ctx, "2024-01-15")
+        '📂 **Found 5 link(s) matching "2024-01-15":**...'
+
+    Search Tips:
+        - Domain searches: "github.com", "stackoverflow.com"
+        - Topic searches: "python", "machine learning", "api"
+        - Date searches: "2024-01", "2024-01-15"
+        - Keyword searches match titles and topics
+        - Use specific terms for better results
     """
     return search_stored_links(query, chat_id=ctx.deps.chat_id, limit=limit)
 
