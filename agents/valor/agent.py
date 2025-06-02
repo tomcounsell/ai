@@ -175,6 +175,7 @@ def create_image(
     prompt: str,
     style: str = "natural",
     quality: str = "standard",
+    size: str = "1024x1024",
 ) -> str:
     """Generate an AI-created image from a text description using DALL-E 3.
 
@@ -188,21 +189,46 @@ def create_image(
     - Visualize something they describe
     - Design graphics or illustrations
 
+    Common error scenarios:
+    - Returns "Image generation unavailable" if OPENAI_API_KEY is not configured
+    - Returns "Image generation error" for API issues or invalid parameters
+    - Returns error for invalid size, style, or quality values
+
     Args:
         ctx: The runtime context containing chat information.
         prompt: Detailed description of the image to generate.
-        style: Image style - "natural" (realistic) or "vivid" (dramatic/artistic).
-        quality: Image quality - "standard" or "hd".
+        style: Image style - "natural" (realistic/photographic) or "vivid" (dramatic/artistic/stylized).
+        quality: Image quality - "standard" (faster/cheaper) or "hd" (higher detail/slower).
+        size: Image dimensions - "1024x1024" (square), "1792x1024" (landscape), or "1024x1792" (portrait).
 
     Returns:
         str: Special formatted response starting with "TELEGRAM_IMAGE_GENERATED|"
              followed by the image path and caption, or error message if failed.
 
     Example:
-        >>> create_image(ctx, "a cat wearing a wizard hat", "vivid", "hd")
+        >>> create_image(ctx, "a cat wearing a wizard hat", "vivid", "hd", "1024x1024")
         'TELEGRAM_IMAGE_GENERATED|/tmp/generated_cat_wizard.png|🎨 **Image Generated!**...'
     """
-    image_path = generate_image(prompt=prompt, style=style, quality=quality, save_directory="/tmp")
+    # Add input validation
+    if not prompt or not prompt.strip():
+        return "🎨 Image generation error: Please provide a description for the image."
+    
+    if len(prompt) > 1000:
+        return "🎨 Image generation error: Description too long (maximum 1000 characters)."
+    
+    valid_styles = ["natural", "vivid"]
+    if style not in valid_styles:
+        return f"🎨 Image generation error: Style must be 'natural' or 'vivid'. Got '{style}'."
+    
+    valid_qualities = ["standard", "hd"]
+    if quality not in valid_qualities:
+        return f"🎨 Image generation error: Quality must be 'standard' or 'hd'. Got '{quality}'."
+    
+    valid_sizes = ["1024x1024", "1792x1024", "1024x1792"]
+    if size not in valid_sizes:
+        return f"🎨 Image generation error: Size must be '1024x1024', '1792x1024', or '1024x1792'. Got '{size}'."
+    
+    image_path = generate_image(prompt=prompt, style=style, quality=quality, size=size, save_directory="/tmp")
 
     if image_path.startswith("🎨") and "error" in image_path.lower():
         return image_path
