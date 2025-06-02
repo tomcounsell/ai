@@ -196,7 +196,7 @@ class TestTelegramToolsMCP:
         mock_chat_history = Mock()
         mock_chat_history.get_context.return_value = mock_messages
 
-        with patch("mcp_servers.telegram_tools.ChatHistoryManager", return_value=mock_chat_history):
+        with patch("integrations.telegram.chat_history.ChatHistoryManager", return_value=mock_chat_history):
             result = get_conversation_context(chat_id="12345", hours_back=24)
             assert "Conversation Context Summary" in result
             assert "Test message 1" in result
@@ -206,7 +206,7 @@ class TestTelegramToolsMCP:
         mock_chat_history = Mock()
         mock_chat_history.get_context.return_value = []
 
-        with patch("mcp_servers.telegram_tools.ChatHistoryManager", return_value=mock_chat_history):
+        with patch("integrations.telegram.chat_history.ChatHistoryManager", return_value=mock_chat_history):
             result = get_recent_history(chat_id="12345")
             assert "No recent messages found" in result
 

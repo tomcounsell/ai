@@ -1,20 +1,51 @@
-"""Telegram message history search tool for context retrieval."""
+"""Telegram message history search tool for context retrieval.
+
+This tool implements intelligent search through Telegram conversation history using
+a relevance + recency scoring algorithm to find the most useful historical context.
+
+Search Algorithm:
+- Searches message content for case-insensitive keyword matches
+- Scores results using: relevance_score + (recency_score * 0.5)
+- relevance_score = count of query term occurrences in message content
+- recency_score = 1 - (message_age_hours / max_age_hours), providing time decay
+- Results sorted by total score (relevance + recency) in descending order
+- Configurable time window (default: 30 days) and result limit (default: 5)
+
+This ensures recent relevant messages rank higher than old relevant messages,
+while still allowing important older context to be found when highly relevant.
+"""
 
 def search_telegram_history(query: str, chat_history_obj, chat_id: int, max_results: int = 5) -> str:
     """
-    Search through Telegram message history for relevant context.
+    Search through Telegram message history for relevant context using intelligent scoring.
+    
+    Uses a relevance + recency algorithm that balances content matching with message age
+    to provide the most useful historical context. Recent relevant messages are prioritized
+    over older ones, but highly relevant older messages can still be found.
+    
+    Search Algorithm Details:
+    - Case-insensitive keyword search through message content
+    - Scoring: relevance_count + (time_decay_factor * 0.5)
+    - Time window: 30 days (configurable in ChatHistoryManager.search_history)
+    - Results ranked by total score, limited by max_results parameter
     
     Use this tool when you need to find specific information from previous 
     conversations that might not be in the immediate recent context.
     
     Args:
         query: Search terms or keywords to find in message history
-        chat_history_obj: Chat history manager instance
+        chat_history_obj: Chat history manager instance with search_history method
         chat_id: ID of the chat to search
         max_results: Maximum number of relevant messages to return (default 5)
         
     Returns:
-        Formatted string of relevant historical messages or "No matches found"
+        Formatted string of relevant historical messages ranked by relevance + recency,
+        or "No matches found" if no relevant messages exist in the search window.
+        
+    Architecture:
+        This function provides a clean interface to ChatHistoryManager.search_history(),
+        handling formatting and error cases for both PydanticAI agent tools and
+        MCP server tools that need consistent conversation history search.
     """
     if not chat_history_obj:
         return "No chat history available for search"
