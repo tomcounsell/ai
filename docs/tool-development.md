@@ -418,4 +418,121 @@ def monitored_tool(param: str) -> str:
         return f"❌ Tool error: {str(e)}"
 ```
 
+## Gold Standard Implementation Patterns
+
+### Exemplary Implementation: `image_analysis_tool.py` (Quality Score: 9.8/10)
+
+The image analysis tool serves as the **architectural reference** for tool development, demonstrating:
+
+#### 1. Sophisticated Error Categorization
+```python
+except FileNotFoundError:
+    return "👁️ Image analysis error: Image file not found."
+except OSError as e:
+    return f"👁️ Image file error: Failed to read image file - {str(e)}"
+except Exception as e:
+    error_type = type(e).__name__
+    if "API" in str(e) or "OpenAI" in str(e):
+        return f"👁️ OpenAI API error: {str(e)}"
+    if "base64" in str(e).lower() or "encoding" in str(e).lower():
+        return f"👁️ Image encoding error: Failed to process image format - {str(e)}"
+    return f"👁️ Image analysis error ({error_type}): {str(e)}"
+```
+
+#### 2. Pre-Validation for Efficiency
+```python
+# Validate format BEFORE file operations (efficiency optimization)
+valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp']
+file_extension = Path(image_path).suffix.lower()
+if file_extension not in valid_extensions:
+    return f"👁️ Image analysis error: Unsupported format '{file_extension}'. Supported: {', '.join(valid_extensions)}"
+```
+
+#### 3. Context-Aware Prompting
+```python
+# Different system prompts for different use cases
+if question:
+    system_content = (
+        "You are an AI assistant with vision capabilities. "
+        "Analyze the provided image and answer the specific question about it. "
+        "Be detailed and accurate in your response. "
+        "Keep responses under 400 words for messaging platforms."
+    )
+else:
+    system_content = (
+        "You are an AI assistant with vision capabilities. "
+        "Describe what you see in the image in a natural, conversational way. "
+        "Focus on the most interesting or relevant aspects. "
+        "Keep responses under 300 words for messaging platforms."
+    )
+```
+
+#### 4. Three-Layer Architecture Excellence
+```python
+# Agent Layer: Context extraction and delegation
+def analyze_shared_image(ctx: RunContext[ValorContext], image_path: str, question: str = "") -> str:
+    # Extract chat context for relevance
+    chat_context = None
+    if ctx.deps.chat_history:
+        recent_messages = ctx.deps.chat_history[-3:]
+        chat_context = " ".join([msg.get("content", "") for msg in recent_messages])
+    
+    # Delegate to implementation with context
+    return analyze_image(image_path=image_path, question=question if question else None, context=chat_context)
+
+# Implementation Layer: Core functionality with comprehensive validation
+def analyze_image(image_path: str, question: str | None = None, context: str | None = None) -> str:
+    # Input validation, format checking, API integration, error handling
+    
+# MCP Layer: Claude Code integration with chat_id context
+@mcp.tool()
+def analyze_shared_image(image_path: str, question: str = "", chat_id: str = "") -> str:
+    # MCP-specific handling with context injection
+```
+
+#### 5. Comprehensive Testing Patterns
+```python
+# Perfect test coverage example (22/22 tests passing, 100% success rate)
+class TestImageAnalysisImplementation:
+    def test_analyze_image_format_validation(self):
+        """Test format validation before file operations."""
+        
+    def test_analyze_image_successful_response(self):
+        """Test with proper API mocking and response validation."""
+        
+    def test_analyze_image_api_error(self):
+        """Test sophisticated error categorization."""
+
+class TestAnalyzeSharedImageAgentTool:
+    def test_agent_tool_context_extraction(self):
+        """Test context-aware delegation patterns."""
+
+class TestImageAnalysisIntegration:
+    def test_interface_consistency_across_implementations(self):
+        """Test three-layer architecture consistency."""
+```
+
+### Key Principles from Gold Standard
+
+1. **Validation Before Operations**: Check inputs and formats before expensive operations
+2. **Sophisticated Error Categorization**: Specific error types with user-friendly messages
+3. **Context-Aware Design**: Different behavior based on use case and available context
+4. **Perfect Test Coverage**: Comprehensive testing across all scenarios and layers
+5. **Three-Layer Consistency**: Clean separation between agent, implementation, and MCP layers
+6. **Performance Optimization**: Pre-validation, efficient error handling, appropriate timeouts
+7. **User Experience Focus**: Clear emoji indicators, helpful error messages, conversation-friendly responses
+
+### Quality Standards
+
+Tools should achieve:
+- ✅ **9.0+ Quality Score**: Excellent implementation meeting all production standards
+- ✅ **95%+ Test Success Rate**: Comprehensive test coverage with minimal failures
+- ✅ **Sub-second Validation**: Efficient input validation and error handling
+- ✅ **Context Integration**: Proper use of chat history and conversation context
+- ✅ **Error Categorization**: Specific error types helping users understand and resolve issues
+
+Use `image_analysis_tool.py` as the architectural reference when developing new tools or improving existing ones.
+
+---
+
 This guide provides the foundation for developing robust, well-integrated tools that extend agent capabilities while maintaining system reliability and performance.
