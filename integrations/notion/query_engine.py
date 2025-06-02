@@ -49,40 +49,10 @@ def load_workspace_settings() -> Tuple[Dict[str, Dict[str, str]], Dict[str, str]
     except Exception as e:
         print(f"Warning: Could not load consolidated workspace config: {e}")
     
-    # Fallback to hardcoded settings (for backward compatibility)
-    fallback_settings = {
-        "PsyOPTIMAL": {
-            "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
-            "url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
-            "description": "PsyOPTIMAL project tasks and management",
-        },
-        "FlexTrip": {
-            "database_id": "1ed2bc89-4d10-80e5-89e9-feefe994dddd",
-            "url": "https://www.notion.so/yudame/1ed2bc894d1080e589e9feefe994dddd",
-            "description": "FlexTrip project tasks and management",
-        },
-        "DeckFusion Dev": {
-            "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
-            "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
-            "description": "DeckFusion development tasks and management",
-        },
-    }
-    
-    fallback_aliases = {
-        "psyoptimal": "PsyOPTIMAL",
-        "psy": "PsyOPTIMAL",
-        "optimal": "PsyOPTIMAL",
-        "flextrip": "FlexTrip",
-        "flex": "FlexTrip",
-        "trip": "FlexTrip",
-        "deckfusion": "DeckFusion Dev",
-        "deck": "DeckFusion Dev",
-        "fusion": "DeckFusion Dev",
-        "deckfusion dev": "DeckFusion Dev",
-        "deck dev": "DeckFusion Dev",
-    }
-    
-    return fallback_settings, fallback_aliases
+    # No fallback - force configuration to be used as source of truth
+    print(f"ERROR: Could not load workspace configuration from {config_file}")
+    print("System requires valid workspace configuration to function properly.")
+    return {}, {}
 
 
 # Load workspace settings from consolidated config
