@@ -35,6 +35,13 @@ def search_web(query: str, max_results: int = 3) -> str:
     Note:
         Requires PERPLEXITY_API_KEY environment variable to be set.
     """
+    # Add input validation to match agent and MCP implementations
+    if not query or not query.strip():
+        return "🔍 Search error: Please provide a search query."
+    
+    if len(query) > 500:
+        return "🔍 Search error: Query too long (maximum 500 characters)."
+
     api_key = os.getenv("PERPLEXITY_API_KEY")
 
     if not api_key:

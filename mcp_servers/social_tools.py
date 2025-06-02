@@ -51,10 +51,10 @@ def search_current_info(query: str, max_results: int = 3) -> str:
 
     # Validate inputs
     if not query or not query.strip():
-        return "🔍 Search error: Query cannot be empty."
+        return "🔍 Search error: Please provide a search query."
     
     if len(query) > 500:
-        return "🔍 Search error: Query too long (max 500 characters)."
+        return "🔍 Search error: Query too long (maximum 500 characters)."
 
     try:
         client = OpenAI(api_key=api_key, base_url="https://api.perplexity.ai", timeout=180)
