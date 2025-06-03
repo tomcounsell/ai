@@ -909,5 +909,68 @@ def detailed_image_assessment(image_path: str) -> str:
         return f"❌ Error in detailed image assessment: {str(e)}"
 
 
+# ==================== DOCUMENTATION TOOLS ====================
+
+
+@mcp.tool()
+def read_documentation(filename: str, chat_id: str = "") -> str:
+    """Read project documentation files to help with development questions.
+    
+    This tool provides access to project documentation like architecture guides,
+    API documentation, system operations guides, and other project specifications.
+    Use this when you need to reference project documentation to answer questions
+    or understand system design.
+    
+    Args:
+        filename: Name of documentation file (e.g., "agent-architecture.md", "system-operations.md")
+        chat_id: Telegram chat ID for workspace context (optional)
+    
+    Returns:
+        str: Documentation content formatted for conversation, or error message if file not found
+    """
+    try:
+        # Import here to avoid circular imports
+        from tools.documentation_tool import read_documentation as read_doc
+        
+        # Add context enhancement if chat_id provided
+        if chat_id:
+            # Could add workspace-specific context here in the future
+            pass
+            
+        return read_doc(filename)
+        
+    except Exception as e:
+        return f"❌ Error reading documentation: {str(e)}"
+
+
+@mcp.tool()  
+def list_documentation_files(chat_id: str = "") -> str:
+    """List all available project documentation files.
+    
+    This tool helps discover what documentation is available in the project
+    before attempting to read specific files. Use this when you want to see
+    what documentation exists or help users find relevant documentation.
+    
+    Args:
+        chat_id: Telegram chat ID for workspace context (optional)
+        
+    Returns:
+        str: Formatted list of available documentation files, or error message if listing fails
+    """
+    try:
+        # Import here to avoid circular imports  
+        from tools.documentation_tool import list_documentation_files as list_docs
+        
+        # Add context enhancement if chat_id provided
+        if chat_id:
+            # Could add workspace-specific filtering here in the future
+            pass
+            
+        return list_docs()
+        
+    except Exception as e:
+        return f"❌ Error listing documentation: {str(e)}"
+
+
 if __name__ == "__main__":
     mcp.run()

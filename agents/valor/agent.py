@@ -32,6 +32,7 @@ from tools.link_analysis_tool import extract_urls, search_stored_links, store_li
 from tools.notion_tool import query_psyoptimal_workspace
 from tools.search_tool import search_web
 from tools.telegram_history_tool import search_telegram_history, get_telegram_context_summary
+from tools.documentation_tool import read_documentation, list_documentation_files
 
 
 class ValorContext(BaseModel):
@@ -98,7 +99,7 @@ Additional context for conversations:
 - Remember: you're a human software engineer, not an AI assistant
 
 IMPORTANT TOOL USAGE:
-- You have access to specialized tools for specific tasks (web search, image generation, image analysis, coding delegation, link saving, notion queries)
+- You have access to specialized tools for specific tasks (web search, image generation, image analysis, coding delegation, link saving, notion queries, documentation reading)
 - When users request something that matches a tool's capability, YOU MUST use the appropriate tool
 - For image requests ("create image", "generate image", "draw", "make picture"), use the create_image tool
 - For current information requests, use the search_current_info tool
@@ -110,6 +111,8 @@ IMPORTANT TOOL USAGE:
 - For saving/analyzing links, use the save_link_for_later tool
 - For searching saved links, use the search_saved_links tool
 - For project/task questions, use the query_notion_projects tool
+- For documentation questions, use the read_project_documentation tool (e.g., "agent-architecture.md", "system-operations.md")
+- To see available documentation, use the list_project_documentation tool
 - Always actually use the tools when appropriate - don't just describe what you would do
 
 DEVELOPMENT TOOLS AVAILABLE (via Claude Code MCP):
@@ -588,6 +591,72 @@ def get_conversation_context(
         chat_id=ctx.deps.chat_id,
         hours_back=hours_back
     )
+
+
+@valor_agent.tool
+def read_project_documentation(ctx: RunContext[ValorContext], filename: str) -> str:
+    """Read project documentation files to help with development questions.
+    
+    This tool provides access to project documentation like architecture guides,
+    API documentation, system operations guides, and other project specifications.
+    Use this when you need to reference project documentation to answer questions
+    or understand system design.
+    
+    Use this when you need to access:
+    - Architecture guides (agent-architecture.md, database-architecture.md)
+    - API documentation and guides
+    - System operations documentation (system-operations.md)
+    - Testing strategies and guides (testing-strategy.md)
+    - Tool development guidelines (tool-development.md)
+    - Project planning documents
+    - Integration guides (telegram-integration.md)
+    - Any other .md files in the docs/ directory
+    
+    Args:
+        ctx: Runtime context with conversation information.
+        filename: Name of documentation file (e.g., "agent-architecture.md", "system-operations.md").
+    
+    Returns:
+        str: Documentation content formatted for conversation, or error message if file not found.
+        
+    Example:
+        >>> read_project_documentation(ctx, "agent-architecture.md")
+        '📖 **agent-architecture.md**\n\n# Agent Architecture\n\nThis document...'
+    """
+    # Input validation
+    if not filename or not filename.strip():
+        return "📖 Error: Please specify a documentation filename."
+    
+    # Delegate to the implementation
+    return read_documentation(filename.strip())
+
+
+@valor_agent.tool  
+def list_project_documentation(ctx: RunContext[ValorContext]) -> str:
+    """List all available project documentation files.
+    
+    This tool helps discover what documentation is available in the project
+    before attempting to read specific files. Use this when you want to see
+    what documentation exists or help users find relevant documentation.
+    
+    Use this when:
+    - User asks "what documentation is available?"
+    - You need to see what docs exist before reading a specific file
+    - User wants to explore project documentation options
+    - You're looking for a specific type of documentation but unsure of filename
+    
+    Args:
+        ctx: Runtime context with conversation information.
+        
+    Returns:
+        str: Formatted list of available documentation files, or error message if listing fails.
+        
+    Example:
+        >>> list_project_documentation(ctx)
+        '📖 **Available Documentation Files:**\n\n- agent-architecture.md\n- system-operations.md\n...'
+    """
+    # Delegate to the implementation
+    return list_documentation_files()
 
 
 async def run_valor_agent(message: str, context: ValorContext | None = None) -> str:
