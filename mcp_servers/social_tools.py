@@ -497,5 +497,127 @@ def search_links(query: str, chat_id: str = "", limit: int = 10) -> str:
     return result.strip()
 
 
+@mcp.tool()
+def technical_analysis(
+    research_topic: str, 
+    focus_areas: str = "", 
+    chat_id: str = ""
+) -> str:
+    """Perform comprehensive technical research and analysis using Claude Code.
+    
+    This tool delegates complex technical research tasks to Claude Code, which excels at:
+    - Exploring codebases and understanding architectures
+    - Analyzing technical documentation and specifications
+    - Researching industry best practices and patterns
+    - Investigating technologies, frameworks, and tools
+    - Comparing different approaches and solutions
+    - Reading and analyzing files across projects
+    
+    Unlike delegate_coding_task which focuses on implementation, this tool is optimized
+    for research, analysis, and investigation tasks where you need comprehensive 
+    technical insights without modifying files.
+    
+    Args:
+        research_topic: The technical topic or question to research and analyze
+        focus_areas: Optional specific areas to focus on (e.g., "performance, security, scalability")
+        chat_id: Chat ID for workspace context (extracted from CONTEXT_DATA if available)
+    
+    Returns:
+        Comprehensive technical analysis and research findings
+    
+    Examples:
+        >>> technical_analysis("How does the authentication system work in this codebase?")
+        >>> technical_analysis("Compare different image compression approaches", "performance, quality")
+        >>> technical_analysis("What are the current API endpoints and their purposes?")
+    """
+    try:
+        # Import here to avoid circular imports
+        import subprocess
+        import os
+        
+        # Get workspace context if available
+        working_dir = "."
+        context_info = ""
+        
+        if chat_id:
+            try:
+                from utilities.workspace_validator import get_workspace_validator
+                validator = get_workspace_validator()
+                workspace_dir = validator.get_working_directory(chat_id)
+                if workspace_dir:
+                    working_dir = workspace_dir
+                    workspace_name = validator.get_workspace_for_chat(chat_id)
+                    context_info = f"Workspace: {workspace_name}, Directory: {working_dir}"
+            except Exception:
+                pass  # Continue with default directory
+        
+        # Build research-focused prompt for Claude Code
+        prompt_parts = [
+            f"TECHNICAL RESEARCH TASK: {research_topic}",
+            "",
+            "RESEARCH OBJECTIVES:",
+            "- Conduct comprehensive technical analysis and investigation",
+            "- Focus on understanding, not modifying files",
+            "- Provide detailed findings with code examples and explanations", 
+            "- Explore relevant files, documentation, and patterns",
+            "- Research best practices and architectural decisions",
+            "",
+        ]
+        
+        if focus_areas:
+            prompt_parts.extend([
+                f"FOCUS AREAS: {focus_areas}",
+                "",
+            ])
+            
+        if context_info:
+            prompt_parts.extend([
+                f"WORKSPACE CONTEXT: {context_info}",
+                "",
+            ])
+        
+        prompt_parts.extend([
+            "RESEARCH GUIDELINES:",
+            "- Use Read, Glob, Grep, and other analysis tools extensively",
+            "- Do NOT edit, write, or modify any files",
+            "- Focus on understanding and explaining what exists",
+            "- Provide code examples and architectural insights",
+            "- Research industry standards and best practices",
+            "- Explain your findings clearly with technical depth",
+            "",
+            "Conduct this technical research thoroughly and provide comprehensive analysis."
+        ])
+        
+        full_prompt = "\n".join(prompt_parts)
+        
+        # Execute Claude Code for research
+        if working_dir and working_dir != ".":
+            command = f'cd "{working_dir}" && claude code "{full_prompt}"'
+            shell = True
+        else:
+            command = ["claude", "code", full_prompt]
+            shell = False
+        
+        process = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,  # 5 minute timeout for research tasks
+            shell=shell
+        )
+        
+        return f"🔬 **Technical Research Results**\n\n{process.stdout}"
+        
+    except subprocess.TimeoutExpired:
+        return f"🔬 **Research Timeout**: Technical analysis of '{research_topic}' exceeded 5 minutes. Try breaking down into smaller research questions."
+        
+    except subprocess.CalledProcessError as e:
+        return f"🔬 **Research Error**: Technical analysis failed: {e.stderr or 'Unknown error'}"
+        
+    except Exception as e:
+        return f"🔬 **Research Error**: {str(e)}"
+
+
 if __name__ == "__main__":
     mcp.run()
