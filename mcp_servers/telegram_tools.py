@@ -4,11 +4,24 @@
 Telegram Tools MCP Server
 
 Provides Telegram conversation history search and context tools for Claude Code integration.
-Converts existing telegram_history_tool functionality to MCP server format.
+This server follows the GOLD STANDARD wrapper pattern by importing functions from 
+standalone tools and adding MCP-specific concerns (context injection, validation).
+
+ARCHITECTURE: MCP Wrapper → Standalone Implementation
+- search_conversation_history → tools/telegram_history_tool.py
+- get_conversation_context → tools/telegram_history_tool.py
+- get_recent_history → Unique MCP implementation (UNIQUE)
+- list_telegram_dialogs → Unique MCP implementation (UNIQUE)
 """
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
+# Import standalone tool implementations following GOLD STANDARD pattern
+from tools.telegram_history_tool import (
+    search_telegram_history,
+    get_telegram_context_summary
+)
 
 # Load environment variables
 load_dotenv()
@@ -33,7 +46,7 @@ def search_conversation_history(query: str, chat_id: str = "", max_results: int 
     Returns:
         Formatted string of relevant historical messages or "No matches found"
     """
-    # Validate inputs
+    # Validate inputs (MCP-specific validation)
     if not query or not query.strip():
         return "❌ Search query cannot be empty."
     
@@ -56,39 +69,22 @@ def search_conversation_history(query: str, chat_id: str = "", max_results: int 
         if not chat_history_obj:
             return "❌ Chat history system not available"
         
-        # Convert chat_id to int if it's a string
+        # Convert chat_id to int if it's a string (MCP-specific handling)
         try:
             chat_id_int = int(chat_id)
         except ValueError:
             return f"❌ Invalid chat ID format: {chat_id}"
         
-        # Search message history 
-        matches = chat_history_obj.search_history(
-            chat_id=chat_id_int, 
-            query=query, 
-            max_results=max_results,
-            max_age_days=30  # Search last 30 days
-        )
+        # Call standalone implementation following GOLD STANDARD pattern
+        result = search_telegram_history(query, chat_history_obj, chat_id_int, max_results)
         
-        if not matches:
-            return f"📂 No messages found matching '{query}' in recent history for chat {chat_id}"
-        
-        # Format results for the agent
-        result_text = f"📂 **Found {len(matches)} relevant message(s) for '{query}' in chat {chat_id}:**\n\n"
-        
-        for i, msg in enumerate(matches, 1):
-            # Format message with timestamp if available
-            timestamp = msg.get('timestamp', 'Unknown time')
-            role = msg.get('role', 'unknown')
-            content = msg.get('content', '').strip()
-            
-            # Limit content length for readability
-            if len(content) > 200:
-                content = content[:200] + "..."
-            
-            result_text += f"{i}. **{role}** ({timestamp}):\n   {content}\n\n"
-        
-        return result_text.strip()
+        # Add MCP-specific formatting for enhanced user experience
+        if result.startswith("No messages found"):
+            return f"📂 {result} for chat {chat_id}"
+        elif result.startswith("Found"):
+            return f"📂 **{result.replace('Found', 'Found in chat ' + chat_id + ':')}**"
+        else:
+            return f"📂 **Search Results for '{query}' in chat {chat_id}:**\n\n{result}"
         
     except ImportError:
         return "❌ Telegram chat history system not available - missing integrations"
@@ -111,6 +107,7 @@ def get_conversation_context(chat_id: str = "", hours_back: int = 24) -> str:
     Returns:
         Formatted summary of recent conversation or "No recent activity"
     """
+    # MCP-specific validation
     if not chat_id:
         return "❌ No chat ID provided for context retrieval. Ensure CONTEXT_DATA includes CHAT_ID."
 
@@ -124,39 +121,26 @@ def get_conversation_context(chat_id: str = "", hours_back: int = 24) -> str:
         if not chat_history_obj:
             return "❌ Chat history system not available"
         
-        # Convert chat_id to int if it's a string
+        # Convert chat_id to int if it's a string (MCP-specific handling)
         try:
             chat_id_int = int(chat_id)
         except ValueError:
             return f"❌ Invalid chat ID format: {chat_id}"
         
-        # Get extended context
-        context_messages = chat_history_obj.get_context(
-            chat_id=chat_id_int,
-            max_context_messages=15,  # More messages for summary
-            max_age_hours=hours_back,
-            always_include_last=3     # Always include last 3
-        )
+        # Call standalone implementation following GOLD STANDARD pattern
+        result = get_telegram_context_summary(chat_history_obj, chat_id_int, hours_back)
         
-        if not context_messages:
-            return f"📭 No conversation activity in the last {hours_back} hours for chat {chat_id}"
-        
-        # Format as conversation summary
-        summary = f"💬 **Conversation Context Summary**\n"
-        summary += f"📅 Last {hours_back} hours | 💬 {len(context_messages)} messages | 🔗 Chat {chat_id}\n\n"
-        
-        for i, msg in enumerate(context_messages, 1):
-            timestamp = msg.get('timestamp', 'Unknown time')
-            role = msg.get('role', 'unknown')
-            content = msg.get('content', '').strip()
-            
-            # Limit content length for readability
-            if len(content) > 150:
-                content = content[:150] + "..."
-            
-            summary += f"{i}. **{role}** ({timestamp}):\n   {content}\n\n"
-            
-        return summary.strip()
+        # Add MCP-specific formatting for enhanced user experience
+        if result.startswith("No conversation activity"):
+            return f"📭 {result} for chat {chat_id}"
+        elif result.startswith("Conversation summary"):
+            # Enhanced formatting with chat context
+            enhanced_result = f"💬 **Conversation Context Summary**\n"
+            enhanced_result += f"📅 Last {hours_back} hours | 🔗 Chat {chat_id}\n\n"
+            enhanced_result += result.replace("Conversation summary", "Summary")
+            return enhanced_result
+        else:
+            return f"💬 **Context for chat {chat_id}:**\n\n{result}"
         
     except ImportError:
         return "❌ Telegram chat history system not available - missing integrations"
