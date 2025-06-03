@@ -1,26 +1,30 @@
 {
   "mcpServers": {
     "social-tools": {
-      "command": "python",
-      "args": ["mcp_servers/social_tools.py"],
+      "command": "uv",
+      "args": ["run", "mcp_servers/social_tools.py"],
+      "cwd": "/Users/valorengels/src/ai",
       "description": "Social tools for web search, image generation, and link analysis",
       "dependencies": ["openai", "requests", "python-dotenv", "mcp"]
     },
     "pm-tools": {
-      "command": "python", 
-      "args": ["mcp_servers/pm_tools.py"],
+      "command": "uv", 
+      "args": ["run", "mcp_servers/pm_tools.py"],
+      "cwd": "/Users/valorengels/src/ai",
       "description": "Project Manager tools for workspace querying and project analysis",
       "dependencies": ["anthropic", "requests", "python-dotenv", "mcp"]
     },
     "telegram-tools": {
-      "command": "python",
-      "args": ["mcp_servers/telegram_tools.py"], 
+      "command": "uv",
+      "args": ["run", "mcp_servers/telegram_tools.py"],
+      "cwd": "/Users/valorengels/src/ai", 
       "description": "Telegram conversation history search and context tools",
       "dependencies": ["python-dotenv", "mcp"]
     },
     "development-tools": {
-      "command": "python",
-      "args": ["mcp_servers/development_tools.py"],
+      "command": "uv",
+      "args": ["run", "mcp_servers/development_tools.py"],
+      "cwd": "/Users/valorengels/src/ai",
       "description": "Comprehensive development tools including test generation, code linting, document analysis, and image processing",
       "dependencies": ["openai", "anthropic", "requests", "python-dotenv", "mcp", "pydantic"]
     }
