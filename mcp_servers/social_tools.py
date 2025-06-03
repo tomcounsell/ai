@@ -30,6 +30,7 @@ from tools.link_analysis_tool import (
     store_link_with_analysis,
     search_stored_links
 )
+from tools.voice_transcription_tool import transcribe_audio_file
 
 # Load environment variables
 load_dotenv()
@@ -192,6 +193,45 @@ def search_links(query: str, chat_id: str = "", limit: int = 10) -> str:
         
     except Exception as e:
         return f"📂 Link search error: {str(e)}"
+
+
+@mcp.tool()
+def transcribe_voice_message(
+    file_path: str,
+    language: str = "",
+    cleanup_file: bool = False,
+    chat_id: str = ""
+) -> str:
+    """Transcribe an audio or voice file to text using OpenAI Whisper API.
+    
+    Use this tool when you need to convert voice messages, audio recordings, or any
+    audio file to text. Supports multiple languages and provides high-quality transcription.
+
+    Args:
+        file_path: Path to the audio/voice file to transcribe (supports OGG, MP3, WAV, MP4, etc.)
+        language: Optional language code for better accuracy (e.g., "en", "es", "fr", "de")
+        cleanup_file: Whether to delete the audio file after transcription (useful for temp files)
+        chat_id: Chat ID for context (extracted from CONTEXT_DATA if available)
+
+    Returns:
+        Transcribed text from the audio file, or error message if transcription fails
+    """
+    try:
+        # Call standalone implementation following GOLD STANDARD pattern
+        language_param = language if language and language.strip() else None
+        
+        result = transcribe_audio_file(file_path, language_param, cleanup_file)
+        
+        # Format for chat context if available
+        if chat_id and result:
+            return f"🎙️ **Voice Transcription**\n\n{result}"
+        else:
+            return result
+            
+    except FileNotFoundError:
+        return f"🎙️ Audio file not found: {file_path}"
+    except Exception as e:
+        return f"🎙️ Voice transcription error: {str(e)}"
 
 
 @mcp.tool()

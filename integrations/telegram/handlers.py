@@ -1105,7 +1105,7 @@ class MessageHandler:
             await self._safe_reply(message, error_msg, "❌ Error processing document")
 
     async def _handle_audio_message(self, client, message, chat_id: int):
-        """Handle audio/voice messages - placeholder for future implementation."""
+        """Handle audio/voice messages with transcription support."""
         try:
             # Get bot's own info for mention processing
             me = await client.get_me()
@@ -1135,27 +1135,96 @@ class MessageHandler:
                     self.chat_history.add_message(chat_id, "user", audio_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 return
 
-            # Store user message in chat history
-            if message.caption:
-                audio_type = "Voice" if message.voice else "Audio"
-                self.chat_history.add_message(chat_id, "user", f"[{audio_type}+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
-            else:
-                audio_type = "[Voice]" if message.voice else "[Audio]"
-                self.chat_history.add_message(chat_id, "user", audio_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
-
+            # Process voice/audio transcription if we should respond
             if is_private_chat or is_mentioned or is_dev_group_chat:
-                if message.voice:
-                    if message.caption:
-                        response = f"🎙️ I hear you sent a voice message with text: '{message.caption}'. Voice transcription isn't implemented yet, but it's on my roadmap."
+                try:
+                    # Download the audio file to a temporary location
+                    import tempfile
+                    import os
+                    
+                    # Create temporary file with appropriate extension
+                    if message.voice:
+                        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ogg')
+                        audio_type = "Voice"
                     else:
-                        response = "🎙️ I hear you sent a voice message! Voice transcription isn't implemented yet, but it's on my roadmap."
+                        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+                        audio_type = "Audio"
+                    
+                    temp_file.close()
+                    temp_path = temp_file.name
+                    
+                    # Download the audio file
+                    await message.download(temp_path)
+                    
+                    # Transcribe using our voice transcription tool
+                    from tools.voice_transcription_tool import transcribe_audio_file
+                    transcribed_text = transcribe_audio_file(temp_path, cleanup_file=True)
+                    
+                    # Handle caption text along with transcription
+                    if message.caption:
+                        # Store both caption and transcribed audio
+                        full_message = f"[{audio_type}+Text] Caption: {message.caption}\nTranscribed audio: {transcribed_text}"
+                        self.chat_history.add_message(chat_id, "user", full_message, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                        
+                        # Process both caption and transcribed text together
+                        combined_text = f"{message.caption}\n\n{transcribed_text}"
+                        response = await self._get_agent_response(chat_id, combined_text, reply_to_telegram_message_id)
+                    else:
+                        # Store transcribed audio only
+                        self.chat_history.add_message(chat_id, "user", transcribed_text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                        
+                        # Process transcribed text
+                        response = await self._get_agent_response(chat_id, transcribed_text, reply_to_telegram_message_id)
+                    
+                    await self._safe_reply(message, response, f"🎙️ {audio_type} transcribed")
+                    self.chat_history.add_message(chat_id, "assistant", response)
+                    
+                except Exception as transcription_error:
+                    # Fallback to old behavior if transcription fails
+                    print(f"🎙️ Voice transcription failed: {transcription_error}")
+                    
+                    # Store original message format in chat history
+                    if message.caption:
+                        audio_type = "Voice" if message.voice else "Audio"
+                        self.chat_history.add_message(chat_id, "user", f"[{audio_type}+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                    else:
+                        audio_type = "[Voice]" if message.voice else "[Audio]"
+                        self.chat_history.add_message(chat_id, "user", audio_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                    
+                    # Provide fallback response
+                    if message.voice:
+                        if message.caption:
+                            response = f"🎙️ I hear you sent a voice message with text: '{message.caption}'. Voice transcription failed, but I can still help with your text message!"
+                            # Process the caption text at least
+                            try:
+                                caption_response = await self._get_agent_response(chat_id, message.caption, reply_to_telegram_message_id)
+                                response = caption_response
+                            except:
+                                pass  # Keep fallback message
+                        else:
+                            response = f"🎙️ I hear you sent a voice message! Transcription failed with error: {str(transcription_error)}"
+                    else:
+                        if message.caption:
+                            response = f"🎵 I see you shared an audio file with text: '{message.caption}'. Audio transcription failed, but I can help with your text!"
+                            # Process the caption text at least
+                            try:
+                                caption_response = await self._get_agent_response(chat_id, message.caption, reply_to_telegram_message_id)
+                                response = caption_response
+                            except:
+                                pass  # Keep fallback message
+                        else:
+                            response = f"🎵 I see you shared an audio file! Transcription failed with error: {str(transcription_error)}"
+                    
+                    await self._safe_reply(message, response, "🎵 Audio received")
+                    self.chat_history.add_message(chat_id, "assistant", response)
+            else:
+                # Just store in history without transcription for non-responding cases
+                if message.caption:
+                    audio_type = "Voice" if message.voice else "Audio"
+                    self.chat_history.add_message(chat_id, "user", f"[{audio_type}+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 else:
-                    if message.caption:
-                        response = f"🎵 I see you shared an audio file with text: '{message.caption}'. Audio analysis isn't implemented yet, but I'm working on it."
-                    else:
-                        response = "🎵 I see you shared an audio file! Audio analysis isn't implemented yet, but I'm working on it."
-                await self._safe_reply(message, response, "🎵 Audio received")
-                self.chat_history.add_message(chat_id, "assistant", response)
+                    audio_type = "[Voice]" if message.voice else "[Audio]"
+                    self.chat_history.add_message(chat_id, "user", audio_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
 
         except Exception as e:
             error_msg = f"❌ Error processing audio: {str(e)}"
