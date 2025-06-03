@@ -150,7 +150,7 @@ This codebase implements a **production-ready unified system** with Claude Code 
 
 /mcp_servers/              # MCP tool servers for Claude Code
   ├── social_tools.py       # Web search, image generation, link analysis
-  ├── notion_tools.py       # Workspace-based project queries
+  ├── pm_tools.py           # Workspace-based project queries (Project Manager tools)
   └── telegram_tools.py     # Conversation history and context
 
 /tools/                    # Function tools (legacy PydanticAI integration)
@@ -277,7 +277,7 @@ class ValorAgent:
     def __init__(self):
         self.claude_session = ClaudeCodeSession(
             system_prompt=self._build_unified_prompt(),
-            mcp_servers=['social-tools', 'notion-tools', 'telegram-tools']
+            mcp_servers=['social-tools', 'pm-tools', 'telegram-tools']
         )
         self.context_manager = ContextWindowManager()
         self.streaming_optimizer = StreamingOptimizer()

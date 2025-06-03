@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Notion Tools MCP Server
+Project Manager (PM) Tools MCP Server
 
-Provides Notion workspace querying and analysis tools for Claude Code integration.
+Provides project management tools for workspace querying and analysis via Claude Code integration.
 Uses the shared NotionQueryEngine for all database operations with strict workspace validation.
 """
 
@@ -23,7 +23,7 @@ from utilities.workspace_validator import WorkspaceAccessError, get_workspace_va
 load_dotenv()
 
 # Initialize MCP server
-mcp = FastMCP("Notion Tools")
+mcp = FastMCP("Project Manager Tools")
 
 
 @mcp.tool()

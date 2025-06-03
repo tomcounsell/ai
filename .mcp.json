@@ -6,10 +6,10 @@
       "description": "Social tools for web search, image generation, and link analysis",
       "dependencies": ["openai", "requests", "python-dotenv", "mcp"]
     },
-    "notion-tools": {
+    "pm-tools": {
       "command": "python", 
-      "args": ["mcp_servers/notion_tools.py"],
-      "description": "Notion workspace querying and project analysis tools",
+      "args": ["mcp_servers/pm_tools.py"],
+      "description": "Project Manager tools for workspace querying and project analysis",
       "dependencies": ["anthropic", "requests", "python-dotenv", "mcp"]
     },
     "telegram-tools": {
