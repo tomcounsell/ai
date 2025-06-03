@@ -314,12 +314,13 @@ class TestEdgeCases:
             complexity_level="invalid"
         )
         
-        # Should use fallback complexity handling
+        # Should use fallback complexity handling (default to medium = 0.6)
         params = generate_test_params(config)
         assert len(params) > 0
         
-        # Should have some complexity score (even if fallback)
+        # Should have fallback complexity score (0.6 for medium default)
         assert all(hasattr(p, 'complexity_score') for p in params)
+        assert all(p.complexity_score == 0.6 for p in params)
     
     def test_unknown_domain_context(self):
         """Test handling of unknown domain contexts."""

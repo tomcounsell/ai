@@ -30,6 +30,40 @@ def generate_test_params(config: TestParamConfig) -> List[TestParams]:
     
     Creates diverse parameter sets to test AI responses across different scenarios,
     useful for evaluating model performance, bias, and consistency.
+    
+    Examples:
+        >>> # Generate UI feedback test parameters
+        >>> config = TestParamConfig(
+        ...     test_type="ui_feedback",
+        ...     param_categories=["ui_feedback"],
+        ...     num_variations=3,
+        ...     complexity_level="medium"
+        ... )
+        >>> params = generate_test_params(config)
+        >>> len(params)
+        3
+        
+        >>> # Generate code quality tests with domain context
+        >>> config = TestParamConfig(
+        ...     test_type="code_quality",
+        ...     param_categories=["code_quality"],
+        ...     num_variations=5,
+        ...     complexity_level="complex",
+        ...     domain_context="healthcare"
+        ... )
+        >>> params = generate_test_params(config)
+        >>> params[0].parameters["domain_context"]
+        'healthcare'
+        
+        >>> # Generate mixed test parameters
+        >>> config = TestParamConfig(
+        ...     test_type="comprehensive_test",
+        ...     param_categories=["ui_feedback", "code_quality", "response_evaluation"],
+        ...     num_variations=10
+        ... )
+        >>> params = generate_test_params(config)
+        >>> len(set(p.test_id for p in params))  # All unique IDs
+        10
     """
     
     # Base parameter templates by category
@@ -92,7 +126,7 @@ def generate_test_params(config: TestParamConfig) -> List[TestParams]:
             parameters["domain_specific_requirements"] = _generate_domain_requirements(config.domain_context)
         
         # Calculate complexity score
-        complexity_score = complexity_multipliers[config.complexity_level]
+        complexity_score = complexity_multipliers.get(config.complexity_level, 0.6)  # default to medium
         
         # Add random variation factors
         if config.complexity_level == "complex":
@@ -169,7 +203,17 @@ def _generate_evaluation_criteria(test_type: str, parameters: Dict[str, Any]) ->
 
 # Example usage functions for PydanticAI integration
 def generate_ui_test_params(num_variations: int = 5, complexity: str = "medium") -> str:
-    """Generate test parameters for UI feedback evaluation."""
+    """Generate test parameters for UI feedback evaluation.
+    
+    Example:
+        >>> params_json = generate_ui_test_params(num_variations=3, complexity="simple")
+        >>> import json
+        >>> params = json.loads(params_json)
+        >>> len(params)
+        3
+        >>> params[0]["test_id"].startswith("ui_feedback_")
+        True
+    """
     config = TestParamConfig(
         test_type="ui_feedback",
         param_categories=["ui_feedback"],
