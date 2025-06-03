@@ -16,19 +16,11 @@ ARCHITECTURE: MCP Wrapper → Standalone Implementation
 """
 
 import os
-import re
-import sqlite3
-from datetime import datetime
-from pathlib import Path
 from typing import Dict, Any
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
-from openai import OpenAI
-import requests
-
-from utilities.database import get_database_connection, init_database
 
 # Import standalone tool implementations following GOLD STANDARD pattern
 from tools.search_tool import search_web
@@ -138,93 +130,6 @@ def analyze_shared_image(
         return f"👁️ Image analysis error: {str(e)}"
 
 
-def _extract_urls(text: str) -> list[str]:
-    """Extract URLs from text using regex."""
-    url_pattern = re.compile(
-        r"http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+"
-    )
-    return url_pattern.findall(text)
-
-
-def _validate_url(url: str) -> bool:
-    """Validate if a URL is properly formatted."""
-    try:
-        result = urlparse(url)
-        return all([result.scheme, result.netloc])
-    except Exception:
-        return False
-
-
-def _analyze_url_content(url: str) -> dict[str, str]:
-    """Analyze a URL and extract structured data using Perplexity."""
-    if not _validate_url(url):
-        return {"error": f"Invalid URL format: {url}"}
-
-    api_key = os.getenv("PERPLEXITY_API_KEY")
-    if not api_key:
-        return {"error": "Missing PERPLEXITY_API_KEY configuration"}
-
-    try:
-        client = OpenAI(api_key=api_key, base_url="https://api.perplexity.ai")
-
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a content analyzer. For the given URL, extract and return "
-                    "ONLY the following information in this exact format:\n\n"
-                    "TITLE: [The actual title of the page/article]\n"
-                    "MAIN_TOPIC: [The primary subject matter in 1-2 sentences]\n"
-                    "REASONS_TO_CARE: [2-3 bullet points explaining why this might be valuable or interesting]\n\n"
-                    "Be concise and factual. If you cannot access the content, say 'Unable to access content'."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Analyze this URL: {url}",
-            },
-        ]
-
-        response = client.chat.completions.create(
-            model="sonar-pro", messages=messages, temperature=0.1, max_tokens=400
-        )
-
-        content = response.choices[0].message.content
-
-        # Parse the structured response
-        analysis = {"title": None, "main_topic": None, "reasons_to_care": None}
-
-        lines = content.split("\n")
-        current_field = None
-
-        for line in lines:
-            line = line.strip()
-            if line.startswith("TITLE:"):
-                analysis["title"] = line[6:].strip()
-            elif line.startswith("MAIN_TOPIC:"):
-                analysis["main_topic"] = line[12:].strip()
-            elif line.startswith("REASONS_TO_CARE:"):
-                analysis["reasons_to_care"] = line[17:].strip()
-            elif line.startswith("•") or line.startswith("-") and current_field == "reasons":
-                if analysis["reasons_to_care"]:
-                    analysis["reasons_to_care"] += "\n" + line
-                else:
-                    analysis["reasons_to_care"] = line
-            elif line and not line.startswith("TITLE:") and not line.startswith("MAIN_TOPIC:"):
-                if "REASONS_TO_CARE" in content and content.index(line) > content.index("REASONS_TO_CARE"):
-                    current_field = "reasons"
-                    if analysis["reasons_to_care"]:
-                        analysis["reasons_to_care"] += "\n" + line
-                    else:
-                        analysis["reasons_to_care"] = line
-
-        return analysis
-
-    except Exception as e:
-        return {"error": str(e)}
-
-
-
 
 @mcp.tool()
 def save_link(url: str, chat_id: str = "", username: str = "") -> str:
@@ -241,55 +146,25 @@ def save_link(url: str, chat_id: str = "", username: str = "") -> str:
     Returns:
         Success message with analysis summary or error message
     """
-    if not _validate_url(url):
-        return f"❌ Invalid URL format: {url}"
-
-    # Initialize database if it doesn't exist
-    init_database()
-    
-    # Get AI analysis of the URL
-    analysis = _analyze_url_content(url)
-    
-    # Parse URL for domain
-    parsed = urlparse(url)
-    domain = parsed.netloc
-    
-    # Determine analysis status and extract fields
-    if "error" in analysis:
-        status = "error"
-        title = None
-        main_topic = None
-        reasons_to_care = None
-        error_message = analysis["error"]
-    else:
-        status = "success"
-        title = analysis.get("title")
-        main_topic = analysis.get("main_topic")
-        reasons_to_care = analysis.get("reasons_to_care")
-        error_message = None
-
     try:
-        with get_database_connection() as conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO links 
-                (url, domain, timestamp, analysis_result, analysis_status, 
-                 title, main_topic, reasons_to_care, error_message, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                url, domain, datetime.now().isoformat(), str(analysis), status,
-                title, main_topic, reasons_to_care, error_message, datetime.now().isoformat()
-            ))
-
-        # Format response with analysis summary
-        if "error" in analysis:
-            return f"🔗 **Link Saved**: {domain}\n\n⚠️ Analysis error: {analysis['error']}"
+        # Call standalone implementation following GOLD STANDARD pattern
+        # Convert chat_id to int if provided, handle optional parameters
+        chat_id_int = int(chat_id) if chat_id and chat_id.isdigit() else None
+        username_param = username if username else None
+        
+        # Call standalone function - returns bool
+        success = store_link_with_analysis(url, chat_id_int, None, username_param)
+        
+        if success:
+            # Parse URL for domain to create user-friendly response
+            parsed = urlparse(url)
+            domain = parsed.netloc or "Unknown"
+            return f"🔗 **Link Saved**: {domain}\n\n✅ Successfully stored with AI analysis"
         else:
-            display_title = title or "Unknown"
-            display_topic = main_topic or "No topic available"
-            return f"🔗 **Link Saved**: {display_title}\n\n📝 **Topic**: {display_topic}\n🌐 **Domain**: {domain}"
-
+            return f"❌ Failed to save link: {url}"
+            
     except Exception as e:
-        return f"❌ Error saving link: {str(e)}"
+        return f"🔗 Link save error: {str(e)}"
 
 
 @mcp.tool()
@@ -307,44 +182,16 @@ def search_links(query: str, chat_id: str = "", limit: int = 10) -> str:
     Returns:
         Formatted list of matching links or message indicating no matches
     """
-    # Initialize database if it doesn't exist
-    init_database()
-
     try:
-        with get_database_connection() as conn:
-            conn.row_factory = sqlite3.Row
-            
-            # Search in domain, URL, title, and main_topic
-            query_lower = query.lower()
-            results = conn.execute("""
-                SELECT * FROM links 
-                WHERE LOWER(domain) LIKE ? 
-                   OR LOWER(url) LIKE ? 
-                   OR LOWER(title) LIKE ?
-                   OR LOWER(main_topic) LIKE ?
-                   OR date(timestamp) LIKE ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-            """, (f"%{query_lower}%", f"%{query_lower}%", f"%{query_lower}%", 
-                  f"%{query_lower}%", f"%{query_lower}%", limit)).fetchall()
-            
-    except Exception:
-        return "📂 Error reading stored links."
-
-    if not results:
-        return f"📂 No links found matching '{query}'"
-
-    # Format results
-    result = f"📂 **Found {len(results)} link(s) matching '{query}':**\n\n"
-    for link in results:
-        timestamp = link["timestamp"][:10] if link["timestamp"] else "Unknown"  # Just date part
-        domain = link["domain"] or "Unknown"
-        title = link["title"] or domain or "No title"
-        status = "✅" if link["analysis_status"] == "success" else "❌"
+        # Call standalone implementation following GOLD STANDARD pattern
+        # Convert chat_id to int if provided, handle optional parameters
+        chat_id_int = int(chat_id) if chat_id and chat_id.isdigit() else None
         
-        result += f"• **{title}** ({timestamp}) {status}\n  {link['url']}\n\n"
-
-    return result.strip()
+        # Call standalone function - returns formatted string
+        return search_stored_links(query, chat_id_int, limit)
+        
+    except Exception as e:
+        return f"📂 Link search error: {str(e)}"
 
 
 @mcp.tool()
