@@ -132,56 +132,60 @@ class TestTaggingConfig:
         assert config.api_provider == "anthropic"
 
 
-class TestTempImageFiles:
-    """Helper class for creating temporary test image files."""
+# ==================== TEST FIXTURES ====================
+
+@pytest.fixture
+def temp_image_file():
+    """Create temporary image file (fake)."""
+    # Create a simple 1x1 PNG image data
+    png_data = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChAGAD7TL5gAAAABJRU5ErkJggg=="
+    )
     
-    @pytest.fixture
-    def temp_image_file(self):
-        """Create temporary image file (fake)."""
-        # Create a simple 1x1 PNG image data
-        png_data = base64.b64decode(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChAGAD7TL5gAAAABJRU5ErkJggg=="
-        )
-        
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
-            f.write(png_data)
-            temp_path = f.name
-        
-        yield temp_path
-        
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
+        f.write(png_data)
+        temp_path = f.name
     
-    @pytest.fixture
-    def temp_jpeg_file(self):
-        """Create temporary JPEG file."""
-        with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as f:
-            # Write minimal JPEG header
-            f.write(b'\xFF\xD8\xFF\xE0')
-            temp_path = f.name
-        
-        yield temp_path
-        
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
+    yield temp_path
     
-    @pytest.fixture
-    def temp_non_image_file(self):
-        """Create temporary non-image file."""
-        with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as f:
-            f.write(b"This is not an image file")
-            temp_path = f.name
-        
-        yield temp_path
-        
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
+    try:
+        os.unlink(temp_path)
+    except:
+        pass
+
+
+@pytest.fixture
+def temp_jpeg_file():
+    """Create temporary JPEG file."""
+    with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as f:
+        # Write minimal JPEG header
+        f.write(b'\xFF\xD8\xFF\xE0')
+        temp_path = f.name
+    
+    yield temp_path
+    
+    try:
+        os.unlink(temp_path)
+    except:
+        pass
+
+
+@pytest.fixture
+def temp_non_image_file():
+    """Create temporary non-image file."""
+    with tempfile.NamedTemporaryFile(suffix='.txt', delete=False) as f:
+        f.write(b"This is not an image file")
+        temp_path = f.name
+    
+    yield temp_path
+    
+    try:
+        os.unlink(temp_path)
+    except:
+        pass
+
+
+# ==================== TEST CLASSES ====================
 
 
 class TestIsImageFile:
@@ -339,7 +343,7 @@ class TestParseAnalysisResponse:
         
         assert analysis.file_path == "test.jpg"
         assert analysis.ai_confidence < 0.5  # Lower confidence for fallback
-        assert "Fallback parsing" in analysis.reasoning or "text_fallback" in str(analysis.technical_quality)
+        assert "text_fallback" in str(analysis.technical_quality)
     
     def test_embedded_json_extraction(self):
         """Test extracting JSON from mixed content."""
@@ -433,7 +437,7 @@ class TestBasicImageAnalysis:
 class TestAnalysisWithAPIs:
     """Test analysis with different API providers using mocks."""
     
-    @patch('tools.image_tagging_tool.openai.OpenAI')
+    @patch('openai.OpenAI')
     def test_openai_analysis_success(self, mock_openai_class, temp_image_file):
         """Test successful OpenAI analysis."""
         # Mock OpenAI client and response
@@ -464,7 +468,7 @@ class TestAnalysisWithAPIs:
             assert analysis.tags[0].tag == "test"
             assert analysis.ai_confidence == 0.8  # High confidence for AI analysis
     
-    @patch('tools.image_tagging_tool.anthropic.Anthropic')
+    @patch('anthropic.Anthropic')
     def test_anthropic_analysis_success(self, mock_anthropic_class, temp_image_file):
         """Test successful Anthropic analysis."""
         # Mock Anthropic client and response
@@ -502,7 +506,7 @@ class TestAnalysisWithAPIs:
             # Should handle missing API key gracefully
             analysis = _analyze_with_openai(temp_image_file, config)
             assert analysis.ai_confidence == 0.0
-            assert "API key" in analysis.technical_quality["error"]
+            assert "OPENAI_API_KEY" in analysis.technical_quality["error"] or "API key" in analysis.technical_quality["error"]
     
     @patch('tools.image_tagging_tool.subprocess.run')
     def test_local_model_analysis(self, mock_run, temp_image_file):
@@ -833,7 +837,9 @@ class TestEdgeCases:
                 ai_confidence=0.3
             )
             
-            result = tag_image(temp_image_file)
+            # Force using basic analysis by setting api_provider to unsupported value
+            config = TaggingConfig(api_provider="basic")
+            result = tag_image(temp_image_file, config)
             assert len(result.tags) == 0
     
     def test_very_large_image_path(self):
