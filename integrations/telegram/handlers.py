@@ -1141,54 +1141,96 @@ class MessageHandler:
                     # Download the audio file to a temporary location
                     import tempfile
                     import os
+                    from utilities.logger import get_logger
+                    
+                    logger = get_logger("telegram.voice_transcription")
+                    logger.info(f"🎙️ Starting voice transcription for chat_id={chat_id}, message_id={message.id}")
                     
                     # Create temporary file with appropriate extension
                     if message.voice:
                         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ogg')
                         audio_type = "Voice"
+                        duration = getattr(message.voice, 'duration', 'unknown')
+                        file_size = getattr(message.voice, 'file_size', 'unknown')
+                        logger.info(f"📥 Voice message details: duration={duration}s, size={file_size} bytes")
                     else:
                         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
                         audio_type = "Audio"
+                        duration = getattr(message.audio, 'duration', 'unknown')
+                        file_size = getattr(message.audio, 'file_size', 'unknown')
+                        logger.info(f"📥 Audio file details: duration={duration}s, size={file_size} bytes")
                     
                     temp_file.close()
                     temp_path = temp_file.name
+                    logger.info(f"📂 Created temporary file: {temp_path}")
                     
                     # Download the audio file
+                    logger.info("⬇️ Starting audio file download...")
                     await message.download(temp_path)
                     
+                    # Verify file was downloaded
+                    if os.path.exists(temp_path):
+                        file_size_downloaded = os.path.getsize(temp_path)
+                        logger.info(f"✅ Download complete: {file_size_downloaded} bytes written to {temp_path}")
+                    else:
+                        logger.error(f"❌ Download failed: file not found at {temp_path}")
+                        raise Exception("Audio file download failed")
+                    
                     # Transcribe using our voice transcription tool
+                    logger.info("🔄 Starting Whisper transcription...")
                     from tools.voice_transcription_tool import transcribe_audio_file
                     transcribed_text = transcribe_audio_file(temp_path, cleanup_file=True)
+                    logger.info(f"✅ Transcription successful: {len(transcribed_text)} characters")
+                    logger.debug(f"📝 Transcribed text: {transcribed_text[:100]}...")
                     
                     # Handle caption text along with transcription
                     if message.caption:
+                        logger.info(f"📝 Processing voice message with caption: {len(message.caption)} chars")
                         # Store both caption and transcribed audio
                         full_message = f"[{audio_type}+Text] Caption: {message.caption}\nTranscribed audio: {transcribed_text}"
                         self.chat_history.add_message(chat_id, "user", full_message, reply_to_telegram_message_id, message.id, is_telegram_id=True)
                         
                         # Process both caption and transcribed text together
                         combined_text = f"{message.caption}\n\n{transcribed_text}"
+                        logger.info("🤖 Routing combined caption+transcription to agent...")
                         await self._route_message_with_intent(client, message, chat_id, combined_text, reply_to_telegram_message_id)
+                        logger.info("✅ Voice message with caption processed successfully")
                         return  # Exit since _route_message_with_intent handles the full response
                     else:
+                        logger.info("📝 Processing voice message (no caption)")
                         # Store transcribed audio only
                         self.chat_history.add_message(chat_id, "user", transcribed_text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
                         
                         # Process transcribed text
+                        logger.info("🤖 Routing transcription to agent...")
                         await self._route_message_with_intent(client, message, chat_id, transcribed_text, reply_to_telegram_message_id)
+                        logger.info("✅ Voice message processed successfully")
                         return  # Exit since _route_message_with_intent handles the full response
                     
                 except Exception as transcription_error:
-                    # Fallback to old behavior if transcription fails
-                    print(f"🎙️ Voice transcription failed: {transcription_error}")
+                    # Enhanced error logging
+                    from utilities.logger import get_logger
+                    logger = get_logger("telegram.voice_transcription")
+                    logger.error(f"❌ Voice transcription failed for chat_id={chat_id}, message_id={message.id}")
+                    logger.error(f"❌ Error type: {type(transcription_error).__name__}")
+                    logger.error(f"❌ Error details: {str(transcription_error)}")
+                    
+                    # Log additional context
+                    try:
+                        import traceback
+                        logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
+                    except:
+                        pass
                     
                     # Store original message format in chat history
                     if message.caption:
                         audio_type = "Voice" if message.voice else "Audio"
                         self.chat_history.add_message(chat_id, "user", f"[{audio_type}+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                        logger.info(f"📝 Stored caption in chat history: {message.caption}")
                     else:
                         audio_type = "[Voice]" if message.voice else "[Audio]"
                         self.chat_history.add_message(chat_id, "user", audio_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                        logger.info(f"📝 Stored audio placeholder in chat history")
                     
                     # Provide fallback response
                     if message.voice:
@@ -1196,26 +1238,35 @@ class MessageHandler:
                             response = f"🎙️ I hear you sent a voice message with text: '{message.caption}'. Voice transcription failed, but I can still help with your text message!"
                             # Process the caption text at least
                             try:
+                                logger.info("🔄 Attempting to process caption text as fallback...")
                                 await self._route_message_with_intent(client, message, chat_id, message.caption, reply_to_telegram_message_id)
+                                logger.info("✅ Caption processed successfully as fallback")
                                 return  # Exit since _route_message_with_intent handles the full response
-                            except:
+                            except Exception as caption_error:
+                                logger.error(f"❌ Caption processing also failed: {caption_error}")
                                 pass  # Keep fallback message
                         else:
                             response = f"🎙️ I hear you sent a voice message! Transcription failed with error: {str(transcription_error)}"
+                            logger.warning(f"⚠️ Sending transcription failure message to user")
                     else:
                         if message.caption:
                             response = f"🎵 I see you shared an audio file with text: '{message.caption}'. Audio transcription failed, but I can help with your text!"
                             # Process the caption text at least
                             try:
+                                logger.info("🔄 Attempting to process audio caption as fallback...")
                                 await self._route_message_with_intent(client, message, chat_id, message.caption, reply_to_telegram_message_id)
+                                logger.info("✅ Audio caption processed successfully as fallback")
                                 return  # Exit since _route_message_with_intent handles the full response
-                            except:
+                            except Exception as caption_error:
+                                logger.error(f"❌ Audio caption processing also failed: {caption_error}")
                                 pass  # Keep fallback message
                         else:
                             response = f"🎵 I see you shared an audio file! Transcription failed with error: {str(transcription_error)}"
+                            logger.warning(f"⚠️ Sending audio transcription failure message to user")
                     
                     await self._safe_reply(message, response, "🎵 Audio received")
                     self.chat_history.add_message(chat_id, "assistant", response)
+                    logger.info("📤 Sent fallback response to user")
             else:
                 # Just store in history without transcription for non-responding cases
                 if message.caption:

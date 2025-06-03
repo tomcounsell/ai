@@ -28,18 +28,39 @@ def transcribe_audio_file(
         Exception: If transcription fails
     """
     try:
+        from utilities.logger import get_logger
+        logger = get_logger("voice_transcription_tool")
+        
+        logger.info(f"🔧 Starting transcription for file: {file_path}")
+        logger.info(f"🌍 Language: {language or 'auto-detect'}")
+        logger.info(f"🗑️ Cleanup after: {cleanup_file}")
+        
         # Verify file exists
         if not Path(file_path).exists():
+            logger.error(f"❌ File not found: {file_path}")
             raise FileNotFoundError(f"Audio file not found: {file_path}")
         
+        # Log file details
+        file_size = Path(file_path).stat().st_size
+        file_ext = Path(file_path).suffix
+        logger.info(f"📁 File details: size={file_size} bytes, extension={file_ext}")
+        
         # Transcribe using OpenAI Whisper
+        logger.info("🔄 Calling OpenAI Whisper API...")
         transcribed_text = transcribe_voice_message(file_path, language)
+        logger.info(f"✅ Transcription completed: {len(transcribed_text)} characters")
+        
+        # Log first few words for debugging (without exposing sensitive content)
+        preview = transcribed_text[:50] + "..." if len(transcribed_text) > 50 else transcribed_text
+        logger.debug(f"📝 Transcription preview: {preview}")
         
         # Cleanup temporary file if requested
         if cleanup_file:
             try:
                 os.unlink(file_path)
-            except OSError:
+                logger.info(f"🗑️ Cleaned up temporary file: {file_path}")
+            except OSError as cleanup_error:
+                logger.warning(f"⚠️ Failed to cleanup file {file_path}: {cleanup_error}")
                 pass  # Ignore cleanup errors
         
         return transcribed_text
@@ -47,11 +68,17 @@ def transcribe_audio_file(
     except FileNotFoundError:
         raise
     except Exception as e:
+        from utilities.logger import get_logger
+        logger = get_logger("voice_transcription_tool")
+        logger.error(f"❌ Transcription failed for {file_path}: {type(e).__name__}: {str(e)}")
+        
         # Cleanup on error if requested
         if cleanup_file and Path(file_path).exists():
             try:
                 os.unlink(file_path)
-            except OSError:
+                logger.info(f"🗑️ Cleaned up file after error: {file_path}")
+            except OSError as cleanup_error:
+                logger.warning(f"⚠️ Failed to cleanup file after error {file_path}: {cleanup_error}")
                 pass
         raise Exception(f"Voice transcription failed: {str(e)}")
 

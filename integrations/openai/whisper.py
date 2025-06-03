@@ -77,6 +77,14 @@ class WhisperClient:
             raise FileNotFoundError(f"Audio file not found: {file_path}")
         
         try:
+            from utilities.logger import get_logger
+            logger = get_logger("openai.whisper_client")
+            
+            logger.info(f"🎯 OpenAI Whisper API call starting")
+            logger.info(f"📁 File: {file_path}")
+            logger.info(f"🌍 Language: {language or 'auto-detect'}")
+            logger.info(f"🤖 Model: {model}")
+            
             with open(file_path, "rb") as audio_file:
                 kwargs = {
                     "model": model,
@@ -86,10 +94,30 @@ class WhisperClient:
                 if language:
                     kwargs["language"] = language
                 
+                logger.info("📡 Sending request to OpenAI Whisper API...")
                 transcription = self.client.audio.transcriptions.create(**kwargs)
-                return transcription.text.strip()
+                
+                result_text = transcription.text.strip()
+                logger.info(f"✅ OpenAI API response received: {len(result_text)} characters")
+                logger.debug(f"📝 Response preview: {result_text[:50]}...")
+                
+                return result_text
                 
         except Exception as e:
+            from utilities.logger import get_logger
+            logger = get_logger("openai.whisper_client")
+            logger.error(f"❌ OpenAI Whisper API call failed: {type(e).__name__}: {str(e)}")
+            
+            # Log specific error types for debugging
+            if "api_key" in str(e).lower():
+                logger.error("🔑 API Key issue detected - check OPENAI_API_KEY environment variable")
+            elif "rate limit" in str(e).lower():
+                logger.error("⏰ Rate limit exceeded - too many API calls")
+            elif "file" in str(e).lower():
+                logger.error("📁 File format or processing issue")
+            elif "network" in str(e).lower() or "connection" in str(e).lower():
+                logger.error("🌐 Network connectivity issue")
+            
             raise Exception(f"Whisper transcription failed: {str(e)}")
 
 
