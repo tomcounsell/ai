@@ -3,7 +3,16 @@
 Social Tools MCP Server
 
 Provides web search, image generation, and link analysis tools for Claude Code integration.
-Converts existing tools from tools/ directory to MCP server format.
+This server follows the GOLD STANDARD wrapper pattern by importing functions from 
+standalone tools and adding MCP-specific concerns (context injection, validation).
+
+ARCHITECTURE: MCP Wrapper → Standalone Implementation
+- search_current_info → tools/search_tool.py
+- create_image → tools/image_generation_tool.py  
+- analyze_shared_image → tools/image_analysis_tool.py
+- save_link → tools/link_analysis_tool.py
+- search_links → tools/link_analysis_tool.py
+- technical_analysis → Unique Claude Code delegation approach
 """
 
 import os
@@ -11,18 +20,24 @@ import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlparse
 from typing import Dict, Any
+from urllib.parse import urlparse
 
-import requests
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from openai import OpenAI
+import requests
 
-# Import shared database utilities
-import sys
-sys.path.append('..')
 from utilities.database import get_database_connection, init_database
+
+# Import standalone tool implementations following GOLD STANDARD pattern
+from tools.search_tool import search_web
+from tools.image_generation_tool import generate_image
+from tools.image_analysis_tool import analyze_image as analyze_image_impl
+from tools.link_analysis_tool import (
+    store_link_with_analysis,
+    search_stored_links
+)
 
 # Load environment variables
 load_dotenv()
@@ -44,53 +59,11 @@ def search_current_info(query: str, max_results: int = 3) -> str:
     Returns:
         AI-synthesized answer based on current web information
     """
-    api_key = os.getenv("PERPLEXITY_API_KEY")
-
-    if not api_key:
-        return "🔍 Search unavailable: Missing PERPLEXITY_API_KEY configuration."
-
-    # Validate inputs
-    if not query or not query.strip():
-        return "🔍 Search error: Please provide a search query."
-    
-    if len(query) > 500:
-        return "🔍 Search error: Query too long (maximum 500 characters)."
-
     try:
-        client = OpenAI(api_key=api_key, base_url="https://api.perplexity.ai", timeout=180)
-
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are a helpful search assistant. Provide a concise, "
-                    "informative answer based on current web information. "
-                    "Keep responses under 300 words for messaging platforms. "
-                    "Format your response clearly and include key facts."
-                ),
-            },
-            {
-                "role": "user",
-                "content": query,
-            },
-        ]
-
-        response = client.chat.completions.create(
-            model="sonar-pro", messages=messages, temperature=0.2, max_tokens=400
-        )
-
-        answer = response.choices[0].message.content
-        return f"🔍 **{query}**\n\n{answer}"
-
-    except requests.exceptions.RequestException as e:
-        return f"🔍 Search network error: Failed to connect to search service - {str(e)}"
+        # Call standalone implementation following GOLD STANDARD pattern
+        return search_web(query, max_results)
     except Exception as e:
-        error_type = type(e).__name__
-        if "API" in str(e) or "Perplexity" in str(e) or "401" in str(e):
-            return f"🔍 Search API error: {str(e)} - Check PERPLEXITY_API_KEY"
-        if "timeout" in str(e).lower():
-            return f"🔍 Search timeout: Query took too long to process"
-        return f"🔍 Search error ({error_type}): {str(e)}"
+        return f"🔍 Search error: {str(e)}"
 
 
 @mcp.tool()
@@ -116,72 +89,22 @@ def create_image(
     Returns:
         Path to the generated image file or error message
     """
-    api_key = os.getenv("OPENAI_API_KEY")
-
-    if not api_key:
-        return "🎨 Image generation unavailable: Missing OPENAI_API_KEY configuration."
-
-    # Validate inputs
-    if not prompt or not prompt.strip():
-        return "🎨 Image generation error: Prompt cannot be empty."
-    
-    valid_sizes = ["1024x1024", "1792x1024", "1024x1792"]
-    if size not in valid_sizes:
-        return f"🎨 Image generation error: Size must be one of {valid_sizes}. Got '{size}'."
-    
-    valid_qualities = ["standard", "hd"]
-    if quality not in valid_qualities:
-        return f"🎨 Image generation error: Quality must be one of {valid_qualities}. Got '{quality}'."
-    
-    valid_styles = ["natural", "vivid"]
-    if style not in valid_styles:
-        return f"🎨 Image generation error: Style must be one of {valid_styles}. Got '{style}'."
-
     try:
-        client = OpenAI(api_key=api_key, timeout=180)
-
-        # Generate image using DALL-E 3
-        response = client.images.generate(
-            prompt=prompt, model="dall-e-3", size=size, quality=quality, style=style, n=1
-        )
-
-        # Get the image URL
-        image_url = response.data[0].url
-
-        # Download the image
-        image_response = requests.get(image_url, timeout=180)
-        image_response.raise_for_status()
-
-        # Determine save path
-        save_path = Path("/tmp")
-        save_path.mkdir(parents=True, exist_ok=True)
-
-        # Create filename from prompt (cleaned up)
-        safe_filename = "".join(
-            c for c in prompt[:50] if c.isalnum() or c in (" ", "-", "_")
-        ).rstrip()
-        safe_filename = safe_filename.replace(" ", "_")
-        image_path = save_path / f"generated_{safe_filename}.png"
-
-        # Save the image
-        with open(image_path, "wb") as f:
-            f.write(image_response.content)
-
-        # Format response for Telegram if chat_id provided
+        # Call standalone implementation following GOLD STANDARD pattern
+        image_path = generate_image(prompt, size, quality, style, save_directory=None)
+        
+        # Handle error cases (standalone function returns error messages starting with emoji)
+        if image_path.startswith("🎨"):
+            return image_path
+            
+        # Format response for Telegram if chat_id provided (MCP-specific feature)
         if chat_id:
             return f"TELEGRAM_IMAGE_GENERATED|{image_path}|{chat_id}"
         else:
-            return str(image_path)
-
-    except requests.exceptions.RequestException as e:
-        return f"🎨 Image download error: Failed to download generated image - {str(e)}"
-    except OSError as e:
-        return f"🎨 Image save error: Failed to save image file - {str(e)}"
+            return image_path
+            
     except Exception as e:
-        error_type = type(e).__name__
-        if "API" in str(e) or "OpenAI" in str(e):
-            return f"🎨 OpenAI API error: {str(e)}"
-        return f"🎨 Image generation error ({error_type}): {str(e)}"
+        return f"🎨 Image generation error: {str(e)}"
 
 
 @mcp.tool()
