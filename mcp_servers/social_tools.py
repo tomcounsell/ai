@@ -603,14 +603,14 @@ def technical_analysis(
             check=True,
             capture_output=True,
             text=True,
-            timeout=300,  # 5 minute timeout for research tasks
+            timeout=7200,  # 2 hour timeout for research tasks
             shell=shell
         )
         
         return f"🔬 **Technical Research Results**\n\n{process.stdout}"
         
     except subprocess.TimeoutExpired:
-        return f"🔬 **Research Timeout**: Technical analysis of '{research_topic}' exceeded 5 minutes. Try breaking down into smaller research questions."
+        return f"🔬 **Research Timeout**: Technical analysis of '{research_topic}' exceeded 2 hours. Try breaking down into smaller research questions."
         
     except subprocess.CalledProcessError as e:
         return f"🔬 **Research Error**: Technical analysis failed: {e.stderr or 'Unknown error'}"
