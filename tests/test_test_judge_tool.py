@@ -7,7 +7,7 @@ import os
 from unittest.mock import patch, MagicMock
 from tools.test_judge_tool import (
     JudgmentScore,
-    TestJudgment,
+    JudgmentResult,
     JudgeConfig,
     judge_test_result,
     judge_code_quality,
@@ -21,7 +21,7 @@ from tools.test_judge_tool import (
 )
 
 
-class TestJudgmentScore:
+class JudgmentResultScore:
     """Test JudgmentScore enum."""
     
     def test_judgment_score_values(self):
@@ -41,12 +41,12 @@ class TestJudgmentScore:
         assert all(isinstance(score.value, str) for score in scores)
 
 
-class TestTestJudgment:
-    """Test TestJudgment model validation."""
+class TestJudgmentResult:
+    """Test JudgmentResult model validation."""
     
     def test_valid_judgment_creation(self):
         """Test creating valid test judgment."""
-        judgment = TestJudgment(
+        judgment = JudgmentResult(
             test_id="test_001",
             overall_score=JudgmentScore.GOOD,
             criteria_scores={"clarity": JudgmentScore.EXCELLENT, "accuracy": JudgmentScore.GOOD},
@@ -65,32 +65,35 @@ class TestTestJudgment:
     def test_confidence_bounds_validation(self):
         """Test confidence score validation."""
         # Valid confidence scores
-        valid_judgment = TestJudgment(
+        valid_judgment = JudgmentResult(
             test_id="test_001",
             overall_score=JudgmentScore.GOOD,
             criteria_scores={},
             detailed_feedback="test",
+            pass_fail=True,
             confidence=0.5,
             reasoning="test"
         )
         assert valid_judgment.confidence == 0.5
         
         # Test boundary values
-        boundary_low = TestJudgment(
+        boundary_low = JudgmentResult(
             test_id="test_002",
             overall_score=JudgmentScore.GOOD,
             criteria_scores={},
             detailed_feedback="test",
+            pass_fail=True,
             confidence=0.0,
             reasoning="test"
         )
         assert boundary_low.confidence == 0.0
         
-        boundary_high = TestJudgment(
+        boundary_high = JudgmentResult(
             test_id="test_003",
             overall_score=JudgmentScore.GOOD,
             criteria_scores={},
             detailed_feedback="test",
+            pass_fail=True,
             confidence=1.0,
             reasoning="test"
         )
@@ -219,7 +222,7 @@ class TestParseJudgmentResult:
         assert judgment.test_id == "test_001"
         assert judgment.overall_score == JudgmentScore.EXCELLENT
         assert judgment.confidence < 0.5  # Low confidence for fallback
-        assert "Fallback parsing" in judgment.reasoning
+        assert "fallback method" in judgment.reasoning
     
     def test_embedded_json_extraction(self):
         """Test extraction of JSON from mixed content."""
@@ -365,7 +368,7 @@ class TestSpecificJudgingFunctions:
     @patch('tools.test_judge_tool.judge_test_result')
     def test_judge_code_quality(self, mock_judge):
         """Test code quality judging."""
-        mock_judge.return_value = TestJudgment(
+        mock_judge.return_value = JudgmentResult(
             test_id="code_quality_123",
             overall_score=JudgmentScore.GOOD,
             criteria_scores={},
@@ -386,13 +389,14 @@ class TestSpecificJudgingFunctions:
         
         # Check that proper context was passed
         call_args = mock_judge.call_args
-        assert call_args[1]["test_context"]["test_type"] == "code_quality"
-        assert call_args[1]["test_context"]["language"] == "python"
+        test_context = call_args[0][2]  # Third positional argument
+        assert test_context["test_type"] == "code_quality"
+        assert test_context["language"] == "python"
     
     @patch('tools.test_judge_tool.judge_test_result')
     def test_judge_response_quality(self, mock_judge):
         """Test response quality judging."""
-        mock_judge.return_value = TestJudgment(
+        mock_judge.return_value = JudgmentResult(
             test_id="response_quality_456",
             overall_score=JudgmentScore.SATISFACTORY,
             criteria_scores={},
@@ -413,12 +417,13 @@ class TestSpecificJudgingFunctions:
         
         # Check context includes original prompt
         call_args = mock_judge.call_args
-        assert call_args[1]["test_context"]["original_prompt"] == "What is 2+2?"
+        test_context = call_args[0][2]  # Third positional argument
+        assert test_context["original_prompt"] == "What is 2+2?"
     
     @patch('tools.test_judge_tool.judge_test_result')
     def test_judge_ui_feedback(self, mock_judge):
         """Test UI feedback judging."""
-        mock_judgment = TestJudgment(
+        mock_judgment = JudgmentResult(
             test_id="ui_feedback_789",
             overall_score=JudgmentScore.EXCELLENT,
             criteria_scores={},
@@ -440,13 +445,14 @@ class TestSpecificJudgingFunctions:
         # Check UI-specific criteria
         call_args = mock_judge.call_args
         criteria = call_args[0][1]  # expected_criteria argument
-        assert "actionable suggestions" in criteria
-        assert "user experience" in criteria
+        criteria_text = " ".join(criteria)  # Join all criteria for substring search
+        assert "actionable suggestions" in criteria_text
+        assert "user experience" in criteria_text
     
     @patch('tools.test_judge_tool.judge_test_result')
     def test_judge_code_review(self, mock_judge):
         """Test code review judging."""
-        mock_judgment = TestJudgment(
+        mock_judgment = JudgmentResult(
             test_id="code_review_101",
             overall_score=JudgmentScore.GOOD,
             criteria_scores={},
@@ -466,9 +472,10 @@ class TestSpecificJudgingFunctions:
         
         # Check code review specific criteria
         call_args = mock_judge.call_args
-        criteria = call_args[0][1]
-        assert "identifies actual issues" in criteria
-        assert "constructive improvement" in criteria
+        criteria = call_args[0][1]  # expected_criteria argument
+        criteria_text = " ".join(criteria)  # Join all criteria for substring search
+        assert "identifies actual issues" in criteria_text
+        assert "constructive improvement" in criteria_text
 
 
 class TestBatchJudging:
@@ -479,7 +486,7 @@ class TestBatchJudging:
         """Test batch judging of multiple tests."""
         # Mock different judgments for each test
         mock_judgments = [
-            TestJudgment(
+            JudgmentResult(
                 test_id="test_1",
                 overall_score=JudgmentScore.GOOD,
                 criteria_scores={},
@@ -488,7 +495,7 @@ class TestBatchJudging:
                 confidence=0.8,
                 reasoning="Passes"
             ),
-            TestJudgment(
+            JudgmentResult(
                 test_id="test_2",
                 overall_score=JudgmentScore.POOR,
                 criteria_scores={},

@@ -17,7 +17,7 @@ class JudgmentScore(str, Enum):
     FAIL = "fail"
 
 
-class TestJudgment(BaseModel):
+class JudgmentResult(BaseModel):
     """Structured test judgment result."""
     test_id: str
     overall_score: JudgmentScore
@@ -30,7 +30,7 @@ class TestJudgment(BaseModel):
 
 class JudgeConfig(BaseModel):
     """Configuration for test judging."""
-    model: str = Field(default="gemma3:12b-it-qat", description="Local model to use for judging")
+    model: str = Field(default="gemma2:3b", description="Local model to use for judging")
     temperature: float = Field(default=0.1, description="Model temperature for consistency")
     strict_mode: bool = Field(default=True, description="Whether to use strict pass/fail criteria")
     custom_criteria: Optional[List[str]] = Field(default=None, description="Additional evaluation criteria")
@@ -41,7 +41,7 @@ def judge_test_result(
     expected_criteria: List[str],
     test_context: Dict[str, Any],
     config: Optional[JudgeConfig] = None
-) -> TestJudgment:
+) -> JudgmentResult:
     """
     Judge test results using local AI model.
     
@@ -66,7 +66,7 @@ def judge_code_quality(
     language: str,
     quality_criteria: List[str],
     config: Optional[JudgeConfig] = None
-) -> TestJudgment:
+) -> JudgmentResult:
     """Judge code quality using local model."""
     test_context = {
         "test_id": f"code_quality_{hash(code) % 10000}",
@@ -82,7 +82,7 @@ def judge_response_quality(
     prompt: str,
     evaluation_criteria: List[str],
     config: Optional[JudgeConfig] = None
-) -> TestJudgment:
+) -> JudgmentResult:
     """Judge AI response quality."""
     test_context = {
         "test_id": f"response_quality_{hash(response) % 10000}",
@@ -96,7 +96,7 @@ def judge_response_quality(
 def batch_judge_tests(
     test_cases: List[Dict[str, Any]],
     config: Optional[JudgeConfig] = None
-) -> List[TestJudgment]:
+) -> List[JudgmentResult]:
     """Judge multiple test cases in batch for efficiency."""
     results = []
     
@@ -177,7 +177,7 @@ def _execute_local_judgment(prompt: str, config: JudgeConfig) -> str:
     """Execute judgment using local Ollama model."""
     try:
         # Execute Ollama command directly with prompt as input
-        cmd = ["ollama", "run", config.model]
+        cmd = ["ollama", "run", "--temperature", str(config.temperature), config.model]
         
         result = subprocess.run(
             cmd,
@@ -201,7 +201,7 @@ def _execute_local_judgment(prompt: str, config: JudgeConfig) -> str:
         return _fallback_judgment(f"Error executing local model: {str(e)}")
 
 
-def _parse_judgment_result(raw_result: str, test_id: str) -> TestJudgment:
+def _parse_judgment_result(raw_result: str, test_id: str) -> JudgmentResult:
     """Parse raw judgment result into structured format."""
     try:
         # Clean up markdown code blocks if present
@@ -229,7 +229,7 @@ def _parse_judgment_result(raw_result: str, test_id: str) -> TestJudgment:
         json_str = cleaned_result[json_start:json_end]
         parsed = json.loads(json_str)
         
-        return TestJudgment(
+        return JudgmentResult(
             test_id=test_id,
             overall_score=JudgmentScore(parsed["overall_score"]),
             criteria_scores={k: JudgmentScore(v) for k, v in parsed.get("criteria_scores", {}).items()},
@@ -244,7 +244,7 @@ def _parse_judgment_result(raw_result: str, test_id: str) -> TestJudgment:
         return _fallback_judgment_parsing(raw_result, test_id)
 
 
-def _fallback_judgment_parsing(raw_result: str, test_id: str) -> TestJudgment:
+def _fallback_judgment_parsing(raw_result: str, test_id: str) -> JudgmentResult:
     """Fallback judgment parsing when JSON parsing fails."""
     # Simple keyword-based fallback
     text_lower = raw_result.lower()
@@ -265,7 +265,7 @@ def _fallback_judgment_parsing(raw_result: str, test_id: str) -> TestJudgment:
         overall_score = JudgmentScore.FAIL
         pass_fail = False
     
-    return TestJudgment(
+    return JudgmentResult(
         test_id=test_id,
         overall_score=overall_score,
         criteria_scores={},
@@ -289,7 +289,7 @@ def _fallback_judgment(error_message: str) -> str:
 
 
 # Example usage functions for specific test types
-def judge_ui_feedback(feedback: str, ui_context: Dict[str, Any]) -> TestJudgment:
+def judge_ui_feedback(feedback: str, ui_context: Dict[str, Any]) -> JudgmentResult:
     """Judge UI feedback quality."""
     criteria = [
         "provides specific actionable suggestions",
@@ -305,7 +305,7 @@ def judge_ui_feedback(feedback: str, ui_context: Dict[str, Any]) -> TestJudgment
     })
 
 
-def judge_code_review(review: str, code_context: Dict[str, Any]) -> TestJudgment:
+def judge_code_review(review: str, code_context: Dict[str, Any]) -> JudgmentResult:
     """Judge code review quality."""
     criteria = [
         "identifies actual issues in the code",
