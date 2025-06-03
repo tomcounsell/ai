@@ -117,13 +117,10 @@ class TestSummaryConfig:
         assert config.focus_topics == ["API", "integration"]
 
 
-class TestTempFiles:
-    """Helper class for creating temporary test files."""
-    
-    @pytest.fixture
-    def temp_markdown_file(self):
-        """Create temporary markdown file."""
-        content = '''# Main Title
+@pytest.fixture
+def temp_markdown_file():
+    """Create temporary markdown file."""
+    content = '''# Main Title
 
 This is the introduction paragraph.
 
@@ -148,21 +145,22 @@ More detailed content here.
 
 Final thoughts and summary.
 '''
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
-            f.write(content)
-            temp_path = f.name
-        
-        yield temp_path
-        
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+        f.write(content)
+        temp_path = f.name
     
-    @pytest.fixture
-    def temp_python_file(self):
-        """Create temporary Python file."""
-        content = '''"""
+    yield temp_path
+    
+    try:
+        os.unlink(temp_path)
+    except:
+        pass
+
+
+@pytest.fixture
+def temp_python_file():
+    """Create temporary Python file."""
+    content = '''"""
 Test module for document summarization.
 
 This module demonstrates various Python constructs.
@@ -198,21 +196,22 @@ def main_function():
 if __name__ == "__main__":
     print(main_function())
 '''
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
-            f.write(content)
-            temp_path = f.name
-        
-        yield temp_path
-        
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+        f.write(content)
+        temp_path = f.name
     
-    @pytest.fixture
-    def temp_text_file(self):
-        """Create temporary text file."""
-        content = '''Introduction to Document Processing
+    yield temp_path
+    
+    try:
+        os.unlink(temp_path)
+    except:
+        pass
+
+
+@pytest.fixture
+def temp_text_file():
+    """Create temporary text file."""
+    content = '''Introduction to Document Processing
 
 Document processing is an important task in many applications. It involves reading, analyzing, and extracting information from various document formats.
 
@@ -236,16 +235,16 @@ Conclusion
 
 Effective document processing can significantly improve workflow efficiency and information extraction capabilities.
 '''
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
-            f.write(content)
-            temp_path = f.name
-        
-        yield temp_path
-        
-        try:
-            os.unlink(temp_path)
-        except:
-            pass
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+        f.write(content)
+        temp_path = f.name
+    
+    yield temp_path
+    
+    try:
+        os.unlink(temp_path)
+    except:
+        pass
 
 
 class TestParseMarkdownSections:
@@ -652,12 +651,13 @@ Here's how to use this tool.
             stderr="Connection failed"
         )
         
-        summary = summarize_url_document("https://invalid-url.com/doc.md")
+        # Use a valid URL format that passes validation
+        summary = summarize_url_document("https://github.com/user/repo/blob/main/nonexistent.md")
         
         assert summary.document_type == "error"
         assert summary.total_words == 0
         assert "Failed to process URL" in summary.summary
-        assert "Connection failed" in summary.key_insights[0]
+        assert "Connection failed" in summary.summary  # Error message should be in summary
 
 
 class TestBatchSummarizeDocs:
@@ -798,6 +798,79 @@ More ünicödë content here.
                 os.unlink(temp_path)
             except:
                 pass
+
+
+class TestSecurity:
+    """Test security aspects of document summarization."""
+    
+    def test_url_validation_blocks_invalid_schemes(self):
+        """Test that invalid URL schemes are blocked."""
+        from tools.doc_summary_tool import _is_safe_url
+        
+        # Test invalid schemes
+        assert not _is_safe_url("file:///etc/passwd")
+        assert not _is_safe_url("ftp://example.com/file.txt")
+        assert not _is_safe_url("javascript:alert(1)")
+        assert not _is_safe_url("data:text/html,<script>alert(1)</script>")
+        
+        # Test valid schemes
+        assert _is_safe_url("https://github.com/user/repo/file.md")
+        assert _is_safe_url("http://example.com/doc.txt")
+    
+    def test_url_validation_blocks_localhost(self):
+        """Test that localhost and private IPs are blocked."""
+        from tools.doc_summary_tool import _is_safe_url
+        
+        # Test localhost variations
+        assert not _is_safe_url("https://localhost/file.md")
+        assert not _is_safe_url("https://127.0.0.1/file.md")
+        assert not _is_safe_url("https://0.0.0.0/file.md")
+        
+        # Test private network ranges
+        assert not _is_safe_url("https://192.168.1.1/file.md")
+        assert not _is_safe_url("https://10.0.0.1/file.md")
+        assert not _is_safe_url("https://172.16.0.1/file.md")
+    
+    def test_url_validation_blocks_malformed_urls(self):
+        """Test that malformed URLs are blocked."""
+        from tools.doc_summary_tool import _is_safe_url
+        
+        # Test malformed URLs
+        assert not _is_safe_url("")
+        assert not _is_safe_url("not-a-url")
+        assert not _is_safe_url("https://")
+        assert not _is_safe_url("https:///file.md")
+        assert not _is_safe_url("https://invalid..domain.com/file.md")
+    
+    def test_unsafe_url_returns_error_summary(self):
+        """Test that unsafe URLs return error summaries without subprocess execution."""
+        summary = summarize_url_document("file:///etc/passwd")
+        
+        assert summary.document_type == "error"
+        assert summary.total_words == 0
+        assert "Invalid or unsafe URL" in summary.summary
+        assert "URL validation failed" in summary.key_insights
+    
+    @patch('tools.doc_summary_tool.subprocess.run')
+    def test_subprocess_security_restrictions(self, mock_run):
+        """Test that subprocess is called with security restrictions."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="# Test content")
+        
+        summarize_url_document("https://github.com/user/repo/file.md")
+        
+        # Verify subprocess was called with security restrictions
+        assert mock_run.called
+        call_args = mock_run.call_args
+        
+        # Check for security flags
+        cmd = call_args[0][0]
+        assert "--max-filesize" in cmd
+        assert "--connect-timeout" in cmd
+        
+        # Check for restricted environment
+        kwargs = call_args[1]
+        assert "env" in kwargs
+        assert kwargs["env"]["PATH"] == "/usr/bin:/bin"
 
 
 class TestIntegration:
