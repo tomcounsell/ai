@@ -1168,16 +1168,15 @@ class MessageHandler:
                         
                         # Process both caption and transcribed text together
                         combined_text = f"{message.caption}\n\n{transcribed_text}"
-                        response = await self._get_agent_response(chat_id, combined_text, reply_to_telegram_message_id)
+                        await self._route_message_with_intent(client, message, chat_id, combined_text, reply_to_telegram_message_id)
+                        return  # Exit since _route_message_with_intent handles the full response
                     else:
                         # Store transcribed audio only
                         self.chat_history.add_message(chat_id, "user", transcribed_text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
                         
                         # Process transcribed text
-                        response = await self._get_agent_response(chat_id, transcribed_text, reply_to_telegram_message_id)
-                    
-                    await self._safe_reply(message, response, f"🎙️ {audio_type} transcribed")
-                    self.chat_history.add_message(chat_id, "assistant", response)
+                        await self._route_message_with_intent(client, message, chat_id, transcribed_text, reply_to_telegram_message_id)
+                        return  # Exit since _route_message_with_intent handles the full response
                     
                 except Exception as transcription_error:
                     # Fallback to old behavior if transcription fails
@@ -1197,8 +1196,8 @@ class MessageHandler:
                             response = f"🎙️ I hear you sent a voice message with text: '{message.caption}'. Voice transcription failed, but I can still help with your text message!"
                             # Process the caption text at least
                             try:
-                                caption_response = await self._get_agent_response(chat_id, message.caption, reply_to_telegram_message_id)
-                                response = caption_response
+                                await self._route_message_with_intent(client, message, chat_id, message.caption, reply_to_telegram_message_id)
+                                return  # Exit since _route_message_with_intent handles the full response
                             except:
                                 pass  # Keep fallback message
                         else:
@@ -1208,8 +1207,8 @@ class MessageHandler:
                             response = f"🎵 I see you shared an audio file with text: '{message.caption}'. Audio transcription failed, but I can help with your text!"
                             # Process the caption text at least
                             try:
-                                caption_response = await self._get_agent_response(chat_id, message.caption, reply_to_telegram_message_id)
-                                response = caption_response
+                                await self._route_message_with_intent(client, message, chat_id, message.caption, reply_to_telegram_message_id)
+                                return  # Exit since _route_message_with_intent handles the full response
                             except:
                                 pass  # Keep fallback message
                         else:
