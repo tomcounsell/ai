@@ -23,6 +23,9 @@ from tools.telegram_history_tool import (
     get_telegram_context_summary
 )
 
+# Import context manager for MCP context injection
+from .context_manager import inject_context_for_tool
+
 # Load environment variables
 load_dotenv()
 
@@ -53,8 +56,11 @@ def search_conversation_history(query: str, chat_id: str = "", max_results: int 
     if len(query) > 200:
         return "❌ Search query too long (max 200 characters)."
     
+    # Inject context if not provided
+    chat_id, _ = inject_context_for_tool(chat_id, "")
+    
     if not chat_id:
-        return "❌ No chat ID provided for history search. Ensure CONTEXT_DATA includes CHAT_ID."
+        return "❌ No chat ID available for history search. Please ensure context is set or provide chat_id parameter."
     
     if max_results < 1 or max_results > 50:
         return "❌ max_results must be between 1 and 50."
@@ -108,8 +114,11 @@ def get_conversation_context(chat_id: str = "", hours_back: int = 24) -> str:
         Formatted summary of recent conversation or "No recent activity"
     """
     # MCP-specific validation
+    # Inject context if not provided
+    chat_id, _ = inject_context_for_tool(chat_id, "")
+    
     if not chat_id:
-        return "❌ No chat ID provided for context retrieval. Ensure CONTEXT_DATA includes CHAT_ID."
+        return "❌ No chat ID available for context retrieval. Please ensure context is set or provide chat_id parameter."
 
     try:
         # Import chat history here to avoid import errors if not available
@@ -162,8 +171,11 @@ def get_recent_history(chat_id: str = "", max_messages: int = 10) -> str:
     Returns:
         Formatted list of recent messages or "No recent messages"
     """
+    # Inject context if not provided
+    chat_id, _ = inject_context_for_tool(chat_id, "")
+    
     if not chat_id:
-        return "❌ No chat ID provided for recent history. Ensure CONTEXT_DATA includes CHAT_ID."
+        return "❌ No chat ID available for recent history. Please ensure context is set or provide chat_id parameter."
 
     try:
         # Import chat history here to avoid import errors if not available
@@ -257,16 +269,20 @@ def list_telegram_dialogs() -> str:
         # Run the async function
         try:
             dialogs_data, error = asyncio.run(get_dialogs())
-        except RuntimeError:
-            # If we're already in an event loop, use current loop
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # Schedule as a task in the current loop
-                import asyncio
-                task = loop.create_task(get_dialogs())
-                dialogs_data, error = task.result() if task.done() else (None, "❌ Failed to retrieve dialogs in current event loop")
+        except RuntimeError as e:
+            # If we're already in an event loop, we can't use asyncio.run()
+            if "cannot be called from a running event loop" in str(e):
+                return "❌ Cannot retrieve dialogs from within an active event loop. Please run from a synchronous context or ensure the Telegram client is running independently."
             else:
-                dialogs_data, error = loop.run_until_complete(get_dialogs())
+                # For other RuntimeError cases, try to get current loop
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        return "❌ Cannot retrieve dialogs: Event loop is already running. Please use the Telegram client directly."
+                    else:
+                        dialogs_data, error = loop.run_until_complete(get_dialogs())
+                except Exception as loop_error:
+                    return f"❌ Event loop error: {str(loop_error)}"
         
         if error:
             return error

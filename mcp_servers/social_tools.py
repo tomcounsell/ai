@@ -32,6 +32,9 @@ from tools.link_analysis_tool import (
 )
 from tools.voice_transcription_tool import transcribe_audio_file
 
+# Import context manager for MCP context injection
+from .context_manager import inject_context_for_tool
+
 # Load environment variables
 load_dotenv()
 
@@ -83,6 +86,9 @@ def create_image(
         Path to the generated image file or error message
     """
     try:
+        # Inject context if not provided
+        chat_id, _ = inject_context_for_tool(chat_id, "")
+        
         # Call standalone implementation following GOLD STANDARD pattern
         image_path = generate_image(prompt, size, quality, style, save_directory=None)
         
@@ -148,6 +154,9 @@ def save_link(url: str, chat_id: str = "", username: str = "") -> str:
         Success message with analysis summary or error message
     """
     try:
+        # Inject context if not provided
+        chat_id, username = inject_context_for_tool(chat_id, username)
+        
         # Call standalone implementation following GOLD STANDARD pattern
         # Convert chat_id to int if provided, handle optional parameters
         chat_id_int = int(chat_id) if chat_id and chat_id.isdigit() else None
@@ -184,6 +193,9 @@ def search_links(query: str, chat_id: str = "", limit: int = 10) -> str:
         Formatted list of matching links or message indicating no matches
     """
     try:
+        # Inject context if not provided
+        chat_id, _ = inject_context_for_tool(chat_id, "")
+        
         # Call standalone implementation following GOLD STANDARD pattern
         # Convert chat_id to int if provided, handle optional parameters
         chat_id_int = int(chat_id) if chat_id and chat_id.isdigit() else None
