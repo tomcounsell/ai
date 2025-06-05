@@ -118,6 +118,19 @@ def init_database() -> None:
                     session_metadata TEXT  -- JSON blob for additional context
                 );
                 
+                -- Promises table for tracking long-running background tasks
+                CREATE TABLE IF NOT EXISTS promises (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    task_description TEXT NOT NULL,
+                    status TEXT DEFAULT 'pending',  -- 'pending', 'in_progress', 'completed', 'failed'
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    result_summary TEXT,
+                    error_message TEXT
+                );
+                
                 -- Indexes for performance
                 CREATE INDEX IF NOT EXISTS idx_token_usage_timestamp ON token_usage(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_id);
@@ -136,6 +149,10 @@ def init_database() -> None:
                 CREATE INDEX IF NOT EXISTS idx_claude_sessions_tool ON claude_code_sessions(tool_name);
                 CREATE INDEX IF NOT EXISTS idx_claude_sessions_active ON claude_code_sessions(is_active);
                 CREATE INDEX IF NOT EXISTS idx_claude_sessions_last_activity ON claude_code_sessions(last_activity);
+                
+                CREATE INDEX IF NOT EXISTS idx_promises_chat_id ON promises(chat_id);
+                CREATE INDEX IF NOT EXISTS idx_promises_status ON promises(status);
+                CREATE INDEX IF NOT EXISTS idx_promises_created_at ON promises(created_at);
             """)
             
             # Insert default data
@@ -306,3 +323,114 @@ def cleanup_old_databases() -> None:
                 logger.info(f"Backed up {file_path} to {file_path}.backup")
             except Exception as e:
                 logger.error(f"Error backing up {file_path}: {e}")
+
+
+# Promise Management Functions
+def create_promise(chat_id: int, message_id: int, task_description: str) -> int:
+    """Create a new promise entry in the database.
+    
+    Args:
+        chat_id: Telegram chat ID
+        message_id: Telegram message ID that triggered the promise
+        task_description: Description of the promised task
+        
+    Returns:
+        int: Promise ID
+    """
+    conn = get_database_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        INSERT INTO promises (chat_id, message_id, task_description)
+        VALUES (?, ?, ?)
+    """, (chat_id, message_id, task_description))
+    
+    promise_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    
+    logger.info(f"Created promise {promise_id} for chat {chat_id}")
+    return promise_id
+
+
+def update_promise_status(promise_id: int, status: str, result_summary: Optional[str] = None, 
+                         error_message: Optional[str] = None) -> None:
+    """Update the status of a promise.
+    
+    Args:
+        promise_id: Promise ID to update
+        status: New status ('pending', 'in_progress', 'completed', 'failed')
+        result_summary: Summary of results if completed
+        error_message: Error message if failed
+    """
+    conn = get_database_connection()
+    
+    if status == 'completed' or status == 'failed':
+        conn.execute("""
+            UPDATE promises 
+            SET status = ?, completed_at = CURRENT_TIMESTAMP, 
+                result_summary = ?, error_message = ?
+            WHERE id = ?
+        """, (status, result_summary, error_message, promise_id))
+    else:
+        conn.execute("""
+            UPDATE promises 
+            SET status = ?
+            WHERE id = ?
+        """, (status, promise_id))
+    
+    conn.commit()
+    conn.close()
+    
+    logger.info(f"Updated promise {promise_id} status to {status}")
+
+
+def get_promise(promise_id: int) -> Optional[dict]:
+    """Get a promise by ID.
+    
+    Args:
+        promise_id: Promise ID to retrieve
+        
+    Returns:
+        dict: Promise data or None if not found
+    """
+    conn = get_database_connection()
+    conn.row_factory = sqlite3.Row
+    
+    result = conn.execute("""
+        SELECT * FROM promises WHERE id = ?
+    """, (promise_id,)).fetchone()
+    
+    conn.close()
+    
+    return dict(result) if result else None
+
+
+def get_pending_promises(chat_id: Optional[int] = None) -> list:
+    """Get all pending promises, optionally filtered by chat.
+    
+    Args:
+        chat_id: Optional chat ID to filter by
+        
+    Returns:
+        list: List of promise dictionaries
+    """
+    conn = get_database_connection()
+    conn.row_factory = sqlite3.Row
+    
+    if chat_id:
+        results = conn.execute("""
+            SELECT * FROM promises 
+            WHERE status = 'pending' AND chat_id = ?
+            ORDER BY created_at ASC
+        """, (chat_id,)).fetchall()
+    else:
+        results = conn.execute("""
+            SELECT * FROM promises 
+            WHERE status = 'pending'
+            ORDER BY created_at ASC
+        """).fetchall()
+    
+    conn.close()
+    
+    return [dict(row) for row in results]

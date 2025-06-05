@@ -77,6 +77,7 @@ This enables reliable task execution while maintaining visibility into the proce
 
 import os
 import subprocess
+import time
 
 
 def execute_valor_delegation(
@@ -164,11 +165,56 @@ def execute_valor_delegation(
         raise subprocess.CalledProcessError(e.returncode, command, error_msg)
 
 
+def estimate_task_duration(task_description: str, specific_instructions: str | None = None) -> int:
+    """Estimate how long a task might take in seconds based on its description.
+    
+    Args:
+        task_description: Description of the task
+        specific_instructions: Additional instructions that might affect duration
+        
+    Returns:
+        int: Estimated duration in seconds
+    """
+    # Keywords that suggest longer tasks
+    long_task_keywords = [
+        "refactor", "rewrite", "implement", "create", "build", "setup",
+        "comprehensive", "entire", "all", "complete", "full",
+        "test suite", "documentation", "migration", "upgrade"
+    ]
+    
+    # Keywords that suggest quick tasks
+    quick_task_keywords = [
+        "fix", "update", "change", "modify", "add", "remove",
+        "typo", "rename", "move", "simple", "quick", "small"
+    ]
+    
+    # Handle None or empty task description
+    if not task_description:
+        return 30  # Default estimate
+    
+    task_lower = task_description.lower()
+    if specific_instructions:
+        task_lower += " " + specific_instructions.lower()
+    
+    # Check for indicators of task complexity
+    long_indicators = sum(1 for keyword in long_task_keywords if keyword in task_lower)
+    quick_indicators = sum(1 for keyword in quick_task_keywords if keyword in task_lower)
+    
+    # Base estimate
+    if long_indicators > quick_indicators:
+        return 60  # 1 minute for complex tasks
+    elif quick_indicators > 0:
+        return 15  # 15 seconds for simple tasks
+    else:
+        return 30  # 30 seconds default
+
+
 def spawn_valor_session(
     task_description: str,
     target_directory: str,
     specific_instructions: str | None = None,
     tools_needed: list[str] | None = None,
+    force_sync: bool = False,
 ) -> str:
     """Spawn a new Claude Code session for a specific development task.
 
@@ -181,9 +227,11 @@ def spawn_valor_session(
         target_directory: Directory where the work should be performed.
         specific_instructions: Additional detailed instructions.
         tools_needed: Specific tools Claude should have access to.
+        force_sync: If True, always execute synchronously (for background execution).
 
     Returns:
         str: Result of Claude's execution including task completion status.
+        If task is estimated to take >30 seconds and not force_sync, returns ASYNC_PROMISE marker.
 
     Example:
         >>> result = spawn_claude_session(
@@ -201,6 +249,13 @@ def spawn_valor_session(
     
     # Execute actual Claude Code delegation
     # Previous safety return was removed to enable real task execution
+    
+    # Estimate task duration
+    estimated_duration = estimate_task_duration(task_description, specific_instructions)
+    
+    # If task is estimated to take >30 seconds and not forced sync, return async promise marker
+    if estimated_duration > 30 and not force_sync:
+        return f"ASYNC_PROMISE|I'll work on this task in the background: {task_description}"
 
     # Build comprehensive prompt
     prompt_parts = [
@@ -230,9 +285,18 @@ def spawn_valor_session(
     full_prompt = "\n".join(prompt_parts)
 
     try:
-        return execute_valor_delegation(
+        # Track execution time
+        start_time = time.time()
+        result = execute_valor_delegation(
             prompt=full_prompt, working_directory=target_directory, allowed_tools=tools_needed
         )
+        execution_time = time.time() - start_time
+        
+        # Log if our estimate was significantly off
+        if execution_time > 30 and estimated_duration <= 30:
+            print(f"Task took {execution_time:.1f}s but was estimated at {estimated_duration}s")
+            
+        return result
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
         return f"""❌ **Development Tool Error**
 

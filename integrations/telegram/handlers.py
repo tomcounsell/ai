@@ -1403,6 +1403,31 @@ class MessageHandler:
                 self.chat_history.add_message(chat_id, "assistant", error_msg)
                 return True
 
+        # Check for ASYNC_PROMISE marker indicating a long-running task
+        if answer and "ASYNC_PROMISE|" in answer:
+            print(f"🔄 Detected ASYNC_PROMISE marker in response")
+            parts = answer.split("ASYNC_PROMISE|", 1)
+            promise_message = parts[1].strip() if len(parts) > 1 else "I'll work on this task in the background."
+            
+            # Extract task description from the promise message
+            task_description = promise_message.replace("I'll work on this task in the background: ", "").strip()
+            
+            # Create promise in database
+            from utilities.database import create_promise
+            promise_id = create_promise(chat_id, message.id, task_description)
+            print(f"📝 Created promise {promise_id} for long-running task")
+            
+            # Send immediate response to user
+            await self._safe_reply(message, promise_message, "📝 Working on task")
+            self.chat_history.add_message(chat_id, "assistant", promise_message)
+            
+            # Execute promise in background
+            import asyncio
+            asyncio.create_task(self._execute_promise_background(message, chat_id, promise_id, task_description))
+            print(f"🚀 Started background execution for promise {promise_id}")
+            
+            return True
+
         # Validate the answer content before processing
         validated_answer = self._validate_message_content(answer, "🤔 I processed your message but didn't have a response.")
 
@@ -1498,3 +1523,94 @@ class MessageHandler:
                 await message.reply("🤖 Error sending response")
             except Exception as e2:
                 print(f"Failed to send fallback reply: {e2}")
+    
+    async def _execute_promise_background(self, original_message, chat_id: int, promise_id: int, task_description: str):
+        """Execute a long-running task in the background and send completion message.
+        
+        Args:
+            original_message: Original Telegram message that triggered the promise
+            chat_id: Chat ID for sending completion message
+            promise_id: Promise ID in database
+            task_description: Description of the task to execute
+        """
+        print(f"🔄 Starting background execution for promise {promise_id}")
+        print(f"   Task: {task_description}")
+        
+        try:
+            # Update promise status to in_progress
+            from utilities.database import update_promise_status
+            update_promise_status(promise_id, "in_progress")
+            
+            # Import delegation tool
+            from tools.valor_delegation_tool import spawn_valor_session
+            
+            # Determine working directory (use current directory as default)
+            import os
+            working_directory = os.getcwd()
+            
+            # Execute the task using the delegation tool (without time check since we're already async)
+            print(f"🚀 Executing task via Claude Code...")
+            import time
+            start_time = time.time()
+            result = spawn_valor_session(
+                task_description=task_description,
+                target_directory=working_directory,
+                specific_instructions=None,
+                tools_needed=None,
+                force_sync=True  # Always execute synchronously in background
+            )
+            execution_time = time.time() - start_time
+            print(f"✅ Task completed in {execution_time:.1f} seconds")
+            
+            # Check if result contains the ASYNC_PROMISE marker (shouldn't happen in background)
+            if "ASYNC_PROMISE|" in result:
+                # Extract the actual result
+                result = result.split("ASYNC_PROMISE|", 1)[0].strip()
+            
+            # Send completion message
+            completion_message = f"""✅ **Task Complete!**
+
+I finished working on: {task_description}
+
+**Result:**
+{result}
+
+This task took {execution_time:.1f} seconds to complete."""
+            
+            # Send the completion message as a reply to the original message
+            try:
+                await original_message.reply(completion_message)
+                self.chat_history.add_message(chat_id, "assistant", completion_message)
+                print(f"📤 Sent completion message for promise {promise_id}")
+            except Exception as send_error:
+                print(f"❌ Failed to send completion message: {send_error}")
+                # Try sending without reply
+                try:
+                    await self.client.send_message(chat_id, completion_message)
+                    self.chat_history.add_message(chat_id, "assistant", completion_message)
+                except Exception as e:
+                    print(f"❌ Failed to send message to chat: {e}")
+            
+            # Update promise status to completed
+            update_promise_status(promise_id, "completed", result_summary=result[:500])
+            print(f"✅ Promise {promise_id} marked as completed")
+            
+        except Exception as e:
+            error_msg = f"❌ **Task Failed**\n\nI encountered an error while working on: {task_description}\n\nError: {str(e)}"
+            print(f"❌ Background task failed for promise {promise_id}: {e}")
+            
+            # Try to send error message
+            try:
+                await original_message.reply(error_msg)
+                self.chat_history.add_message(chat_id, "assistant", error_msg)
+            except:
+                try:
+                    await self.client.send_message(chat_id, error_msg)
+                    self.chat_history.add_message(chat_id, "assistant", error_msg)
+                except:
+                    print(f"❌ Could not send error message to user")
+            
+            # Update promise status to failed
+            from utilities.database import update_promise_status
+            update_promise_status(promise_id, "failed", error_message=str(e))
+            print(f"❌ Promise {promise_id} marked as failed")
