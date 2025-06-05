@@ -311,6 +311,19 @@ def technical_analysis(
             hours_back=2  # Look for sessions in last 2 hours
         )
         
+        # Get project priming context if this is a new session
+        project_context = ""
+        if not recent_session:
+            try:
+                # Import here to avoid circular imports
+                import sys
+                import os
+                sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+                from mcp_servers.development_tools import get_project_context
+                project_context = get_project_context(chat_id)
+            except Exception:
+                pass
+        
         # Build research-focused prompt for Claude Code with session context
         prompt_parts = [
             f"TECHNICAL RESEARCH TASK: {research_topic}",
@@ -318,6 +331,16 @@ def technical_analysis(
             f"WORKING DIRECTORY: {working_dir}",
             ""
         ]
+        
+        # Add project context for new sessions (equivalent to /prime)
+        if project_context and not recent_session:
+            prompt_parts.extend([
+                "PROJECT CONTEXT (equivalent to /prime):",
+                project_context,
+                "",
+                "---",
+                ""
+            ])
         
         if focus_areas:
             prompt_parts.extend([f"FOCUS AREAS: {focus_areas}", ""])

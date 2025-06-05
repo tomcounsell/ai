@@ -163,13 +163,33 @@ def _execute_with_session_management(
     import os
     from utilities.claude_code_session_manager import ClaudeCodeSessionManager
     
-    # Build comprehensive prompt
+    # Get project priming context if this is a new session
+    project_context = ""
+    if not existing_session:
+        try:
+            # Import here to avoid circular imports
+            from mcp_servers.development_tools import get_project_context
+            project_context = get_project_context(chat_id)
+        except Exception:
+            pass
+    
+    # Build comprehensive prompt with project priming for new sessions
     prompt_parts = [
         f"TASK: {task_description}",
         "",
         f"WORKING DIRECTORY: {working_directory}",
         ""
     ]
+    
+    # Add project context for new sessions (equivalent to /prime)
+    if project_context and not existing_session:
+        prompt_parts.extend([
+            "PROJECT CONTEXT (equivalent to /prime):",
+            project_context,
+            "",
+            "---",
+            ""
+        ])
     
     if specific_instructions:
         prompt_parts.extend([f"SPECIFIC INSTRUCTIONS: {specific_instructions}", ""])
