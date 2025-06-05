@@ -1,88 +1,78 @@
 """
-Valor Delegation Tool - Provides development guidance instead of spawning Claude Code sessions.
+Valor Delegation Tool - Executes development tasks using Claude Code sessions.
 
-## Architecture Decision: Guidance Over Delegation
+## Architecture Decision: Enabled Delegation
 
-This tool was redesigned in commit 05c9323 to prevent agent hanging issues caused by recursive 
-Claude Code spawning. Instead of executing tasks directly, it now provides comprehensive 
-development guidance.
+This tool spawns Claude Code sessions to execute development tasks autonomously.
+It has been re-enabled to support actual task execution rather than just guidance.
 
-### Historical Context: The Hanging Issue
+### Implementation Features
 
-**Problem**: The original implementation attempted to spawn subprocess Claude Code sessions 
-from within a PydanticAI agent tool. This caused:
-- Agent hanging during tool selection 
-- Infinite recursion when Claude Code spawned more Claude Code sessions
-- Process deadlocks and unresponsive agent behavior
-- Poor user experience with delayed/missing responses
+**Current Capabilities**: This tool executes development tasks by spawning Claude Code sessions:
+- Autonomous task execution with proper workspace isolation
+- Directory validation and tool permissions
+- Execution monitoring with timeout support
+- Comprehensive error handling and reporting
 
-**Root Cause**: PydanticAI agents running subprocess commands that spawn the same tool 
-created circular dependencies and resource contention.
+**Usage Patterns**:
+- Bug fixes and feature implementation
+- Code refactoring and optimization
+- Testing and validation tasks
+- Git workflow automation
 
-**Solution**: Replace subprocess delegation with intelligent guidance responses that:
-- Provide step-by-step implementation approaches
-- Share relevant code examples and patterns
-- Offer testing strategies and best practices
-- Include architecture and integration advice
+### Technical Implementation
 
-### Current Implementation
+The tool spawns subprocess calls to `claude code` with:
+- Working directory isolation for workspace safety
+- Comprehensive prompts with context and requirements
+- Proper error handling and timeout management
+- Structured output parsing and response formatting
 
-The tool now returns structured guidance responses containing:
-- Task-specific implementation approaches
-- Code structure and architecture advice
-- Testing and validation strategies  
-- Integration patterns and best practices
-- Working directory context for user reference
+### Benefits of Direct Execution
 
-This approach provides equivalent value to users while eliminating:
-- Hanging and deadlock issues
-- Recursive spawning problems
-- Process management complexity
-- Security concerns with subprocess execution
-
-### Benefits of Guidance Approach
-
-1. **Reliability**: No hanging, deadlocks, or subprocess issues
-2. **Performance**: Instant responses without subprocess overhead
-3. **Security**: No arbitrary command execution or process spawning
-4. **Flexibility**: Guidance adapts to user context and preferences
-5. **Maintainability**: Simpler architecture without process management
+1. **Task Completion**: Actually executes requested work autonomously
+2. **Workspace Awareness**: Operates in correct project directories
+3. **Git Integration**: Can commit changes and follow workflows
+4. **Testing Support**: Runs tests and validates implementations
+5. **Real Results**: Provides actual code changes, not just guidance
 
 ### Integration Notes
 
-Tools or systems expecting delegation results should handle the new guidance format:
-- Response starts with "💡 **Development Guidance Available**"
-- Contains structured sections for implementation approaches
-- Includes working directory context
-- Provides actionable next steps and questions
+The tool returns structured execution results containing:
+- Task completion status and summary
+- Details of changes made (files modified, tests run, etc.)
+- Any errors encountered during execution
+- Git commit information if changes were committed
+- Working directory context for reference
 
 Example response structure:
 ```
-💡 **Development Guidance Available**
+✅ **Task Completed Successfully**
 
-For the task: **[task_description]**
+Task: Fix authentication bug in login system
 
-**Implementation Approach:**
-- Step-by-step guidance...
+**Changes Made:**
+- Modified src/auth/login.py: Fixed password validation logic
+- Updated tests/test_auth.py: Added test cases for edge cases
+- All tests passing: 15/15
 
-**Specific Help I Can Provide:**
-- Architecture advice...
+**Git Status:**
+- Committed changes: "Fix authentication validation bug"
+- Branch: main
+- Files changed: 2
 
-**Working Directory:** `/path/to/project`
-
-What specific aspect would you like me to help you with first?
+**Working Directory:** `/Users/user/project`
 ```
 
-### Migration Notes for Developers
+### Error Handling
 
-If you need actual code execution (the original delegation behavior):
-1. Use Claude Code directly from command line instead of through agent tools
-2. Consider MCP tools for specific development tasks
-3. Use the guidance provided to implement solutions manually
-4. For complex automation, consider CI/CD pipelines instead of agent delegation
+If Claude Code execution fails, the tool provides detailed error information:
+- Exit codes and error messages
+- Stdout/stderr output for debugging
+- Timeout information if applicable
+- Suggestions for manual resolution
 
-This architectural change prioritizes system reliability and user experience over 
-convenience features that caused critical stability issues.
+This enables reliable task execution while maintaining visibility into the process.
 """
 
 import os
@@ -209,31 +199,8 @@ def spawn_valor_session(
         like following existing patterns, testing, and git workflows.
     """
     
-    # IMPORTANT: Prevent recursive Claude Code sessions that cause hanging
-    # For safety, always avoid spawning Claude Code when running as an agent tool
-    # This prevents infinite recursion and hanging issues
-    return f"""💡 **Development Guidance Available**
-
-For the task: **{task_description}**
-
-I can help you with this directly instead of delegating to another session:
-
-**Implementation Approach:**
-- I can provide step-by-step guidance for this task
-- Share relevant code examples and patterns
-- Review your implementation if you share code
-- Suggest testing strategies and best practices
-
-**Specific Help I Can Provide:**
-- Code structure and architecture advice
-- Implementation details and examples
-- Testing and validation approaches
-- Integration patterns and best practices
-
-**Working Directory:** `{target_directory}`
-{f"**Additional Requirements:** {specific_instructions}" if specific_instructions else ""}
-
-What specific aspect would you like me to help you with first? I can provide detailed technical guidance to accomplish this task."""
+    # Execute actual Claude Code delegation
+    # Previous safety return was removed to enable real task execution
 
     # Build comprehensive prompt
     prompt_parts = [

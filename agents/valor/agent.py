@@ -102,10 +102,12 @@ IMPORTANT TOOL USAGE:
 - When users request something that matches a tool's capability, YOU MUST use the appropriate tool
 - For image requests ("create image", "generate image", "draw", "make picture"), use the create_image tool
 - For current information requests, use the search_current_info tool
-- For complex coding tasks, use the delegate_coding_task tool with structured prompts:
-  * For complex features: Use PLANNING PHASE template first, then IMPLEMENTATION PHASE template
-  * For simple tasks: Use direct task description
+- For coding tasks, use the delegate_coding_task tool IMMEDIATELY - this tool actually executes code:
+  * CRITICAL: Execute first, respond after - call the tool and wait for results
+  * Don't make promises ("I'll fix...") - do the work then report completion
+  * The tool spawns Claude Code to actually write code, run tests, and commit changes
   * Always specify target_directory and include detailed requirements in specific_instructions
+  * Report actual results from the execution, not plans or intentions
 - For analyzing shared images, use the analyze_shared_image tool
 - For saving/analyzing links, use the save_link_for_later tool
 - For searching saved links, use the search_saved_links tool
@@ -287,27 +289,28 @@ def delegate_coding_task(
     target_directory: str = "",
     specific_instructions: str = "",
 ) -> str:
-    """Provide development guidance and implementation advice for coding tasks.
+    """Execute development tasks autonomously using Claude Code sessions.
 
-    This tool provides comprehensive development guidance instead of executing tasks directly.
-    It offers detailed implementation approaches, code examples, and best practices to help
-    with any software development challenge.
+    This tool spawns a new Claude Code session to actually execute coding tasks rather than 
+    just providing guidance. It performs real work including writing code, running tests, 
+    making git commits, and providing detailed results.
 
-    The tool provides structured guidance including:
-    - Step-by-step implementation approaches
-    - Relevant code examples and patterns  
-    - Testing strategies and best practices
-    - Architecture and integration advice
+    The tool executes tasks including:
+    - Writing and modifying code files
+    - Running tests and fixing failures
+    - Git operations (commit, branch management)
+    - Dependency management and builds
+    - Code refactoring and optimization
 
-    Use this for ANY development request:
-    - "Fix the login bug"
-    - "Add a dark mode feature" 
-    - "Refactor the API endpoints"
-    - "Update dependencies and run tests"
-    - "Implement user authentication"
+    Use this for ANY development work that needs to be actually completed:
+    - "Fix the login bug" - Will actually fix the bug and commit changes
+    - "Add a dark mode feature" - Will implement the feature with tests
+    - "Refactor the API endpoints" - Will perform refactoring with validation
+    - "Update dependencies and run tests" - Will update deps and ensure tests pass
+    - "Implement user authentication" - Will build complete auth system
 
-    Simply describe what needs to be done and receive detailed technical guidance.
-    For Telegram groups, working directory context is automatically provided.
+    The tool operates in the correct workspace directory and follows project conventions.
+    For Telegram groups, working directory context is automatically determined.
 
     Args:
         ctx: The runtime context containing chat information.
@@ -316,11 +319,11 @@ def delegate_coding_task(
         specific_instructions: (Optional) Any additional constraints or preferences.
 
     Returns:
-        str: Comprehensive development guidance with implementation approaches and examples.
+        str: Detailed execution results including changes made, tests run, and git status.
 
     Example:
         >>> delegate_coding_task(ctx, "Fix the authentication bug")
-        'Development Guidance Available\\n\\nFor the task: Fix the authentication bug...'
+        '✅ **Task Completed Successfully**\\n\\nTask: Fix authentication bug...'
     """
     try:
         # Determine the working directory
