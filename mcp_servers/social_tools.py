@@ -284,21 +284,21 @@ def technical_analysis(
         import subprocess
         import os
         
-        # Get workspace context if available
-        working_dir = "."
-        context_info = ""
+        # Use unified workspace resolution
+        from utilities.workspace_validator import WorkspaceResolver
+        from .context_manager import inject_context_for_tool
         
-        if chat_id:
-            try:
-                from utilities.workspace_validator import get_workspace_validator
-                validator = get_workspace_validator()
-                workspace_dir = validator.get_working_directory(chat_id)
-                if workspace_dir:
-                    working_dir = workspace_dir
-                    workspace_name = validator.get_workspace_for_chat(chat_id)
-                    context_info = f"Workspace: {workspace_name}, Directory: {working_dir}"
-            except Exception:
-                pass  # Continue with default directory
+        # Inject context if not provided
+        chat_id, _ = inject_context_for_tool(chat_id, "")
+        
+        working_dir, context_desc = WorkspaceResolver.resolve_working_directory(
+            chat_id=chat_id,
+            username=None,  # technical_analysis doesn't typically have username context
+            is_group_chat=True,  # Assume group context for technical analysis
+            target_directory=""
+        )
+        
+        context_info = context_desc
         
         # Build research-focused prompt for Claude Code
         prompt_parts = [
@@ -359,13 +359,33 @@ def technical_analysis(
         return f"🔬 **Technical Research Results**\n\n{process.stdout}"
         
     except subprocess.TimeoutExpired:
-        return f"🔬 **Research Timeout**: Technical analysis of '{research_topic}' exceeded 2 hours. Try breaking down into smaller research questions."
+        from utilities.swe_error_recovery import SWEErrorRecovery
+        return SWEErrorRecovery.format_recovery_response(
+            tool_name="technical_analysis",
+            task_description=research_topic,
+            error_message="Research exceeded 2 hour timeout",
+            working_directory=working_dir,
+            execution_time=7200.0
+        )
         
     except subprocess.CalledProcessError as e:
-        return f"🔬 **Research Error**: Technical analysis failed: {e.stderr or 'Unknown error'}"
+        from utilities.swe_error_recovery import SWEErrorRecovery
+        error_msg = f"Claude Code failed (exit {e.returncode}): {e.stderr or 'Unknown error'}"
+        return SWEErrorRecovery.format_recovery_response(
+            tool_name="technical_analysis", 
+            task_description=research_topic,
+            error_message=error_msg,
+            working_directory=working_dir
+        )
         
     except Exception as e:
-        return f"🔬 **Research Error**: {str(e)}"
+        from utilities.swe_error_recovery import SWEErrorRecovery
+        return SWEErrorRecovery.format_recovery_response(
+            tool_name="technical_analysis",
+            task_description=research_topic, 
+            error_message=str(e),
+            working_directory=working_dir
+        )
 
 
 if __name__ == "__main__":

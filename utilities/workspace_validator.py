@@ -39,6 +39,105 @@ class WorkspaceAccessError(Exception):
     pass
 
 
+class WorkspaceResolver:
+    """Unified workspace resolution for SWE tools"""
+    
+    @staticmethod
+    def resolve_working_directory(
+        chat_id: Optional[str] = None,
+        username: Optional[str] = None,
+        is_group_chat: bool = False,
+        target_directory: str = ""
+    ) -> tuple[str, str]:
+        """
+        Unified workspace resolution logic for both SWE tools.
+        
+        Args:
+            chat_id: Chat ID for workspace detection
+            username: Username for DM workspace detection  
+            is_group_chat: Whether this is a group chat
+            target_directory: Explicit directory override
+            
+        Returns:
+            tuple[str, str]: (working_directory, context_description)
+        """
+        # Explicit directory takes highest priority
+        if target_directory and target_directory.strip():
+            return target_directory, f"Explicit directory: {target_directory}"
+            
+        # Try chat-based workspace resolution
+        if chat_id:
+            try:
+                chat_id_int = int(chat_id)
+                
+                # Import here to avoid circular imports
+                from integrations.notion.utils import get_workspace_working_directory, get_telegram_group_project
+                
+                # Try group workspace first
+                workspace_dir = get_workspace_working_directory(chat_id_int)
+                if workspace_dir:
+                    project_name, _ = get_telegram_group_project(chat_id_int)
+                    return workspace_dir, f"Workspace: {project_name or 'Unknown'}"
+                    
+                # Try DM directory for private chats
+                if username and not is_group_chat:
+                    dm_dir = get_dm_user_working_directory(username)
+                    return dm_dir, f"DM directory for @{username}"
+                    
+            except (ValueError, Exception):
+                pass  # Fall through to default
+        
+        # Try username-only resolution (fallback for DMs)
+        if username and not is_group_chat:
+            try:
+                dm_dir = get_dm_user_working_directory(username)
+                return dm_dir, f"DM directory for @{username}"
+            except Exception:
+                pass
+        
+        # Default fallback
+        return ".", "Current directory (no workspace context)"
+    
+    @staticmethod
+    def get_workspace_context_info(
+        chat_id: Optional[str] = None,
+        username: Optional[str] = None,
+        is_group_chat: bool = False
+    ) -> dict:
+        """
+        Get comprehensive workspace context information.
+        
+        Returns:
+            dict: Context information including workspace name, directory, permissions
+        """
+        working_dir, context_desc = WorkspaceResolver.resolve_working_directory(
+            chat_id, username, is_group_chat
+        )
+        
+        workspace_name = "Unknown"
+        has_write_permissions = True  # Default assumption
+        
+        if chat_id:
+            try:
+                chat_id_int = int(chat_id)
+                from integrations.notion.utils import get_telegram_group_project
+                project_name, _ = get_telegram_group_project(chat_id_int)
+                if project_name:
+                    workspace_name = project_name
+            except Exception:
+                pass
+        
+        return {
+            "working_directory": working_dir,
+            "context_description": context_desc,
+            "workspace_name": workspace_name,
+            "has_write_permissions": has_write_permissions,
+            "chat_id": chat_id,
+            "username": username,
+            "is_group_chat": is_group_chat
+        }
+
+
 class WorkspaceValidator:
     """Validates and enforces workspace access controls"""
     

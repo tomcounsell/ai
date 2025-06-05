@@ -326,27 +326,19 @@ def delegate_coding_task(
         '✅ **Task Completed Successfully**\\n\\nTask: Fix authentication bug...'
     """
     try:
-        # Determine the working directory
-        working_dir = target_directory
+        # Use unified workspace resolution
+        from utilities.workspace_validator import WorkspaceResolver
+        from utilities.swe_error_recovery import SWEErrorRecovery
         
-        # If no target directory specified and we have a chat_id, use workspace directory
-        if not working_dir and ctx.deps.chat_id:
-            from integrations.notion.utils import get_workspace_working_directory, get_dm_working_directory
-            
-            # Try group workspace directory first
-            workspace_dir = get_workspace_working_directory(ctx.deps.chat_id)
-            if workspace_dir:
-                working_dir = workspace_dir
-                print(f"🏢 Using workspace directory for chat {ctx.deps.chat_id}: {working_dir}")
-            elif ctx.deps.username and not ctx.deps.is_group_chat:
-                # For DMs, use user-specific working directory
-                dm_dir = get_dm_working_directory(ctx.deps.username)
-                working_dir = dm_dir
-                print(f"👤 Using DM working directory for user @{ctx.deps.username}: {working_dir}")
+        working_dir, context_desc = WorkspaceResolver.resolve_working_directory(
+            chat_id=str(ctx.deps.chat_id) if ctx.deps.chat_id else None,
+            username=ctx.deps.username,
+            is_group_chat=ctx.deps.is_group_chat,
+            target_directory=target_directory
+        )
         
-        # Fall back to current directory if still not set
-        if not working_dir:
-            working_dir = "."
+        print(f"📁 Workspace resolved: {context_desc}")
+        print(f"🎯 Working directory: {working_dir}")
             
         result = spawn_valor_session(
             task_description=task_description,
@@ -355,7 +347,15 @@ def delegate_coding_task(
         )
         return result
     except Exception as e:
-        return f"Error providing development guidance: {str(e)}"
+        # Use intelligent error recovery
+        error_message = str(e)
+        recovery_response = SWEErrorRecovery.format_recovery_response(
+            tool_name="delegate_coding_task",
+            task_description=task_description,
+            error_message=error_message,
+            working_directory=working_dir if 'working_dir' in locals() else "."
+        )
+        return recovery_response
 
 
 @valor_agent.tool
