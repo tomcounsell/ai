@@ -117,6 +117,11 @@ def execute_valor_delegation(
         >>> "script" in result.lower()
         True
     """
+    print(f"🔧 execute_valor_delegation called with:")
+    print(f"   - prompt length: {len(prompt)} chars")
+    print(f"   - working_directory: {working_directory}")
+    print(f"   - timeout: {timeout}")
+    
     # Default allowed tools for coding tasks
     if allowed_tools is None:
         allowed_tools = ["Edit", "Write", "Read", "Bash", "Glob", "Grep", "LS", "MultiEdit", "Task"]
@@ -133,13 +138,16 @@ def execute_valor_delegation(
         # Use shell command to change directory and run Claude Code
         command = f'cd "{working_directory}" && claude code "{prompt}"'
         shell = True
+        print(f"🏃 Running Claude Code with shell command in directory: {working_directory}")
     else:
         # Run in current directory
         command = ["claude", "code", prompt]
         shell = False
+        print(f"🏃 Running Claude Code in current directory")
 
     try:
         # Execute Claude Code
+        print(f"🚀 Executing subprocess.run with timeout={timeout}...")
         process = subprocess.run(
             command, 
             check=True, 
@@ -149,6 +157,8 @@ def execute_valor_delegation(
             shell=shell
         )
 
+        print(f"✅ subprocess completed successfully")
+        print(f"   stdout length: {len(process.stdout)} chars")
         return process.stdout
 
     except subprocess.TimeoutExpired:
@@ -250,11 +260,18 @@ def spawn_valor_session(
     # Execute actual Claude Code delegation
     # Previous safety return was removed to enable real task execution
     
+    print(f"🎯 spawn_valor_session called with:")
+    print(f"   - task_description: {task_description}")
+    print(f"   - target_directory: {target_directory}")
+    print(f"   - force_sync: {force_sync}")
+    
     # Estimate task duration
     estimated_duration = estimate_task_duration(task_description, specific_instructions)
+    print(f"⏱️  Estimated task duration: {estimated_duration} seconds")
     
     # If task is estimated to take >30 seconds and not forced sync, return async promise marker
     if estimated_duration > 30 and not force_sync:
+        print(f"🔄 Returning ASYNC_PROMISE marker (duration > 30s and not force_sync)")
         return f"ASYNC_PROMISE|I'll work on this task in the background: {task_description}"
 
     # Build comprehensive prompt
@@ -283,21 +300,26 @@ def spawn_valor_session(
     )
 
     full_prompt = "\n".join(prompt_parts)
+    print(f"📝 Built full prompt ({len(full_prompt)} chars)")
 
     try:
         # Track execution time
         start_time = time.time()
+        print(f"🏃 Calling execute_valor_delegation...")
         result = execute_valor_delegation(
             prompt=full_prompt, working_directory=target_directory, allowed_tools=tools_needed
         )
         execution_time = time.time() - start_time
         
+        print(f"✅ Delegation completed in {execution_time:.1f}s")
+        
         # Log if our estimate was significantly off
         if execution_time > 30 and estimated_duration <= 30:
-            print(f"Task took {execution_time:.1f}s but was estimated at {estimated_duration}s")
+            print(f"⚠️  Task took {execution_time:.1f}s but was estimated at {estimated_duration}s")
             
         return result
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+        print(f"❌ Delegation failed with error: {type(e).__name__}: {str(e)}")
         return f"""❌ **Development Tool Error**
 
 The Claude Code delegation failed: {str(e)}
@@ -309,3 +331,12 @@ For "{task_description}", I can:
 - Share code examples
 - Explain the approach step-by-step
 - Review existing code if you share it"""
+    except Exception as e:
+        print(f"❌ Unexpected error in spawn_valor_session: {type(e).__name__}: {str(e)}")
+        import traceback
+        print(f"Traceback:\n{traceback.format_exc()}")
+        return f"""❌ **Unexpected Error**
+
+An unexpected error occurred: {str(e)}
+
+I'll help you with this task directly instead."""

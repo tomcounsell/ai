@@ -65,6 +65,7 @@ class TelegramClient:
             # Register message handler
             @self.client.on_message()
             async def handle_message(client, message):
+                print(f"DEBUG: Received message from {message.from_user.username if message.from_user else 'unknown'}: {message.text[:50] if message.text else 'non-text'}")
                 await self.message_handler.handle_message(client, message)
 
             # Test message handling with self-ping

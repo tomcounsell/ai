@@ -99,4 +99,5 @@ async def initialize_telegram():
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=9000, reload=True, log_level="info")
+    # Disable reload to prevent session file changes from triggering restarts
+    uvicorn.run("main:app", host="0.0.0.0", port=9000, reload=False, log_level="info")

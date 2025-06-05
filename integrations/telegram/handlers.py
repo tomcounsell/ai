@@ -656,6 +656,14 @@ class MessageHandler:
             if answer:
                 print(f"   ✅ Agent returned response ({len(answer)} chars)")
                 print(f"   Response preview: {answer[:100]}..." if len(answer) > 100 else f"   Response: {answer}")
+                
+                # Check for ASYNC_PROMISE marker
+                if "ASYNC_PROMISE|" in answer:
+                    print(f"   🔄 ASYNC_PROMISE marker detected in response!")
+                    promise_parts = answer.split("ASYNC_PROMISE|", 1)
+                    print(f"   Promise parts: {len(promise_parts)} parts")
+                    if len(promise_parts) > 1:
+                        print(f"   Promise message: {promise_parts[1][:100]}...")
             else:
                 print(f"   ⚠️  Agent returned empty response")
             
@@ -1535,21 +1543,35 @@ class MessageHandler:
         """
         print(f"🔄 Starting background execution for promise {promise_id}")
         print(f"   Task: {task_description}")
+        print(f"   Chat ID: {chat_id}")
+        print(f"   Original message ID: {original_message.id}")
         
         try:
             # Update promise status to in_progress
-            from utilities.database import update_promise_status
+            print(f"📊 Updating promise {promise_id} status to 'in_progress'...")
+            from utilities.database import update_promise_status, get_promise
             update_promise_status(promise_id, "in_progress")
             
+            # Verify promise was updated
+            promise_data = get_promise(promise_id)
+            print(f"   Promise status after update: {promise_data.get('status') if promise_data else 'NOT FOUND'}")
+            
             # Import delegation tool
+            print(f"📦 Importing delegation tool...")
             from tools.valor_delegation_tool import spawn_valor_session
             
             # Determine working directory (use current directory as default)
             import os
             working_directory = os.getcwd()
+            print(f"📂 Working directory: {working_directory}")
             
             # Execute the task using the delegation tool (without time check since we're already async)
             print(f"🚀 Executing task via Claude Code...")
+            print(f"   Calling spawn_valor_session with:")
+            print(f"   - task_description: {task_description}")
+            print(f"   - target_directory: {working_directory}")
+            print(f"   - force_sync: True")
+            
             import time
             start_time = time.time()
             result = spawn_valor_session(
@@ -1561,6 +1583,7 @@ class MessageHandler:
             )
             execution_time = time.time() - start_time
             print(f"✅ Task completed in {execution_time:.1f} seconds")
+            print(f"📄 Result preview: {result[:200]}..." if len(result) > 200 else f"📄 Result: {result}")
             
             # Check if result contains the ASYNC_PROMISE marker (shouldn't happen in background)
             if "ASYNC_PROMISE|" in result:
