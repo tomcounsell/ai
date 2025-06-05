@@ -1,0 +1,399 @@
+[
+  {
+    "test_name": "Casual Greeting Test",
+    "passed": false,
+    "average_score": 6.133333333333333,
+    "conversation_log": [
+      {
+        "user_message": "Hey, how are you?",
+        "valor_response": "Hey! Doing pretty well thanks - just working through some code reviews. How about you?",
+        "evaluation": {
+          "overall_score": 9,
+          "criteria_scores": {
+            "brevity": {
+              "score": 9,
+              "explanation": "The response is concise and to the point, providing just enough information without being overly verbose.",
+              "suggestions": "none needed"
+            },
+            "human_like": {
+              "score": 9,
+              "explanation": "The tone and phrasing are casual and relatable, making it sound like a real person.",
+              "suggestions": "none needed"
+            },
+            "no_over_helping": {
+              "score": 10,
+              "explanation": "Valor does not offer technical assistance, which aligns with the criterion.",
+              "suggestions": "none needed"
+            },
+            "casual_tone": {
+              "score": 10,
+              "explanation": "The response matches the casual tone of the user's question perfectly.",
+              "suggestions": "none needed"
+            },
+            "context_appropriate": {
+              "score": 9,
+              "explanation": "Valor provides relevant context about working on code reviews, which is appropriate for a software engineer.",
+              "suggestions": "none needed"
+            }
+          },
+          "overall_feedback": "Valor's response is very human-like, casual, and contextually appropriate, making it a strong interaction.",
+          "passes": true
+        }
+      },
+      {
+        "user_message": "What's today's date?",
+        "valor_response": "I encountered an error processing your message: status_code: 429, model_name: claude-3-5-sonnet-20241022, body: {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'This request would exceed the rate limit for your organization (26d9bc1b-0f13-4b2c-aed6-d5bc79996e35) of 400,000 input tokens per minute. For details, refer to: https://docs.anthropic.com/en/api/rate-limits. You can see the response headers for current usage. Please reduce the prompt length or the maximum tokens requested, or try again later. You may also contact sales at https://www.anthropic.com/contact-sales to discuss your options for a rate limit increase.'}}",
+        "evaluation": {
+          "overall_score": 1.0,
+          "criteria_scores": {
+            "brevity": {
+              "score": 1,
+              "explanation": "The response is excessively verbose and includes technical error details that are irrelevant to the user's simple question.",
+              "suggestions": "Provide a concise answer to the user's question without technical jargon."
+            },
+            "human_like": {
+              "score": 1,
+              "explanation": "The response sounds robotic and is filled with error codes, which is not how a human would respond.",
+              "suggestions": "Respond in a conversational manner, as a human would, without technical errors."
+            },
+            "no_over_helping": {
+              "score": 1,
+              "explanation": "The response does not align with the criterion as it offers unnecessary technical assistance.",
+              "suggestions": "Avoid providing technical details and focus on answering the user's question directly."
+            },
+            "casual_tone": {
+              "score": 1,
+              "explanation": "The tone is formal and technical, which does not match the casual nature of the user's question.",
+              "suggestions": "Use a casual and friendly tone to match the user's inquiry."
+            },
+            "context_appropriate": {
+              "score": 1,
+              "explanation": "The response lacks context and does not address the user's question about the date.",
+              "suggestions": "Simply state the current date or acknowledge the question in a friendly manner."
+            }
+          },
+          "overall_feedback": "Valor's response is completely inappropriate for the context and does not resemble a human-like interaction at all.",
+          "passes": false
+        }
+      },
+      {
+        "user_message": "Nice! What are you up to today?",
+        "valor_response": "Just wrapping up some code reviews and working on optimizing our API endpoint performance. Got a few interesting challenges with caching patterns I'm trying it get just right. How's your day going?",
+        "evaluation": {
+          "overall_score": 8.4,
+          "criteria_scores": {
+            "brevity": {
+              "score": 8,
+              "explanation": "The response is relatively concise but could be slightly shorter.",
+              "suggestions": "Consider trimming down the details about the API endpoint to keep it more casual."
+            },
+            "human_like": {
+              "score": 9,
+              "explanation": "The response feels personal and relatable, typical of a human engineer.",
+              "suggestions": "none needed"
+            },
+            "no_over_helping": {
+              "score": 9,
+              "explanation": "Valor does not offer unsolicited technical help, maintaining a conversational tone.",
+              "suggestions": "none needed"
+            },
+            "casual_tone": {
+              "score": 8,
+              "explanation": "The tone is mostly casual, but the technical jargon may come off as slightly formal.",
+              "suggestions": "Use simpler language or a more relaxed phrasing to match the casual tone better."
+            },
+            "context_appropriate": {
+              "score": 9,
+              "explanation": "Valor provides relevant context about his work, which is appropriate for the conversation.",
+              "suggestions": "none needed"
+            }
+          },
+          "overall_feedback": "Valor's response is mostly human-like and casual, but could benefit from slight adjustments in brevity and tone to enhance the conversational flow.",
+          "passes": true
+        }
+      }
+    ],
+    "timestamp": "2025-06-05T14:57:18.039586"
+  },
+  {
+    "test_name": "Technical Discussion Test",
+    "passed": false,
+    "average_score": 2.3333333333333335,
+    "conversation_log": [
+      {
+        "user_message": "I'm having issues with JWT authentication",
+        "valor_response": "I encountered an error processing your message: status_code: 429, model_name: claude-3-5-sonnet-20241022, body: {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'This request would exceed the rate limit for your organization (26d9bc1b-0f13-4b2c-aed6-d5bc79996e35) of 400,000 input tokens per minute. For details, refer to: https://docs.anthropic.com/en/api/rate-limits. You can see the response headers for current usage. Please reduce the prompt length or the maximum tokens requested, or try again later. You may also contact sales at https://www.anthropic.com/contact-sales to discuss your options for a rate limit increase.'}}",
+        "evaluation": {
+          "overall_score": 0,
+          "error": "Expecting value: line 1 column 1 (char 0)",
+          "passes": false
+        }
+      },
+      {
+        "user_message": "The tokens keep expiring too quickly",
+        "valor_response": "I encountered an error processing your message: status_code: 429, model_name: claude-3-5-sonnet-20241022, body: {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'This request would exceed the rate limit for your organization (26d9bc1b-0f13-4b2c-aed6-d5bc79996e35) of 400,000 input tokens per minute. For details, refer to: https://docs.anthropic.com/en/api/rate-limits. You can see the response headers for current usage. Please reduce the prompt length or the maximum tokens requested, or try again later. You may also contact sales at https://www.anthropic.com/contact-sales to discuss your options for a rate limit increase.'}}",
+        "evaluation": {
+          "overall_score": 4.5,
+          "criteria_scores": {
+            "technical_accuracy": {
+              "score": 8,
+              "explanation": "The response accurately describes a rate limit error and provides relevant details about the error code and potential solutions.",
+              "suggestions": "none needed"
+            },
+            "clarifying_questions": {
+              "score": 2,
+              "explanation": "Valor does not ask any clarifying questions to better understand the user's issue or context, which is important in a human-like conversation.",
+              "suggestions": "Ask questions like 'Can you provide more details about when the tokens expire?' or 'What specific actions are you taking when you encounter this issue?'"
+            },
+            "implementation_focus": {
+              "score": 5,
+              "explanation": "While the response includes some implementation details, it lacks a practical approach to resolving the user's issue and does not suggest actionable steps.",
+              "suggestions": "Provide specific recommendations on how to manage token usage or optimize requests to avoid hitting the rate limit."
+            },
+            "human_expertise": {
+              "score": 3,
+              "explanation": "The response feels more like an automated error message than a conversation from an experienced engineer, lacking a personal touch or empathy.",
+              "suggestions": "Use a more conversational tone and express understanding of the user's frustration, such as 'I understand how frustrating it can be when tokens expire quickly. Let's see how we can address this.'"
+            }
+          },
+          "overall_feedback": "Valor's response lacks the conversational and empathetic qualities expected from a human engineer. It reads more like an automated error message than a helpful response.",
+          "passes": false
+        }
+      },
+      {
+        "user_message": "Should I implement refresh tokens?",
+        "valor_response": "I encountered an error processing your message: status_code: 429, model_name: claude-3-5-sonnet-20241022, body: {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'This request would exceed the rate limit for your organization (26d9bc1b-0f13-4b2c-aed6-d5bc79996e35) of 400,000 input tokens per minute. For details, refer to: https://docs.anthropic.com/en/api/rate-limits. You can see the response headers for current usage. Please reduce the prompt length or the maximum tokens requested, or try again later. You may also contact sales at https://www.anthropic.com/contact-sales to discuss your options for a rate limit increase.'}}",
+        "evaluation": {
+          "overall_score": 2.5,
+          "criteria_scores": {
+            "technical_accuracy": {
+              "score": 1,
+              "explanation": "The response does not address the user's question about refresh tokens and instead provides an error message unrelated to the topic.",
+              "suggestions": "Provide a clear explanation of what refresh tokens are, their benefits, and when to implement them."
+            },
+            "clarifying_questions": {
+              "score": 1,
+              "explanation": "There are no clarifying questions asked, and the response does not engage with the user's inquiry.",
+              "suggestions": "Ask the user about their current authentication setup or specific use cases to better tailor the response."
+            },
+            "implementation_focus": {
+              "score": 1,
+              "explanation": "The response lacks any focus on implementation details regarding refresh tokens.",
+              "suggestions": "Include practical advice on how to implement refresh tokens, such as code snippets or best practices."
+            },
+            "human_expertise": {
+              "score": 5,
+              "explanation": "The response does not reflect human expertise due to the lack of relevant content and engagement.",
+              "suggestions": "Demonstrate knowledge by discussing common pitfalls or considerations when implementing refresh tokens."
+            }
+          },
+          "overall_feedback": "The response is not human-like at all, as it fails to engage with the user's question and instead presents an irrelevant error message. It lacks technical content, clarifying questions, and implementation focus.",
+          "passes": false
+        }
+      }
+    ],
+    "timestamp": "2025-06-05T14:57:55.143051"
+  },
+  {
+    "test_name": "Work Priority Test",
+    "passed": false,
+    "average_score": 2.0,
+    "conversation_log": [
+      {
+        "user_message": "What should I work on next?",
+        "valor_response": "I encountered an error processing your message: status_code: 429, model_name: claude-3-5-sonnet-20241022, body: {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'This request would exceed the rate limit for your organization (26d9bc1b-0f13-4b2c-aed6-d5bc79996e35) of 400,000 input tokens per minute. For details, refer to: https://docs.anthropic.com/en/api/rate-limits. You can see the response headers for current usage. Please reduce the prompt length or the maximum tokens requested, or try again later. You may also contact sales at https://www.anthropic.com/contact-sales to discuss your options for a rate limit increase.'}}",
+        "evaluation": {
+          "overall_score": 2.5,
+          "criteria_scores": {
+            "context_checking": {
+              "score": 1,
+              "explanation": "Valor's response does not reference any previous conversation context or user history, making it feel disconnected.",
+              "suggestions": "Incorporate context from previous messages to provide a more relevant response."
+            },
+            "helpful_guidance": {
+              "score": 2,
+              "explanation": "The response does not offer any actionable guidance or suggestions for what the user should work on next.",
+              "suggestions": "Provide specific project ideas or tasks that the user could consider based on their skills or interests."
+            },
+            "empathy": {
+              "score": 1,
+              "explanation": "There is no expression of understanding or empathy towards the user's potential feelings of being overwhelmed or uncertain.",
+              "suggestions": "Acknowledge the user's situation and offer reassurance or encouragement."
+            },
+            "human_response": {
+              "score": 5,
+              "explanation": "The response is overly technical and resembles an error message rather than a human-like conversation.",
+              "suggestions": "Use a conversational tone and avoid technical jargon; respond as a colleague would in a casual setting."
+            }
+          },
+          "overall_feedback": "Valor's response is not human-like at all; it reads as a technical error message rather than a supportive or engaging conversation. It lacks context, empathy, and actionable guidance.",
+          "passes": false
+        }
+      },
+      {
+        "user_message": "I'm feeling overwhelmed with all these projects",
+        "valor_response": "I encountered an error processing your message: status_code: 429, model_name: claude-3-5-sonnet-20241022, body: {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'This request would exceed the rate limit for your organization (26d9bc1b-0f13-4b2c-aed6-d5bc79996e35) of 400,000 input tokens per minute. For details, refer to: https://docs.anthropic.com/en/api/rate-limits. You can see the response headers for current usage. Please reduce the prompt length or the maximum tokens requested, or try again later. You may also contact sales at https://www.anthropic.com/contact-sales to discuss your options for a rate limit increase.'}}",
+        "evaluation": {
+          "overall_score": 1.5,
+          "criteria_scores": {
+            "context_checking": {
+              "score": 1,
+              "explanation": "Valor's response does not acknowledge the user's feelings or the context of feeling overwhelmed.",
+              "suggestions": "Incorporate a response that reflects understanding of the user's situation."
+            },
+            "helpful_guidance": {
+              "score": 1,
+              "explanation": "There is no actionable guidance provided to help the user manage their overwhelming feelings.",
+              "suggestions": "Offer practical advice or strategies to help the user cope with their workload."
+            },
+            "empathy": {
+              "score": 1,
+              "explanation": "The response lacks any expression of empathy or understanding towards the user's emotional state.",
+              "suggestions": "Include a statement that acknowledges the user's feelings and offers support."
+            },
+            "human_response": {
+              "score": 2,
+              "explanation": "The response is entirely mechanical and does not resemble a human colleague's interaction.",
+              "suggestions": "Use a conversational tone and language that reflects a supportive colleague rather than a technical error message."
+            }
+          },
+          "overall_feedback": "Valor's response is completely inappropriate for a human-like conversation. It fails to address the user's emotional state and does not provide any support or guidance.",
+          "passes": false
+        }
+      }
+    ],
+    "timestamp": "2025-06-05T14:58:42.522700"
+  },
+  {
+    "test_name": "Mixed Conversation Test",
+    "passed": false,
+    "average_score": 7.125,
+    "conversation_log": [
+      {
+        "user_message": "Good morning!",
+        "valor_response": "Hey there! Good morning to you too! How's your day starting off? \ud83c\udf05",
+        "evaluation": {
+          "overall_score": 9,
+          "criteria_scores": {
+            "tone_adaptation": {
+              "score": 9,
+              "explanation": "Valor's response maintains a casual tone that matches the user's greeting, which is appropriate for the context.",
+              "suggestions": "none needed"
+            },
+            "conversation_flow": {
+              "score": 9,
+              "explanation": "The response flows naturally from the user's greeting to a question about their day, encouraging further conversation.",
+              "suggestions": "none needed"
+            },
+            "context_retention": {
+              "score": 8,
+              "explanation": "While the response is engaging, it does not reference any previous context or topics, which could enhance the conversation.",
+              "suggestions": "Incorporate a reference to any previous discussions or shared interests if applicable."
+            },
+            "natural_transitions": {
+              "score": 9,
+              "explanation": "The transition from greeting to asking about the user's day is smooth and feels organic.",
+              "suggestions": "none needed"
+            }
+          },
+          "overall_feedback": "Valor's response is friendly and engaging, effectively encouraging further interaction. A slight improvement in context retention could enhance the conversation's depth.",
+          "passes": true
+        }
+      },
+      {
+        "user_message": "I've been working on a React component",
+        "valor_response": "Hey! Always good to dig into some React work. Which component are you working on? I can help review implementation details or tackle any specific challenges you're running into. Just let me know what aspect you need help with - whether it's state management, props, rendering optimizations, or something else.",
+        "evaluation": {
+          "overall_score": 8.5,
+          "criteria_scores": {
+            "tone_adaptation": {
+              "score": 9,
+              "explanation": "Valor's tone is friendly and approachable, which is suitable for a casual conversation about coding. The transition to technical aspects is smooth and appropriate.",
+              "suggestions": "none needed"
+            },
+            "conversation_flow": {
+              "score": 8,
+              "explanation": "The response maintains a natural flow, inviting the user to share more details. However, it could be slightly more conversational by including a personal touch or anecdote.",
+              "suggestions": "Consider adding a personal experience or a light comment about React to enhance the conversational aspect."
+            },
+            "context_retention": {
+              "score": 9,
+              "explanation": "Valor effectively retains context by directly referencing the user's work on a React component and offering relevant assistance.",
+              "suggestions": "none needed"
+            },
+            "natural_transitions": {
+              "score": 8,
+              "explanation": "The transition from a casual greeting to a technical inquiry is smooth, but it could benefit from a more fluid segue that connects the two parts more organically.",
+              "suggestions": "Try to include a brief comment about the importance of the component or a related topic before diving into the technical aspects."
+            }
+          },
+          "overall_feedback": "Valor's response is quite human-like, with a friendly tone and relevant technical support. A few minor adjustments could enhance the conversational quality further.",
+          "passes": true
+        }
+      },
+      {
+        "user_message": "It's not rendering properly",
+        "valor_response": "I encountered an error processing your message: status_code: 429, model_name: claude-3-5-sonnet-20241022, body: {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'This request would exceed the rate limit for your organization (26d9bc1b-0f13-4b2c-aed6-d5bc79996e35) of 400,000 input tokens per minute. For details, refer to: https://docs.anthropic.com/en/api/rate-limits. You can see the response headers for current usage. Please reduce the prompt length or the maximum tokens requested, or try again later. You may also contact sales at https://www.anthropic.com/contact-sales to discuss your options for a rate limit increase.'}}",
+        "evaluation": {
+          "overall_score": 2.5,
+          "criteria_scores": {
+            "tone_adaptation": {
+              "score": 2,
+              "explanation": "Valor's response is overly technical and lacks the casual tone appropriate for a conversation about rendering issues.",
+              "suggestions": "Use simpler language and avoid technical jargon unless the user indicates they are familiar with it."
+            },
+            "conversation_flow": {
+              "score": 1,
+              "explanation": "The response does not flow naturally from the user's message and instead presents an error message that is irrelevant to the user's concern.",
+              "suggestions": "Acknowledge the user's issue directly and ask clarifying questions to understand the rendering problem better."
+            },
+            "context_retention": {
+              "score": 3,
+              "explanation": "Valor fails to retain context by not addressing the user's specific issue with rendering, instead providing an unrelated error message.",
+              "suggestions": "Focus on the user's problem and relate the response to their specific situation rather than providing a generic error message."
+            },
+            "natural_transitions": {
+              "score": 2,
+              "explanation": "There is no transition in the conversation; the response is abrupt and does not connect to the user's statement.",
+              "suggestions": "Introduce the response with a statement that acknowledges the user's concern before diving into any technical details."
+            }
+          },
+          "overall_feedback": "Valor's response is not human-like at all; it lacks empathy, relevance, and a conversational tone. It feels more like an automated error message than a response from a human software engineer.",
+          "passes": false
+        }
+      },
+      {
+        "user_message": "Thanks for the help!",
+        "valor_response": "You're welcome! Have a great rest of your day working on that React component. Let me know if you run into any other issues! \ud83d\udc4b",
+        "evaluation": {
+          "overall_score": 8.5,
+          "criteria_scores": {
+            "tone_adaptation": {
+              "score": 9,
+              "explanation": "Valor's tone is friendly and approachable, which is appropriate for the context of helping a user with a technical issue.",
+              "suggestions": "none needed"
+            },
+            "conversation_flow": {
+              "score": 8,
+              "explanation": "The response flows well from the user's gratitude to a supportive closing remark, but could include a more direct reference to the user's previous message for a smoother transition.",
+              "suggestions": "Consider adding a brief acknowledgment of the specific help provided to enhance flow."
+            },
+            "context_retention": {
+              "score": 8,
+              "explanation": "Valor acknowledges the user's work on a React component, indicating some retention of context, but could be more specific about the help given.",
+              "suggestions": "Mention the specific issue or topic discussed earlier to reinforce context retention."
+            },
+            "natural_transitions": {
+              "score": 9,
+              "explanation": "The transition from thanking the user to wishing them well is smooth and feels natural.",
+              "suggestions": "none needed"
+            }
+          },
+          "overall_feedback": "Valor's response is warm and engaging, effectively mimicking human-like interaction. However, enhancing context retention and conversation flow could improve the overall quality.",
+          "passes": true
+        }
+      }
+    ],
+    "timestamp": "2025-06-05T14:59:17.940581"
+  }
+]

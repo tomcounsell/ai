@@ -133,17 +133,23 @@ def execute_valor_delegation(
         if not os.path.isdir(working_directory):
             raise NotADirectoryError(f"Path is not a directory: {working_directory}")
 
-    # Build Claude command - execute in working directory using cd
-    if working_directory:
-        # Use shell command to change directory and run Claude Code
-        command = f'cd "{working_directory}" && claude code "{prompt}"'
-        shell = True
-        print(f"🏃 Running Claude Code with shell command in directory: {working_directory}")
-    else:
-        # Run in current directory
-        command = ["claude", "code", prompt]
-        shell = False
-        print(f"🏃 Running Claude Code in current directory")
+    # Build Claude command - prefer non-shell execution for reliability
+    # Use --print flag for non-interactive execution
+    
+    # Save current directory and change if needed
+    original_dir = os.getcwd()
+    if working_directory and working_directory != ".":
+        try:
+            os.chdir(working_directory)
+            print(f"📂 Changed to directory: {working_directory}")
+        except Exception as e:
+            print(f"❌ Failed to change directory: {e}")
+            return f"Failed to change to directory {working_directory}: {str(e)}"
+    
+    # Always use list form for better reliability
+    command = ["claude", "--print", prompt]
+    shell = False
+    print(f"🏃 Running Claude Code with command list")
 
     try:
         # Execute Claude Code
@@ -159,13 +165,37 @@ def execute_valor_delegation(
 
         print(f"✅ subprocess completed successfully")
         print(f"   stdout length: {len(process.stdout)} chars")
+        
+        # Restore original directory
+        if working_directory and working_directory != ".":
+            os.chdir(original_dir)
+            print(f"📂 Restored directory to: {original_dir}")
+            
         return process.stdout
 
     except subprocess.TimeoutExpired:
-        raise subprocess.TimeoutExpired(
-            command, timeout, f"Claude Code execution timed out after {timeout} seconds"
-        )
+        print(f"⏱️  Timeout after {timeout} seconds")
+        print(f"   Command: {command if isinstance(command, str) else ' '.join(command)}")
+        
+        # Restore original directory
+        if working_directory and working_directory != ".":
+            os.chdir(original_dir)
+            print(f"📂 Restored directory to: {original_dir}")
+        
+        # Return a timeout message instead of raising
+        return f"""⏱️ **Execution Timed Out**
+
+The Claude Code session timed out after {timeout} seconds. This might happen if:
+- The task requires user permissions
+- The prompt is too complex
+- Claude Code is waiting for input
+
+For the task you requested, I can help you directly instead."""
     except subprocess.CalledProcessError as e:
+        # Restore original directory
+        if working_directory and working_directory != ".":
+            os.chdir(original_dir)
+            print(f"📂 Restored directory to: {original_dir}")
         # Include both stdout and stderr in error for debugging
         error_msg = f"Claude Code failed with exit code {e.returncode}\n"
         if e.stdout:
@@ -274,30 +304,16 @@ def spawn_valor_session(
         print(f"🔄 Returning ASYNC_PROMISE marker (duration > 30s and not force_sync)")
         return f"ASYNC_PROMISE|I'll work on this task in the background: {task_description}"
 
-    # Build comprehensive prompt
+    # Build a simpler prompt for better Claude Code compatibility
     prompt_parts = [
-        f"TASK: {task_description}",
-        "",
-        f"WORKING DIRECTORY: {target_directory}",
-        "",
-        "INSTRUCTIONS:",
+        f"Please help me with this task: {task_description}",
     ]
 
     if specific_instructions:
-        prompt_parts.extend([specific_instructions, ""])
+        prompt_parts.append(f"\nAdditional instructions: {specific_instructions}")
 
-    prompt_parts.extend(
-        [
-            "REQUIREMENTS:",
-            "- Follow existing code patterns and conventions",
-            "- Ensure all changes are properly tested if tests exist",
-            "- Use appropriate git workflow (branch, commit, etc.)",
-            "- Provide clear commit messages",
-            "- Handle errors gracefully",
-            "",
-            "Execute this task autonomously and report results.",
-        ]
-    )
+    # Keep the prompt simple and direct
+    prompt_parts.append("\nPlease complete this task and provide a summary of what you did.")
 
     full_prompt = "\n".join(prompt_parts)
     print(f"📝 Built full prompt ({len(full_prompt)} chars)")
@@ -306,8 +322,15 @@ def spawn_valor_session(
         # Track execution time
         start_time = time.time()
         print(f"🏃 Calling execute_valor_delegation...")
+        # Set a reasonable timeout based on our estimate, with a minimum of 60 seconds
+        timeout = max(60, estimated_duration * 2)  # Double the estimate for safety
+        print(f"⏱️  Setting timeout to {timeout} seconds")
+        
         result = execute_valor_delegation(
-            prompt=full_prompt, working_directory=target_directory, allowed_tools=tools_needed
+            prompt=full_prompt, 
+            working_directory=target_directory, 
+            allowed_tools=tools_needed,
+            timeout=timeout
         )
         execution_time = time.time() - start_time
         

@@ -1590,29 +1590,39 @@ class MessageHandler:
                 # Extract the actual result
                 result = result.split("ASYNC_PROMISE|", 1)[0].strip()
             
+            # Truncate result if too long for Telegram (4096 char limit)
+            max_result_length = 3500  # Leave room for the wrapper text
+            truncated_result = result[:max_result_length] + "..." if len(result) > max_result_length else result
+            
             # Send completion message
             completion_message = f"""✅ **Task Complete!**
 
 I finished working on: {task_description}
 
 **Result:**
-{result}
+{truncated_result}
 
 This task took {execution_time:.1f} seconds to complete."""
             
             # Send the completion message as a reply to the original message
             try:
+                print(f"📤 Attempting to send completion message to chat {chat_id}...")
                 await original_message.reply(completion_message)
                 self.chat_history.add_message(chat_id, "assistant", completion_message)
-                print(f"📤 Sent completion message for promise {promise_id}")
+                print(f"✅ Sent completion message for promise {promise_id}")
             except Exception as send_error:
-                print(f"❌ Failed to send completion message: {send_error}")
-                # Try sending without reply
+                print(f"❌ Failed to send completion message via reply: {type(send_error).__name__}: {send_error}")
+                # Try sending without reply using the client
                 try:
-                    await self.client.send_message(chat_id, completion_message)
-                    self.chat_history.add_message(chat_id, "assistant", completion_message)
+                    if hasattr(self, 'client') and self.client:
+                        print(f"🔄 Attempting to send via client.send_message...")
+                        await self.client.send_message(chat_id, completion_message)
+                        self.chat_history.add_message(chat_id, "assistant", completion_message)
+                        print(f"✅ Sent completion message via client")
+                    else:
+                        print(f"❌ Client not available for sending message")
                 except Exception as e:
-                    print(f"❌ Failed to send message to chat: {e}")
+                    print(f"❌ Failed to send message to chat: {type(e).__name__}: {e}")
             
             # Update promise status to completed
             update_promise_status(promise_id, "completed", result_summary=result[:500])
@@ -1620,18 +1630,28 @@ This task took {execution_time:.1f} seconds to complete."""
             
         except Exception as e:
             error_msg = f"❌ **Task Failed**\n\nI encountered an error while working on: {task_description}\n\nError: {str(e)}"
-            print(f"❌ Background task failed for promise {promise_id}: {e}")
+            print(f"❌ Background task failed for promise {promise_id}: {type(e).__name__}: {e}")
+            import traceback
+            print(f"Traceback:\n{traceback.format_exc()}")
             
             # Try to send error message
             try:
+                print(f"📤 Attempting to send error message to chat {chat_id}...")
                 await original_message.reply(error_msg)
                 self.chat_history.add_message(chat_id, "assistant", error_msg)
-            except:
+                print(f"✅ Sent error message via reply")
+            except Exception as reply_error:
+                print(f"❌ Failed to send error via reply: {type(reply_error).__name__}: {reply_error}")
                 try:
-                    await self.client.send_message(chat_id, error_msg)
-                    self.chat_history.add_message(chat_id, "assistant", error_msg)
-                except:
-                    print(f"❌ Could not send error message to user")
+                    if hasattr(self, 'client') and self.client:
+                        print(f"🔄 Attempting to send error via client.send_message...")
+                        await self.client.send_message(chat_id, error_msg)
+                        self.chat_history.add_message(chat_id, "assistant", error_msg)
+                        print(f"✅ Sent error message via client")
+                    else:
+                        print(f"❌ Client not available for sending error message")
+                except Exception as send_error:
+                    print(f"❌ Could not send error message to user: {type(send_error).__name__}: {send_error}")
             
             # Update promise status to failed
             from utilities.database import update_promise_status

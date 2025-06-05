@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from integrations.notion.query_engine import get_notion_engine
 from integrations.telegram.client import TelegramClient
+from utilities.database import init_database
 
 load_dotenv()
 
@@ -28,6 +29,11 @@ class AuthPassword(BaseModel):
 async def start_telegram_client():
     """Initialize the Telegram client."""
     global telegram_client, notion_engine
+
+    # Initialize database tables including promises
+    print("Initializing database...")
+    init_database()
+    print("Database initialized successfully")
 
     # Initialize Notion query engine
     notion_engine = get_notion_engine()
