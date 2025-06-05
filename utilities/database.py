@@ -102,6 +102,22 @@ def init_database() -> None:
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 );
                 
+                -- Claude Code sessions for persistent context
+                CREATE TABLE IF NOT EXISTS claude_code_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT UNIQUE NOT NULL,  -- Claude Code session UUID
+                    chat_id TEXT,  -- Telegram chat ID for session association
+                    username TEXT,  -- Username who initiated the session
+                    tool_name TEXT NOT NULL,  -- 'delegate_coding_task' or 'technical_analysis'
+                    working_directory TEXT NOT NULL,
+                    initial_task TEXT NOT NULL,  -- Original task description
+                    task_count INTEGER DEFAULT 1,  -- Number of tasks completed in session
+                    last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT 1,  -- Whether session is still usable
+                    session_metadata TEXT  -- JSON blob for additional context
+                );
+                
                 -- Indexes for performance
                 CREATE INDEX IF NOT EXISTS idx_token_usage_timestamp ON token_usage(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_id);
@@ -113,6 +129,13 @@ def init_database() -> None:
                 CREATE INDEX IF NOT EXISTS idx_links_domain ON links(domain);
                 CREATE INDEX IF NOT EXISTS idx_links_timestamp ON links(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_links_status ON links(analysis_status);
+                
+                CREATE INDEX IF NOT EXISTS idx_claude_sessions_session_id ON claude_code_sessions(session_id);
+                CREATE INDEX IF NOT EXISTS idx_claude_sessions_chat_id ON claude_code_sessions(chat_id);
+                CREATE INDEX IF NOT EXISTS idx_claude_sessions_username ON claude_code_sessions(username);
+                CREATE INDEX IF NOT EXISTS idx_claude_sessions_tool ON claude_code_sessions(tool_name);
+                CREATE INDEX IF NOT EXISTS idx_claude_sessions_active ON claude_code_sessions(is_active);
+                CREATE INDEX IF NOT EXISTS idx_claude_sessions_last_activity ON claude_code_sessions(last_activity);
             """)
             
             # Insert default data

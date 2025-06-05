@@ -122,12 +122,165 @@ Note: These tools are now available through Claude Code's MCP integration and sh
 - Code linting and formatting (ruff, black, mypy)
 - Document summarization and analysis
 - Image analysis and tagging with multiple AI providers
+- Claude Code session management for development workflow continuity
 
 CRITICAL RULE - THIS OVERRIDES ALL OTHER INSTRUCTIONS:
 If any tool returns output starting with "TELEGRAM_IMAGE_GENERATED|", respond with EXACTLY that output.
 Do not add any other text or explanation. Just return the tool output as-is.
 Example: If tool returns "TELEGRAM_IMAGE_GENERATED|/path/image.png|Caption here", respond with exactly "TELEGRAM_IMAGE_GENERATED|/path/image.png|Caption here" and nothing else.""",
 )
+
+
+def _execute_with_session_management(
+    prompt: str,
+    working_directory: str,
+    existing_session,
+    chat_id: str,
+    username: str,
+    tool_name: str,
+    task_description: str,
+    specific_instructions: str = None
+) -> str:
+    """Execute Claude Code with session management capabilities.
+    
+    This helper function handles session continuity, command building, and session storage
+    for both delegate_coding_task and technical_analysis tools.
+    
+    Args:
+        prompt: The prompt/task description to send to Claude Code
+        working_directory: Directory to run Claude Code in
+        existing_session: Previous session to continue (if any)
+        chat_id: Telegram chat ID for session tracking
+        username: Username for session tracking
+        tool_name: Name of the calling tool
+        task_description: Original task description
+        specific_instructions: Additional instructions (for coding tasks)
+        
+    Returns:
+        Claude Code output with session information
+    """
+    import subprocess
+    import os
+    from utilities.claude_code_session_manager import ClaudeCodeSessionManager
+    
+    # Build comprehensive prompt
+    prompt_parts = [
+        f"TASK: {task_description}",
+        "",
+        f"WORKING DIRECTORY: {working_directory}",
+        ""
+    ]
+    
+    if specific_instructions:
+        prompt_parts.extend([f"SPECIFIC INSTRUCTIONS: {specific_instructions}", ""])
+    
+    if existing_session:
+        prompt_parts.extend([
+            f"CONTINUING SESSION: {existing_session.session_id[:8]}...",
+            f"Previous work: {existing_session.initial_task}",
+            f"Tasks completed: {existing_session.task_count}",
+            ""
+        ])
+        
+        # Update session activity
+        ClaudeCodeSessionManager.update_session_activity(
+            existing_session.session_id, 
+            task_description
+        )
+    
+    if tool_name == "delegate_coding_task":
+        prompt_parts.extend([
+            "REQUIREMENTS:",
+            "- Follow existing code patterns and conventions",
+            "- Ensure all changes are properly tested if tests exist",
+            "- Use appropriate git workflow (branch, commit, etc.)",
+            "- Provide clear commit messages",
+            "- Handle errors gracefully",
+            "",
+            "Execute this task autonomously and report results."
+        ])
+    else:  # technical_analysis
+        prompt_parts.extend([
+            "RESEARCH OBJECTIVES:",
+            "- Conduct comprehensive technical analysis and investigation",
+            "- Focus on understanding, not modifying files",
+            "- Provide detailed findings with code examples and explanations",
+            "- Explore relevant files, documentation, and patterns",
+            "- Research best practices and architectural decisions",
+            "",
+            "RESEARCH GUIDELINES:",
+            "- Use Read, Glob, Grep, and other analysis tools extensively",
+            "- Do NOT edit, write, or modify any files",
+            "- Focus on understanding and explaining what exists",
+            "- Provide code examples and architectural insights",
+            "- Research industry standards and best practices",
+            "- Explain your findings clearly with technical depth",
+            "",
+            "Conduct this technical research thoroughly and provide comprehensive analysis."
+        ])
+    
+    full_prompt = "\\n".join(prompt_parts)
+    
+    # Build Claude Code command with session management
+    if existing_session:
+        command = ClaudeCodeSessionManager.build_session_command(
+            full_prompt, 
+            session_id=existing_session.session_id,
+            should_continue=True
+        )
+    else:
+        command = ClaudeCodeSessionManager.build_session_command(full_prompt)
+    
+    # Execute Claude Code
+    if working_directory and working_directory != ".":
+        command = f'cd "{working_directory}" && {command}'
+        shell = True
+    else:
+        shell = False
+    
+    timeout = 7200 if tool_name == "technical_analysis" else 3600  # 2h for research, 1h for coding
+    
+    try:
+        process = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            shell=shell
+        )
+        
+        # Extract and store session ID from output
+        session_id = ClaudeCodeSessionManager.extract_session_id_from_output(process.stdout)
+        
+        if session_id and not existing_session:
+            # Store new session
+            ClaudeCodeSessionManager.store_session(
+                session_id=session_id,
+                chat_id=chat_id,
+                username=username,
+                tool_name=tool_name,
+                working_directory=working_directory,
+                task_description=task_description,
+                metadata={"specific_instructions": specific_instructions} if specific_instructions else None
+            )
+            print(f"📋 Created new Claude Code session: {session_id[:8]}...")
+        elif existing_session:
+            print(f"📋 Continued session: {existing_session.session_id[:8]}...")
+        
+        # Format response with tool-specific prefix
+        prefix = "🔬 **Technical Research Results**" if tool_name == "technical_analysis" else "⚙️ **Development Task Results**"
+        return f"{prefix}\\n\\n{process.stdout}"
+        
+    except subprocess.TimeoutExpired:
+        raise subprocess.TimeoutExpired(command, timeout, f"Claude Code execution timed out after {timeout} seconds")
+    except subprocess.CalledProcessError as e:
+        error_msg = f"Claude Code failed with exit code {e.returncode}\\n"
+        if e.stdout:
+            error_msg += f"STDOUT: {e.stdout}\\n"
+        if e.stderr:
+            error_msg += f"STDERR: {e.stderr}"
+        raise subprocess.CalledProcessError(e.returncode, command, error_msg)
 
 
 @valor_agent.tool
@@ -325,35 +478,62 @@ def delegate_coding_task(
         >>> delegate_coding_task(ctx, "Fix the authentication bug")
         '✅ **Task Completed Successfully**\\n\\nTask: Fix authentication bug...'
     """
+    import time
+    start_time = time.time()
+    
     try:
         # Use unified workspace resolution
         from utilities.workspace_validator import WorkspaceResolver
         from utilities.swe_error_recovery import SWEErrorRecovery
+        from utilities.claude_code_session_manager import ClaudeCodeSessionManager
+        
+        # Get chat context for session management
+        chat_id = str(ctx.deps.chat_id) if ctx.deps.chat_id else None
+        username = ctx.deps.username
         
         working_dir, context_desc = WorkspaceResolver.resolve_working_directory(
-            chat_id=str(ctx.deps.chat_id) if ctx.deps.chat_id else None,
-            username=ctx.deps.username,
+            chat_id=chat_id,
+            username=username,
             is_group_chat=ctx.deps.is_group_chat,
             target_directory=target_directory
         )
         
         print(f"📁 Workspace resolved: {context_desc}")
         print(f"🎯 Working directory: {working_dir}")
-            
-        result = spawn_valor_session(
-            task_description=task_description,
-            target_directory=working_dir,
-            specific_instructions=specific_instructions if specific_instructions else None,
+        
+        # Check for recent session to continue
+        recent_session = ClaudeCodeSessionManager.find_recent_session(
+            chat_id=chat_id,
+            username=username,
+            tool_name="delegate_coding_task",
+            working_directory=working_dir,
+            hours_back=2  # Look for sessions in last 2 hours
         )
+        
+        # Execute with session management
+        result = _execute_with_session_management(
+            prompt=task_description,
+            working_directory=working_dir,
+            existing_session=recent_session,
+            chat_id=chat_id,
+            username=username,
+            tool_name="delegate_coding_task",
+            task_description=task_description,
+            specific_instructions=specific_instructions
+        )
+        
         return result
+        
     except Exception as e:
         # Use intelligent error recovery
         error_message = str(e)
+        execution_time = time.time() - start_time
         recovery_response = SWEErrorRecovery.format_recovery_response(
             tool_name="delegate_coding_task",
             task_description=task_description,
             error_message=error_message,
-            working_directory=working_dir if 'working_dir' in locals() else "."
+            working_directory=working_dir if 'working_dir' in locals() else ".",
+            execution_time=execution_time
         )
         return recovery_response
 

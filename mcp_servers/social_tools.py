@@ -279,53 +279,74 @@ def technical_analysis(
         >>> technical_analysis("Compare different image compression approaches", "performance, quality")
         >>> technical_analysis("What are the current API endpoints and their purposes?")
     """
+    import time
+    start_time = time.time()
+    
     try:
         # Import here to avoid circular imports
         import subprocess
         import os
         
-        # Use unified workspace resolution
+        # Use unified workspace resolution and session management
         from utilities.workspace_validator import WorkspaceResolver
+        from utilities.claude_code_session_manager import ClaudeCodeSessionManager
         from .context_manager import inject_context_for_tool
         
         # Inject context if not provided
-        chat_id, _ = inject_context_for_tool(chat_id, "")
+        chat_id, username = inject_context_for_tool(chat_id, "")
         
         working_dir, context_desc = WorkspaceResolver.resolve_working_directory(
             chat_id=chat_id,
-            username=None,  # technical_analysis doesn't typically have username context
+            username=username,
             is_group_chat=True,  # Assume group context for technical analysis
             target_directory=""
         )
         
-        context_info = context_desc
+        # Check for recent session to continue
+        recent_session = ClaudeCodeSessionManager.find_recent_session(
+            chat_id=chat_id,
+            username=username,
+            tool_name="technical_analysis",
+            working_directory=working_dir,
+            hours_back=2  # Look for sessions in last 2 hours
+        )
         
-        # Build research-focused prompt for Claude Code
+        # Build research-focused prompt for Claude Code with session context
         prompt_parts = [
             f"TECHNICAL RESEARCH TASK: {research_topic}",
             "",
-            "RESEARCH OBJECTIVES:",
-            "- Conduct comprehensive technical analysis and investigation",
-            "- Focus on understanding, not modifying files",
-            "- Provide detailed findings with code examples and explanations", 
-            "- Explore relevant files, documentation, and patterns",
-            "- Research best practices and architectural decisions",
-            "",
+            f"WORKING DIRECTORY: {working_dir}",
+            ""
         ]
         
         if focus_areas:
+            prompt_parts.extend([f"FOCUS AREAS: {focus_areas}", ""])
+            
+        if context_desc:
+            prompt_parts.extend([f"WORKSPACE CONTEXT: {context_desc}", ""])
+        
+        if recent_session:
             prompt_parts.extend([
-                f"FOCUS AREAS: {focus_areas}",
-                "",
+                f"CONTINUING SESSION: {recent_session.session_id[:8]}...",
+                f"Previous research: {recent_session.initial_task}",
+                f"Tasks completed: {recent_session.task_count}",
+                ""
             ])
             
-        if context_info:
-            prompt_parts.extend([
-                f"WORKSPACE CONTEXT: {context_info}",
-                "",
-            ])
+            # Update session activity
+            ClaudeCodeSessionManager.update_session_activity(
+                recent_session.session_id, 
+                research_topic
+            )
         
         prompt_parts.extend([
+            "RESEARCH OBJECTIVES:",
+            "- Conduct comprehensive technical analysis and investigation",
+            "- Focus on understanding, not modifying files",
+            "- Provide detailed findings with code examples and explanations",
+            "- Explore relevant files, documentation, and patterns",
+            "- Research best practices and architectural decisions",
+            "",
             "RESEARCH GUIDELINES:",
             "- Use Read, Glob, Grep, and other analysis tools extensively",
             "- Do NOT edit, write, or modify any files",
@@ -339,12 +360,21 @@ def technical_analysis(
         
         full_prompt = "\n".join(prompt_parts)
         
+        # Build Claude Code command with session management
+        if recent_session:
+            command = ClaudeCodeSessionManager.build_session_command(
+                full_prompt, 
+                session_id=recent_session.session_id,
+                should_continue=True
+            )
+        else:
+            command = ClaudeCodeSessionManager.build_session_command(full_prompt)
+        
         # Execute Claude Code for research
         if working_dir and working_dir != ".":
-            command = f'cd "{working_dir}" && claude code "{full_prompt}"'
+            command = f'cd "{working_dir}" && {command}'
             shell = True
         else:
-            command = ["claude", "code", full_prompt]
             shell = False
         
         process = subprocess.run(
@@ -356,36 +386,226 @@ def technical_analysis(
             shell=shell
         )
         
+        # Extract and store session ID from output
+        session_id = ClaudeCodeSessionManager.extract_session_id_from_output(process.stdout)
+        
+        if session_id and not recent_session:
+            # Store new session
+            ClaudeCodeSessionManager.store_session(
+                session_id=session_id,
+                chat_id=chat_id,
+                username=username,
+                tool_name="technical_analysis",
+                working_directory=working_dir,
+                task_description=research_topic,
+                metadata={"focus_areas": focus_areas} if focus_areas else None
+            )
+            print(f"🔬 Created new Claude Code research session: {session_id[:8]}...")
+        elif recent_session:
+            print(f"🔬 Continued research session: {recent_session.session_id[:8]}...")
+        
         return f"🔬 **Technical Research Results**\n\n{process.stdout}"
         
     except subprocess.TimeoutExpired:
         from utilities.swe_error_recovery import SWEErrorRecovery
+        execution_time = time.time() - start_time
         return SWEErrorRecovery.format_recovery_response(
             tool_name="technical_analysis",
             task_description=research_topic,
             error_message="Research exceeded 2 hour timeout",
-            working_directory=working_dir,
-            execution_time=7200.0
+            working_directory=working_dir if 'working_dir' in locals() else ".",
+            execution_time=execution_time
         )
         
     except subprocess.CalledProcessError as e:
         from utilities.swe_error_recovery import SWEErrorRecovery
+        execution_time = time.time() - start_time
         error_msg = f"Claude Code failed (exit {e.returncode}): {e.stderr or 'Unknown error'}"
         return SWEErrorRecovery.format_recovery_response(
             tool_name="technical_analysis", 
             task_description=research_topic,
             error_message=error_msg,
-            working_directory=working_dir
+            working_directory=working_dir if 'working_dir' in locals() else ".",
+            execution_time=execution_time
         )
         
     except Exception as e:
         from utilities.swe_error_recovery import SWEErrorRecovery
+        execution_time = time.time() - start_time
         return SWEErrorRecovery.format_recovery_response(
             tool_name="technical_analysis",
             task_description=research_topic, 
             error_message=str(e),
-            working_directory=working_dir
+            working_directory=working_dir if 'working_dir' in locals() else ".",
+            execution_time=execution_time
         )
+
+
+@mcp.tool()
+def manage_claude_code_sessions(
+    action: str = "list",
+    session_id: str = "",
+    chat_id: str = ""
+) -> str:
+    """Manage Claude Code sessions for the current chat.
+    
+    This tool allows users to view, continue, or deactivate their Claude Code sessions
+    for better workflow continuity and session management.
+    
+    Actions:
+    - "list": Show all active sessions for the current chat
+    - "show": Show details for a specific session (requires session_id)
+    - "deactivate": Mark a session as inactive (requires session_id)
+    - "continue": Get instructions to continue a specific session (requires session_id)
+    
+    Args:
+        action: The action to perform ("list", "show", "deactivate", "continue")
+        session_id: Session ID for actions that require it (show, deactivate, continue)
+        chat_id: Chat ID for context (extracted from CONTEXT_DATA if available)
+    
+    Returns:
+        Formatted session information or action results
+    
+    Examples:
+        >>> manage_claude_code_sessions("list")
+        📋 **Active Claude Code Sessions**...
+        
+        >>> manage_claude_code_sessions("show", "a1b2c3d4")
+        📋 **Session Details**...
+    """
+    try:
+        from utilities.claude_code_session_manager import ClaudeCodeSessionManager
+        from .context_manager import inject_context_for_tool
+        
+        # Inject context if not provided
+        chat_id, username = inject_context_for_tool(chat_id, "")
+        
+        if action == "list":
+            sessions = ClaudeCodeSessionManager.get_chat_sessions(
+                chat_id=chat_id,
+                limit=10,
+                active_only=True
+            )
+            
+            if not sessions:
+                return "📋 **No Active Sessions**\n\nNo active Claude Code sessions found for this chat."
+            
+            response_parts = ["📋 **Active Claude Code Sessions**\n"]
+            
+            for i, session in enumerate(sessions, 1):
+                session_summary = ClaudeCodeSessionManager.format_session_summary(session)
+                response_parts.append(f"{i}. {session_summary}")
+            
+            response_parts.extend([
+                "",
+                "💡 **Usage Tips:**",
+                "• Use `manage_claude_code_sessions(\"show\", \"session_id\")` for details",
+                "• Sessions automatically continue when you use the same tool in the same directory",
+                "• Sessions expire after 24 hours of inactivity"
+            ])
+            
+            return "\n".join(response_parts)
+        
+        elif action == "show":
+            if not session_id:
+                return "❌ Session ID required for 'show' action. Use format: manage_claude_code_sessions(\"show\", \"session_id\")"
+            
+            # Find sessions and filter for the requested one
+            sessions = ClaudeCodeSessionManager.get_chat_sessions(chat_id, limit=50, active_only=False)
+            target_session = None
+            
+            for session in sessions:
+                if session.session_id.startswith(session_id) or session.session_id == session_id:
+                    target_session = session
+                    break
+            
+            if not target_session:
+                return f"❌ Session not found: {session_id}"
+            
+            metadata = target_session.session_metadata
+            focus_areas = metadata.get("focus_areas", "") if metadata else ""
+            specific_instructions = metadata.get("specific_instructions", "") if metadata else ""
+            
+            details = [
+                f"📋 **Session Details: {target_session.session_id[:8]}...**\n",
+                f"**Tool:** {target_session.tool_name}",
+                f"**Working Directory:** {target_session.working_directory}",
+                f"**Initial Task:** {target_session.initial_task}",
+                f"**Tasks Completed:** {target_session.task_count}",
+                f"**Created:** {target_session.created_at.strftime('%Y-%m-%d %H:%M')}",
+                f"**Last Activity:** {target_session.last_activity.strftime('%Y-%m-%d %H:%M')}",
+                f"**Status:** {'🟢 Active' if target_session.is_active else '🔴 Inactive'}"
+            ]
+            
+            if focus_areas:
+                details.append(f"**Focus Areas:** {focus_areas}")
+            if specific_instructions:
+                details.append(f"**Instructions:** {specific_instructions}")
+            
+            return "\n".join(details)
+        
+        elif action == "deactivate":
+            if not session_id:
+                return "❌ Session ID required for 'deactivate' action. Use format: manage_claude_code_sessions(\"deactivate\", \"session_id\")"
+            
+            # Find the session first to verify ownership
+            sessions = ClaudeCodeSessionManager.get_chat_sessions(chat_id, limit=50, active_only=True)
+            target_session = None
+            
+            for session in sessions:
+                if session.session_id.startswith(session_id) or session.session_id == session_id:
+                    target_session = session
+                    break
+            
+            if not target_session:
+                return f"❌ Active session not found: {session_id}"
+            
+            success = ClaudeCodeSessionManager.deactivate_session(target_session.session_id)
+            
+            if success:
+                return f"✅ **Session Deactivated**\n\nSession {target_session.session_id[:8]}... has been marked as inactive."
+            else:
+                return f"❌ Failed to deactivate session {session_id}"
+        
+        elif action == "continue":
+            if not session_id:
+                return "❌ Session ID required for 'continue' action. Use format: manage_claude_code_sessions(\"continue\", \"session_id\")"
+            
+            # Find the session
+            sessions = ClaudeCodeSessionManager.get_chat_sessions(chat_id, limit=50, active_only=True)
+            target_session = None
+            
+            for session in sessions:
+                if session.session_id.startswith(session_id) or session.session_id == session_id:
+                    target_session = session
+                    break
+            
+            if not target_session:
+                return f"❌ Active session not found: {session_id}"
+            
+            return f"""🔄 **Continue Session: {target_session.session_id[:8]}...**
+
+**To continue this session**, simply use the same tool (`{target_session.tool_name}`) with a follow-up task in the same workspace.
+
+**Session Context:**
+• Tool: {target_session.tool_name}
+• Directory: {target_session.working_directory}
+• Previous work: {target_session.initial_task}
+• Tasks completed: {target_session.task_count}
+
+The system will automatically detect and continue this session when you:
+1. Use `{target_session.tool_name}` again
+2. In the same working directory: `{target_session.working_directory}`
+3. Within the next 2 hours
+
+**Example follow-up:**
+"Continue the previous work by adding tests for the new features" """
+        
+        else:
+            return f"❌ Unknown action: {action}. Valid actions: list, show, deactivate, continue"
+    
+    except Exception as e:
+        return f"📋 Session management error: {str(e)}"
 
 
 if __name__ == "__main__":
