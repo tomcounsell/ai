@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timedelta
 
 # Add the project root to Python path
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from utilities.claude_code_session_manager import ClaudeCodeSessionManager
 from utilities.database import init_database
