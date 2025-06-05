@@ -634,192 +634,482 @@ def handle_research_task(topic, focus_areas=""):
         return result
 ```
 
+## Implementation Analysis
+
+### Subprocess Execution Patterns
+
+Both tools use nearly identical subprocess execution patterns with subtle differences:
+
+**delegate_coding_task (`tools/valor_delegation_tool.py:142-164`)**:
+```python
+process = subprocess.run(
+    command, 
+    check=True, 
+    capture_output=True, 
+    text=True, 
+    timeout=timeout,  # Variable timeout
+    shell=shell
+)
+# Raises exceptions for error handling
+```
+
+**technical_analysis (`mcp_servers/social_tools.py:350-368`)**:
+```python
+process = subprocess.run(
+    command,
+    check=True,
+    capture_output=True,
+    text=True,
+    timeout=7200,  # Fixed 2-hour timeout
+    shell=shell
+)
+# Returns formatted error strings
+```
+
+### Working Directory Resolution
+
+**delegate_coding_task** - Sophisticated workspace detection:
+```python
+# agents/valor/agent.py:330-342
+if not working_dir and ctx.deps.chat_id:
+    workspace_dir = get_workspace_working_directory(ctx.deps.chat_id)
+    if workspace_dir:
+        working_dir = workspace_dir
+    elif ctx.deps.username and not ctx.deps.is_group_chat:
+        dm_dir = get_dm_working_directory(ctx.deps.username)
+        working_dir = dm_dir
+```
+
+**technical_analysis** - Basic workspace detection:
+```python
+# mcp_servers/social_tools.py:291-301
+if chat_id:
+    validator = get_workspace_validator()
+    workspace_dir = validator.get_working_directory(chat_id)
+    if workspace_dir:
+        working_dir = workspace_dir
+```
+
+### Error Handling Strategies
+
+**delegate_coding_task** - Exception-based with user-friendly fallbacks:
+```python
+# agents/valor/agent.py:354-355
+except Exception as e:
+    return f"Error providing development guidance: {str(e)}"
+```
+
+**technical_analysis** - Direct error string returns:
+```python
+# mcp_servers/social_tools.py:361-368
+except subprocess.TimeoutExpired:
+    return f"🔬 **Research Timeout**: ..."
+except subprocess.CalledProcessError as e:
+    return f"🔬 **Research Error**: ..."
+```
+
 ## Improvement Recommendations
 
 ### 1. Consolidate Subprocess Execution
 
-**Current Issue:** Both tools implement similar subprocess execution with slight variations.
+**Current Issue:** Both tools implement nearly identical subprocess execution with subtle differences causing maintenance overhead.
 
-**Recommendation:** Create a shared utility module:
+**Recommended Solution:** Create shared utility in `utilities/claude_code_executor.py`:
 
 ```python
-# utilities/claude_code_executor.py
+from typing import Optional, Union
+import subprocess
+import os
+
 class ClaudeCodeExecutor:
-    def __init__(self, working_directory=None, timeout=None):
-        self.working_directory = working_directory
-        self.timeout = timeout
+    @staticmethod
+    def execute_claude_code(
+        prompt: str,
+        working_directory: str = ".",
+        timeout: Optional[int] = None,
+        tools_allowed: Optional[list[str]] = None
+    ) -> tuple[bool, str]:
+        """
+        Unified Claude Code execution with consistent error handling.
+        
+        Returns:
+            tuple[bool, str]: (success, result_or_error_message)
+        """
+        # Build command
+        if working_directory and working_directory != ".":
+            command = f'cd "{working_directory}" && claude code "{prompt}"'
+            shell = True
+        else:
+            command = ["claude", "code", prompt]
+            shell = False
+        
+        try:
+            process = subprocess.run(
+                command,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                shell=shell
+            )
+            return True, process.stdout
+            
+        except subprocess.TimeoutExpired:
+            return False, f"⏱️ Claude Code execution timed out after {timeout} seconds"
+        except subprocess.CalledProcessError as e:
+            error_msg = f"❌ Claude Code failed (exit {e.returncode})"
+            if e.stderr:
+                error_msg += f": {e.stderr}"
+            return False, error_msg
+        except Exception as e:
+            return False, f"❌ Execution error: {str(e)}"
+```
+
+**Benefits:**
+- Single source of truth for Claude Code execution
+- Consistent error handling across tools
+- Easier testing and maintenance
+- Standardized timeout handling
+
+### 2. Unify Workspace Resolution
+
+**Current Issue:** Different workspace detection strategies with overlapping functionality.
+
+**Recommended Solution:** Enhance `utilities/workspace_validator.py`:
+
+```python
+class WorkspaceResolver:
+    @staticmethod
+    def resolve_working_directory(
+        chat_id: Optional[str] = None,
+        username: Optional[str] = None,
+        is_group_chat: bool = False,
+        target_directory: str = ""
+    ) -> tuple[str, str]:
+        """
+        Unified workspace resolution logic.
+        
+        Returns:
+            tuple[str, str]: (working_directory, context_description)
+        """
+        if target_directory:
+            return target_directory, f"Explicit directory: {target_directory}"
+            
+        if chat_id:
+            # Try group workspace first
+            workspace_dir = get_workspace_working_directory(chat_id)
+            if workspace_dir:
+                workspace_name = get_workspace_for_chat(chat_id)
+                return workspace_dir, f"Workspace: {workspace_name}"
+                
+            # Try DM directory for private chats
+            if username and not is_group_chat:
+                dm_dir = get_dm_working_directory(username)
+                return dm_dir, f"DM directory for @{username}"
+        
+        return ".", "Current directory (no workspace context)"
+```
+
+### 3. Standardize Response Formatting
+
+**Current Issue:** Inconsistent response formats between tools.
+
+**Recommended Solution:** Create response formatters in `utilities/swe_response_formatter.py`:
+
+```python
+class SWEResponseFormatter:
+    @staticmethod
+    def format_execution_result(
+        tool_name: str,
+        task_description: str,
+        success: bool,
+        result: str,
+        working_directory: str,
+        execution_time: float = None
+    ) -> str:
+        """Standard format for execution results."""
+        
+        status_emoji = "✅" if success else "❌"
+        header = f"{status_emoji} **{tool_name} {'Completed' if success else 'Failed'}**"
+        
+        sections = [
+            header,
+            "",
+            f"**Task:** {task_description}",
+            f"**Directory:** {working_directory}",
+        ]
+        
+        if execution_time:
+            sections.append(f"**Duration:** {execution_time:.1f}s")
+            
+        sections.extend(["", "**Results:**", result])
+        
+        return "\n".join(sections)
     
-    def execute(self, prompt: str, tools: list[str] = None) -> str:
-        """Execute Claude Code with standardized error handling."""
-        # Shared implementation with:
-        # - Directory validation
-        # - Command construction
-        # - Error handling
-        # - Output formatting
-```
-
-### 2. Unify Error Handling
-
-**Current Issue:** Inconsistent error handling and user messaging between tools.
-
-**Recommendation:** Standardize error handling patterns:
-
-```python
-# utilities/error_handlers.py
-class ClaudeCodeErrorHandler:
-    @staticmethod
-    def handle_subprocess_error(error, context):
-        """Standardized error handling for subprocess failures."""
-        if isinstance(error, subprocess.TimeoutExpired):
-            return format_timeout_error(error, context)
-        elif isinstance(error, subprocess.CalledProcessError):
-            return format_execution_error(error, context)
-        else:
-            return format_generic_error(error, context)
-```
-
-### 3. Enhance Context Management
-
-**Current Issue:** MCP tools rely on external context injection while agent tools have direct access.
-
-**Recommendation:** Create unified context provider:
-
-```python
-# utilities/context_provider.py
-class UnifiedContextProvider:
-    def get_workspace_context(self, chat_id=None, username=None):
-        """Provide consistent workspace context across both architectures."""
-        return {
-            'working_directory': self._resolve_working_directory(chat_id, username),
-            'workspace_name': self._resolve_workspace_name(chat_id),
-            'permissions': self._resolve_permissions(chat_id, username),
-        }
-```
-
-### 4. Implement Response Formatters
-
-**Current Issue:** Different response formats make it hard to process results consistently.
-
-**Recommendation:** Standardize response formatting:
-
-```python
-# utilities/response_formatters.py
-class SWEToolResponseFormatter:
-    @staticmethod
-    def format_success(task, changes, git_info=None):
-        """Standard success response format."""
+    @staticmethod  
+    def format_research_result(
+        research_topic: str,
+        findings: str,
+        focus_areas: str = "",
+        working_directory: str = "."
+    ) -> str:
+        """Standard format for research results."""
         
-    @staticmethod
-    def format_error(error_type, error_message, suggestions=None):
-        """Standard error response format."""
+        sections = [
+            "🔬 **Technical Research Complete**",
+            "",
+            f"**Research Topic:** {research_topic}",
+        ]
         
-    @staticmethod
-    def format_research(findings, methodology, sources=None):
-        """Standard research response format."""
+        if focus_areas:
+            sections.append(f"**Focus Areas:** {focus_areas}")
+            
+        sections.extend([
+            f"**Analyzed:** {working_directory}",
+            "",
+            "**Findings:**",
+            findings
+        ])
+        
+        return "\n".join(sections)
 ```
 
-### 5. Add Tool Selection Logic
+### 4. Implement Intelligent Tool Selection
 
-**Current Issue:** No clear guidance on when to use which tool.
+**Current Issue:** Users must manually choose between delegate_coding_task and technical_analysis.
 
-**Recommendation:** Implement intelligent tool selection:
+**Recommended Solution:** Add decision logic to agent system:
 
 ```python
-# utilities/tool_selector.py
-class SWEToolSelector:
-    def recommend_tool(self, request: str, context: dict) -> str:
-        """Analyze request and recommend appropriate tool."""
-        if self._requires_file_modification(request):
-            return "delegate_coding_task"
-        elif self._is_research_focused(request):
-            return "technical_analysis"
-        else:
-            return self._analyze_intent(request, context)
+def suggest_swe_tool(user_request: str) -> tuple[str, str]:
+    """
+    Analyze user request and suggest appropriate SWE tool.
+    
+    Returns:
+        tuple[str, str]: (recommended_tool, reasoning)
+    """
+    modification_keywords = [
+        "fix", "implement", "add", "create", "build", "update", 
+        "refactor", "delete", "modify", "change", "commit"
+    ]
+    
+    analysis_keywords = [
+        "analyze", "research", "investigate", "understand", "explain",
+        "review", "study", "explore", "examine", "document"
+    ]
+    
+    request_lower = user_request.lower()
+    
+    has_modification = any(keyword in request_lower for keyword in modification_keywords)
+    has_analysis = any(keyword in request_lower for keyword in analysis_keywords)
+    
+    if has_modification and not has_analysis:
+        return "delegate_coding_task", "Request involves code modification"
+    elif has_analysis and not has_modification:
+        return "technical_analysis", "Request is research/analysis focused"
+    elif has_modification and has_analysis:
+        return "delegate_coding_task", "Mixed request, defaulting to execution tool"
+    else:
+        return "technical_analysis", "Unclear intent, defaulting to safe analysis"
 ```
 
-### 6. Implement Monitoring and Metrics
+### 5. Add Execution Monitoring
 
 **Current Issue:** No visibility into tool usage patterns or success rates.
 
-**Recommendation:** Add comprehensive monitoring:
+**Recommended Solution:** Add monitoring to both tools:
 
 ```python
-# utilities/swe_tool_monitor.py
-class SWEToolMonitor:
-    def track_execution(self, tool_name, task, duration, success):
-        """Track tool usage and performance metrics."""
+# utilities/swe_monitoring.py
+from utilities.database import get_database_connection
+import time
+import json
+
+class SWEMonitor:
+    @staticmethod
+    def log_execution(
+        tool_name: str,
+        task_description: str,
+        working_directory: str,
+        success: bool,
+        execution_time: float,
+        error_message: str = None,
+        chat_id: str = None
+    ):
+        """Log SWE tool execution for monitoring and analytics."""
         
-    def get_usage_statistics(self):
-        """Provide insights into tool effectiveness."""
+        conn = get_database_connection()
+        conn.execute("""
+            INSERT INTO swe_executions 
+            (tool_name, task_description, working_directory, success, 
+             execution_time, error_message, chat_id, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            tool_name, task_description, working_directory, success,
+            execution_time, error_message, chat_id, time.time()
+        ))
+        conn.commit()
+    
+    @staticmethod
+    def get_success_rate(tool_name: str = None, days: int = 7) -> dict:
+        """Get success rate statistics for SWE tools."""
         
-    def identify_improvement_opportunities(self):
-        """Analyze patterns to suggest optimizations."""
+        conn = get_database_connection()
+        where_clause = "WHERE timestamp > ?" 
+        params = [time.time() - (days * 24 * 3600)]
+        
+        if tool_name:
+            where_clause += " AND tool_name = ?"
+            params.append(tool_name)
+            
+        cursor = conn.execute(f"""
+            SELECT tool_name, 
+                   COUNT(*) as total,
+                   SUM(CASE WHEN success THEN 1 ELSE 0 END) as successful,
+                   AVG(execution_time) as avg_time
+            FROM swe_executions 
+            {where_clause}
+            GROUP BY tool_name
+        """, params)
+        
+        return {row[0]: {
+            'total': row[1], 
+            'successful': row[2], 
+            'success_rate': row[2]/row[1] if row[1] > 0 else 0,
+            'avg_time': row[3]
+        } for row in cursor.fetchall()}
 ```
 
-### 7. Create Integration Testing Framework
+### 6. Enhanced Error Recovery
 
-**Current Issue:** Limited testing coverage for cross-tool scenarios.
+**Current Issue:** Limited error recovery and user guidance on failures.
 
-**Recommendation:** Comprehensive integration testing:
+**Recommended Solution:** Add intelligent error recovery:
 
 ```python
-# tests/test_swe_tools_integration.py
-class SWEToolsIntegrationTest:
-    def test_workflow_delegation(self):
-        """Test complete workflow from research to implementation."""
-        # 1. Use technical_analysis to understand existing code
-        # 2. Use delegate_coding_task to implement changes
-        # 3. Verify results and integration
+class SWEErrorRecovery:
+    @staticmethod
+    def suggest_recovery(
+        tool_name: str, 
+        error_message: str, 
+        task_description: str
+    ) -> str:
+        """Provide intelligent recovery suggestions based on error patterns."""
         
-    def test_error_recovery_patterns(self):
-        """Test error handling across both tools."""
+        error_lower = error_message.lower()
         
-    def test_workspace_consistency(self):
-        """Ensure both tools work consistently in same workspace."""
+        if "timeout" in error_lower:
+            return (
+                "💡 **Recovery Suggestion:** Task may be too complex for single execution. "
+                "Try breaking it into smaller steps or use technical_analysis first "
+                "to understand the scope."
+            )
+        elif "permission denied" in error_lower:
+            return (
+                "💡 **Recovery Suggestion:** Check file permissions and working directory. "
+                "Ensure Claude Code has access to the target files."
+            )
+        elif "command not found" in error_lower:
+            return (
+                "💡 **Recovery Suggestion:** Claude Code may not be in PATH. "
+                "Verify installation with `claude --version`."
+            )
+        elif "no such file" in error_lower:
+            return (
+                "💡 **Recovery Suggestion:** Working directory may be incorrect. "
+                "Verify the target directory exists and contains the expected files."
+            )
+        else:
+            return (
+                f"💡 **Recovery Suggestion:** Consider using {'technical_analysis' if tool_name == 'delegate_coding_task' else 'delegate_coding_task'} "
+                f"as an alternative approach for: {task_description}"
+            )
 ```
 
-### 8. Documentation and Developer Experience
+### 7. Database Schema for SWE Operations
 
-**Current Issue:** Unclear when and how to use each tool effectively.
+**Recommended Addition:** Add SWE execution tracking to database schema:
 
-**Recommendation:** Enhanced developer documentation:
+```sql
+-- Add to utilities/database.py
+CREATE TABLE IF NOT EXISTS swe_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tool_name TEXT NOT NULL,
+    task_description TEXT NOT NULL,
+    working_directory TEXT NOT NULL,
+    success BOOLEAN NOT NULL,
+    execution_time REAL,
+    error_message TEXT,
+    chat_id TEXT,
+    timestamp REAL NOT NULL,
+    result_summary TEXT
+);
 
-```markdown
-# Developer Quick Reference
-
-## Tool Selection Decision Tree
-1. Do you need to modify files? → delegate_coding_task
-2. Do you need to research/analyze? → technical_analysis
-3. Unsure? Start with technical_analysis for understanding
-
-## Common Patterns
-- Research → Implement: technical_analysis followed by delegate_coding_task
-- Debug → Fix: technical_analysis to understand, delegate_coding_task to fix
-- Document → Update: technical_analysis to analyze, delegate_coding_task to write docs
-
-## Performance Guidelines
-- delegate_coding_task: Expect 30s-5min execution time
-- technical_analysis: Expect 1-10min for complex analysis
-- Both tools: Always include timeout handling
+CREATE INDEX IF NOT EXISTS idx_swe_executions_timestamp ON swe_executions(timestamp);
+CREATE INDEX IF NOT EXISTS idx_swe_executions_tool ON swe_executions(tool_name);
+CREATE INDEX IF NOT EXISTS idx_swe_executions_success ON swe_executions(success);
 ```
 
-## Conclusion
+### 8. Integration Testing Framework
 
-The current implementation provides two complementary approaches to software engineering automation:
+**Current Issue:** No automated testing for cross-tool workflows.
 
-- **delegate_coding_task** excels at actual implementation work with sophisticated workspace awareness and error handling
-- **technical_analysis** provides powerful research capabilities with read-only safety guarantees
+**Recommended Solution:** Create integration test suite:
 
-Key strengths include:
-- Clear separation of concerns between implementation and research
-- Robust workspace resolution and context management
-- Comprehensive error handling and user guidance
-- Integration with both agent and MCP architectures
+```python
+# tests/test_swe_integration.py
+class TestSWEIntegration:
+    
+    def test_tool_selection_logic(self):
+        """Test that tool selection recommends correct tool for various requests."""
+        
+        test_cases = [
+            ("Fix the authentication bug", "delegate_coding_task"),
+            ("How does the auth system work?", "technical_analysis"),
+            ("Research best practices for API design", "technical_analysis"),
+            ("Implement user registration", "delegate_coding_task"),
+        ]
+        
+        for request, expected_tool in test_cases:
+            recommended_tool, _ = suggest_swe_tool(request)
+            assert recommended_tool == expected_tool
+    
+    def test_workspace_resolution_consistency(self):
+        """Test that both tools resolve workspaces consistently."""
+        
+        # Test with same inputs
+        chat_id = "12345"
+        username = "testuser"
+        
+        # Both should resolve to same workspace
+        delegate_dir = resolve_working_directory(chat_id, username, False)
+        analysis_dir = resolve_working_directory(chat_id, username, False)
+        
+        assert delegate_dir == analysis_dir
+    
+    def test_error_handling_consistency(self):
+        """Test that both tools handle similar errors consistently."""
+        
+        # Test timeout scenarios
+        # Test permission errors  
+        # Test invalid directory errors
+        pass
+```
 
-Areas for improvement include:
-- Consolidating shared functionality to reduce duplication
-- Standardizing response formats and error handling
-- Enhancing context management across architectures
-- Adding intelligent tool selection and monitoring capabilities
+## Summary
 
-The recommended improvements would create a more cohesive, maintainable, and powerful software engineering automation system while preserving the unique strengths of each approach.
+The two SWE tools provide complementary capabilities but suffer from code duplication and inconsistent patterns. The key improvements would:
+
+1. **Consolidate common functionality** into shared utilities
+2. **Standardize response formats** for consistent user experience  
+3. **Unify workspace resolution** to eliminate behavioral differences
+4. **Add intelligent tool selection** to guide users to the right tool
+5. **Implement monitoring and analytics** for system improvement
+6. **Enhance error recovery** with actionable guidance
+7. **Create comprehensive testing** for integration scenarios
+
+These improvements would create a more cohesive, maintainable, and powerful software engineering automation platform while preserving the distinct strengths of each tool.
+
+---
+
+*This documentation serves as the definitive guide for understanding, using, and improving the software engineering automation tools in the AI agent system.*
