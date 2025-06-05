@@ -24,7 +24,10 @@ from tools.telegram_history_tool import (
 )
 
 # Import context manager for MCP context injection
-from .context_manager import inject_context_for_tool
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from context_manager import inject_context_for_tool
 
 # Load environment variables
 load_dotenv()

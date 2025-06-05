@@ -33,7 +33,9 @@ from tools.link_analysis_tool import (
 from tools.voice_transcription_tool import transcribe_audio_file
 
 # Import context manager for MCP context injection
-from .context_manager import inject_context_for_tool
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from context_manager import inject_context_for_tool
 
 # Load environment variables
 load_dotenv()
