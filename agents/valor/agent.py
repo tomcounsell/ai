@@ -163,15 +163,17 @@ def _execute_with_session_management(
     import os
     from utilities.claude_code_session_manager import ClaudeCodeSessionManager
     
-    # Get project priming context if this is a new session
-    project_context = ""
+    # Get workspace-specific prime content if this is a new session
+    prime_content = ""
     if not existing_session:
-        try:
-            # Import here to avoid circular imports
-            from mcp_servers.development_tools import get_project_context
-            project_context = get_project_context(chat_id)
-        except Exception:
-            pass
+        prime_content = ClaudeCodeSessionManager.load_workspace_prime_content(working_directory)
+        if not prime_content:
+            # Fallback to generic project context if no workspace-specific prime found
+            try:
+                from mcp_servers.development_tools import get_project_context
+                prime_content = get_project_context(chat_id)
+            except Exception:
+                pass
     
     # Build comprehensive prompt with project priming for new sessions
     prompt_parts = [
@@ -181,11 +183,11 @@ def _execute_with_session_management(
         ""
     ]
     
-    # Add project context for new sessions (equivalent to /prime)
-    if project_context and not existing_session:
+    # Add workspace-specific prime content for new sessions
+    if prime_content and not existing_session:
         prompt_parts.extend([
-            "PROJECT CONTEXT (equivalent to /prime):",
-            project_context,
+            "WORKSPACE PRIME CONTEXT (/prime equivalent):",
+            prime_content,
             "",
             "---",
             ""

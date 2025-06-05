@@ -124,8 +124,22 @@ def test_session_management():
         print("✅ Session summary:")
         print(f"   {summary}")
     
-    # Test 8: Deactivate session
-    print("\n🔴 Test 8: Deactivate session")
+    # Test 8: Workspace-specific prime content
+    print("\n📋 Test 8: Workspace-specific prime content")
+    
+    # Test AI workspace prime
+    ai_prime = ClaudeCodeSessionManager.load_workspace_prime_content("/Users/valorengels/src/ai")
+    print(f"✅ AI prime content found: {bool(ai_prime)}")
+    if ai_prime:
+        print(f"   Length: {len(ai_prime)} characters")
+        print(f"   Preview: {ai_prime[:80]}...")
+    
+    # Test non-existent workspace
+    fake_prime = ClaudeCodeSessionManager.load_workspace_prime_content("/nonexistent/path")
+    print(f"✅ Non-existent prime handled: {fake_prime is None}")
+    
+    # Test 9: Deactivate session
+    print("\n🔴 Test 9: Deactivate session")
     deactivated = ClaudeCodeSessionManager.deactivate_session(test_session_id)
     print(f"✅ Session deactivated: {deactivated}")
     

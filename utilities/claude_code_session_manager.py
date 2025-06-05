@@ -10,9 +10,11 @@ import json
 import re
 import sqlite3
 import time
+import os
 from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, List
 from dataclasses import dataclass
+from pathlib import Path
 
 from .database import get_database_connection
 
@@ -378,6 +380,31 @@ class ClaudeCodeSessionManager:
                 
         except sqlite3.Error as e:
             print(f"Error cleaning up old sessions: {e}")
+    
+    @staticmethod
+    def load_workspace_prime_content(working_directory: str) -> Optional[str]:
+        """
+        Load the workspace-specific /prime command content from .claude/commands/prime.md
+        
+        Args:
+            working_directory: The working directory to look for prime.md in
+            
+        Returns:
+            Prime content if found, None otherwise
+        """
+        try:
+            prime_path = Path(working_directory) / ".claude" / "commands" / "prime.md"
+            
+            if prime_path.exists() and prime_path.is_file():
+                with open(prime_path, 'r', encoding='utf-8') as f:
+                    content = f.read().strip()
+                    if content:
+                        return content
+                        
+        except Exception as e:
+            print(f"Error loading prime content from {working_directory}: {e}")
+            
+        return None
     
     @staticmethod
     def format_session_summary(session: ClaudeCodeSession) -> str:

@@ -311,18 +311,23 @@ def technical_analysis(
             hours_back=2  # Look for sessions in last 2 hours
         )
         
-        # Get project priming context if this is a new session
-        project_context = ""
+        # Get workspace-specific prime content if this is a new session
+        prime_content = ""
         if not recent_session:
-            try:
-                # Import here to avoid circular imports
-                import sys
-                import os
-                sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-                from mcp_servers.development_tools import get_project_context
-                project_context = get_project_context(chat_id)
-            except Exception:
-                pass
+            # Import here to avoid circular imports
+            import sys
+            import os
+            sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+            from utilities.claude_code_session_manager import ClaudeCodeSessionManager
+            
+            prime_content = ClaudeCodeSessionManager.load_workspace_prime_content(working_dir)
+            if not prime_content:
+                # Fallback to generic project context if no workspace-specific prime found
+                try:
+                    from mcp_servers.development_tools import get_project_context
+                    prime_content = get_project_context(chat_id)
+                except Exception:
+                    pass
         
         # Build research-focused prompt for Claude Code with session context
         prompt_parts = [
@@ -332,11 +337,11 @@ def technical_analysis(
             ""
         ]
         
-        # Add project context for new sessions (equivalent to /prime)
-        if project_context and not recent_session:
+        # Add workspace-specific prime content for new sessions
+        if prime_content and not recent_session:
             prompt_parts.extend([
-                "PROJECT CONTEXT (equivalent to /prime):",
-                project_context,
+                "WORKSPACE PRIME CONTEXT (/prime equivalent):",
+                prime_content,
                 "",
                 "---",
                 ""
@@ -629,6 +634,84 @@ The system will automatically detect and continue this session when you:
     
     except Exception as e:
         return f"📋 Session management error: {str(e)}"
+
+
+@mcp.tool()
+def show_workspace_prime_content(
+    working_directory: str = "",
+    chat_id: str = ""
+) -> str:
+    """Show the workspace-specific /prime command content that will be used for new Claude Code sessions.
+    
+    This tool displays the prime.md content from the .claude/commands/ directory of the
+    specified workspace, which automatically primes new Claude Code sessions with 
+    project-specific context and commands.
+    
+    Args:
+        working_directory: Specific directory to check (optional, will resolve from chat if empty)
+        chat_id: Chat ID for workspace context (extracted from CONTEXT_DATA if available)
+    
+    Returns:
+        The prime content that would be used for Claude Code sessions, or info if not found
+    
+    Examples:
+        >>> show_workspace_prime_content()
+        📋 **Workspace Prime Content**...
+        
+        >>> show_workspace_prime_content("/Users/valorengels/src/psyoptimal")
+        📋 **PsyOPTIMAL Prime Content**...
+    """
+    try:
+        from utilities.claude_code_session_manager import ClaudeCodeSessionManager
+        from utilities.workspace_validator import WorkspaceResolver
+        from .context_manager import inject_context_for_tool
+        
+        # Inject context if not provided
+        chat_id, username = inject_context_for_tool(chat_id, "")
+        
+        # Resolve working directory if not provided
+        if not working_directory:
+            working_directory, context_desc = WorkspaceResolver.resolve_working_directory(
+                chat_id=chat_id,
+                username=username,
+                is_group_chat=True,
+                target_directory=""
+            )
+        
+        # Load prime content
+        prime_content = ClaudeCodeSessionManager.load_workspace_prime_content(working_directory)
+        
+        if prime_content:
+            # Extract title from first line if it exists
+            lines = prime_content.split('\n')
+            title = lines[0].replace('#', '').strip() if lines and lines[0].startswith('#') else "Prime Content"
+            
+            return f"""📋 **Workspace Prime Content**
+
+**Directory**: {working_directory}
+**Prime File**: {working_directory}/.claude/commands/prime.md
+**Title**: {title}
+**Length**: {len(prime_content)} characters
+
+**Content Preview** (first 500 chars):
+```
+{prime_content[:500]}{'...' if len(prime_content) > 500 else ''}
+```
+
+💡 **Note**: This content is automatically included in new Claude Code sessions for this workspace to provide project-specific context and guidance."""
+        
+        else:
+            return f"""📋 **No Workspace Prime Content Found**
+
+**Directory**: {working_directory}
+**Expected Location**: {working_directory}/.claude/commands/prime.md
+
+❌ No prime.md file found in this workspace's .claude/commands/ directory.
+
+💡 **Note**: Without workspace-specific prime content, new Claude Code sessions will use generic project context as fallback."""
+    
+    except Exception as e:
+        return f"📋 Error loading workspace prime content: {str(e)}"
 
 
 if __name__ == "__main__":
