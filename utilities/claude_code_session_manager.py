@@ -337,11 +337,11 @@ class ClaudeCodeSessionManager:
             Complete Claude Code command string
         """
         if session_id:
-            return f'claude --resume {session_id} "{base_prompt}"'
+            return f'claude -r {session_id} "{base_prompt}"'
         elif should_continue:
-            return f'claude --continue "{base_prompt}"'
+            return f'claude -c "{base_prompt}"'
         else:
-            return f'claude code "{base_prompt}"'
+            return f'claude "{base_prompt}"'
     
     @staticmethod
     def _cleanup_old_sessions(conn: sqlite3.Connection, chat_id: Optional[str]) -> None:
