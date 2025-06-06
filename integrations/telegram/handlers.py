@@ -1429,10 +1429,15 @@ class MessageHandler:
             await self._safe_reply(message, promise_message, "📝 Working on task")
             self.chat_history.add_message(chat_id, "assistant", promise_message)
             
-            # Execute promise in background
-            import asyncio
-            asyncio.create_task(self._execute_promise_background(message, chat_id, promise_id, task_description))
-            print(f"🚀 Started background execution for promise {promise_id}")
+            # Execute promise using Huey
+            from utilities.promise_manager_huey import HueyPromiseManager
+            promise_manager = HueyPromiseManager()
+            
+            # Update the promise manager to handle the execution
+            from tasks.promise_tasks import execute_promise_by_type
+            execute_promise_by_type(promise_id)
+            
+            print(f"🚀 Queued promise {promise_id} for Huey execution")
             
             return True
 

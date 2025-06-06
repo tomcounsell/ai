@@ -787,6 +787,47 @@ The architecture preserves all existing functionality while adding the missing c
 
 ---
 
+## Updated Recommendation: Huey Task Queue (January 2025)
+
+After thorough evaluation of task queue options, we recommend **Huey** over Celery for the following reasons:
+
+### Why Huey is the Best Fit:
+- ✅ **Native SQLite support** - No Redis/RabbitMQ dependencies required
+- ✅ **Simpler than Celery** - Easier setup, fewer moving parts, cleaner codebase
+- ✅ **All essential features** - Parallel execution, retries, scheduling, persistence
+- ✅ **Well-documented** - LLMs understand it well, reducing documentation burden
+- ✅ **Production-ready** - Battle-tested in real applications
+- ✅ **10-hour implementation** - Faster than both Celery and custom solutions
+
+### Feature Comparison:
+
+| Feature | Huey | Celery | Custom |
+|---------|------|--------|---------|
+| SQLite Support | ✅ Native | ❌ Requires Redis | ✅ Built-in |
+| Parallel Execution | ✅ Multi-worker | ✅ Advanced | ⚠️ Complex |
+| Dependencies | ⚠️ Simple polling | ✅ Complex graphs | ⚠️ Manual |
+| Setup Complexity | Low | High | Medium |
+| Implementation Time | 10 hours | 12 hours | 20-24 hours |
+| Maintenance Burden | Low | High | High |
+
+### Implementation Path with Huey:
+
+1. **Fix missed messages bug** (2 hours) - Apply corrected timestamp logic
+2. **Install and configure Huey** (2 hours) - Set up SqliteHuey backend
+3. **Implement promise tasks** (3 hours) - Create task definitions
+4. **Add dependency support** (2 hours) - Simple polling mechanism
+5. **Testing and deployment** (1 hour) - Verify all functionality
+
+### Key Benefits:
+- **Maintains SQLite-only architecture** - No additional services needed
+- **Simpler than Celery** - Easier to understand and maintain
+- **Sufficient features** - Handles our parallel execution and dependency needs
+- **Better fit for our scale** - We don't need Celery's enterprise features
+
+See `docs/plan/unified-promise-queue-architecture.md` for detailed implementation guide using Huey.
+
+---
+
 ## Updated Summary: Enhanced Promise Architecture Needed
 
 ### Current Reality (January 2025)
