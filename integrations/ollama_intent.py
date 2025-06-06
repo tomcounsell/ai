@@ -116,16 +116,18 @@ Respond with a JSON object containing:
 - reasoning: brief explanation of classification
 - emoji: single appropriate emoji that best represents this specific message's intent and mood
 
-For emoji selection, be creative! Consider:
-- 🔍 for searching/investigating
-- 📊 for data analysis
-- 🔨 for building/working on tasks
-- ✨ for creative/magical work
-- 🌐 for web/network operations
-- 📡 for fetching external data
-- ⚙️ for technical processing
-- 🧠 for thinking/AI processing
-- And any other standard emoji that fits the specific message context
+For emoji selection, be creative and specific to the message! You can use:
+- Processing: 🔍 📊 🔨 ✨ 🌐 📡 ⚙️ 🧠 💡 🎯 📈 🔧 🚀 💫 🌟
+- Happy/positive: 😊 😄 😃 🥳 🤩 😋 😌 🙌 👏 🎉 🎊 🌈 ☀️
+- Animals: 🐶 🐱 🦊 🐻 🐼 🦄 🦋 🐬 🐳 🦈 🐙 🦑 🐢 🦁 🦅
+- Food: 🍎 🍕 🍔 🍣 🍰 🍪 🍩 🍺 🍷 ☕ 🧋 🍾 🥂 🍹
+- Nature: 🌸 🌺 🌻 🌹 🌷 🌼 🌿 🍀 🌱 🌲 🌳 🌊 ⛰️ 🏔️
+- Tech/objects: 💻 📱 🎮 🎧 🎤 🎸 🎹 📷 🎬 🚗 ✈️ 🚀 🛸
+- Status: 🏁 🚦 🔔 📢 💬 📝 📋 📌 📍 🗂️ 📁 💯 🏆 🥇
+- Weather: ☀️ 🌤️ ⛅ ☁️ 🌧️ ⛈️ 🌩️ ❄️ 🌨️ 🌪️ 🌈
+- And hundreds more friendly, positive emojis!
+
+Choose the emoji that best captures the specific mood, topic, or action of the message. Avoid anything threatening, unkind, or inappropriate.
 
 Be decisive and pick the most likely intent even if uncertain."""
 
