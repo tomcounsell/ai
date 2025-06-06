@@ -156,3 +156,6 @@ logs/
 # SQLite databases - data files not for version control
 *.db
 system.db
+
+# Test results JSON files
+tests/test_results_*.json
