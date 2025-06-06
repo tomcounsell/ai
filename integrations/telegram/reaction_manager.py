@@ -40,6 +40,8 @@ class TelegramReactionManager:
         }
 
         # Valid Telegram reaction emojis (confirmed working)
+        # Note: This list includes standard Telegram reactions plus some custom ones
+        # that may be available with Telegram Premium or in specific contexts
         self.valid_telegram_emojis = {
             "👍",
             "👎",
@@ -116,6 +118,15 @@ class TelegramReactionManager:
             "😡",
             "🎨",
             "✅",
+            # Additional emojis for processing stages
+            "🔍",  # Searching
+            "📊",  # Analyzing data
+            "🔨",  # Building/Working
+            "✨",  # Processing/Magic
+            "🌐",  # Web/Network operations
+            "📡",  # Fetching/Communication
+            "⚙️",  # Processing/Settings
+            "🧠",  # Thinking/AI processing
         }
 
         # Intent-specific reaction emojis (from intent classification)
@@ -259,20 +270,54 @@ class TelegramReactionManager:
                 logger.debug(f"Reaction {emoji} already exists for message {message_key}")
                 return True
 
-            # Add the reaction
-            await client.send_reaction(chat_id, message_id, emoji)
+            # Use raw API to append reaction instead of replacing
+            # This supports Telegram Layer 169+ multiple reactions
+            from pyrogram.raw import functions, types
+
+            # Get all existing reactions to append to
+            all_reactions = existing_reactions + [emoji]
+
+            # Create reaction objects for all emojis
+            reactions = [
+                types.ReactionEmoji(emoticon=reaction_emoji) for reaction_emoji in all_reactions
+            ]
+
+            # Send all reactions (existing + new) to append properly
+            await client.invoke(
+                functions.messages.SendReaction(
+                    peer=await client.resolve_peer(chat_id),
+                    msg_id=message_id,
+                    reaction=reactions,
+                    big=False,
+                )
+            )
 
             # Track the reaction
             if message_key not in self.message_reactions:
                 self.message_reactions[message_key] = []
             self.message_reactions[message_key].append(emoji)
 
-            logger.debug(f"Added reaction {emoji} ({status.value}) to message {message_key}")
+            logger.debug(
+                f"Added reaction {emoji} ({status.value}) to message {message_key} - total reactions: {len(all_reactions)}"
+            )
             return True
 
         except Exception as e:
             logger.warning(f"Failed to add reaction {emoji} to message {message_key}: {e}")
-            return False
+            # Fallback to simple send_reaction if raw API fails
+            try:
+                await client.send_reaction(chat_id, message_id, emoji)
+
+                # Track the reaction even with fallback
+                if message_key not in self.message_reactions:
+                    self.message_reactions[message_key] = []
+                self.message_reactions[message_key].append(emoji)
+
+                logger.debug(f"Added reaction {emoji} via fallback method")
+                return True
+            except Exception as fallback_e:
+                logger.warning(f"Fallback also failed: {fallback_e}")
+                return False
 
     async def update_reaction_sequence(
         self,
@@ -354,6 +399,35 @@ class TelegramReactionManager:
         """
         return self.intent_reactions.get(intent, "🤔")
 
+    async def add_processing_stage_reaction(
+        self, client, chat_id: int, message_id: int, stage_emoji: str
+    ) -> bool:
+        """
+        Add a reaction for intermediate processing stages.
+
+        This allows adding reactions as processing evolves, such as:
+        - 🔍 when starting search
+        - 📊 when analyzing data
+        - 🔨 when executing tasks
+        - etc.
+
+        Args:
+            client: Telegram client instance
+            chat_id: Chat ID
+            message_id: Message ID
+            stage_emoji: Emoji representing the processing stage
+
+        Returns:
+            bool: True if reaction was added successfully
+        """
+        if stage_emoji not in self.valid_telegram_emojis:
+            logger.warning(f"Invalid stage emoji '{stage_emoji}', skipping")
+            return False
+
+        return await self._add_reaction(
+            client, chat_id, message_id, stage_emoji, ReactionStatus.PROCESSING
+        )
+
     async def cleanup_old_reactions(self, max_tracked_messages: int = 1000) -> None:
         """
         Clean up old reaction tracking data to prevent memory buildup.
@@ -426,4 +500,31 @@ async def complete_reaction_sequence(
     """
     return await reaction_manager.update_reaction_sequence(
         client, chat_id, message_id, intent_result, success
+    )
+
+
+async def add_processing_stage_reaction(
+    client, chat_id: int, message_id: int, stage_emoji: str
+) -> bool:
+    """
+    Convenience function to add a processing stage reaction.
+
+    Use this to add reactions as message processing evolves:
+    - 🔍 when searching
+    - 📊 when analyzing
+    - 🔨 when building
+    - 🌐 when fetching web data
+    - etc.
+
+    Args:
+        client: Telegram client instance
+        chat_id: Chat ID
+        message_id: Message ID
+        stage_emoji: Emoji for the processing stage
+
+    Returns:
+        bool: True if reaction was added successfully
+    """
+    return await reaction_manager.add_processing_stage_reaction(
+        client, chat_id, message_id, stage_emoji
     )
