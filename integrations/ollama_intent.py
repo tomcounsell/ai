@@ -5,51 +5,52 @@ This module provides intent classification using local Ollama models to determin
 the appropriate response strategy and tool access for incoming messages.
 """
 
-import aiohttp
-import asyncio
 import json
 import logging
-from enum import Enum
-from typing import Optional, Dict, Any
 from dataclasses import dataclass
+from enum import Enum
+from typing import Any
+
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
 
 class MessageIntent(Enum):
     """Possible message intents for classification."""
-    
+
     # General conversation
-    CASUAL_CHAT = "casual_chat"          # Regular conversation, friendly chat
-    QUESTION_ANSWER = "question_answer"   # Direct questions requiring factual answers
-    
+    CASUAL_CHAT = "casual_chat"  # Regular conversation, friendly chat
+    QUESTION_ANSWER = "question_answer"  # Direct questions requiring factual answers
+
     # Work and productivity
-    PROJECT_QUERY = "project_query"       # Questions about projects, tasks, status
-    DEVELOPMENT_TASK = "development_task" # Code-related requests, programming help
-    
+    PROJECT_QUERY = "project_query"  # Questions about projects, tasks, status
+    DEVELOPMENT_TASK = "development_task"  # Code-related requests, programming help
+
     # Creative and content
-    IMAGE_GENERATION = "image_generation" # Requests to create images
-    IMAGE_ANALYSIS = "image_analysis"     # Analyzing shared images
-    
+    IMAGE_GENERATION = "image_generation"  # Requests to create images
+    IMAGE_ANALYSIS = "image_analysis"  # Analyzing shared images
+
     # Information and research
-    WEB_SEARCH = "web_search"            # Requests requiring current web information
-    LINK_ANALYSIS = "link_analysis"      # Analyzing shared links
-    
+    WEB_SEARCH = "web_search"  # Requests requiring current web information
+    LINK_ANALYSIS = "link_analysis"  # Analyzing shared links
+
     # Health checks and system
-    SYSTEM_HEALTH = "system_health"      # Health checks, ping, status
-    
+    SYSTEM_HEALTH = "system_health"  # Health checks, ping, status
+
     # Catch-all
-    UNCLEAR = "unclear"                  # Intent cannot be determined
+    UNCLEAR = "unclear"  # Intent cannot be determined
 
 
 @dataclass
 class IntentResult:
     """Result of intent classification."""
+
     intent: MessageIntent
     confidence: float
     reasoning: str
     suggested_emoji: str
-    
+
     @property
     def is_high_confidence(self) -> bool:
         """Check if classification confidence is high enough to trust."""
@@ -59,16 +60,20 @@ class IntentResult:
 class OllamaIntentClassifier:
     """
     Multi-tier intent classification system with intelligent fallbacks:
-    
+
     1. Primary: Ollama (granite3.2-vision) - Local, fast, privacy-preserving
     2. Fallback: GPT-3.5 Turbo - Requires OPENAI_API_KEY in environment
     3. Last resort: Rule-based classification - Always available
     """
-    
-    def __init__(self, model_name: str = "granite3.2-vision:latest", ollama_url: str = "http://localhost:11434"):
+
+    def __init__(
+        self,
+        model_name: str = "granite3.2-vision:latest",
+        ollama_url: str = "http://localhost:11434",
+    ):
         """
         Initialize the Ollama intent classifier.
-        
+
         Args:
             model_name: Name of the Ollama model to use for classification
             ollama_url: URL of the Ollama server
@@ -76,7 +81,7 @@ class OllamaIntentClassifier:
         self.model_name = model_name
         self.ollama_url = ollama_url
         self.session = None
-        
+
         # Intent-specific emoji mapping using valid Telegram reaction emojis
         self.intent_emojis = {
             MessageIntent.CASUAL_CHAT: "😁",
@@ -90,7 +95,7 @@ class OllamaIntentClassifier:
             MessageIntent.SYSTEM_HEALTH: "❤️",
             MessageIntent.UNCLEAR: "🤨",
         }
-        
+
         # System prompt for intent classification
         self.system_prompt = """You are an expert message intent classifier. Analyze the user's message and classify it into one of these specific intents:
 
@@ -109,15 +114,26 @@ Respond with a JSON object containing:
 - intent: one of the exact intent names above
 - confidence: float between 0.0-1.0
 - reasoning: brief explanation of classification
-- emoji: single appropriate emoji for this intent
+- emoji: single appropriate emoji that best represents this specific message's intent and mood
+
+For emoji selection, be creative and specific to the message! You can use:
+- Processing: 🔍 📊 🔨 ✨ 🌐 📡 ⚙️ 🧠 💡 🎯 📈 🔧 🚀 💫 🌟
+- Happy/positive: 😊 😄 😃 🥳 🤩 😋 😌 🙌 👏 🎉 🎊 🌈 ☀️
+- Animals: 🐶 🐱 🦊 🐻 🐼 🦄 🦋 🐬 🐳 🦈 🐙 🦑 🐢 🦁 🦅
+- Food: 🍎 🍕 🍔 🍣 🍰 🍪 🍩 🍺 🍷 ☕ 🧋 🍾 🥂 🍹
+- Nature: 🌸 🌺 🌻 🌹 🌷 🌼 🌿 🍀 🌱 🌲 🌳 🌊 ⛰️ 🏔️
+- Tech/objects: 💻 📱 🎮 🎧 🎤 🎸 🎹 📷 🎬 🚗 ✈️ 🚀 🛸
+- Status: 🏁 🚦 🔔 📢 💬 📝 📋 📌 📍 🗂️ 📁 💯 🏆 🥇
+- Weather: ☀️ 🌤️ ⛅ ☁️ 🌧️ ⛈️ 🌩️ ❄️ 🌨️ 🌪️ 🌈
+- And hundreds more friendly, positive emojis!
+
+Choose the emoji that best captures the specific mood, topic, or action of the message. Avoid anything threatening, unkind, or inappropriate.
 
 Be decisive and pick the most likely intent even if uncertain."""
 
     async def __aenter__(self):
         """Async context manager entry."""
-        self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=5.0)
-        )
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5.0))
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -125,14 +141,16 @@ Be decisive and pick the most likely intent even if uncertain."""
         if self.session:
             await self.session.close()
 
-    async def classify_intent(self, message: str, context: Optional[Dict[str, Any]] = None) -> IntentResult:
+    async def classify_intent(
+        self, message: str, context: dict[str, Any] | None = None
+    ) -> IntentResult:
         """
         Classify the intent of a message using Ollama.
-        
+
         Args:
             message: The message text to classify
             context: Optional context information (chat_id, username, etc.)
-            
+
         Returns:
             IntentResult with classification details
         """
@@ -141,13 +159,13 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.UNCLEAR,
                 confidence=1.0,
                 reasoning="Empty message",
-                suggested_emoji="🤔"
+                suggested_emoji="🤔",
             )
-            
+
         try:
             # Prepare the classification prompt
             user_prompt = f"Message to classify: '{message.strip()}'"
-            
+
             # Add context if available
             if context:
                 if context.get("has_image"):
@@ -156,16 +174,18 @@ Be decisive and pick the most likely intent even if uncertain."""
                     user_prompt += "\n[Note: This message contains URLs]"
                 if context.get("is_group_chat"):
                     user_prompt += "\n[Note: This is from a group chat]"
-            
+
             # Make request to Ollama
             response = await self._make_ollama_request(user_prompt)
-            
+
             # Parse the response
             result = self._parse_classification_response(response, message)
-            
-            logger.info(f"Intent classified: {result.intent.value} (confidence: {result.confidence:.2f})")
+
+            logger.info(
+                f"Intent classified: {result.intent.value} (confidence: {result.confidence:.2f})"
+            )
             return result
-            
+
         except Exception as e:
             error_msg = str(e) if e else "Unknown error"
             logger.error(f"Intent classification failed: {error_msg}")
@@ -176,10 +196,8 @@ Be decisive and pick the most likely intent even if uncertain."""
     async def _make_ollama_request(self, prompt: str) -> str:
         """Make a request to the Ollama API."""
         if not self.session:
-            self.session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=5.0)
-            )
-            
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5.0))
+
         payload = {
             "model": self.model_name,
             "prompt": f"{self.system_prompt}\n\n{prompt}",
@@ -188,17 +206,14 @@ Be decisive and pick the most likely intent even if uncertain."""
                 "temperature": 0.1,  # Low temperature for consistent classification
                 "top_p": 0.9,
                 "num_predict": 200,  # Limit response length
-            }
+            },
         }
-        
-        async with self.session.post(
-            f"{self.ollama_url}/api/generate",
-            json=payload
-        ) as response:
+
+        async with self.session.post(f"{self.ollama_url}/api/generate", json=payload) as response:
             if response.status != 200:
                 error_text = await response.text()
                 raise Exception(f"Ollama API error: {response.status} - {error_text}")
-                
+
             result = await response.json()
             return result.get("response", "")
 
@@ -207,55 +222,55 @@ Be decisive and pick the most likely intent even if uncertain."""
         try:
             # Try to extract JSON from response
             response_clean = response.strip()
-            
+
             # Handle cases where response might not be pure JSON
-            json_start = response_clean.find('{')
-            json_end = response_clean.rfind('}') + 1
-            
+            json_start = response_clean.find("{")
+            json_end = response_clean.rfind("}") + 1
+
             if json_start >= 0 and json_end > json_start:
                 json_str = response_clean[json_start:json_end]
                 result_data = json.loads(json_str)
             else:
                 # If no JSON found, try to parse the whole response
                 result_data = json.loads(response_clean)
-            
+
             # Extract and validate fields
             intent_str = result_data.get("intent", "unclear").lower()
             confidence = float(result_data.get("confidence", 0.5))
             reasoning = result_data.get("reasoning", "Classified by AI")
             suggested_emoji = result_data.get("emoji", "🤔")
-            
+
             # Map intent string to enum
             intent = self._map_intent_string(intent_str)
-            
+
             # Validate confidence
             confidence = max(0.0, min(1.0, confidence))
-            
+
             # Use default emoji if not provided or invalid for Telegram
-            valid_telegram_emojis = {
-                "👍", "👎", "❤️", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", 
-                "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳", "❤️‍🔥", 
-                "🌚", "🌭", "💯", "🤣", "⚡", "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", 
-                "💋", "🖕", "😈", "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", 
-                "😨", "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿", "🆒", 
-                "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷‍♂", "🤷", "🤷‍♀", 
-                "😡", "🎨"
-            }
-            if not suggested_emoji or len(suggested_emoji) != 1 or suggested_emoji not in valid_telegram_emojis:
+            # Import the valid emojis from the reaction manager
+            from .telegram.reaction_manager import reaction_manager
+
+            valid_telegram_emojis = reaction_manager.valid_telegram_emojis
+
+            if (
+                not suggested_emoji
+                or len(suggested_emoji) != 1
+                or suggested_emoji not in valid_telegram_emojis
+            ):
                 suggested_emoji = self.intent_emojis.get(intent, "🤔")
-            
+
             return IntentResult(
                 intent=intent,
                 confidence=confidence,
                 reasoning=reasoning,
-                suggested_emoji=suggested_emoji
+                suggested_emoji=suggested_emoji,
             )
-            
+
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             error_msg = str(e) if e else "Unknown parsing error"
             logger.warning(f"Failed to parse Ollama response: {error_msg}")
             logger.debug(f"Raw response: {response[:200]}...")
-            
+
             # Fallback to rule-based classification
             return self._fallback_classification(original_message)
 
@@ -273,40 +288,42 @@ Be decisive and pick the most likely intent even if uncertain."""
             "system_health": MessageIntent.SYSTEM_HEALTH,
             "unclear": MessageIntent.UNCLEAR,
         }
-        
+
         return intent_mapping.get(intent_str.lower(), MessageIntent.UNCLEAR)
 
-    def _fallback_classification(self, message: str, context: Optional[Dict[str, Any]] = None) -> IntentResult:
+    def _fallback_classification(
+        self, message: str, context: dict[str, Any] | None = None
+    ) -> IntentResult:
         """Fallback rule-based classification when Ollama fails."""
         message_lower = message.lower().strip()
-        
+
         # System health checks
         if message_lower in ["ping", "health", "status"]:
             return IntentResult(
                 intent=MessageIntent.SYSTEM_HEALTH,
                 confidence=1.0,
                 reasoning="System health keyword detected",
-                suggested_emoji="❤️"
+                suggested_emoji="❤️",
             )
-        
+
         # Image analysis (check for image markers)
         if any(marker in message.upper() for marker in ["[IMAGE]", "[PHOTO]", "IMAGE FILE PATH:"]):
             return IntentResult(
                 intent=MessageIntent.IMAGE_ANALYSIS,
                 confidence=0.9,
                 reasoning="Image content markers detected",
-                suggested_emoji="👀"
+                suggested_emoji="👀",
             )
-        
+
         # Link analysis (check for URLs)
         if any(url in message_lower for url in ["http://", "https://", "www."]):
             return IntentResult(
                 intent=MessageIntent.LINK_ANALYSIS,
                 confidence=0.9,
                 reasoning="URL detected in message",
-                suggested_emoji="🍾"
+                suggested_emoji="🍾",
             )
-        
+
         # Image generation requests
         image_keywords = ["generate", "create", "make", "draw", "image", "picture", "art"]
         if any(keyword in message_lower for keyword in image_keywords):
@@ -314,9 +331,9 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.IMAGE_GENERATION,
                 confidence=0.7,
                 reasoning="Image creation keywords detected",
-                suggested_emoji="🎨"
+                suggested_emoji="🎨",
             )
-        
+
         # Development tasks
         dev_keywords = ["code", "bug", "fix", "implement", "function", "class", "variable", "debug"]
         if any(keyword in message_lower for keyword in dev_keywords):
@@ -324,19 +341,27 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.DEVELOPMENT_TASK,
                 confidence=0.7,
                 reasoning="Development keywords detected",
-                suggested_emoji="👨‍💻"
+                suggested_emoji="👨‍💻",
             )
-        
+
         # Project queries
-        project_keywords = ["project", "task", "deadline", "status", "progress", "psyoptimal", "flextrip"]
+        project_keywords = [
+            "project",
+            "task",
+            "deadline",
+            "status",
+            "progress",
+            "psyoptimal",
+            "flextrip",
+        ]
         if any(keyword in message_lower for keyword in project_keywords):
             return IntentResult(
                 intent=MessageIntent.PROJECT_QUERY,
                 confidence=0.7,
                 reasoning="Project keywords detected",
-                suggested_emoji="🙏"
+                suggested_emoji="🙏",
             )
-        
+
         # Web search indicators
         search_keywords = ["what's", "latest", "news", "current", "recent", "today", "now"]
         if any(keyword in message_lower for keyword in search_keywords):
@@ -344,9 +369,9 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.WEB_SEARCH,
                 confidence=0.6,
                 reasoning="Current information keywords detected",
-                suggested_emoji="🗿"
+                suggested_emoji="🗿",
             )
-        
+
         # Question indicators
         question_markers = ["?", "what", "how", "why", "when", "where", "who"]
         if any(marker in message_lower for marker in question_markers):
@@ -354,35 +379,40 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.QUESTION_ANSWER,
                 confidence=0.6,
                 reasoning="Question markers detected",
-                suggested_emoji="🤔"
+                suggested_emoji="🤔",
             )
-        
+
         # Default to casual chat
         return IntentResult(
             intent=MessageIntent.CASUAL_CHAT,
             confidence=0.5,
             reasoning="No specific intent markers detected, defaulting to casual chat",
-            suggested_emoji="😁"
+            suggested_emoji="😁",
         )
 
-    async def _gpt_fallback_classification(self, message: str, context: Optional[Dict[str, Any]] = None) -> IntentResult:
+    async def _gpt_fallback_classification(
+        self, message: str, context: dict[str, Any] | None = None
+    ) -> IntentResult:
         """Fallback to GPT-3.5 Turbo when Ollama fails."""
         try:
-            import openai
             import os
-            
+
+            import openai
+
             # Check if OpenAI API key is available
             api_key = os.getenv("OPENAI_API_KEY")
             if not api_key:
-                logger.warning("OPENAI_API_KEY not found, falling back to rule-based classification")
+                logger.warning(
+                    "OPENAI_API_KEY not found, falling back to rule-based classification"
+                )
                 return self._fallback_classification(message, context)
-            
+
             # Initialize OpenAI client
             client = openai.OpenAI(api_key=api_key)
-            
+
             # Prepare the classification prompt
             user_prompt = f"Message to classify: '{message.strip()}'"
-            
+
             # Add context if available
             if context:
                 if context.get("has_image"):
@@ -391,26 +421,28 @@ Be decisive and pick the most likely intent even if uncertain."""
                     user_prompt += "\n[Note: This message contains URLs]"
                 if context.get("is_group_chat"):
                     user_prompt += "\n[Note: This is from a group chat]"
-            
+
             # Make request to GPT-3.5 Turbo
             response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": user_prompt}
+                    {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.1,
-                max_tokens=200
+                max_tokens=200,
             )
-            
+
             result_text = response.choices[0].message.content
-            
+
             # Parse the response using the same parsing logic
             result = self._parse_classification_response(result_text, message)
-            
-            logger.info(f"GPT-3.5 fallback classified: {result.intent.value} (confidence: {result.confidence:.2f})")
+
+            logger.info(
+                f"GPT-3.5 fallback classified: {result.intent.value} (confidence: {result.confidence:.2f})"
+            )
             return result
-            
+
         except Exception as e:
             logger.error(f"GPT-3.5 fallback also failed: {e}")
             # Last resort: rule-based classification
@@ -420,13 +452,11 @@ Be decisive and pick the most likely intent even if uncertain."""
         """Check if Ollama server is available."""
         try:
             if not self.session:
-                self.session = aiohttp.ClientSession(
-                    timeout=aiohttp.ClientTimeout(total=2.0)
-                )
-                
+                self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2.0))
+
             async with self.session.get(f"{self.ollama_url}/api/tags") as response:
                 return response.status == 200
-                
+
         except Exception as e:
             logger.debug(f"Ollama not available: {e}")
             return False
@@ -436,16 +466,18 @@ Be decisive and pick the most likely intent even if uncertain."""
 intent_classifier = OllamaIntentClassifier()
 
 
-async def classify_message_intent(message: str, context: Optional[Dict[str, Any]] = None) -> IntentResult:
+async def classify_message_intent(
+    message: str, context: dict[str, Any] | None = None
+) -> IntentResult:
     """
     Classify the intent of a message.
-    
+
     Convenience function that uses the singleton classifier instance.
-    
+
     Args:
         message: The message text to classify
         context: Optional context information
-        
+
     Returns:
         IntentResult with classification details
     """
