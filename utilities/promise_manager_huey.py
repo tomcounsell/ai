@@ -104,11 +104,14 @@ class HueyPromiseManager:
             )
         else:
             # Execute immediately
-            result = execute_promise_by_type(promise_id)
+            self.logger.info(f"Scheduling promise {promise_id} for immediate execution")
+            # Use delay=0 for immediate execution
+            result = execute_promise_by_type.schedule(args=(promise_id,), delay=0)
             
             # Store Huey task ID if available
             if hasattr(result, 'id'):
                 self._update_huey_task_id(promise_id, result.id)
+                self.logger.info(f"Queued promise {promise_id} with Huey task ID: {result.id}")
         
         return promise_id
     

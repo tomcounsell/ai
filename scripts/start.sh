@@ -51,7 +51,7 @@ start_huey() {
         -w 4 \
         -k thread \
         -l "$PROJECT_ROOT/logs/huey.log" \
-        -v > /dev/null 2>&1 &
+        -v >> "$PROJECT_ROOT/logs/huey_startup.log" 2>&1 &
     
     HUEY_PID=$!
     echo $HUEY_PID > "$PROJECT_ROOT/huey.pid"

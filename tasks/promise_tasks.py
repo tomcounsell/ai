@@ -234,10 +234,13 @@ def execute_promise_by_type(promise_id: int):
     BEST PRACTICE: Use a routing function to keep task selection
     logic centralized and easy to extend.
     """
+    logger.info(f"Execute promise by type called for promise {promise_id}")
     promise = get_promise(promise_id)
     if not promise:
         logger.error(f"Promise {promise_id} not found")
         return
+    
+    logger.info(f"Promise {promise_id} details: type={promise.get('task_type')}, status={promise.get('status')}, description={promise.get('task_description')[:50]}...")
     
     # Route based on task type
     # IMPLEMENTATION NOTE: Add new task types here as needed
@@ -249,7 +252,10 @@ def execute_promise_by_type(promise_id: int):
     
     task_func = task_map.get(promise['task_type'])
     if task_func:
-        task_func(promise_id)
+        logger.info(f"Routing promise {promise_id} to {task_func.__name__}")
+        # Schedule the task instead of calling directly with delay=0 for immediate execution
+        result = task_func.schedule(args=(promise_id,), delay=0)
+        logger.info(f"Scheduled task {task_func.__name__} for promise {promise_id}, Huey task ID: {getattr(result, 'id', 'unknown')}")
     else:
         logger.error(f"Unknown task type: {promise['task_type']}")
         update_promise_status(promise_id, 'failed', error_message=f"Unknown task type: {promise['task_type']}")
