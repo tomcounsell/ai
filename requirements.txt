@@ -123,6 +123,8 @@ httpx-sse==0.4.0
     # via
     #   cohere
     #   mcp
+huey==2.5.3
+    # via -r requirements/base.txt
 huggingface-hub==0.32.1
     # via tokenizers
 identify==2.6.12

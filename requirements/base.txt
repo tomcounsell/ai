@@ -13,6 +13,7 @@ passlib[bcrypt]
 python-multipart
 psutil
 aiohttp
+huey
 
 # Development tools
 ruff
