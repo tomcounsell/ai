@@ -818,32 +818,56 @@ The promise system needs significant enhancements to support modern workflows:
 - No lost work due to crashes or maintenance
 - Query and re-execute pending promises on startup
 
-### Recommended Approach: Celery Integration
+### Recommended Approach: Huey Task Queue
 
-Based on analysis, implementing a **Celery-based task queue** provides:
-- ✅ **Battle-tested reliability** - Used in production by major companies
-- ✅ **All required features** - Parallel execution, dependencies, persistence
-- ✅ **Less code to maintain** - Leverage existing robust solution
-- ✅ **Monitoring included** - Flower dashboard for task visibility
-- ✅ **12-hour implementation** - Faster than building custom system
+After thorough evaluation, we recommend **Huey** over Celery for the following reasons:
 
-### Alternative: Enhanced Custom Implementation
+#### Why Huey is the Best Fit:
+- ✅ **Native SQLite support** - No Redis/RabbitMQ dependencies required
+- ✅ **Simpler than Celery** - Easier setup, fewer moving parts, cleaner codebase
+- ✅ **All essential features** - Parallel execution, retries, scheduling, persistence
+- ✅ **Well-documented** - LLMs understand it well, reducing documentation burden
+- ✅ **Production-ready** - Battle-tested in real applications
+- ✅ **10-hour implementation** - Faster than both Celery and custom solutions
 
-If Celery is not desired, enhance the minimal promise system with:
-1. **Task executor pool** - Concurrent promise execution
-2. **Dependency tracking** - Promise chaining and prerequisites  
-3. **Startup recovery** - Database queries for pending promises
-4. **Estimated time: 20-24 hours** - More complex than Celery approach
+#### Feature Comparison:
+
+| Feature | Huey | Celery | Custom |
+|---------|------|--------|---------|
+| SQLite Support | ✅ Native | ❌ Requires Redis | ✅ Built-in |
+| Parallel Execution | ✅ Multi-worker | ✅ Advanced | ⚠️ Complex |
+| Dependencies | ⚠️ Simple polling | ✅ Complex graphs | ⚠️ Manual |
+| Setup Complexity | Low | High | Medium |
+| Implementation Time | 10 hours | 12 hours | 20-24 hours |
+| Maintenance Burden | Low | High | High |
+
+### Implementation Architecture
+
+Using Huey with our SQLite-only approach:
+
+1. **Promise Storage** - Enhanced SQLite tables with Huey task IDs
+2. **Task Execution** - Huey consumers running as separate processes
+3. **Dependency Handling** - Simple polling with smart scheduling
+4. **Restart Recovery** - Automatic via Huey's persistence layer
 
 ### Migration Path
 
-1. **Fix missed messages bug** (2 hours) - Critical bug affecting message catchup
-2. **Implement Celery infrastructure** (3 hours) - Set up task queue system
-3. **Enhance promise system** (4 hours) - Add parallel execution and dependencies
-4. **Integration and testing** (3 hours) - Ensure reliability
+1. **Fix missed messages bug** (2 hours) - Correct the timestamp logic
+2. **Install and configure Huey** (2 hours) - Set up SqliteHuey
+3. **Implement promise tasks** (3 hours) - Create task definitions
+4. **Integration with handlers** (2 hours) - Connect to message flow
+5. **Testing and deployment** (1 hour) - Verify functionality
 
-### Decision: Proceed with Celery ✅
-- **Faster implementation** - 12 hours vs 24 for custom
-- **More reliable** - Proven in production environments
-- **Better features** - Monitoring, retries, routing included
-- **Future-proof** - Easy to scale and extend
+### Alternative: Simple AsyncIO Implementation
+
+If even Huey feels excessive, a minimal AsyncIO approach can work:
+- Use Python's built-in `asyncio.create_task()`
+- Store promise state in existing SQLite tables
+- Resume tasks on startup via database queries
+- **Estimated time: 6-8 hours** - But less robust
+
+### Decision: Proceed with Huey ✅
+- **Maintains portability** - SQLite-only, no external services
+- **Right-sized solution** - Not too simple, not too complex
+- **Future-proof** - Easy to migrate to Celery later if needed
+- **Best practices built-in** - Retries, monitoring, error handling

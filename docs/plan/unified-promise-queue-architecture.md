@@ -7,7 +7,7 @@ This document proposes a unified architecture that solves two critical issues:
 1. **Missed Messages Bug**: The current logic incorrectly filters messages, making it impossible to catch messages sent while the bot was offline
 2. **Promise System Enhancement**: Expanding our promise architecture to support parallel execution, dependencies, and restart recovery
 
-Instead of building a custom solution, we'll leverage **Celery** - a battle-tested distributed task queue that provides all the features we need.
+After evaluation, we recommend using **Huey** - a lightweight task queue with native SQLite support that provides the features we need without the complexity of Celery or Redis dependencies.
 
 ## Current Issues
 

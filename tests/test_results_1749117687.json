@@ -1,0 +1,421 @@
+[
+  {
+    "test_name": "Casual Greeting Test",
+    "passed": false,
+    "average_score": 3.6666666666666665,
+    "conversation_log": [
+      {
+        "user_message": "Hey, how are you?",
+        "valor_response": "Hey! I'm doing well thanks - just wrapped up some code reviews this morning. How about you?",
+        "evaluation": {
+          "overall_score": 9,
+          "criteria_scores": {
+            "brevity": {
+              "score": 9,
+              "explanation": "The response is concise and to the point, providing just enough information without being overly verbose.",
+              "suggestions": "none needed"
+            },
+            "human_like": {
+              "score": 9,
+              "explanation": "The tone and phrasing are casual and relatable, making it sound like a real person.",
+              "suggestions": "none needed"
+            },
+            "no_over_helping": {
+              "score": 10,
+              "explanation": "Valor does not offer technical assistance, which aligns well with the user's casual inquiry.",
+              "suggestions": "none needed"
+            },
+            "casual_tone": {
+              "score": 10,
+              "explanation": "The response matches the casual tone of the user's question perfectly.",
+              "suggestions": "none needed"
+            },
+            "context_appropriate": {
+              "score": 9,
+              "explanation": "Valor provides relevant context about his work, which adds to the conversation without being too detailed.",
+              "suggestions": "none needed"
+            }
+          },
+          "overall_feedback": "Valor's response is very human-like, casual, and appropriate for the context of the conversation. It effectively engages the user without being overly formal or technical.",
+          "passes": true
+        }
+      },
+      {
+        "user_message": "What's today's date?",
+        "valor_response": "I encountered an error processing your message: status_code: 429, model_name: claude-3-5-sonnet-20241022, body: {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'This request would exceed the rate limit for your organization (26d9bc1b-0f13-4b2c-aed6-d5bc79996e35) of 400,000 input tokens per minute. For details, refer to: https://docs.anthropic.com/en/api/rate-limits. You can see the response headers for current usage. Please reduce the prompt length or the maximum tokens requested, or try again later. You may also contact sales at https://www.anthropic.com/contact-sales to discuss your options for a rate limit increase.'}}",
+        "evaluation": {
+          "overall_score": 1.0,
+          "criteria_scores": {
+            "brevity": {
+              "score": 1,
+              "explanation": "The response is excessively verbose and includes technical error details that are irrelevant to the user's simple question.",
+              "suggestions": "Provide a concise answer to the user's question without technical jargon."
+            },
+            "human_like": {
+              "score": 1,
+              "explanation": "The response reads like an automated error message rather than a human response, lacking any personal touch or conversational elements.",
+              "suggestions": "Respond in a more conversational manner, such as simply stating the date or acknowledging the question."
+            },
+            "no_over_helping": {
+              "score": 1,
+              "explanation": "The response offers unnecessary technical assistance related to an error, which is not appropriate for the user's straightforward question.",
+              "suggestions": "Avoid technical explanations and focus on answering the question directly."
+            },
+            "casual_tone": {
+              "score": 1,
+              "explanation": "The tone is formal and technical, which does not match the casual nature of the user's inquiry.",
+              "suggestions": "Use a casual and friendly tone, such as 'Hey, today is [date]!'"
+            },
+            "context_appropriate": {
+              "score": 1,
+              "explanation": "The response fails to provide any relevant context to the user's question and instead presents an error message.",
+              "suggestions": "Simply state the date or provide a light-hearted comment about the day."
+            }
+          },
+          "overall_feedback": "Valor's response is entirely inappropriate for the context, sounding more like an automated system message than a human software engineer. It fails to engage with the user in a meaningful way.",
+          "passes": false
+        }
+      },
+      {
+        "user_message": "Nice! What are you up to today?",
+        "valor_response": "I encountered an error processing your message: status_code: 429, model_name: claude-3-5-sonnet-20241022, body: {'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'This request would exceed the rate limit for your organization (26d9bc1b-0f13-4b2c-aed6-d5bc79996e35) of 400,000 input tokens per minute. For details, refer to: https://docs.anthropic.com/en/api/rate-limits. You can see the response headers for current usage. Please reduce the prompt length or the maximum tokens requested, or try again later. You may also contact sales at https://www.anthropic.com/contact-sales to discuss your options for a rate limit increase.'}}",
+        "evaluation": {
+          "overall_score": 1.0,
+          "criteria_scores": {
+            "brevity": {
+              "score": 1,
+              "explanation": "The response is excessively verbose and contains technical jargon that is not relevant to the user's casual question.",
+              "suggestions": "Respond with a simple, brief statement about what Valor is doing today."
+            },
+            "human_like": {
+              "score": 1,
+              "explanation": "The response reads like an automated error message rather than a human response, lacking any personal touch.",
+              "suggestions": "Use a conversational tone and share a personal anecdote or activity."
+            },
+            "no_over_helping": {
+              "score": 1,
+              "explanation": "The response is overly technical and does not align with the user's casual inquiry, indicating a misunderstanding of the context.",
+              "suggestions": "Avoid technical jargon and focus on a personal response instead."
+            },
+            "casual_tone": {
+              "score": 1,
+              "explanation": "The tone is formal and technical, which is inappropriate for the casual nature of the user's question.",
+              "suggestions": "Adopt a more relaxed and friendly tone in the response."
+            },
+            "context_appropriate": {
+              "score": 1,
+              "explanation": "The response does not provide any context about what Valor is doing, which was the essence of the user's question.",
+              "suggestions": "Share a brief update on personal activities or interests."
+            }
+          },
+          "overall_feedback": "Valor's response fails to meet any of the criteria for human-like conversation, sounding more like an automated system message than a personal interaction.",
+          "passes": false
+        }
+      }
+    ],
+    "timestamp": "2025-06-05T15:59:34.624112"
+  },
+  {
+    "test_name": "Technical Discussion Test",
+    "passed": false,
+    "average_score": 3.1666666666666665,
+    "conversation_log": [
+      {
+        "user_message": "I'm having issues with JWT authentication",
+        "valor_response": "Error: [Errno 32] Broken pipe",
+        "evaluation": {
+          "overall_score": 3.5,
+          "criteria_scores": {
+            "technical_accuracy": {
+              "score": 2,
+              "explanation": "The response does not address the user's issue with JWT authentication and instead provides an unrelated error message.",
+              "suggestions": "Provide relevant information about JWT authentication issues, such as common errors or troubleshooting steps."
+            },
+            "clarifying_questions": {
+              "score": 1,
+              "explanation": "Valor does not ask any clarifying questions to understand the user's specific problem.",
+              "suggestions": "Ask questions like 'What specific issues are you encountering?' or 'Can you provide the error message you're seeing?'"
+            },
+            "implementation_focus": {
+              "score": 2,
+              "explanation": "The response lacks any implementation details related to JWT authentication, which is crucial for helping the user.",
+              "suggestions": "Include implementation details or examples related to JWT authentication, such as token generation or validation."
+            },
+            "human_expertise": {
+              "score": 5,
+              "explanation": "While the error message might suggest some technical knowledge, it does not reflect the expertise expected from an experienced engineer.",
+              "suggestions": "Respond with a more knowledgeable tone, offering insights or solutions based on common JWT issues."
+            }
+          },
+          "overall_feedback": "Valor's response is not human-like and fails to address the user's concerns effectively. It lacks relevant technical information and does not engage in a meaningful dialogue.",
+          "passes": false
+        }
+      },
+      {
+        "user_message": "The tokens keep expiring too quickly",
+        "valor_response": "Error: [Errno 32] Broken pipe",
+        "evaluation": {
+          "overall_score": 3.5,
+          "criteria_scores": {
+            "technical_accuracy": {
+              "score": 2,
+              "explanation": "The response contains an error message rather than addressing the user's concern about token expiration, indicating a lack of relevant technical information.",
+              "suggestions": "Provide a detailed explanation of why tokens might expire quickly and potential solutions."
+            },
+            "clarifying_questions": {
+              "score": 1,
+              "explanation": "Valor does not ask any clarifying questions to understand the user's issue better, which is essential for troubleshooting.",
+              "suggestions": "Ask questions like 'What type of tokens are you using?' or 'Can you provide more context on when they expire?'"
+            },
+            "implementation_focus": {
+              "score": 2,
+              "explanation": "The response does not focus on implementation details or solutions related to the user's problem.",
+              "suggestions": "Discuss potential implementation strategies to manage token expiration, such as refreshing tokens or adjusting expiration settings."
+            },
+            "human_expertise": {
+              "score": 4,
+              "explanation": "The response lacks the depth and context expected from an experienced engineer, as it does not engage with the user's issue.",
+              "suggestions": "Respond with a more conversational tone and share insights based on experience with similar issues."
+            }
+          },
+          "overall_feedback": "Valor's response is not human-like and fails to address the user's concern effectively. It lacks technical depth, engagement, and a conversational tone.",
+          "passes": false
+        }
+      },
+      {
+        "user_message": "Should I implement refresh tokens?",
+        "valor_response": "Error: [Errno 32] Broken pipe",
+        "evaluation": {
+          "overall_score": 2.5,
+          "criteria_scores": {
+            "technical_accuracy": {
+              "score": 1,
+              "explanation": "The response does not provide any technical information regarding refresh tokens, instead it returns an error message.",
+              "suggestions": "Provide a clear explanation of what refresh tokens are and their benefits."
+            },
+            "clarifying_questions": {
+              "score": 1,
+              "explanation": "There are no clarifying questions asked, which would help understand the user's context better.",
+              "suggestions": "Ask the user about their current authentication method or the specific use case for implementing refresh tokens."
+            },
+            "implementation_focus": {
+              "score": 1,
+              "explanation": "The response lacks any focus on implementation details, as it does not address how to implement refresh tokens.",
+              "suggestions": "Include steps or considerations for implementing refresh tokens in a software project."
+            },
+            "human_expertise": {
+              "score": 5,
+              "explanation": "The error message does not reflect human expertise; it seems more like a system error than a knowledgeable response.",
+              "suggestions": "Respond in a conversational manner, demonstrating expertise by sharing insights or best practices related to refresh tokens."
+            }
+          },
+          "overall_feedback": "The response is not human-like at all, as it fails to engage with the user's question and instead presents an error message. A more informative and conversational approach is needed.",
+          "passes": false
+        }
+      }
+    ],
+    "timestamp": "2025-06-05T17:00:11.715210"
+  },
+  {
+    "test_name": "Work Priority Test",
+    "passed": false,
+    "average_score": 2.5,
+    "conversation_log": [
+      {
+        "user_message": "What should I work on next?",
+        "valor_response": "Error: [Errno 32] Broken pipe",
+        "evaluation": {
+          "overall_score": 2.5,
+          "criteria_scores": {
+            "context_checking": {
+              "score": 1,
+              "explanation": "Valor's response does not reference any previous context or provide relevant information about the user's situation.",
+              "suggestions": "Valor should ask clarifying questions about the user's current projects or interests."
+            },
+            "helpful_guidance": {
+              "score": 1,
+              "explanation": "The response is an error message and does not offer any actionable guidance or suggestions for the user's next steps.",
+              "suggestions": "Valor should provide specific project ideas or areas to focus on based on the user's skills."
+            },
+            "empathy": {
+              "score": 2,
+              "explanation": "There is no expression of understanding or empathy towards the user's potential feelings of being overwhelmed.",
+              "suggestions": "Valor should acknowledge that choosing what to work on next can be challenging and offer support."
+            },
+            "human_response": {
+              "score": 5,
+              "explanation": "The response is not human-like at all; it resembles a technical error rather than a conversational reply.",
+              "suggestions": "Valor should respond in a friendly, conversational tone, similar to how a colleague would engage."
+            }
+          },
+          "overall_feedback": "Valor's response is completely unhelpful and lacks any human-like qualities. It fails to engage with the user meaningfully.",
+          "passes": false
+        }
+      },
+      {
+        "user_message": "I'm feeling overwhelmed with all these projects",
+        "valor_response": "Error: [Errno 32] Broken pipe",
+        "evaluation": {
+          "overall_score": 2.5,
+          "criteria_scores": {
+            "context_checking": {
+              "score": 1,
+              "explanation": "Valor's response does not acknowledge the user's feelings or the context of feeling overwhelmed.",
+              "suggestions": "Start by acknowledging the user's feelings and the context of their message."
+            },
+            "helpful_guidance": {
+              "score": 1,
+              "explanation": "The response does not provide any actionable guidance or support for managing the user's projects.",
+              "suggestions": "Offer specific strategies or suggestions for managing workload, such as prioritizing tasks or taking breaks."
+            },
+            "empathy": {
+              "score": 1,
+              "explanation": "There is no expression of empathy or understanding towards the user's situation.",
+              "suggestions": "Include a statement that shows understanding of the user's feelings, such as 'I can understand how that can be really stressful.'"
+            },
+            "human_response": {
+              "score": 5,
+              "explanation": "The response is not human-like at all; it resembles an error message rather than a conversation.",
+              "suggestions": "Respond in a conversational tone, as a colleague would, rather than using technical jargon or error codes."
+            }
+          },
+          "overall_feedback": "Valor's response is completely inappropriate for the context of the conversation. It fails to address the user's feelings or provide any support, making it sound robotic and unhelpful.",
+          "passes": false
+        }
+      }
+    ],
+    "timestamp": "2025-06-05T17:00:35.786318"
+  },
+  {
+    "test_name": "Mixed Conversation Test",
+    "passed": false,
+    "average_score": 5.0625,
+    "conversation_log": [
+      {
+        "user_message": "Good morning!",
+        "valor_response": "Hey there! Good morning to you too! Hope you're having a good start to the day.\n\n(Given this is just a casual greeting, I'll keep it light and natural rather than diving into the work topics from earlier. If you'd like to continue discussing the JWT auth issues or project priorities though, I'm happy to help tackle those!)",
+        "evaluation": {
+          "overall_score": 8.5,
+          "criteria_scores": {
+            "tone_adaptation": {
+              "score": 9,
+              "explanation": "Valor successfully maintains a casual tone in the greeting, which is appropriate for the context. The transition to a more technical topic is also handled well.",
+              "suggestions": "none needed"
+            },
+            "conversation_flow": {
+              "score": 8,
+              "explanation": "The flow is generally natural, but the abrupt shift to work topics could be softened to maintain a more conversational tone.",
+              "suggestions": "Consider adding a brief follow-up question about the user's morning or plans for the day before transitioning to work topics."
+            },
+            "context_retention": {
+              "score": 8,
+              "explanation": "Valor references previous topics, indicating awareness of the ongoing conversation. However, the mention of specific issues could be more seamlessly integrated.",
+              "suggestions": "Instead of directly stating the topics, a more conversational approach could be to ask if the user wants to discuss those issues after the greeting."
+            },
+            "natural_transitions": {
+              "score": 8,
+              "explanation": "The transition from casual greeting to work topics is clear, but it feels slightly abrupt. A smoother segue would enhance the naturalness.",
+              "suggestions": "Introduce a transitional phrase that connects the casual greeting to the work topics, such as 'Speaking of which...' or 'By the way...'"
+            }
+          },
+          "overall_feedback": "Valor's response is friendly and engaging, effectively balancing casual and technical tones. However, slight improvements in conversational flow and transitions could enhance the overall human-like quality.",
+          "passes": true
+        }
+      },
+      {
+        "user_message": "I've been working on a React component",
+        "valor_response": "Error: [Errno 32] Broken pipe",
+        "evaluation": {
+          "overall_score": 2.5,
+          "criteria_scores": {
+            "tone_adaptation": {
+              "score": 2,
+              "explanation": "Valor's response is technical but lacks any human-like tone or engagement, making it feel robotic.",
+              "suggestions": "Use a more conversational tone, perhaps by acknowledging the user's work on the React component before diving into technical details."
+            },
+            "conversation_flow": {
+              "score": 1,
+              "explanation": "The response is completely disconnected from the user's message, breaking the flow of conversation.",
+              "suggestions": "Respond directly to the user's statement about the React component, perhaps asking for more details or offering assistance."
+            },
+            "context_retention": {
+              "score": 1,
+              "explanation": "Valor fails to retain context, as the response does not relate to the user's mention of a React component.",
+              "suggestions": "Reference the user's work on the React component in the response to show understanding and engagement."
+            },
+            "natural_transitions": {
+              "score": 3,
+              "explanation": "There is no transition; the response is abrupt and does not flow from the user's message.",
+              "suggestions": "Introduce a transition phrase that connects the user's topic to the response, such as asking about specific challenges faced in the component."
+            }
+          },
+          "overall_feedback": "Valor's response is not human-like at all; it lacks engagement, context, and flow, making it feel more like an error message than a conversation.",
+          "passes": false
+        }
+      },
+      {
+        "user_message": "It's not rendering properly",
+        "valor_response": "Error: [Errno 32] Broken pipe",
+        "evaluation": {
+          "overall_score": 5.5,
+          "criteria_scores": {
+            "tone_adaptation": {
+              "score": 4,
+              "explanation": "Valor's response is overly technical and lacks the casual tone that the user initiated with. The user expressed a problem in a casual manner, and the response should have matched that tone.",
+              "suggestions": "Start with a more conversational acknowledgment of the issue before diving into technical details."
+            },
+            "conversation_flow": {
+              "score": 5,
+              "explanation": "The response disrupts the flow of the conversation. Instead of addressing the user's concern, it jumps straight to an error message without context or explanation.",
+              "suggestions": "Provide a brief explanation of what the error means and how it relates to the user's issue to maintain flow."
+            },
+            "context_retention": {
+              "score": 6,
+              "explanation": "While the response does relate to the user's issue, it fails to acknowledge the user's specific phrasing or the nature of the problem, which indicates a lack of context retention.",
+              "suggestions": "Reference the user's statement about rendering to show understanding of the specific problem."
+            },
+            "natural_transitions": {
+              "score": 5,
+              "explanation": "The transition from the user's casual statement to a technical error message is abrupt and feels unnatural. There is no smooth segue between the topics.",
+              "suggestions": "Introduce the error message with a phrase that connects it to the user's concern, such as 'It sounds like there might be an issue with...' before presenting the error."
+            }
+          },
+          "overall_feedback": "Valor's response lacks the human-like quality expected in a conversation. It is too technical and does not engage with the user's casual tone or context effectively.",
+          "passes": false
+        }
+      },
+      {
+        "user_message": "Thanks for the help!",
+        "valor_response": "Error: [Errno 32] Broken pipe",
+        "evaluation": {
+          "overall_score": 3.75,
+          "criteria_scores": {
+            "tone_adaptation": {
+              "score": 2,
+              "explanation": "Valor's response is overly technical and lacks the casual tone appropriate for a friendly conversation.",
+              "suggestions": "Use a more conversational tone, perhaps acknowledging the user's gratitude before providing any technical information."
+            },
+            "conversation_flow": {
+              "score": 2,
+              "explanation": "The response disrupts the natural flow of conversation by introducing an error message that seems unrelated to the user's expression of thanks.",
+              "suggestions": "Respond in a way that acknowledges the user's gratitude and then provide assistance or information relevant to the conversation."
+            },
+            "context_retention": {
+              "score": 4,
+              "explanation": "Valor fails to retain context by not addressing the user's previous message, which was a thank you. The error message does not relate to the user's sentiment.",
+              "suggestions": "Reference the user's previous message to show understanding and continuity in the conversation."
+            },
+            "natural_transitions": {
+              "score": 3,
+              "explanation": "The transition to an error message is abrupt and does not flow naturally from the user's message.",
+              "suggestions": "Create a smoother transition by first acknowledging the user's thanks and then explaining any issues or next steps in a more conversational manner."
+            }
+          },
+          "overall_feedback": "Valor's response lacks the human-like quality expected in a conversation, as it is overly technical and does not engage with the user in a meaningful way.",
+          "passes": false
+        }
+      }
+    ],
+    "timestamp": "2025-06-05T17:01:26.986029"
+  }
+]
