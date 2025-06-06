@@ -787,25 +787,63 @@ The architecture preserves all existing functionality while adding the missing c
 
 ---
 
-## Updated Summary: Minimal Implementation Ready
+## Updated Summary: Enhanced Promise Architecture Needed
 
-### Current Reality (December 2024)
-- ✅ **Immediate fix is COMPLETE** - Synchronous execution works perfectly for 95% of use cases
+### Current Reality (January 2025)
+- ✅ **Immediate fix is COMPLETE** - Synchronous execution works for simple tasks
 - ✅ **No more empty promises** - Delegation tool executes tasks before responding
-- ✅ **Production-ready** - System is stable and reliable with current architecture
+- ❌ **Limited to sequential execution** - Cannot handle parallel tasks
+- ❌ **No dependency management** - Cannot coordinate complex workflows
+- ❌ **No restart recovery** - Pending tasks lost on system restart
 
-### Minimal Promise Architecture Need
-The full promise architecture is **NOT urgently needed**. The minimal implementation (8 hours) should only be built when:
-1. Users frequently request tasks that take >30 seconds
-2. Telegram timeout issues become a real problem
-3. Progress updates for long tasks become essential
+### Enhanced Promise Architecture Requirements
 
-### Implementation Readiness: YES ✅
-- **Clear requirements** - Minimal architecture well-defined
-- **Low risk** - Non-invasive changes to existing system  
-- **High value** - Solves specific long-task problem
-- **Test coverage** - Comprehensive testing plan included
-- **Quick rollback** - Can revert if issues arise
+The promise system needs significant enhancements to support modern workflows:
 
-### Recommendation
-**Wait for actual need** before implementing. The current synchronous model works well. When long-running tasks become a pain point, the minimal promise architecture can be implemented in a single focused 8-hour sprint with excellent test coverage.
+#### 1. **Parallel Promise Execution**
+- Execute multiple independent tasks simultaneously
+- Example: "Review all Python files for security issues" - each file reviewed in parallel
+- Reduces total execution time dramatically
+- Better resource utilization
+
+#### 2. **Promise Dependencies**
+- Define execution order and dependencies between tasks
+- Example: "Set up environment" → "Write tests" → "Run tests"
+- Ensures correct sequencing of related operations
+- Supports complex multi-step workflows
+
+#### 3. **Resume on Restart**
+- Persist promise state across system restarts
+- Automatically resume interrupted tasks
+- No lost work due to crashes or maintenance
+- Query and re-execute pending promises on startup
+
+### Recommended Approach: Celery Integration
+
+Based on analysis, implementing a **Celery-based task queue** provides:
+- ✅ **Battle-tested reliability** - Used in production by major companies
+- ✅ **All required features** - Parallel execution, dependencies, persistence
+- ✅ **Less code to maintain** - Leverage existing robust solution
+- ✅ **Monitoring included** - Flower dashboard for task visibility
+- ✅ **12-hour implementation** - Faster than building custom system
+
+### Alternative: Enhanced Custom Implementation
+
+If Celery is not desired, enhance the minimal promise system with:
+1. **Task executor pool** - Concurrent promise execution
+2. **Dependency tracking** - Promise chaining and prerequisites  
+3. **Startup recovery** - Database queries for pending promises
+4. **Estimated time: 20-24 hours** - More complex than Celery approach
+
+### Migration Path
+
+1. **Fix missed messages bug** (2 hours) - Critical bug affecting message catchup
+2. **Implement Celery infrastructure** (3 hours) - Set up task queue system
+3. **Enhance promise system** (4 hours) - Add parallel execution and dependencies
+4. **Integration and testing** (3 hours) - Ensure reliability
+
+### Decision: Proceed with Celery ✅
+- **Faster implementation** - 12 hours vs 24 for custom
+- **More reliable** - Proven in production environments
+- **Better features** - Monitoring, retries, routing included
+- **Future-proof** - Easy to scale and extend
