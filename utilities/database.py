@@ -124,11 +124,13 @@ def init_database() -> None:
                     chat_id INTEGER NOT NULL,
                     message_id INTEGER NOT NULL,
                     task_description TEXT NOT NULL,
+                    task_type TEXT DEFAULT 'code',  -- 'code', 'search', 'analysis'
                     status TEXT DEFAULT 'pending',  -- 'pending', 'in_progress', 'completed', 'failed'
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     completed_at TIMESTAMP,
                     result_summary TEXT,
-                    error_message TEXT
+                    error_message TEXT,
+                    metadata TEXT  -- JSON blob for task-specific data
                 );
                 
                 -- Indexes for performance

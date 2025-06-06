@@ -46,7 +46,10 @@ def with_promise_tracking(func):
             logger.error(f"Failed promise {promise_id}: {str(e)}", exc_info=True)
             update_promise_status(promise_id, 'failed', error_message=str(e))
             raise  # Re-raise for Huey retry mechanism
-            
+    
+    # Preserve the original function's name for Huey
+    wrapper.__name__ = func.__name__
+    wrapper.__doc__ = func.__doc__
     return wrapper
 
 

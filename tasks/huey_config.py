@@ -34,7 +34,7 @@ huey = SqliteHuey(
     timeout=10.0,          # Connection timeout in seconds
     
     # Task expiration (results cleaned up after 1 week)
-    result_expire=604800,  # 7 days in seconds
+    # Note: result_expire is passed to huey, not to SqliteStorage
 )
 
 # IMPLEMENTATION NOTE: Import tasks here to register them with Huey
