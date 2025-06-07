@@ -97,11 +97,17 @@ class OllamaIntentClassifier:
             MessageIntent.UNCLEAR: "🤨",
         }
 
-        # Import valid emojis at initialization
-        from .telegram.emoji_mapping import VALID_TELEGRAM_REACTIONS
+        # Import valid emojis and descriptions at initialization
+        from .telegram.emoji_mapping import VALID_TELEGRAM_REACTIONS, EMOJI_DESCRIPTIONS
         
-        # Create a formatted list of valid emojis for the prompt
-        valid_emoji_list = ', '.join(sorted(VALID_TELEGRAM_REACTIONS))
+        # Create a formatted list of valid emojis with descriptions for the prompt
+        emoji_entries = []
+        for emoji in sorted(VALID_TELEGRAM_REACTIONS):
+            if emoji in EMOJI_DESCRIPTIONS:
+                emoji_entries.append(f"{emoji} - {EMOJI_DESCRIPTIONS[emoji]}")
+            else:
+                emoji_entries.append(emoji)
+        valid_emoji_list = '\n'.join(emoji_entries)
         
         # System prompt for intent classification
         self.system_prompt = f"""You are an expert message intent classifier. Analyze the user's message and classify it into one of these specific intents:
@@ -123,10 +129,11 @@ Respond with a JSON object containing:
 - reasoning: brief explanation of classification
 - emoji: single emoji from the list below that best represents this message's intent and mood
 
-IMPORTANT: You MUST choose your emoji from ONLY these valid Telegram reaction emojis:
+IMPORTANT: You MUST choose your emoji from ONLY these valid Telegram reaction emojis. Each emoji has a specific meaning:
+
 {valid_emoji_list}
 
-Choose the emoji that best captures the specific mood, topic, or action of the message from the list above. If unsure, use 🤔.
+Choose the emoji that best matches the message's mood, topic, or action based on the descriptions above. If unsure, use 🤔 (thinking).
 
 Be decisive and pick the most likely intent even if uncertain."""
 

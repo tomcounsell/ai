@@ -1,153 +1,224 @@
-#!/usr/bin/env python
 """
-End-to-end test for the promise architecture.
+End-to-end tests for the promise queue system.
 
-This test simulates a real scenario where:
-1. A user sends a message requesting a long-running task
-2. The system creates a promise and returns immediately
-3. The task executes in the background
-4. A completion message is sent when done
+These tests verify the complete flow from Telegram message handling
+through promise creation, task execution, and completion notification.
 """
-
+import pytest
 import asyncio
+import json
 import time
 from datetime import datetime
-from unittest.mock import Mock, patch, AsyncMock
+from unittest.mock import Mock, patch, AsyncMock, MagicMock
 
-# Import the components we need
-from integrations.telegram.handlers import MessageHandler
-from utilities.database import (
-    init_database, create_promise, get_promise, 
-    update_promise_status, get_pending_promises
-)
-from tools.valor_delegation_tool import execute_valor_delegation, spawn_valor_session, estimate_task_duration
+from utilities.database import init_database, get_database_connection, get_promise
+from utilities.promise_manager_huey import HueyPromiseManager
+from integrations.telegram.handlers import TelegramHandler
+from tasks.huey_config import huey
 
 
-async def test_promise_e2e():
-    """Run end-to-end test of promise architecture."""
-    print("\n🧪 PROMISE ARCHITECTURE END-TO-END TEST")
-    print("=" * 50)
+class TestPromiseE2E:
+    """End-to-end tests for promise queue functionality."""
     
-    # 1. Initialize database
-    print("\n1️⃣ Initializing database...")
-    init_database()
-    print("   ✅ Database initialized")
-    
-    # 2. Create mock Telegram components
-    print("\n2️⃣ Setting up mock Telegram environment...")
-    mock_client = AsyncMock()
-    mock_message = Mock()
-    mock_message.id = 12345
-    mock_message.text = "Can you create comprehensive documentation for the promise architecture?"
-    mock_message.from_user = Mock()
-    mock_message.from_user.id = 67890
-    mock_message.from_user.username = "testuser"
-    mock_message.date = Mock()
-    mock_message.date.timestamp = Mock(return_value=time.time())
-    
-    # Mock chat history
-    mock_chat_history = Mock()
-    mock_chat_history.get_recent_messages = Mock(return_value=[])
-    mock_chat_history.add_message = Mock()
-    
-    # 3. Create message handler
-    print("   ✅ Mock environment ready")
-    print("\n3️⃣ Creating message handler...")
-    handler = MessageHandler(mock_client, mock_chat_history)
-    print("   ✅ Message handler created")
-    
-    # 4. Test task duration estimation
-    print("\n4️⃣ Testing task duration estimation...")
-    duration = estimate_task_duration("create comprehensive documentation")
-    print(f"   📊 Estimated duration: {duration} seconds")
-    print(f"   {'🔄 Will use async promise' if duration > 30 else '⚡ Will use sync execution'}")
-    
-    # 5. Simulate delegation tool response
-    print("\n5️⃣ Testing delegation tool...")
-    with patch('tools.valor_delegation_tool.spawn_valor_session') as mock_spawn:
-        # Make it return async promise marker
-        mock_spawn.return_value = "✅ Created comprehensive documentation with 5 sections and code examples"
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        """Set up test environment."""
+        # Initialize database
+        init_database()
         
-        # Test the delegation
-        response = execute_valor_delegation(
-            Mock(deps=Mock(chat_id=123)),
-            "create comprehensive documentation",
-            ".",
-            ""
+        # Enable immediate mode for testing
+        huey.immediate = True
+        
+        yield
+        
+        # Cleanup
+        huey.immediate = False
+        with get_database_connection() as conn:
+            conn.execute("DELETE FROM promises")
+            conn.execute("DELETE FROM message_queue")
+            conn.commit()
+    
+    @pytest.mark.asyncio
+    async def test_async_promise_detection_and_execution(self):
+        """Test that ASYNC_PROMISE markers trigger background execution."""
+        # Mock the valor agent to return an ASYNC_PROMISE response
+        mock_agent_response = Mock()
+        mock_agent_response.data = "ASYNC_PROMISE|I'll analyze your code in the background"
+        
+        with patch('agents.valor.agent.valor_agent.run') as mock_agent:
+            mock_agent.return_value = mock_agent_response
+            
+            # Mock the delegation tool to complete the task
+            with patch('tools.valor_delegation_tool.spawn_valor_session') as mock_spawn:
+                mock_spawn.return_value = "Code analysis complete: 5 issues found"
+                
+                # Create mock message and handler
+                handler = TelegramHandler()
+                mock_message = Mock()
+                mock_message.id = 12345
+                mock_message.text = "Analyze the authentication code"
+                mock_message.from_user = Mock(username="testuser")
+                mock_message.chat = Mock(id=67890, type="private")
+                
+                # Mock Telegram client for sending completion notification
+                mock_client = Mock()
+                mock_send_message = AsyncMock()
+                mock_client.send_message = mock_send_message
+                
+                # Process message (this should create a promise)
+                with patch('integrations.telegram.client.get_telegram_client') as mock_get_client:
+                    mock_get_client.return_value = Mock(client=mock_client)
+                    
+                    # Process the message
+                    await handler._process_message_text(mock_message, 67890, "Analyze the authentication code")
+                
+                # Verify promise was created
+                with get_database_connection() as conn:
+                    cursor = conn.cursor()
+                    promise = cursor.execute(
+                        "SELECT * FROM promises WHERE chat_id = ?",
+                        (67890,)
+                    ).fetchone()
+                
+                assert promise is not None
+                assert promise[3] == "I'll analyze your code in the background"  # task_description
+                assert promise[5] == "completed"  # status (immediate mode)
+                
+                # In immediate mode, the task executes synchronously
+                # Verify the delegation tool was called
+                mock_spawn.assert_called_once()
+    
+    @pytest.mark.asyncio
+    async def test_search_promise_execution(self):
+        """Test search task execution through promises."""
+        manager = HueyPromiseManager()
+        
+        # Mock search tool
+        with patch('tools.search_tool.search_web') as mock_search:
+            mock_search.return_value = "🔍 **Python tutorials**\n\nFound 3 excellent tutorials..."
+            
+            # Create search promise
+            promise_id = manager.create_promise(
+                chat_id=12345,
+                message_id=67890,
+                task_description="Find Python async/await tutorials",
+                task_type="search",
+                metadata={'query': 'Python async await tutorials'}
+            )
+            
+            # In immediate mode, task executes synchronously
+            time.sleep(0.1)
+            
+            # Check promise completed
+            promise = get_promise(promise_id)
+            assert promise['status'] == 'completed'
+            assert 'Found 3 excellent tutorials' in promise['result_summary']
+            
+            # Verify search was called with correct query
+            mock_search.assert_called_with('Python async await tutorials', max_results=3)
+    
+    @pytest.mark.asyncio
+    async def test_missed_message_queue_processing(self):
+        """Test that missed messages are queued and processed."""
+        from utilities.database import queue_missed_message, get_pending_messages
+        from tasks.telegram_tasks import process_missed_message
+        
+        # Queue a missed message
+        message_id = queue_missed_message(
+            chat_id=12345,
+            message_text="What's the project status?",
+            sender_username="testuser",
+            original_timestamp=datetime.utcnow().isoformat(),
+            metadata={'is_group_chat': False}
         )
-        print(f"   📝 Response: {response[:100]}...")
-        print(f"   {'✅ Contains ASYNC_PROMISE marker' if 'ASYNC_PROMISE|' in response else '❌ Missing ASYNC_PROMISE marker'}")
+        
+        # Verify it's queued
+        pending = get_pending_messages()
+        assert len(pending) == 1
+        assert pending[0]['message_text'] == "What's the project status?"
+        
+        # Mock agent response
+        mock_response = Mock()
+        mock_response.data = "Here's the current project status..."
+        
+        with patch('agents.valor.agent.valor_agent.run') as mock_agent:
+            mock_agent.return_value = mock_response
+            
+            # Mock Telegram client
+            mock_client = Mock()
+            mock_send = AsyncMock()
+            mock_client.send_message = mock_send
+            
+            with patch('integrations.telegram.client.get_telegram_client') as mock_get_client:
+                mock_get_client.return_value = Mock(client=mock_client)
+                
+                # Process the missed message
+                process_missed_message(message_id)
+                
+                # Verify message was processed
+                with get_database_connection() as conn:
+                    cursor = conn.cursor()
+                    processed = cursor.execute(
+                        "SELECT status FROM message_queue WHERE id = ?",
+                        (message_id,)
+                    ).fetchone()
+                
+                assert processed[0] == 'completed'
     
-    # 6. Test promise creation from response
-    print("\n6️⃣ Testing promise creation...")
-    chat_id = 123
+    @pytest.mark.asyncio
+    async def test_promise_cancellation(self):
+        """Test that promises can be cancelled before execution."""
+        manager = HueyPromiseManager()
+        
+        # Disable immediate mode to prevent execution
+        huey.immediate = False
+        
+        try:
+            # Create a promise
+            promise_id = manager.create_promise(
+                chat_id=12345,
+                message_id=67890,
+                task_description="Long running task",
+                task_type="code"
+            )
+            
+            # Cancel it immediately
+            success = manager.cancel_promise(promise_id)
+            assert success is True
+            
+            # Verify status
+            promise = get_promise(promise_id)
+            assert promise['status'] == 'cancelled'
+            assert 'Cancelled by user' in promise['error_message']
+            
+        finally:
+            huey.immediate = True
     
-    # Check if we should create a promise
-    if "ASYNC_PROMISE|" in response:
-        parts = response.split("ASYNC_PROMISE|", 1)
-        promise_message = parts[1].strip() if len(parts) > 1 else "Working on task"
+    @pytest.mark.asyncio
+    async def test_task_failure_handling(self):
+        """Test that task failures are properly handled."""
+        manager = HueyPromiseManager()
         
-        # Create promise
-        promise_id = create_promise(chat_id, mock_message.id, promise_message)
-        print(f"   ✅ Created promise ID: {promise_id}")
-        
-        # Verify promise
-        promise = get_promise(promise_id)
-        print(f"   📊 Promise status: {promise['status']}")
-        print(f"   📝 Task description: {promise['task_description'][:50]}...")
-    
-    # 7. Simulate background execution
-    print("\n7️⃣ Simulating background execution...")
-    if promise_id:
-        # Update to in_progress
-        update_promise_status(promise_id, "in_progress")
-        print("   ⏳ Status updated to: in_progress")
-        
-        # Simulate task completion
-        await asyncio.sleep(0.5)  # Short delay to simulate work
-        
-        # Update to completed
-        result = "Created comprehensive documentation with:\n- Architecture overview\n- Implementation guide\n- Testing strategy\n- Examples"
-        update_promise_status(promise_id, "completed", result_summary=result)
-        print("   ✅ Status updated to: completed")
-        
-        # Verify final state
-        final_promise = get_promise(promise_id)
-        print(f"   📊 Final status: {final_promise['status']}")
-        print(f"   📝 Result: {final_promise['result_summary'][:50]}...")
-    
-    # 8. Test completion message
-    print("\n8️⃣ Testing completion message...")
-    if final_promise['status'] == 'completed':
-        completion_msg = f"""✅ **Task Complete!**
+        # Mock a failing task
+        with patch('tools.valor_delegation_tool.spawn_valor_session') as mock_spawn:
+            mock_spawn.side_effect = Exception("Network error: Unable to reach API")
+            
+            # Create promise
+            promise_id = manager.create_promise(
+                chat_id=12345,
+                message_id=67890,
+                task_description="Deploy to production",
+                task_type="code"
+            )
+            
+            # In immediate mode, failure happens synchronously
+            time.sleep(0.1)
+            
+            # Check promise failed
+            promise = get_promise(promise_id)
+            assert promise['status'] == 'failed'
+            assert 'Network error' in promise['error_message']
 
-I finished working on: {final_promise['task_description']}
 
-**Result:**
-{final_promise['result_summary']}
-
-_Task completed successfully!_"""
-        
-        print("   📨 Completion message:")
-        print("   " + "\n   ".join(completion_msg.split("\n")))
-    
-    # 9. Summary
-    print("\n" + "=" * 50)
-    print("✅ END-TO-END TEST COMPLETE!")
-    print("\nSummary:")
-    print(f"  • Task duration: {duration}s ({'async' if duration > 30 else 'sync'})")
-    print(f"  • Promise created: {'Yes' if promise_id else 'No'}")
-    print(f"  • Background execution: {'Success' if final_promise['status'] == 'completed' else 'Failed'}")
-    print(f"  • System ready: Yes")
-    
-    # Check for any pending promises
-    pending = get_pending_promises()
-    print(f"\n📊 Pending promises in system: {len(pending)}")
-    if pending:
-        for p in pending:
-            print(f"   - Promise {p['id']}: {p['task_description'][:50]}...")
-
-
-if __name__ == "__main__":
-    # Run the test
-    asyncio.run(test_promise_e2e())
+if __name__ == '__main__':
+    pytest.main([__file__, '-v'])

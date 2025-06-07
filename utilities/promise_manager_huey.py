@@ -19,6 +19,68 @@ from .database import get_database_connection, create_promise as db_create_promi
 logger = logging.getLogger(__name__)
 
 
+def _resolve_workspace_context(chat_id: int) -> Dict[str, Any]:
+    """
+    Resolve workspace context from chat_id using workspace configuration.
+    
+    Args:
+        chat_id: Telegram chat ID
+        
+    Returns:
+        Dictionary containing workspace information:
+        - working_directory: Path to project directory
+        - workspace_type: Type of workspace (yudame, psyoptimal, etc.)
+        - database_id: Notion database ID if available
+        - workspace_name: Human-readable workspace name
+    """
+    # Default workspace context (Yudame AI)
+    default_context = {
+        'working_directory': '/Users/valorengels/src/ai',
+        'workspace_type': 'yudame',
+        'database_id': None,
+        'workspace_name': 'Yudame'
+    }
+    
+    try:
+        import json
+        import os
+        
+        # Load workspace configuration
+        config_path = os.path.join(os.path.dirname(__file__), '..', 'config', 'workspace_config.json')
+        if not os.path.exists(config_path):
+            logger.warning(f"Workspace config not found at {config_path}, using default")
+            return default_context
+            
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Look up chat_id in telegram_groups mapping
+        chat_id_str = str(chat_id)
+        workspace_name = config.get('telegram_groups', {}).get(chat_id_str)
+        
+        if not workspace_name:
+            # Check if it's a DM (use default for DMs)
+            logger.info(f"Chat {chat_id} not found in workspace mapping, using default workspace")
+            return default_context
+        
+        # Get workspace details
+        workspace = config.get('workspaces', {}).get(workspace_name)
+        if not workspace:
+            logger.warning(f"Workspace '{workspace_name}' not found in config, using default")
+            return default_context
+        
+        return {
+            'working_directory': workspace.get('working_directory', default_context['working_directory']),
+            'workspace_type': workspace.get('workspace_type', default_context['workspace_type']),
+            'database_id': workspace.get('database_id'),
+            'workspace_name': workspace_name
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to resolve workspace context for chat {chat_id}: {e}")
+        return default_context
+
+
 class HueyPromiseManager:
     """
     Manages promise lifecycle with Huey task queue.
@@ -69,8 +131,22 @@ class HueyPromiseManager:
         if task_type not in ['code', 'search', 'analysis']:
             raise ValueError(f"Invalid task type: {task_type}")
         
+        # Resolve workspace context for this chat
+        workspace_context = _resolve_workspace_context(chat_id)
+        
         # Determine initial status
         status = 'waiting' if dependencies else 'pending'
+        
+        # Enhance metadata with workspace context
+        enhanced_metadata = metadata.copy() if metadata else {}
+        enhanced_metadata.update({
+            'workspace_context': workspace_context,
+            'dependencies': dependencies or [],
+            'task_type': task_type,
+            'priority': priority,
+            'username': username,
+            'user_id': user_id
+        })
         
         # Create promise in database
         with get_database_connection() as conn:
@@ -80,14 +156,13 @@ class HueyPromiseManager:
             # For now, use the basic create_promise function
             promise_id = db_create_promise(chat_id, message_id, task_description)
             
-            # Update with additional fields if needed
-            if metadata or dependencies:
-                cursor.execute("""
-                    UPDATE promises 
-                    SET status = ?
-                    WHERE id = ?
-                """, (status, promise_id))
-                conn.commit()
+            # Update with enhanced metadata and status
+            cursor.execute("""
+                UPDATE promises 
+                SET status = ?, metadata = ?
+                WHERE id = ?
+            """, (status, json.dumps(enhanced_metadata), promise_id))
+            conn.commit()
         
         self.logger.info(
             f"Created promise {promise_id}: {task_type} - "

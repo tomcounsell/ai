@@ -43,6 +43,28 @@ load_dotenv()
 # Initialize MCP server
 mcp = FastMCP("Social Tools")
 
+# Default emoji mappings for each MCP tool
+# Using only valid Telegram reaction emojis from our validated set of 72
+MCP_TOOL_EMOJIS = {
+    "search_current_info": "🗿",      # moai - stone face, based, solid info
+    "create_image": "🎉",             # party popper - let's gooo, celebration mode
+    "analyze_shared_image": "🤩",     # star eyes - shook, amazing, mind blown, obsessed
+    "save_link": "🍾",               # champagne - we poppin bottles, saved successfully
+    "search_links": "🔥",            # fire - that's fire, lit search results
+    "transcribe_voice_message": "✍", # writing hand - taking notes, documenting
+    "technical_analysis": "🤓",      # nerd - big brain time, technical deep dive
+    "manage_claude_code_sessions": "👨‍💻", # technologist - coding time, tech management
+    "show_workspace_prime_content": "💯"  # 100 - facts, complete info, real talk
+}
+
+# Reserved status emojis for system-wide use
+# These should be used consistently across all tools for status indicators
+STATUS_EMOJIS = {
+    "done": "🫡",      # saluting - yes chief, copy that, respect, task completed
+    "error": "🥴",     # woozy - drunk thoughts, confused, lost the plot, error state
+    "read_receipt": "👀"  # eyes - I see you, watching this, acknowledged/seen
+}
+
 @mcp.tool()
 def search_current_info(query: str, max_results: int = 3) -> str:
     """Search the web and return AI-synthesized answers using Perplexity.

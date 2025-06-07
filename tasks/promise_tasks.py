@@ -77,14 +77,21 @@ def execute_coding_task(promise_id: int) -> str:
     
     # Parse task metadata
     metadata = json.loads(promise.get('metadata') or '{}')
+    workspace_context = metadata.get('workspace_context', {})
+    
+    # Get working directory from workspace context
+    working_directory = workspace_context.get('working_directory', '.')
+    workspace_name = workspace_context.get('workspace_name', 'Unknown')
+    
+    logger.info(f"Executing coding task in workspace: {workspace_name} ({working_directory})")
     
     # IMPLEMENTATION NOTE: Import here to avoid circular imports
     from tools.valor_delegation_tool import spawn_valor_session
     
-    # Execute with Claude Code
+    # Execute with Claude Code in the correct workspace
     result = spawn_valor_session(
         task_description=promise['task_description'],
-        target_directory=metadata.get('target_directory', '.'),
+        target_directory=working_directory,
         specific_instructions=metadata.get('instructions', ''),
         force_sync=True  # Force synchronous execution since we're already in background
     )
@@ -109,6 +116,10 @@ def execute_search_task(promise_id: int) -> str:
     
     # Parse task metadata
     metadata = json.loads(promise.get('metadata') or '{}')
+    workspace_context = metadata.get('workspace_context', {})
+    workspace_name = workspace_context.get('workspace_name', 'Unknown')
+    
+    logger.info(f"Executing search task for workspace: {workspace_name}")
     
     # Import search tool
     from tools.search_tool import search_web
@@ -140,7 +151,11 @@ def execute_analysis_task(promise_id: int) -> str:
     
     # Parse task metadata
     metadata = json.loads(promise.get('metadata') or '{}')
+    workspace_context = metadata.get('workspace_context', {})
+    workspace_name = workspace_context.get('workspace_name', 'Unknown')
     analysis_type = metadata.get('analysis_type', 'general')
+    
+    logger.info(f"Executing {analysis_type} analysis task for workspace: {workspace_name}")
     
     result = None
     
@@ -353,10 +368,11 @@ def execute_promise_by_type(promise_id: int):
     else:
         task_func = task_map.get(promise['task_type'])
     if task_func:
-        logger.info(f"Routing promise {promise_id} to {task_func.__name__}")
+        task_name = getattr(task_func, '__name__', str(task_func))
+        logger.info(f"Routing promise {promise_id} to {task_name}")
         # Schedule the task instead of calling directly with delay=0 for immediate execution
         result = task_func.schedule(args=(promise_id,), delay=0)
-        logger.info(f"Scheduled task {task_func.__name__} for promise {promise_id}, Huey task ID: {getattr(result, 'id', 'unknown')}")
+        logger.info(f"Scheduled task {task_name} for promise {promise_id}, Huey task ID: {getattr(result, 'id', 'unknown')}")
     else:
         logger.error(f"Unknown task type: {promise['task_type']}")
         update_promise_status(promise_id, 'failed', error_message=f"Unknown task type: {promise['task_type']}")
