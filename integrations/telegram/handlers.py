@@ -212,7 +212,18 @@ class MessageHandler:
         )
         print(f"   Content preview: {message_preview}")
 
-        # === STEP 2: ACCESS CONTROL VALIDATION ===
+        # === STEP 2: SELF-MESSAGE FILTER ===
+        print(f"🤖 Checking if message is from bot itself...")
+        me = await client.get_me()
+        bot_id = me.id
+        
+        if user_id and user_id == bot_id:
+            print(f"🔄 IGNORING SELF-MESSAGE: Bot {bot_id} sent message to itself, skipping processing")
+            return
+
+        print(f"✅ Message is from external user {user_id}, proceeding with processing")
+
+        # === STEP 3: ACCESS CONTROL VALIDATION ===
         print(f"🔒 Checking access permissions for {chat_type} {chat_id}...")
         if not self._should_handle_chat(chat_id, is_private_chat, username):
             # Track denied access for aggregated logging
@@ -221,7 +232,7 @@ class MessageHandler:
 
         print(f"✅ Access granted for {chat_type} {chat_id} ({username_display})")
 
-        # === STEP 3: MESSAGE ACKNOWLEDGMENT ===
+        # === STEP 4: MESSAGE ACKNOWLEDGMENT ===
         print(f"📖 Marking message {message_id} as read...")
         try:
             await client.read_chat_history(chat_id, message.id)
@@ -229,17 +240,35 @@ class MessageHandler:
         except Exception as e:
             print(f"⚠️  Could not mark message as read: {e}")
 
-        # === STEP 4: INITIAL REACTION (USER FEEDBACK) ===
-        print(f"👀 Adding 'received' reaction to message {message_id}...")
-        from .reaction_manager import add_message_received_reaction
+        # === STEP 5: EARLY RESPONSE DECISION (to avoid unnecessary reactions) ===
+        print("🎯 Early response decision check...")
+        from ..notion.utils import is_dev_group
+        
+        is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+        
+        # Check if we would respond to this message at all
+        is_mentioned, _ = self._process_mentions(message, me.username, bot_id, is_private_chat)
+        should_respond = is_private_chat or is_mentioned or is_dev_group_chat
+        
+        print(f"   Private chat: {is_private_chat}")
+        print(f"   Mentioned: {is_mentioned}")
+        print(f"   Dev group: {is_dev_group_chat}")
+        print(f"   Will respond: {should_respond}")
 
-        try:
-            await add_message_received_reaction(client, chat_id, message.id)
-            print("✅ Received reaction added")
-        except Exception as e:
-            print(f"⚠️  Could not add received reaction: {e}")
+        # === STEP 6: INITIAL REACTION (USER FEEDBACK) - Only if we'll respond ===
+        if should_respond:
+            print(f"👀 Adding 'received' reaction to message {message_id}...")
+            from .reaction_manager import add_message_received_reaction
 
-        # === STEP 5: MESSAGE TYPE DETECTION AND ROUTING ===
+            try:
+                await add_message_received_reaction(client, chat_id, message.id)
+                print("✅ Received reaction added")
+            except Exception as e:
+                print(f"⚠️  Could not add received reaction: {e}")
+        else:
+            print("⚪ Skipping received reaction (won't respond to this message)")
+
+        # === STEP 7: MESSAGE TYPE DETECTION AND ROUTING ===
         print(f"🔍 Detecting message type for {message_id}...")
 
         if message.photo:
@@ -265,11 +294,11 @@ class MessageHandler:
             print(f"   Message type: {type(message).__name__}")
             return
 
-        # === STEP 6: TEXT MESSAGE PROCESSING ===
+        # === STEP 8: TEXT MESSAGE PROCESSING ===
         print("💬 TEXT MESSAGE detected - proceeding with text processing pipeline")
         print(f"   Message length: {len(message.text)} characters")
 
-        # === STEP 7: MESSAGE AGE VALIDATION ===
+        # === STEP 9: MESSAGE AGE VALIDATION ===
         message_timestamp = message.date.timestamp()
         print(f"⏰ Checking message age (timestamp: {message_timestamp})...")
 
@@ -305,26 +334,24 @@ class MessageHandler:
 
         print("✅ Message is recent - proceeding with real-time processing")
 
-        # === STEP 8: BOT METADATA RETRIEVAL ===
-        print("🤖 Retrieving bot information...")
-        me = await client.get_me()
+        # === STEP 10: BOT METADATA RETRIEVAL ===
+        print("🤖 Using bot information from self-message filter...")
         bot_username = me.username
-        bot_id = me.id
         print(f"   Bot username: @{bot_username}")
         print(f"   Bot ID: {bot_id}")
 
-        # === STEP 9: CHAT HISTORY CONTEXT CHECK ===
+        # === STEP 11: CHAT HISTORY CONTEXT CHECK ===
         current_history_count = len(self.chat_history.chat_histories.get(chat_id, []))
         print(f"📚 Current chat history length for {chat_id}: {current_history_count} messages")
 
         print(f"🔄 Processing message from {chat_type} {chat_id}: '{message.text[:50]}...'")
 
-        # === STEP 10: EXTRACT REPLY CONTEXT EARLY (needed for missed messages) ===
+        # === STEP 12: EXTRACT REPLY CONTEXT EARLY (needed for missed messages) ===
         reply_to_telegram_message_id = None
         if hasattr(message, "reply_to_message") and message.reply_to_message:
             reply_to_telegram_message_id = getattr(message.reply_to_message, "id", None)
 
-        # === STEP 11: MISSED MESSAGES PROCESSING ===
+        # === STEP 13: MISSED MESSAGES PROCESSING ===
         if chat_id in self.missed_messages_per_chat and self.missed_messages_per_chat[chat_id]:
             missed_count = len(self.missed_messages_per_chat[chat_id])
             print(f"📬 Found {missed_count} missed messages for chat {chat_id} - processing batch")
@@ -332,7 +359,7 @@ class MessageHandler:
                 client, chat_id, message, message.text, reply_to_telegram_message_id
             )
 
-        # === STEP 12: MENTION DETECTION AND TEXT PROCESSING ===
+        # === STEP 14: MENTION DETECTION AND TEXT PROCESSING ===
         print("🏷️  Processing mentions and cleaning message text...")
         try:
             is_mentioned, processed_text = self._process_mentions(
@@ -355,19 +382,20 @@ class MessageHandler:
         else:
             print("📝 Message is not a reply")
 
-        # === STEP 13: SPECIAL GROUP HANDLING ===
-        from ..notion.utils import is_dev_group
-
-        is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
-        print(f"🛠️  Is dev group: {is_dev_group_chat}")
-
-        # === STEP 14: RESPONSE DECISION LOGIC ===
-        should_respond = is_private_chat or is_mentioned or is_dev_group_chat
-        print("🎯 Response decision:")
+        # === STEP 15: FINAL RESPONSE DECISION LOGIC ===
+        # Note: We already computed should_respond earlier, but check consistency
+        final_should_respond = is_private_chat or is_mentioned or is_dev_group_chat
+        
+        if final_should_respond != should_respond:
+            print(f"⚠️  Response decision changed: was {should_respond}, now {final_should_respond}")
+        
+        print("🎯 Final response decision:")
         print(f"   Private chat: {is_private_chat}")
         print(f"   Mentioned: {is_mentioned}")
         print(f"   Dev group: {is_dev_group_chat}")
-        print(f"   Will respond: {should_respond}")
+        print(f"   Will respond: {final_should_respond}")
+
+        should_respond = final_should_respond
 
         if not should_respond:
             print("💾 Storing message for context but not responding")
@@ -381,7 +409,7 @@ class MessageHandler:
             )
             return
 
-        # === STEP 15: CHAT HISTORY STORAGE ===
+        # === STEP 16: CHAT HISTORY STORAGE ===
         print("💾 Storing user message in chat history...")
         self.chat_history.add_message(
             chat_id,
@@ -394,14 +422,14 @@ class MessageHandler:
         new_history_count = len(self.chat_history.chat_histories.get(chat_id, []))
         print(f"   Chat history updated: {current_history_count} → {new_history_count} messages")
 
-        # === STEP 16: SPECIAL MESSAGE TYPE DETECTION ===
+        # === STEP 17: SPECIAL MESSAGE TYPE DETECTION ===
         print("🔍 Checking for special message types...")
         if is_url_only_message(processed_text):
             print("🔗 LINK-ONLY MESSAGE detected - routing to link handler")
             await self._handle_link_message(message, chat_id, processed_text)
             return
 
-        # === STEP 17: INTENT CLASSIFICATION AND AGENT ROUTING ===
+        # === STEP 18: INTENT CLASSIFICATION AND AGENT ROUTING ===
         print("🧠 Starting intent classification and agent routing...")
         await self._route_message_with_intent(
             client, message, chat_id, processed_text, reply_to_telegram_message_id
