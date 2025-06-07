@@ -321,6 +321,17 @@ Groups are configured in `config/workspace_config.json` with `is_dev_group` flag
 | **Dev groups** (`is_dev_group: true`) | All messages | ✅ Always responds |
 | **Regular groups** | @mentions only | ✅ Only when mentioned |
 
+### Asynchronous Task Handling
+
+Long-running tasks are automatically detected and processed in the background:
+
+1. **Detection**: Tools returning `ASYNC_PROMISE|` markers trigger background execution
+2. **Promise Creation**: Task details stored in database with unique ID
+3. **Background Processing**: Huey consumer executes task asynchronously
+4. **Completion Notification**: User receives formatted results when task completes
+
+See [Promise Queue Documentation](promise-queue.md) for detailed implementation.
+
 ### Dev Group Detection Utility
 
 ```python

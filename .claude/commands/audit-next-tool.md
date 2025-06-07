@@ -1,199 +1,155 @@
-# Audit Next Tool
+# Tool Audit System
 
-Automatically picks up the next tool from the audit TODO list in `docs/plan/TODO.md`, performs a comprehensive audit according to `docs/plan/tool_auditing.md`, and then implements the resulting recommendations.
+Comprehensive tool audit system for validating and maintaining code quality across the tool ecosystem. All current tools have been audited, but this system remains ready for new tool additions.
 
-## Command Overview
+## Current Status
 
-This command will:
+**All Audits Complete**: ✅ 12/12 standalone tools audited and approved  
+**System Health**: ✅ Production-ready and maintainable  
+**Architecture**: ✅ GOLD STANDARD patterns throughout  
 
-1. **Identify Next Tool**: Read `docs/plan/TODO.md` and find the first tool marked with 🔴 (Not Started)
-2. **Perform Comprehensive Audit**: Follow the 4-phase audit process from `docs/plan/tool_auditing.md`
-3. **Generate Deliverables**: Create audit report and recommendations TODO list
-4. **Implement Improvements**: Work through the recommendations systematically
-5. **Update Status**: Mark tool as ✅ Approved in the TODO list
+**Audit Registry**: See `docs/plan/AUDITS.md` for complete audit history and results
 
-## Execution Steps
+## Command Purpose
 
-### Phase 1: Tool Selection and Setup (5-10 minutes)
+This command provides systematic audit capabilities for:
 
-1. **Use TodoWrite tool** to create audit tracking tasks
-2. **Read** `docs/plan/TODO.md` to identify the next tool marked with 🔴
-3. **Create audit workspace**: `mkdir -p docs/audits/` (if not exists)
-4. **Update TODO status** to 🟡 In Progress in TODO.md
-5. **Identify tool files**: Locate both agent tool (if applicable) and implementation files
-6. **Check git history**: Look for recent commits related to the tool (especially for "recently fixed" tools)
+1. **New Tool Validation**: When new tools are added to the system
+2. **Periodic Re-audits**: Quality validation for existing tools after major changes
+3. **Architecture Compliance**: Ensuring new tools follow established patterns
+4. **Quality Maintenance**: Ongoing validation of system health
 
-### Phase 2: Comprehensive Audit (60-90 minutes)
+## Audit Process Overview
 
-Follow the structured audit process from `docs/plan/tool_auditing.md`:
+When auditing new or modified tools, follow the 4-phase process:
 
-#### 2.1 Design Review (15-20 minutes)
-- **Read tool source code** - Both agent wrapper and implementation
-- **Analyze architecture** - Separation of concerns, single responsibility  
-- **Validate interface design** - Parameters, return types, context usage
-- **Check dependencies** - External services, imports, coupling
-- **Review recent changes** - Git commits, architectural decisions
+### Phase 1: Analysis and Assessment
+- **Tool Identification**: Locate tool files and related components
+- **Architecture Review**: Validate separation of concerns and design patterns
+- **Duplication Check**: Ensure no unnecessary code duplication
+- **Git History**: Review recent changes and context
 
-#### 2.2 Implementation Review (20-30 minutes)
-- **Code quality assessment** - Style, error handling, performance
-- **PydanticAI integration** - Decoration, context usage, return formatting
-- **Security validation** - Input sanitization, safe API calls
-- **Dependency management** - API keys, timeouts, rate limiting
-- **Performance considerations** - Response times, hanging prevention
+### Phase 2: Quality Validation
+- **Code Quality**: Style, error handling, performance considerations
+- **Integration Patterns**: MCP wrapper patterns, PydanticAI integration
+- **Security Review**: Input validation, safe API calls, dependency management
+- **Documentation**: Agent and developer documentation quality
 
-#### 2.3 Testing Validation (15-25 minutes)
-- **Locate existing tests** - Find test files for the tool
-- **Run existing tests** - Validate current functionality works
-- **Identify testing gaps** - Happy path, errors, edge cases, integration
-- **Check agent integration** - Tool selection, conversation formatting
-- **Performance validation** - Execution times, hanging prevention
+### Phase 3: Testing Assessment
+- **Test Coverage**: Existing tests and gap identification
+- **Functionality Validation**: End-to-end testing and integration
+- **Performance Testing**: Response times and resource usage
+- **Regression Prevention**: Ensure changes don't break existing functionality
 
-#### 2.4 Documentation Review (10-15 minutes)
-- **Agent documentation** - Docstring clarity, usage examples, parameters
-- **Developer documentation** - Architecture notes, maintenance guidance
-- **Integration documentation** - Dependencies, configuration, errors
-- **Historical context** - Document any recent fixes or architectural changes
+### Phase 4: Documentation and Completion
+- **Update Audit Registry**: Add results to `docs/plan/AUDITS.md`
+- **Create Audit Report**: Document findings and recommendations
+- **Implement Fixes**: Address critical and high priority issues
+- **Commit Changes**: Preserve audit work and improvements
 
-### Phase 3: Generate Deliverables (15 minutes)
+## Established Quality Standards
 
-#### 3.1 Create Audit Report
-- **Generate** `docs/audits/[tool_name]_audit_report.md`
-- **Include** executive summary with Pass/Conditional Pass/Fail assessment
-- **Document** detailed findings from all 4 phases
-- **List** priority action items
+All audited tools must meet these standards:
 
-#### 3.2 Create Recommendations TODO
-- **Generate** `docs/audits/[tool_name]_recommendations.md`
-- **Break down findings** into actionable tasks with effort estimates
-- **Prioritize items**: Critical/High/Medium/Low
-- **Include implementation notes**: Dependencies, risks, success criteria
-- **Provide timeline estimates** for each priority level
+### Architecture Requirements
+- ✅ **Clear separation of concerns**: Single responsibility principle
+- ✅ **Proper integration patterns**: Follow GOLD STANDARD MCP wrapper pattern
+- ✅ **Minimal dependencies**: Well-justified external dependencies
+- ✅ **Clean interfaces**: Typed parameters and consistent return types
 
-### Phase 4: Implement Recommendations (60-180 minutes)
+### Code Quality Standards  
+- ✅ **Comprehensive error handling**: Graceful failure and recovery
+- ✅ **Security best practices**: Input validation, safe API usage
+- ✅ **Performance considerations**: Reasonable response times, timeout handling
+- ✅ **Code style compliance**: PEP 8 and project conventions
 
-Work through the recommendations in priority order:
+### Documentation Requirements
+- ✅ **Agent-friendly documentation**: Clear docstrings with examples
+- ✅ **Developer documentation**: Architecture notes and maintenance guidance
+- ✅ **Integration documentation**: Dependencies, configuration, error handling
+- ✅ **Usage examples**: Practical examples for common use cases
 
-#### 4.1 Critical and High Priority Items
-- **Code quality fixes**: Address immediate issues with specific file:line locations
-- **Documentation updates**: Enhance agent docstrings with examples and usage guidance
-- **Critical testing gaps**: Add tests for basic functionality and error conditions
-- **Architecture improvements**: Fix separation of concerns or interface issues
+### Testing Standards
+- ✅ **Core functionality coverage**: Happy path and error conditions
+- ✅ **Integration testing**: Tool works within the ecosystem
+- ✅ **Performance validation**: Meets timing requirements
+- ✅ **Regression prevention**: Changes don't break existing functionality
 
-#### 4.2 Medium Priority Items (if time permits)
-- **Enhancement opportunities**: Improve performance or add helpful features
-- **Additional documentation**: Troubleshooting guides, more examples
-- **Extended testing**: Edge cases, load testing, additional integration tests
+## Architecture Patterns
 
-#### 4.3 Validation
-- **Test all changes**: Ensure no regressions introduced
-- **Validate agent integration**: Confirm tool selection and response formatting work
-- **Performance check**: Ensure reasonable execution times maintained
-- **Documentation review**: Verify all updates are clear and helpful
+### GOLD STANDARD: MCP Wrapper Pattern
+```python
+# MCP tool imports and calls standalone implementation
+from tools.standalone_tool import core_function
 
-### Phase 5: Completion and Cleanup (10-15 minutes)
-
-1. **Update audit report** with final "Approved" status
-2. **Update TodoWrite** to mark all audit tasks as completed
-3. **Delete** temporary `docs/audits/[tool_name]_recommendations.md` file
-4. **Update** `docs/plan/TODO.md` to mark tool as ✅ Approved
-5. **Commit and push changes**: Create comprehensive commit with all improvements
-6. **Optional**: Archive results to `docs/audits/completed/` for organization
-
-## Command Execution Notes
-
-### Tool Priority Order
-Follow the priority order defined in `docs/plan/TODO.md`:
-1. **Critical Priority**: `delegate_coding_task`, `valor_delegation_tool.py`
-2. **High Priority**: `search_current_info`, `create_image`, `analyze_shared_image`, etc.
-3. **Medium Priority**: Link tools, conversation history tools
-4. **Low Priority**: Support tools and utilities
-
-### Special Considerations
-
-#### For Recently Fixed Tools (delegate_coding_task, valor_delegation_tool.py)
-- **Extra validation** of the recursive spawning fix
-- **Thorough testing** of the new guidance response format
-- **Performance verification** that hanging issues are resolved
-
-#### For Agent Tools vs Implementation Tools
-- **Agent tools**: Focus on PydanticAI integration, conversation formatting, tool selection
-- **Implementation tools**: Focus on core logic, external API integration, error handling
-- **Tool pairs**: Consider both together when they're closely related
-
-#### For External API Tools (search, image generation, notion)
-- **API key validation**: Proper environment variable handling
-- **Rate limiting**: Respect service limits and implement appropriate delays
-- **Fallback behavior**: Graceful handling when services are unavailable
-- **Timeout handling**: Prevent hanging on slow/unresponsive APIs
-
-### Success Criteria
-- Tool passes all 4 audit phases
-- Critical and high-priority recommendations implemented
-- Documentation enhanced for both agent and developer use
-- Tests added covering key functionality and error conditions
-- No regressions in existing functionality
-- Tool marked as ✅ Approved in TODO list
-
-### Automation Commands
-
-To execute this audit process:
-
-```bash
-# This command will automatically:
-# 1. Find the next 🔴 tool in TODO.md
-# 2. Perform the complete audit
-# 3. Implement all recommendations
-# 4. Update status to ✅ Approved
-
-# Run in the project root directory
-cd /Users/valorengels/src/ai
+@mcp.tool()
+def mcp_wrapper_function(params) -> str:
+    # Add MCP-specific concerns (validation, context)
+    # Call standalone implementation
+    # Format for MCP protocol
+    return core_function(params)
 ```
 
-## Expected Time Investment
+### Infrastructure Pattern
+```python
+# Infrastructure models and utilities
+class ToolModel(BaseModel):
+    # Well-designed Pydantic models
+    # Comprehensive validation
+    # Clear documentation
+```
 
-Based on actual audit experience:
+### Integration Pattern (Acceptable)
+```python
+# Both MCP and standalone use shared services
+from integrations.shared_service import SharedService
+# Acceptable when tools access shared services differently
+```
 
-- **Critical Priority Tools**: 3-4 hours (recently fixed tools needing thorough validation)
-  - Example: delegate_coding_task took ~3 hours with comprehensive documentation updates and testing
-- **High Priority Tools**: 2-3 hours (core user-facing functionality)
-- **Medium Priority Tools**: 1.5-2 hours (supporting functionality)  
-- **Low Priority Tools**: 1-1.5 hours (utilities and support tools)
+## For New Tool Audits
 
-**Time Breakdown** (for critical tools):
-- Audit phases: 60-90 minutes
-- Generate deliverables: 15-20 minutes
-- Implement improvements: 60-120 minutes
-- Completion and cleanup: 10-15 minutes
+When new tools are added to the system:
 
-## Quality Standards
+1. **Use the established 4-phase process** as outlined above
+2. **Follow GOLD STANDARD patterns** from existing approved tools
+3. **Update the audit registry** in `docs/plan/AUDITS.md`
+4. **Ensure architectural consistency** with the established codebase patterns
+5. **Document lessons learned** for future audit improvements
 
-Each audited tool must meet:
-- ✅ Clear separation of concerns
-- ✅ Proper PydanticAI integration
-- ✅ Comprehensive error handling
-- ✅ Agent-friendly documentation with examples
-- ✅ Developer maintenance documentation
-- ✅ Test coverage for core scenarios
-- ✅ Performance within reasonable limits
-- ✅ Security best practices
+### Tool Categories to Audit
+- **Standalone Tools**: In `/tools/` directory - core implementation layer
+- **MCP Server Tools**: Wrapper functions in MCP servers
+- **Infrastructure**: Models, utilities, and shared components
+- **Integration Tools**: External service connectors
 
-## Integration with Development Workflow
+### Audit Documentation
+- **Update** `docs/plan/AUDITS.md` with new audit results
+- **Create** detailed audit reports for comprehensive audits
+- **Document** any new patterns or architectural decisions
+- **Preserve** audit methodology improvements
 
-This command integrates with the existing development workflow by:
-- **Following established patterns** from `docs/plan/tool_auditing.md`
-- **Using TodoWrite tool** to track audit progress and implementation tasks
-- **Using existing file structure** in `docs/audits/`
-- **Updating central TODO tracking** in `docs/plan/TODO.md`
-- **Creating clean commits** with comprehensive improvement descriptions
-- **Preserving audit work** by committing and pushing all changes
-- **Building audit history** for future reference and pattern identification
+## System Health Maintenance
 
-## Lessons Learned from First Audit
+The audit system supports ongoing system health through:
 
-**delegate_coding_task audit (December 2025)**:
-- **Git history is crucial** - Understanding recent fixes saves significant time
-- **TodoWrite integration works well** - Helps track complex audit progress
-- **Mock RunContext testing pattern** - Effective for agent tool testing
-- **Documentation updates are critical** - Outdated docs were main blocker
-- **Commit and push immediately** - Preserves audit work for future reference
-- **Test hanging prevention specifically** - Critical for subprocess-related tools
+- **Quality Standards**: Consistent standards across all tools
+- **Architecture Compliance**: Ensuring patterns remain consistent
+- **Technical Debt Prevention**: Catching issues before they accumulate
+- **Documentation Currency**: Keeping documentation accurate and helpful
+
+## Historical Context
+
+**December 2024 Audit Program**:
+- ✅ **12 tools audited**: Comprehensive validation completed
+- ✅ **Architecture crisis resolved**: All duplications eliminated
+- ✅ **GOLD STANDARD patterns**: Established throughout codebase
+- ✅ **Quality improvements**: Enhanced testing, documentation, security
+- ✅ **System consolidation**: Clean, maintainable architecture achieved
+
+**Audit Registry**: Complete history available in `docs/plan/AUDITS.md`
+
+---
+
+**Last Updated**: December 30, 2024  
+**All Current Tools**: ✅ Audited and approved  
+**System Status**: ✅ Production-ready and maintainable

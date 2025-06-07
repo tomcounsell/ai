@@ -4,6 +4,34 @@
 
 This document outlines the **INTELLIGENCE VALIDATION SYSTEM** for our valor_agent architecture. Our testing approach completely eliminates keyword trigger validation in favor of testing LLM contextual decision-making, intelligent tool selection, and end-to-end conversation flows. We validate that the valor_agent makes smart decisions based on natural language understanding, NOT rigid pattern matching.
 
+## ⚠️ TEMPORARY TEST RESTRICTIONS
+
+**Due to system overload issues when running the full test suite, automatic test execution is currently disabled.**
+
+### Current Status:
+- **Test execution temporarily disabled** in development workflows
+- **Manual test runs only** when system resources permit
+- **Promise Queue integration** will enable controlled test scheduling
+
+### Future Plan:
+Once the [Promise Queue](promise-queue.md) is fully implemented:
+1. Tests will be scheduled as background tasks with resource limits
+2. Test runs will be distributed over time to prevent overload
+3. Priority-based test execution will ensure critical tests run first
+4. Results will be delivered asynchronously via notifications
+
+### Running Tests Manually:
+```bash
+# Run single test file (recommended)
+python tests/test_agent_quick.py
+
+# Run specific test
+python -m pytest tests/test_telegram_chat_agent.py::test_tool_selection -v
+
+# DO NOT RUN: Full test suite (causes system overload)
+# cd tests && python run_tests.py  # DISABLED
+```
+
 ## Current Testing Infrastructure
 
 ### Test Organization

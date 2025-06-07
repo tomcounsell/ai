@@ -1,4 +1,119 @@
-"""Image analysis and tagging tool using AI vision models."""
+"""Image analysis and tagging tool using AI vision models.
+
+This module provides comprehensive image analysis and tagging capabilities using
+multiple AI vision providers including OpenAI GPT-4o, Anthropic Claude Vision,
+local models via Ollama, and basic metadata analysis as fallback.
+
+ARCHITECTURE OVERVIEW:
+======================
+This tool follows the gold standard wrapper pattern where:
+- Standalone implementation (this file) contains all business logic
+- MCP tools (development_tools.py) provide interface wrappers with access control
+- Multiple AI providers with robust fallback strategies
+- Configuration-driven behavior via Pydantic models
+
+SUPPORTED PROVIDERS:
+===================
+1. OpenAI GPT-4o - High-quality vision analysis with structured JSON responses
+2. Anthropic Claude Vision - Alternative vision analysis with excellent accuracy  
+3. Local LLaVA via Ollama - Privacy-focused local processing
+4. Basic metadata analysis - Filename and file properties fallback
+
+CONFIGURATION:
+==============
+Environment Variables Required:
+- OPENAI_API_KEY: For OpenAI GPT-4o vision analysis
+- ANTHROPIC_API_KEY: For Anthropic Claude Vision analysis
+
+Optional Setup:
+- Ollama installation for local models: https://ollama.ai
+- LLaVA model: `ollama pull llava:latest`
+
+USAGE EXAMPLES:
+===============
+
+Basic Usage:
+>>> from tools.image_tagging_tool import tag_image
+>>> analysis = tag_image("path/to/image.jpg")
+>>> print(f"Tags: {[tag.tag for tag in analysis.tags]}")
+
+Using OpenAI Provider:
+>>> config = TaggingConfig(api_provider="openai", max_tags=15)
+>>> analysis = tag_image("image.jpg", config)
+
+Using Anthropic Provider:
+>>> config = TaggingConfig(api_provider="anthropic", min_confidence=0.5)
+>>> analysis = tag_image("image.jpg", config)
+
+Using Local Model:
+>>> config = TaggingConfig(local_model=True)
+>>> analysis = tag_image("image.jpg", config)
+
+Batch Processing:
+>>> image_paths = ["image1.jpg", "image2.png", "image3.gif"]
+>>> results = batch_tag_images(image_paths)
+>>> for path, analysis in results.items():
+...     print(f"{path}: {len(analysis.tags)} tags")
+
+Simple Tag Extraction:
+>>> tags = extract_simple_tags("image.jpg", max_tags=10)
+>>> print(tags)  # ['person', 'outdoor', 'nature', ...]
+
+Content Moderation:
+>>> moderation_tags = content_moderation_tags("image.jpg")
+>>> print(moderation_tags)  # ['safe', 'family_friendly', ...]
+
+TROUBLESHOOTING:
+================
+
+1. API Key Issues:
+   - Error: "OPENAI_API_KEY not found"
+   - Solution: Set environment variable `export OPENAI_API_KEY=your_key`
+   - Validation: Check with `echo $OPENAI_API_KEY`
+
+2. Rate Limiting:
+   - Error: "Rate limit exceeded"
+   - Solution: Implement delays between requests or use different provider
+   - Alternative: Switch to local model with `local_model=True`
+
+3. Local Model Issues:
+   - Error: "Ollama not found"
+   - Solution: Install Ollama from https://ollama.ai
+   - Setup: Run `ollama pull llava:latest` after installation
+
+4. Large Image Issues:
+   - Error: "Image too large" or timeout
+   - Solution: Resize images before processing or increase timeout
+   - Alternative: Use basic metadata analysis as fallback
+
+5. Network/API Issues:
+   - Error: Connection timeouts
+   - Solution: Tool automatically falls back to basic analysis
+   - Check: Verify internet connection and API service status
+
+PERFORMANCE NOTES:
+==================
+- OpenAI GPT-4o: ~2-5 seconds per image, excellent accuracy
+- Anthropic Claude: ~3-6 seconds per image, high accuracy
+- Local LLaVA: ~5-15 seconds per image (CPU dependent), privacy-focused
+- Basic analysis: <1 second, filename/metadata only
+
+SECURITY CONSIDERATIONS:
+========================
+- API keys are loaded from environment variables only
+- Images are base64 encoded for API transmission
+- Local model option provides privacy (no external API calls)
+- Input validation prevents malicious file access
+- Graceful error handling prevents information leakage
+
+MCP INTEGRATION:
+================
+This tool integrates with Claude Code via MCP tools in development_tools.py:
+- analyze_image_content(): Comprehensive analysis with directory access control
+- get_simple_image_tags(): Quick tagging with access validation
+Both tools properly import and call functions from this module following
+the established wrapper pattern.
+"""
 
 import base64
 import json

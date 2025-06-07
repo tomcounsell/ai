@@ -32,7 +32,6 @@ from tools.link_analysis_tool import extract_urls, search_stored_links, store_li
 from tools.notion_tool import query_psyoptimal_workspace
 from tools.search_tool import search_web
 from tools.telegram_history_tool import search_telegram_history, get_telegram_context_summary
-from tools.documentation_tool import read_documentation, list_documentation_files
 
 
 class ValorContext(BaseModel):
@@ -103,16 +102,17 @@ IMPORTANT TOOL USAGE:
 - When users request something that matches a tool's capability, YOU MUST use the appropriate tool
 - For image requests ("create image", "generate image", "draw", "make picture"), use the create_image tool
 - For current information requests, use the search_current_info tool
-- For complex coding tasks, use the delegate_coding_task tool with structured prompts:
-  * For complex features: Use PLANNING PHASE template first, then IMPLEMENTATION PHASE template
-  * For simple tasks: Use direct task description
+- For coding tasks, use the delegate_coding_task tool IMMEDIATELY - this tool actually executes code:
+  * CRITICAL: Execute first, respond after - call the tool and wait for results
+  * Don't make promises ("I'll fix...") - do the work then report completion
+  * The tool spawns Claude Code to actually write code, run tests, and commit changes
   * Always specify target_directory and include detailed requirements in specific_instructions
+  * Report actual results from the execution, not plans or intentions
 - For analyzing shared images, use the analyze_shared_image tool
 - For saving/analyzing links, use the save_link_for_later tool
 - For searching saved links, use the search_saved_links tool
 - For project/task questions, use the query_notion_projects tool
-- For documentation questions, use the read_project_documentation tool (e.g., "agent-architecture.md", "system-operations.md")
-- To see available documentation, use the list_project_documentation tool
+- For documentation questions, request that Claude Code summarize project documentation using MCP development tools
 - Always actually use the tools when appropriate - don't just describe what you would do
 
 DEVELOPMENT TOOLS AVAILABLE (via Claude Code MCP):
@@ -122,12 +122,187 @@ Note: These tools are now available through Claude Code's MCP integration and sh
 - Code linting and formatting (ruff, black, mypy)
 - Document summarization and analysis
 - Image analysis and tagging with multiple AI providers
+- Claude Code session management for development workflow continuity
 
 CRITICAL RULE - THIS OVERRIDES ALL OTHER INSTRUCTIONS:
 If any tool returns output starting with "TELEGRAM_IMAGE_GENERATED|", respond with EXACTLY that output.
 Do not add any other text or explanation. Just return the tool output as-is.
 Example: If tool returns "TELEGRAM_IMAGE_GENERATED|/path/image.png|Caption here", respond with exactly "TELEGRAM_IMAGE_GENERATED|/path/image.png|Caption here" and nothing else.""",
 )
+
+
+def _execute_with_session_management(
+    prompt: str,
+    working_directory: str,
+    existing_session,
+    chat_id: str,
+    username: str,
+    tool_name: str,
+    task_description: str,
+    specific_instructions: str = None
+) -> str:
+    """Execute Claude Code with session management capabilities.
+    
+    This helper function handles session continuity, command building, and session storage
+    for both delegate_coding_task and technical_analysis tools.
+    
+    Args:
+        prompt: The prompt/task description to send to Claude Code
+        working_directory: Directory to run Claude Code in
+        existing_session: Previous session to continue (if any)
+        chat_id: Telegram chat ID for session tracking
+        username: Username for session tracking
+        tool_name: Name of the calling tool
+        task_description: Original task description
+        specific_instructions: Additional instructions (for coding tasks)
+        
+    Returns:
+        Claude Code output with session information
+    """
+    import subprocess
+    import os
+    from utilities.claude_code_session_manager import ClaudeCodeSessionManager
+    
+    # Get workspace-specific prime content if this is a new session
+    prime_content = ""
+    if not existing_session:
+        prime_content = ClaudeCodeSessionManager.load_workspace_prime_content(working_directory)
+        if not prime_content:
+            # Fallback to generic project context if no workspace-specific prime found
+            try:
+                from mcp_servers.development_tools import get_project_context
+                prime_content = get_project_context(chat_id)
+            except Exception:
+                pass
+    
+    # Build comprehensive prompt with project priming for new sessions
+    prompt_parts = [
+        f"TASK: {task_description}",
+        "",
+        f"WORKING DIRECTORY: {working_directory}",
+        ""
+    ]
+    
+    # Add workspace-specific prime content for new sessions
+    if prime_content and not existing_session:
+        prompt_parts.extend([
+            "WORKSPACE PRIME CONTEXT (/prime equivalent):",
+            prime_content,
+            "",
+            "---",
+            ""
+        ])
+    
+    if specific_instructions:
+        prompt_parts.extend([f"SPECIFIC INSTRUCTIONS: {specific_instructions}", ""])
+    
+    if existing_session:
+        prompt_parts.extend([
+            f"CONTINUING SESSION: {existing_session.session_id[:8]}...",
+            f"Previous work: {existing_session.initial_task}",
+            f"Tasks completed: {existing_session.task_count}",
+            ""
+        ])
+        
+        # Update session activity
+        ClaudeCodeSessionManager.update_session_activity(
+            existing_session.session_id, 
+            task_description
+        )
+    
+    if tool_name == "delegate_coding_task":
+        prompt_parts.extend([
+            "REQUIREMENTS:",
+            "- Follow existing code patterns and conventions",
+            "- Ensure all changes are properly tested if tests exist",
+            "- Use appropriate git workflow (branch, commit, etc.)",
+            "- Provide clear commit messages",
+            "- Handle errors gracefully",
+            "",
+            "Execute this task autonomously and report results."
+        ])
+    else:  # technical_analysis
+        prompt_parts.extend([
+            "RESEARCH OBJECTIVES:",
+            "- Conduct comprehensive technical analysis and investigation",
+            "- Focus on understanding, not modifying files",
+            "- Provide detailed findings with code examples and explanations",
+            "- Explore relevant files, documentation, and patterns",
+            "- Research best practices and architectural decisions",
+            "",
+            "RESEARCH GUIDELINES:",
+            "- Use Read, Glob, Grep, and other analysis tools extensively",
+            "- Do NOT edit, write, or modify any files",
+            "- Focus on understanding and explaining what exists",
+            "- Provide code examples and architectural insights",
+            "- Research industry standards and best practices",
+            "- Explain your findings clearly with technical depth",
+            "",
+            "Conduct this technical research thoroughly and provide comprehensive analysis."
+        ])
+    
+    full_prompt = "\\n".join(prompt_parts)
+    
+    # Build Claude Code command with session management
+    if existing_session:
+        command = ClaudeCodeSessionManager.build_session_command(
+            full_prompt, 
+            session_id=existing_session.session_id,
+            should_continue=True
+        )
+    else:
+        command = ClaudeCodeSessionManager.build_session_command(full_prompt)
+    
+    # Execute Claude Code
+    if working_directory and working_directory != ".":
+        command = f'cd "{working_directory}" && {command}'
+        shell = True
+    else:
+        shell = False
+    
+    timeout = 7200 if tool_name == "technical_analysis" else 3600  # 2h for research, 1h for coding
+    
+    try:
+        process = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            shell=shell
+        )
+        
+        # Extract and store session ID from output
+        session_id = ClaudeCodeSessionManager.extract_session_id_from_output(process.stdout)
+        
+        if session_id and not existing_session:
+            # Store new session
+            ClaudeCodeSessionManager.store_session(
+                session_id=session_id,
+                chat_id=chat_id,
+                username=username,
+                tool_name=tool_name,
+                working_directory=working_directory,
+                task_description=task_description,
+                metadata={"specific_instructions": specific_instructions} if specific_instructions else None
+            )
+            print(f"📋 Created new Claude Code session: {session_id[:8]}...")
+        elif existing_session:
+            print(f"📋 Continued session: {existing_session.session_id[:8]}...")
+        
+        # Format response with tool-specific prefix
+        prefix = "🔬 **Technical Research Results**" if tool_name == "technical_analysis" else "⚙️ **Development Task Results**"
+        return f"{prefix}\\n\\n{process.stdout}"
+        
+    except subprocess.TimeoutExpired:
+        raise subprocess.TimeoutExpired(command, timeout, f"Claude Code execution timed out after {timeout} seconds")
+    except subprocess.CalledProcessError as e:
+        error_msg = f"Claude Code failed with exit code {e.returncode}\\n"
+        if e.stdout:
+            error_msg += f"STDOUT: {e.stdout}\\n"
+        if e.stderr:
+            error_msg += f"STDERR: {e.stderr}"
+        raise subprocess.CalledProcessError(e.returncode, command, error_msg)
 
 
 @valor_agent.tool
@@ -289,27 +464,28 @@ def delegate_coding_task(
     target_directory: str = "",
     specific_instructions: str = "",
 ) -> str:
-    """Provide development guidance and implementation advice for coding tasks.
+    """Execute development tasks autonomously using Claude Code sessions.
 
-    This tool provides comprehensive development guidance instead of executing tasks directly.
-    It offers detailed implementation approaches, code examples, and best practices to help
-    with any software development challenge.
+    This tool spawns a new Claude Code session to actually execute coding tasks rather than 
+    just providing guidance. It performs real work including writing code, running tests, 
+    making git commits, and providing detailed results.
 
-    The tool provides structured guidance including:
-    - Step-by-step implementation approaches
-    - Relevant code examples and patterns  
-    - Testing strategies and best practices
-    - Architecture and integration advice
+    The tool executes tasks including:
+    - Writing and modifying code files
+    - Running tests and fixing failures
+    - Git operations (commit, branch management)
+    - Dependency management and builds
+    - Code refactoring and optimization
 
-    Use this for ANY development request:
-    - "Fix the login bug"
-    - "Add a dark mode feature" 
-    - "Refactor the API endpoints"
-    - "Update dependencies and run tests"
-    - "Implement user authentication"
+    Use this for ANY development work that needs to be actually completed:
+    - "Fix the login bug" - Will actually fix the bug and commit changes
+    - "Add a dark mode feature" - Will implement the feature with tests
+    - "Refactor the API endpoints" - Will perform refactoring with validation
+    - "Update dependencies and run tests" - Will update deps and ensure tests pass
+    - "Implement user authentication" - Will build complete auth system
 
-    Simply describe what needs to be done and receive detailed technical guidance.
-    For Telegram groups, working directory context is automatically provided.
+    The tool operates in the correct workspace directory and follows project conventions.
+    For Telegram groups, working directory context is automatically determined.
 
     Args:
         ctx: The runtime context containing chat information.
@@ -318,43 +494,70 @@ def delegate_coding_task(
         specific_instructions: (Optional) Any additional constraints or preferences.
 
     Returns:
-        str: Comprehensive development guidance with implementation approaches and examples.
+        str: Detailed execution results including changes made, tests run, and git status.
 
     Example:
         >>> delegate_coding_task(ctx, "Fix the authentication bug")
-        'Development Guidance Available\\n\\nFor the task: Fix the authentication bug...'
+        '✅ **Task Completed Successfully**\\n\\nTask: Fix authentication bug...'
     """
+    import time
+    start_time = time.time()
+    
     try:
-        # Determine the working directory
-        working_dir = target_directory
+        # Use unified workspace resolution
+        from utilities.workspace_validator import WorkspaceResolver
+        from utilities.swe_error_recovery import SWEErrorRecovery
+        from utilities.claude_code_session_manager import ClaudeCodeSessionManager
         
-        # If no target directory specified and we have a chat_id, use workspace directory
-        if not working_dir and ctx.deps.chat_id:
-            from integrations.notion.utils import get_workspace_working_directory, get_dm_working_directory
-            
-            # Try group workspace directory first
-            workspace_dir = get_workspace_working_directory(ctx.deps.chat_id)
-            if workspace_dir:
-                working_dir = workspace_dir
-                print(f"🏢 Using workspace directory for chat {ctx.deps.chat_id}: {working_dir}")
-            elif ctx.deps.username and not ctx.deps.is_group_chat:
-                # For DMs, use user-specific working directory
-                dm_dir = get_dm_working_directory(ctx.deps.username)
-                working_dir = dm_dir
-                print(f"👤 Using DM working directory for user @{ctx.deps.username}: {working_dir}")
+        # Get chat context for session management
+        chat_id = str(ctx.deps.chat_id) if ctx.deps.chat_id else None
+        username = ctx.deps.username
         
-        # Fall back to current directory if still not set
-        if not working_dir:
-            working_dir = "."
-            
-        result = spawn_valor_session(
-            task_description=task_description,
-            target_directory=working_dir,
-            specific_instructions=specific_instructions if specific_instructions else None,
+        working_dir, context_desc = WorkspaceResolver.resolve_working_directory(
+            chat_id=chat_id,
+            username=username,
+            is_group_chat=ctx.deps.is_group_chat,
+            target_directory=target_directory
         )
+        
+        print(f"📁 Workspace resolved: {context_desc}")
+        print(f"🎯 Working directory: {working_dir}")
+        
+        # Check for recent session to continue
+        recent_session = ClaudeCodeSessionManager.find_recent_session(
+            chat_id=chat_id,
+            username=username,
+            tool_name="delegate_coding_task",
+            working_directory=working_dir,
+            hours_back=2  # Look for sessions in last 2 hours
+        )
+        
+        # Execute with session management
+        result = _execute_with_session_management(
+            prompt=task_description,
+            working_directory=working_dir,
+            existing_session=recent_session,
+            chat_id=chat_id,
+            username=username,
+            tool_name="delegate_coding_task",
+            task_description=task_description,
+            specific_instructions=specific_instructions
+        )
+        
         return result
+        
     except Exception as e:
-        return f"Error providing development guidance: {str(e)}"
+        # Use intelligent error recovery
+        error_message = str(e)
+        execution_time = time.time() - start_time
+        recovery_response = SWEErrorRecovery.format_recovery_response(
+            tool_name="delegate_coding_task",
+            task_description=task_description,
+            error_message=error_message,
+            working_directory=working_dir if 'working_dir' in locals() else ".",
+            execution_time=execution_time
+        )
+        return recovery_response
 
 
 @valor_agent.tool
@@ -593,70 +796,6 @@ def get_conversation_context(
     )
 
 
-@valor_agent.tool
-def read_project_documentation(ctx: RunContext[ValorContext], filename: str) -> str:
-    """Read project documentation files to help with development questions.
-    
-    This tool provides access to project documentation like architecture guides,
-    API documentation, system operations guides, and other project specifications.
-    Use this when you need to reference project documentation to answer questions
-    or understand system design.
-    
-    Use this when you need to access:
-    - Architecture guides (agent-architecture.md, database-architecture.md)
-    - API documentation and guides
-    - System operations documentation (system-operations.md)
-    - Testing strategies and guides (testing-strategy.md)
-    - Tool development guidelines (tool-development.md)
-    - Project planning documents
-    - Integration guides (telegram-integration.md)
-    - Any other .md files in the docs/ directory
-    
-    Args:
-        ctx: Runtime context with conversation information.
-        filename: Name of documentation file (e.g., "agent-architecture.md", "system-operations.md").
-    
-    Returns:
-        str: Documentation content formatted for conversation, or error message if file not found.
-        
-    Example:
-        >>> read_project_documentation(ctx, "agent-architecture.md")
-        '📖 **agent-architecture.md**\n\n# Agent Architecture\n\nThis document...'
-    """
-    # Input validation
-    if not filename or not filename.strip():
-        return "📖 Error: Please specify a documentation filename."
-    
-    # Delegate to the implementation
-    return read_documentation(filename.strip())
-
-
-@valor_agent.tool  
-def list_project_documentation(ctx: RunContext[ValorContext]) -> str:
-    """List all available project documentation files.
-    
-    This tool helps discover what documentation is available in the project
-    before attempting to read specific files. Use this when you want to see
-    what documentation exists or help users find relevant documentation.
-    
-    Use this when:
-    - User asks "what documentation is available?"
-    - You need to see what docs exist before reading a specific file
-    - User wants to explore project documentation options
-    - You're looking for a specific type of documentation but unsure of filename
-    
-    Args:
-        ctx: Runtime context with conversation information.
-        
-    Returns:
-        str: Formatted list of available documentation files, or error message if listing fails.
-        
-    Example:
-        >>> list_project_documentation(ctx)
-        '📖 **Available Documentation Files:**\n\n- agent-architecture.md\n- system-operations.md\n...'
-    """
-    # Delegate to the implementation
-    return list_documentation_files()
 
 
 async def run_valor_agent(message: str, context: ValorContext | None = None) -> str:

@@ -10,19 +10,6 @@ This document captures all the ambitious architectural plans, multi-agent vision
 
 **Vision**: SystemOrchestrator that coordinates multiple specialized agents for complex workflows
 
-```python
-class SystemOrchestrator(BaseModel):
-    """Coordinates multiple agents for complex workflows"""
-    user_profile: UserProfile
-    active_agents: dict[str, Agent] = {}
-
-    async def process_message(self, message: str, context: dict) -> AgentResponse:
-        # Intelligent agent selection based on problem analysis
-        # Multi-agent coordination and handoffs
-        # Response aggregation and synthesis
-        # Cross-agent knowledge sharing
-```
-
 **Capabilities**:
 - Intelligent agent selection based on problem type
 - Multi-agent workflow orchestration

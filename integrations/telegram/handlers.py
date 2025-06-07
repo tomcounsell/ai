@@ -749,6 +749,14 @@ class MessageHandler:
                     if len(answer) > 100
                     else f"   Response: {answer}"
                 )
+                
+                # Check for ASYNC_PROMISE marker
+                if "ASYNC_PROMISE|" in answer:
+                    print(f"   🔄 ASYNC_PROMISE marker detected in response!")
+                    promise_parts = answer.split("ASYNC_PROMISE|", 1)
+                    print(f"   Promise parts: {len(promise_parts)} parts")
+                    if len(promise_parts) > 1:
+                        print(f"   Promise message: {promise_parts[1][:100]}...")
             else:
                 print("   ⚠️  Agent returned empty response")
 
@@ -1287,7 +1295,7 @@ class MessageHandler:
             await self._safe_reply(message, error_msg, "❌ Error processing document")
 
     async def _handle_audio_message(self, client, message, chat_id: int):
-        """Handle audio/voice messages - placeholder for future implementation."""
+        """Handle audio/voice messages with transcription support."""
         try:
             # Get bot's own info for mention processing
             me = await client.get_me()
@@ -1354,19 +1362,146 @@ class MessageHandler:
                     is_telegram_id=True,
                 )
 
+            # Process voice/audio transcription if we should respond
             if is_private_chat or is_mentioned or is_dev_group_chat:
-                if message.voice:
-                    if message.caption:
-                        response = f"🎙️ I hear you sent a voice message with text: '{message.caption}'. Voice transcription isn't implemented yet, but it's on my roadmap."
+                try:
+                    # Download the audio file to a temporary location
+                    import tempfile
+                    import os
+                    from utilities.logger import get_logger
+                    
+                    logger = get_logger("telegram.voice_transcription")
+                    logger.info(f"🎙️ Starting voice transcription for chat_id={chat_id}, message_id={message.id}")
+                    
+                    # Create temporary file with appropriate extension
+                    if message.voice:
+                        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.ogg')
+                        audio_type = "Voice"
+                        duration = getattr(message.voice, 'duration', 'unknown')
+                        file_size = getattr(message.voice, 'file_size', 'unknown')
+                        logger.info(f"📥 Voice message details: duration={duration}s, size={file_size} bytes")
                     else:
-                        response = "🎙️ I hear you sent a voice message! Voice transcription isn't implemented yet, but it's on my roadmap."
+                        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.mp3')
+                        audio_type = "Audio"
+                        duration = getattr(message.audio, 'duration', 'unknown')
+                        file_size = getattr(message.audio, 'file_size', 'unknown')
+                        logger.info(f"📥 Audio file details: duration={duration}s, size={file_size} bytes")
+                    
+                    temp_file.close()
+                    temp_path = temp_file.name
+                    logger.info(f"📂 Created temporary file: {temp_path}")
+                    
+                    # Download the audio file
+                    logger.info("⬇️ Starting audio file download...")
+                    await message.download(temp_path)
+                    
+                    # Verify file was downloaded
+                    if os.path.exists(temp_path):
+                        file_size_downloaded = os.path.getsize(temp_path)
+                        logger.info(f"✅ Download complete: {file_size_downloaded} bytes written to {temp_path}")
+                    else:
+                        logger.error(f"❌ Download failed: file not found at {temp_path}")
+                        raise Exception("Audio file download failed")
+                    
+                    # Transcribe using our voice transcription tool
+                    logger.info("🔄 Starting Whisper transcription...")
+                    from tools.voice_transcription_tool import transcribe_audio_file
+                    transcribed_text = transcribe_audio_file(temp_path, cleanup_file=True)
+                    logger.info(f"✅ Transcription successful: {len(transcribed_text)} characters")
+                    logger.debug(f"📝 Transcribed text: {transcribed_text[:100]}...")
+                    
+                    # Handle caption text along with transcription
+                    if message.caption:
+                        logger.info(f"📝 Processing voice message with caption: {len(message.caption)} chars")
+                        # Store both caption and transcribed audio
+                        full_message = f"[{audio_type}+Text] Caption: {message.caption}\nTranscribed audio: {transcribed_text}"
+                        self.chat_history.add_message(chat_id, "user", full_message, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                        
+                        # Process both caption and transcribed text together
+                        combined_text = f"{message.caption}\n\n{transcribed_text}"
+                        logger.info("🤖 Routing combined caption+transcription to agent...")
+                        await self._route_message_with_intent(client, message, chat_id, combined_text, reply_to_telegram_message_id)
+                        logger.info("✅ Voice message with caption processed successfully")
+                        return  # Exit since _route_message_with_intent handles the full response
+                    else:
+                        logger.info("📝 Processing voice message (no caption)")
+                        # Store transcribed audio only
+                        self.chat_history.add_message(chat_id, "user", transcribed_text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                        
+                        # Process transcribed text
+                        logger.info("🤖 Routing transcription to agent...")
+                        await self._route_message_with_intent(client, message, chat_id, transcribed_text, reply_to_telegram_message_id)
+                        logger.info("✅ Voice message processed successfully")
+                        return  # Exit since _route_message_with_intent handles the full response
+                    
+                except Exception as transcription_error:
+                    # Enhanced error logging
+                    from utilities.logger import get_logger
+                    logger = get_logger("telegram.voice_transcription")
+                    logger.error(f"❌ Voice transcription failed for chat_id={chat_id}, message_id={message.id}")
+                    logger.error(f"❌ Error type: {type(transcription_error).__name__}")
+                    logger.error(f"❌ Error details: {str(transcription_error)}")
+                    
+                    # Log additional context
+                    try:
+                        import traceback
+                        logger.error(f"❌ Full traceback:\n{traceback.format_exc()}")
+                    except:
+                        pass
+                    
+                    # Store original message format in chat history
+                    if message.caption:
+                        audio_type = "Voice" if message.voice else "Audio"
+                        self.chat_history.add_message(chat_id, "user", f"[{audio_type}+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                        logger.info(f"📝 Stored caption in chat history: {message.caption}")
+                    else:
+                        audio_type = "[Voice]" if message.voice else "[Audio]"
+                        self.chat_history.add_message(chat_id, "user", audio_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
+                        logger.info(f"📝 Stored audio placeholder in chat history")
+                    
+                    # Provide fallback response
+                    if message.voice:
+                        if message.caption:
+                            response = f"🎙️ I hear you sent a voice message with text: '{message.caption}'. Voice transcription failed, but I can still help with your text message!"
+                            # Process the caption text at least
+                            try:
+                                logger.info("🔄 Attempting to process caption text as fallback...")
+                                await self._route_message_with_intent(client, message, chat_id, message.caption, reply_to_telegram_message_id)
+                                logger.info("✅ Caption processed successfully as fallback")
+                                return  # Exit since _route_message_with_intent handles the full response
+                            except Exception as caption_error:
+                                logger.error(f"❌ Caption processing also failed: {caption_error}")
+                                pass  # Keep fallback message
+                        else:
+                            response = f"🎙️ I hear you sent a voice message! Transcription failed with error: {str(transcription_error)}"
+                            logger.warning(f"⚠️ Sending transcription failure message to user")
+                    else:
+                        if message.caption:
+                            response = f"🎵 I see you shared an audio file with text: '{message.caption}'. Audio transcription failed, but I can help with your text!"
+                            # Process the caption text at least
+                            try:
+                                logger.info("🔄 Attempting to process audio caption as fallback...")
+                                await self._route_message_with_intent(client, message, chat_id, message.caption, reply_to_telegram_message_id)
+                                logger.info("✅ Audio caption processed successfully as fallback")
+                                return  # Exit since _route_message_with_intent handles the full response
+                            except Exception as caption_error:
+                                logger.error(f"❌ Audio caption processing also failed: {caption_error}")
+                                pass  # Keep fallback message
+                        else:
+                            response = f"🎵 I see you shared an audio file! Transcription failed with error: {str(transcription_error)}"
+                            logger.warning(f"⚠️ Sending audio transcription failure message to user")
+                    
+                    await self._safe_reply(message, response, "🎵 Audio received")
+                    self.chat_history.add_message(chat_id, "assistant", response)
+                    logger.info("📤 Sent fallback response to user")
+            else:
+                # Just store in history without transcription for non-responding cases
+                if message.caption:
+                    audio_type = "Voice" if message.voice else "Audio"
+                    self.chat_history.add_message(chat_id, "user", f"[{audio_type}+Text] {message.caption}", reply_to_telegram_message_id, message.id, is_telegram_id=True)
                 else:
-                    if message.caption:
-                        response = f"🎵 I see you shared an audio file with text: '{message.caption}'. Audio analysis isn't implemented yet, but I'm working on it."
-                    else:
-                        response = "🎵 I see you shared an audio file! Audio analysis isn't implemented yet, but I'm working on it."
-                await self._safe_reply(message, response, "🎵 Audio received")
-                self.chat_history.add_message(chat_id, "assistant", response)
+                    audio_type = "[Voice]" if message.voice else "[Audio]"
+                    self.chat_history.add_message(chat_id, "user", audio_type, reply_to_telegram_message_id, message.id, is_telegram_id=True)
 
         except Exception as e:
             error_msg = f"❌ Error processing audio: {str(e)}"
@@ -1535,6 +1670,36 @@ class MessageHandler:
                 self.chat_history.add_message(chat_id, "assistant", error_msg)
                 return True
 
+        # Check for ASYNC_PROMISE marker indicating a long-running task
+        if answer and "ASYNC_PROMISE|" in answer:
+            print(f"🔄 Detected ASYNC_PROMISE marker in response")
+            parts = answer.split("ASYNC_PROMISE|", 1)
+            promise_message = parts[1].strip() if len(parts) > 1 else "I'll work on this task in the background."
+            
+            # Extract task description from the promise message
+            task_description = promise_message.replace("I'll work on this task in the background: ", "").strip()
+            
+            # Create promise in database
+            from utilities.database import create_promise
+            promise_id = create_promise(chat_id, message.id, task_description)
+            print(f"📝 Created promise {promise_id} for long-running task")
+            
+            # Send immediate response to user
+            await self._safe_reply(message, promise_message, "📝 Working on task")
+            self.chat_history.add_message(chat_id, "assistant", promise_message)
+            
+            # Execute promise using Huey
+            from utilities.promise_manager_huey import HueyPromiseManager
+            promise_manager = HueyPromiseManager()
+            
+            # Update the promise manager to handle the execution
+            from tasks.promise_tasks import execute_promise_by_type
+            execute_promise_by_type(promise_id)
+            
+            print(f"🚀 Queued promise {promise_id} for Huey execution")
+            
+            return True
+
         # Validate the answer content before processing
         validated_answer = self._validate_message_content(
             answer, "🤔 I processed your message but didn't have a response."
@@ -1642,3 +1807,129 @@ class MessageHandler:
                 await message.reply("🤖 Error sending response")
             except Exception as e2:
                 print(f"Failed to send fallback reply: {e2}")
+    
+    async def _execute_promise_background(self, original_message, chat_id: int, promise_id: int, task_description: str):
+        """Execute a long-running task in the background and send completion message.
+        
+        Args:
+            original_message: Original Telegram message that triggered the promise
+            chat_id: Chat ID for sending completion message
+            promise_id: Promise ID in database
+            task_description: Description of the task to execute
+        """
+        print(f"🔄 Starting background execution for promise {promise_id}")
+        print(f"   Task: {task_description}")
+        print(f"   Chat ID: {chat_id}")
+        print(f"   Original message ID: {original_message.id}")
+        
+        try:
+            # Update promise status to in_progress
+            print(f"📊 Updating promise {promise_id} status to 'in_progress'...")
+            from utilities.database import update_promise_status, get_promise
+            update_promise_status(promise_id, "in_progress")
+            
+            # Verify promise was updated
+            promise_data = get_promise(promise_id)
+            print(f"   Promise status after update: {promise_data.get('status') if promise_data else 'NOT FOUND'}")
+            
+            # Import delegation tool
+            print(f"📦 Importing delegation tool...")
+            from tools.valor_delegation_tool import spawn_valor_session
+            
+            # Determine working directory (use current directory as default)
+            import os
+            working_directory = os.getcwd()
+            print(f"📂 Working directory: {working_directory}")
+            
+            # Execute the task using the delegation tool (without time check since we're already async)
+            print(f"🚀 Executing task via Claude Code...")
+            print(f"   Calling spawn_valor_session with:")
+            print(f"   - task_description: {task_description}")
+            print(f"   - target_directory: {working_directory}")
+            print(f"   - force_sync: True")
+            
+            import time
+            start_time = time.time()
+            result = spawn_valor_session(
+                task_description=task_description,
+                target_directory=working_directory,
+                specific_instructions=None,
+                tools_needed=None,
+                force_sync=True  # Always execute synchronously in background
+            )
+            execution_time = time.time() - start_time
+            print(f"✅ Task completed in {execution_time:.1f} seconds")
+            print(f"📄 Result preview: {result[:200]}..." if len(result) > 200 else f"📄 Result: {result}")
+            
+            # Check if result contains the ASYNC_PROMISE marker (shouldn't happen in background)
+            if "ASYNC_PROMISE|" in result:
+                # Extract the actual result
+                result = result.split("ASYNC_PROMISE|", 1)[0].strip()
+            
+            # Truncate result if too long for Telegram (4096 char limit)
+            max_result_length = 3500  # Leave room for the wrapper text
+            truncated_result = result[:max_result_length] + "..." if len(result) > max_result_length else result
+            
+            # Send completion message
+            completion_message = f"""✅ **Task Complete!**
+
+I finished working on: {task_description}
+
+**Result:**
+{truncated_result}
+
+This task took {execution_time:.1f} seconds to complete."""
+            
+            # Send the completion message as a reply to the original message
+            try:
+                print(f"📤 Attempting to send completion message to chat {chat_id}...")
+                await original_message.reply(completion_message)
+                self.chat_history.add_message(chat_id, "assistant", completion_message)
+                print(f"✅ Sent completion message for promise {promise_id}")
+            except Exception as send_error:
+                print(f"❌ Failed to send completion message via reply: {type(send_error).__name__}: {send_error}")
+                # Try sending without reply using the client
+                try:
+                    if hasattr(self, 'client') and self.client:
+                        print(f"🔄 Attempting to send via client.send_message...")
+                        await self.client.send_message(chat_id, completion_message)
+                        self.chat_history.add_message(chat_id, "assistant", completion_message)
+                        print(f"✅ Sent completion message via client")
+                    else:
+                        print(f"❌ Client not available for sending message")
+                except Exception as e:
+                    print(f"❌ Failed to send message to chat: {type(e).__name__}: {e}")
+            
+            # Update promise status to completed
+            update_promise_status(promise_id, "completed", result_summary=result[:500])
+            print(f"✅ Promise {promise_id} marked as completed")
+            
+        except Exception as e:
+            error_msg = f"❌ **Task Failed**\n\nI encountered an error while working on: {task_description}\n\nError: {str(e)}"
+            print(f"❌ Background task failed for promise {promise_id}: {type(e).__name__}: {e}")
+            import traceback
+            print(f"Traceback:\n{traceback.format_exc()}")
+            
+            # Try to send error message
+            try:
+                print(f"📤 Attempting to send error message to chat {chat_id}...")
+                await original_message.reply(error_msg)
+                self.chat_history.add_message(chat_id, "assistant", error_msg)
+                print(f"✅ Sent error message via reply")
+            except Exception as reply_error:
+                print(f"❌ Failed to send error via reply: {type(reply_error).__name__}: {reply_error}")
+                try:
+                    if hasattr(self, 'client') and self.client:
+                        print(f"🔄 Attempting to send error via client.send_message...")
+                        await self.client.send_message(chat_id, error_msg)
+                        self.chat_history.add_message(chat_id, "assistant", error_msg)
+                        print(f"✅ Sent error message via client")
+                    else:
+                        print(f"❌ Client not available for sending error message")
+                except Exception as send_error:
+                    print(f"❌ Could not send error message to user: {type(send_error).__name__}: {send_error}")
+            
+            # Update promise status to failed
+            from utilities.database import update_promise_status
+            update_promise_status(promise_id, "failed", error_message=str(e))
+            print(f"❌ Promise {promise_id} marked as failed")

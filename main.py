@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from integrations.notion.query_engine import get_notion_engine
 from integrations.telegram.client import TelegramClient
+from utilities.database import init_database
 
 load_dotenv()
 
@@ -28,6 +29,11 @@ class AuthPassword(BaseModel):
 async def start_telegram_client():
     """Initialize the Telegram client."""
     global telegram_client, notion_engine
+
+    # Initialize database tables including promises
+    print("Initializing database...")
+    init_database()
+    print("Database initialized successfully")
 
     # Initialize Notion query engine
     notion_engine = get_notion_engine()
@@ -99,4 +105,5 @@ async def initialize_telegram():
 
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=9000, reload=True, log_level="info")
+    # Disable reload to prevent session file changes from triggering restarts
+    uvicorn.run("main:app", host="0.0.0.0", port=9000, reload=False, log_level="info")

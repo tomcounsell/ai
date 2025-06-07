@@ -153,6 +153,7 @@ class IntegratedMonitoringSystem:
 - **Automatic optimization**: Context management, streaming rate control, resource cleanup
 - **Production readiness**: Health validation, performance benchmarking, error recovery
 - **Comprehensive metrics**: JSON export for monitoring and analysis
+- **Asynchronous task execution**: Integration with [Promise Queue](promise-queue.md) for background processing
 
 ## Performance Achievements
 

@@ -2,6 +2,8 @@
 
 This document outlines the comprehensive process for auditing PydanticAI tools to ensure they meet production quality standards, maintain clear separation of concerns, and provide reliable functionality within the agent ecosystem.
 
+**🚨 URGENT UPDATE**: [Comprehensive Tool Analysis](../../comprehensive_tool_analysis.md) reveals massive tool duplication across all 3 layers. All audits must now include **Duplication Assessment** phase.
+
 ## Overview
 
 A tool audit validates that a PydanticAI tool is well-designed, thoroughly tested, properly documented, and follows established architectural patterns. The audit process ensures tools are maintainable, reliable, and provide clear value to both the agent and human developers.
@@ -28,14 +30,66 @@ A tool audit validates that a PydanticAI tool is well-designed, thoroughly teste
 
 ## Audit Process Overview
 
-The audit follows a structured approach across four main phases:
+The audit follows a structured approach across five main phases:
 
-1. **Design Review** - Architecture and separation of concerns
-2. **Implementation Review** - Code quality and best practices
-3. **Testing Validation** - End-to-end functionality coverage
-4. **Documentation Review** - Clarity for both agents and developers
+1. **Duplication Assessment** - Identify cross-layer duplications and consolidation opportunities
+2. **Design Review** - Architecture and separation of concerns
+3. **Implementation Review** - Code quality and best practices
+4. **Testing Validation** - End-to-end functionality coverage
+5. **Documentation Review** - Clarity for both agents and developers
 
-## Phase 1: Design Review
+## Phase 1: Duplication Assessment
+
+**🚨 CRITICAL PHASE**: Due to architecture crisis, this phase is now MANDATORY for all tool audits.
+
+### 1.1 Cross-Layer Duplication Check
+
+**Objective**: Identify if the tool being audited exists in multiple layers with the same functionality.
+
+**Duplication Mapping Process**:
+1. **Check Agent Layer**: Search `agents/valor/agent.py` for `@valor_agent.tool` with similar functionality
+2. **Check MCP Layer**: Search all `mcp_servers/*.py` files for `@mcp.tool` with similar functionality  
+3. **Check Standalone Layer**: Search `tools/` directory for similar implementation files
+4. **Document findings**: Record all duplications found
+
+**Duplication Categories**:
+- 🔴 **Full Duplication**: Identical functionality across 3 layers (Agent + MCP + Standalone)
+- 🟡 **Partial Duplication**: Similar functionality with different feature sets
+- 🟢 **Unique Tool**: Exists only in current layer
+
+**Critical Questions to Answer**:
+- Does this tool duplicate functionality in other layers?
+- Which implementation is the most comprehensive/maintained?
+- What are the API differences between implementations?
+- Which layer should be the "source of truth" for this functionality?
+
+### 1.2 Consolidation Planning
+
+**For Full Duplications (🔴)**:
+- **MANDATORY**: Mark tool for consolidation in audit report
+- **Recommend**: Keep MCP implementation as primary (Claude Code integration)
+- **Plan**: Deprecation strategy for Agent/Standalone duplicates
+- **Document**: Migration path for current users
+
+**For Partial Duplications (🟡)**:
+- **Analyze**: Feature differences between implementations
+- **Recommend**: Consolidation strategy (merge features into one layer)
+- **Plan**: Feature migration or tool specialization
+
+**For Unique Tools (🟢)**:
+- **Validate**: Tool provides unique value not available elsewhere
+- **Document**: Why this tool needs to exist separately
+- **Consider**: Whether functionality should be moved to MCP layer
+
+### 1.3 Architecture Impact Assessment
+
+**Questions to Address**:
+- How does this duplication affect maintenance overhead?
+- What is the cost of keeping multiple implementations?
+- Are there inconsistencies between implementations that confuse users?
+- What would be the impact of consolidating this tool?
+
+## Phase 2: Design Review
 
 ### 1.1 Architectural Assessment
 
@@ -257,30 +311,37 @@ def search_current_info(ctx: RunContext[ValorContext], query: str) -> str:
 4. **Locate tool files**: Find both agent tool and implementation files
 5. **Check git history**: Look for recent commits related to the tool (especially "recently fixed" tools)
 
-### Phase 2: Comprehensive 4-Phase Audit (60-90 minutes)
+### Phase 2: Comprehensive 5-Phase Audit (75-110 minutes)
 
-#### 2.1 Design Review (15-20 minutes)
+#### 2.1 Duplication Assessment (10-15 minutes) 🚨 NEW MANDATORY PHASE
+1. **Cross-layer duplication check** - Agent, MCP, Standalone layers
+2. **Document all duplications found** - Full, partial, or unique status
+3. **Identify consolidation opportunities** - Which layer should be primary
+4. **Plan migration strategy** - For duplicated functionality
+5. **Assess architecture impact** - Maintenance overhead, user confusion
+
+#### 2.2 Design Review (15-20 minutes)
 1. **Read tool source code** - Both agent wrapper and implementation
 2. **Analyze architecture** - Separation of concerns, single responsibility
 3. **Validate interface design** - Parameters, return types, context usage
 4. **Check dependencies** - External services, imports, coupling
 5. **Review recent changes** - Git commits, architectural decisions
 
-#### 2.2 Implementation Review (20-30 minutes)
+#### 2.3 Implementation Review (20-30 minutes)
 1. **Code quality assessment** - Style, error handling, performance
 2. **PydanticAI integration** - Decoration, context usage, return formatting
 3. **Security validation** - Input sanitization, safe API calls
 4. **Dependency management** - API keys, timeouts, rate limiting
 5. **Performance considerations** - Response times, resource usage
 
-#### 2.3 Testing Validation (15-25 minutes)
+#### 2.4 Testing Validation (15-25 minutes)
 1. **Locate existing tests** - Find test files for the tool
 2. **Run existing tests** - Validate current functionality
 3. **Identify testing gaps** - Happy path, errors, edge cases, integration
 4. **Check agent integration** - Tool selection, conversation formatting
 5. **Performance validation** - Execution times, hanging prevention
 
-#### 2.4 Documentation Review (10-15 minutes)
+#### 2.5 Documentation Review (10-15 minutes)
 1. **Agent documentation** - Docstring clarity, usage examples, parameters
 2. **Developer documentation** - Architecture notes, maintenance guidance
 3. **Integration documentation** - Dependencies, configuration, errors
@@ -315,10 +376,17 @@ def search_current_info(ctx: RunContext[ValorContext], query: str) -> str:
 
 ## Executive Summary
 - Tool Purpose: [Brief description]
+- Duplication Status: [🔴 Full / 🟡 Partial / 🟢 Unique]
 - Overall Assessment: [Pass/Conditional Pass/Fail]
 - Key Findings: [3-5 bullet points]
 
 ## Detailed Findings
+
+### Duplication Assessment 🚨 CRITICAL
+- Cross-Layer Analysis: [Agent/MCP/Standalone status]
+- Duplication Type: [Full/Partial/Unique with details]
+- Consolidation Recommendation: [Which layer to keep as primary]
+- Migration Impact: [Effect on users/tests/documentation]
 
 ### Design Review
 - Architecture: [Assessment]
@@ -341,14 +409,22 @@ def search_current_info(ctx: RunContext[ValorContext], query: str) -> str:
 - Recommendations: [List]
 
 ## Priority Action Items
+🔴 **CRITICAL - Duplication Issues**:
+1. [Duplication consolidation task]
+2. [Migration planning]
+
+**HIGH PRIORITY**:
 1. [High priority item]
 2. [Medium priority item]
-3. [Low priority item]
+
+**MEDIUM/LOW PRIORITY**:
+1. [Low priority item]
 
 ## Approval Status
 - [ ] Approved for production use
 - [ ] Approved with conditions: [List conditions]
 - [ ] Requires rework before approval
+- [ ] 🚨 DUPLICATION CONSOLIDATION REQUIRED before approval
 ```
 
 ### 2. Tool Improvement Recommendations

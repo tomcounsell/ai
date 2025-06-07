@@ -43,6 +43,28 @@ agent = Agent(
 )
 ```
 
+## Asynchronous Task Support
+
+Tools can integrate with the [Promise Queue](promise-queue.md) for long-running operations:
+
+```python
+def spawn_valor_session(task_description: str, ...) -> str:
+    """Example tool with async support."""
+    estimated_duration = estimate_task_duration(task_description)
+    
+    # Return async promise marker for long tasks
+    if estimated_duration > 30 and not force_sync:
+        return f"ASYNC_PROMISE|I'll work on this task in the background: {task_description}"
+    
+    # Execute synchronously for short tasks
+    return execute_task(task_description)
+```
+
+When a tool returns an `ASYNC_PROMISE|` marker:
+1. The Telegram handler creates a promise in the database
+2. Huey consumer executes the task in the background
+3. User receives a completion notification when done
+
 ## Current Tool Implementations
 
 ### Web Search Tool (`tools/search_tool.py`)

@@ -102,6 +102,53 @@ def init_database() -> None:
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 );
                 
+                -- Claude Code sessions for persistent context
+                CREATE TABLE IF NOT EXISTS claude_code_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT UNIQUE NOT NULL,  -- Claude Code session UUID
+                    chat_id TEXT,  -- Telegram chat ID for session association
+                    username TEXT,  -- Username who initiated the session
+                    tool_name TEXT NOT NULL,  -- 'delegate_coding_task' or 'technical_analysis'
+                    working_directory TEXT NOT NULL,
+                    initial_task TEXT NOT NULL,  -- Original task description
+                    task_count INTEGER DEFAULT 1,  -- Number of tasks completed in session
+                    last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT 1,  -- Whether session is still usable
+                    session_metadata TEXT  -- JSON blob for additional context
+                );
+                
+                -- Promises table for tracking long-running background tasks
+                CREATE TABLE IF NOT EXISTS promises (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    task_description TEXT NOT NULL,
+                    task_type TEXT DEFAULT 'code',  -- 'code', 'search', 'analysis'
+                    status TEXT DEFAULT 'pending',  -- 'pending', 'in_progress', 'completed', 'failed'
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    result_summary TEXT,
+                    error_message TEXT,
+                    metadata TEXT  -- JSON blob for task-specific data
+                );
+                
+                -- Message queue for missed/scheduled messages
+                CREATE TABLE IF NOT EXISTS message_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER,
+                    message_text TEXT NOT NULL,
+                    message_type TEXT NOT NULL,  -- 'missed', 'scheduled', 'followup'
+                    sender_username TEXT,
+                    original_timestamp TIMESTAMP,
+                    status TEXT DEFAULT 'pending',  -- 'pending', 'processing', 'completed', 'failed'
+                    processed_at TIMESTAMP,
+                    error_message TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    metadata TEXT  -- JSON blob with full message data
+                );
+                
                 -- Indexes for performance
                 CREATE INDEX IF NOT EXISTS idx_token_usage_timestamp ON token_usage(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_id);
@@ -113,6 +160,21 @@ def init_database() -> None:
                 CREATE INDEX IF NOT EXISTS idx_links_domain ON links(domain);
                 CREATE INDEX IF NOT EXISTS idx_links_timestamp ON links(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_links_status ON links(analysis_status);
+                
+                CREATE INDEX IF NOT EXISTS idx_claude_sessions_session_id ON claude_code_sessions(session_id);
+                CREATE INDEX IF NOT EXISTS idx_claude_sessions_chat_id ON claude_code_sessions(chat_id);
+                CREATE INDEX IF NOT EXISTS idx_claude_sessions_username ON claude_code_sessions(username);
+                CREATE INDEX IF NOT EXISTS idx_claude_sessions_tool ON claude_code_sessions(tool_name);
+                CREATE INDEX IF NOT EXISTS idx_claude_sessions_active ON claude_code_sessions(is_active);
+                CREATE INDEX IF NOT EXISTS idx_claude_sessions_last_activity ON claude_code_sessions(last_activity);
+                
+                CREATE INDEX IF NOT EXISTS idx_promises_chat_id ON promises(chat_id);
+                CREATE INDEX IF NOT EXISTS idx_promises_status ON promises(status);
+                CREATE INDEX IF NOT EXISTS idx_promises_created_at ON promises(created_at);
+                
+                CREATE INDEX IF NOT EXISTS idx_message_queue_status ON message_queue(status);
+                CREATE INDEX IF NOT EXISTS idx_message_queue_chat_id ON message_queue(chat_id);
+                CREATE INDEX IF NOT EXISTS idx_message_queue_created_at ON message_queue(created_at);
             """)
             
             # Insert default data
@@ -283,3 +345,218 @@ def cleanup_old_databases() -> None:
                 logger.info(f"Backed up {file_path} to {file_path}.backup")
             except Exception as e:
                 logger.error(f"Error backing up {file_path}: {e}")
+
+
+# Promise Management Functions
+def create_promise(chat_id: int, message_id: int, task_description: str) -> int:
+    """Create a new promise entry in the database.
+    
+    Args:
+        chat_id: Telegram chat ID
+        message_id: Telegram message ID that triggered the promise
+        task_description: Description of the promised task
+        
+    Returns:
+        int: Promise ID
+    """
+    conn = get_database_connection()
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+        INSERT INTO promises (chat_id, message_id, task_description)
+        VALUES (?, ?, ?)
+    """, (chat_id, message_id, task_description))
+    
+    promise_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    
+    logger.info(f"Created promise {promise_id} for chat {chat_id}")
+    return promise_id
+
+
+def update_promise_status(promise_id: int, status: str, result_summary: Optional[str] = None, 
+                         error_message: Optional[str] = None) -> None:
+    """Update the status of a promise.
+    
+    Args:
+        promise_id: Promise ID to update
+        status: New status ('pending', 'in_progress', 'completed', 'failed')
+        result_summary: Summary of results if completed
+        error_message: Error message if failed
+    """
+    conn = get_database_connection()
+    
+    if status == 'completed' or status == 'failed':
+        conn.execute("""
+            UPDATE promises 
+            SET status = ?, completed_at = CURRENT_TIMESTAMP, 
+                result_summary = ?, error_message = ?
+            WHERE id = ?
+        """, (status, result_summary, error_message, promise_id))
+    else:
+        conn.execute("""
+            UPDATE promises 
+            SET status = ?
+            WHERE id = ?
+        """, (status, promise_id))
+    
+    conn.commit()
+    conn.close()
+    
+    logger.info(f"Updated promise {promise_id} status to {status}")
+
+
+def get_promise(promise_id: int) -> Optional[dict]:
+    """Get a promise by ID.
+    
+    Args:
+        promise_id: Promise ID to retrieve
+        
+    Returns:
+        dict: Promise data or None if not found
+    """
+    conn = get_database_connection()
+    conn.row_factory = sqlite3.Row
+    
+    result = conn.execute("""
+        SELECT * FROM promises WHERE id = ?
+    """, (promise_id,)).fetchone()
+    
+    conn.close()
+    
+    return dict(result) if result else None
+
+
+def get_pending_promises(chat_id: Optional[int] = None) -> list:
+    """Get all pending promises, optionally filtered by chat.
+    
+    Args:
+        chat_id: Optional chat ID to filter by
+        
+    Returns:
+        list: List of promise dictionaries
+    """
+    conn = get_database_connection()
+    conn.row_factory = sqlite3.Row
+    
+    if chat_id:
+        results = conn.execute("""
+            SELECT * FROM promises 
+            WHERE status = 'pending' AND chat_id = ?
+            ORDER BY created_at ASC
+        """, (chat_id,)).fetchall()
+    else:
+        results = conn.execute("""
+            SELECT * FROM promises 
+            WHERE status = 'pending'
+            ORDER BY created_at ASC
+        """).fetchall()
+    
+    conn.close()
+    
+    return [dict(row) for row in results]
+
+
+# Message Queue Functions
+def queue_missed_message(
+    chat_id: int,
+    message_text: str,
+    sender_username: Optional[str] = None,
+    message_id: Optional[int] = None,
+    original_timestamp: Optional[str] = None,
+    metadata: Optional[dict] = None
+) -> int:
+    """Queue a missed message for later processing.
+    
+    Args:
+        chat_id: Telegram chat ID
+        message_text: The message content
+        sender_username: Username of sender
+        message_id: Original message ID
+        original_timestamp: When message was originally sent
+        metadata: Additional message data as dict
+        
+    Returns:
+        int: Message queue ID
+    """
+    with get_database_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO message_queue (
+                chat_id, message_id, message_text, message_type,
+                sender_username, original_timestamp, metadata
+            ) VALUES (?, ?, ?, 'missed', ?, ?, ?)
+        """, (
+            chat_id, message_id, message_text,
+            sender_username, original_timestamp,
+            json.dumps(metadata) if metadata else None
+        ))
+        
+        message_queue_id = cursor.lastrowid
+        conn.commit()
+        
+    logger.info(f"Queued missed message {message_queue_id} from {sender_username} in chat {chat_id}")
+    return message_queue_id
+
+
+def get_pending_messages(limit: int = 10) -> list:
+    """Get pending messages from the queue.
+    
+    Args:
+        limit: Maximum number of messages to return
+        
+    Returns:
+        list: List of message dictionaries
+    """
+    with get_database_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        results = cursor.execute("""
+            SELECT * FROM message_queue 
+            WHERE status = 'pending'
+            ORDER BY created_at ASC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        
+    return [dict(row) for row in results]
+
+
+def update_message_queue_status(
+    message_id: int,
+    status: str,
+    error_message: Optional[str] = None
+) -> None:
+    """Update the status of a queued message.
+    
+    Args:
+        message_id: Message queue ID
+        status: New status ('processing', 'completed', 'failed')
+        error_message: Error message if failed
+    """
+    with get_database_connection() as conn:
+        cursor = conn.cursor()
+        
+        if status == 'completed':
+            cursor.execute("""
+                UPDATE message_queue 
+                SET status = ?, processed_at = ?
+                WHERE id = ?
+            """, (status, datetime.utcnow().isoformat(), message_id))
+        elif status == 'failed' and error_message:
+            cursor.execute("""
+                UPDATE message_queue 
+                SET status = ?, error_message = ?, processed_at = ?
+                WHERE id = ?
+            """, (status, error_message, datetime.utcnow().isoformat(), message_id))
+        else:
+            cursor.execute("""
+                UPDATE message_queue 
+                SET status = ?
+                WHERE id = ?
+            """, (status, message_id))
+        
+        conn.commit()
+        
+    logger.debug(f"Updated message queue {message_id} status to {status}")

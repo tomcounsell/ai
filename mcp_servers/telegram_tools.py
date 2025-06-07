@@ -4,11 +4,30 @@
 Telegram Tools MCP Server
 
 Provides Telegram conversation history search and context tools for Claude Code integration.
-Converts existing telegram_history_tool functionality to MCP server format.
+This server follows the GOLD STANDARD wrapper pattern by importing functions from 
+standalone tools and adding MCP-specific concerns (context injection, validation).
+
+ARCHITECTURE: MCP Wrapper → Standalone Implementation
+- search_conversation_history → tools/telegram_history_tool.py
+- get_conversation_context → tools/telegram_history_tool.py
+- get_recent_history → Unique MCP implementation (UNIQUE)
+- list_telegram_dialogs → Unique MCP implementation (UNIQUE)
 """
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
+# Import standalone tool implementations following GOLD STANDARD pattern
+from tools.telegram_history_tool import (
+    search_telegram_history,
+    get_telegram_context_summary
+)
+
+# Import context manager for MCP context injection
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from context_manager import inject_context_for_tool
 
 # Load environment variables
 load_dotenv()
@@ -33,15 +52,18 @@ def search_conversation_history(query: str, chat_id: str = "", max_results: int 
     Returns:
         Formatted string of relevant historical messages or "No matches found"
     """
-    # Validate inputs
+    # Validate inputs (MCP-specific validation)
     if not query or not query.strip():
         return "❌ Search query cannot be empty."
     
     if len(query) > 200:
         return "❌ Search query too long (max 200 characters)."
     
+    # Inject context if not provided
+    chat_id, _ = inject_context_for_tool(chat_id, "")
+    
     if not chat_id:
-        return "❌ No chat ID provided for history search. Ensure CONTEXT_DATA includes CHAT_ID."
+        return "❌ No chat ID available for history search. Please ensure context is set or provide chat_id parameter."
     
     if max_results < 1 or max_results > 50:
         return "❌ max_results must be between 1 and 50."
@@ -56,39 +78,22 @@ def search_conversation_history(query: str, chat_id: str = "", max_results: int 
         if not chat_history_obj:
             return "❌ Chat history system not available"
         
-        # Convert chat_id to int if it's a string
+        # Convert chat_id to int if it's a string (MCP-specific handling)
         try:
             chat_id_int = int(chat_id)
         except ValueError:
             return f"❌ Invalid chat ID format: {chat_id}"
         
-        # Search message history 
-        matches = chat_history_obj.search_history(
-            chat_id=chat_id_int, 
-            query=query, 
-            max_results=max_results,
-            max_age_days=30  # Search last 30 days
-        )
+        # Call standalone implementation following GOLD STANDARD pattern
+        result = search_telegram_history(query, chat_history_obj, chat_id_int, max_results)
         
-        if not matches:
-            return f"📂 No messages found matching '{query}' in recent history for chat {chat_id}"
-        
-        # Format results for the agent
-        result_text = f"📂 **Found {len(matches)} relevant message(s) for '{query}' in chat {chat_id}:**\n\n"
-        
-        for i, msg in enumerate(matches, 1):
-            # Format message with timestamp if available
-            timestamp = msg.get('timestamp', 'Unknown time')
-            role = msg.get('role', 'unknown')
-            content = msg.get('content', '').strip()
-            
-            # Limit content length for readability
-            if len(content) > 200:
-                content = content[:200] + "..."
-            
-            result_text += f"{i}. **{role}** ({timestamp}):\n   {content}\n\n"
-        
-        return result_text.strip()
+        # Add MCP-specific formatting for enhanced user experience
+        if result.startswith("No messages found"):
+            return f"📂 {result} for chat {chat_id}"
+        elif result.startswith("Found"):
+            return f"📂 **{result.replace('Found', 'Found in chat ' + chat_id + ':')}**"
+        else:
+            return f"📂 **Search Results for '{query}' in chat {chat_id}:**\n\n{result}"
         
     except ImportError:
         return "❌ Telegram chat history system not available - missing integrations"
@@ -111,8 +116,12 @@ def get_conversation_context(chat_id: str = "", hours_back: int = 24) -> str:
     Returns:
         Formatted summary of recent conversation or "No recent activity"
     """
+    # MCP-specific validation
+    # Inject context if not provided
+    chat_id, _ = inject_context_for_tool(chat_id, "")
+    
     if not chat_id:
-        return "❌ No chat ID provided for context retrieval. Ensure CONTEXT_DATA includes CHAT_ID."
+        return "❌ No chat ID available for context retrieval. Please ensure context is set or provide chat_id parameter."
 
     try:
         # Import chat history here to avoid import errors if not available
@@ -124,39 +133,26 @@ def get_conversation_context(chat_id: str = "", hours_back: int = 24) -> str:
         if not chat_history_obj:
             return "❌ Chat history system not available"
         
-        # Convert chat_id to int if it's a string
+        # Convert chat_id to int if it's a string (MCP-specific handling)
         try:
             chat_id_int = int(chat_id)
         except ValueError:
             return f"❌ Invalid chat ID format: {chat_id}"
         
-        # Get extended context
-        context_messages = chat_history_obj.get_context(
-            chat_id=chat_id_int,
-            max_context_messages=15,  # More messages for summary
-            max_age_hours=hours_back,
-            always_include_last=3     # Always include last 3
-        )
+        # Call standalone implementation following GOLD STANDARD pattern
+        result = get_telegram_context_summary(chat_history_obj, chat_id_int, hours_back)
         
-        if not context_messages:
-            return f"📭 No conversation activity in the last {hours_back} hours for chat {chat_id}"
-        
-        # Format as conversation summary
-        summary = f"💬 **Conversation Context Summary**\n"
-        summary += f"📅 Last {hours_back} hours | 💬 {len(context_messages)} messages | 🔗 Chat {chat_id}\n\n"
-        
-        for i, msg in enumerate(context_messages, 1):
-            timestamp = msg.get('timestamp', 'Unknown time')
-            role = msg.get('role', 'unknown')
-            content = msg.get('content', '').strip()
-            
-            # Limit content length for readability
-            if len(content) > 150:
-                content = content[:150] + "..."
-            
-            summary += f"{i}. **{role}** ({timestamp}):\n   {content}\n\n"
-            
-        return summary.strip()
+        # Add MCP-specific formatting for enhanced user experience
+        if result.startswith("No conversation activity"):
+            return f"📭 {result} for chat {chat_id}"
+        elif result.startswith("Conversation summary"):
+            # Enhanced formatting with chat context
+            enhanced_result = f"💬 **Conversation Context Summary**\n"
+            enhanced_result += f"📅 Last {hours_back} hours | 🔗 Chat {chat_id}\n\n"
+            enhanced_result += result.replace("Conversation summary", "Summary")
+            return enhanced_result
+        else:
+            return f"💬 **Context for chat {chat_id}:**\n\n{result}"
         
     except ImportError:
         return "❌ Telegram chat history system not available - missing integrations"
@@ -178,8 +174,11 @@ def get_recent_history(chat_id: str = "", max_messages: int = 10) -> str:
     Returns:
         Formatted list of recent messages or "No recent messages"
     """
+    # Inject context if not provided
+    chat_id, _ = inject_context_for_tool(chat_id, "")
+    
     if not chat_id:
-        return "❌ No chat ID provided for recent history. Ensure CONTEXT_DATA includes CHAT_ID."
+        return "❌ No chat ID available for recent history. Please ensure context is set or provide chat_id parameter."
 
     try:
         # Import chat history here to avoid import errors if not available
@@ -273,16 +272,20 @@ def list_telegram_dialogs() -> str:
         # Run the async function
         try:
             dialogs_data, error = asyncio.run(get_dialogs())
-        except RuntimeError:
-            # If we're already in an event loop, use current loop
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # Schedule as a task in the current loop
-                import asyncio
-                task = loop.create_task(get_dialogs())
-                dialogs_data, error = task.result() if task.done() else (None, "❌ Failed to retrieve dialogs in current event loop")
+        except RuntimeError as e:
+            # If we're already in an event loop, we can't use asyncio.run()
+            if "cannot be called from a running event loop" in str(e):
+                return "❌ Cannot retrieve dialogs from within an active event loop. Please run from a synchronous context or ensure the Telegram client is running independently."
             else:
-                dialogs_data, error = loop.run_until_complete(get_dialogs())
+                # For other RuntimeError cases, try to get current loop
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        return "❌ Cannot retrieve dialogs: Event loop is already running. Please use the Telegram client directly."
+                    else:
+                        dialogs_data, error = loop.run_until_complete(get_dialogs())
+                except Exception as loop_error:
+                    return f"❌ Event loop error: {str(loop_error)}"
         
         if error:
             return error

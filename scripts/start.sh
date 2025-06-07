@@ -25,6 +25,52 @@ check_server() {
     return 1
 }
 
+# Function to check if Huey consumer is running
+check_huey() {
+    if pgrep -f "huey_consumer.py" > /dev/null; then
+        HUEY_PID=$(pgrep -f "huey_consumer.py")
+        echo "✅ Huey consumer is already running (PID: $HUEY_PID)"
+        return 0
+    fi
+    return 1
+}
+
+# Function to start Huey consumer
+start_huey() {
+    echo "🚀 Starting Huey task queue consumer..."
+    
+    # Set production environment variables
+    export HUEY_DB_PATH="data/huey.db"
+    export HUEY_IMMEDIATE="false"
+    
+    # Ensure data directory exists
+    mkdir -p "$PROJECT_ROOT/data" "$PROJECT_ROOT/logs"
+    
+    # Start Huey consumer in background
+    python "$PROJECT_ROOT/huey_consumer.py" tasks.huey_config.huey \
+        -w 4 \
+        -k thread \
+        -l "$PROJECT_ROOT/logs/huey.log" \
+        -v >> "$PROJECT_ROOT/logs/huey_startup.log" 2>&1 &
+    
+    HUEY_PID=$!
+    echo $HUEY_PID > "$PROJECT_ROOT/huey.pid"
+    
+    # Wait a moment for Huey to start
+    sleep 2
+    
+    # Check if Huey started successfully
+    if ps -p $HUEY_PID > /dev/null 2>&1; then
+        echo "✅ Huey consumer started successfully (PID: $HUEY_PID)"
+        return 0
+    else
+        echo "❌ Failed to start Huey consumer"
+        echo "📋 Check logs: cat logs/huey.log"
+        rm -f "$PROJECT_ROOT/huey.pid"
+        return 1
+    fi
+}
+
 # Function to start server
 start_server() {
     echo "Starting FastAPI development server with hot reload..."
@@ -65,14 +111,17 @@ start_server() {
         echo "  API docs: http://localhost:$PORT/docs"
         echo "  Redoc:    http://localhost:$PORT/redoc"
         echo ""
-        echo "📁 Logs:    tail -f logs/server.log"
+        echo "📁 Logs:"
+        echo "  Server:   tail -f logs/server.log"
+        echo "  Huey:     tail -f logs/huey.log"
         echo "🛑 Stop:    scripts/stop.sh"
         echo ""
         echo "🤖 Services running:"
         echo "  ✅ FastAPI server (with hot reload)"
         echo "  ✅ Telegram client (authenticated)"
+        echo "  ✅ Huey task queue (background processing)"
         echo ""
-        echo "Ready to receive Telegram messages!"
+        echo "Ready to receive Telegram messages and process background tasks!"
         
         # Show last few lines of log to confirm startup
         echo ""
@@ -154,6 +203,15 @@ authenticate_telegram() {
 
 # Main logic
 if check_server; then
+    # Server is running, but check if Huey is also running
+    if ! check_huey; then
+        echo ""
+        echo "🚀 Server is running, but Huey consumer is not. Starting Huey..."
+        if ! start_huey; then
+            echo "❌ Failed to start Huey consumer"
+            exit 1
+        fi
+    fi
     exit 0
 fi
 
@@ -205,5 +263,14 @@ echo ""
 # Prevent database locks before starting
 prevent_database_locks
 echo ""
+
+# Start Huey consumer first
+if ! check_huey; then
+    if ! start_huey; then
+        echo "❌ Failed to start Huey consumer"
+        exit 1
+    fi
+    echo ""
+fi
 
 start_server

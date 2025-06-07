@@ -8,6 +8,34 @@ from pydantic import BaseModel, Field
 from urllib.parse import urlparse
 import subprocess
 import tempfile
+import re
+
+
+def _is_safe_url(url: str) -> bool:
+    """Validate URL for security before subprocess execution."""
+    try:
+        parsed = urlparse(url)
+        
+        # Only allow HTTP/HTTPS schemes
+        if parsed.scheme not in ['http', 'https']:
+            return False
+        
+        # Validate hostname exists and is not localhost/private
+        if not parsed.netloc:
+            return False
+            
+        # Block localhost and private IPs
+        hostname = parsed.netloc.split(':')[0].lower()
+        if hostname in ['localhost', '127.0.0.1', '0.0.0.0'] or hostname.startswith('192.168.') or hostname.startswith('10.') or hostname.startswith('172.'):
+            return False
+        
+        # Basic format validation
+        if not re.match(r'^[a-zA-Z0-9._-]+\.[a-zA-Z]{2,}$', hostname):
+            return False
+            
+        return True
+    except Exception:
+        return False
 
 
 class DocumentSection(BaseModel):
@@ -92,17 +120,32 @@ def summarize_document(
 
 def summarize_url_document(url: str, config: Optional[SummaryConfig] = None) -> DocumentSummary:
     """Summarize document from URL (supports GitHub, GitLab, docs sites)."""
+    # Validate URL before processing
+    if not _is_safe_url(url):
+        return DocumentSummary(
+            title=f"Error: {url}",
+            total_words=0,
+            total_sections=0,
+            summary="Invalid or unsafe URL provided",
+            key_insights=["URL validation failed"],
+            sections=[],
+            reading_time_minutes=0,
+            document_type="error",
+            main_topics=[]
+        )
+    
     # Download content using curl or similar
     try:
         with tempfile.NamedTemporaryFile(mode='w+', suffix='.md', delete=False) as f:
             temp_path = f.name
         
-        # Use curl to download the content
+        # Use curl to download the content with restricted options
         result = subprocess.run(
-            ["curl", "-s", "-L", url],
+            ["curl", "-s", "-L", "--max-filesize", "10485760", "--connect-timeout", "10", url],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=30,
+            env={"PATH": "/usr/bin:/bin"}  # Restrict environment
         )
         
         if result.returncode == 0:
@@ -421,15 +464,36 @@ def _summarize_section(section: DocumentSection, config: SummaryConfig) -> Docum
     sentences = [s.strip() for s in sentences if s.strip()]
     
     if len(sentences) <= 3:
+        # Even with few sentences, enforce word limit by truncating
+        words = section.content.split()
+        if len(words) > config.max_section_words:
+            truncated_content = ' '.join(words[:config.max_section_words]) + '...'
+            return DocumentSection(
+                title=section.title,
+                content=truncated_content,
+                level=section.level,
+                word_count=len(truncated_content.split()),
+                key_points=section.key_points
+            )
         return section
     
-    # Take first 2 and last sentence, plus key points
+    # Take first 2 and last sentence, but enforce word limit
     summary_sentences = sentences[:2] + sentences[-1:]
     summary_content = '. '.join(summary_sentences) + '.'
     
-    # Add key points if they exist
+    # Add key points if they exist and we have room
     if section.key_points:
-        summary_content += '\n\nKey points:\n' + '\n'.join(f"• {point}" for point in section.key_points[:3])
+        key_points_text = '\n\nKey points:\n' + '\n'.join(f"• {point}" for point in section.key_points[:3])
+        potential_content = summary_content + key_points_text
+        
+        # Check if adding key points exceeds limit
+        if len(potential_content.split()) <= config.max_section_words:
+            summary_content = potential_content
+    
+    # Final word count enforcement - truncate if still too long
+    words = summary_content.split()
+    if len(words) > config.max_section_words:
+        summary_content = ' '.join(words[:config.max_section_words]) + '...'
     
     return DocumentSection(
         title=section.title,

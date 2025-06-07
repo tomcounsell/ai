@@ -2,6 +2,7 @@
 
 import os
 import time
+from datetime import datetime
 
 from pyrogram import Client
 
@@ -65,6 +66,7 @@ class TelegramClient:
             # Register message handler
             @self.client.on_message()
             async def handle_message(client, message):
+                print(f"DEBUG: Received message from {message.from_user.username if message.from_user else 'unknown'}: {message.text[:50] if message.text else 'non-text'}")
                 await self.message_handler.handle_message(client, message)
 
             # Test message handling with self-ping
@@ -176,6 +178,8 @@ class TelegramClient:
             return
 
         print("🔍 Checking for missed messages during startup...")
+        print(f"   Bot started at: {self.bot_start_time} ({datetime.fromtimestamp(self.bot_start_time).strftime('%Y-%m-%d %H:%M:%S')})")
+        print(f"   Catchup window: Last 5 minutes before startup")
         
         try:
             from .utils import is_message_too_old
@@ -207,12 +211,16 @@ class TelegramClient:
                         if not message.text:
                             continue
                             
-                        # Skip messages from before bot start time
-                        if message.date.timestamp() < self.bot_start_time:
-                            continue
-                            
-                        # Check if message is too old (using same 5-minute threshold)
-                        if is_message_too_old(message.date.timestamp()):
+                        # Check if this is a missed message (sent while bot was offline)
+                        message_time = message.date.timestamp()
+                        
+                        # Define catchup window (5 minutes before bot start)
+                        catchup_window_start = self.bot_start_time - 300  # 5 minutes
+                        
+                        # Message is missed if it's:
+                        # 1. From before bot started
+                        # 2. But within the catchup window
+                        if catchup_window_start < message_time < self.bot_start_time:
                             # This is a missed message - collect it
                             chat_missed_messages.append(message.text)
                             missed_message_count += 1
@@ -221,9 +229,11 @@ class TelegramClient:
                             self.chat_history.add_message(chat_id, "user", message.text)
                             
                             print(f"Found missed message in chat {chat_id}: {message.text[:50]}...")
+                            print(f"  Message time: {message_time}, Bot start: {self.bot_start_time}")
                         
-                        # Stop if we've gone too far back in time
-                        if message.date.timestamp() < (self.bot_start_time - 3600):  # 1 hour before startup
+                        # Skip messages that are too old (before catchup window)
+                        elif message_time < catchup_window_start:
+                            # We've gone too far back, no need to check older messages
                             break
 
                 except Exception as e:
