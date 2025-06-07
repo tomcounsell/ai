@@ -13,6 +13,30 @@ The AI agent system uses a **single shared SQLite database** (`system.db`) for a
 
 ### Tables
 
+#### Promise Queue System
+```sql
+-- Promises table for asynchronous task tracking
+CREATE TABLE IF NOT EXISTS promises (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    task_description TEXT NOT NULL,
+    task_type TEXT DEFAULT 'code',  -- 'code', 'search', 'analysis'
+    status TEXT DEFAULT 'pending',  -- 'pending', 'in_progress', 'completed', 'failed'
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP,
+    result_summary TEXT,
+    error_message TEXT,
+    metadata TEXT  -- JSON blob for task-specific data
+);
+
+-- Indexes for performance
+CREATE INDEX idx_promises_status ON promises(status);
+CREATE INDEX idx_promises_chat_id ON promises(chat_id);
+```
+
+For detailed promise queue operations, see [Promise Queue Documentation](promise-queue.md).
+
 #### Token Usage Tracking
 ```sql
 -- Projects table for project metadata

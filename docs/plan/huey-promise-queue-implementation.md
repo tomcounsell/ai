@@ -5,6 +5,10 @@
 **Last Updated**: January 2025  
 **Current Status**: PARTIALLY IMPLEMENTED ⚠️
 
+**Documentation Status**: ✅ MIGRATED to [docs/promise-queue.md](../promise-queue.md)
+
+This document remains as a detailed implementation guide while the official documentation is in [docs/promise-queue.md](../promise-queue.md).
+
 ### ✅ COMPLETED & TESTED:
 - Database schema with promises table
 - Basic Huey configuration (`tasks/huey_config.py`)

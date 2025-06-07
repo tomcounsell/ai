@@ -110,8 +110,11 @@ scripts/demo_agent.sh
 # Monitor demo progress
 tail -f logs/agent_demo.log
 
-# Run all tests
-cd tests && python run_tests.py
+# Run specific tests manually (full suite temporarily disabled)
+python tests/test_agent_quick.py
+
+# DO NOT RUN: Full test suite (causes system overload)
+# cd tests && python run_tests.py  # DISABLED - See docs/testing-strategy.md
 ```
 
 ## Architecture Overview

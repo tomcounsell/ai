@@ -3,6 +3,8 @@ Telegram reaction management system for intent-based message preprocessing.
 
 This module provides a centralized system for managing Telegram message reactions
 based on message intent classification and processing status.
+
+Updated version that uses dynamic reaction fetching instead of hardcoded lists.
 """
 
 import asyncio
@@ -10,6 +12,7 @@ import logging
 from enum import Enum
 
 from ..ollama_intent import IntentResult, MessageIntent
+from .dynamic_reactions import dynamic_reactions
 
 logger = logging.getLogger(__name__)
 
@@ -31,17 +34,16 @@ class TelegramReactionManager:
         """Initialize the reaction manager."""
 
         # Base reaction emojis for different statuses
-        # Using only valid Telegram reactions based on API investigation
         self.status_reactions = {
             ReactionStatus.RECEIVED: "👀",  # Eyes - message seen
             ReactionStatus.PROCESSING: None,  # Will use intent-specific emoji
-            ReactionStatus.COMPLETED: "👍",  # Thumbs up - completed (✅ not available)
-            ReactionStatus.ERROR: "👎",  # Thumbs down - error (🚫 not available)
+            ReactionStatus.COMPLETED: "✅",  # Green checkmark - completed
+            ReactionStatus.ERROR: "🚫",  # No entry sign - error
             ReactionStatus.IGNORED: None,  # No reaction for ignored messages
         }
 
-        # Valid Telegram reaction emojis (confirmed working)
-        # Based on actual API investigation - only 74 reactions are available
+        # Based on the test results, these are the actually available reactions
+        # This will be dynamically updated when reactions are fetched
         self.valid_telegram_emojis = {
             "☃", "⚡", "✍", "❤", "❤‍🔥", "🆒", "🌚", "🌭", "🍌", "🍓", "🍾",
             "🎃", "🎄", "🎅", "🎉", "🏆", "🐳", "👀", "👌", "👍", "👎", "👏",
@@ -53,62 +55,32 @@ class TelegramReactionManager:
         }
 
         # Intent-specific reaction emojis (from intent classification)
-        # Using only valid Telegram reaction emojis based on API investigation
+        # Using only valid Telegram reaction emojis
         self.intent_reactions = {
             MessageIntent.CASUAL_CHAT: "😁",
             MessageIntent.QUESTION_ANSWER: "🤔",
             MessageIntent.PROJECT_QUERY: "🙏",
             MessageIntent.DEVELOPMENT_TASK: "👨‍💻",
-            MessageIntent.IMAGE_GENERATION: "🎉",  # Party - 🎨 not available
+            MessageIntent.IMAGE_GENERATION: "🎨",  # Not in valid list, will fallback
             MessageIntent.IMAGE_ANALYSIS: "👀",
             MessageIntent.WEB_SEARCH: "🗿",
             MessageIntent.LINK_ANALYSIS: "🍾",
-            MessageIntent.SYSTEM_HEALTH: "❤",  # Plain heart - ❤️ with variant selector not available
+            MessageIntent.SYSTEM_HEALTH: "❤",
             MessageIntent.UNCLEAR: "🤨",
-        }
-
-        # Mapping for tool-specific emojis that aren't valid reactions
-        # Maps invalid emoji -> valid alternative
-        self.emoji_mapping = {
-            # Status emojis
-            "✅": "👍",  # Checkmark -> Thumbs up
-            "🚫": "👎",  # No entry -> Thumbs down
-            "❌": "👎",  # X mark -> Thumbs down
-            # Tool/action emojis
-            "🔍": "👀",  # Magnifying glass -> Eyes
-            "📊": "💯",  # Bar chart -> 100
-            "🎨": "🎉",  # Art palette -> Party
-            "🌐": "🌚",  # Globe -> Moon face
-            "🔨": "🔥",  # Hammer -> Fire
-            "✨": "⚡",  # Sparkles -> Lightning
-            "🧠": "🤓",  # Brain -> Nerd face
-            "💡": "⚡",  # Light bulb -> Lightning
-            "🎯": "💯",  # Target -> 100
-            "📈": "🏆",  # Chart up -> Trophy
-            "🔧": "🔥",  # Wrench -> Fire
-            "🚀": "⚡",  # Rocket -> Lightning
-            "💫": "⚡",  # Dizzy -> Lightning
-            "🌟": "⭐",  # Glowing star -> Star (but ⭐ also not available, so...)
-            "⭐": "🏆",  # Star -> Trophy
-            "📡": "🌚",  # Satellite antenna -> Moon face
-            "⚙️": "🔥",  # Gear -> Fire
-            "🔔": "👀",  # Bell -> Eyes
-            "📢": "😱",  # Loudspeaker -> Scream
-            "💬": "💭",  # Speech bubble -> Thought bubble (but also not available)
-            "💭": "🤔",  # Thought bubble -> Thinking face
-            "📝": "✍",  # Memo -> Writing hand
-            "📋": "✍",  # Clipboard -> Writing hand
-            "📌": "👀",  # Pushpin -> Eyes
-            "📍": "👀",  # Round pushpin -> Eyes
-            "🗂️": "🗿",  # Card index dividers -> Moai (for stability/organization)
-            "📁": "🗿",  # File folder -> Moai
-            "📂": "🗿",  # Open file folder -> Moai
-            # Heart variants
-            "❤️": "❤",  # Red heart with variant selector -> Plain red heart
         }
 
         # Track reactions added to messages to avoid duplicates
         self.message_reactions: dict[tuple, list[str]] = {}  # (chat_id, message_id) -> [emojis]
+
+    async def update_valid_reactions(self, client):
+        """Update the list of valid reactions from Telegram API."""
+        try:
+            reactions = await dynamic_reactions.get_available_reactions(client)
+            if reactions:
+                self.valid_telegram_emojis = reactions
+                logger.info(f"Updated valid reactions list: {len(reactions)} reactions available")
+        except Exception as e:
+            logger.error(f"Failed to update reactions list: {e}")
 
     async def add_received_reaction(self, client, chat_id: int, message_id: int) -> bool:
         """
@@ -122,6 +94,11 @@ class TelegramReactionManager:
         Returns:
             bool: True if reaction was added successfully
         """
+        # Update reactions list if needed
+        if not hasattr(self, '_reactions_updated'):
+            await self.update_valid_reactions(client)
+            self._reactions_updated = True
+            
         return await self._add_reaction(
             client,
             chat_id,
@@ -147,10 +124,21 @@ class TelegramReactionManager:
         """
         # Use suggested emoji from classification if available and valid, otherwise use default
         emoji = intent_result.suggested_emoji
+        
+        # Check if emoji is valid
         if not emoji or len(emoji) != 1 or emoji not in self.valid_telegram_emojis:
-            emoji = self.intent_reactions.get(intent_result.intent, "🤔")
+            # Try to use intent-specific emoji
+            default_emoji = self.intent_reactions.get(intent_result.intent, "🤔")
+            
+            # If the default emoji is also not valid, use a safe fallback
+            if default_emoji not in self.valid_telegram_emojis:
+                # Use a reaction we know is valid
+                emoji = "🤔"  # This is confirmed to be in the valid list
+            else:
+                emoji = default_emoji
+                
             logger.debug(
-                f"Invalid suggested emoji '{intent_result.suggested_emoji}', using default: {emoji}"
+                f"Invalid suggested emoji '{intent_result.suggested_emoji}', using: {emoji}"
             )
 
         success = await self._add_reaction(
@@ -177,11 +165,13 @@ class TelegramReactionManager:
         Returns:
             bool: True if reaction was added successfully
         """
+        # ✅ is not in the valid list, use a different completion indicator
+        completion_emoji = "👍"  # Thumbs up for completion
         return await self._add_reaction(
             client,
             chat_id,
             message_id,
-            self.status_reactions[ReactionStatus.COMPLETED],
+            completion_emoji,
             ReactionStatus.COMPLETED,
         )
 
@@ -197,11 +187,13 @@ class TelegramReactionManager:
         Returns:
             bool: True if reaction was added successfully
         """
+        # 🚫 is not in the valid list, use a different error indicator
+        error_emoji = "👎"  # Thumbs down for error
         return await self._add_reaction(
             client,
             chat_id,
             message_id,
-            self.status_reactions[ReactionStatus.ERROR],
+            error_emoji,
             ReactionStatus.ERROR,
         )
 
@@ -228,16 +220,6 @@ class TelegramReactionManager:
         """
         if not emoji:
             return False
-
-        # Map invalid emojis to valid alternatives
-        if emoji not in self.valid_telegram_emojis:
-            mapped_emoji = self.emoji_mapping.get(emoji)
-            if mapped_emoji:
-                logger.debug(f"Mapping invalid emoji '{emoji}' to valid emoji '{mapped_emoji}'")
-                emoji = mapped_emoji
-            else:
-                logger.warning(f"Invalid emoji '{emoji}' has no mapping, using default 🤔")
-                emoji = "🤔"
 
         message_key = (chat_id, message_id)
 
@@ -327,7 +309,7 @@ class TelegramReactionManager:
         This method manages the full lifecycle of reactions:
         1. Received (👀) - already added
         2. Intent-specific emoji
-        3. Completion (✅) or Error (❌)
+        3. Completion (👍) or Error (👎)
 
         Args:
             client: Telegram client instance
@@ -391,7 +373,11 @@ class TelegramReactionManager:
         Returns:
             str: Emoji character for this intent
         """
-        return self.intent_reactions.get(intent, "🤔")
+        emoji = self.intent_reactions.get(intent, "🤔")
+        # Validate it's in the current valid list
+        if emoji not in self.valid_telegram_emojis:
+            return "🤔"  # Safe fallback
+        return emoji
 
     async def update_tool_reaction(
         self, client, chat_id: int, message_id: int, tool_emoji: str
@@ -399,13 +385,8 @@ class TelegramReactionManager:
         """
         Update the second reaction slot with a tool-specific emoji.
 
-        This replaces the intent emoji with a tool-specific one as processing evolves:
-        - 🔍 when searching
-        - 📊 when analyzing data
-        - 🎨 when generating images
-        - 🌐 when fetching web data
-        - 🔨 when executing tasks
-        - etc.
+        This replaces the intent emoji with a tool-specific one as processing evolves.
+        Only uses emojis from the valid Telegram reactions list.
 
         Args:
             client: Telegram client instance
@@ -416,12 +397,31 @@ class TelegramReactionManager:
         Returns:
             bool: True if reaction was updated successfully
         """
-        if tool_emoji not in self.valid_telegram_emojis:
-            logger.warning(f"Invalid tool emoji '{tool_emoji}', skipping")
-            return False
-
+        # Map common tool emojis to valid Telegram reactions
+        tool_emoji_mapping = {
+            "🔍": "👀",  # Searching -> Eyes
+            "📊": "💯",  # Analyzing data -> 100
+            "🎨": "🎉",  # Art/Creating -> Party
+            "🌐": "🌚",  # Web/Network -> Moon face
+            "🔨": "🔥",  # Building/Working -> Fire
+            "✨": "⚡",  # Processing/Magic -> Lightning
+            "🧠": "🤓",  # Thinking/AI -> Nerd face
+            "💡": "💯",  # Ideas -> 100
+            "🎯": "🎯",  # Target (if available)
+            "📈": "📈",  # Chart (if available)
+            "🔧": "🔧",  # Tool (if available)
+            "🚀": "🔥",  # Launch -> Fire
+        }
+        
+        # Try to map the tool emoji to a valid one
+        mapped_emoji = tool_emoji_mapping.get(tool_emoji, tool_emoji)
+        
+        if mapped_emoji not in self.valid_telegram_emojis:
+            logger.warning(f"Invalid tool emoji '{tool_emoji}', using default")
+            mapped_emoji = "⚡"  # Lightning as default tool indicator
+            
         return await self._add_reaction(
-            client, chat_id, message_id, tool_emoji, ReactionStatus.PROCESSING
+            client, chat_id, message_id, mapped_emoji, ReactionStatus.PROCESSING
         )
 
     async def cleanup_old_reactions(self, max_tracked_messages: int = 1000) -> None:
@@ -503,13 +503,8 @@ async def update_tool_reaction(client, chat_id: int, message_id: int, tool_emoji
     """
     Convenience function to update the tool reaction (second slot).
 
-    Use this to replace the intent emoji with a tool-specific one:
-    - 🔍 when searching
-    - 📊 when analyzing
-    - 🎨 when generating images
-    - 🌐 when fetching web data
-    - 🔨 when building
-    - etc.
+    Use this to replace the intent emoji with a tool-specific one.
+    The emoji will be mapped to a valid Telegram reaction.
 
     Args:
         client: Telegram client instance

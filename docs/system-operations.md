@@ -11,18 +11,20 @@ This guide covers running, monitoring, and maintaining the AI agent system in de
 #### Starting the Development Server
 
 ```bash
-# Start complete system (FastAPI server + Telegram client)
+# Start complete system (FastAPI server + Telegram client + Huey consumer)
 scripts/start.sh
 
 # What this does:
 # - Checks for existing server processes
 # - Prevents database locks with proactive session cleanup
 # - Checks Telegram authentication status
-# - Starts both FastAPI server and Telegram client
+# - Starts FastAPI server, Telegram client, and Huey task consumer
 # - Validates system health with self-ping end-to-end testing
-# - Saves PID for process management
+# - Saves PIDs for process management
 # - Provides immediate feedback on startup status
 ```
+
+The startup script also launches the **Huey consumer** for background task processing. See [Promise Queue Documentation](promise-queue.md) for details on the asynchronous task system.
 
 **Script Details** (`scripts/start.sh`):
 ```bash
@@ -377,6 +379,29 @@ click>=8.1.0
 ```
 
 ## Health Monitoring
+
+### Promise Queue Monitoring
+
+Monitor the asynchronous task execution system:
+
+```bash
+# Check pending promises
+sqlite3 system.db "SELECT id, task_description, status, created_at FROM promises WHERE status='pending' ORDER BY created_at;"
+
+# View promise statistics
+sqlite3 system.db "SELECT status, COUNT(*) as count FROM promises GROUP BY status;"
+
+# Check Huey consumer status
+ps aux | grep huey_consumer
+
+# Monitor Huey logs
+tail -f logs/huey.log
+
+# View recent completed promises
+sqlite3 system.db "SELECT task_description, completed_at, result_summary FROM promises WHERE status='completed' ORDER BY completed_at DESC LIMIT 5;"
+```
+
+For detailed promise queue operations, see [Promise Queue Documentation](promise-queue.md).
 
 ### Agent Health Checks
 
