@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from integrations.telegram.reaction_manager import TelegramReactionManager
 from integrations.ollama_intent import IntentResult, MessageIntent
+from integrations.telegram.emoji_mapping import EMOJI_MAPPING, get_valid_emoji
 
 
 async def test_reaction_mapping():
@@ -46,7 +47,7 @@ async def test_reaction_mapping():
             mapped = emoji
         else:
             status = "✗ INVALID"
-            mapped = manager.emoji_mapping.get(emoji, "🤔")
+            mapped = get_valid_emoji(emoji)
         
         print(f"{emoji} {description:<30} {status} → {mapped}")
     

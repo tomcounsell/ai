@@ -102,35 +102,112 @@ def execute_coding_task(promise_id: int) -> str:
 @huey.task(retries=3, retry_delay=60)
 @with_promise_tracking
 def execute_search_task(promise_id: int) -> str:
-    """Execute a search task."""
+    """Execute a search task using Perplexity AI."""
     promise = get_promise(promise_id)
     if not promise:
         raise ValueError(f"Promise {promise_id} not found")
     
-    # For now, just return a placeholder
-    # TODO: Implement actual search logic
-    result = f"Search completed for: {promise['task_description']}"
+    # Parse task metadata
+    metadata = json.loads(promise.get('metadata') or '{}')
     
-    send_completion_notification.schedule(args=(promise_id, result), delay=1)
+    # Import search tool
+    from tools.search_tool import search_web
     
-    return result
+    # Extract search query from task description or metadata
+    search_query = metadata.get('query', promise['task_description'])
+    max_results = metadata.get('max_results', 3)
+    
+    try:
+        # Execute search
+        result = search_web(search_query, max_results=max_results)
+        
+        # Send completion notification
+        send_completion_notification.schedule(args=(promise_id, result), delay=1)
+        
+        return result
+    except Exception as e:
+        logger.error(f"Search task failed: {str(e)}")
+        raise
 
 
 @huey.task(retries=3, retry_delay=60)
 @with_promise_tracking
 def execute_analysis_task(promise_id: int) -> str:
-    """Execute an analysis task."""
+    """Execute an analysis task (image, link, or document analysis)."""
     promise = get_promise(promise_id)
     if not promise:
         raise ValueError(f"Promise {promise_id} not found")
     
-    # For now, just return a placeholder
-    # TODO: Implement actual analysis logic
-    result = f"Analysis completed for: {promise['task_description']}"
+    # Parse task metadata
+    metadata = json.loads(promise.get('metadata') or '{}')
+    analysis_type = metadata.get('analysis_type', 'general')
     
-    send_completion_notification.schedule(args=(promise_id, result), delay=1)
+    result = None
     
-    return result
+    try:
+        if analysis_type == 'image':
+            # Import image analysis tool
+            from tools.image_analysis_tool import analyze_image_with_ai
+            
+            image_path = metadata.get('image_path')
+            question = metadata.get('question', '')
+            
+            if not image_path:
+                raise ValueError("Image path required for image analysis")
+            
+            result = analyze_image_with_ai(image_path, question, str(promise['chat_id']))
+            
+        elif analysis_type == 'link':
+            # Import link analysis tool
+            from tools.link_analysis_tool import analyze_link
+            
+            url = metadata.get('url')
+            if not url:
+                raise ValueError("URL required for link analysis")
+            
+            result = analyze_link(url, str(promise['chat_id']))
+            
+        elif analysis_type == 'document':
+            # Import documentation tool
+            from tools.documentation_tool import analyze_documentation
+            
+            file_path = metadata.get('file_path', '.')
+            question = metadata.get('question', promise['task_description'])
+            
+            result = analyze_documentation(file_path, question)
+            
+        else:
+            # General analysis - use Claude for text analysis
+            from integrations.telegram.client import get_telegram_client
+            from agents.valor.agent import valor_agent
+            from agents.valor.context import TelegramChatContext
+            
+            # Build context for analysis
+            context = TelegramChatContext(
+                chat_id=promise['chat_id'],
+                username=metadata.get('username'),
+                is_group_chat=metadata.get('is_group_chat', False)
+            )
+            
+            # Run analysis through valor agent
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            analysis_prompt = f"Please analyze this: {promise['task_description']}"
+            agent_result = loop.run_until_complete(
+                valor_agent.run(analysis_prompt, deps=context)
+            )
+            result = agent_result.data
+        
+        # Send completion notification
+        send_completion_notification.schedule(args=(promise_id, result), delay=1)
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Analysis task failed: {str(e)}")
+        raise
 
 
 @huey.task(retries=2, retry_delay=30)
@@ -196,8 +273,10 @@ def check_promise_dependencies(promise_id: int):
     if not promise or promise['status'] != 'waiting':
         return
     
-    # Check parent promises
-    parent_ids = json.loads(promise.get('parent_promise_ids') or '[]')
+    # Check parent promises - stored in metadata
+    metadata = json.loads(promise.get('metadata') or '{}')
+    parent_ids = metadata.get('parent_promise_ids', [])
+    
     if not parent_ids:
         # No dependencies, execute immediately
         update_promise_status(promise_id, 'pending')
@@ -206,11 +285,26 @@ def check_promise_dependencies(promise_id: int):
     
     # Check if all parents are completed
     all_completed = True
+    failed_parents = []
+    
     for parent_id in parent_ids:
         parent = get_promise(parent_id)
-        if not parent or parent['status'] != 'completed':
+        if not parent:
+            logger.warning(f"Parent promise {parent_id} not found for promise {promise_id}")
+            failed_parents.append(parent_id)
             all_completed = False
-            break
+        elif parent['status'] == 'failed':
+            logger.warning(f"Parent promise {parent_id} failed for promise {promise_id}")
+            failed_parents.append(parent_id)
+            all_completed = False
+        elif parent['status'] != 'completed':
+            all_completed = False
+    
+    if failed_parents:
+        # If any parent failed, fail this promise too
+        error_msg = f"Parent promise(s) failed: {', '.join(map(str, failed_parents))}"
+        update_promise_status(promise_id, 'failed', error_message=error_msg)
+        return
     
     if all_completed:
         # Dependencies satisfied, execute
@@ -250,7 +344,14 @@ def execute_promise_by_type(promise_id: int):
         'analysis': execute_analysis_task,
     }
     
-    task_func = task_map.get(promise['task_type'])
+    # Check if this is a test execution task
+    metadata = json.loads(promise.get('metadata') or '{}')
+    if metadata.get('test_files') or metadata.get('test_pattern'):
+        # This is a test execution promise
+        from tasks.test_runner_tasks import execute_test_suite
+        task_func = execute_test_suite
+    else:
+        task_func = task_map.get(promise['task_type'])
     if task_func:
         logger.info(f"Routing promise {promise_id} to {task_func.__name__}")
         # Schedule the task instead of calling directly with delay=0 for immediate execution

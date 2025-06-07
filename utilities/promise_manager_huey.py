@@ -253,8 +253,175 @@ class HueyPromiseManager:
         
         return resumed_count
     
+    def get_promise_status(self, promise_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Get current status of a promise.
+        
+        Returns:
+            Dictionary with promise details or None if not found
+        """
+        with get_database_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT chat_id, message_id, task_description, task_type,
+                       status, created_at, completed_at, result_summary,
+                       error_message, metadata
+                FROM promises
+                WHERE id = ?
+            """, (promise_id,))
+            
+            row = cursor.fetchone()
+            
+        if not row:
+            return None
+            
+        return {
+            'id': promise_id,
+            'chat_id': row[0],
+            'message_id': row[1],
+            'task_description': row[2],
+            'task_type': row[3],
+            'status': row[4],
+            'created_at': row[5],
+            'completed_at': row[6],
+            'result_summary': row[7],
+            'error_message': row[8],
+            'metadata': json.loads(row[9]) if row[9] else None
+        }
+    
+    def cancel_promise(self, promise_id: int) -> bool:
+        """
+        Cancel a pending promise.
+        
+        Returns:
+            True if promise was cancelled, False if not found or already completed
+        """
+        with get_database_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Only cancel if still pending or waiting
+            cursor.execute("""
+                UPDATE promises
+                SET status = 'cancelled',
+                    completed_at = ?,
+                    error_message = 'Cancelled by user'
+                WHERE id = ? AND status IN ('pending', 'waiting')
+            """, (datetime.utcnow().isoformat(), promise_id))
+            
+            success = cursor.rowcount > 0
+            conn.commit()
+            
+        if success:
+            self.logger.info(f"Cancelled promise {promise_id}")
+        else:
+            self.logger.warning(f"Could not cancel promise {promise_id} - may be already completed")
+            
+        return success
+    
+    def get_user_promises(self, chat_id: int, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Get recent promises for a specific chat.
+        
+        Args:
+            chat_id: Telegram chat ID
+            limit: Maximum number of promises to return
+            
+        Returns:
+            List of promise dictionaries
+        """
+        with get_database_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, message_id, task_description, task_type,
+                       status, created_at, completed_at, result_summary,
+                       error_message
+                FROM promises
+                WHERE chat_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (chat_id, limit))
+            
+            rows = cursor.fetchall()
+            
+        promises = []
+        for row in rows:
+            promises.append({
+                'id': row[0],
+                'message_id': row[1],
+                'task_description': row[2],
+                'task_type': row[3],
+                'status': row[4],
+                'created_at': row[5],
+                'completed_at': row[6],
+                'result_summary': row[7],
+                'error_message': row[8]
+            })
+            
+        return promises
+    
     def _update_huey_task_id(self, promise_id: int, task_id: str):
         """Store Huey task ID for tracking."""
-        # Note: We'd need to add huey_task_id column to promises table
-        # For now, just log it
+        # Store in metadata for now since we don't have a dedicated column
+        with get_database_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get current metadata
+            cursor.execute("SELECT metadata FROM promises WHERE id = ?", (promise_id,))
+            row = cursor.fetchone()
+            
+            if row:
+                metadata = json.loads(row[0]) if row[0] else {}
+                metadata['huey_task_id'] = task_id
+                
+                cursor.execute("""
+                    UPDATE promises 
+                    SET metadata = ? 
+                    WHERE id = ?
+                """, (json.dumps(metadata), promise_id))
+                conn.commit()
+        
         self.logger.debug(f"Promise {promise_id} has Huey task ID: {task_id}")
+    
+    def _topological_sort(self, nodes: List[str], dependencies: Dict[str, List[str]]) -> List[str]:
+        """
+        Sort nodes based on dependencies (topological sort).
+        
+        Args:
+            nodes: List of node names
+            dependencies: Dict mapping node to list of nodes it depends on
+            
+        Returns:
+            List of nodes in dependency order
+        """
+        # Build adjacency list (reverse of dependencies)
+        graph = {node: [] for node in nodes}
+        in_degree = {node: 0 for node in nodes}
+        
+        for node, deps in dependencies.items():
+            if node in graph:
+                in_degree[node] = len(deps)
+                for dep in deps:
+                    if dep in graph:
+                        graph[dep].append(node)
+        
+        # Start with nodes that have no dependencies
+        queue = [node for node in nodes if in_degree[node] == 0]
+        result = []
+        
+        while queue:
+            current = queue.pop(0)
+            result.append(current)
+            
+            # Reduce in-degree for dependent nodes
+            for neighbor in graph[current]:
+                in_degree[neighbor] -= 1
+                if in_degree[neighbor] == 0:
+                    queue.append(neighbor)
+        
+        # If we haven't processed all nodes, there's a cycle
+        if len(result) != len(nodes):
+            # Return original order as fallback
+            self.logger.warning("Dependency cycle detected, using original order")
+            return nodes
+            
+        return result

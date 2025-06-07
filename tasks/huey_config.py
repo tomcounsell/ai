@@ -42,6 +42,7 @@ huey = SqliteHuey(
 try:
     from . import promise_tasks
     from . import telegram_tasks
+    from . import test_runner_tasks
 except ImportError:
     # Tasks not yet created or circular import during setup
     pass

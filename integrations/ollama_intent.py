@@ -83,21 +83,28 @@ class OllamaIntentClassifier:
         self.session = None
 
         # Intent-specific emoji mapping using valid Telegram reaction emojis
+        # Note: Updated to use only valid Telegram reactions
         self.intent_emojis = {
             MessageIntent.CASUAL_CHAT: "😁",
             MessageIntent.QUESTION_ANSWER: "🤔",
             MessageIntent.PROJECT_QUERY: "🙏",
             MessageIntent.DEVELOPMENT_TASK: "👨‍💻",
-            MessageIntent.IMAGE_GENERATION: "🎨",
+            MessageIntent.IMAGE_GENERATION: "🎉",  # Changed from 🎨 (not available)
             MessageIntent.IMAGE_ANALYSIS: "👀",
             MessageIntent.WEB_SEARCH: "🗿",
             MessageIntent.LINK_ANALYSIS: "🍾",
-            MessageIntent.SYSTEM_HEALTH: "❤️",
+            MessageIntent.SYSTEM_HEALTH: "❤",  # Changed from ❤️ (variant selector issue)
             MessageIntent.UNCLEAR: "🤨",
         }
 
+        # Import valid emojis at initialization
+        from .telegram.emoji_mapping import VALID_TELEGRAM_REACTIONS
+        
+        # Create a formatted list of valid emojis for the prompt
+        valid_emoji_list = ', '.join(sorted(VALID_TELEGRAM_REACTIONS))
+        
         # System prompt for intent classification
-        self.system_prompt = """You are an expert message intent classifier. Analyze the user's message and classify it into one of these specific intents:
+        self.system_prompt = f"""You are an expert message intent classifier. Analyze the user's message and classify it into one of these specific intents:
 
 1. casual_chat - Friendly conversation, greetings, personal topics, casual remarks
 2. question_answer - Direct questions requiring factual answers, "what is...", "how does..."
@@ -114,20 +121,12 @@ Respond with a JSON object containing:
 - intent: one of the exact intent names above
 - confidence: float between 0.0-1.0
 - reasoning: brief explanation of classification
-- emoji: single appropriate emoji that best represents this specific message's intent and mood
+- emoji: single emoji from the list below that best represents this message's intent and mood
 
-For emoji selection, be creative and specific to the message! You can use:
-- Processing: 🔍 📊 🔨 ✨ 🌐 📡 ⚙️ 🧠 💡 🎯 📈 🔧 🚀 💫 🌟
-- Happy/positive: 😊 😄 😃 🥳 🤩 😋 😌 🙌 👏 🎉 🎊 🌈 ☀️
-- Animals: 🐶 🐱 🦊 🐻 🐼 🦄 🦋 🐬 🐳 🦈 🐙 🦑 🐢 🦁 🦅
-- Food: 🍎 🍕 🍔 🍣 🍰 🍪 🍩 🍺 🍷 ☕ 🧋 🍾 🥂 🍹
-- Nature: 🌸 🌺 🌻 🌹 🌷 🌼 🌿 🍀 🌱 🌲 🌳 🌊 ⛰️ 🏔️
-- Tech/objects: 💻 📱 🎮 🎧 🎤 🎸 🎹 📷 🎬 🚗 ✈️ 🚀 🛸
-- Status: 🏁 🚦 🔔 📢 💬 📝 📋 📌 📍 🗂️ 📁 💯 🏆 🥇
-- Weather: ☀️ 🌤️ ⛅ ☁️ 🌧️ ⛈️ 🌩️ ❄️ 🌨️ 🌪️ 🌈
-- And hundreds more friendly, positive emojis!
+IMPORTANT: You MUST choose your emoji from ONLY these valid Telegram reaction emojis:
+{valid_emoji_list}
 
-Choose the emoji that best captures the specific mood, topic, or action of the message. Avoid anything threatening, unkind, or inappropriate.
+Choose the emoji that best captures the specific mood, topic, or action of the message from the list above. If unsure, use 🤔.
 
 Be decisive and pick the most likely intent even if uncertain."""
 
@@ -247,15 +246,12 @@ Be decisive and pick the most likely intent even if uncertain."""
             confidence = max(0.0, min(1.0, confidence))
 
             # Use default emoji if not provided or invalid for Telegram
-            # Import the valid emojis from the reaction manager
-            from .telegram.reaction_manager import reaction_manager
-
-            valid_telegram_emojis = reaction_manager.valid_telegram_emojis
+            from .telegram.emoji_mapping import VALID_TELEGRAM_REACTIONS
 
             if (
                 not suggested_emoji
                 or len(suggested_emoji) != 1
-                or suggested_emoji not in valid_telegram_emojis
+                or suggested_emoji not in VALID_TELEGRAM_REACTIONS
             ):
                 suggested_emoji = self.intent_emojis.get(intent, "🤔")
 
@@ -303,7 +299,7 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.SYSTEM_HEALTH,
                 confidence=1.0,
                 reasoning="System health keyword detected",
-                suggested_emoji="❤️",
+                suggested_emoji="❤",
             )
 
         # Image analysis (check for image markers)
@@ -331,7 +327,7 @@ Be decisive and pick the most likely intent even if uncertain."""
                 intent=MessageIntent.IMAGE_GENERATION,
                 confidence=0.7,
                 reasoning="Image creation keywords detected",
-                suggested_emoji="🎨",
+                suggested_emoji="🎉",
             )
 
         # Development tasks

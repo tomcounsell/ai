@@ -133,6 +133,22 @@ def init_database() -> None:
                     metadata TEXT  -- JSON blob for task-specific data
                 );
                 
+                -- Message queue for missed/scheduled messages
+                CREATE TABLE IF NOT EXISTS message_queue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id INTEGER NOT NULL,
+                    message_id INTEGER,
+                    message_text TEXT NOT NULL,
+                    message_type TEXT NOT NULL,  -- 'missed', 'scheduled', 'followup'
+                    sender_username TEXT,
+                    original_timestamp TIMESTAMP,
+                    status TEXT DEFAULT 'pending',  -- 'pending', 'processing', 'completed', 'failed'
+                    processed_at TIMESTAMP,
+                    error_message TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    metadata TEXT  -- JSON blob with full message data
+                );
+                
                 -- Indexes for performance
                 CREATE INDEX IF NOT EXISTS idx_token_usage_timestamp ON token_usage(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_id);
@@ -155,6 +171,10 @@ def init_database() -> None:
                 CREATE INDEX IF NOT EXISTS idx_promises_chat_id ON promises(chat_id);
                 CREATE INDEX IF NOT EXISTS idx_promises_status ON promises(status);
                 CREATE INDEX IF NOT EXISTS idx_promises_created_at ON promises(created_at);
+                
+                CREATE INDEX IF NOT EXISTS idx_message_queue_status ON message_queue(status);
+                CREATE INDEX IF NOT EXISTS idx_message_queue_chat_id ON message_queue(chat_id);
+                CREATE INDEX IF NOT EXISTS idx_message_queue_created_at ON message_queue(created_at);
             """)
             
             # Insert default data
@@ -436,3 +456,107 @@ def get_pending_promises(chat_id: Optional[int] = None) -> list:
     conn.close()
     
     return [dict(row) for row in results]
+
+
+# Message Queue Functions
+def queue_missed_message(
+    chat_id: int,
+    message_text: str,
+    sender_username: Optional[str] = None,
+    message_id: Optional[int] = None,
+    original_timestamp: Optional[str] = None,
+    metadata: Optional[dict] = None
+) -> int:
+    """Queue a missed message for later processing.
+    
+    Args:
+        chat_id: Telegram chat ID
+        message_text: The message content
+        sender_username: Username of sender
+        message_id: Original message ID
+        original_timestamp: When message was originally sent
+        metadata: Additional message data as dict
+        
+    Returns:
+        int: Message queue ID
+    """
+    with get_database_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO message_queue (
+                chat_id, message_id, message_text, message_type,
+                sender_username, original_timestamp, metadata
+            ) VALUES (?, ?, ?, 'missed', ?, ?, ?)
+        """, (
+            chat_id, message_id, message_text,
+            sender_username, original_timestamp,
+            json.dumps(metadata) if metadata else None
+        ))
+        
+        message_queue_id = cursor.lastrowid
+        conn.commit()
+        
+    logger.info(f"Queued missed message {message_queue_id} from {sender_username} in chat {chat_id}")
+    return message_queue_id
+
+
+def get_pending_messages(limit: int = 10) -> list:
+    """Get pending messages from the queue.
+    
+    Args:
+        limit: Maximum number of messages to return
+        
+    Returns:
+        list: List of message dictionaries
+    """
+    with get_database_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        results = cursor.execute("""
+            SELECT * FROM message_queue 
+            WHERE status = 'pending'
+            ORDER BY created_at ASC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        
+    return [dict(row) for row in results]
+
+
+def update_message_queue_status(
+    message_id: int,
+    status: str,
+    error_message: Optional[str] = None
+) -> None:
+    """Update the status of a queued message.
+    
+    Args:
+        message_id: Message queue ID
+        status: New status ('processing', 'completed', 'failed')
+        error_message: Error message if failed
+    """
+    with get_database_connection() as conn:
+        cursor = conn.cursor()
+        
+        if status == 'completed':
+            cursor.execute("""
+                UPDATE message_queue 
+                SET status = ?, processed_at = ?
+                WHERE id = ?
+            """, (status, datetime.utcnow().isoformat(), message_id))
+        elif status == 'failed' and error_message:
+            cursor.execute("""
+                UPDATE message_queue 
+                SET status = ?, error_message = ?, processed_at = ?
+                WHERE id = ?
+            """, (status, error_message, datetime.utcnow().isoformat(), message_id))
+        else:
+            cursor.execute("""
+                UPDATE message_queue 
+                SET status = ?
+                WHERE id = ?
+            """, (status, message_id))
+        
+        conn.commit()
+        
+    logger.debug(f"Updated message queue {message_id} status to {status}")

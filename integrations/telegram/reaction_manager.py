@@ -10,6 +10,7 @@ import logging
 from enum import Enum
 
 from ..ollama_intent import IntentResult, MessageIntent
+from .emoji_mapping import VALID_TELEGRAM_REACTIONS, get_valid_emoji
 
 logger = logging.getLogger(__name__)
 
@@ -40,17 +41,8 @@ class TelegramReactionManager:
             ReactionStatus.IGNORED: None,  # No reaction for ignored messages
         }
 
-        # Valid Telegram reaction emojis (confirmed working)
-        # Based on actual API investigation - only 74 reactions are available
-        self.valid_telegram_emojis = {
-            "☃", "⚡", "✍", "❤", "❤‍🔥", "🆒", "🌚", "🌭", "🍌", "🍓", "🍾",
-            "🎃", "🎄", "🎅", "🎉", "🏆", "🐳", "👀", "👌", "👍", "👎", "👏",
-            "👨‍💻", "👻", "👾", "💅", "💊", "💋", "💔", "💘", "💩", "💯", "🔥",
-            "🕊", "🖕", "🗿", "😁", "😂", "😇", "😈", "😍", "😎", "😐", "😘",
-            "😡", "😢", "😨", "😭", "😱", "😴", "🙈", "🙉", "🙊", "🙏", "🤓",
-            "🤔", "🤗", "🤝", "🤡", "🤣", "🤨", "🤩", "🤪", "🤬", "🤮", "🤯",
-            "🤷", "🤷‍♀", "🤷‍♂", "🥰", "🥱", "🥴", "🦄", "🫡"
-        }
+        # Use the valid reactions from the emoji mapping module
+        self.valid_telegram_emojis = VALID_TELEGRAM_REACTIONS
 
         # Intent-specific reaction emojis (from intent classification)
         # Using only valid Telegram reaction emojis based on API investigation
@@ -67,45 +59,6 @@ class TelegramReactionManager:
             MessageIntent.UNCLEAR: "🤨",
         }
 
-        # Mapping for tool-specific emojis that aren't valid reactions
-        # Maps invalid emoji -> valid alternative
-        self.emoji_mapping = {
-            # Status emojis
-            "✅": "👍",  # Checkmark -> Thumbs up
-            "🚫": "👎",  # No entry -> Thumbs down
-            "❌": "👎",  # X mark -> Thumbs down
-            # Tool/action emojis
-            "🔍": "👀",  # Magnifying glass -> Eyes
-            "📊": "💯",  # Bar chart -> 100
-            "🎨": "🎉",  # Art palette -> Party
-            "🌐": "🌚",  # Globe -> Moon face
-            "🔨": "🔥",  # Hammer -> Fire
-            "✨": "⚡",  # Sparkles -> Lightning
-            "🧠": "🤓",  # Brain -> Nerd face
-            "💡": "⚡",  # Light bulb -> Lightning
-            "🎯": "💯",  # Target -> 100
-            "📈": "🏆",  # Chart up -> Trophy
-            "🔧": "🔥",  # Wrench -> Fire
-            "🚀": "⚡",  # Rocket -> Lightning
-            "💫": "⚡",  # Dizzy -> Lightning
-            "🌟": "⭐",  # Glowing star -> Star (but ⭐ also not available, so...)
-            "⭐": "🏆",  # Star -> Trophy
-            "📡": "🌚",  # Satellite antenna -> Moon face
-            "⚙️": "🔥",  # Gear -> Fire
-            "🔔": "👀",  # Bell -> Eyes
-            "📢": "😱",  # Loudspeaker -> Scream
-            "💬": "💭",  # Speech bubble -> Thought bubble (but also not available)
-            "💭": "🤔",  # Thought bubble -> Thinking face
-            "📝": "✍",  # Memo -> Writing hand
-            "📋": "✍",  # Clipboard -> Writing hand
-            "📌": "👀",  # Pushpin -> Eyes
-            "📍": "👀",  # Round pushpin -> Eyes
-            "🗂️": "🗿",  # Card index dividers -> Moai (for stability/organization)
-            "📁": "🗿",  # File folder -> Moai
-            "📂": "🗿",  # Open file folder -> Moai
-            # Heart variants
-            "❤️": "❤",  # Red heart with variant selector -> Plain red heart
-        }
 
         # Track reactions added to messages to avoid duplicates
         self.message_reactions: dict[tuple, list[str]] = {}  # (chat_id, message_id) -> [emojis]
@@ -229,15 +182,11 @@ class TelegramReactionManager:
         if not emoji:
             return False
 
-        # Map invalid emojis to valid alternatives
+        # Map invalid emojis to valid alternatives using the centralized mapping
+        emoji = get_valid_emoji(emoji)
         if emoji not in self.valid_telegram_emojis:
-            mapped_emoji = self.emoji_mapping.get(emoji)
-            if mapped_emoji:
-                logger.debug(f"Mapping invalid emoji '{emoji}' to valid emoji '{mapped_emoji}'")
-                emoji = mapped_emoji
-            else:
-                logger.warning(f"Invalid emoji '{emoji}' has no mapping, using default 🤔")
-                emoji = "🤔"
+            logger.warning(f"get_valid_emoji returned invalid emoji '{emoji}', using fallback")
+            emoji = "🤔"
 
         message_key = (chat_id, message_id)
 
