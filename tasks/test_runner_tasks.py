@@ -239,6 +239,68 @@ def schedule_test_run(
     return promise_id
 
 
+@huey.task(retries=1)
+def execute_test_suite_by_name(promise_id: int) -> str:
+    """Execute specific test suite types (unit, integration, e2e, intent)."""
+    promise = get_promise(promise_id)
+    if not promise:
+        raise ValueError(f"Promise {promise_id} not found")
+    
+    metadata = json.loads(promise.get('metadata') or '{}')
+    suite_type = metadata.get('suite_type', 'unit')
+    
+    update_promise_status(promise_id, 'in_progress')
+    
+    if suite_type == 'unit':
+        result = _run_unit_tests(promise_id, metadata)
+    elif suite_type == 'e2e':
+        result = _run_e2e_tests(promise_id, metadata)
+    elif suite_type == 'intent':
+        result = _run_intent_tests(promise_id, metadata)
+    elif suite_type == 'integration':
+        result = _run_integration_tests(promise_id, metadata)
+    else:
+        raise ValueError(f"Unknown suite type: {suite_type}")
+    
+    return result
+
+
+@huey.task(retries=1, retry_delay=300)  # 5 min delay for OLLAMA cooldown
+def execute_ollama_intensive_tests(promise_id: int) -> str:
+    """Execute OLLAMA-heavy tests with rate limiting."""
+    promise = get_promise(promise_id)
+    if not promise:
+        raise ValueError(f"Promise {promise_id} not found")
+    
+    metadata = json.loads(promise.get('metadata') or '{}')
+    test_batch_size = metadata.get('batch_size', 3)  # Small batches for OLLAMA
+    cooldown_delay = metadata.get('cooldown_delay', 10)  # Seconds between tests
+    
+    update_promise_status(promise_id, 'in_progress')
+    
+    # Run with OLLAMA rate limiting
+    import time
+    test_files = metadata.get('test_files', [])
+    results = []
+    
+    for i, test_file in enumerate(test_files):
+        result = _run_single_test(test_file, timeout=120)
+        results.append(result)
+        
+        # Rate limiting for local OLLAMA
+        if i < len(test_files) - 1:  # Don't delay after last test
+            time.sleep(cooldown_delay)
+    
+    # Compile results
+    passed = len([r for r in results if r['success']])
+    summary = f"OLLAMA Tests: {passed}/{len(results)} passed"
+    
+    update_promise_status(promise_id, 'completed', result_summary=summary)
+    send_completion_notification.schedule(args=(promise_id, summary), delay=1)
+    
+    return summary
+
+
 @huey.periodic_task(crontab(hour='2', minute='0'))
 def nightly_test_run():
     """
@@ -248,8 +310,8 @@ def nightly_test_run():
     """
     critical_tests = [
         'tests/test_agent_quick.py',
-        'tests/test_promise_system.py',
-        'tests/test_telegram_ping_health.py'
+        'tests/test_promise_simple.py',
+        'tests/test_reaction_fix.py'
     ]
     
     # Create a system promise for nightly tests
@@ -279,3 +341,111 @@ def nightly_test_run():
     execute_test_suite.schedule(args=(promise_id,), delay=0)
     
     logger.info(f"Scheduled nightly test run as promise {promise_id}")
+
+
+def _run_unit_tests(promise_id: int, metadata: dict) -> str:
+    """Run lightweight unit tests."""
+    unit_tests = [
+        'tests/test_agent_quick.py',
+        'tests/test_file_reader.py', 
+        'tests/test_expanded_emojis.py',
+        'tests/test_message_validation_fixes.py'
+    ]
+    
+    results = []
+    for test_file in unit_tests:
+        result = _run_single_test(test_file, timeout=60)
+        results.append(result)
+    
+    passed = len([r for r in results if r['success']])
+    summary = f"Unit Tests: {passed}/{len(results)} passed"
+    
+    update_promise_status(promise_id, 'completed', result_summary=summary)
+    send_completion_notification.schedule(args=(promise_id, summary), delay=1)
+    
+    return summary
+
+
+def _run_e2e_tests(promise_id: int, metadata: dict) -> str:
+    """Run end-to-end tests using the E2E framework."""
+    try:
+        # Import E2E framework
+        import subprocess
+        import tempfile
+        
+        # Run E2E tests in isolated environment
+        cmd = ["python", "tests/run_e2e_tests.py", "--quick"]
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10 minute timeout for E2E
+                cwd=temp_dir
+            )
+        
+        success = result.returncode == 0
+        summary = f"E2E Tests: {'PASSED' if success else 'FAILED'}"
+        
+        if success:
+            update_promise_status(promise_id, 'completed', result_summary=summary)
+        else:
+            update_promise_status(promise_id, 'failed', error_message=result.stderr[:500])
+        
+        send_completion_notification.schedule(args=(promise_id, summary), delay=1)
+        return summary
+        
+    except Exception as e:
+        error_msg = f"E2E test execution failed: {str(e)}"
+        update_promise_status(promise_id, 'failed', error_message=error_msg)
+        return error_msg
+
+
+def _run_intent_tests(promise_id: int, metadata: dict) -> str:
+    """Run intent classification tests with OLLAMA rate limiting."""
+    intent_tests = [
+        'tests/test_reaction_fix.py',
+        'tests/test_three_reaction_strategy.py'
+    ]
+    
+    results = []
+    import time
+    
+    for i, test_file in enumerate(intent_tests):
+        result = _run_single_test(test_file, timeout=180)  # 3 min for OLLAMA tests
+        results.append(result)
+        
+        # OLLAMA cooldown between tests
+        if i < len(intent_tests) - 1:
+            time.sleep(15)  # 15 second cooldown
+    
+    passed = len([r for r in results if r['success']])
+    summary = f"Intent Tests: {passed}/{len(results)} passed (OLLAMA rate-limited)"
+    
+    update_promise_status(promise_id, 'completed', result_summary=summary)
+    send_completion_notification.schedule(args=(promise_id, summary), delay=1)
+    
+    return summary
+
+
+def _run_integration_tests(promise_id: int, metadata: dict) -> str:
+    """Run integration tests (API-based, lightweight)."""
+    integration_tests = [
+        'tests/test_image_tools.py',  # Now lightweight/mocked
+        'tests/test_search_current_info_comprehensive.py',  # Converted
+        'tests/test_valor_delegation_tool.py'  # Converted
+    ]
+    
+    results = []
+    for test_file in integration_tests:
+        result = _run_single_test(test_file, timeout=120)
+        results.append(result)
+    
+    passed = len([r for r in results if r['success']])
+    summary = f"Integration Tests: {passed}/{len(results)} passed"
+    
+    update_promise_status(promise_id, 'completed', result_summary=summary)
+    send_completion_notification.schedule(args=(promise_id, summary), delay=1)
+    
+    return summary

@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 """
-Comprehensive test suite for search_current_info tool and implementation.
-
-Tests both the agent tool (agents/valor/agent.py) and implementation (tools/search_tool.py)
-covering happy path, error conditions, input validation, and performance scenarios.
+Lightweight search tool validation using local OLLAMA instead of expensive APIs.
+Converted from comprehensive test suite to reduce API costs.
 """
 
 import os
 import sys
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
-import pytest
+from unittest.mock import Mock, patch
 
 # Add project root to path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-# Import the components to test
-from tools.search_tool import search_web, search_web_async
-from agents.valor.agent import search_current_info, ValorContext
+# Import test target
+from tools.search_tool import search_web
 
 
 class MockRunContext:

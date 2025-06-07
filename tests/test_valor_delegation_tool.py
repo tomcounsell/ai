@@ -1,18 +1,27 @@
 #!/usr/bin/env python3
 """
-Test the Valor delegation tool integration.
+Lightweight delegation tool validation using local OLLAMA.
+Converted to avoid expensive Claude Code API calls.
 """
 
-import asyncio
 import sys
-import tempfile
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 # Add parent directory to path for imports
 sys.path.append(str(Path(__file__).parent.parent))
 
-from agents.valor.agent import ValorContext, run_valor_agent
-from tools.valor_delegation_tool import execute_valor_delegation
+def test_delegation_tool_import():
+    """Test delegation tool can be imported without API calls."""
+    print("🧪 Testing delegation tool import")
+    
+    try:
+        from tools.valor_delegation_tool import execute_valor_delegation
+        print("✅ Delegation tool imported successfully")
+        return True
+    except ImportError as e:
+        print(f"❌ Failed to import delegation tool: {e}")
+        return False
 
 
 async def test_valor_delegation_tool_basic():

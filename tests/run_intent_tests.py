@@ -1,18 +1,169 @@
 #!/usr/bin/env python3
 """
-Quick test runner for intent classification and prompt combinations.
-
-This provides a simple interface to test the intent system without
-the full pytest overhead.
-
-Usage:
-    python tests/run_intent_tests.py
-    python tests/run_intent_tests.py --quick
-    python tests/run_intent_tests.py --intent casual_chat
+Queue-enabled intent test runner with OLLAMA rate limiting.
+Now schedules intent tests as background promises with controlled resource usage.
 """
 
-import asyncio
 import sys
+import asyncio
+from pathlib import Path
+
+# Add parent directory to path
+sys.path.append(str(Path(__file__).parent.parent))
+
+from utilities.promise_manager_huey import HueyPromiseManager
+
+
+def schedule_intent_tests(test_type: str = 'basic', chat_id: int = 0, message_id: int = 0) -> int:
+    """Schedule intent tests to run in the background with OLLAMA rate limiting."""
+    manager = HueyPromiseManager()
+    
+    test_descriptions = {
+        'basic': 'Basic intent classification tests (3-5 intents)',
+        'full': 'Complete intent test suite (all intents)',
+        'quick': 'Quick intent validation (1-2 intents)',
+        'integration': 'Intent + prompt generation integration'
+    }
+    
+    description = test_descriptions.get(test_type, f'{test_type} intent tests')
+    
+    # Create promise for intent testing
+    promise_id = manager.create_promise(
+        chat_id=chat_id,
+        message_id=message_id,
+        task_description=f"Run intent tests: {description}",
+        task_type='analysis',
+        metadata={
+            'suite_type': 'intent',
+            'test_type': test_type,
+            'ollama_rate_limit': True,
+            'batch_size': _get_batch_size(test_type),
+            'cooldown_delay': _get_cooldown_delay(test_type)
+        }
+    )
+    
+    # Schedule execution with OLLAMA-specific task
+    from tasks.test_runner_tasks import execute_ollama_intensive_tests
+    execute_ollama_intensive_tests.schedule(args=(promise_id,), delay=3)  # Delay for OLLAMA prep
+    
+    return promise_id
+
+
+def _get_batch_size(test_type: str) -> int:
+    """Get appropriate batch size for OLLAMA processing."""
+    sizes = {
+        'quick': 1,
+        'basic': 3,
+        'full': 5,
+        'integration': 2
+    }
+    return sizes.get(test_type, 3)
+
+
+def _get_cooldown_delay(test_type: str) -> int:
+    """Get cooldown delay between OLLAMA requests."""
+    delays = {
+        'quick': 5,    # 5 seconds
+        'basic': 10,   # 10 seconds
+        'full': 15,    # 15 seconds  
+        'integration': 20  # 20 seconds for integration
+    }
+    return delays.get(test_type, 10)
+
+
+def main():
+    """Main intent test runner interface - now uses Huey queue with OLLAMA rate limiting."""
+    print("🧠 Intent Classification Test Suite (Queue-Enabled)")
+    print("=" * 60)
+    print("Now using Huey queue with OLLAMA rate limiting for controlled execution")
+    print()
+    
+    # OLLAMA status check
+    try:
+        import aiohttp
+        print("🔧 OLLAMA Status:")
+        print("  ⚙️  Will use rate-limited local inference")
+        print("  🐌 Tests include cooldown delays to prevent overload")
+    except ImportError:
+        print("  ❌ aiohttp not available - some tests may fail")
+    
+    print()
+    
+    # Check command line arguments
+    if len(sys.argv) > 1:
+        test_type = sys.argv[1]
+        
+        # Handle legacy flags
+        if test_type == '--quick':
+            test_type = 'quick'
+        elif test_type.startswith('--intent'):
+            # --intent casual_chat becomes basic
+            test_type = 'basic'
+        
+        if test_type in ['basic', 'full', 'quick', 'integration']:
+            cooldown = _get_cooldown_delay(test_type)
+            print(f"🚀 Scheduling {test_type} intent tests...")
+            print(f"⏱️  OLLAMA cooldown: {cooldown} seconds between requests")
+            
+            promise_id = schedule_intent_tests(test_type)
+            print(f"✅ Intent tests scheduled as promise {promise_id}")
+            print(f"💡 Monitor progress in Telegram or check promise status")
+            return 0
+        else:
+            print(f"❌ Unknown test type: {test_type}")
+            print("Available: basic, full, quick, integration")
+            return 1
+    
+    # Interactive mode
+    print("Available intent test types:")
+    print("1. quick       - Quick validation (1-2 intents, 2-3 min)")
+    print("2. basic       - Core intent tests (3-5 intents, 5-8 min)")
+    print("3. integration - Intent + prompts (2 intents, 8-10 min)")
+    print("4. full        - Complete suite (all intents, 15-20 min)")
+    print()
+    print("⚠️  All tests include OLLAMA rate limiting to prevent system overload")
+    print()
+    
+    choice = input("Select test type (1-4) or press Enter to exit: ").strip()
+    
+    test_map = {
+        '1': 'quick',
+        '2': 'basic',
+        '3': 'integration',
+        '4': 'full'
+    }
+    
+    if not choice:
+        print("Exiting...")
+        return 0
+    
+    if choice in test_map:
+        test_type = test_map[choice]
+        cooldown = _get_cooldown_delay(test_type)
+        batch_size = _get_batch_size(test_type)
+        
+        print(f"🚀 Scheduling {test_type} intent tests...")
+        print(f"⚙️  Configuration:")
+        print(f"   - Batch size: {batch_size}")
+        print(f"   - Cooldown: {cooldown} seconds")
+        print(f"   - Rate limited: Yes")
+        
+        promise_id = schedule_intent_tests(test_type)
+        print(f"✅ Intent tests scheduled as promise {promise_id}")
+        print(f"💡 Monitor progress in Telegram or check promise status")
+        
+        if test_type == 'full':
+            print("⚠️  Full suite may take 15-20 minutes due to rate limiting")
+        
+        return 0
+    
+    else:
+        print("❌ Invalid choice")
+        return 1
+
+
+if __name__ == "__main__":
+    exit(main())
 from pathlib import Path
 
 # Add parent directory to path
