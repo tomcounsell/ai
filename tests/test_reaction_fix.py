@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from integrations.telegram.reaction_manager import TelegramReactionManager
 from integrations.ollama_intent import IntentResult, MessageIntent
-from integrations.telegram.emoji_mapping import EMOJI_MAPPING, get_valid_emoji
+from integrations.telegram.emoji_mapping import VALID_TELEGRAM_REACTIONS
 
 
 async def test_reaction_mapping():
@@ -46,8 +46,8 @@ async def test_reaction_mapping():
             status = "✓ VALID"
             mapped = emoji
         else:
-            status = "✗ INVALID"
-            mapped = get_valid_emoji(emoji)
+            status = "✗ INVALID (pre-selection constraint prevents usage)"
+            mapped = "N/A - system now prevents invalid emoji selection"
         
         print(f"{emoji} {description:<30} {status} → {mapped}")
     
@@ -71,10 +71,11 @@ async def test_reaction_mapping():
     print(f"COMPLETED: {manager.status_reactions[ReactionStatus.COMPLETED]} (was ✅, now 👍)")
     print(f"ERROR:     {manager.status_reactions[ReactionStatus.ERROR]} (was 🚫, now 👎)")
     
-    print("\n✅ Reaction system has been fixed to use only valid Telegram emojis!")
-    print(f"   - Reduced from 672 to {len(manager.valid_telegram_emojis)} valid reactions")
-    print("   - Invalid emojis are automatically mapped to valid alternatives")
-    print("   - All status and intent reactions now use valid emojis")
+    print("\n✅ Reaction system refactored to use pre-selection constraint approach!")
+    print(f"   - Using {len(manager.valid_telegram_emojis)} valid Telegram reactions")
+    print("   - Removed emoji mapping system in favor of direct validation")
+    print("   - System prevents invalid emoji selection upfront")
+    print("   - All status and intent reactions use only valid emojis")
 
 
 if __name__ == "__main__":

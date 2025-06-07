@@ -7,11 +7,12 @@ Based on API investigation showing only 74 reactions are available.
 
 # Valid Telegram reaction emojis (from API investigation)
 # Only these 74 emojis can be used as reactions
+# Note: Removed offensive emojis (💩, 🖕) from the list
 VALID_TELEGRAM_REACTIONS = {
     "☃", "⚡", "✍", "❤", "❤‍🔥", "🆒", "🌚", "🌭", "🍌", "🍓", "🍾",
     "🎃", "🎄", "🎅", "🎉", "🏆", "🐳", "👀", "👌", "👍", "👎", "👏",
-    "👨‍💻", "👻", "👾", "💅", "💊", "💋", "💔", "💘", "💩", "💯", "🔥",
-    "🕊", "🖕", "🗿", "😁", "😂", "😇", "😈", "😍", "😎", "😐", "😘",
+    "👨‍💻", "👻", "👾", "💅", "💊", "💋", "💔", "💘", "💯", "🔥",
+    "🕊", "🗿", "😁", "😂", "😇", "😈", "😍", "😎", "😐", "😘",
     "😡", "😢", "😨", "😭", "😱", "😴", "🙈", "🙉", "🙊", "🙏", "🤓",
     "🤔", "🤗", "🤝", "🤡", "🤣", "🤨", "🤩", "🤪", "🤬", "🤮", "🤯",
     "🤷", "🤷‍♀", "🤷‍♂", "🥰", "🥱", "🥴", "🦄", "🫡"
@@ -21,200 +22,106 @@ VALID_TELEGRAM_REACTIONS = {
 # These help the LLM understand when to use each emoji
 EMOJI_DESCRIPTIONS = {
     # Objects and symbols
-    "☃": "snowman - winter, cold topics, holiday season",
-    "⚡": "lightning - speed, energy, excitement, electricity, quick actions",
-    "✍": "writing hand - writing, documentation, notes, signing",
-    "🆒": "cool button - cool, awesome, stylish, modern",
+    "☃": "snowman - giving cold vibes, icy response, winter mood",
+    "⚡": "lightning - fast af, electric energy, that was quick, zoom zoom",
+    "✍": "writing hand - taking notes, receipts collected, documenting the tea",
+    "🆒": "cool button - that's cool, nice, fresh, we chillin",
     
     # Hearts and emotions
-    "❤": "red heart - love, appreciation, health, vitality",
-    "❤‍🔥": "heart on fire - passion, intense love, burning desire",
-    "💔": "broken heart - sadness, heartbreak, disappointment",
-    "💘": "heart with arrow - falling in love, cupid, romance",
-    "💋": "kiss mark - kiss, romance, affection, beauty",
-    "💅": "nail polish - beauty, style, sass, self-care",
-    "💊": "pill - medicine, health, cure, solution",
-    "💩": "poop - bad, terrible, joking, silly",
-    "💯": "100 points - perfect, excellent, complete, achievement",
+    "❤": "red heart - love this, wholesome content, you're valid",
+    "❤‍🔥": "heart on fire - this is fire, hot take, spicy opinion",
+    "💔": "broken heart - pain, heartbreak, this ain't it, emotional damage",
+    "💘": "heart with arrow - caught feelings, shipping this, cupid's work",
+    "💋": "kiss mark - chef's kiss, mwah, perfect, slay",
+    "💅": "nail polish - and that's on period, slay queen, serving looks",
+    "💊": "pill - hard to swallow, tough pill, reality check, cope",
+    "💯": "100 points - facts, no cap, absolutely, real talk, valid",
     
     # Nature and animals
-    "🌚": "new moon face - mysterious, dark, secretive, night",
-    "🐳": "whale - big, huge, massive, ocean",
-    "🕊": "dove - peace, hope, freedom, spiritual",
-    "🦄": "unicorn - magical, unique, rare, special, fantasy",
+    "🌚": "new moon face - side eye, sus, creeping, lurking energy",
+    "🐳": "whale - big mood, whale of a time, massive flex",
+    "🕊": "dove - peace out, rest in peace, sending good vibes",
+    "🦄": "unicorn - rare find, one of a kind, extra special, main character energy",
     
     # Food
-    "🌭": "hot dog - food, lunch, casual eating",
-    "🍌": "banana - fruit, silly, food, yellow",
-    "🍓": "strawberry - sweet, fruit, delicious, red",
-    "🍾": "champagne - celebration, success, party, achievement",
+    "🌭": "hot dog - snack time, casual eats, random but ok",
+    "🍌": "banana - going bananas, silly goose energy, potassium vibes",
+    "🍓": "strawberry - sweet like that, berry cute, fresh",
+    "🍾": "champagne - we poppin bottles, celebration mode, big wins only",
     
     # Holiday and celebration
-    "🎃": "jack-o-lantern - Halloween, spooky, October, scary fun",
-    "🎄": "Christmas tree - Christmas, holidays, December, festive",
-    "🎅": "Santa - Christmas, gifts, holiday cheer, generosity",
-    "🎉": "party popper - celebration, party, fun, success, achievement",
-    "🏆": "trophy - winner, achievement, success, champion, first place",
+    "🎃": "jack-o-lantern - spooky szn, Halloween vibes, boo",
+    "🎄": "Christmas tree - festive af, holiday mood, cozy season",
+    "🎅": "Santa - unrealistic expectations, too good to be true, cap",
+    "🎉": "party popper - let's gooo, we did it, party time, W",
+    "🏆": "trophy - you won, champion behavior, first place energy, goated",
     
     # Fire and energy
-    "🔥": "fire - hot, trending, awesome, intense, burning, passionate",
+    "🔥": "fire - that's fire, lit, heat, bussin, absolutely slaps",
     
     # Hand gestures
-    "👀": "eyes - looking, watching, observing, noticing, attention",
-    "👌": "OK hand - okay, perfect, good, approval",
-    "👍": "thumbs up - good, yes, approval, success, positive",
-    "👎": "thumbs down - bad, no, disapproval, negative, failure",
-    "👏": "clapping - applause, congratulations, well done, bravo",
-    "🖕": "middle finger - offensive, angry, rude (use carefully)",
-    "🤝": "handshake - agreement, deal, cooperation, partnership",
-    "🙏": "folded hands - please, thank you, prayer, hope, gratitude",
+    "👀": "eyes - I see you, watching this, eyes emoji, noticed that",
+    "👌": "OK hand - perfect, chef's kiss, just right, mint",
+    "👍": "thumbs up - bet, sounds good, approved, we gucci",
+    "👎": "thumbs down - nah, not it, L, miss me with that",
+    "👏": "clapping - period, facts, louder for those in back, tea",
+    "🤝": "handshake - respect, we good, deal sealed, mutual understanding",
+    "🙏": "folded hands - please bestie, blessed, grateful, manifesting",
     
     # People and professions
-    "👨‍💻": "technologist - coding, programming, tech, development, computer work",
-    "👻": "ghost - spooky, Halloween, disappear, supernatural",
-    "👾": "alien monster - gaming, retro, weird, strange",
+    "👨‍💻": "technologist - coding time, tech bro energy, debugging life",
+    "👻": "ghost - ghosting, spooky vibes, disappeared, boo",
+    "👾": "alien monster - gamer moment, retro vibes, weird flex but ok",
     
     # Faces - positive emotions
-    "😁": "beaming face - very happy, excited, cheerful, grinning",
-    "😂": "joy - funny, hilarious, laughing hard, tears of joy",
-    "😇": "halo - innocent, angelic, good, blessed, holy",
-    "😍": "heart eyes - love, adore, amazing, beautiful, crush",
-    "😎": "sunglasses - cool, confident, awesome, chill",
-    "😘": "kiss - love, affection, flirting, cute",
-    "🤗": "hugging - warm, welcoming, embrace, comfort, support",
-    "🤣": "rolling on floor - extremely funny, hilarious, can't stop laughing",
-    "🤩": "star eyes - amazed, impressed, excited, wonderful",
-    "🥰": "hearts face - loved, warm feelings, affection, sweet",
+    "😁": "beaming face - big smile energy, living my best life, vibing",
+    "😂": "joy - I'm dead, crying laughing, hilarious, deceased",
+    "😇": "halo - innocent til proven guilty, being good, angel behavior",
+    "😍": "heart eyes - obsessed, love this for us, stunning, need this",
+    "😎": "sunglasses - cool kid alert, unbothered, too cool for this",
+    "😘": "kiss - sending love, xoxo, cute, flirty vibes",
+    "🤗": "hugging - hugs, wholesome content, supportive bestie, comfort",
+    "🤣": "rolling on floor - LMAOOO, I can't, stop it, too funny",
+    "🤩": "star eyes - shook, amazing, mind blown, obsessed",
+    "🥰": "hearts face - soft hours, uwu energy, precious, wholesome",
     
     # Faces - negative emotions
-    "😈": "smiling devil - mischievous, naughty, evil playful",
-    "😐": "neutral - meh, indifferent, unimpressed, blank",
-    "😡": "angry red - very angry, furious, mad, rage",
-    "😢": "crying - sad, tears, upset, emotional",
-    "😨": "fearful - scared, worried, nervous, anxious",
-    "😭": "loudly crying - very sad, devastated, sobbing",
-    "😱": "screaming - shocked, terrified, very scared, mind blown",
-    "🤬": "cursing - very angry, swearing, furious, rage",
-    "🤮": "vomiting - disgusting, sick, gross, terrible",
+    "😈": "smiling devil - menace behavior, chaos mode, up to no good",
+    "😐": "neutral - bruh, deadass, no thoughts head empty, meh",
+    "😡": "angry red - pressed, big mad, heated, rage mode activated",
+    "😢": "crying - sad hours, in my feels, pain, crying in the club",
+    "😨": "fearful - shook, scared, anxiety has entered the chat",
+    "😭": "loudly crying - I'm crying, literally sobbing, can't handle this",
+    "😱": "screaming - WHAT, I'm shook, plot twist, absolutely not",
+    "🤬": "cursing - mad mad, choosing violence, absolutely livid",
+    "🤮": "vomiting - ew, nasty, thanks I hate it, disgusting",
     
     # Faces - other emotions
-    "😴": "sleeping - tired, bored, sleepy, zzz",
-    "🤓": "nerd - smart, geeky, studious, knowledgeable",
-    "🤔": "thinking - wondering, considering, puzzled, hmm",
-    "🤡": "clown - silly, funny, foolish, circus, joke",
-    "🤨": "raised eyebrow - skeptical, suspicious, doubtful, really?",
-    "🤪": "crazy - wild, silly, zany, goofy, weird",
-    "🤯": "exploding head - mind blown, shocked, amazed, wow",
-    "🥱": "yawning - tired, bored, sleepy, exhausted",
-    "🥴": "woozy - dizzy, confused, drunk, unwell",
+    "😴": "sleeping - sleepy time, boring, snoozefest, catching z's",
+    "🤓": "nerd - actually... , nerd alert, smart cookie, big brain time",
+    "🤔": "thinking - hmm, thinking face, processing, let me think",
+    "🤡": "clown - you're a clown, circus behavior, goofy, joke's on you",
+    "🤨": "raised eyebrow - sus, side eye, doubt, the rock eyebrow",
+    "🤪": "crazy - unhinged, chaotic energy, silly goose, quirky",
+    "🤯": "exploding head - mind blown, WHAT, I can't even, shooketh",
+    "🥱": "yawning - boring, sleepy, this ain't it, snooze",
+    "🥴": "woozy - drunk thoughts, confused, lost the plot, wasted",
     
     # Monkeys
-    "🙈": "see no evil - embarrassed, shy, oops, don't want to see",
-    "🙉": "hear no evil - not listening, ignoring, la la la",
-    "🙊": "speak no evil - oops, secret, shouldn't have said that",
+    "🙈": "see no evil - I didn't see that, embarrassing, cringe, hide",
+    "🙉": "hear no evil - didn't hear nothing, selective hearing, ignoring",
+    "🙊": "speak no evil - oops my bad, tea spilled, said too much",
     
     # Shrugging
-    "🤷": "shrug - don't know, whatever, confused, unsure",
-    "🤷‍♀": "woman shrugging - don't know, whatever (female)",
-    "🤷‍♂": "man shrugging - don't know, whatever (male)",
+    "🤷": "shrug - idk bestie, it is what it is, no clue, whatever",
+    "🤷‍♀": "woman shrugging - girl idk, not my problem, whatever sis",
+    "🤷‍♂": "man shrugging - bro idk, not sure, whatever dude",
     
     # Other
-    "🗿": "moai - stone face, serious, unmoved, stoic, deadpan",
-    "🫡": "saluting - respect, yes sir, acknowledged, military"
+    "🗿": "moai - stone face, based, chad energy, unmoved, deadpan",
+    "🫡": "saluting - yes chief, copy that, respect, at your service"
 }
 
-# Mapping for invalid emojis to valid alternatives
-# This ensures that commonly used emojis that aren't available as reactions
-# are automatically converted to semantically similar valid reactions
-EMOJI_MAPPING = {
-    # Status emojis
-    "✅": "👍",  # Checkmark -> Thumbs up
-    "🚫": "👎",  # No entry -> Thumbs down
-    "❌": "👎",  # X mark -> Thumbs down
-    
-    # Tool/action emojis
-    "🔍": "👀",  # Magnifying glass -> Eyes
-    "📊": "💯",  # Bar chart -> 100
-    "🎨": "🎉",  # Art palette -> Party
-    "🌐": "🌚",  # Globe -> Moon face
-    "🔨": "🔥",  # Hammer -> Fire
-    "✨": "⚡",  # Sparkles -> Lightning
-    "🧠": "🤓",  # Brain -> Nerd face
-    "💡": "⚡",  # Light bulb -> Lightning
-    "🎯": "💯",  # Target -> 100
-    "📈": "🏆",  # Chart up -> Trophy
-    "🔧": "🔥",  # Wrench -> Fire
-    "🚀": "⚡",  # Rocket -> Lightning
-    "💫": "⚡",  # Dizzy -> Lightning
-    "🌟": "🏆",  # Glowing star -> Trophy
-    "⭐": "🏆",  # Star -> Trophy
-    "📡": "🌚",  # Satellite antenna -> Moon face
-    "⚙️": "🔥",  # Gear -> Fire
-    "🔔": "👀",  # Bell -> Eyes
-    "📢": "😱",  # Loudspeaker -> Scream
-    "💬": "🤔",  # Speech bubble -> Thinking face
-    "💭": "🤔",  # Thought bubble -> Thinking face
-    "📝": "✍",  # Memo -> Writing hand
-    "📋": "✍",  # Clipboard -> Writing hand
-    "📌": "👀",  # Pushpin -> Eyes
-    "📍": "👀",  # Round pushpin -> Eyes
-    "🗂️": "🗿",  # Card index dividers -> Moai (for stability/organization)
-    "📁": "🗿",  # File folder -> Moai
-    "📂": "🗿",  # Open file folder -> Moai
-    
-    # Heart variants
-    "❤️": "❤",  # Red heart with variant selector -> Plain red heart
-    
-    # Additional common mappings
-    "🤖": "🤓",  # Robot -> Nerd face
-    "🎮": "👾",  # Video game -> Alien monster
-    "🍕": "🍌",  # Pizza -> Banana (both food)
-    "🏃": "⚡",  # Running -> Lightning (speed)
-    "📸": "👀",  # Camera -> Eyes
-    "🎭": "🤡",  # Theater masks -> Clown
-    "🛠️": "🔥",  # Tools -> Fire
-    "⚠️": "😨",  # Warning -> Fearful face
-    "🔒": "🗿",  # Lock -> Moai (security/solid)
-    "🔓": "👍",  # Unlock -> Thumbs up
-    "📣": "😱",  # Megaphone -> Scream
-    "🏁": "🏆",  # Checkered flag -> Trophy
-    "⏰": "⚡",  # Alarm clock -> Lightning (urgency)
-    "🌍": "🌚",  # Earth globe -> Moon face
-    "🌎": "🌚",  # Globe Americas -> Moon face
-    "🌏": "🌚",  # Globe Asia -> Moon face
-    "🔌": "⚡",  # Electric plug -> Lightning
-    "🎪": "🤡",  # Circus tent -> Clown
-    "🎢": "😱",  # Roller coaster -> Scream
-    "🌈": "🦄",  # Rainbow -> Unicorn
-    "☁️": "🌚",  # Cloud -> Moon face
-    "⛈️": "😱",  # Thunder cloud -> Scream
-    "🌙": "🌚",  # Crescent moon -> Moon face
-    "🌞": "😁",  # Sun with face -> Beaming face
-    "🔮": "🤓",  # Crystal ball -> Nerd face (mystical knowledge)
-}
-
-
-def get_valid_emoji(emoji: str) -> str:
-    """
-    Convert an emoji to a valid Telegram reaction.
-    
-    Args:
-        emoji: The emoji to validate/convert
-        
-    Returns:
-        A valid Telegram reaction emoji
-    """
-    # If it's already valid, return as-is
-    if emoji in VALID_TELEGRAM_REACTIONS:
-        return emoji
-    
-    # Try to map it to a valid alternative
-    mapped = EMOJI_MAPPING.get(emoji)
-    if mapped:
-        return mapped
-    
-    # Default fallback
-    return "🤔"  # Thinking face as universal fallback
 
 
 def is_valid_reaction(emoji: str) -> bool:

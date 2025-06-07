@@ -10,7 +10,7 @@ import logging
 from enum import Enum
 
 from ..ollama_intent import IntentResult, MessageIntent
-from .emoji_mapping import VALID_TELEGRAM_REACTIONS, get_valid_emoji
+from .emoji_mapping import VALID_TELEGRAM_REACTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -182,10 +182,9 @@ class TelegramReactionManager:
         if not emoji:
             return False
 
-        # Map invalid emojis to valid alternatives using the centralized mapping
-        emoji = get_valid_emoji(emoji)
+        # Validate emoji is in valid Telegram reactions list
         if emoji not in self.valid_telegram_emojis:
-            logger.warning(f"get_valid_emoji returned invalid emoji '{emoji}', using fallback")
+            logger.warning(f"Invalid emoji '{emoji}', using fallback")
             emoji = "🤔"
 
         message_key = (chat_id, message_id)
