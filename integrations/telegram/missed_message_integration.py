@@ -27,15 +27,16 @@ class MissedMessageIntegration:
         """
         Replacement for legacy _check_startup_missed_messages.
         
-        Immediately returns (non-blocking) and schedules background scans.
+        TEMPORARILY DISABLED: To prevent database lock conflicts with main server.
+        Background scans are handled by Huey when system is stable.
         """
         self.logger.info("🚀 Starting new promise-based missed message system...")
         
         try:
-            # Start background scans for all authorized chats
-            await self.missed_message_manager.start_missed_message_scan()
+            # TEMPORARILY DISABLED: Prevents database lock conflicts
+            # await self.missed_message_manager.start_missed_message_scan()
             
-            self.logger.info("✅ Missed message system started successfully")
+            self.logger.info("✅ Missed message system startup disabled (prevents session locks)")
             
         except Exception as e:
             self.logger.error(f"❌ Failed to start missed message system: {e}", exc_info=True)

@@ -252,7 +252,23 @@ def scan_chat_for_missed_messages(chat_id: int) -> None:
 
 async def _async_scan_chat(chat_id: int) -> None:
     """Async implementation of chat scanning."""
+    import os
     from integrations.telegram.client import TelegramClient
+    
+    # Check if session file is already locked by another process
+    session_file = "ai_project_bot.session"
+    if os.path.exists(session_file):
+        try:
+            # Try to check if file is locked by attempting to get lock info
+            import subprocess
+            result = subprocess.run(['lsof', session_file], capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip():
+                # Session file is locked by other processes
+                logger.warning(f"Session file locked by other processes - skipping chat {chat_id} scan")
+                return
+        except Exception:
+            # If we can't check, proceed anyway
+            pass
     
     # Get or create telegram client connection
     client = TelegramClient()
@@ -260,7 +276,7 @@ async def _async_scan_chat(chat_id: int) -> None:
         logger.error(f"Cannot scan chat {chat_id} - Telegram client initialization failed")
         return
     
-    if not client.is_connected():
+    if not client.is_connected:  # Fixed: removed () - is_connected is a property
         logger.error(f"Cannot scan chat {chat_id} - Telegram client not connected")
         await client.stop()
         return
