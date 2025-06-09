@@ -139,7 +139,7 @@ Be decisive and pick the most likely intent even if uncertain."""
 
     async def __aenter__(self):
         """Async context manager entry."""
-        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5.0))
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30.0))
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -169,6 +169,8 @@ Be decisive and pick the most likely intent even if uncertain."""
             )
 
         try:
+            logger.debug(f"Starting Ollama intent classification for message: '{message[:50]}...'")
+            
             # Prepare the classification prompt
             user_prompt = f"Message to classify: '{message.strip()}'"
 
@@ -181,10 +183,15 @@ Be decisive and pick the most likely intent even if uncertain."""
                 if context.get("is_group_chat"):
                     user_prompt += "\n[Note: This is from a group chat]"
 
+            logger.debug(f"Prepared user prompt: {user_prompt}")
+
             # Make request to Ollama
+            logger.debug(f"Making Ollama request to {self.ollama_url} with model {self.model_name}")
             response = await self._make_ollama_request(user_prompt)
+            logger.debug(f"Ollama response received: {response[:200]}...")
 
             # Parse the response
+            logger.debug("Parsing Ollama response")
             result = self._parse_classification_response(response, message)
 
             logger.info(
@@ -194,15 +201,17 @@ Be decisive and pick the most likely intent even if uncertain."""
 
         except Exception as e:
             error_msg = str(e) if e else "Unknown error"
-            logger.error(f"Intent classification failed: {error_msg}")
+            logger.error(f"Intent classification failed: {error_msg}", exc_info=True)
             logger.debug(f"Message that failed: '{message[:100]}...'")
+            logger.debug(f"Context that failed: {context}")
             # Fallback to GPT-3.5 Turbo classification
             return await self._gpt_fallback_classification(message, context)
 
     async def _make_ollama_request(self, prompt: str) -> str:
         """Make a request to the Ollama API."""
+        logger.debug(f"Creating Ollama request session if needed")
         if not self.session:
-            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5.0))
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30.0))
 
         payload = {
             "model": self.model_name,
@@ -215,13 +224,27 @@ Be decisive and pick the most likely intent even if uncertain."""
             },
         }
 
-        async with self.session.post(f"{self.ollama_url}/api/generate", json=payload) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                raise Exception(f"Ollama API error: {response.status} - {error_text}")
+        logger.debug(f"Ollama request payload: model={self.model_name}, prompt_length={len(payload['prompt'])}")
+        
+        try:
+            async with self.session.post(f"{self.ollama_url}/api/generate", json=payload) as response:
+                logger.debug(f"Ollama response status: {response.status}")
+                
+                if response.status != 200:
+                    error_text = await response.text()
+                    logger.error(f"Ollama API error: {response.status} - {error_text}")
+                    raise Exception(f"Ollama API error: {response.status} - {error_text}")
 
-            result = await response.json()
-            return result.get("response", "")
+                result = await response.json()
+                response_text = result.get("response", "")
+                logger.debug(f"Ollama response length: {len(response_text)} characters")
+                return response_text
+        except aiohttp.ClientError as e:
+            logger.error(f"Ollama client error: {e}")
+            raise Exception(f"Ollama connection error: {e}")
+        except Exception as e:
+            logger.error(f"Ollama request error: {e}")
+            raise
 
     def _parse_classification_response(self, response: str, original_message: str) -> IntentResult:
         """Parse the Ollama response into an IntentResult."""
