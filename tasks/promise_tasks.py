@@ -226,7 +226,6 @@ def execute_analysis_task(promise_id: int) -> str:
             
         else:
             # General analysis - use Claude for text analysis
-            from integrations.telegram.client import get_telegram_client
             from agents.valor.agent import valor_agent
             from agents.valor.context import TelegramChatContext
             
@@ -261,7 +260,7 @@ def execute_analysis_task(promise_id: int) -> str:
 @huey.task(retries=2, retry_delay=30)
 def send_completion_notification(promise_id: int, result: str):
     """
-    Send completion message to user via Telegram.
+    Send completion message to user via database task queue.
     
     IMPLEMENTATION NOTE: This is a separate task so notification
     failures don't affect the main task completion status.
@@ -270,9 +269,6 @@ def send_completion_notification(promise_id: int, result: str):
     if not promise:
         logger.error(f"Promise {promise_id} not found for notification")
         return
-    
-    # Import here to avoid circular imports
-    from integrations.telegram.client import get_telegram_client
     
     # Format completion message
     # BEST PRACTICE: Make messages informative but concise
@@ -288,24 +284,21 @@ _Completed in {duration}_
 """
     
     try:
-        # Get Telegram client and send message
-        client = get_telegram_client()
-        if client and client.client:
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            
-            loop.run_until_complete(
-                client.client.send_message(
-                    chat_id=promise['chat_id'],
-                    text=message
-                )
-            )
-            
-            logger.info(f"Sent completion notification for promise {promise_id}")
+        # Queue message via database task queue instead of direct Telegram client
+        from utilities.database import queue_server_task
+        queue_server_task(
+            'send_message',
+            {
+                'chat_id': promise['chat_id'],
+                'message_text': message
+            },
+            priority=4  # Normal priority for notifications
+        )
+        
+        logger.info(f"Queued completion notification for promise {promise_id}")
     except Exception as e:
         # BEST PRACTICE: Log notification failures but don't retry forever
-        logger.error(f"Failed to send completion notification: {e}")
+        logger.error(f"Failed to queue completion notification: {e}")
 
 
 @huey.task()

@@ -53,14 +53,6 @@ def process_missed_message(message_id: int):
         return
     
     try:
-        # Import Telegram handler components
-        from integrations.telegram.client import get_telegram_client
-        
-        # Get Telegram client
-        telegram_client = get_telegram_client()
-        if not telegram_client or not telegram_client.client:
-            raise Exception("Telegram client not available")
-        
         # Process through agent with context
         import asyncio
         loop = asyncio.new_event_loop()
@@ -85,18 +77,22 @@ def process_missed_message(message_id: int):
             
             # Process through agent
             result = await valor_agent.run(enhanced_message, deps=context)
-            
-            # Send response
-            if result.data:
-                await telegram_client.client.send_message(
-                    message_data['chat_id'],
-                    result.data
-                )
-            
             return result.data
         
         result = loop.run_until_complete(process_message())
         logger.info(f"Processed missed message {message_id} successfully")
+        
+        # Send response via database task queue instead of direct Telegram client
+        if result:
+            from utilities.database import queue_server_task
+            queue_server_task(
+                'send_message',
+                {
+                    'chat_id': message_data['chat_id'],
+                    'message_text': result
+                },
+                priority=3  # High priority for responses
+            )
         
         # Mark as completed
         update_message_queue_status(message_id, 'completed')

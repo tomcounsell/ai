@@ -149,6 +149,21 @@ def init_database() -> None:
                     metadata TEXT  -- JSON blob with full message data
                 );
                 
+                -- Server tasks table for main server to process background work
+                CREATE TABLE IF NOT EXISTS server_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_type TEXT NOT NULL,  -- 'scan_missed_messages', 'send_message', 'cleanup', etc.
+                    task_data TEXT,  -- JSON blob with task parameters
+                    priority INTEGER DEFAULT 5,  -- 1=highest, 10=lowest
+                    status TEXT DEFAULT 'pending',  -- 'pending', 'processing', 'completed', 'failed'
+                    scheduled_for TIMESTAMP DEFAULT CURRENT_TIMESTAMP,  -- When to run this task
+                    attempts INTEGER DEFAULT 0,
+                    max_attempts INTEGER DEFAULT 3,
+                    error_message TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    processed_at TIMESTAMP
+                );
+                
                 -- Chat state tracking for persistent message resumption
                 CREATE TABLE IF NOT EXISTS chat_state (
                     chat_id INTEGER PRIMARY KEY,
@@ -188,6 +203,10 @@ def init_database() -> None:
                 CREATE INDEX IF NOT EXISTS idx_message_queue_status ON message_queue(status);
                 CREATE INDEX IF NOT EXISTS idx_message_queue_chat_id ON message_queue(chat_id);
                 CREATE INDEX IF NOT EXISTS idx_message_queue_created_at ON message_queue(created_at);
+                
+                CREATE INDEX IF NOT EXISTS idx_server_tasks_status ON server_tasks(status);
+                CREATE INDEX IF NOT EXISTS idx_server_tasks_priority ON server_tasks(priority, scheduled_for);
+                CREATE INDEX IF NOT EXISTS idx_server_tasks_type ON server_tasks(task_type);
             """)
             
             # Insert default data
@@ -196,6 +215,79 @@ def init_database() -> None:
     except sqlite3.Error as e:
         logger.error(f"Database initialization error: {e}")
         raise
+
+
+# Server Task Queue Functions
+
+def queue_server_task(task_type: str, task_data: dict = None, priority: int = 5, scheduled_for: str = None) -> int:
+    """Queue a task for the main server to process.
+    
+    Args:
+        task_type: Type of task ('scan_missed_messages', 'send_message', etc.)
+        task_data: Dictionary with task parameters (will be JSON encoded)
+        priority: Priority 1-10 (1=highest, 10=lowest)
+        scheduled_for: ISO timestamp when to run (None=now)
+    
+    Returns:
+        int: Task ID
+    """
+    import json
+    
+    with get_database_connection() as conn:
+        cursor = conn.cursor()
+        
+        task_data_json = json.dumps(task_data) if task_data else None
+        
+        cursor.execute("""
+            INSERT INTO server_tasks (task_type, task_data, priority, scheduled_for)
+            VALUES (?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))
+        """, (task_type, task_data_json, priority, scheduled_for))
+        
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_pending_server_tasks(limit: int = 10) -> list:
+    """Get pending server tasks ready for processing.
+    
+    Returns tasks ordered by priority (highest first) then by scheduled_for.
+    """
+    with get_database_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT * FROM server_tasks 
+            WHERE status = 'pending' 
+            AND scheduled_for <= CURRENT_TIMESTAMP
+            AND attempts < max_attempts
+            ORDER BY priority ASC, scheduled_for ASC
+            LIMIT ?
+        """, (limit,))
+        
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def update_server_task_status(task_id: int, status: str, error_message: str = None) -> None:
+    """Update server task status."""
+    with get_database_connection() as conn:
+        cursor = conn.cursor()
+        
+        if status in ('completed', 'failed'):
+            cursor.execute("""
+                UPDATE server_tasks 
+                SET status = ?, error_message = ?, processed_at = CURRENT_TIMESTAMP,
+                    attempts = attempts + 1
+                WHERE id = ?
+            """, (status, error_message, task_id))
+        else:
+            cursor.execute("""
+                UPDATE server_tasks 
+                SET status = ?, attempts = attempts + 1
+                WHERE id = ?
+            """, (status, task_id))
+        
+        conn.commit()
 
 
 def _insert_default_data(conn: sqlite3.Connection) -> None:
