@@ -30,22 +30,42 @@ def with_promise_tracking(func):
     updates across all promise-executing tasks.
     """
     def wrapper(promise_id: int, *args, **kwargs):
+        # Get promise info for enhanced logging
+        promise = get_promise(promise_id)
+        task_desc = promise.get('task_description', 'Unknown task') if promise else 'Unknown task'
+        chat_id = promise.get('chat_id', 'Unknown') if promise else 'Unknown'
+        
+        start_time = datetime.now()
+        logger.info(f"🚀 STARTING TASK [{func.__name__}] Promise {promise_id} | Chat: {chat_id}")
+        logger.info(f"📝 Task Description: {task_desc[:100]}{'...' if len(task_desc) > 100 else ''}")
+        
         try:
             # Mark as in_progress
             update_promise_status(promise_id, 'in_progress')
-            logger.info(f"Starting promise {promise_id}: {func.__name__}")
             
             # Execute the actual task
             result = func(promise_id, *args, **kwargs)
             
+            # Calculate execution time
+            execution_time = datetime.now() - start_time
+            duration_str = f"{execution_time.total_seconds():.1f}s"
+            
             # Mark as completed
             update_promise_status(promise_id, 'completed', result_summary=result)
-            logger.info(f"Completed promise {promise_id}")
+            
+            logger.info(f"✅ COMPLETED TASK [{func.__name__}] Promise {promise_id} in {duration_str}")
+            logger.info(f"📊 Result Summary: {result[:150] if result else 'No result'}{'...' if result and len(result) > 150 else ''}")
             
             return result
             
         except Exception as e:
-            logger.error(f"Failed promise {promise_id}: {str(e)}", exc_info=True)
+            execution_time = datetime.now() - start_time
+            duration_str = f"{execution_time.total_seconds():.1f}s"
+            
+            logger.error(f"❌ FAILED TASK [{func.__name__}] Promise {promise_id} after {duration_str}")
+            logger.error(f"💥 Error: {str(e)}")
+            logger.error(f"🔍 Full traceback:", exc_info=True)
+            
             update_promise_status(promise_id, 'failed', error_message=str(e))
             raise  # Re-raise for Huey retry mechanism
     
@@ -85,7 +105,11 @@ def execute_coding_task(promise_id: int) -> str:
     working_directory = workspace_context.get('working_directory', '.')
     workspace_name = workspace_context.get('workspace_name', 'Unknown')
     
-    logger.info(f"Executing coding task in workspace: {workspace_name} ({working_directory})")
+    logger.info(f"💻 Coding Task Configuration:")
+    logger.info(f"   🏢 Workspace: {workspace_name}")
+    logger.info(f"   📁 Directory: {working_directory}")
+    logger.info(f"   🔧 Instructions: {metadata.get('instructions', 'None')[:50]}{'...' if len(metadata.get('instructions', '')) > 50 else ''}")
+    logger.info(f"🏃 Spawning Claude Code session...")
     
     # IMPLEMENTATION NOTE: Import here to avoid circular imports
     from tools.valor_delegation_tool import spawn_valor_session
@@ -121,7 +145,14 @@ def execute_search_task(promise_id: int) -> str:
     workspace_context = metadata.get('workspace_context', {})
     workspace_name = workspace_context.get('workspace_name', 'Unknown')
     
-    logger.info(f"Executing search task for workspace: {workspace_name}")
+    logger.info(f"🔍 Search Task Configuration:")
+    logger.info(f"   🏢 Workspace: {workspace_name}")
+    logger.info(f"   🌐 Using Perplexity AI for current information")
+    
+    # Extract search query from task description or metadata
+    search_query = metadata.get('search_query', promise['task_description'])
+    logger.info(f"   🔎 Search Query: {search_query[:100]}{'...' if len(search_query) > 100 else ''}")
+    logger.info(f"🏃 Executing web search...")
     
     # Import search tool
     from tools.search_tool import search_web

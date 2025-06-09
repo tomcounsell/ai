@@ -24,23 +24,33 @@ def process_missed_message(message_id: int):
     IMPLEMENTATION NOTE: We store the full message in the database
     rather than passing large objects through the task queue.
     """
-    with get_database_connection() as conn:
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+    start_time = datetime.now()
+    logger.info(f"📬 STARTING MISSED MESSAGE PROCESSING | Message ID: {message_id}")
+    
+    try:
+        with get_database_connection() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            row = cursor.execute("""
+                SELECT * FROM message_queue
+                WHERE id = ? AND status = 'pending'
+            """, (message_id,)).fetchone()
+            
+            if not row:
+                logger.warning(f"📭 Message {message_id} not found or already processed")
+                return
+            
+            message_data = dict(row)
+            logger.info(f"📧 Found message from chat {message_data.get('chat_id')} | Text: {message_data.get('text', '')[:50]}...")
         
-        row = cursor.execute("""
-            SELECT * FROM message_queue
-            WHERE id = ? AND status = 'pending'
-        """, (message_id,)).fetchone()
+        # Mark as processing
+        update_message_queue_status(message_id, 'processing')
+        logger.info(f"🔄 Marked message {message_id} as processing")
         
-        if not row:
-            logger.warning(f"Message {message_id} not found or already processed")
-            return
-        
-        message_data = dict(row)
-        
-    # Mark as processing
-    update_message_queue_status(message_id, 'processing')
+    except Exception as e:
+        logger.error(f"❌ Database error: {e}")
+        return
     
     try:
         # Import Telegram handler components
@@ -91,8 +101,13 @@ def process_missed_message(message_id: int):
         # Mark as completed
         update_message_queue_status(message_id, 'completed')
         
+        execution_time = datetime.now() - start_time
+        logger.info(f"✅ COMPLETED MISSED MESSAGE PROCESSING | Message {message_id} in {execution_time.total_seconds():.1f}s")
+        
     except Exception as e:
-        logger.error(f"Failed to process missed message {message_id}: {e}", exc_info=True)
+        execution_time = datetime.now() - start_time
+        logger.error(f"❌ FAILED MISSED MESSAGE PROCESSING | Message {message_id} after {execution_time.total_seconds():.1f}s")
+        logger.error(f"💥 Error: {e}", exc_info=True)
         
         # Mark as failed
         update_message_queue_status(message_id, 'failed', str(e))

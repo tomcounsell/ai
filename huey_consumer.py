@@ -37,16 +37,34 @@ if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    logger.info("Starting Huey consumer...")
-    logger.info(f"Working directory: {os.getcwd()}")
-    logger.info(f"Huey database: {os.environ.get('HUEY_DB_PATH', 'data/huey.db')}")
-    logger.info(f"Immediate mode: {os.environ.get('HUEY_IMMEDIATE', 'false')}")
+    logger.info("🚀 STARTING HUEY TASK QUEUE CONSUMER")
+    logger.info("=" * 50)
+    logger.info(f"📁 Working directory: {os.getcwd()}")
+    logger.info(f"🗄️  Huey database: {os.environ.get('HUEY_DB_PATH', 'data/huey.db')}")
+    logger.info(f"⚡ Immediate mode: {os.environ.get('HUEY_IMMEDIATE', 'false')}")
+    logger.info(f"🧵 Available task types:")
+    
+    # List available tasks
+    try:
+        # Try to get task names from registry
+        if hasattr(huey._registry, '_registry'):
+            tasks = list(huey._registry._registry.keys())
+        else:
+            tasks = ['Tasks will be listed once registered']
+        
+        for task_name in tasks:
+            logger.info(f"   • {task_name}")
+    except Exception:
+        logger.info("   • Task registry will be populated at runtime")
+    
+    logger.info("=" * 50)
     
     try:
         # IMPLEMENTATION NOTE: The consumer handles all the complex
         # bits of task execution, retries, and scheduling.
         consumer = Consumer(huey)
-        logger.info("Huey consumer initialized successfully")
+        logger.info("✅ Huey consumer initialized successfully")
+        logger.info("👀 Monitoring for queued tasks...")
         consumer.run()
     except Exception as e:
         logger.error(f"Failed to start Huey consumer: {str(e)}", exc_info=True)

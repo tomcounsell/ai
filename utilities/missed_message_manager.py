@@ -231,15 +231,22 @@ def scan_chat_for_missed_messages(chat_id: int) -> None:
     
     Uses last_seen_message_id to resume from where we left off.
     """
-    logger.info(f"🔍 Scanning chat {chat_id} for missed messages...")
+    start_time = datetime.now()
+    logger.info(f"🔍 STARTING MISSED MESSAGE SCAN | Chat: {chat_id}")
+    logger.info(f"⏰ Scan initiated at {start_time.strftime('%H:%M:%S')}")
     
     try:
         # This needs to run in async context
         import asyncio
         asyncio.run(_async_scan_chat(chat_id))
         
+        execution_time = datetime.now() - start_time
+        logger.info(f"✅ COMPLETED MISSED MESSAGE SCAN | Chat: {chat_id} in {execution_time.total_seconds():.1f}s")
+        
     except Exception as e:
-        logger.error(f"❌ Failed to scan chat {chat_id}: {e}", exc_info=True)
+        execution_time = datetime.now() - start_time
+        logger.error(f"❌ FAILED MISSED MESSAGE SCAN | Chat: {chat_id} after {execution_time.total_seconds():.1f}s")
+        logger.error(f"💥 Error: {e}", exc_info=True)
         raise
 
 
