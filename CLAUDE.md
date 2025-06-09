@@ -361,6 +361,61 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 - Test the happy path thoroughly; edge cases are secondary
 - Use actual services (Notion, Perplexity, Claude) rather than mocks when possible
 
+## Database Queries and Monitoring
+
+### Promise Queue Database Queries
+
+The system uses SQLite databases for promise queue management and system monitoring.
+
+#### Promise Database Schema
+```sql
+-- Main promises table in system.db
+CREATE TABLE promises (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    task_description TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',  -- 'pending', 'in_progress', 'completed', 'failed'
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP,
+    result_summary TEXT,
+    error_message TEXT,
+    task_type TEXT DEFAULT 'code',
+    metadata TEXT
+);
+```
+
+#### Common Monitoring Queries
+```bash
+# Check pending tasks
+sqlite3 system.db "SELECT id, task_description, status, created_at FROM promises WHERE status='pending' ORDER BY created_at;"
+
+# Check in-progress tasks
+sqlite3 system.db "SELECT id, task_description, status, created_at FROM promises WHERE status='in_progress' ORDER BY created_at DESC;"
+
+# Check failed tasks with errors
+sqlite3 system.db "SELECT id, task_description, status, error_message FROM promises WHERE status='failed';"
+
+# Get promise status summary
+sqlite3 system.db "SELECT status, COUNT(*) as count FROM promises GROUP BY status;"
+
+# Check recent completed tasks
+sqlite3 system.db "SELECT id, task_description, completed_at, result_summary FROM promises WHERE status='completed' ORDER BY completed_at DESC LIMIT 10;"
+
+# Check Huey scheduled tasks
+sqlite3 data/huey.db "SELECT id, queue, timestamp, DATETIME(timestamp, 'unixepoch') as scheduled_time FROM schedule ORDER BY timestamp DESC LIMIT 5;"
+
+# Monitor task execution patterns
+sqlite3 system.db "SELECT task_type, COUNT(*) as count, AVG(julianday(completed_at) - julianday(created_at)) * 24 * 60 as avg_duration_minutes FROM promises WHERE status='completed' GROUP BY task_type;"
+```
+
+#### Database Files
+- **`system.db`** - Main promise queue and system data
+- **`data/huey.db`** - Huey task scheduler internal state
+- **`token_usage.db`** - AI model usage tracking (legacy)
+
+Use these queries to monitor system health, track task completion, and debug background processing issues.
+
 ## Important Notes
 **UNIFIED SYSTEM ARCHITECTURE FACTS:**
 - **Conversational development environment** - seamless chat-to-code execution without boundaries
