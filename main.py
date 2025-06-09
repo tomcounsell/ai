@@ -60,6 +60,8 @@ async def start_telegram_client():
         logger.info("🤖 Telegram integration initialized successfully")
     else:
         logger.error("❌ Failed to initialize Telegram integration")
+        logger.error("🛑 SERVER CANNOT FUNCTION WITHOUT TELEGRAM - SHUTTING DOWN")
+        raise RuntimeError("Telegram integration failed - server cannot operate without it")
 
 
 async def periodic_health_check():
