@@ -1,5 +1,6 @@
 """Telegram client management and initialization."""
 
+import logging
 import os
 import time
 from datetime import datetime
@@ -8,6 +9,8 @@ from pyrogram import Client
 
 from .chat_history import ChatHistoryManager
 from .handlers import MessageHandler
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramClient:
@@ -31,12 +34,12 @@ class TelegramClient:
             api_id = os.getenv("TELEGRAM_API_ID")
             api_hash = os.getenv("TELEGRAM_API_HASH")
 
-            print(
+            logger.info(
                 f"Loading Telegram credentials: api_id={api_id}, api_hash={'*' * len(api_hash) if api_hash else None}"
             )
 
             if not all([api_id, api_hash]):
-                print("Telegram credentials not found in environment variables")
+                logger.error("Telegram credentials not found in environment variables")
                 return False
 
             # Create client with better session handling to prevent database locks
@@ -50,7 +53,7 @@ class TelegramClient:
 
             # Start the client
             await self.client.start()
-            print("Telegram client started successfully")
+            logger.info("Telegram client started successfully")
 
             # Initialize message handler
             self.message_handler = MessageHandler(
@@ -69,7 +72,7 @@ class TelegramClient:
             # Register message handler
             @self.client.on_message()
             async def handle_message(client, message):
-                print(f"DEBUG: Received message from {message.from_user.username if message.from_user else 'unknown'}: {message.text[:50] if message.text else 'non-text'}")
+                logger.debug(f"DEBUG: Received message from {message.from_user.username if message.from_user else 'unknown'}: {message.text[:50] if message.text else 'non-text'}")
                 # Pass the client object so handler can access missed_message_integration
                 await self.message_handler.handle_message(client, message)
 
@@ -79,20 +82,20 @@ class TelegramClient:
             return True
 
         except Exception as e:
-            print(f"Failed to start Telegram client: {e}")
+            logger.error(f"Failed to start Telegram client: {e}")
             return False
 
     async def stop(self):
         """Stop the Telegram client and save state."""
-        print("Saving chat history...")
+        logger.info("Saving chat history...")
         self.chat_history.save_history()
 
         if self.client:
             try:
                 await self.client.stop()
-                print("Telegram client stopped")
+                logger.info("Telegram client stopped")
             except Exception as e:
-                print(f"Error stopping Telegram client: {e}")
+                logger.error(f"Error stopping Telegram client: {e}")
 
     async def list_active_dialogs(self) -> dict:
         """List all active Telegram groups and DMs with their details.
@@ -192,10 +195,10 @@ class TelegramClient:
             # Start background scanning (non-blocking)
             await self.missed_message_integration.startup_scan()
             
-            print("✅ New missed message system initialized successfully")
+            logger.info("✅ New missed message system initialized successfully")
 
         except Exception as e:
-            print(f"❌ Error initializing missed message system: {e}")
+            logger.error(f"❌ Error initializing missed message system: {e}")
             # Don't fail startup - continue without missed message detection
             self.missed_message_integration = None
 
@@ -204,7 +207,7 @@ class TelegramClient:
         if not self.client or not self.message_handler:
             return
         
-        print("🔄 Testing message handling with self-ping...")
+        logger.info("🔄 Testing message handling with self-ping...")
         
         try:
             # Get own user info
@@ -227,13 +230,13 @@ class TelegramClient:
                 test_found = any(test_message in msg.get("content", "") for msg in recent_messages[-3:])
                 
                 if test_found:
-                    print("✅ Self-ping test successful - message handling is operational")
+                    logger.info("✅ Self-ping test successful - message handling is operational")
                 else:
-                    print("⚠️  Self-ping test: message sent but not processed (check whitelist)")
+                    logger.warning("⚠️  Self-ping test: message sent but not processed (check whitelist)")
             else:
-                print("⚠️  Self-ping test: no chat history found (check whitelist configuration)")
+                logger.warning("⚠️  Self-ping test: no chat history found (check whitelist configuration)")
                 
         except Exception as e:
-            print(f"⚠️  Self-ping test failed: {e}")
-            print("   This indicates message handling may not be working properly")
+            logger.warning(f"⚠️  Self-ping test failed: {e}")
+            logger.warning("   This indicates message handling may not be working properly")
             # Don't fail startup, but warn the user

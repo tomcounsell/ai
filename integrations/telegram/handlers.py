@@ -1,11 +1,14 @@
 """Message handlers for Telegram bot functionality."""
 
+import logging
 from pyrogram.enums import ChatType
 
 from tools.link_analysis_tool import extract_urls, is_url_only_message, store_link_with_analysis
 
 # All functionality now handled by valor_agent (telegram_chat_agent)
 from .utils import is_user_priority_question
+
+logger = logging.getLogger(__name__)
 
 
 class MessageHandler:
@@ -142,7 +145,7 @@ class MessageHandler:
             )
 
         if summary_parts:
-            print(f"🚫 ACCESS SUMMARY: {' | '.join(summary_parts)} (not whitelisted)")
+            logger.warning(f"🚫 ACCESS SUMMARY: {' | '.join(summary_parts)} (not whitelisted)")
 
             # Clear old entries (keep last hour)
             import time
@@ -202,41 +205,41 @@ class MessageHandler:
             else (message.text or "[no text]")
         )
 
-        print(
+        logger.info(
             f"📨 INCOMING MESSAGE: {chat_type} {chat_id} from {username_display} (msg_id: {message_id})"
         )
-        print(f"   Content preview: {message_preview}")
+        logger.debug(f"   Content preview: {message_preview}")
 
         # === STEP 2: SELF-MESSAGE FILTER ===
-        print(f"🤖 Checking if message is from bot itself...")
+        logger.debug(f"🤖 Checking if message is from bot itself...")
         me = await client.get_me()
         bot_id = me.id
         
         if user_id and user_id == bot_id:
-            print(f"🔄 IGNORING SELF-MESSAGE: Bot {bot_id} sent message to itself, skipping processing")
+            logger.info(f"🔄 IGNORING SELF-MESSAGE: Bot {bot_id} sent message to itself, skipping processing")
             return
 
-        print(f"✅ Message is from external user {user_id}, proceeding with processing")
+        logger.debug(f"✅ Message is from external user {user_id}, proceeding with processing")
 
         # === STEP 3: ACCESS CONTROL VALIDATION ===
-        print(f"🔒 Checking access permissions for {chat_type} {chat_id}...")
+        logger.debug(f"🔒 Checking access permissions for {chat_type} {chat_id}...")
         if not self._should_handle_chat(chat_id, is_private_chat, username):
             # Track denied access for aggregated logging
             self._track_access_denial(chat_id, is_private_chat, username, message_preview)
             return
 
-        print(f"✅ Access granted for {chat_type} {chat_id} ({username_display})")
+        logger.info(f"✅ Access granted for {chat_type} {chat_id} ({username_display})")
 
         # === STEP 4: MESSAGE ACKNOWLEDGMENT ===
-        print(f"📖 Marking message {message_id} as read...")
+        logger.debug(f"📖 Marking message {message_id} as read...")
         try:
             await client.read_chat_history(chat_id, message.id)
-            print("✅ Message marked as read")
+            logger.debug("✅ Message marked as read")
         except Exception as e:
-            print(f"⚠️  Could not mark message as read: {e}")
+            logger.warning(f"⚠️  Could not mark message as read: {e}")
 
         # === STEP 5: EARLY RESPONSE DECISION (to avoid unnecessary reactions) ===
-        print("🎯 Early response decision check...")
+        logger.debug("🎯 Early response decision check...")
         from ..notion.utils import is_dev_group
         
         is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
@@ -245,68 +248,68 @@ class MessageHandler:
         is_mentioned, _ = self._process_mentions(message, me.username, bot_id, is_private_chat)
         should_respond = is_private_chat or is_mentioned or is_dev_group_chat
         
-        print(f"   Private chat: {is_private_chat}")
-        print(f"   Mentioned: {is_mentioned}")
-        print(f"   Dev group: {is_dev_group_chat}")
-        print(f"   Will respond: {should_respond}")
+        logger.debug(f"   Private chat: {is_private_chat}")
+        logger.debug(f"   Mentioned: {is_mentioned}")
+        logger.debug(f"   Dev group: {is_dev_group_chat}")
+        logger.debug(f"   Will respond: {should_respond}")
 
         # === STEP 6: INITIAL REACTION (USER FEEDBACK) - Only if we'll respond ===
         if should_respond:
-            print(f"👀 Adding 'received' reaction to message {message_id}...")
+            logger.debug(f"👀 Adding 'received' reaction to message {message_id}...")
             from .reaction_manager import add_message_received_reaction
 
             try:
                 await add_message_received_reaction(client, chat_id, message.id)
-                print("✅ Received reaction added")
+                logger.debug("✅ Received reaction added")
             except Exception as e:
-                print(f"⚠️  Could not add received reaction: {e}")
+                logger.warning(f"⚠️  Could not add received reaction: {e}")
         else:
-            print("⚪ Skipping received reaction (won't respond to this message)")
+            logger.debug("⚪ Skipping received reaction (won't respond to this message)")
 
         # === STEP 7: MESSAGE TYPE DETECTION AND ROUTING ===
-        print(f"🔍 Detecting message type for {message_id}...")
+        logger.debug(f"🔍 Detecting message type for {message_id}...")
 
         if message.photo:
-            print("📸 PHOTO MESSAGE detected - routing to photo handler")
+            logger.info("📸 PHOTO MESSAGE detected - routing to photo handler")
             await self._handle_photo_message(client, message, chat_id)
             return
         elif message.document:
-            print("📄 DOCUMENT MESSAGE detected - routing to document handler")
+            logger.info("📄 DOCUMENT MESSAGE detected - routing to document handler")
             await self._handle_document_message(client, message, chat_id)
             return
         elif message.voice or message.audio:
             audio_type = "voice" if message.voice else "audio"
-            print(f"🎵 {audio_type.upper()} MESSAGE detected - routing to audio handler")
+            logger.info(f"🎵 {audio_type.upper()} MESSAGE detected - routing to audio handler")
             await self._handle_audio_message(client, message, chat_id)
             return
         elif message.video or message.video_note:
             video_type = "video_note" if message.video_note else "video"
-            print(f"🎬 {video_type.upper()} MESSAGE detected - routing to video handler")
+            logger.info(f"🎬 {video_type.upper()} MESSAGE detected - routing to video handler")
             await self._handle_video_message(client, message, chat_id)
             return
         elif not message.text:
-            print("❓ UNSUPPORTED MESSAGE TYPE detected - skipping (no text content)")
-            print(f"   Message type: {type(message).__name__}")
+            logger.info("❓ UNSUPPORTED MESSAGE TYPE detected - skipping (no text content)")
+            logger.debug(f"   Message type: {type(message).__name__}")
             return
 
         # === STEP 8: TEXT MESSAGE PROCESSING ===
-        print("💬 TEXT MESSAGE detected - proceeding with text processing pipeline")
-        print(f"   Message length: {len(message.text)} characters")
+        logger.info("💬 TEXT MESSAGE detected - proceeding with text processing pipeline")
+        logger.debug(f"   Message length: {len(message.text)} characters")
 
         # === STEP 9: REAL-TIME MESSAGE PROCESSING ===
-        print("✅ Processing message in real-time")
+        logger.debug("✅ Processing message in real-time")
 
         # === STEP 10: BOT METADATA RETRIEVAL ===
-        print("🤖 Using bot information from self-message filter...")
+        logger.debug("🤖 Using bot information from self-message filter...")
         bot_username = me.username
-        print(f"   Bot username: @{bot_username}")
-        print(f"   Bot ID: {bot_id}")
+        logger.debug(f"   Bot username: @{bot_username}")
+        logger.debug(f"   Bot ID: {bot_id}")
 
         # === STEP 11: CHAT HISTORY CONTEXT CHECK ===
         current_history_count = len(self.chat_history.chat_histories.get(chat_id, []))
-        print(f"📚 Current chat history length for {chat_id}: {current_history_count} messages")
+        logger.debug(f"📚 Current chat history length for {chat_id}: {current_history_count} messages")
 
-        print(f"🔄 Processing message from {chat_type} {chat_id}: '{message.text[:50]}...'")
+        logger.info(f"🔄 Processing message from {chat_type} {chat_id}: '{message.text[:50]}...'")
 
         # === STEP 12: EXTRACT REPLY CONTEXT EARLY (needed for missed messages) ===
         reply_to_telegram_message_id = None
@@ -317,45 +320,45 @@ class MessageHandler:
         await self._handle_missed_messages_new_system(client, chat_id, message)
 
         # === STEP 14: MENTION DETECTION AND TEXT PROCESSING ===
-        print("🏷️  Processing mentions and cleaning message text...")
+        logger.debug("🏷️  Processing mentions and cleaning message text...")
         try:
             is_mentioned, processed_text = self._process_mentions(
                 message, bot_username, bot_id, is_private_chat
             )
-            print(f"   Is mentioned: {is_mentioned}")
-            print(f"   Processed text: '{processed_text[:50]}...'")
+            logger.debug(f"   Is mentioned: {is_mentioned}")
+            logger.debug(f"   Processed text: '{processed_text[:50]}...'")
         except Exception as e:
-            print(f"❌ Error processing mentions: {e}")
+            logger.error(f"❌ Error processing mentions: {e}")
             # Fallback: treat as regular message without mentions
             is_mentioned = is_private_chat  # Only respond in private chats if error
             processed_text = (
                 getattr(message, "text", None) or getattr(message, "caption", None) or ""
             )
-            print(f"   Fallback - is_mentioned: {is_mentioned}, text: '{processed_text[:50]}...'")
+            logger.debug(f"   Fallback - is_mentioned: {is_mentioned}, text: '{processed_text[:50]}...'")
 
         # Log reply context that was extracted earlier
         if reply_to_telegram_message_id:
-            print(f"🔗 Message is replying to Telegram message {reply_to_telegram_message_id}")
+            logger.debug(f"🔗 Message is replying to Telegram message {reply_to_telegram_message_id}")
         else:
-            print("📝 Message is not a reply")
+            logger.debug("📝 Message is not a reply")
 
         # === STEP 15: FINAL RESPONSE DECISION LOGIC ===
         # Note: We already computed should_respond earlier, but check consistency
         final_should_respond = is_private_chat or is_mentioned or is_dev_group_chat
         
         if final_should_respond != should_respond:
-            print(f"⚠️  Response decision changed: was {should_respond}, now {final_should_respond}")
+            logger.warning(f"⚠️  Response decision changed: was {should_respond}, now {final_should_respond}")
         
-        print("🎯 Final response decision:")
-        print(f"   Private chat: {is_private_chat}")
-        print(f"   Mentioned: {is_mentioned}")
-        print(f"   Dev group: {is_dev_group_chat}")
-        print(f"   Will respond: {final_should_respond}")
+        logger.debug("🎯 Final response decision:")
+        logger.debug(f"   Private chat: {is_private_chat}")
+        logger.debug(f"   Mentioned: {is_mentioned}")
+        logger.debug(f"   Dev group: {is_dev_group_chat}")
+        logger.debug(f"   Will respond: {final_should_respond}")
 
         should_respond = final_should_respond
 
         if not should_respond:
-            print("💾 Storing message for context but not responding")
+            logger.debug("💾 Storing message for context but not responding")
             self.chat_history.add_message(
                 chat_id,
                 "user",
@@ -367,7 +370,7 @@ class MessageHandler:
             return
 
         # === STEP 16: CHAT HISTORY STORAGE ===
-        print("💾 Storing user message in chat history...")
+        logger.debug("💾 Storing user message in chat history...")
         self.chat_history.add_message(
             chat_id,
             "user",
@@ -377,17 +380,17 @@ class MessageHandler:
             is_telegram_id=True,
         )
         new_history_count = len(self.chat_history.chat_histories.get(chat_id, []))
-        print(f"   Chat history updated: {current_history_count} → {new_history_count} messages")
+        logger.debug(f"   Chat history updated: {current_history_count} → {new_history_count} messages")
 
         # === STEP 17: SPECIAL MESSAGE TYPE DETECTION ===
-        print("🔍 Checking for special message types...")
+        logger.debug("🔍 Checking for special message types...")
         if is_url_only_message(processed_text):
-            print("🔗 LINK-ONLY MESSAGE detected - routing to link handler")
+            logger.info("🔗 LINK-ONLY MESSAGE detected - routing to link handler")
             await self._handle_link_message(message, chat_id, processed_text)
             return
 
         # === STEP 18: INTENT CLASSIFICATION AND AGENT ROUTING ===
-        print("🧠 Starting intent classification and agent routing...")
+        logger.info("🧠 Starting intent classification and agent routing...")
         await self._route_message_with_intent(
             client, message, chat_id, processed_text, reply_to_telegram_message_id
         )
@@ -402,20 +405,20 @@ class MessageHandler:
             # Use injected integration first
             if hasattr(self, 'missed_message_integration') and self.missed_message_integration:
                 await self.missed_message_integration.process_missed_for_chat(chat_id)
-                print(f"📬 Processed missed messages for chat {chat_id}")
+                logger.debug(f"📬 Processed missed messages for chat {chat_id}")
                 return
             
             # Fallback: Get from client
             if hasattr(client, 'missed_message_integration') and client.missed_message_integration:
                 await client.missed_message_integration.process_missed_for_chat(chat_id)
-                print(f"📬 Processed missed messages for chat {chat_id}")
+                logger.debug(f"📬 Processed missed messages for chat {chat_id}")
                 return
             
             # If no integration available, log warning but don't fail
-            print(f"⚠️  No missed message integration available for chat {chat_id}")
+            logger.warning(f"⚠️  No missed message integration available for chat {chat_id}")
                     
         except Exception as e:
-            print(f"❌ Failed to process missed messages for chat {chat_id}: {e}")
+            logger.error(f"❌ Failed to process missed messages for chat {chat_id}: {e}")
     
     async def _update_last_seen_message(self, client, chat_id: int, message_id: int):
         """Update last seen message in the new missed message system."""
@@ -431,7 +434,7 @@ class MessageHandler:
                 return
                 
         except Exception as e:
-            print(f"Warning: Failed to update last seen for chat {chat_id}: {e}")
+            logger.warning(f"Warning: Failed to update last seen for chat {chat_id}: {e}")
 
     def _process_mentions(
         self, message, bot_username: str, bot_id: int, is_private_chat: bool
@@ -515,7 +518,7 @@ class MessageHandler:
                             break
                     except (AttributeError, IndexError, TypeError) as e:
                         # Log entity processing error but continue
-                        print(f"Warning: Error processing entity {entity}: {e}")
+                        logger.warning(f"Warning: Error processing entity {entity}: {e}")
                         continue
 
         return is_mentioned, processed_text

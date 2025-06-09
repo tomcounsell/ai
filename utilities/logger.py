@@ -11,12 +11,22 @@ def setup_logging():
     logs_dir = Path("logs")
     logs_dir.mkdir(exist_ok=True)
     
-    # Configure root logger
+    # Configure root logger with rotating file handler
+    import logging.handlers
+    file_handler = logging.handlers.RotatingFileHandler(
+        logs_dir / 'system.log', 
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=3
+    )
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    ))
+    
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler(logs_dir / 'ai_agent.log'),
+            file_handler,
             logging.StreamHandler()  # Also log to console
         ]
     )

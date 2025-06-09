@@ -8,6 +8,7 @@ token usage tracking, link analysis, and other persistent storage needs.
 import sqlite3
 import os
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 

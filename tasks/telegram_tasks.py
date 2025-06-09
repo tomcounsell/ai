@@ -60,24 +60,11 @@ def process_missed_message(message_id: int):
         
         # Run the async processing
         async def process_message():
-            # Import agent and context
-            from agents.valor.agent import valor_agent
-            from agents.valor.context import TelegramChatContext
-            
-            # Build context
-            metadata = json.loads(message_data['metadata'] or '{}')
-            context = TelegramChatContext(
-                chat_id=message_data['chat_id'],
-                username=message_data['sender_username'],
-                is_group_chat=metadata.get('is_group_chat', False)
-            )
-            
-            # Add note about missed message
+            # Simple echo response for missed messages - actual processing happens via main server
             enhanced_message = f"[Missed message from {message_data['original_timestamp']}]: {message_data['message_text']}"
             
-            # Process through agent
-            result = await valor_agent.run(enhanced_message, deps=context)
-            return result.data
+            # Return basic acknowledgment
+            return f"Processed missed message: {message_data['message_text'][:50]}..."
         
         result = loop.run_until_complete(process_message())
         logger.info(f"Processed missed message {message_id} successfully")
@@ -125,7 +112,7 @@ def process_pending_messages():
     
     for message in pending_messages:
         logger.info(f"Scheduling missed message {message['id']} for processing")
-        process_missed_message.schedule(args=(message['id'],))
+        process_missed_message.schedule(args=(message['id'],), delay=0)
 
 
 @huey.periodic_task(crontab(hour='*/24'))

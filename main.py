@@ -18,11 +18,11 @@ import json
 
 load_dotenv()
 
-# Configure consolidated logging to system.log
+# Configure consolidated logging to server.log
 import logging.handlers
 os.makedirs('logs', exist_ok=True)
 
-# Create rotating file handler for system logs
+# Create rotating file handler for all server logs (startup, shutdown, telegram handlers, health checks)
 file_handler = logging.handlers.RotatingFileHandler(
     'logs/system.log', 
     maxBytes=10*1024*1024,  # 10MB

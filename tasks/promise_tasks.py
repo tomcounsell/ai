@@ -9,6 +9,7 @@ DESIGN PATTERN: Each task should be:
 import json
 import logging
 import os
+import sqlite3
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 
@@ -494,6 +495,8 @@ def system_health_check():
 def gather_system_health_data() -> Dict[str, Any]:
     """Gather current system state for health analysis."""
     with get_database_connection() as conn:
+        conn.row_factory = sqlite3.Row  # Enable dict-like access
+        
         # Promise queue analysis
         queue_stats = conn.execute("""
             SELECT 
@@ -714,6 +717,7 @@ def gather_daydream_context() -> Dict[str, Any]:
     
     # Get recent promise activity for trend analysis
     with get_database_connection() as conn:
+        conn.row_factory = sqlite3.Row  # Enable dict-like access
         recent_promises = conn.execute("""
             SELECT 
                 task_description,

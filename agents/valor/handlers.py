@@ -5,7 +5,10 @@ This module contains the message handling functions that integrate the Valor age
 with Telegram chat functionality, including context management and conversation history.
 """
 
+import logging
 from .agent import ValorContext, valor_agent
+
+logger = logging.getLogger(__name__)
 
 
 def _detect_mixed_content(message: str) -> bool:
@@ -81,10 +84,10 @@ def _build_enhanced_message_context(
     # Detect mixed content
     has_mixed_content = _detect_mixed_content(message)
     if has_mixed_content:
-        print(
+        logger.info(
             f"🖼️📝 MIXED CONTENT DETECTED: Message contains both text and image for chat {chat_id}"
         )
-        print(
+        logger.debug(
             f"Message preview: {message[:100]}..." if len(message) > 100 else f"Message: {message}"
         )
 
@@ -176,11 +179,11 @@ async def handle_telegram_message(
 
     # Log intent information if available
     if intent_result:
-        print(f"🔧 INTENT-AWARE HANDLER START for chat {chat_id}")
-        print(f"   Intent: {intent_result.intent.value}")
-        print(f"   Confidence: {intent_result.confidence:.2f}")
+        logger.info(f"🔧 INTENT-AWARE HANDLER START for chat {chat_id}")
+        logger.debug(f"   Intent: {intent_result.intent.value}")
+        logger.debug(f"   Confidence: {intent_result.confidence:.2f}")
     else:
-        print(f"🤖 STANDARD HANDLER START for chat {chat_id}")
+        logger.info(f"🤖 STANDARD HANDLER START for chat {chat_id}")
 
     # Prepare context
     context = ValorContext(
@@ -203,12 +206,12 @@ async def handle_telegram_message(
     intent_system_prompt = None
     if intent_result:
         try:
-            print("📦 Importing intent-specific modules...")
+            logger.debug("📦 Importing intent-specific modules...")
             from integrations.intent_prompts import get_intent_system_prompt
 
-            print("✅ Intent modules imported successfully")
+            logger.debug("✅ Intent modules imported successfully")
 
-            print("🎯 Generating intent-specific system prompt...")
+            logger.debug("🎯 Generating intent-specific system prompt...")
             prompt_context = {
                 "chat_id": chat_id,
                 "username": username,
@@ -217,9 +220,9 @@ async def handle_telegram_message(
                 "has_links": any(url in message.lower() for url in ["http://", "https://", "www."]),
             }
             intent_system_prompt = get_intent_system_prompt(intent_result, prompt_context)
-            print(f"🎯 Using intent-specific system prompt for {intent_result.intent.value}")
+            logger.debug(f"🎯 Using intent-specific system prompt for {intent_result.intent.value}")
         except Exception as e:
-            print(f"⚠️ Failed to load intent-specific prompt: {e}")
+            logger.warning(f"⚠️ Failed to load intent-specific prompt: {e}")
             intent_system_prompt = None
 
     # Run the agent with error handling and optional intent optimization
@@ -227,18 +230,18 @@ async def handle_telegram_message(
     try:
         # Handle intent-specific system prompt if available
         if intent_result and intent_system_prompt:
-            print("🚀 Starting Valor agent execution with intent-specific prompt...")
+            logger.debug("🚀 Starting Valor agent execution with intent-specific prompt...")
             original_system_prompt = valor_agent.system_prompt
             valor_agent.system_prompt = intent_system_prompt
         else:
-            print("🚀 Starting Valor agent execution with default prompt...")
+            logger.debug("🚀 Starting Valor agent execution with default prompt...")
 
-        print(f"⏳ Executing agent.run() with enhanced message ({len(enhanced_message)} chars)...")
+        logger.debug(f"⏳ Executing agent.run() with enhanced message ({len(enhanced_message)} chars)...")
         result = await valor_agent.run(enhanced_message, deps=context)
-        print("✅ Agent execution completed successfully")
+        logger.debug("✅ Agent execution completed successfully")
 
         if not result or not hasattr(result, "output") or not result.output:
-            print(f"⚠️ Agent returned empty result for chat {chat_id}")
+            logger.warning(f"⚠️ Agent returned empty result for chat {chat_id}")
             return "I processed your message but didn't generate a response. Please try again."
 
         # Extract tool usage information
@@ -268,9 +271,9 @@ async def handle_telegram_message(
                                 )
                                 if action_name not in actions_taken:
                                     actions_taken.append(action_name)
-                                print(f"🔧 Tool used: {part.tool_name}")
+                                logger.debug(f"🔧 Tool used: {part.tool_name}")
         except Exception as e:
-            print(f"⚠️ Could not extract tool usage information: {e}")
+            logger.warning(f"⚠️ Could not extract tool usage information: {e}")
 
         # Add action summary to the beginning of the response if actions were taken
         output = result.output
@@ -278,15 +281,15 @@ async def handle_telegram_message(
             action_summary = "Actions: " + ", ".join(actions_taken) + "\n\n"
             output = action_summary + output
 
-        print(f"📤 Agent response length: {len(output)} chars")
+        logger.debug(f"📤 Agent response length: {len(output)} chars")
         return output
 
     except Exception as e:
         error_msg = f"Error running valor_agent: {str(e)}"
-        print(f"❌ {error_msg}")
+        logger.error(f"❌ {error_msg}")
         import traceback
 
-        traceback.print_exc()
+        logger.error("Exception traceback:", exc_info=True)
         return f"I encountered an error processing your message: {str(e)}"
 
     finally:
