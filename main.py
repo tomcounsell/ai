@@ -18,10 +18,28 @@ import json
 
 load_dotenv()
 
-# Configure logging
+# Configure consolidated logging to system.log
+import logging.handlers
+os.makedirs('logs', exist_ok=True)
+
+# Create rotating file handler for system logs
+file_handler = logging.handlers.RotatingFileHandler(
+    'logs/system.log', 
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=3
+)
+file_handler.setFormatter(logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+))
+
+# Configure root logger
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        file_handler,
+        logging.StreamHandler()  # Still log to console
+    ]
 )
 logger = logging.getLogger(__name__)
 

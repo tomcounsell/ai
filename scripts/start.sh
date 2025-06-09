@@ -46,12 +46,11 @@ start_huey() {
     # Ensure data directory exists
     mkdir -p "$PROJECT_ROOT/data" "$PROJECT_ROOT/logs"
     
-    # Start Huey consumer in background
+    # Start Huey consumer in background (logs to tasks.log via Python logging)
     python "$PROJECT_ROOT/huey_consumer.py" tasks.huey_config.huey \
-        -w 4 \
+        -w 1 \
         -k thread \
-        -l "$PROJECT_ROOT/logs/huey.log" \
-        -v >> "$PROJECT_ROOT/logs/huey_startup.log" 2>&1 &
+        -v &
     
     HUEY_PID=$!
     echo $HUEY_PID > "$PROJECT_ROOT/huey.pid"
@@ -65,7 +64,7 @@ start_huey() {
         return 0
     else
         echo "❌ Failed to start Huey consumer"
-        echo "📋 Check logs: cat logs/huey.log"
+        echo "📋 Check logs: tail -f logs/tasks.log"
         rm -f "$PROJECT_ROOT/huey.pid"
         return 1
     fi
@@ -89,13 +88,9 @@ start_server() {
         pip install uvicorn[standard] fastapi
     fi
 
-    # Create logs directory if it doesn't exist
-    mkdir -p "$PROJECT_ROOT/logs"
-    LOG_FILE="$PROJECT_ROOT/logs/server.log"
-
-    # Start server in background and redirect output to log file
-    echo "Launching server in background (logs: logs/server.log)..."
-    nohup uvicorn main:app --host 0.0.0.0 --port $PORT --reload > "$LOG_FILE" 2>&1 &
+    # Start server in background (logs to system.log via Python logging)
+    echo "Launching server in background (logs: logs/system.log)..."
+    nohup uvicorn main:app --host 0.0.0.0 --port $PORT --reload > /dev/null 2>&1 &
     SERVER_PID=$!
     echo $SERVER_PID > "$PID_FILE"
 
@@ -112,8 +107,8 @@ start_server() {
         echo "  Redoc:    http://localhost:$PORT/redoc"
         echo ""
         echo "📁 Logs:"
-        echo "  Server:   tail -f logs/server.log"
-        echo "  Huey:     tail -f logs/huey.log"
+        echo "  System:   tail -f logs/system.log"
+        echo "  Tasks:    tail -f logs/tasks.log"
         echo "🛑 Stop:    scripts/stop.sh"
         echo ""
         echo "🤖 Services running:"
@@ -126,11 +121,11 @@ start_server() {
         # Show last few lines of log to confirm startup
         echo ""
         echo "📋 Recent startup logs:"
-        tail -n 5 "$LOG_FILE" 2>/dev/null || echo "  (logs not available yet)"
+        tail -n 5 "logs/system.log" 2>/dev/null || echo "  (logs not available yet)"
     else
         echo "❌ Failed to start server"
         echo "📋 Check logs for details:"
-        cat "$LOG_FILE" 2>/dev/null || echo "  (no log file found)"
+        tail -20 "logs/system.log" 2>/dev/null || echo "  (no log file found)"
         rm -f "$PID_FILE"
         exit 1
     fi

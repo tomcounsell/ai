@@ -361,6 +361,27 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 - Test the happy path thoroughly; edge cases are secondary
 - Use actual services (Notion, Perplexity, Claude) rather than mocks when possible
 
+## Logging Architecture
+
+The system uses **consolidated logging** with exactly **2 log files**:
+
+- **`logs/system.log`** - Main server, Telegram client, FastAPI operations, and system health
+- **`logs/tasks.log`** - Huey worker, task execution, promise processing, and background operations
+
+Both logs use rotating file handlers (10MB max, 3 backups) and also output to console during development.
+
+**Monitoring Commands:**
+```bash
+# Monitor system operations (server, Telegram, health checks)
+tail -f logs/system.log
+
+# Monitor task execution (Huey worker, promise processing)
+tail -f logs/tasks.log
+
+# Monitor both simultaneously
+tail -f logs/system.log logs/tasks.log
+```
+
 ## Database Queries and Monitoring
 
 ### Promise Queue Database Queries

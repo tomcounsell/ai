@@ -19,10 +19,28 @@ import os
 from huey.consumer import Consumer
 from tasks.huey_config import huey
 
-# Configure logging
+# Configure consolidated logging to tasks.log
+import logging.handlers
+os.makedirs('logs', exist_ok=True)
+
+# Create rotating file handler for task logs
+file_handler = logging.handlers.RotatingFileHandler(
+    'logs/tasks.log', 
+    maxBytes=10*1024*1024,  # 10MB
+    backupCount=3
+)
+file_handler.setFormatter(logging.Formatter(
+    '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+))
+
+# Configure logging for Huey tasks
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        file_handler,
+        logging.StreamHandler()  # Still log to console
+    ]
 )
 
 logger = logging.getLogger(__name__)
