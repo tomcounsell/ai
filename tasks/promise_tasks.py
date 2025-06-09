@@ -438,8 +438,15 @@ def resume_stalled_promises():
     
     BEST PRACTICE: Always have a recovery mechanism for
     tasks that might get orphaned during restarts.
+    
+    Enhanced to handle:
+    - In-progress promises stalled for >4 hours
+    - Pending promises orphaned for >5 minutes (server restart recovery)
     """
-    # Find promises marked as in_progress for too long
+    stalled_count = 0
+    orphaned_count = 0
+    
+    # Find promises marked as in_progress for too long (original logic)
     stalled_cutoff = datetime.utcnow() - timedelta(hours=4)
     
     with get_database_connection() as conn:
@@ -457,6 +464,67 @@ def resume_stalled_promises():
         # Reset to pending
         update_promise_status(promise_id, 'pending')
         execute_promise_by_type.schedule(args=(promise_id,))
+        stalled_count += 1
+    
+    # Find pending promises that were never processed after server restart
+    orphaned_cutoff = datetime.utcnow() - timedelta(minutes=5)
+    
+    with get_database_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id FROM promises 
+            WHERE status = 'pending' 
+            AND created_at < ?
+        """, (orphaned_cutoff,))
+        
+        orphaned_promises = cursor.fetchall()
+    
+    for (promise_id,) in orphaned_promises:
+        logger.warning(f"Resuming orphaned pending promise {promise_id}")
+        execute_promise_by_type.schedule(args=(promise_id,))
+        orphaned_count += 1
+    
+    if stalled_count > 0 or orphaned_count > 0:
+        logger.info(f"Promise recovery: {stalled_count} stalled, {orphaned_count} orphaned promises resumed")
+
+
+@huey.task(retries=1, retry_delay=30)
+def startup_promise_recovery():
+    """
+    Process any orphaned promises on server startup.
+    
+    This function is called once when the server starts to handle
+    promises that may have been interrupted during the previous shutdown.
+    """
+    logger.info("🔄 Starting startup promise recovery...")
+    
+    recovered_count = 0
+    
+    # Find all pending promises (may have been orphaned during restart)
+    with get_database_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, task_description, created_at FROM promises 
+            WHERE status = 'pending'
+            ORDER BY created_at ASC
+        """)
+        
+        pending_promises = cursor.fetchall()
+    
+    if not pending_promises:
+        logger.info("✅ No orphaned promises found during startup")
+        return
+    
+    logger.info(f"📬 Found {len(pending_promises)} pending promises to recover")
+    
+    for promise_id, task_description, created_at in pending_promises:
+        logger.info(f"Recovering promise {promise_id}: {task_description[:50]}... (created: {created_at})")
+        
+        # Schedule the promise for immediate execution
+        execute_promise_by_type.schedule(args=(promise_id,), delay=0)
+        recovered_count += 1
+    
+    logger.info(f"✅ Startup promise recovery complete: {recovered_count} promises scheduled for execution")
 
 
 @huey.periodic_task(crontab(minute='*/15'))

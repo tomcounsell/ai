@@ -454,24 +454,30 @@ def cleanup_old_databases() -> None:
 
 
 # Promise Management Functions
-def create_promise(chat_id: int, message_id: int, task_description: str) -> int:
+def create_promise(chat_id: int, message_id: int, task_description: str, metadata: Optional[dict] = None) -> int:
     """Create a new promise entry in the database.
     
     Args:
         chat_id: Telegram chat ID
         message_id: Telegram message ID that triggered the promise
         task_description: Description of the promised task
+        metadata: Optional metadata dict containing message context, user info, etc.
         
     Returns:
         int: Promise ID
     """
+    import json
+    
     conn = get_database_connection()
     cursor = conn.cursor()
     
+    # Serialize metadata to JSON
+    metadata_json = json.dumps(metadata) if metadata else None
+    
     cursor.execute("""
-        INSERT INTO promises (chat_id, message_id, task_description)
-        VALUES (?, ?, ?)
-    """, (chat_id, message_id, task_description))
+        INSERT INTO promises (chat_id, message_id, task_description, metadata)
+        VALUES (?, ?, ?, ?)
+    """, (chat_id, message_id, task_description, metadata_json))
     
     promise_id = cursor.lastrowid
     conn.commit()

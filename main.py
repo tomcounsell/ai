@@ -79,6 +79,15 @@ async def start_telegram_client():
 
     if success:
         logger.info("🤖 Telegram integration initialized successfully")
+        
+        # Schedule startup promise recovery after successful Telegram initialization
+        try:
+            from tasks.promise_tasks import startup_promise_recovery
+            logger.info("🔄 Scheduling startup promise recovery...")
+            startup_promise_recovery.schedule(delay=5)  # Give Huey a moment to fully start
+            logger.info("✅ Startup promise recovery scheduled")
+        except Exception as recovery_error:
+            logger.warning(f"⚠️  Could not schedule startup promise recovery: {recovery_error}")
     else:
         logger.error("❌ Failed to initialize Telegram integration")
         logger.error("🛑 SERVER CANNOT FUNCTION WITHOUT TELEGRAM - SHUTTING DOWN")

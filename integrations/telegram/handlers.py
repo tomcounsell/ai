@@ -1,6 +1,7 @@
 """Message handlers for Telegram bot functionality."""
 
 import logging
+from datetime import datetime
 from pyrogram.enums import ChatType
 
 from tools.link_analysis_tool import extract_urls, is_url_only_message, store_link_with_analysis
@@ -1650,9 +1651,23 @@ class MessageHandler:
             # Extract task description from the promise message
             task_description = promise_message.replace("I'll work on this task in the background: ", "").strip()
             
-            # Create promise in database
+            # Build comprehensive metadata for promise recovery
+            promise_metadata = {
+                "original_message_text": message.text if hasattr(message, 'text') else None,
+                "username": message.from_user.username if message.from_user else None,
+                "user_id": message.from_user.id if message.from_user else None,
+                "user_first_name": message.from_user.first_name if message.from_user else None,
+                "is_group_chat": message.chat.type != ChatType.PRIVATE,
+                "chat_title": getattr(message.chat, 'title', None),
+                "message_date": message.date.isoformat() if hasattr(message, 'date') and message.date else None,
+                "reply_to_message_id": getattr(message.reply_to_message, 'id', None) if hasattr(message, 'reply_to_message') and message.reply_to_message else None,
+                "promise_creation_timestamp": datetime.now().isoformat(),
+                "server_restart_recovery": True  # Flag to indicate this can be recovered after restart
+            }
+            
+            # Create promise in database with metadata
             from utilities.database import create_promise
-            promise_id = create_promise(chat_id, message.id, task_description)
+            promise_id = create_promise(chat_id, message.id, task_description, promise_metadata)
             print(f"📝 Created promise {promise_id} for long-running task")
             
             # Send immediate response to user
