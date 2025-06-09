@@ -367,7 +367,7 @@ Service integrations use mapping files in `/integrations/{service}/` to translat
 
 The system uses SQLite databases for promise queue management and system monitoring.
 
-#### Promise Database Schema
+#### Database Schema Reference
 ```sql
 -- Main promises table in system.db
 CREATE TABLE promises (
@@ -383,30 +383,93 @@ CREATE TABLE promises (
     task_type TEXT DEFAULT 'code',
     metadata TEXT
 );
+
+-- Message queue for missed/scheduled messages
+CREATE TABLE message_queue (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER,
+    message_text TEXT NOT NULL,
+    message_type TEXT NOT NULL,  -- 'missed', 'scheduled', 'followup'
+    sender_username TEXT,
+    original_timestamp TIMESTAMP,
+    status TEXT DEFAULT 'pending',  -- 'pending', 'processing', 'completed', 'failed'
+    processed_at TIMESTAMP,
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    metadata TEXT  -- JSON blob with full message data
+);
+
+-- Claude Code session tracking
+CREATE TABLE claude_code_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT UNIQUE NOT NULL,  -- Claude Code session UUID
+    chat_id TEXT,  -- Telegram chat ID for session association
+    username TEXT,  -- Username who initiated the session
+    tool_name TEXT NOT NULL,  -- 'delegate_coding_task' or 'technical_analysis'
+    working_directory TEXT NOT NULL,
+    initial_task TEXT NOT NULL,  -- Original task description
+    task_count INTEGER DEFAULT 1,  -- Number of tasks completed in session
+    last_activity DATETIME DEFAULT CURRENT_TIMESTAMP,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    is_active BOOLEAN DEFAULT 1,  -- Whether session is still usable
+    session_metadata TEXT  -- JSON blob for additional context
+);
+
+-- Chat state for missed message tracking
+CREATE TABLE chat_state (
+    chat_id INTEGER PRIMARY KEY,
+    last_seen_message_id INTEGER,  -- Telegram message ID of last processed message
+    last_seen_timestamp TIMESTAMP,  -- Timestamp of last processed message
+    bot_last_online TIMESTAMP,     -- When bot was last confirmed online for this chat
+    bot_last_offline TIMESTAMP,    -- When bot went offline
+    scan_completed_at TIMESTAMP,   -- Last time we completed a full missed message scan
+    total_messages_scanned INTEGER DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 ```
 
 #### Common Monitoring Queries
 ```bash
 # Check pending tasks
-sqlite3 system.db "SELECT id, task_description, status, created_at FROM promises WHERE status='pending' ORDER BY created_at;"
+sqlite3 system.db "SELECT id, task_type, task_description, status, created_at FROM promises WHERE status='pending' ORDER BY created_at;"
 
 # Check in-progress tasks
-sqlite3 system.db "SELECT id, task_description, status, created_at FROM promises WHERE status='in_progress' ORDER BY created_at DESC;"
+sqlite3 system.db "SELECT id, task_type, task_description, status, created_at FROM promises WHERE status='in_progress' ORDER BY created_at DESC;"
 
 # Check failed tasks with errors
-sqlite3 system.db "SELECT id, task_description, status, error_message FROM promises WHERE status='failed';"
+sqlite3 system.db "SELECT id, task_type, task_description, status, error_message FROM promises WHERE status='failed';"
 
 # Get promise status summary
 sqlite3 system.db "SELECT status, COUNT(*) as count FROM promises GROUP BY status;"
 
-# Check recent completed tasks
-sqlite3 system.db "SELECT id, task_description, completed_at, result_summary FROM promises WHERE status='completed' ORDER BY completed_at DESC LIMIT 10;"
+# Check recent completed tasks (most recent first)
+sqlite3 system.db "SELECT id, task_type, task_description, completed_at, result_summary FROM promises WHERE status='completed' ORDER BY completed_at DESC LIMIT 10;"
+
+# Get most recent promise (any status)
+sqlite3 system.db "SELECT id, task_type, task_description, status, chat_id, message_id, created_at FROM promises ORDER BY created_at DESC LIMIT 1;"
+
+# Check message queue for missed messages
+sqlite3 system.db "SELECT id, message_text, sender_username, original_timestamp, status FROM message_queue ORDER BY created_at DESC LIMIT 5;"
+
+# Check chat state for last seen messages
+sqlite3 system.db "SELECT chat_id, last_seen_message_id, last_seen_timestamp, scan_completed_at FROM chat_state ORDER BY updated_at DESC;"
+
+# Check Claude Code sessions
+sqlite3 system.db "SELECT session_id, chat_id, username, tool_name, initial_task, task_count, last_activity, is_active FROM claude_code_sessions ORDER BY last_activity DESC LIMIT 5;"
 
 # Check Huey scheduled tasks
-sqlite3 data/huey.db "SELECT id, queue, timestamp, DATETIME(timestamp, 'unixepoch') as scheduled_time FROM schedule ORDER BY timestamp DESC LIMIT 5;"
+sqlite3 data/huey.db "SELECT * FROM schedule ORDER BY id DESC LIMIT 5;"
+
+# Check active Huey tasks
+sqlite3 data/huey.db "SELECT id, queue, priority FROM task ORDER BY id DESC LIMIT 5;"
 
 # Monitor task execution patterns
-sqlite3 system.db "SELECT task_type, COUNT(*) as count, AVG(julianday(completed_at) - julianday(created_at)) * 24 * 60 as avg_duration_minutes FROM promises WHERE status='completed' GROUP BY task_type;"
+sqlite3 system.db "SELECT task_type, COUNT(*) as count, AVG(julianday(completed_at) - julianday(created_at)) * 24 * 60 as avg_duration_minutes FROM promises WHERE status='completed' AND completed_at IS NOT NULL GROUP BY task_type;"
+
+# Check link analysis results
+sqlite3 system.db "SELECT url, title, main_topic, analysis_status, created_at FROM links ORDER BY created_at DESC LIMIT 5;"
 ```
 
 #### Database Files
