@@ -2,119 +2,132 @@
 
 ## Overview
 
-This plan documents the architecture for enabling screenshot sharing between target workspace Playwright tests and the AI agent system for automated bug report workflows.
+This plan documents the architecture for enabling screenshot sharing between target workspace Playwright tests and the Claude Code-based AI agent system for automated bug report workflows.
 
 ## Problem Statement
 
 **Workflow Requirements:**
 1. AI agent receives bug report from Notion (e.g., "login screen is broken")
-2. Agent navigates to target workspace and leverages existing/new Playwright tests
-3. Test captures screenshot of login page
-4. AI agent retrieves screenshot and uploads to Telegram with analysis
+2. Agent spawns Claude Code session in target workspace to leverage existing/new Playwright tests
+3. Claude Code executes test that captures screenshot of login page
+4. Screenshot must be handed back to main AI agent for Telegram upload with analysis
 5. Agent updates Notion task with evidence and completion status
 
 **Core Challenge:**
-- Target workspace Playwright tests run in isolated directories
-- AI system has workspace security restrictions preventing cross-workspace file access
-- Need secure, reliable file handoff mechanism between processes
+- Target workspace Playwright tests run in isolated directories under Claude Code
+- Claude Code sessions are ephemeral subprocess executions
+- Main AI system needs to retrieve screenshots from these ephemeral sessions
+- Must respect strict workspace security boundaries
+- Need secure, reliable file handoff mechanism between Claude Code processes and main agent
 
 ## Current System Analysis
 
 ### ✅ Existing Capabilities
-- **Notion Integration**: Task monitoring, AI analysis, workspace mapping
-- **Workspace Security**: Strict isolation with directory access controls
-- **Telegram Integration**: Image upload/download, chat history management
-- **Image Processing**: Compression, analysis, metadata handling
-- **Server Management**: Unified startup, health validation, process management
+- **Claude Code Integration**: MCP tools spawn Claude Code sessions in isolated workspaces
+- **Workspace Security**: Strict isolation with directory access controls via `workspace_validator.py`
+- **Telegram Integration**: `TELEGRAM_IMAGE_GENERATED|` marker triggers image upload pipeline
+- **Image Processing**: GPT-4o analysis, compression, metadata handling via `image_analysis_tool.py`
+- **MCP Architecture**: Development tools in `mcp_servers/development_tools.py`
+- **Value Delegation**: `valor_delegation_tool.py` handles Claude Code spawning
 
 ### ❌ Missing Capabilities
-- Cross-workspace file sharing mechanism
-- Playwright test coordination tools
-- Screenshot retrieval and handoff automation
+- Cross-process file handoff from Claude Code sessions to main agent
+- Screenshot retrieval MCP tool
+- Playwright test coordination with screenshot handoff
+- Integration with existing `TELEGRAM_IMAGE_GENERATED|` pipeline
 
 ## Solution Architecture
 
-### Core Strategy: User Temporary Directory
+### Core Strategy: Workspace-Safe File Handoff
 
-**Key Insight:** Use `~/tmp/ai_screenshots/` as user-owned neutral territory outside workspace restrictions
+**Key Insight:** Use workspace-relative temporary directories that both Claude Code and main agent can access within workspace boundaries
 
 ```
-Target Workspace               AI Agent System
+Claude Code Session            AI Agent (MCP)
 ┌─────────────────┐           ┌──────────────────┐
 │ Playwright Test │           │ Screenshot Tool  │
 │                 │           │                  │
 │ page.screenshot │──────────▶│ retrieve_shot()  │
-│ (~/tmp/ai_...)  │   File    │ upload_telegram()│
-│                 │  Handoff  │ update_notion()  │
+│ (workspace/tmp) │   File    │ analyze_image()  │
+│                 │  Handoff  │ TELEGRAM_IMAGE_* │
 └─────────────────┘           └──────────────────┘
 ```
 
 ## Implementation Plan
 
-### Phase 1: Shared Directory Infrastructure
+### Phase 1: Workspace-Safe Screenshot Directory
 
-#### 1.1 Create User Screenshot Directory
-```bash
-# System setup (one-time)
-mkdir -p ~/tmp/ai_screenshots
-chmod 755 ~/tmp/ai_screenshots
-```
-
-#### 1.2 Update Workspace Security
+#### 1.1 Update Workspace Security Model
 **File:** `/utilities/workspace_validator.py`
 
 **Modifications Needed:**
-- Add exception for `~/tmp/ai_screenshots/` access across all workspaces
-- Maintain existing workspace isolation for all other directories
-- Add validation for screenshot file extensions (`.png`, `.jpg`, `.jpeg`)
+- Add exception for `{workspace}/tmp/ai_screenshots/` access within workspace boundaries
+- Maintain existing workspace isolation for cross-workspace access
+- Enable screenshot subdirectory access within each workspace
 
 ```python
-def validate_directory_access(chat_id: int, file_path: str) -> bool:
-    """Validate directory access with screenshot sharing exception."""
+def validate_directory_access(self, chat_id: str, file_path: str) -> None:
+    """Validate directory access with workspace screenshot sharing."""
     import os
-    screenshot_dir = os.path.expanduser('~/tmp/ai_screenshots/')
-
-    # Allow ~/tmp/ai_screenshots/ access for all chats
-    if file_path.startswith(screenshot_dir):
-        return True
-
-    # Existing workspace validation logic
+    
+    # Get the workspace this chat is mapped to
+    workspace_name = self.get_workspace_for_chat(chat_id)
+    if not workspace_name:
+        raise WorkspaceAccessError(f"Chat {chat_id} is not mapped to any workspace")
+    
+    workspace = self.workspaces[workspace_name]
+    normalized_path = os.path.abspath(file_path)
+    
+    # Allow workspace/tmp/ai_screenshots/ access within workspace
+    for allowed_dir in workspace.allowed_directories:
+        workspace_screenshots_dir = os.path.join(allowed_dir, "tmp", "ai_screenshots")
+        if normalized_path.startswith(os.path.abspath(workspace_screenshots_dir)):
+            return  # Access granted for workspace screenshots
+    
+    # Existing workspace validation logic continues...
     # ... rest of current implementation
 ```
 
 ### Phase 2: Screenshot File Conventions
 
 #### 2.1 Naming Convention
-**Format:** `~/tmp/ai_screenshots/{workspace}_{task_id}_{timestamp}.png`
+**Format:** `{workspace_dir}/tmp/ai_screenshots/{task_id}_{timestamp}.png`
 
 **Examples:**
-- `~/tmp/ai_screenshots/deckfusion_login_bug_1748855141.png`
-- `~/tmp/ai_screenshots/psyoptimal_nav_issue_1748855200.png`
+- `/Users/valorengels/src/deckfusion/tmp/ai_screenshots/login_bug_1748855141.png`
+- `/Users/valorengels/src/psyoptimal/tmp/ai_screenshots/nav_issue_1748855200.png`
 
-#### 2.2 Playwright Test Integration
-**Target workspace test pattern:**
+#### 2.2 Claude Code Playwright Integration
+**Claude Code session pattern (executed in target workspace):**
 
 ```javascript
-// In any workspace Playwright test
-const os = require('os');
-const path = require('path');
+// Claude Code generates this in target workspace Playwright test
+import { test, expect } from '@playwright/test';
+import path from 'path';
+import fs from 'fs';
 
-const taskId = process.env.NOTION_TASK_ID || 'manual_test';
-const workspace = 'deckfusion'; // or extracted from cwd
-const timestamp = Date.now();
-const screenshotPath = path.join(
-    os.homedir(),
-    'tmp',
-    'ai_screenshots',
-    `${workspace}_${taskId}_${timestamp}.png`
-);
-
-await page.screenshot({
-    path: screenshotPath,
-    fullPage: true
+test('capture bug evidence screenshot', async ({ page }) => {
+    // Ensure screenshot directory exists
+    const screenshotDir = path.join(process.cwd(), 'tmp', 'ai_screenshots');
+    fs.mkdirSync(screenshotDir, { recursive: true });
+    
+    // Generate unique filename
+    const taskId = process.env.NOTION_TASK_ID || 'manual_test';
+    const timestamp = Date.now();
+    const screenshotPath = path.join(screenshotDir, `${taskId}_${timestamp}.png`);
+    
+    // Navigate to page and capture screenshot
+    await page.goto('https://localhost:3000/login');
+    await page.screenshot({
+        path: screenshotPath,
+        fullPage: true
+    });
+    
+    console.log(`Screenshot saved: ${screenshotPath}`);
+    
+    // Output standardized result for main agent to parse
+    console.log(`SCREENSHOT_CAPTURED:${screenshotPath}`);
 });
-
-console.log(`Screenshot saved: ${screenshotPath}`);
 ```
 
 ### Phase 3: AI Agent Integration
@@ -125,145 +138,239 @@ console.log(`Screenshot saved: ${screenshotPath}`);
 ```python
 @mcp.tool()
 def retrieve_workspace_screenshot(
-    workspace: str,
     task_id: str,
-    chat_id: int,
+    chat_id: str = "",
     max_age_minutes: int = 10
 ) -> str:
     """
-    Retrieve and upload screenshot from target workspace test.
+    Retrieve and analyze screenshot from current workspace after Claude Code execution.
+
+    This tool searches for screenshots captured by Claude Code sessions in the current
+    workspace's tmp/ai_screenshots/ directory and returns them using the TELEGRAM_IMAGE_GENERATED
+    marker for automatic Telegram upload.
 
     Args:
-        workspace: Target workspace name (deckfusion, psyoptimal, etc.)
-        task_id: Notion task identifier for screenshot matching
-        chat_id: Telegram chat ID for upload destination
-        max_age_minutes: Maximum age of screenshot to accept
+        task_id: Task identifier for screenshot matching
+        chat_id: Telegram chat ID for workspace detection and upload
+        max_age_minutes: Maximum age of screenshot to accept (default: 10)
 
     Returns:
-        Success message with upload confirmation
+        TELEGRAM_IMAGE_GENERATED marker with screenshot path for automatic upload
     """
     import os
     import glob
     import time
-    from datetime import datetime, timedelta
-
-    # Directory validation (should pass with new security rules)
-    screenshot_dir = os.path.expanduser("~/tmp/ai_screenshots")
-    if not validate_directory_access(chat_id, screenshot_dir):
-        return "Error: Access denied to screenshot directory"
-
-    # Find matching screenshot files
-    pattern = f"{screenshot_dir}/{workspace}_{task_id}_*.png"
-    matching_files = glob.glob(pattern)
-
-    if not matching_files:
-        return f"No screenshots found for {workspace} task {task_id}"
-
-    # Get most recent file within age limit
-    cutoff_time = time.time() - (max_age_minutes * 60)
-    recent_files = [
-        f for f in matching_files
-        if os.path.getmtime(f) > cutoff_time
-    ]
-
-    if not recent_files:
-        return f"No recent screenshots found (last {max_age_minutes} minutes)"
-
-    # Use most recent file
-    screenshot_path = max(recent_files, key=os.path.getmtime)
-
-    # Upload to Telegram using existing image upload pipeline
+    from pathlib import Path
+    
     try:
-        # Leverage existing image analysis and upload tools
-        upload_result = upload_screenshot_to_telegram(screenshot_path, chat_id)
+        # Get workspace working directory for this chat
+        if chat_id:
+            from utilities.workspace_validator import get_workspace_validator
+            validator = get_workspace_validator()
+            workspace_name = validator.get_workspace_for_chat(chat_id)
+            if workspace_name:
+                working_dir = validator.get_allowed_directories(chat_id)[0]
+            else:
+                working_dir = os.getcwd()
+        else:
+            working_dir = os.getcwd()
 
-        # Clean up temporary file
-        os.remove(screenshot_path)
+        # Look for screenshots in workspace tmp directory
+        screenshot_dir = os.path.join(working_dir, "tmp", "ai_screenshots")
+        
+        if not os.path.exists(screenshot_dir):
+            return f"📸 No screenshot directory found in {working_dir}/tmp/ai_screenshots"
 
-        return f"Screenshot uploaded successfully: {upload_result}"
+        # Find matching screenshot files
+        pattern = os.path.join(screenshot_dir, f"{task_id}_*.png")
+        matching_files = glob.glob(pattern)
+
+        if not matching_files:
+            return f"📸 No screenshots found for task {task_id} in {screenshot_dir}"
+
+        # Get most recent file within age limit
+        cutoff_time = time.time() - (max_age_minutes * 60)
+        recent_files = [
+            f for f in matching_files
+            if os.path.getmtime(f) > cutoff_time
+        ]
+
+        if not recent_files:
+            return f"📸 No recent screenshots found for task {task_id} (last {max_age_minutes} minutes)"
+
+        # Use most recent file
+        screenshot_path = max(recent_files, key=os.path.getmtime)
+        
+        # Validate file access through workspace validator
+        if chat_id:
+            access_error = validate_directory_access(chat_id, screenshot_path)
+            if access_error:
+                return access_error
+
+        # Analyze screenshot using existing image analysis tool
+        from tools.image_analysis_tool import analyze_image
+        analysis = analyze_image(
+            screenshot_path, 
+            question="What does this screenshot show? Focus on any UI issues, errors, or relevant details.",
+            context=f"This is a screenshot captured for task: {task_id}"
+        )
+        
+        # Return using TELEGRAM_IMAGE_GENERATED marker for automatic upload
+        caption = f"📸 **Screenshot Evidence - Task {task_id}**\n\n{analysis}"
+        
+        # Clean up file after successful processing
+        try:
+            os.remove(screenshot_path)
+        except Exception:
+            pass  # Don't fail if cleanup fails
+            
+        return f"TELEGRAM_IMAGE_GENERATED|{screenshot_path}|{caption}"
 
     except Exception as e:
-        return f"Upload failed: {str(e)}"
-
-def upload_screenshot_to_telegram(screenshot_path: str, chat_id: int) -> str:
-    """Upload screenshot using existing Telegram integration."""
-    # Implementation leverages existing image upload pipeline
-    # from /tools/image_generation_tool.py patterns
-    pass
+        return f"📸 Screenshot retrieval error: {str(e)}"
 ```
 
-#### 3.2 Integration with Existing Image Pipeline
-**Leverage existing tools:**
-- `/tools/image_analysis_tool.py` - For screenshot analysis if needed
-- `/mcp_servers/social_tools.py` - For Telegram upload mechanism
-- `/integrations/telegram/handlers.py` - For message formatting
+#### 3.2 Integration with Existing Pipeline
+**Leverages existing architecture:**
+- `/tools/image_analysis_tool.py` - GPT-4o vision analysis of screenshots
+- `TELEGRAM_IMAGE_GENERATED|` marker - Automatic Telegram upload via existing pipeline
+- `/agents/valor/agent.py` - Recognizes marker and handles upload
+- `/utilities/workspace_validator.py` - Security validation for file access
 
-### Phase 4: Workflow Orchestration
+### Phase 4: Enhanced Valor Delegation
 
-#### 4.1 End-to-End Workflow Tool
+#### 4.1 Updated Delegation Tool
+**File:** `/tools/valor_delegation_tool.py`
+
+**Enhancement needed:** Parse Claude Code output to detect screenshot markers
+
+```python
+def spawn_valor_session(
+    task_description: str,
+    target_directory: str,
+    specific_instructions: str | None = None,
+    tools_needed: list[str] | None = None,
+    force_sync: bool = False,
+) -> str:
+    """Enhanced to handle screenshot capture workflows."""
+    
+    # Build enhanced prompt for screenshot tasks
+    if "screenshot" in task_description.lower() or "playwright" in task_description.lower():
+        prompt_parts = [
+            f"Please help me with this task: {task_description}",
+            "",
+            "IMPORTANT: If you create Playwright tests that capture screenshots:",
+            "1. Save screenshots to ./tmp/ai_screenshots/{task_id}_{timestamp}.png",
+            "2. Output 'SCREENSHOT_CAPTURED:{path}' when done",
+            "3. Use process.env.NOTION_TASK_ID or generate a unique task ID",
+        ]
+        
+        if specific_instructions:
+            prompt_parts.append(f"\nAdditional instructions: {specific_instructions}")
+    else:
+        # Standard prompt building
+        prompt_parts = [f"Please help me with this task: {task_description}"]
+    
+    # Execute Claude Code delegation
+    result = execute_valor_delegation(...)
+    
+    # Parse output for screenshot markers
+    if "SCREENSHOT_CAPTURED:" in result:
+        lines = result.split('\n')
+        for line in lines:
+            if line.startswith("SCREENSHOT_CAPTURED:"):
+                screenshot_path = line.split(":", 1)[1].strip()
+                # Extract task ID from path for later retrieval
+                # Return indication that screenshot is available
+                return f"{result}\n\n📸 Screenshot captured and ready for retrieval"
+    
+    return result
+```
+
+#### 4.2 End-to-End Bug Report Workflow
 **File:** `/mcp_servers/development_tools.py`
 
 ```python
 @mcp.tool()
-def execute_bug_report_workflow(
+def execute_bug_report_with_screenshot(
+    task_description: str,
     notion_task_id: str,
-    workspace: str,
-    test_command: str,
-    chat_id: int
+    chat_id: str = ""
 ) -> str:
     """
-    Execute complete bug report workflow with screenshot evidence.
+    Execute complete bug report workflow with automated screenshot evidence.
+
+    This tool orchestrates:
+    1. Claude Code session to create/run Playwright test
+    2. Screenshot capture during test execution
+    3. Screenshot retrieval and analysis
+    4. Automatic Telegram upload with AI analysis
 
     Args:
-        notion_task_id: Notion task ID for tracking
-        workspace: Target workspace (deckfusion, psyoptimal, etc.)
-        test_command: Playwright test command to execute
-        chat_id: Telegram chat for progress updates
+        task_description: Description of the bug or issue to investigate
+        notion_task_id: Notion task ID for tracking and file naming
+        chat_id: Telegram chat ID for workspace detection and upload
 
     Returns:
-        Workflow completion status with evidence links
+        TELEGRAM_IMAGE_GENERATED marker with screenshot and analysis, or error message
     """
-    # 1. Validate workspace access
-    workspace_path = get_workspace_path(workspace)
-    if not validate_directory_access(chat_id, workspace_path):
-        return f"Access denied to {workspace} workspace"
-
-    # 2. Set environment for test execution
-    os.environ['NOTION_TASK_ID'] = notion_task_id
-
-    # 3. Execute Playwright test in target workspace
-    import subprocess
+    import os
+    from tools.valor_delegation_tool import spawn_valor_session
+    
     try:
-        result = subprocess.run(
-            test_command,
-            cwd=workspace_path,
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minute timeout
+        # Get workspace directory for this chat
+        if chat_id:
+            from utilities.workspace_validator import get_workspace_validator
+            validator = get_workspace_validator()
+            workspace_name = validator.get_workspace_for_chat(chat_id)
+            if workspace_name:
+                target_directory = validator.get_allowed_directories(chat_id)[0]
+            else:
+                return "❌ Unable to determine workspace for this chat"
+        else:
+            target_directory = os.getcwd()
+
+        # Set environment variable for Claude Code session
+        os.environ['NOTION_TASK_ID'] = notion_task_id
+
+        # Execute Claude Code session with screenshot instructions
+        enhanced_instructions = f"""
+        Create and run a Playwright test to investigate: {task_description}
+        
+        Requirements:
+        1. Navigate to the relevant page/component
+        2. Capture a full-page screenshot showing the issue
+        3. Save screenshot to ./tmp/ai_screenshots/{notion_task_id}_{{timestamp}}.png
+        4. Output the exact text: SCREENSHOT_CAPTURED:{{path}}
+        
+        The screenshot will be automatically retrieved and uploaded to Telegram with AI analysis.
+        """
+
+        delegation_result = spawn_valor_session(
+            task_description=f"Create Playwright test with screenshot for: {task_description}",
+            target_directory=target_directory,
+            specific_instructions=enhanced_instructions,
+            force_sync=True  # Wait for completion
         )
 
-        if result.returncode != 0:
-            return f"Test execution failed: {result.stderr}"
+        # Check if screenshot was captured
+        if "SCREENSHOT_CAPTURED:" not in delegation_result:
+            return f"⚠️ Task completed but no screenshot captured:\n\n{delegation_result}"
 
-    except subprocess.TimeoutExpired:
-        return "Test execution timed out (5 minutes)"
+        # Retrieve and process screenshot
+        screenshot_result = retrieve_workspace_screenshot(
+            task_id=notion_task_id,
+            chat_id=chat_id,
+            max_age_minutes=5
+        )
 
-    # 4. Retrieve and upload screenshot
-    screenshot_result = retrieve_workspace_screenshot(
-        workspace=workspace,
-        task_id=notion_task_id,
-        chat_id=chat_id,
-        max_age_minutes=5
-    )
+        if screenshot_result.startswith("TELEGRAM_IMAGE_GENERATED|"):
+            return screenshot_result  # Success - will trigger automatic upload
+        else:
+            return f"📋 **Task Completed**\n\n{delegation_result}\n\n⚠️ Screenshot issue: {screenshot_result}"
 
-    # 5. Update Notion task with evidence
-    notion_update = update_notion_task_with_evidence(
-        task_id=notion_task_id,
-        screenshot_evidence=screenshot_result,
-        test_output=result.stdout
-    )
-
-    return f"Workflow completed: {screenshot_result} | Notion: {notion_update}"
+    except Exception as e:
+        return f"❌ Bug report workflow error: {str(e)}"
 ```
 
 ### Phase 5: Testing and Validation
@@ -272,65 +379,82 @@ def execute_bug_report_workflow(
 **File:** `/tests/test_screenshot_handoff.py`
 
 ```python
-def test_screenshot_sharing_permissions():
-    """Test that /tmp/ai_screenshots/ is accessible across workspaces."""
+def test_workspace_screenshot_directory_access():
+    """Test that workspace/tmp/ai_screenshots/ is accessible within workspace boundaries."""
 
-def test_screenshot_retrieval_tool():
-    """Test MCP tool can find and process screenshots."""
+def test_screenshot_retrieval_mcp_tool():
+    """Test MCP tool can find and process screenshots with TELEGRAM_IMAGE_GENERATED marker."""
 
-def test_workflow_orchestration():
-    """Test end-to-end bug report workflow."""
+def test_bug_report_workflow_orchestration():
+    """Test end-to-end bug report workflow with Claude Code delegation."""
 
-def test_cleanup_automation():
-    """Test temporary file cleanup."""
+def test_screenshot_cleanup_automation():
+    """Test automatic file cleanup after processing."""
+
+def test_workspace_security_boundaries():
+    """Verify that screenshot access respects workspace isolation."""
 ```
 
 #### 5.2 Integration Testing
-- Test with real workspace Playwright setup
-- Validate Telegram upload integration
-- Confirm Notion task update workflow
-- Verify security boundaries remain intact
+- Test Claude Code delegation with screenshot instructions
+- Validate `TELEGRAM_IMAGE_GENERATED|` marker processing
+- Confirm automatic Telegram upload and AI analysis
+- Verify workspace security boundaries remain intact
+- Test screenshot cleanup and file lifecycle management
 
 ## Security Considerations
 
 ### Maintained Security Boundaries
-1. **Workspace Isolation**: Only `~/tmp/ai_screenshots/` is shared, all other directories remain isolated
-2. **File Type Validation**: Only image files allowed in shared directory
-3. **Time-based Cleanup**: Screenshots auto-deleted after upload
-4. **Access Logging**: All cross-workspace access logged for audit
+1. **Workspace Isolation**: Screenshots only accessible within assigned workspace boundaries
+2. **No Cross-Workspace Access**: Each workspace's tmp directory is isolated
+3. **File Type Validation**: Only image files in screenshot directories
+4. **Time-based Cleanup**: Screenshots auto-deleted after processing
+5. **Access Logging**: All file access validated through workspace validator
 
 ### Risk Mitigation
+- **Workspace Validation**: All screenshot access goes through existing workspace validator
 - **File Size Limits**: Prevent disk abuse with size restrictions
-- **Rate Limiting**: Prevent screenshot spam
-- **Path Validation**: Strict validation of screenshot file paths
-- **Automatic Cleanup**: Remove files after processing to prevent accumulation
+- **Rate Limiting**: Claude Code session timeouts prevent abuse
+- **Path Validation**: Strict validation of screenshot file paths within workspace
+- **Automatic Cleanup**: Remove files immediately after processing
 
 ## Benefits and Trade-offs
 
 ### ✅ Benefits
-- **Minimal Security Impact**: Only creates specific exception for temporary files
-- **Leverages Existing Infrastructure**: Uses current image upload and Telegram integration
-- **Clean Separation**: Target workspaces don't need AI system dependencies
-- **Flexible**: Works with any workspace that can save to `/tmp/ai_screenshots/`
+- **Zero Security Compromise**: Uses existing workspace isolation model
+- **Leverages Existing Infrastructure**: Integrates with Claude Code, MCP tools, and Telegram pipeline
+- **AI-Powered Analysis**: GPT-4o vision analysis of all screenshots
+- **Seamless Integration**: Uses established `TELEGRAM_IMAGE_GENERATED|` pattern
+- **Workspace-Aware**: Respects existing chat-to-workspace mappings
 
 ### ⚠️ Trade-offs
-- **Temporary Storage Dependency**: Relies on shared filesystem
-- **Timing Coordination**: Requires coordination between test execution and screenshot retrieval
-- **Additional Cleanup Logic**: Need to manage temporary file lifecycle
+- **Claude Code Dependency**: Requires Claude Code for test execution
+- **Timing Coordination**: Brief coordination between delegation and retrieval
+- **Temporary Storage**: Uses workspace tmp directories (cleaned automatically)
 
 ## Implementation Timeline
 
-1. **Week 1**: Update workspace validator and create shared directory infrastructure
-2. **Week 2**: Implement screenshot retrieval MCP tool and test with manual files
-3. **Week 3**: Create workflow orchestration tool and integrate with existing systems
-4. **Week 4**: End-to-end testing and documentation
+1. **Week 1**: Update workspace validator for tmp/ai_screenshots access
+2. **Week 2**: Implement screenshot retrieval MCP tool with TELEGRAM_IMAGE_GENERATED integration
+3. **Week 3**: Enhance valor delegation tool with screenshot detection
+4. **Week 4**: Create end-to-end bug report workflow tool and comprehensive testing
 
 ## Success Criteria
 
-1. **Functional**: Screenshot successfully transferred from any workspace to AI agent
-2. **Secure**: No compromise of existing workspace isolation
-3. **Reliable**: 95%+ success rate for screenshot handoff
-4. **Clean**: Automatic cleanup prevents disk accumulation
-5. **Integrated**: Seamless integration with existing Notion and Telegram workflows
+1. **Functional**: Screenshots successfully captured by Claude Code and retrieved by main agent
+2. **Secure**: No compromise of existing workspace isolation - enhanced validation
+3. **Reliable**: 95%+ success rate for screenshot handoff with automatic retry
+4. **Integrated**: Seamless integration with existing MCP tools and Telegram upload pipeline
+5. **AI-Enhanced**: Automatic GPT-4o analysis of all screenshots before upload
 
-This solution provides a robust, secure mechanism for screenshot sharing while maintaining the security and modularity of the existing AI agent system.
+## Modern Architecture Benefits
+
+This updated solution leverages the current unified conversational development environment:
+
+- **Claude Code Integration**: Natural workflow where Claude Code creates tests and captures screenshots
+- **MCP Tool Architecture**: Clean separation between tools and implementation
+- **Workspace Security**: Enhanced security model with workspace-relative paths
+- **Telegram Integration**: Reuses proven `TELEGRAM_IMAGE_GENERATED|` pipeline
+- **AI Analysis**: Every screenshot gets intelligent analysis before sharing
+
+The solution maintains all existing security guarantees while providing a robust, AI-enhanced screenshot sharing capability for automated bug reporting workflows.

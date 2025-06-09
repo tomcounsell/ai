@@ -972,5 +972,195 @@ def list_documentation_files(chat_id: str = "") -> str:
         return f"❌ Error listing documentation: {str(e)}"
 
 
+# ==================== SCREENSHOT HANDOFF TOOLS ====================
+
+
+@mcp.tool()
+def retrieve_workspace_screenshot(
+    task_id: str,
+    chat_id: str = "",
+    max_age_minutes: int = 10
+) -> str:
+    """
+    Retrieve and analyze screenshot from current workspace after Claude Code execution.
+
+    This tool searches for screenshots captured by Claude Code sessions in the current
+    workspace's tmp/ai_screenshots/ directory and returns them using the TELEGRAM_IMAGE_GENERATED
+    marker for automatic Telegram upload.
+
+    Args:
+        task_id: Task identifier for screenshot matching
+        chat_id: Telegram chat ID for workspace detection and upload
+        max_age_minutes: Maximum age of screenshot to accept (default: 10)
+
+    Returns:
+        TELEGRAM_IMAGE_GENERATED marker with screenshot path for automatic upload
+    """
+    import os
+    import glob
+    import time
+    from pathlib import Path
+    
+    try:
+        # Get workspace working directory for this chat
+        if chat_id:
+            validator = get_workspace_validator()
+            workspace_name = validator.get_workspace_for_chat(chat_id)
+            if workspace_name:
+                allowed_dirs = validator.get_allowed_directories(chat_id)
+                working_dir = allowed_dirs[0] if allowed_dirs else os.getcwd()
+            else:
+                working_dir = os.getcwd()
+        else:
+            working_dir = os.getcwd()
+
+        # Look for screenshots in workspace tmp directory
+        screenshot_dir = os.path.join(working_dir, "tmp", "ai_screenshots")
+        
+        if not os.path.exists(screenshot_dir):
+            return f"📸 No screenshot directory found in {working_dir}/tmp/ai_screenshots"
+
+        # Find matching screenshot files
+        pattern = os.path.join(screenshot_dir, f"{task_id}_*.png")
+        matching_files = glob.glob(pattern)
+
+        if not matching_files:
+            return f"📸 No screenshots found for task {task_id} in {screenshot_dir}"
+
+        # Get most recent file within age limit
+        cutoff_time = time.time() - (max_age_minutes * 60)
+        recent_files = [
+            f for f in matching_files
+            if os.path.getmtime(f) > cutoff_time
+        ]
+
+        if not recent_files:
+            return f"📸 No recent screenshots found for task {task_id} (last {max_age_minutes} minutes)"
+
+        # Use most recent file
+        screenshot_path = max(recent_files, key=os.path.getmtime)
+        
+        # Validate file access through workspace validator
+        if chat_id:
+            access_error = validate_directory_access(chat_id, screenshot_path)
+            if access_error:
+                return access_error
+
+        # Analyze screenshot using existing image analysis tool
+        from tools.image_analysis_tool import analyze_image
+        analysis = analyze_image(
+            screenshot_path, 
+            question="What does this screenshot show? Focus on any UI issues, errors, or relevant details.",
+            context=f"This is a screenshot captured for task: {task_id}"
+        )
+        
+        # Return using TELEGRAM_IMAGE_GENERATED marker for automatic upload
+        caption = f"📸 **Screenshot Evidence - Task {task_id}**\n\n{analysis}"
+        
+        # Clean up file after successful processing
+        try:
+            os.remove(screenshot_path)
+        except Exception:
+            pass  # Don't fail if cleanup fails
+            
+        return f"TELEGRAM_IMAGE_GENERATED|{screenshot_path}|{caption}"
+
+    except Exception as e:
+        return f"📸 Screenshot retrieval error: {str(e)}"
+
+
+@mcp.tool()
+def execute_bug_report_with_screenshot(
+    task_description: str,
+    notion_task_id: str,
+    chat_id: str = ""
+) -> str:
+    """
+    Execute complete bug report workflow with automated screenshot evidence.
+
+    This tool orchestrates:
+    1. Claude Code session to create/run Playwright test
+    2. Screenshot capture during test execution
+    3. Screenshot retrieval and analysis
+    4. Automatic Telegram upload with AI analysis
+
+    Args:
+        task_description: Description of the bug or issue to investigate
+        notion_task_id: Notion task ID for tracking and file naming
+        chat_id: Telegram chat ID for workspace detection and upload
+
+    Returns:
+        TELEGRAM_IMAGE_GENERATED marker with screenshot and analysis, or error message
+    """
+    import os
+    
+    try:
+        # Get workspace directory for this chat
+        if chat_id:
+            validator = get_workspace_validator()
+            workspace_name = validator.get_workspace_for_chat(chat_id)
+            if workspace_name:
+                allowed_dirs = validator.get_allowed_directories(chat_id)
+                target_directory = allowed_dirs[0] if allowed_dirs else os.getcwd()
+            else:
+                return "❌ Unable to determine workspace for this chat"
+        else:
+            target_directory = os.getcwd()
+
+        # Import delegation tool
+        from tools.valor_delegation_tool import spawn_valor_session
+
+        # Set environment variable for Claude Code session
+        original_task_id = os.environ.get('NOTION_TASK_ID')
+        os.environ['NOTION_TASK_ID'] = notion_task_id
+
+        try:
+            # Execute Claude Code session with screenshot instructions
+            enhanced_instructions = f"""
+            Create and run a Playwright test to investigate: {task_description}
+            
+            Requirements:
+            1. Navigate to the relevant page/component
+            2. Capture a full-page screenshot showing the issue
+            3. Save screenshot to ./tmp/ai_screenshots/{notion_task_id}_{{timestamp}}.png
+            4. Output the exact text: SCREENSHOT_CAPTURED:{{path}}
+            
+            The screenshot will be automatically retrieved and uploaded to Telegram with AI analysis.
+            """
+
+            delegation_result = spawn_valor_session(
+                task_description=f"Create Playwright test with screenshot for: {task_description}",
+                target_directory=target_directory,
+                specific_instructions=enhanced_instructions,
+                force_sync=True  # Wait for completion
+            )
+
+            # Check if screenshot was captured
+            if "SCREENSHOT_CAPTURED:" not in delegation_result:
+                return f"⚠️ Task completed but no screenshot captured:\n\n{delegation_result}"
+
+            # Retrieve and process screenshot
+            screenshot_result = retrieve_workspace_screenshot(
+                task_id=notion_task_id,
+                chat_id=chat_id,
+                max_age_minutes=5
+            )
+
+            if screenshot_result.startswith("TELEGRAM_IMAGE_GENERATED|"):
+                return screenshot_result  # Success - will trigger automatic upload
+            else:
+                return f"📋 **Task Completed**\n\n{delegation_result}\n\n⚠️ Screenshot issue: {screenshot_result}"
+
+        finally:
+            # Restore original environment
+            if original_task_id is not None:
+                os.environ['NOTION_TASK_ID'] = original_task_id
+            elif 'NOTION_TASK_ID' in os.environ:
+                del os.environ['NOTION_TASK_ID']
+
+    except Exception as e:
+        return f"❌ Bug report workflow error: {str(e)}"
+
+
 if __name__ == "__main__":
     mcp.run()

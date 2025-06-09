@@ -304,10 +304,23 @@ def spawn_valor_session(
         print(f"🔄 Returning ASYNC_PROMISE marker (duration > 30s and not force_sync)")
         return f"ASYNC_PROMISE|I'll work on this task in the background: {task_description}"
 
-    # Build a simpler prompt for better Claude Code compatibility
+    # Build enhanced prompt with screenshot support
     prompt_parts = [
         f"Please help me with this task: {task_description}",
     ]
+
+    # Add screenshot-specific instructions if this is a screenshot task
+    if "screenshot" in task_description.lower() or "playwright" in task_description.lower() or (specific_instructions and "screenshot" in specific_instructions.lower()):
+        prompt_parts.extend([
+            "",
+            "SCREENSHOT CAPTURE INSTRUCTIONS:",
+            "- If you create Playwright tests that capture screenshots:",
+            "- Save screenshots to ./tmp/ai_screenshots/{task_id}_{timestamp}.png",
+            "- Create the tmp/ai_screenshots directory if it doesn't exist",
+            f"- Use task ID: {os.environ.get('NOTION_TASK_ID', 'manual_test')}",
+            "- Output 'SCREENSHOT_CAPTURED:{full_path}' when screenshot is saved",
+            "- Use full page screenshots with { fullPage: true } option",
+        ])
 
     if specific_instructions:
         prompt_parts.append(f"\nAdditional instructions: {specific_instructions}")
@@ -339,7 +352,22 @@ def spawn_valor_session(
         # Log if our estimate was significantly off
         if execution_time > 30 and estimated_duration <= 30:
             print(f"⚠️  Task took {execution_time:.1f}s but was estimated at {estimated_duration}s")
+        
+        # Check for screenshot capture markers in the output
+        if "SCREENSHOT_CAPTURED:" in result:
+            print(f"📸 Screenshot capture detected in Claude Code output")
+            lines = result.split('\n')
+            screenshot_paths = []
+            for line in lines:
+                if line.strip().startswith("SCREENSHOT_CAPTURED:"):
+                    screenshot_path = line.split(":", 1)[1].strip()
+                    screenshot_paths.append(screenshot_path)
+                    print(f"📸 Screenshot captured: {screenshot_path}")
             
+            if screenshot_paths:
+                # Add visual indicator that screenshots are ready for retrieval
+                result += f"\n\n📸 **Screenshot(s) Captured:** {len(screenshot_paths)} screenshot(s) ready for retrieval"
+                
         return result
     except (subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
         print(f"❌ Delegation failed with error: {type(e).__name__}: {str(e)}")

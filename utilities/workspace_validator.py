@@ -291,6 +291,17 @@ class WorkspaceValidator:
                 access_allowed = True
                 break
         
+        # Special exception: Allow access to workspace screenshot directories
+        # This enables screenshot handoff from Claude Code sessions to main agent
+        if not access_allowed:
+            for allowed_dir in workspace.allowed_directories:
+                workspace_screenshots_dir = os.path.join(allowed_dir, "tmp", "ai_screenshots")
+                workspace_screenshots_normalized = os.path.abspath(workspace_screenshots_dir)
+                if normalized_path.startswith(workspace_screenshots_normalized):
+                    access_allowed = True
+                    logger.info(f"Screenshot directory access granted: Chat {chat_id} -> {normalized_path}")
+                    break
+        
         if not access_allowed:
             error_msg = (
                 f"STRICT DIRECTORY ISOLATION VIOLATION: Chat {chat_id} (workspace: {workspace_name}) "
