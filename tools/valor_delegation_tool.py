@@ -314,6 +314,7 @@ def spawn_valor_session(
         "- This ensures proper shutdown and restart in one operation",
         "- Wait for startup completion before finishing the task", 
         "- The server has shutdown protection, so this combined approach avoids conflicts",
+        "- IMPORTANT: Always restart and leave the server running before you finish",
         "",
     ]
 
