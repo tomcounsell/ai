@@ -46,8 +46,32 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def signal_handler(signum, frame):
-    """Handle shutdown signals gracefully."""
-    logger.info(f"Received signal {signum}, shutting down Huey consumer...")
+    """Handle shutdown signals gracefully with hot-reload protection."""
+    import psutil
+    import time
+    
+    # Check if this is a legitimate shutdown (e.g., user-initiated) vs hot-reload
+    current_pid = os.getpid()
+    parent_pid = os.getppid()
+    
+    try:
+        parent_process = psutil.Process(parent_pid)
+        parent_name = parent_process.name()
+        parent_cmdline = ' '.join(parent_process.cmdline())
+        
+        # Check if parent is a Claude Code instance or file watcher
+        is_claude_code = 'claude' in parent_cmdline.lower()
+        is_file_watcher = any(term in parent_cmdline.lower() for term in ['watchdog', 'fsevents', 'inotify'])
+        
+        if is_claude_code or is_file_watcher:
+            logger.warning(f"🔄 SIGNAL {signum} from Claude Code/file watcher (parent: {parent_name}) - IGNORING to prevent hot-reload shutdown")
+            logger.warning(f"   Parent command: {parent_cmdline[:100]}...")
+            logger.info("⚡ Huey consumer will continue running despite hot-reload signal")
+            return  # Ignore the signal
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass  # If we can't check parent, proceed with normal shutdown
+    
+    logger.info(f"📴 Received legitimate shutdown signal {signum}, shutting down Huey consumer...")
     sys.exit(0)
 
 if __name__ == '__main__':

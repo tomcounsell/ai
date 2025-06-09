@@ -46,11 +46,25 @@ start_huey() {
     # Ensure data directory exists
     mkdir -p "$PROJECT_ROOT/data" "$PROJECT_ROOT/logs"
     
-    # Start Huey consumer in background (logs to tasks.log via Python logging)
-    python "$PROJECT_ROOT/huey_consumer.py" tasks.huey_config.huey \
-        -w 1 \
-        -k thread \
-        -v &
+    # Start Huey consumer in background with auto-restart protection
+    (
+        while true; do
+            echo "🚀 Starting Huey consumer (auto-restart enabled)..."
+            python "$PROJECT_ROOT/huey_consumer.py" tasks.huey_config.huey \
+                -w 1 \
+                -k thread \
+                -v
+            
+            EXIT_CODE=$?
+            if [ $EXIT_CODE -eq 0 ]; then
+                echo "✅ Huey consumer exited cleanly"
+                break
+            else
+                echo "⚠️  Huey consumer crashed (exit code: $EXIT_CODE), restarting in 3 seconds..."
+                sleep 3
+            fi
+        done
+    ) &
     
     HUEY_PID=$!
     echo $HUEY_PID > "$PROJECT_ROOT/huey.pid"
