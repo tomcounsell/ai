@@ -22,6 +22,7 @@ class TelegramClient:
         self.chat_history = ChatHistoryManager()
         self.message_handler: MessageHandler | None = None
         self.bot_start_time = None
+        self._active_handlers = set()  # Track active message handlers
 
     async def initialize(self, notion_scout=None) -> bool:
         """Initialize the Telegram client with proper configuration."""
@@ -69,12 +70,19 @@ class TelegramClient:
             if hasattr(self, 'missed_message_integration'):
                 self.message_handler.missed_message_integration = self.missed_message_integration
 
-            # Register message handler
+            # Register message handler with active tracking
             @self.client.on_message()
             async def handle_message(client, message):
-                logger.debug(f"DEBUG: Received message from {message.from_user.username if message.from_user else 'unknown'}: {message.text[:50] if message.text else 'non-text'}")
-                # Pass the client object so handler can access missed_message_integration
-                await self.message_handler.handle_message(client, message)
+                handler_id = f"{message.chat.id}_{message.id}_{time.time()}"
+                self._active_handlers.add(handler_id)
+                
+                try:
+                    logger.debug(f"DEBUG: Received message from {message.from_user.username if message.from_user else 'unknown'}: {message.text[:50] if message.text else 'non-text'}")
+                    # Pass the client object so handler can access missed_message_integration
+                    await self.message_handler.handle_message(client, message)
+                finally:
+                    # Always remove handler from active set, even if exception occurs
+                    self._active_handlers.discard(handler_id)
 
             # Test message handling with self-ping
             await self._test_message_handling()

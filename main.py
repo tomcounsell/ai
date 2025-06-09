@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import signal
 from contextlib import asynccontextmanager
 from datetime import datetime
 
@@ -45,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 telegram_client = None
 notion_engine = None
+_shutdown_requested = False
 
 
 class AuthCode(BaseModel):
@@ -175,10 +177,22 @@ async def handle_cleanup_task(task_data: dict):
 
 async def periodic_health_check():
     """Periodic health check to log server status and process database tasks"""
+    global _shutdown_requested
+    
     while True:
         try:
             await asyncio.sleep(30)  # Check every 30 seconds for tasks, health every 5 minutes
             telegram_status = "connected" if telegram_client and telegram_client.is_connected else "disconnected"
+            
+            # Check for deferred shutdown requests
+            if _shutdown_requested:
+                if telegram_client and telegram_client._active_handlers:
+                    active_count = len(telegram_client._active_handlers)
+                    logger.warning(f"⏳ Shutdown deferred - {active_count} message handlers still active")
+                else:
+                    logger.info("✅ All message handlers completed - proceeding with deferred shutdown")
+                    # Exit gracefully - this will trigger the lifespan shutdown
+                    break
             
             # Process pending server tasks
             await process_pending_server_tasks()
@@ -196,7 +210,8 @@ async def periodic_health_check():
                 if telegram_client and telegram_client.is_connected:
                     try:
                         # Get basic connection info
-                        logger.info("🤖 Telegram client active and receiving messages")
+                        active_handlers = len(telegram_client._active_handlers) if telegram_client._active_handlers else 0
+                        logger.info(f"🤖 Telegram client active and receiving messages (active handlers: {active_handlers})")
                     except Exception as e:
                         logger.warning(f"⚠️  Telegram client status check failed: {e}")
                     
@@ -207,11 +222,32 @@ async def periodic_health_check():
             logger.error(f"❌ Health check error: {e}")
 
 
+def handle_shutdown_signal(signum, frame):
+    """Handle shutdown signals gracefully during message processing"""
+    global _shutdown_requested
+    
+    if telegram_client and telegram_client._active_handlers:
+        active_count = len(telegram_client._active_handlers)
+        logger.warning(f"🛑 Shutdown signal received ({signal.Signals(signum).name}) but {active_count} message handlers are active")
+        logger.warning("⏳ Deferring shutdown to prevent message processing corruption...")
+        _shutdown_requested = True
+        return
+    
+    logger.info(f"🛑 Shutdown signal received ({signal.Signals(signum).name}) - no active handlers, proceeding...")
+    _shutdown_requested = True
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Handle startup and shutdown events"""
+    """Handle startup and shutdown events with graceful message processing protection"""
     # Startup
     logger.info("🚀 Starting FastAPI server with Telegram integration...")
+    
+    # Install signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, handle_shutdown_signal)
+    signal.signal(signal.SIGINT, handle_shutdown_signal)
+    logger.info("🛡️  Signal handlers installed for graceful shutdown protection")
+    
     await start_telegram_client()
     
     # Start periodic health check
@@ -220,9 +256,27 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
+    # Shutdown with message processing protection
     logger.info("🛑 Shutting down server...")
     global telegram_client
+    
+    # Wait for any active message processing to complete before shutdown
+    if telegram_client and hasattr(telegram_client, '_active_handlers'):
+        active_count = len(telegram_client._active_handlers) if telegram_client._active_handlers else 0
+        if active_count > 0:
+            logger.info(f"⏳ Waiting for {active_count} active message handlers to complete...")
+            max_wait = 10  # Maximum 10 seconds wait
+            wait_count = 0
+            while len(telegram_client._active_handlers) > 0 and wait_count < max_wait:
+                await asyncio.sleep(1)
+                wait_count += 1
+                remaining = len(telegram_client._active_handlers)
+                logger.info(f"⏳ Still waiting... {remaining} handlers remaining ({max_wait - wait_count}s)")
+            
+            if len(telegram_client._active_handlers) > 0:
+                logger.warning(f"⚠️  Proceeding with shutdown despite {len(telegram_client._active_handlers)} active handlers")
+            else:
+                logger.info("✅ All message handlers completed gracefully")
     
     # Cancel health check
     health_task.cancel()
@@ -230,6 +284,7 @@ async def lifespan(app: FastAPI):
         await health_task
     except asyncio.CancelledError:
         pass
+    logger.info("🛑 Periodic health check stopped")
 
     if telegram_client:
         logger.info("🤖 Stopping Telegram client...")
