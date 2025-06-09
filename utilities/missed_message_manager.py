@@ -249,8 +249,13 @@ async def _async_scan_chat(chat_id: int) -> None:
     
     # Get or create telegram client connection
     client = TelegramClient()
-    if not await client.ensure_connected():
+    if not await client.initialize():
+        logger.error(f"Cannot scan chat {chat_id} - Telegram client initialization failed")
+        return
+    
+    if not client.is_connected():
         logger.error(f"Cannot scan chat {chat_id} - Telegram client not connected")
+        await client.stop()
         return
     
     try:
@@ -326,8 +331,10 @@ async def _async_scan_chat(chat_id: int) -> None:
         raise
     finally:
         # Cleanup client connection
-        if hasattr(client, 'cleanup'):
-            await client.cleanup()
+        try:
+            await client.stop()
+        except Exception as cleanup_error:
+            logger.warning(f"Error stopping Telegram client: {cleanup_error}")
 
 
 @huey.task(retries=2, retry_delay=30)
