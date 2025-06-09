@@ -287,21 +287,17 @@ class TelegramReactionManager:
         Returns:
             bool: True if all reactions were updated successfully
         """
-        results = []
-
-        # Add intent reaction
-        results.append(await self.add_intent_reaction(client, chat_id, message_id, intent_result))
-
+        # Only add completion/error reaction since intent reaction was already added
+        # during the intent classification phase
+        
         # Small delay to ensure reactions appear in sequence
         await asyncio.sleep(0.2)
 
         # Add completion/error reaction
         if success:
-            results.append(await self.add_completion_reaction(client, chat_id, message_id))
+            return await self.add_completion_reaction(client, chat_id, message_id)
         else:
-            results.append(await self.add_error_reaction(client, chat_id, message_id))
-
-        return all(results)
+            return await self.add_error_reaction(client, chat_id, message_id)
 
     def get_message_reactions(self, chat_id: int, message_id: int) -> list[str]:
         """
