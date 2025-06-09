@@ -555,6 +555,29 @@ Tools should achieve:
 
 Use `image_analysis_tool.py` as the architectural reference when developing new tools or improving existing ones.
 
+## Advanced Tool Integration: Screenshot Handoff
+
+The system includes sophisticated **screenshot handoff capabilities** that enable seamless coordination between Claude Code sessions and the main AI agent:
+
+### Screenshot Capture Workflow
+- **Claude Code Integration**: Playwright tests in target workspaces capture screenshots to `./tmp/ai_screenshots/{task_id}_{timestamp}.png`
+- **Secure Handoff**: Workspace-safe file transfer maintains security boundaries while enabling cross-process coordination
+- **AI Analysis**: Automatic GPT-4o vision analysis of captured screenshots before Telegram upload
+- **Cleanup**: Automatic file removal after processing to prevent storage accumulation
+
+### Key MCP Tools
+- **`retrieve_workspace_screenshot`**: Retrieves and analyzes screenshots from workspace tmp directories
+- **`execute_bug_report_with_screenshot`**: End-to-end bug investigation with automated screenshot evidence
+- **Integration**: Uses existing `TELEGRAM_IMAGE_GENERATED|` pipeline for seamless upload
+
+### Implementation Location
+- **MCP Tools**: `mcp_servers/development_tools.py` (lines 979-1160)
+- **Workspace Security**: `utilities/workspace_validator.py` (ai_screenshots directory support)
+- **Delegation Enhancement**: `tools/valor_delegation_tool.py` (SCREENSHOT_CAPTURED marker handling)
+- **Comprehensive Testing**: `tests/test_screenshot_handoff*.py` (unit, integration, e2e)
+
+This capability enables AI-powered bug reporting workflows where the agent can delegate test creation to Claude Code, automatically capture visual evidence, and provide intelligent analysis—all while maintaining strict workspace security boundaries.
+
 ---
 
 This guide provides the foundation for developing robust, well-integrated tools that extend agent capabilities while maintaining system reliability and performance.

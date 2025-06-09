@@ -76,6 +76,17 @@ def get_conversation_context(hours_back: int = 24, chat_id: str = None) -> str:
     """Get extended conversation context beyond immediate messages."""
 ```
 
+#### Development Tools Server (`mcp_servers/development_tools.py`)
+```python
+@mcp.tool()
+def retrieve_workspace_screenshot(task_id: str, chat_id: str = "", max_age_minutes: int = 10) -> str:
+    """Retrieve and analyze screenshots from Claude Code Playwright test execution."""
+
+@mcp.tool()
+def execute_bug_report_with_screenshot(task_description: str, notion_task_id: str, chat_id: str = "") -> str:
+    """Execute complete bug investigation workflow with automated screenshot evidence capture."""
+```
+
 ## Production Optimization Components
 
 ### Context Window Management (`agents/context_window_manager.py`)
