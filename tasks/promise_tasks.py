@@ -17,6 +17,7 @@ from .huey_config import huey
 from utilities.database import (
     get_promise, update_promise_status, get_database_connection, get_pending_promises
 )
+from utilities.missed_message_manager import scan_chat_for_missed_messages, process_missed_message_batch
 
 logger = logging.getLogger(__name__)
 

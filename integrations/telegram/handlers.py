@@ -351,13 +351,8 @@ class MessageHandler:
         if hasattr(message, "reply_to_message") and message.reply_to_message:
             reply_to_telegram_message_id = getattr(message.reply_to_message, "id", None)
 
-        # === STEP 13: MISSED MESSAGES PROCESSING ===
-        if chat_id in self.missed_messages_per_chat and self.missed_messages_per_chat[chat_id]:
-            missed_count = len(self.missed_messages_per_chat[chat_id])
-            print(f"📬 Found {missed_count} missed messages for chat {chat_id} - processing batch")
-            await self._process_missed_messages_through_agent(
-                client, chat_id, message, message.text, reply_to_telegram_message_id
-            )
+        # === STEP 13: NEW MISSED MESSAGE SYSTEM INTEGRATION ===
+        await self._handle_missed_messages_new_system(client, chat_id, message)
 
         # === STEP 14: MENTION DETECTION AND TEXT PROCESSING ===
         print("🏷️  Processing mentions and cleaning message text...")
@@ -434,6 +429,9 @@ class MessageHandler:
         await self._route_message_with_intent(
             client, message, chat_id, processed_text, reply_to_telegram_message_id
         )
+        
+        # === STEP 19: UPDATE LAST SEEN MESSAGE ===
+        await self._update_last_seen_message(client, chat_id, message.id)
 
     async def _process_missed_messages_through_agent(
         self, client, chat_id: int, message, processed_text: str, reply_to_telegram_message_id
@@ -492,6 +490,48 @@ class MessageHandler:
             # Clear anyway to avoid getting stuck
             if chat_id in self.missed_messages_per_chat:
                 del self.missed_messages_per_chat[chat_id]
+    
+    async def _handle_missed_messages_new_system(self, client, chat_id: int, message):
+        """Handle missed messages using the new promise-based system."""
+        try:
+            # Use injected integration first
+            if hasattr(self, 'missed_message_integration') and self.missed_message_integration:
+                await self.missed_message_integration.process_missed_for_chat(chat_id)
+                print(f"📬 Processed missed messages for chat {chat_id} via new system")
+                return
+            
+            # Fallback: Get from client
+            if hasattr(client, 'missed_message_integration') and client.missed_message_integration:
+                await client.missed_message_integration.process_missed_for_chat(chat_id)
+                print(f"📬 Processed missed messages for chat {chat_id} via client integration")
+                return
+            
+            # Legacy fallback
+            if chat_id in self.missed_messages_per_chat and self.missed_messages_per_chat[chat_id]:
+                missed_count = len(self.missed_messages_per_chat[chat_id])
+                print(f"📬 Found {missed_count} missed messages for chat {chat_id} - processing via legacy system")
+                await self._process_missed_messages_through_agent(
+                    client, chat_id, message, message.text, getattr(message, 'id', None)
+                )
+                    
+        except Exception as e:
+            print(f"Warning: Failed to process missed messages for chat {chat_id}: {e}")
+    
+    async def _update_last_seen_message(self, client, chat_id: int, message_id: int):
+        """Update last seen message in the new missed message system."""
+        try:
+            # Use injected integration first
+            if hasattr(self, 'missed_message_integration') and self.missed_message_integration:
+                self.missed_message_integration.update_last_seen(chat_id, message_id)
+                return
+            
+            # Fallback: Get from client
+            if hasattr(client, 'missed_message_integration') and client.missed_message_integration:
+                client.missed_message_integration.update_last_seen(chat_id, message_id)
+                return
+                
+        except Exception as e:
+            print(f"Warning: Failed to update last seen for chat {chat_id}: {e}")
 
     def _process_mentions(
         self, message, bot_username: str, bot_id: int, is_private_chat: bool

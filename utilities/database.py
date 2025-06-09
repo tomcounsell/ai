@@ -149,6 +149,19 @@ def init_database() -> None:
                     metadata TEXT  -- JSON blob with full message data
                 );
                 
+                -- Chat state tracking for persistent message resumption
+                CREATE TABLE IF NOT EXISTS chat_state (
+                    chat_id INTEGER PRIMARY KEY,
+                    last_seen_message_id INTEGER,  -- Telegram message ID of last processed message
+                    last_seen_timestamp TIMESTAMP,  -- Timestamp of last processed message
+                    bot_last_online TIMESTAMP,     -- When bot was last confirmed online for this chat
+                    bot_last_offline TIMESTAMP,    -- When bot went offline
+                    scan_completed_at TIMESTAMP,   -- Last time we completed a full missed message scan
+                    total_messages_scanned INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+                
                 -- Indexes for performance
                 CREATE INDEX IF NOT EXISTS idx_token_usage_timestamp ON token_usage(timestamp);
                 CREATE INDEX IF NOT EXISTS idx_token_usage_project ON token_usage(project_id);
@@ -560,3 +573,133 @@ def update_message_queue_status(
         conn.commit()
         
     logger.debug(f"Updated message queue {message_id} status to {status}")
+
+
+def update_chat_state(chat_id: int, last_seen_message_id: int = None, 
+                     last_seen_timestamp: str = None, bot_online: bool = None) -> None:
+    """Update chat state tracking for missed message detection."""
+    from datetime import datetime
+    
+    with get_database_connection() as conn:
+        cursor = conn.cursor()
+        
+        # Get current state
+        cursor.execute("SELECT * FROM chat_state WHERE chat_id = ?", (chat_id,))
+        existing = cursor.fetchone()
+        
+        now = datetime.utcnow().isoformat()
+        
+        if existing:
+            # Update existing record
+            updates = ["updated_at = ?"]
+            params = [now]
+            
+            if last_seen_message_id is not None:
+                updates.extend(["last_seen_message_id = ?", "last_seen_timestamp = ?"])
+                params.extend([last_seen_message_id, last_seen_timestamp or now])
+            
+            if bot_online is True:
+                updates.append("bot_last_online = ?")
+                params.append(now)
+            elif bot_online is False:
+                updates.append("bot_last_offline = ?")
+                params.append(now)
+            
+            params.append(chat_id)
+            
+            cursor.execute(f"""
+                UPDATE chat_state 
+                SET {', '.join(updates)}
+                WHERE chat_id = ?
+            """, params)
+        else:
+            # Create new record
+            cursor.execute("""
+                INSERT INTO chat_state 
+                (chat_id, last_seen_message_id, last_seen_timestamp, bot_last_online, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (chat_id, last_seen_message_id, last_seen_timestamp or now, now, now, now))
+        
+        conn.commit()
+
+
+def get_chat_state(chat_id: int) -> Optional[dict]:
+    """Get chat state for missed message tracking."""
+    with get_database_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM chat_state WHERE chat_id = ?", (chat_id,))
+        row = cursor.fetchone()
+        
+        if row:
+            columns = [description[0] for description in cursor.description]
+            return dict(zip(columns, row))
+        return None
+
+
+def queue_missed_message(chat_id: int, message_id: int, message_text: str, 
+                        sender_username: str, original_timestamp: str, metadata: dict = None) -> int:
+    """Queue a missed message for background processing."""
+    import json
+    
+    with get_database_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO message_queue 
+            (chat_id, message_id, message_text, message_type, sender_username, 
+             original_timestamp, metadata)
+            VALUES (?, ?, ?, 'missed', ?, ?, ?)
+        """, (chat_id, message_id, message_text, sender_username, 
+              original_timestamp, json.dumps(metadata or {})))
+        
+        conn.commit()
+        return cursor.lastrowid
+
+
+def get_pending_missed_messages(chat_id: int = None) -> list:
+    """Get pending missed messages for processing."""
+    with get_database_connection() as conn:
+        cursor = conn.cursor()
+        
+        if chat_id:
+            cursor.execute("""
+                SELECT * FROM message_queue 
+                WHERE chat_id = ? AND message_type = 'missed' AND status = 'pending'
+                ORDER BY original_timestamp ASC
+            """, (chat_id,))
+        else:
+            cursor.execute("""
+                SELECT * FROM message_queue 
+                WHERE message_type = 'missed' AND status = 'pending'
+                ORDER BY original_timestamp ASC
+            """)
+        
+        rows = cursor.fetchall()
+        columns = [description[0] for description in cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+
+def mark_scan_completed(chat_id: int, messages_scanned: int) -> None:
+    """Mark that we completed a full message scan for a chat."""
+    from datetime import datetime
+    
+    with get_database_connection() as conn:
+        cursor = conn.cursor()
+        now = datetime.utcnow().isoformat()
+        
+        cursor.execute("""
+            UPDATE chat_state 
+            SET scan_completed_at = ?, total_messages_scanned = ?, updated_at = ?
+            WHERE chat_id = ?
+        """, (now, messages_scanned, now, chat_id))
+        
+        if cursor.rowcount == 0:
+            # Create record if it doesn't exist
+            cursor.execute("""
+                INSERT INTO chat_state 
+                (chat_id, scan_completed_at, total_messages_scanned, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (chat_id, now, messages_scanned, now, now))
+        
+        conn.commit()
+    
+    logger.debug(f"Marked scan completed for chat {chat_id}, scanned {messages_scanned} messages")
