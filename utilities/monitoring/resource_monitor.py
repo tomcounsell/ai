@@ -62,6 +62,16 @@ class ResourceLimits:
     max_sessions: int = 100
     session_timeout_hours: float = 24.0
     cleanup_interval_minutes: float = 15.0
+    
+    # System protection thresholds
+    emergency_memory_mb: float = 800.0  # Trigger emergency cleanup
+    emergency_cpu_percent: float = 95.0  # Trigger emergency throttling
+    critical_memory_mb: float = 1000.0  # Consider process restart
+    
+    # Auto-restart configuration
+    enable_auto_restart: bool = True
+    restart_memory_threshold_mb: float = 1200.0
+    restart_after_hours: float = 48.0  # Restart after long uptime
 
 
 @dataclass
@@ -118,6 +128,13 @@ class ResourceMonitor:
         self.peak_memory_usage = 0.0
         self.peak_session_count = 0
         self.performance_baselines = self._establish_baselines()
+        
+        # Emergency protection state
+        self.emergency_cleanups_performed = 0
+        self.last_emergency_cleanup = None
+        self.cpu_throttling_active = False
+        self.restart_recommended = False
+        self.restart_callbacks: List[Callable] = []
     
     def _establish_baselines(self) -> Dict[str, float]:
         """Establish performance baselines for comparison."""
@@ -270,7 +287,45 @@ class ResourceMonitor:
         """Check for resource-based alerts and issues."""
         alerts = []
         
-        # Memory alerts
+        # Emergency protection checks (FIRST PRIORITY)
+        if snapshot.memory_mb > self.limits.critical_memory_mb:
+            self._handle_critical_memory_situation(snapshot)
+            alerts.append(PerformanceAlert(
+                alert_type="critical_memory",
+                severity="critical",
+                message=f"CRITICAL: Memory usage {snapshot.memory_mb:.1f}MB exceeds critical threshold {self.limits.critical_memory_mb}MB",
+                timestamp=snapshot.timestamp,
+                resource_snapshot=snapshot,
+                recommended_action="Emergency cleanup initiated, consider immediate restart"
+            ))
+        elif snapshot.memory_mb > self.limits.emergency_memory_mb:
+            self._handle_emergency_memory_situation(snapshot)
+            alerts.append(PerformanceAlert(
+                alert_type="emergency_memory",
+                severity="high",
+                message=f"EMERGENCY: Memory usage {snapshot.memory_mb:.1f}MB requires immediate cleanup",
+                timestamp=snapshot.timestamp,
+                resource_snapshot=snapshot,
+                recommended_action="Emergency session cleanup in progress"
+            ))
+            
+        # Emergency CPU protection
+        if snapshot.cpu_percent > self.limits.emergency_cpu_percent:
+            self._handle_emergency_cpu_situation(snapshot)
+            alerts.append(PerformanceAlert(
+                alert_type="emergency_cpu",
+                severity="high",
+                message=f"EMERGENCY: CPU usage {snapshot.cpu_percent:.1f}% triggering throttling",
+                timestamp=snapshot.timestamp,
+                resource_snapshot=snapshot,
+                recommended_action="CPU throttling enabled, limiting new operations"
+            ))
+        
+        # Check for auto-restart conditions
+        if self.limits.enable_auto_restart:
+            self._check_auto_restart_conditions(snapshot)
+        
+        # Standard alerts (existing logic)
         if snapshot.memory_mb > self.limits.max_memory_mb:
             alerts.append(PerformanceAlert(
                 alert_type="memory_limit_exceeded",
@@ -611,9 +666,129 @@ class ResourceMonitor:
             "oldest_session": min(self.active_sessions.values(), key=lambda s: s.created_at, default=None)
         }
     
+    def _handle_emergency_memory_situation(self, snapshot: ResourceSnapshot):
+        """Handle emergency memory situation with aggressive cleanup."""
+        now = datetime.now()
+        
+        # Prevent too frequent emergency cleanups (min 60 seconds apart)
+        if (self.last_emergency_cleanup and 
+            (now - self.last_emergency_cleanup).total_seconds() < 60):
+            return
+        
+        print(f"🚨 EMERGENCY MEMORY CLEANUP: {snapshot.memory_mb:.1f}MB > {self.limits.emergency_memory_mb}MB")
+        
+        # 1. Force garbage collection
+        collected = gc.collect()
+        print(f"   - Garbage collection freed {collected} objects")
+        
+        # 2. Aggressive session cleanup (remove 50% of sessions)
+        sessions_to_remove = max(1, len(self.active_sessions) // 2)
+        sorted_sessions = sorted(
+            self.active_sessions.items(),
+            key=lambda x: x[1].last_activity
+        )
+        
+        cleaned_sessions = 0
+        for i in range(min(sessions_to_remove, len(sorted_sessions))):
+            session_id = sorted_sessions[i][0]
+            if self.unregister_session(session_id):
+                cleaned_sessions += 1
+        
+        print(f"   - Emergency cleanup removed {cleaned_sessions} sessions")
+        
+        # 3. Clear performance history to free memory
+        if len(self.resource_history) > 100:
+            # Keep only last 50 entries
+            recent_history = list(self.resource_history)[-50:]
+            self.resource_history.clear()
+            self.resource_history.extend(recent_history)
+            print(f"   - Trimmed resource history")
+        
+        self.last_emergency_cleanup = now
+        self.emergency_cleanups_performed += 1
+    
+    def _handle_critical_memory_situation(self, snapshot: ResourceSnapshot):
+        """Handle critical memory situation - prepare for restart."""
+        print(f"💀 CRITICAL MEMORY SITUATION: {snapshot.memory_mb:.1f}MB > {self.limits.critical_memory_mb}MB")
+        
+        # 1. Emergency memory cleanup first
+        self._handle_emergency_memory_situation(snapshot)
+        
+        # 2. Mark restart as recommended
+        self.restart_recommended = True
+        
+        # 3. Clear all non-essential data
+        self.performance_alerts = self.performance_alerts[-10:]  # Keep only last 10 alerts
+        
+        # 4. Trigger restart callbacks if configured
+        for callback in self.restart_callbacks:
+            try:
+                callback("critical_memory", snapshot)
+            except Exception as e:
+                print(f"⚠️ Restart callback error: {e}")
+        
+        print("   - Restart recommended due to critical memory usage")
+    
+    def _handle_emergency_cpu_situation(self, snapshot: ResourceSnapshot):
+        """Handle emergency CPU situation with throttling."""
+        if not self.cpu_throttling_active:
+            print(f"🐌 CPU THROTTLING ENABLED: {snapshot.cpu_percent:.1f}% > {self.limits.emergency_cpu_percent}%")
+            self.cpu_throttling_active = True
+        
+        # Add delay to reduce CPU pressure
+        time.sleep(0.5)
+    
+    def _check_auto_restart_conditions(self, snapshot: ResourceSnapshot):
+        """Check if automatic restart should be triggered."""
+        uptime = datetime.now() - self.start_time
+        uptime_hours = uptime.total_seconds() / 3600
+        
+        should_restart = False
+        restart_reason = ""
+        
+        # Check memory threshold
+        if snapshot.memory_mb > self.limits.restart_memory_threshold_mb:
+            should_restart = True
+            restart_reason = f"memory_threshold ({snapshot.memory_mb:.1f}MB > {self.limits.restart_memory_threshold_mb}MB)"
+        
+        # Check uptime threshold
+        elif uptime_hours > self.limits.restart_after_hours:
+            should_restart = True
+            restart_reason = f"uptime_threshold ({uptime_hours:.1f}h > {self.limits.restart_after_hours}h)"
+        
+        if should_restart and not self.restart_recommended:
+            self.restart_recommended = True
+            print(f"🔄 AUTO-RESTART RECOMMENDED: {restart_reason}")
+            
+            # Trigger restart callbacks
+            for callback in self.restart_callbacks:
+                try:
+                    callback(restart_reason, snapshot)
+                except Exception as e:
+                    print(f"⚠️ Restart callback error: {e}")
+    
+    def add_restart_callback(self, callback: Callable[[str, ResourceSnapshot], None]):
+        """Add callback function for restart recommendations."""
+        self.restart_callbacks.append(callback)
+    
     def add_alert_callback(self, callback: Callable[[PerformanceAlert], None]):
         """Add callback function for performance alerts."""
         self.alert_callbacks.append(callback)
+    
+    def get_emergency_status(self) -> Dict[str, Any]:
+        """Get emergency protection status."""
+        return {
+            "emergency_cleanups_performed": self.emergency_cleanups_performed,
+            "last_emergency_cleanup": self.last_emergency_cleanup.isoformat() if self.last_emergency_cleanup else None,
+            "cpu_throttling_active": self.cpu_throttling_active,
+            "restart_recommended": self.restart_recommended,
+            "protection_thresholds": {
+                "emergency_memory_mb": self.limits.emergency_memory_mb,
+                "emergency_cpu_percent": self.limits.emergency_cpu_percent,
+                "critical_memory_mb": self.limits.critical_memory_mb,
+                "restart_memory_threshold_mb": self.limits.restart_memory_threshold_mb
+            }
+        }
     
     def export_metrics(self, filepath: str):
         """Export comprehensive metrics to JSON file."""

@@ -15,6 +15,8 @@ from pydantic import BaseModel
 from integrations.notion.query_engine import get_notion_engine
 from integrations.telegram.client import TelegramClient
 from utilities.database import init_database, get_pending_server_tasks, update_server_task_status
+from utilities.monitoring.resource_monitor import resource_monitor, ResourceLimits
+from utilities.auto_restart_manager import initialize_auto_restart
 import json
 
 load_dotenv()
@@ -47,6 +49,7 @@ logger = logging.getLogger(__name__)
 telegram_client = None
 notion_engine = None
 _shutdown_requested = False
+auto_restart_manager = None
 
 
 class AuthCode(BaseModel):
@@ -59,12 +62,30 @@ class AuthPassword(BaseModel):
 
 async def start_telegram_client():
     """Initialize the Telegram client."""
-    global telegram_client, notion_engine
+    global telegram_client, notion_engine, auto_restart_manager
 
     # Initialize database tables including promises
     logger.info("🗄️  Initializing database...")
     init_database()
     logger.info("✅ Database initialized successfully")
+    
+    # Initialize resource monitoring with production limits
+    logger.info("🔧 Starting resource monitoring with emergency protection...")
+    limits = ResourceLimits(
+        max_memory_mb=400.0,  # Conservative limit for development
+        emergency_memory_mb=600.0,  # Emergency cleanup trigger
+        critical_memory_mb=800.0,  # Critical situation threshold
+        restart_memory_threshold_mb=1000.0,  # Auto-restart threshold
+        max_cpu_percent=85.0,
+        emergency_cpu_percent=95.0,
+        restart_after_hours=24.0  # Restart after 24 hours uptime
+    )
+    resource_monitor.limits = limits
+    resource_monitor.start_monitoring(monitoring_interval=30.0)  # Check every 30 seconds
+    
+    # Initialize auto-restart manager
+    auto_restart_manager = initialize_auto_restart(resource_monitor)
+    logger.info("✅ Resource monitoring and auto-restart protection enabled")
 
     # Initialize Notion query engine
     notion_engine = get_notion_engine()
@@ -336,6 +357,68 @@ async def initialize_telegram():
         return {"status": "initialization_started"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to initialize: {e}")
+
+
+@app.get("/resources/status")
+async def resource_status():
+    """Get current resource usage and health status"""
+    try:
+        health = resource_monitor.get_system_health()
+        emergency = resource_monitor.get_emergency_status()
+        return {
+            "health": health,
+            "emergency": emergency,
+            "monitoring_active": resource_monitor.monitoring_active
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get resource status: {e}")
+
+
+@app.get("/resources/sessions")
+async def session_report():
+    """Get detailed session management report"""
+    try:
+        return resource_monitor.get_session_report()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get session report: {e}")
+
+
+@app.get("/restart/status")
+async def restart_status():
+    """Get auto-restart status and history"""
+    try:
+        if auto_restart_manager:
+            return auto_restart_manager.get_restart_status()
+        else:
+            return {"error": "Auto-restart manager not initialized"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get restart status: {e}")
+
+
+@app.post("/restart/force")
+async def force_restart():
+    """Force an immediate server restart"""
+    try:
+        if auto_restart_manager:
+            auto_restart_manager.force_restart("api_request")
+            return {"status": "restart_initiated", "message": "Server restart has been initiated"}
+        else:
+            raise HTTPException(status_code=503, detail="Auto-restart manager not available")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to force restart: {e}")
+
+
+@app.post("/restart/cancel")
+async def cancel_restart():
+    """Cancel a scheduled restart"""
+    try:
+        if auto_restart_manager:
+            auto_restart_manager.cancel_scheduled_restart("api_request")
+            return {"status": "restart_cancelled", "message": "Scheduled restart has been cancelled"}
+        else:
+            raise HTTPException(status_code=503, detail="Auto-restart manager not available")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to cancel restart: {e}")
 
 
 if __name__ == "__main__":
