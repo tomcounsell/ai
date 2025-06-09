@@ -95,7 +95,7 @@ start_server() {
     echo $SERVER_PID > "$PID_FILE"
 
     # Wait a moment for server to start
-    sleep 3
+    sleep 5
 
     # Check if server started successfully
     if ps -p $SERVER_PID > /dev/null 2>&1; then
@@ -117,11 +117,9 @@ start_server() {
         echo "  ✅ Huey task queue (background processing)"
         echo ""
         echo "Ready to receive Telegram messages and process background tasks!"
-        
-        # Show last few lines of log to confirm startup
         echo ""
-        echo "📋 Recent startup logs:"
-        tail -n 5 "logs/system.log" 2>/dev/null || echo "  (logs not available yet)"
+        echo "🚀 Server is running in background. Check logs with:"
+        echo "  tail -f logs/system.log"
     else
         echo "❌ Failed to start server"
         echo "📋 Check logs for details:"
