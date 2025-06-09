@@ -304,15 +304,22 @@ def spawn_valor_session(
         print(f"🔄 Returning ASYNC_PROMISE marker (duration > 30s and not force_sync)")
         return f"ASYNC_PROMISE|I'll work on this task in the background: {task_description}"
 
-    # Build enhanced prompt with screenshot support
+    # Build enhanced prompt with screenshot support and server management
     prompt_parts = [
         f"Please help me with this task: {task_description}",
+        "",
+        "SERVER MANAGEMENT INSTRUCTIONS:",
+        "If your changes require a server restart (e.g., modifying main.py, handlers, core files):",
+        "- Use a single command: `scripts/stop.sh && scripts/start.sh`",
+        "- This ensures proper shutdown and restart in one operation",
+        "- Wait for startup completion before finishing the task", 
+        "- The server has shutdown protection, so this combined approach avoids conflicts",
+        "",
     ]
 
     # Add screenshot-specific instructions if this is a screenshot task
     if "screenshot" in task_description.lower() or "playwright" in task_description.lower() or (specific_instructions and "screenshot" in specific_instructions.lower()):
         prompt_parts.extend([
-            "",
             "SCREENSHOT CAPTURE INSTRUCTIONS:",
             "- If you create Playwright tests that capture screenshots:",
             "- Save screenshots to ./tmp/ai_screenshots/{task_id}_{timestamp}.png",
@@ -320,13 +327,15 @@ def spawn_valor_session(
             f"- Use task ID: {os.environ.get('NOTION_TASK_ID', 'manual_test')}",
             "- Output 'SCREENSHOT_CAPTURED:{full_path}' when screenshot is saved",
             "- Use full page screenshots with { fullPage: true } option",
+            "",
         ])
 
     if specific_instructions:
-        prompt_parts.append(f"\nAdditional instructions: {specific_instructions}")
+        prompt_parts.append(f"Additional instructions: {specific_instructions}")
+        prompt_parts.append("")
 
     # Keep the prompt simple and direct
-    prompt_parts.append("\nPlease complete this task and provide a summary of what you did.")
+    prompt_parts.append("Please complete this task and provide a summary of what you did.")
 
     full_prompt = "\n".join(prompt_parts)
     print(f"📝 Built full prompt ({len(full_prompt)} chars)")
