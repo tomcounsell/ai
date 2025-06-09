@@ -1,16 +1,5 @@
 """Utility functions for Telegram integration."""
 
-import time
-
-MAX_MESSAGE_AGE_SECONDS = 300  # Only respond to messages newer than 5 minutes
-
-
-def is_message_too_old(message_timestamp: int) -> bool:
-    """Check if a message is too old to respond to (for catch-up handling)."""
-    current_time = time.time()
-    message_age = current_time - message_timestamp
-    return message_age > MAX_MESSAGE_AGE_SECONDS
-
 
 def is_notion_question(text: str) -> bool:
     """Detect if a message is asking about Notion."""

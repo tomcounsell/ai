@@ -57,7 +57,6 @@ class TelegramClient:
                 client=self.client,
                 chat_history=self.chat_history,
                 notion_scout=notion_scout,
-                bot_start_time=self.bot_start_time,
             )
 
             # Initialize new missed message system

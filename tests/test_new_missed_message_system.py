@@ -254,7 +254,7 @@ class TestMissedMessageArchitecture:
         # Test 5: Comprehensive error recovery
         # - Database operations are transactional
         # - Errors don't clear all data
-        # - Graceful degradation to legacy system
+        # - Robust error handling throughout
         
         # Test 6: No memory-only storage
         # - All state persisted in SQLite

@@ -5,21 +5,16 @@ from pyrogram.enums import ChatType
 from tools.link_analysis_tool import extract_urls, is_url_only_message, store_link_with_analysis
 
 # All functionality now handled by valor_agent (telegram_chat_agent)
-from .utils import (
-    is_message_too_old,
-    is_user_priority_question,
-)
+from .utils import is_user_priority_question
 
 
 class MessageHandler:
     """Handles incoming Telegram messages with context awareness."""
 
-    def __init__(self, client, chat_history, notion_scout=None, bot_start_time=None):
+    def __init__(self, client, chat_history, notion_scout=None):
         self.client = client
         self.chat_history = chat_history
         self.notion_scout = notion_scout
-        self.bot_start_time = bot_start_time
-        self.missed_messages_per_chat = {}
         # Web search now handled by PydanticAI agents
         # Link analysis now handled by link_analysis_tool
 
@@ -298,41 +293,8 @@ class MessageHandler:
         print("💬 TEXT MESSAGE detected - proceeding with text processing pipeline")
         print(f"   Message length: {len(message.text)} characters")
 
-        # === STEP 9: MESSAGE AGE VALIDATION ===
-        message_timestamp = message.date.timestamp()
-        print(f"⏰ Checking message age (timestamp: {message_timestamp})...")
-
-        if is_message_too_old(message_timestamp):
-            print("⏰ MESSAGE TOO OLD - collecting as missed message for batch processing")
-
-            # Collect missed messages for later batch response
-            if chat_id not in self.missed_messages_per_chat:
-                self.missed_messages_per_chat[chat_id] = []
-                print(f"📝 Created new missed message queue for chat {chat_id}")
-
-            self.missed_messages_per_chat[chat_id].append(message.text)
-            print(
-                f"📝 Added to missed messages queue (total: {len(self.missed_messages_per_chat[chat_id])})"
-            )
-
-            # Still store old messages for context
-            reply_to_telegram_message_id = None
-            if hasattr(message, "reply_to_message") and message.reply_to_message:
-                reply_to_telegram_message_id = getattr(message.reply_to_message, "id", None)
-                print(f"🔗 Message is replying to Telegram message {reply_to_telegram_message_id}")
-
-            self.chat_history.add_message(
-                chat_id,
-                "user",
-                message.text,
-                reply_to_telegram_message_id,
-                message.id,
-                is_telegram_id=True,
-            )
-            print(f"💾 Stored missed message in chat history: {message.text[:50]}...")
-            return
-
-        print("✅ Message is recent - proceeding with real-time processing")
+        # === STEP 9: REAL-TIME MESSAGE PROCESSING ===
+        print("✅ Processing message in real-time")
 
         # === STEP 10: BOT METADATA RETRIEVAL ===
         print("🤖 Using bot information from self-message filter...")
@@ -433,89 +395,27 @@ class MessageHandler:
         # === STEP 19: UPDATE LAST SEEN MESSAGE ===
         await self._update_last_seen_message(client, chat_id, message.id)
 
-    async def _process_missed_messages_through_agent(
-        self, client, chat_id: int, message, processed_text: str, reply_to_telegram_message_id
-    ):
-        """Process missed messages through the normal agent routing system with context-aware filtering."""
-        try:
-            missed_messages = self.missed_messages_per_chat[chat_id]
-            print(f"Processing {len(missed_messages)} missed messages for chat {chat_id}")
-
-            # Get bot info for mention detection
-            me = await client.get_me()
-            bot_username = me.username
-
-            # Determine chat type for filtering
-            is_private_chat = message.chat.type.name in ["PRIVATE", "BOT"]
-
-            # Check if this is a dev group
-            from ..notion.utils import is_dev_group
-
-            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
-
-            # Filter messages based on chat type
-            if is_private_chat or is_dev_group_chat:
-                # DMs and dev groups: process all missed messages
-                messages_to_process = missed_messages
-                print(
-                    f"Chat type: {'DM' if is_private_chat else 'dev group'} - processing all {len(messages_to_process)} missed messages"
-                )
-            else:
-                # Non-dev groups: only process messages where bot was @mentioned
-                messages_to_process = [msg for msg in missed_messages if f"@{bot_username}" in msg]
-                print(
-                    f"Chat type: non-dev group - processing {len(messages_to_process)} of {len(missed_messages)} missed messages (mentions only)"
-                )
-
-            # Only respond if we have relevant messages to process
-            if messages_to_process:
-                # Create a summary of relevant missed messages and route through normal agent system
-                missed_summary = (
-                    f"I was offline and missed {len(messages_to_process)} relevant messages. Recent messages were: "
-                    + "; ".join(messages_to_process[-3:])
-                )
-
-                # Route the missed message summary through normal agent processing
-                await self._route_message_with_intent(
-                    client, message, chat_id, missed_summary, reply_to_telegram_message_id
-                )
-            else:
-                print(f"No relevant missed messages to process for chat {chat_id}")
-
-            # Clear missed messages for this chat
-            del self.missed_messages_per_chat[chat_id]
-
-        except Exception as e:
-            print(f"Error processing missed messages through agent: {e}")
-            # Clear anyway to avoid getting stuck
-            if chat_id in self.missed_messages_per_chat:
-                del self.missed_messages_per_chat[chat_id]
     
     async def _handle_missed_messages_new_system(self, client, chat_id: int, message):
-        """Handle missed messages using the new promise-based system."""
+        """Handle missed messages using the promise-based system."""
         try:
             # Use injected integration first
             if hasattr(self, 'missed_message_integration') and self.missed_message_integration:
                 await self.missed_message_integration.process_missed_for_chat(chat_id)
-                print(f"📬 Processed missed messages for chat {chat_id} via new system")
+                print(f"📬 Processed missed messages for chat {chat_id}")
                 return
             
             # Fallback: Get from client
             if hasattr(client, 'missed_message_integration') and client.missed_message_integration:
                 await client.missed_message_integration.process_missed_for_chat(chat_id)
-                print(f"📬 Processed missed messages for chat {chat_id} via client integration")
+                print(f"📬 Processed missed messages for chat {chat_id}")
                 return
             
-            # Legacy fallback
-            if chat_id in self.missed_messages_per_chat and self.missed_messages_per_chat[chat_id]:
-                missed_count = len(self.missed_messages_per_chat[chat_id])
-                print(f"📬 Found {missed_count} missed messages for chat {chat_id} - processing via legacy system")
-                await self._process_missed_messages_through_agent(
-                    client, chat_id, message, message.text, getattr(message, 'id', None)
-                )
+            # If no integration available, log warning but don't fail
+            print(f"⚠️  No missed message integration available for chat {chat_id}")
                     
         except Exception as e:
-            print(f"Warning: Failed to process missed messages for chat {chat_id}: {e}")
+            print(f"❌ Failed to process missed messages for chat {chat_id}: {e}")
     
     async def _update_last_seen_message(self, client, chat_id: int, message_id: int):
         """Update last seen message in the new missed message system."""
