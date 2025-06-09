@@ -63,23 +63,13 @@ def process_missed_message(message_id: int):
             # Simple echo response for missed messages - actual processing happens via main server
             enhanced_message = f"[Missed message from {message_data['original_timestamp']}]: {message_data['message_text']}"
             
-            # Return basic acknowledgment
-            return f"Processed missed message: {message_data['message_text'][:50]}..."
+            # Return basic acknowledgment - no response needed for missed messages
+            return None
         
         result = loop.run_until_complete(process_message())
         logger.info(f"Processed missed message {message_id} successfully")
         
-        # Send response via database task queue instead of direct Telegram client
-        if result:
-            from utilities.database import queue_server_task
-            queue_server_task(
-                'send_message',
-                {
-                    'chat_id': message_data['chat_id'],
-                    'message_text': result
-                },
-                priority=3  # High priority for responses
-            )
+        # No response needed for missed messages - they are processed silently
         
         # Mark as completed
         update_message_queue_status(message_id, 'completed')

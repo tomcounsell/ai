@@ -372,7 +372,7 @@ def process_missed_message_batch(chat_id: int, summary: str) -> None:
         # For now, just mark as completed
         # TODO: Integrate with _route_message_with_intent or similar
         
-        logger.info(f"✅ Processed missed messages for chat {chat_id}: {summary[:100]}...")
+        logger.info(f"✅ Completed missed message processing for chat {chat_id}")
         
         # Mark all pending messages for this chat as completed
         pending = get_pending_missed_messages(chat_id)
