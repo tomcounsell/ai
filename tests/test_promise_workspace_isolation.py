@@ -24,7 +24,7 @@ def test_workspace_context_resolution():
         # (chat_id, expected_workspace_name, expected_working_directory)
         (-1002600253717, "PsyOPTIMAL", "/Users/valorengels/src/psyoptimal"),
         (-4897329503, "PsyOPTIMAL Dev", "/Users/valorengels/src/psyoptimal"),
-        (-1002374450243, "Tom's Team", "/Users/valorengels/src/deckfusion"),
+        (-4818206585, "Valor Test Team", "/Users/valorengels/src/ai"),
         (-1002553869320, "DeckFusion Dev", "/Users/valorengels/src/deckfusion"),
         (-4719889199, "Yudame", "/Users/valorengels/src/ai"),
         (-4891178445, "Yudame Dev", "/Users/valorengels/src/ai"),
@@ -69,7 +69,7 @@ def test_promise_workspace_metadata():
         test_cases = [
             # (chat_id, expected_workspace_name, expected_working_directory)
             (-1002600253717, "PsyOPTIMAL", "/Users/valorengels/src/psyoptimal"),
-            (-1002374450243, "Tom's Team", "/Users/valorengels/src/deckfusion"),
+            (-4818206585, "Valor Test Team", "/Users/valorengels/src/ai"),
             (-4719889199, "Yudame", "/Users/valorengels/src/ai"),
         ]
         
@@ -137,7 +137,7 @@ def test_promise_execution_with_workspace():
             # Create promises for different workspaces
             test_cases = [
                 (-1002600253717, "/Users/valorengels/src/psyoptimal", "PsyOPTIMAL task"),
-                (-1002374450243, "/Users/valorengels/src/deckfusion", "DeckFusion task"),
+                (-4818206585, "/Users/valorengels/src/ai", "Test task"),
                 (-4719889199, "/Users/valorengels/src/ai", "Yudame task"),
             ]
             

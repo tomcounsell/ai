@@ -84,6 +84,16 @@
       "telegram_chat_ids": [],
       "aliases": ["flextrip dev"],
       "is_dev_group": true
+    },
+    "Valor Test Team": {
+      "database_id": "****",
+      "url": "https://www.notion.so/yudame/****",
+      "description": "Test group for Valor bot testing and development",
+      "workspace_type": "test",
+      "working_directory": "/Users/valorengels/src/ai",
+      "telegram_chat_ids": ["-4818206585"],
+      "aliases": ["test", "valor test"],
+      "is_test_group": true
     }
   },
   "telegram_groups": {
@@ -93,7 +103,8 @@
     "-4891178445": "Yudame Dev",
     "-4719889199": "Yudame",
     "-1002374450243": "Tom's Team",
-    "-1002455228990": "Verkstad"
+    "-1002455228990": "Verkstad",
+    "-4818206585": "Valor Test Team"
   },
   "dm_whitelist": {
     "description": "Users allowed to send direct messages to the bot",
