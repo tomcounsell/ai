@@ -777,21 +777,39 @@ def gather_daydream_context() -> Dict[str, Any]:
         # Get workspace configurations
         workspace_config = load_workspace_config()
         
-        # Analyze each active workspace
-        workspaces = workspace_config.get('workspaces', {})
-        for workspace_name, workspace_data in workspaces.items():
-            if isinstance(workspace_data, dict) and workspace_data.get('working_directory'):
-                try:
-                    workspace_context = analyze_workspace_for_daydream(
-                        workspace_name, 
-                        workspace_data['working_directory']
-                    )
-                    context['workspace_analysis'][workspace_name] = workspace_context
-                except Exception as e:
-                    logger.warning(f"Failed to analyze workspace {workspace_name}: {e}")
-        
-        # Get recent promise activity for trend analysis
+        # Get recent promise activity and workspace priorities for trend analysis
         with get_database_connection() as conn:
+            # Analyze workspaces iteratively - prioritize by config + activity
+            workspaces = workspace_config.get('workspaces', {})
+            workspace_priorities = get_workspace_priorities(conn, workspaces)
+            
+            # Rotate through workspaces to ensure all get analyzed over time
+            analyzed_count = 0
+            max_workspaces_per_cycle = 3
+            
+            # Use current hour to determine rotation offset for fair distribution
+            from datetime import datetime as dt
+            current_hour = dt.utcnow().hour
+            rotation_offset = (current_hour // 6) % len(workspace_priorities) if workspace_priorities else 0
+            
+            # Create rotated list starting from offset
+            rotated_priorities = workspace_priorities[rotation_offset:] + workspace_priorities[:rotation_offset]
+            
+            for workspace_name, workspace_data in rotated_priorities[:max_workspaces_per_cycle]:
+                if isinstance(workspace_data, dict) and workspace_data.get('working_directory'):
+                    try:
+                        logger.info(f"🧠 Analyzing workspace: {workspace_name}")
+                        workspace_context = analyze_workspace_for_daydream(
+                            workspace_name, 
+                            workspace_data['working_directory']
+                        )
+                        context['workspace_analysis'][workspace_name] = workspace_context
+                        analyzed_count += 1
+                    except Exception as e:
+                        logger.warning(f"Failed to analyze workspace {workspace_name}: {e}")
+            
+            logger.info(f"🧠 Analyzed {analyzed_count}/{len(workspaces)} workspaces this cycle")
+            
             # Get recent promises with proper column mapping
             recent_promises = conn.execute("""
                 SELECT 
@@ -1143,6 +1161,66 @@ def format_duration(start_time: str, end_time: str) -> str:
         return "unknown duration"
 
 
+def get_workspace_priorities(conn, workspaces: Dict[str, Any]) -> list:
+    """Get workspaces prioritized by daydream_priority and recent activity."""
+    import os
+    priorities = []
+    
+    try:
+        # Get chat activity for each workspace to prioritize analysis
+        for workspace_name, workspace_data in workspaces.items():
+            if not isinstance(workspace_data, dict):
+                continue
+                
+            # Use configured daydream_priority (higher = more important)
+            priority_score = workspace_data.get('daydream_priority', 5)  # Default priority 5
+            
+            # Get recent activity level for this workspace based on chat_ids
+            chat_ids = workspace_data.get('telegram_chat_ids', [])
+            activity_score = 0
+            
+            if chat_ids:
+                # Convert to string format for SQL
+                chat_id_str = ','.join(str(cid) for cid in chat_ids)
+                try:
+                    result = conn.execute(f"""
+                        SELECT COUNT(*) as task_count
+                        FROM promises 
+                        WHERE chat_id IN ({chat_id_str})
+                        AND created_at > datetime('now', '-7 days')
+                    """).fetchone()
+                    activity_score = result[0] if result else 0
+                except Exception:
+                    # If query fails, fall back to directory existence check
+                    activity_score = 1 if workspace_data.get('working_directory') else 0
+            else:
+                # For workspaces without chat IDs, check if directory exists
+                working_dir = workspace_data.get('working_directory')
+                if working_dir and os.path.exists(working_dir):
+                    activity_score = 1
+            
+            # Combined score: priority (weight 10) + recent activity (weight 1)
+            combined_score = (priority_score * 10) + activity_score
+            
+            priorities.append((workspace_name, workspace_data, combined_score, priority_score, activity_score))
+        
+        # Sort by combined score (descending), then by priority, then alphabetically
+        priorities.sort(key=lambda x: (-x[2], -x[3], x[0]))
+        
+        # Log the prioritization for transparency
+        logger.info("🧠 Workspace prioritization:")
+        for name, data, combined, priority, activity in priorities[:5]:  # Top 5
+            logger.info(f"   {name}: priority={priority}, activity={activity}, total={combined}")
+        
+        # Return tuples of (name, data) without the scores
+        return [(name, data) for name, data, combined, priority, activity in priorities]
+        
+    except Exception as e:
+        logger.warning(f"Error prioritizing workspaces: {e}")
+        # Fall back to simple alphabetical order
+        return list(workspaces.items())
+
+
 def gather_system_metrics(conn) -> Dict[str, Any]:
     """Gather system-wide metrics for daydreaming analysis."""
     metrics = {}
@@ -1288,13 +1366,28 @@ def enhance_workspace_analysis(workspace_info: Dict[str, Any], working_dir: str)
             'large_files': []  # Files > 500 lines
         }
         
+        # Analyze files with intelligent sampling strategy
         total_lines = 0
-        for py_file in python_files[:20]:  # Limit to first 20 files for performance
+        files_analyzed = 0
+        max_files = min(len(python_files), 100)  # Reasonable limit based on codebase size
+        
+        # For large codebases, sample files intelligently
+        if len(python_files) > 100:
+            # Sample every Nth file to get representative coverage
+            step = len(python_files) // 100
+            sampled_files = python_files[::step][:100]
+        else:
+            sampled_files = python_files
+        
+        for py_file in sampled_files:
             try:
                 with open(py_file, 'r', encoding='utf-8', errors='ignore') as f:
                     lines = len(f.readlines())
                     total_lines += lines
-                    if lines > 500:
+                    files_analyzed += 1
+                    
+                    # Track large files (but limit to avoid log spam)
+                    if lines > 500 and len(workspace_info['complexity_metrics']['large_files']) < 10:
                         rel_path = os.path.relpath(py_file, working_dir)
                         workspace_info['complexity_metrics']['large_files'].append({
                             'file': rel_path,
@@ -1303,8 +1396,11 @@ def enhance_workspace_analysis(workspace_info: Dict[str, Any], working_dir: str)
             except Exception:
                 continue
         
-        if python_files:
-            workspace_info['complexity_metrics']['avg_lines_per_file'] = round(total_lines / min(len(python_files), 20), 1)
+        workspace_info['complexity_metrics']['files_analyzed'] = files_analyzed
+        workspace_info['complexity_metrics']['sample_coverage'] = round((files_analyzed / len(python_files)) * 100, 1) if python_files else 0
+        
+        if files_analyzed > 0:
+            workspace_info['complexity_metrics']['avg_lines_per_file'] = round(total_lines / files_analyzed, 1)
         
         # Quality indicators
         workspace_info['quality_indicators'] = {

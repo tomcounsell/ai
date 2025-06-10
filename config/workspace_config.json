@@ -7,7 +7,8 @@
       "workspace_type": "yudame",
       "working_directory": "/Users/valorengels/src/ai",
       "telegram_chat_ids": ["-4719889199"],
-      "aliases": ["yudame"]
+      "aliases": ["yudame"],
+      "daydream_priority": 10
     },
     "Yudame Dev": {
       "database_id": "****",
@@ -17,7 +18,8 @@
       "working_directory": "/Users/valorengels/src/ai",
       "telegram_chat_ids": ["-4891178445"],
       "aliases": ["yudame dev"],
-      "is_dev_group": true
+      "is_dev_group": true,
+      "daydream_priority": 9
     },
     "Verkstad": {
       "database_id": "****",
@@ -26,7 +28,8 @@
       "workspace_type": "verkstad",
       "working_directory": "/Users/valorengels/src/verkstad",
       "telegram_chat_ids": ["-1002455228990"],
-      "aliases": ["verkstad"]
+      "aliases": ["verkstad"],
+      "daydream_priority": 7
     },
     "PsyOPTIMAL": {
       "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
@@ -35,7 +38,8 @@
       "workspace_type": "psyoptimal",
       "working_directory": "/Users/valorengels/src/psyoptimal",
       "telegram_chat_ids": ["-1002600253717"],
-      "aliases": ["psyoptimal", "PO"]
+      "aliases": ["psyoptimal", "PO"],
+      "daydream_priority": 8
     },
     "PsyOPTIMAL Dev": {
       "database_id": "1d22bc89-4d10-8079-8dcb-e7813b006c5c",
@@ -45,7 +49,8 @@
       "working_directory": "/Users/valorengels/src/psyoptimal",
       "telegram_chat_ids": ["-4897329503"],
       "aliases": ["psyoptimal dev", "PO dev"],
-      "is_dev_group": true
+      "is_dev_group": true,
+      "daydream_priority": 6
     },
     "Tom's Team": {
       "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
@@ -54,7 +59,8 @@
       "workspace_type": "deckfusion",
       "working_directory": "/Users/valorengels/src/deckfusion",
       "telegram_chat_ids": ["-1002374450243"],
-      "aliases": ["deckfusion", "DF", "tom", "toms team"]
+      "aliases": ["deckfusion", "DF", "tom", "toms team"],
+      "daydream_priority": 8
     },
     "DeckFusion Dev": {
       "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
@@ -64,7 +70,8 @@
       "working_directory": "/Users/valorengels/src/deckfusion",
       "telegram_chat_ids": ["-1002553869320"],
       "aliases": ["deckfusion dev", "DF dev"],
-      "is_dev_group": true
+      "is_dev_group": true,
+      "daydream_priority": 5
     },
     "FlexTrip": {
       "database_id": "****",
@@ -73,7 +80,8 @@
       "workspace_type": "flextrip",
       "working_directory": "/Users/valorengels/src/flextrip",
       "telegram_chat_ids": [],
-      "aliases": ["flextrip"]
+      "aliases": ["flextrip"],
+      "daydream_priority": 4
     },
     "FlexTrip Dev": {
       "database_id": "****",
@@ -83,7 +91,8 @@
       "working_directory": "/Users/valorengels/src/flextrip",
       "telegram_chat_ids": [],
       "aliases": ["flextrip dev"],
-      "is_dev_group": true
+      "is_dev_group": true,
+      "daydream_priority": 3
     },
     "Valor Test Team": {
       "database_id": "****",
@@ -93,7 +102,8 @@
       "working_directory": "/Users/valorengels/src/ai",
       "telegram_chat_ids": ["-4818206585"],
       "aliases": ["test", "valor test"],
-      "is_test_group": true
+      "is_test_group": true,
+      "daydream_priority": 2
     }
   },
   "telegram_groups": {
