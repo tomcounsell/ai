@@ -685,7 +685,8 @@ def query_notion_projects(
     """
     try:
         # Use workspace-aware MCP tool with proper access validation
-        from mcp_servers.pm_tools import query_notion_projects as mcp_query_notion
+        # Revolutionary living project context - replaced query_notion_projects
+        from mcp_servers.pm_tools import get_development_context as mcp_get_context
         from utilities.workspace_validator import get_workspace_validator
         
         # Get chat context
@@ -701,8 +702,8 @@ def query_notion_projects(
         if not workspace_name:
             return "❌ Access denied: This chat is not mapped to any workspace"
         
-        # Query the workspace with proper validation
-        result = mcp_query_notion(workspace_name, question, chat_id)
+        # Get living project context for the workspace
+        result = mcp_get_context(workspace_name, chat_id)
         return result
     except Exception as e:
         error_str = str(e)

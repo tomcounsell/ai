@@ -269,9 +269,10 @@ class MessageHandler:
 
         # === STEP 5: EARLY RESPONSE DECISION (to avoid unnecessary reactions) ===
         logger.debug("🎯 Early response decision check...")
-        from ..notion.utils import is_dev_group
+        # PLACEHOLDER: Revolutionary project context will replace is_dev_group utility
         
-        is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+        # PLACEHOLDER: Revolutionary project context will determine workspace type
+        is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
         
         # Check if we would respond to this message at all
         is_mentioned, _ = self._process_mentions(message, me.username, bot_id, is_private_chat)
@@ -987,23 +988,11 @@ class MessageHandler:
                 return None
 
             # Get the project associated with this Telegram group
-            from ..notion.utils import get_telegram_group_project
+            # PLACEHOLDER: Revolutionary workspace mapping will replace get_telegram_group_project
 
-            project_name, db_id = get_telegram_group_project(chat_id)
-            if not db_id:
-                print(f"No Notion database configured for group {chat_id}")
-                return None
-
-            print(f"Using Notion database for {project_name} (group {chat_id})")
-            print(f"   Full Database ID: {db_id}")
-            print(f"   Database Filter (first 8 chars): {db_id[:8]}")
-
-            # Get answer from Notion Scout using the query_all_accessible_databases method
-            answer = await self.notion_scout.query_all_accessible_databases(
-                processed_text, db_filter=db_id[:8]
-            )
-
-            return answer
+            # PLACEHOLDER: Revolutionary living project context will replace this section
+            print(f"Revolutionary project context will provide workspace-aware responses for group {chat_id}")
+            return None
 
         except Exception as e:
             print(f"Error getting group-specific Notion context: {e}")
@@ -1090,9 +1079,10 @@ class MessageHandler:
                 reply_to_telegram_message_id = getattr(message.reply_to_message, "id", None)
 
             # Check if this is a dev group that should handle all messages
-            from ..notion.utils import is_dev_group
+            # PLACEHOLDER: Revolutionary project context will replace is_dev_group utility
 
-            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+            # PLACEHOLDER: Revolutionary project context will determine workspace type
+        is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
 
             # Only respond in private chats, when mentioned in groups, or in dev groups
             if not (is_private_chat or is_mentioned or is_dev_group_chat):
@@ -1215,9 +1205,10 @@ class MessageHandler:
                 reply_to_telegram_message_id = getattr(message.reply_to_message, "id", None)
 
             # Check if this is a dev group that should handle all messages
-            from ..notion.utils import is_dev_group
+            # PLACEHOLDER: Revolutionary project context will replace is_dev_group utility
 
-            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+            # PLACEHOLDER: Revolutionary project context will determine workspace type
+        is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
 
             # Store message in chat history even if not responding
             if not (is_private_chat or is_mentioned or is_dev_group_chat):
@@ -1292,9 +1283,10 @@ class MessageHandler:
                 reply_to_telegram_message_id = getattr(message.reply_to_message, "id", None)
 
             # Check if this is a dev group that should handle all messages
-            from ..notion.utils import is_dev_group
+            # PLACEHOLDER: Revolutionary project context will replace is_dev_group utility
 
-            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+            # PLACEHOLDER: Revolutionary project context will determine workspace type
+        is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
 
             # Store message in chat history even if not responding
             if not (is_private_chat or is_mentioned or is_dev_group_chat):
@@ -1505,9 +1497,10 @@ class MessageHandler:
                 reply_to_telegram_message_id = getattr(message.reply_to_message, "id", None)
 
             # Check if this is a dev group that should handle all messages
-            from ..notion.utils import is_dev_group
+            # PLACEHOLDER: Revolutionary project context will replace is_dev_group utility
 
-            is_dev_group_chat = is_dev_group(chat_id) if not is_private_chat else False
+            # PLACEHOLDER: Revolutionary project context will determine workspace type
+        is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
 
             # Store message in chat history even if not responding
             if not (is_private_chat or is_mentioned or is_dev_group_chat):
