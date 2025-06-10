@@ -138,27 +138,30 @@ Additional specialized personas are planned for future development to provide di
 **Engaging Interactions**: Distinct personalities and communication styles
 **Scalable Architecture**: Easy addition of new personas without disrupting existing functionality
 
-## Current Message Routing
+## Revolutionary Unified Intelligence System
 
-The system uses content-based routing to determine appropriate handling:
+The system uses **intelligent conversational AI** instead of keyword-based routing:
 
 ```python
 async def handle_telegram_message(message, chat_id, **context):
-    """Route messages based on content analysis."""
-    if is_search_request(message):
-        return await handle_search_query(message, chat_id, context)
-    elif is_notion_question(message):
-        return await handle_notion_question(message, chat_id, context)
-    elif is_user_priority_question(message):
-        return await handle_priority_question(message, chat_id, context)
-    else:
-        return await handle_general_question(message, chat_id, context)
+    """Unified intelligent message handling with living project context."""
+    # Revolutionary approach: Single intelligent agent with full context
+    living_context = await get_project_context(chat_id)
+    
+    # Valor agent with always-on project awareness
+    return await valor_agent.handle_message(
+        message, 
+        chat_id, 
+        project_context=living_context,
+        **context
+    )
 ```
 
-**Message Type Detection**:
-- Search requests: "search for", "look up", "what's happening"
-- Notion questions: "project", "task", "psyoptimal", "flextrip"
-- Priority questions: "priority", "should i work on", "what should i do"
-- General questions: Default handling through Valor Engels persona
+**Intelligent Context Integration**:
+- **Living Project Context**: Always-on awareness of current project state
+- **Natural Language Understanding**: No keyword triggers or rigid patterns
+- **Context-Aware Responses**: Decisions based on conversation flow and project needs
+- **Unified Experience**: Single intelligent agent handling all interaction types
+- **Proactive Assistance**: Agent anticipates needs and provides relevant context
 
 This framework provides the foundation for evolving from single-persona interactions to sophisticated multi-agent collaboration while maintaining clear persona identities and effective user experience.
