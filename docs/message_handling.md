@@ -385,12 +385,12 @@ This final step ensures continuous system improvement and prevents accumulation 
 
 ```bash
 # Chat filtering for multi-server deployments
-TELEGRAM_ALLOWED_GROUPS=-1001234567890,-1009876543210  # Comma-separated group IDs
+TELEGRAM_ALLOWED_GROUPS=PsyOPTIMAL,DeckFusion Dev  # Comma-separated workspace names
 # Note: DMs now use username whitelist in workspace_config.json instead of TELEGRAM_ALLOW_DMS
 
 # Example configurations:
-# Server 1 (PsyOPTIMAL only): TELEGRAM_ALLOWED_GROUPS=-1001234567890
-# Server 2 (FlexTrip only):   TELEGRAM_ALLOWED_GROUPS=-1009876543210
+# Server 1 (PsyOPTIMAL only): TELEGRAM_ALLOWED_GROUPS=PsyOPTIMAL,PsyOPTIMAL Dev
+# Server 2 (DeckFusion only): TELEGRAM_ALLOWED_GROUPS=Tom's Team,DeckFusion Dev
 # Server 3 (DMs only):        TELEGRAM_ALLOWED_GROUPS= (DM users controlled by dm_whitelist)
 ```
 
@@ -557,7 +557,7 @@ Based on `scripts/list_telegram_groups.py` output:
 **Notes:**
 - ✅ **Mapped groups** have workspace configurations in `config/workspace_config.json`
 - ⚠️ **Unmapped groups** are listed in `deprecated_mappings` section
-- All groups currently show "access denied" until added to `TELEGRAM_ALLOWED_GROUPS` environment variable
+- All groups currently show "access denied" until their workspace name is added to `TELEGRAM_ALLOWED_GROUPS` environment variable
 
 ### Workspace Security Features:
 

@@ -4,7 +4,7 @@
       "notion_db_url": "https://www.notion.so/yudame/****",
       "description": "Yudame team chat and project management",
       "working_directory": "/Users/valorengels/src/ai",
-      "telegram_chat_ids": ["-4719889199"],
+      "telegram_chat_id": "-4719889199",
       "aliases": ["yudame"],
       "daydream_priority": 10
     },
@@ -12,7 +12,7 @@
       "notion_db_url": "https://www.notion.so/yudame/****",
       "description": "Yudame development team tasks and management",
       "working_directory": "/Users/valorengels/src/ai",
-      "telegram_chat_ids": ["-4891178445"],
+      "telegram_chat_id": "-4891178445",
       "aliases": ["yudame dev"],
       "is_dev_group": true,
       "daydream_priority": 9
@@ -21,7 +21,7 @@
       "notion_db_url": "https://www.notion.so/yudame/****",
       "description": "Verkstad project management",
       "working_directory": "/Users/valorengels/src/verkstad",
-      "telegram_chat_ids": ["-1002455228990"],
+      "telegram_chat_id": "-1002455228990",
       "aliases": ["verkstad"],
       "daydream_priority": 7
     },
@@ -29,7 +29,7 @@
       "notion_db_url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
       "description": "PsyOPTIMAL team chat and project management",
       "working_directory": "/Users/valorengels/src/psyoptimal",
-      "telegram_chat_ids": ["-1002600253717"],
+      "telegram_chat_id": "-1002600253717",
       "aliases": ["psyoptimal", "PO"],
       "daydream_priority": 0
     },
@@ -37,7 +37,7 @@
       "notion_db_url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
       "description": "PsyOPTIMAL development tasks and management",
       "working_directory": "/Users/valorengels/src/psyoptimal",
-      "telegram_chat_ids": ["-4897329503"],
+      "telegram_chat_id": "-4897329503",
       "aliases": ["psyoptimal dev", "PO dev"],
       "is_dev_group": true,
       "daydream_priority": 7
@@ -46,7 +46,7 @@
       "notion_db_url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
       "description": "DeckFusion team chat and project management",
       "working_directory": "/Users/valorengels/src/deckfusion",
-      "telegram_chat_ids": ["-1002374450243"],
+      "telegram_chat_id": "-1002374450243",
       "aliases": ["deckfusion", "DF", "tom", "toms team"],
       "daydream_priority": 0
     },
@@ -54,7 +54,7 @@
       "notion_db_url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
       "description": "DeckFusion development tasks and management",
       "working_directory": "/Users/valorengels/src/deckfusion",
-      "telegram_chat_ids": ["-1002553869320"],
+      "telegram_chat_id": "-1002553869320",
       "aliases": ["deckfusion dev", "DF dev"],
       "is_dev_group": true,
       "daydream_priority": 5
@@ -63,7 +63,7 @@
       "notion_db_url": "https://www.notion.so/yudame/****",
       "description": "FlexTrip team chat and project management",
       "working_directory": "/Users/valorengels/src/flextrip",
-      "telegram_chat_ids": [],
+      "telegram_chat_id": null,
       "aliases": ["flextrip"],
       "daydream_priority": 0
     },
@@ -71,7 +71,7 @@
       "notion_db_url": "https://www.notion.so/yudame/****",
       "description": "FlexTrip team development tasks and management",
       "working_directory": "/Users/valorengels/src/flextrip",
-      "telegram_chat_ids": [],
+      "telegram_chat_id": null,
       "aliases": ["flextrip dev"],
       "is_dev_group": true,
       "daydream_priority": 0
@@ -80,7 +80,7 @@
       "notion_db_url": "https://www.notion.so/yudame/****",
       "description": "Test group for Valor bot testing and development",
       "working_directory": "/Users/valorengels/src/test",
-      "telegram_chat_ids": ["-4818206585"],
+      "telegram_chat_id": "-4818206585",
       "aliases": ["test", "valor test"],
       "is_test_group": true,
       "daydream_priority": 2

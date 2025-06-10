@@ -51,7 +51,7 @@ class TestScreenshotHandoffRealWorkspace(unittest.TestCase):
                     "database_id": "test-db-id",
                     "workspace_type": "test",
                     "working_directory": self.workspace_root,
-                    "telegram_chat_ids": ["-123456789"],
+                    "telegram_chat_id": "-123456789",
                     "aliases": ["test"],
                     "allowed_directories": [self.workspace_root]
                 }

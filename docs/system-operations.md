@@ -159,7 +159,7 @@ MAX_CONVERSATION_HISTORY=50
 AGENT_TIMEOUT_SECONDS=30
 
 # Telegram Chat Filtering (Multi-Server Setup)
-TELEGRAM_ALLOWED_GROUPS=-1002600253717,-4897329503  # Comma-separated group IDs
+TELEGRAM_ALLOWED_GROUPS=PsyOPTIMAL,PsyOPTIMAL Dev  # Comma-separated workspace names
 TELEGRAM_ALLOW_DMS=false  # DMs now use user whitelist instead of global setting
 ```
 

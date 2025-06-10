@@ -50,22 +50,50 @@ class MessageHandler:
                 self.allowed_groups = set()
                 return
 
-            # Parse allowed groups from environment
+            # Parse allowed groups from environment (workspace names)
             allowed_groups_env = os.getenv("TELEGRAM_ALLOWED_GROUPS", "")
             self.allowed_groups = set()
             if allowed_groups_env.strip():
                 try:
-                    # Parse comma-separated group chat IDs
-                    group_ids = [
-                        int(group_id.strip())
-                        for group_id in allowed_groups_env.split(",")
-                        if group_id.strip()
+                    # Parse comma-separated workspace names and map to chat IDs
+                    workspace_names = [
+                        name.strip()
+                        for name in allowed_groups_env.split(",")
+                        if name.strip()
                     ]
-                    self.allowed_groups = set(group_ids)
-                    logger.info(
-                        f"Group whitelist configured: {len(self.allowed_groups)} groups allowed"
-                    )
-                except ValueError as e:
+                    
+                    # Load workspace config to map names to chat IDs
+                    import json
+                    from pathlib import Path
+                    config_file = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
+                    if config_file.exists():
+                        with open(config_file) as f:
+                            config = json.load(f)
+                        
+                        workspaces = config.get("workspaces", {})
+                        group_ids = []
+                        resolved_workspaces = []
+                        
+                        for workspace_name in workspace_names:
+                            if workspace_name in workspaces:
+                                chat_id = workspaces[workspace_name].get("telegram_chat_id")
+                                if chat_id:
+                                    group_ids.append(int(chat_id))
+                                    resolved_workspaces.append(workspace_name)
+                                else:
+                                    logger.warning(f"Workspace '{workspace_name}' has no telegram_chat_id")
+                            else:
+                                logger.warning(f"Unknown workspace '{workspace_name}' in TELEGRAM_ALLOWED_GROUPS")
+                        
+                        self.allowed_groups = set(group_ids)
+                        logger.info(
+                            f"Group whitelist configured: {len(self.allowed_groups)} groups allowed from workspaces: {', '.join(resolved_workspaces)}"
+                        )
+                    else:
+                        logger.error("Workspace config not found. Cannot resolve TELEGRAM_ALLOWED_GROUPS.")
+                        self.allowed_groups = set()
+                        
+                except Exception as e:
                     logger.error(f"Error parsing TELEGRAM_ALLOWED_GROUPS: {e}. Denying all groups.")
                     self.allowed_groups = set()
             else:

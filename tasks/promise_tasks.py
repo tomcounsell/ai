@@ -1332,20 +1332,18 @@ def get_workspace_priorities(conn, workspaces: Dict[str, Any]) -> list:
             # Use configured daydream_priority (higher = more important)
             priority_score = workspace_data.get('daydream_priority', 5)  # Default priority 5
             
-            # Get recent activity level for this workspace based on chat_ids
-            chat_ids = workspace_data.get('telegram_chat_ids', [])
+            # Get recent activity level for this workspace based on chat_id
+            chat_id = workspace_data.get('telegram_chat_id')
             activity_score = 0
             
-            if chat_ids:
-                # Convert to string format for SQL
-                chat_id_str = ','.join(str(cid) for cid in chat_ids)
+            if chat_id:
                 try:
-                    result = conn.execute(f"""
+                    result = conn.execute("""
                         SELECT COUNT(*) as task_count
                         FROM promises 
-                        WHERE chat_id IN ({chat_id_str})
+                        WHERE chat_id = ?
                         AND created_at > datetime('now', '-7 days')
-                    """).fetchone()
+                    """, (str(chat_id),)).fetchone()
                     activity_score = result[0] if result else 0
                 except Exception:
                     # If query fails, fall back to directory existence check

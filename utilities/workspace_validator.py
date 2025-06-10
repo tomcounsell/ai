@@ -31,7 +31,7 @@ class WorkspaceConfig:
     workspace_type: WorkspaceType
     notion_database_id: str
     allowed_directories: List[str]
-    telegram_chat_ids: Set[str]
+    telegram_chat_id: Optional[str]
     aliases: List[str]
 
 
@@ -168,31 +168,44 @@ class WorkspaceValidator:
         
         # Load workspaces from the new consolidated config format
         for workspace_name, workspace_data in config.get("workspaces", {}).items():
+            # Derive workspace_type from working_directory
+            from integrations.notion.utils import derive_workspace_type_from_directory
+            working_directory = workspace_data.get("working_directory", "")
+            workspace_type_str = derive_workspace_type_from_directory(working_directory)
+            
             # Map workspace_type string to enum
-            workspace_type_str = workspace_data.get("workspace_type", "").lower()
             if workspace_type_str == "deckfusion":
                 workspace_type = WorkspaceType.DECKFUSION
             elif workspace_type_str == "psyoptimal":
                 workspace_type = WorkspaceType.PSYOPTIMAL
             elif workspace_type_str == "flextrip":
                 workspace_type = WorkspaceType.FLEXTRIP
-            elif workspace_type_str == "yudame":
-                workspace_type = WorkspaceType.YUDAME
+            elif workspace_type_str == "ai":
+                workspace_type = WorkspaceType.AI
             elif workspace_type_str == "verkstad":
                 workspace_type = WorkspaceType.VERKSTAD
+            elif workspace_type_str == "test":
+                workspace_type = WorkspaceType.TEST
             else:
                 # Skip unknown workspace types
                 continue
             
-            # Convert telegram_chat_ids list to set of strings
-            telegram_chat_ids = set(str(chat_id) for chat_id in workspace_data.get("telegram_chat_ids", []))
+            # Get single telegram_chat_id
+            telegram_chat_id = workspace_data.get("telegram_chat_id")
+            if telegram_chat_id is not None:
+                telegram_chat_id = str(telegram_chat_id)
+            
+            # Extract database_id from notion_db_url
+            from integrations.notion.utils import extract_database_id_from_url
+            notion_db_url = workspace_data.get("notion_db_url", "")
+            database_id = extract_database_id_from_url(notion_db_url)
             
             workspaces[workspace_name] = WorkspaceConfig(
                 name=workspace_name,
                 workspace_type=workspace_type,
-                notion_database_id=workspace_data["database_id"],
+                notion_database_id=database_id,
                 allowed_directories=workspace_data.get("allowed_directories", []),
-                telegram_chat_ids=telegram_chat_ids,
+                telegram_chat_id=telegram_chat_id,
                 aliases=workspace_data.get("aliases", [])
             )
         
@@ -202,8 +215,8 @@ class WorkspaceValidator:
         """Build mapping from chat IDs to workspace names"""
         chat_mapping = {}
         for workspace_name, workspace in self.workspaces.items():
-            for chat_id in workspace.telegram_chat_ids:
-                chat_mapping[chat_id] = workspace_name
+            if workspace.telegram_chat_id:
+                chat_mapping[workspace.telegram_chat_id] = workspace_name
         return chat_mapping
     
     def get_workspace_for_chat(self, chat_id: str) -> Optional[str]:
@@ -430,7 +443,7 @@ class WorkspaceValidator:
                 "type": workspace.workspace_type.value,
                 "notion_database_id": workspace.notion_database_id,
                 "allowed_directories": workspace.allowed_directories,
-                "telegram_chat_ids": list(workspace.telegram_chat_ids),
+                "telegram_chat_id": workspace.telegram_chat_id,
                 "aliases": workspace.aliases
             }
         return result
