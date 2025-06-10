@@ -955,7 +955,7 @@ def ollama_daydream_analysis(context: Dict[str, Any]) -> str:
         response = requests.post(
             'http://localhost:11434/api/generate',
             json={
-                'model': 'llama3.2',  # Use lightweight model for daydreaming
+                'model': 'gemma3:12b-it-qat',  # Use available Gemma model for daydreaming
                 'prompt': prompt,
                 'stream': False,
                 'options': {
