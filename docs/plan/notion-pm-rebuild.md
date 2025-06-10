@@ -1,161 +1,297 @@
-# Notion PM Integration Rebuild Plan
+# Notion Integration Rebuild: First Principles Approach
 
-## Overview
+## Vision: Notion as Valor's Natural Development Workspace
 
-Rebuild the Notion integration from the ground up to focus on Project Management (PM) tasks for the Valor agent. The goal is for Valor to intelligently check PM tasks in Notion to know what's assigned to him and see what the rest of the dev team is working on.
+**Core Principle**: Valor should interact with Notion exactly like a human software engineer - as their primary source of truth for project context, task management, and team coordination.
 
-## Current State Analysis
+### How Human Engineers Use Notion
+1. **Project Context**: Check project status, understand current priorities and blockers
+2. **Task Management**: See what's assigned, update progress, mark tasks complete
+3. **Team Coordination**: Understand what teammates are working on, identify dependencies
+4. **Documentation**: Reference specs, requirements, and technical decisions
+5. **Planning**: Understand roadmaps, sprint goals, and upcoming milestones
+6. **Communication**: Leave updates, ask questions, coordinate with team
 
-### Problems with Current System
-- **Outdated "scout" terminology** - Not aligned with PM-focused purpose
-- **Keyword triggers** - Hardcoded pattern matching instead of intelligent decision-making
-- **Redundant workspace resolution** - Manual alias checking when chats are already mapped to workspaces
-- **Generic querying** - Not focused on PM tasks and assignments
+### Valor's Notion Superpowers
+Unlike humans, Valor can:
+- **Instant Context Switch**: Seamlessly access any project's context in seconds
+- **Cross-Project Visibility**: Understand dependencies and connections across all workspaces
+- **Real-time Updates**: Always have the latest project state without manual refreshing
+- **Intelligent Synthesis**: Combine project data with technical expertise for actionable insights
 
-### Current Architecture Issues
-- `notion_scout.py` with heavy "scout" terminology throughout
-- Keyword trigger functions in `/integrations/telegram/utils.py`:
-  - `is_notion_question()` with hardcoded project names
-  - `is_user_priority_question()` with rigid pattern matching
-- Manual workspace resolution in Telegram handlers
-- Complex alias system for CLI that's not needed for PM workflows
+## First Principles Analysis
 
-## New PM-Focused Design
+### Fundamental Problems with Current Approach
+The current system treats Notion as a **data source** rather than a **development workspace**:
 
-### Core Concept
-- **Purpose**: Valor agent checks PM tasks in Notion to know what's assigned to him and see what the dev team is working on
-- **Trigger**: Agent intelligence determines when to check PM tasks (no keyword triggers)
-- **Scope**: Each workspace maps to a specific Notion database (PM todo list)
-- **Focus**: Task assignment visibility and team status
+- **Reactive instead of Proactive**: Only checks Notion when "triggered"
+- **Query-Based instead of Context-Aware**: Asks specific questions rather than maintaining ongoing project awareness
+- **Isolated instead of Integrated**: Notion data separate from development workflow
+- **Static instead of Dynamic**: Point-in-time snapshots rather than living project state
 
-### Key Principles
-1. **Intelligent Decision Making**: Valor agent determines PM task relevance based on conversation context
-2. **Workspace Isolation**: Each chat is already tied to its specific workspace via `config/workspace_config.json`
-3. **PM-Focused Interface**: Functions specifically designed for assignment status and team visibility
-4. **Simplified Architecture**: Remove redundant complexity and focus on core PM needs
+### How Engineers Actually Work
+Engineers don't "query" their project management tools - they **live in them**:
 
-## New Architecture
+1. **Constant Context**: Always aware of current sprint, blockers, priorities
+2. **Proactive Updates**: Check in regularly, update status, communicate progress  
+3. **Integrated Workflow**: PM context influences all technical decisions
+4. **Team Awareness**: Understand dependencies and coordinate naturally
 
-### 1. File Restructuring
+## Revolutionary Design: Living Project Context
+
+### Core Philosophy: Always-On Project Awareness
+Valor should maintain **persistent awareness** of project context, not reactive querying:
+
+```python
+# Instead of: "Check Notion when triggered"
+# New paradigm: "Always know the project state"
+
+class ProjectContext:
+    current_tasks: List[Task]           # What I'm working on
+    team_status: Dict[str, Task]        # What teammates are doing  
+    blockers: List[Blocker]             # Current impediments
+    priorities: List[Priority]          # This week's focus
+    recent_updates: List[Update]        # Latest changes
+    upcoming_deadlines: List[Deadline]  # Time-sensitive items
+```
+
+### Integration Points: Notion as Development Context
+
+#### 1. **Session Initialization** 
+Every conversation starts with fresh project context:
+```python
+# On chat start or significant time gap
+await refresh_project_context(workspace)
+# Valor knows current state before first message
+```
+
+#### 2. **Progress Integration**
+Development work automatically updates Notion:
+```python
+# After completing tasks via Claude Code
+await update_task_progress(task_id, status="completed", notes=work_summary)
+# Notion reflects actual development progress
+```
+
+#### 3. **Decision Support**
+Project context informs all technical decisions:
+```python
+# When asked "what should I work on?"
+# Consider: current sprint goals, blockers, dependencies, deadlines
+# Provide intelligent prioritization based on full project state
+```
+
+#### 4. **Team Coordination**
+Natural awareness of team activities:
+```python
+# "Is anyone working on the auth system?"
+# Instant answer based on current team status
+# No manual querying required
+```
+
+## Revolutionary Architecture: Living Project Context
+
+### 1. Context Management System
 ```
 /integrations/notion/
-├── pm_engine.py          # Renamed from query_engine.py, PM-focused
-├── task_manager.py       # New: Core PM task management functions
-└── utils.py              # Simplified workspace utilities
+├── project_context.py        # Always-on project awareness
+├── task_lifecycle.py         # Task creation, updates, completion  
+├── team_coordination.py      # Real-time team status tracking
+└── workspace_sync.py         # Bi-directional Notion synchronization
 
-/agents/
-├── pm_task_manager.py    # Renamed from notion_scout.py, PM CLI tool
-└── valor/                # Valor agent integration
+/agents/valor/
+├── project_awareness.py      # Persistent project context integration
+└── development_workflow.py   # Notion-integrated development actions
 
 /mcp_servers/
-└── pm_tools.py           # Updated MCP tools for PM workflows
+└── project_context_tools.py  # Rich project context for Claude Code
 ```
 
-### 2. New PM-Focused Interface
+### 2. Living Context Interface
 ```python
-# Core PM functions
-def get_my_assigned_tasks(workspace_name: str) -> str:
-    """Get tasks assigned to Valor in this workspace"""
+class ProjectContext:
+    """Always-current project state that updates continuously"""
     
-def get_team_status(workspace_name: str) -> str:
-    """Get what the dev team is working on"""
-    
-def check_pm_dashboard(workspace_name: str, context: str) -> str:
-    """Intelligent PM task analysis based on conversation context"""
-
-def get_task_assignments(workspace_name: str, assignee: str = None) -> str:
-    """Get task assignments for specific team member or all"""
-
-def check_sprint_status(workspace_name: str) -> str:
-    """Get current sprint/milestone status"""
-```
-
-### 3. MCP Tool Updates
-```python
-@mcp.tool()
-def check_pm_tasks(workspace_name: str, focus: str = "assignments", chat_id: str = "") -> str:
-    """Check PM tasks with focus on assignments, team status, or sprint progress.
-    
-    Focus options:
-    - "assignments" - Tasks assigned to Valor
-    - "team" - What the dev team is working on  
-    - "sprint" - Current sprint/milestone status
-    - "all" - Comprehensive PM dashboard
-    """
-```
-
-### 4. Agent Integration Pattern
-```python
-# Valor agent integration
-class ValorAgent:
-    def should_check_pm_tasks(self, message_context: str) -> bool:
-        """Intelligent determination of when to check PM tasks"""
-        # LLM-based decision making, no keyword triggers
+    def get_current_focus(self) -> str:
+        """What I should be working on right now"""
         
-    def get_pm_context(self, workspace_name: str, conversation_context: str) -> str:
-        """Get relevant PM context based on conversation"""
-        # Contextual PM task retrieval
+    def get_team_status(self) -> Dict[str, str]:
+        """Real-time view of what everyone is doing"""
+        
+    def get_blockers_and_dependencies(self) -> List[str]:
+        """Current impediments and waiting-for items"""
+        
+    def update_progress(self, work_summary: str) -> None:
+        """Automatically update Notion with completed work"""
+        
+    def check_for_updates(self) -> List[str]:
+        """What's changed since I last checked"""
+        
+    def get_context_for_decision(self, technical_question: str) -> str:
+        """Project context relevant to this technical decision"""
 ```
 
-## Implementation Steps
+### 3. Integrated Development Actions
+```python
+class NotionIntegratedDevelopment:
+    """Development actions that automatically coordinate with Notion"""
+    
+    async def start_task(self, task_id: str) -> str:
+        """Begin work on task, update status in Notion"""
+        
+    async def complete_task(self, task_id: str, work_summary: str) -> str:
+        """Mark complete in Notion with technical details"""
+        
+    async def report_blocker(self, blocker_description: str) -> str:
+        """Log blocker in Notion for team visibility"""
+        
+    async def request_review(self, task_id: str, review_notes: str) -> str:
+        """Move to review status with context"""
+```
 
-### Phase 1: Remove Legacy System
-- [x] Remove keyword trigger functions (`is_notion_question`, `is_user_priority_question`)
-- [x] Remove hardcoded project name checking in Telegram handlers
-- [ ] Rename `notion_scout.py` to `pm_task_manager.py`
-- [ ] Remove "scout" terminology throughout codebase
-- [ ] Clean up alias system (keep only for CLI convenience)
+### 4. Claude Code Integration
+```python
+# Enhanced MCP tools with rich project context
+@mcp.tool()
+def get_development_context(workspace_name: str, chat_id: str = "") -> str:
+    """Provide Claude Code with full project context including:
+    - Current sprint goals and priorities
+    - My assigned tasks and their status
+    - Team dependencies and blockers  
+    - Recent project updates and decisions
+    - Technical context from Notion specs
+    """
 
-### Phase 2: Create PM-Focused Core
-- [ ] Create `task_manager.py` with PM-specific functions
-- [ ] Refactor `query_engine.py` to `pm_engine.py` with PM focus
-- [ ] Implement assignment-focused querying
-- [ ] Add team status visibility functions
+@mcp.tool()  
+def update_task_progress(task_id: str, work_summary: str, status: str = "completed") -> str:
+    """Update Notion after Claude Code completes development work"""
 
-### Phase 3: Update Integration Points
-- [ ] Update MCP tools in `pm_tools.py` for PM workflows
-- [ ] Integrate PM functions with Valor agent
-- [ ] Update workspace configuration for PM-specific metadata
-- [ ] Remove redundant workspace resolution logic
+@mcp.tool()
+def create_task_from_development(title: str, description: str, technical_details: str) -> str:
+    """Create new Notion task from development discovery"""
+```
 
-### Phase 4: Testing & Validation
-- [ ] Test PM task assignment queries
-- [ ] Validate team status visibility
-- [ ] Test Valor agent's intelligent PM task checking
-- [ ] Verify workspace isolation in PM context
+## Implementation Strategy: Revolutionary vs Evolutionary
 
-## Expected Outcomes
+### Phase 1: Foundation - Living Context Infrastructure
+**Goal**: Build the always-on project awareness foundation
 
-### User Experience
-1. **Natural Interaction**: Valor intelligently knows when to check PM tasks
-2. **Assignment Awareness**: Clear visibility into what's assigned to Valor
-3. **Team Coordination**: Understanding of what teammates are working on
-4. **Context-Aware**: PM task checking based on conversation relevance
+1. **Project Context Engine**
+   ```python
+   # /integrations/notion/project_context.py
+   class LiveProjectContext:
+       """Maintains real-time project state"""
+       async def initialize(workspace_name: str)
+       async def refresh_context()  
+       def get_current_state() -> ProjectState
+   ```
 
-### Technical Benefits
-1. **Simplified Architecture**: Remove keyword triggers and redundant logic
-2. **Focused Interface**: PM-specific functions instead of generic querying
-3. **Intelligent Decision Making**: LLM-driven relevance detection
-4. **Workspace Isolation**: Proper chat-to-workspace mapping usage
+2. **Session Integration**
+   ```python
+   # Valor agent starts every session with fresh context
+   await self.project_context.initialize(workspace_name)
+   # Always knows current project state before first message
+   ```
 
-## Migration Notes
+3. **Basic MCP Integration**
+   ```python
+   @mcp.tool()
+   def get_project_context(workspace_name: str) -> str:
+       """Provide current project state to Claude Code"""
+   ```
 
-### Backward Compatibility
-- CLI tools maintain workspace aliases for user convenience
-- MCP tools provide clear migration path from old to new functions
-- Workspace configuration remains unchanged (already consolidated)
+### Phase 2: Development Workflow Integration  
+**Goal**: Make Notion part of the development process
 
-### Configuration Changes
-- No changes to `workspace_config.json` required
-- Environment variables remain the same
-- Workspace-to-database mapping stays intact
+1. **Task Lifecycle Management**
+   ```python
+   # Automatic task updates after Claude Code work
+   await update_task_progress(task_id, completed_work_summary)
+   ```
 
-## Success Criteria
+2. **Development-Aware Context**
+   ```python
+   # Claude Code gets rich context for every development task
+   context = get_development_context(workspace, technical_question)
+   # Includes current sprint goals, dependencies, specs
+   ```
 
-1. **Valor Agent Intelligence**: Agent correctly determines when to check PM tasks without keyword triggers
-2. **Assignment Clarity**: Clear visibility into Valor's assigned tasks
-3. **Team Awareness**: Understanding of team member work status
-4. **Simplified Codebase**: Removal of redundant logic and keyword triggers
-5. **Maintained Functionality**: All current PM query capabilities preserved with improved focus
+3. **Bi-directional Synchronization**
+   ```python
+   # Changes in development workflow reflect in Notion
+   # Changes in Notion immediately available to development
+   ```
 
-This rebuild transforms the Notion integration from a generic "scouting" system into a focused PM task management tool that aligns with Valor's role and the team's workflow needs.
+### Phase 3: Advanced Team Coordination
+**Goal**: Full team awareness and coordination
+
+1. **Real-time Team Status**
+   ```python
+   # Always know what teammates are working on
+   team_status = get_live_team_status()
+   # Understand dependencies and blockers in real-time
+   ```
+
+2. **Intelligent Decision Support**
+   ```python
+   # "What should I work on?" considers:
+   # - Current sprint priorities
+   # - Team dependencies  
+   # - My skills and availability
+   # - Project deadlines and blockers
+   ```
+
+3. **Proactive Coordination**
+   ```python
+   # Valor proactively identifies coordination opportunities
+   # "FYI, Tom is blocked on the auth system you're working on"
+   ```
+
+## Revolutionary Outcomes
+
+### For Valor
+- **Never out of context**: Always knows current project state
+- **Seamless workflow**: Development and PM perfectly integrated  
+- **Intelligent prioritization**: Context-aware work recommendations
+- **Automatic updates**: Progress tracked without manual effort
+
+### For the Team  
+- **Real-time visibility**: Always current status in Notion
+- **Better coordination**: Valor understands dependencies and blockers
+- **Rich context**: Technical work includes project context
+- **Reduced overhead**: Less manual PM tool management
+
+### For Development Process
+- **Context-driven development**: Every technical decision informed by project state
+- **Integrated documentation**: Development work automatically documented in Notion
+- **Proactive problem solving**: Blockers and dependencies identified early
+- **Seamless handoffs**: Rich context for task transitions
+
+## Success Metrics
+
+### Quantitative
+- **Context freshness**: Project state always <5 minutes old
+- **Update automation**: 90%+ of task updates happen automatically  
+- **Response relevance**: 95%+ of responses include appropriate project context
+- **Development efficiency**: 30% reduction in context-switching overhead
+
+### Qualitative  
+- **Natural interaction**: Conversations feel like talking to a fully-informed teammate
+- **Proactive assistance**: Valor anticipates needs and coordination opportunities
+- **Seamless workflow**: PM and development feel like one integrated process
+- **Team alignment**: Everyone always knows current priorities and status
+
+## Migration Philosophy
+
+**Revolutionary, not evolutionary**: This isn't about improving the current system - it's about fundamentally changing how Valor relates to project management.
+
+**From**: Query-based project data access
+**To**: Living, always-current project awareness
+
+**From**: Separate PM and development workflows  
+**To**: Integrated development-PM lifecycle
+
+**From**: Manual status updates and coordination
+**To**: Automatic synchronization and proactive coordination
+
+This transformation makes Valor the most project-aware team member, combining technical expertise with perfect project context to deliver exceptional development outcomes.
