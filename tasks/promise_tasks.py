@@ -768,39 +768,78 @@ def gather_daydream_context() -> Dict[str, Any]:
         'timestamp': datetime.utcnow().isoformat(),
         'workspace_analysis': {},
         'recent_activity': {},
-        'codebase_insights': {}
+        'codebase_insights': {},
+        'system_metrics': {},
+        'development_trends': {}
     }
     
-    # Get workspace configurations
-    workspace_config = load_workspace_config()
-    
-    # Analyze each active workspace
-    for workspace_name, workspace_data in workspace_config.get('workspaces', {}).items():
-        if workspace_data.get('working_directory'):
-            workspace_context = analyze_workspace_for_daydream(
-                workspace_name, 
-                workspace_data['working_directory']
-            )
-            context['workspace_analysis'][workspace_name] = workspace_context
-    
-    # Get recent promise activity for trend analysis
-    with get_database_connection() as conn:
-        conn.row_factory = sqlite3.Row  # Enable dict-like access
-        recent_promises = conn.execute("""
-            SELECT 
-                task_description,
-                task_type,
-                status,
-                created_at,
-                completed_at,
-                chat_id
-            FROM promises 
-            WHERE created_at > datetime('now', '-7 days')
-            ORDER BY created_at DESC
-            LIMIT 50
-        """).fetchall()
+    try:
+        # Get workspace configurations
+        workspace_config = load_workspace_config()
         
-        context['recent_activity'] = [dict(row) for row in recent_promises] if recent_promises else []
+        # Analyze each active workspace
+        workspaces = workspace_config.get('workspaces', {})
+        for workspace_name, workspace_data in workspaces.items():
+            if isinstance(workspace_data, dict) and workspace_data.get('working_directory'):
+                try:
+                    workspace_context = analyze_workspace_for_daydream(
+                        workspace_name, 
+                        workspace_data['working_directory']
+                    )
+                    context['workspace_analysis'][workspace_name] = workspace_context
+                except Exception as e:
+                    logger.warning(f"Failed to analyze workspace {workspace_name}: {e}")
+        
+        # Get recent promise activity for trend analysis
+        with get_database_connection() as conn:
+            # Get recent promises with proper column mapping
+            recent_promises = conn.execute("""
+                SELECT 
+                    task_description,
+                    task_type,
+                    status,
+                    created_at,
+                    completed_at,
+                    chat_id
+                FROM promises 
+                WHERE created_at > datetime('now', '-7 days')
+                ORDER BY created_at DESC
+                LIMIT 50
+            """).fetchall()
+            
+            # Convert to list of dictionaries properly
+            context['recent_activity'] = []
+            if recent_promises:
+                for row in recent_promises:
+                    try:
+                        # Access by index since row_factory might not be set
+                        context['recent_activity'].append({
+                            'task_description': row[0],
+                            'task_type': row[1],
+                            'status': row[2],
+                            'created_at': row[3],
+                            'completed_at': row[4],
+                            'chat_id': row[5]
+                        })
+                    except Exception as e:
+                        logger.warning(f"Failed to process promise row: {e}")
+                        continue
+            
+            # Get system metrics
+            context['system_metrics'] = gather_system_metrics(conn)
+            
+            # Get development trends
+            context['development_trends'] = gather_development_trends(conn)
+    
+    except Exception as e:
+        logger.error(f"Error gathering daydream context: {e}")
+        # Return minimal context to prevent complete failure
+        context = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'workspace_analysis': {},
+            'recent_activity': [],
+            'error': str(e)
+        }
     
     return context
 
@@ -809,6 +848,7 @@ def analyze_workspace_for_daydream(workspace_name: str, working_dir: str) -> Dic
     """Analyze a workspace directory for daydreaming context."""
     import os
     import subprocess
+    import glob
     
     workspace_info = {
         'name': workspace_name,
@@ -817,7 +857,10 @@ def analyze_workspace_for_daydream(workspace_name: str, working_dir: str) -> Dic
         'git_status': None,
         'recent_commits': [],
         'file_stats': {},
-        'tech_stack': []
+        'tech_stack': [],
+        'complexity_metrics': {},
+        'quality_indicators': {},
+        'development_activity': {}
     }
     
     if not workspace_info['exists']:
@@ -871,6 +914,9 @@ def analyze_workspace_for_daydream(workspace_name: str, working_dir: str) -> Dic
         for file, tech in common_files.items():
             if os.path.exists(os.path.join(working_dir, file)):
                 workspace_info['tech_stack'].append(tech)
+        
+        # Add enhanced analysis
+        workspace_info = enhance_workspace_analysis(workspace_info, working_dir)
                 
     except Exception as e:
         workspace_info['analysis_error'] = str(e)
@@ -916,36 +962,83 @@ def ollama_daydream_analysis(context: Dict[str, Any]) -> str:
 def build_daydream_prompt(context: Dict[str, Any]) -> str:
     """Build a creative prompt for AI daydreaming."""
     
-    # Summarize workspace activity
+    # Summarize workspace activity with enhanced metrics
     workspace_summary = []
     for name, info in context['workspace_analysis'].items():
         if info.get('exists'):
             tech_stack = ', '.join(info.get('tech_stack', []))
-            file_types = list(info.get('file_stats', {}).keys())[:5]
-            workspace_summary.append(f"- {name}: {tech_stack} ({', '.join(file_types)})")
+            
+            # Add quality indicators
+            quality_info = info.get('quality_indicators', {})
+            quality_flags = []
+            if quality_info.get('has_tests'):
+                quality_flags.append('tests')
+            if quality_info.get('has_docs'):
+                quality_flags.append('docs')
+            if quality_info.get('has_ci'):
+                quality_flags.append('CI')
+            
+            # Add complexity metrics
+            complexity = info.get('complexity_metrics', {})
+            complexity_note = ""
+            if complexity.get('avg_lines_per_file', 0) > 200:
+                complexity_note = " [large files detected]"
+            elif complexity.get('total_python_files', 0) > 50:
+                complexity_note = " [complex codebase]"
+            
+            workspace_line = f"- {name}: {tech_stack}"
+            if quality_flags:
+                workspace_line += f" (has: {', '.join(quality_flags)})"
+            if complexity_note:
+                workspace_line += complexity_note
+            
+            workspace_summary.append(workspace_line)
     
-    # Summarize recent activity
+    # Summarize recent activity with trends
     activity_summary = []
     for activity in context['recent_activity'][:10]:
-        activity_summary.append(f"- {activity['task_type']}: {activity['task_description'][:50]}...")
+        status_emoji = "✅" if activity['status'] == 'completed' else "⏳" if activity['status'] == 'in_progress' else "❌" if activity['status'] == 'failed' else "📋"
+        activity_summary.append(f"- {status_emoji} {activity['task_type']}: {activity['task_description'][:50]}...")
     
-    prompt = f"""You are Valor Engels, a thoughtful software engineer reflecting on your development environment.
+    # Add system metrics if available
+    metrics_summary = ""
+    if 'system_metrics' in context and context['system_metrics']:
+        metrics = context['system_metrics']
+        success_rate = metrics.get('success_rate', 0)
+        total_tasks = sum(stats.get('count', 0) for stats in metrics.get('completion_stats', {}).values())
+        metrics_summary = f"\n\nSYSTEM PERFORMANCE (last 30 days):\n- Success rate: {success_rate}% ({total_tasks} total tasks)"
+        
+        if 'task_types' in metrics:
+            top_tasks = list(metrics['task_types'].items())[:3]
+            task_breakdown = ", ".join([f"{task}: {count}" for task, count in top_tasks])
+            metrics_summary += f"\n- Most common tasks: {task_breakdown}"
+    
+    # Add development trends
+    trends_summary = ""
+    if 'development_trends' in context and context['development_trends'].get('weekly_trends'):
+        recent_weeks = context['development_trends']['weekly_trends'][:3]
+        if recent_weeks:
+            avg_completion_rate = sum(w.get('completion_rate', 0) for w in recent_weeks) / len(recent_weeks)
+            trends_summary = f"\n\nDEVELOPMENT TRENDS:\n- Recent completion rate: {avg_completion_rate:.1f}% (3-week average)"
+    
+    prompt = f"""You are Valor Engels, an AI system performing thoughtful reflection on your development environment and activities.
 
 WORKSPACE OVERVIEW:
 {chr(10).join(workspace_summary) if workspace_summary else '- No active workspaces detected'}
 
 RECENT DEVELOPMENT ACTIVITY:
-{chr(10).join(activity_summary) if activity_summary else '- No recent activity'}
+{chr(10).join(activity_summary) if activity_summary else '- No recent activity'}{metrics_summary}{trends_summary}
 
-As a creative developer, reflect on these observations and provide insights about:
+Time for creative reflection! As an intelligent development system, provide insights about:
 
-1. **Code Patterns**: What patterns do you see in the tech stack and recent work?
-2. **Development Velocity**: How does the activity suggest team productivity and focus?
-3. **Technical Opportunities**: What improvements or optimizations come to mind?
-4. **Future Thinking**: What interesting directions could this work evolve toward?
-5. **Quality Reflection**: Any thoughts on code quality, architecture, or technical debt?
+1. **Architecture Patterns**: What patterns emerge from the workspace analysis and tech stacks?
+2. **Development Velocity**: How does the data suggest productivity trends and focus areas?
+3. **Quality Assessment**: Based on tests, docs, and complexity metrics, what quality insights stand out?
+4. **Technical Opportunities**: What improvements, optimizations, or innovations come to mind?
+5. **Strategic Direction**: Where might this development trajectory lead? What future possibilities emerge?
+6. **Process Insights**: Any observations about development workflows, task patterns, or efficiency?
 
-Respond as Valor would - direct but thoughtful, with a mix of German precision and Californian optimism. Keep it under 400 words and focus on actionable insights rather than generic advice.
+Respond as Valor would - analytical yet creative, combining German engineering precision with California innovation mindset. Focus on actionable insights and creative connections. Keep it under 400 words and avoid generic advice.
 
 Begin your reflection:"""
 
@@ -1048,3 +1141,199 @@ def format_duration(start_time: str, end_time: str) -> str:
             return f"{int(duration.total_seconds() / 3600)} hours"
     except:
         return "unknown duration"
+
+
+def gather_system_metrics(conn) -> Dict[str, Any]:
+    """Gather system-wide metrics for daydreaming analysis."""
+    metrics = {}
+    
+    try:
+        # Promise completion rates
+        completion_stats = conn.execute("""
+            SELECT 
+                status,
+                COUNT(*) as count,
+                AVG(CASE 
+                    WHEN completed_at IS NOT NULL AND created_at IS NOT NULL 
+                    THEN (julianday(completed_at) - julianday(created_at)) * 24 * 60 
+                    ELSE NULL 
+                END) as avg_duration_minutes
+            FROM promises 
+            WHERE created_at > datetime('now', '-30 days')
+            GROUP BY status
+        """).fetchall()
+        
+        metrics['completion_stats'] = {}
+        total_tasks = 0
+        for row in completion_stats:
+            status = row[0]
+            count = row[1]
+            avg_duration = row[2]
+            total_tasks += count
+            metrics['completion_stats'][status] = {
+                'count': count,
+                'avg_duration_minutes': round(avg_duration, 2) if avg_duration else None
+            }
+        
+        # Calculate success rate
+        completed_count = metrics['completion_stats'].get('completed', {}).get('count', 0)
+        metrics['success_rate'] = round((completed_count / total_tasks) * 100, 1) if total_tasks > 0 else 0
+        
+        # Task type distribution
+        task_types = conn.execute("""
+            SELECT task_type, COUNT(*) as count
+            FROM promises 
+            WHERE created_at > datetime('now', '-30 days')
+            GROUP BY task_type
+            ORDER BY count DESC
+        """).fetchall()
+        
+        metrics['task_types'] = {row[0]: row[1] for row in task_types}
+        
+        # Recent activity trends (last 7 days)
+        daily_activity = conn.execute("""
+            SELECT 
+                date(created_at) as day,
+                COUNT(*) as task_count
+            FROM promises 
+            WHERE created_at > datetime('now', '-7 days')
+            GROUP BY date(created_at)
+            ORDER BY day DESC
+        """).fetchall()
+        
+        metrics['daily_activity'] = {row[0]: row[1] for row in daily_activity}
+        
+    except Exception as e:
+        logger.warning(f"Error gathering system metrics: {e}")
+        metrics['error'] = str(e)
+    
+    return metrics
+
+
+def gather_development_trends(conn) -> Dict[str, Any]:
+    """Gather development trend analysis for daydreaming."""
+    trends = {}
+    
+    try:
+        # Weekly completion trends
+        weekly_trends = conn.execute("""
+            SELECT 
+                strftime('%Y-W%W', created_at) as week,
+                COUNT(*) as total_tasks,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_tasks,
+                AVG(CASE 
+                    WHEN completed_at IS NOT NULL AND created_at IS NOT NULL 
+                    THEN (julianday(completed_at) - julianday(created_at)) * 24 * 60 
+                    ELSE NULL 
+                END) as avg_completion_time_minutes
+            FROM promises 
+            WHERE created_at > datetime('now', '-8 weeks')
+            GROUP BY strftime('%Y-W%W', created_at)
+            ORDER BY week DESC
+            LIMIT 8
+        """).fetchall()
+        
+        trends['weekly_trends'] = []
+        for row in weekly_trends:
+            week_data = {
+                'week': row[0],
+                'total_tasks': row[1],
+                'completed_tasks': row[2],
+                'completion_rate': round((row[2] / row[1]) * 100, 1) if row[1] > 0 else 0,
+                'avg_completion_time_minutes': round(row[3], 2) if row[3] else None
+            }
+            trends['weekly_trends'].append(week_data)
+        
+        # Most active chat/workspace
+        chat_activity = conn.execute("""
+            SELECT 
+                chat_id,
+                COUNT(*) as task_count,
+                SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_count
+            FROM promises 
+            WHERE created_at > datetime('now', '-30 days')
+            GROUP BY chat_id
+            ORDER BY task_count DESC
+            LIMIT 5
+        """).fetchall()
+        
+        trends['most_active_chats'] = []
+        for row in chat_activity:
+            chat_data = {
+                'chat_id': row[0],
+                'task_count': row[1],
+                'completed_count': row[2],
+                'completion_rate': round((row[2] / row[1]) * 100, 1) if row[1] > 0 else 0
+            }
+            trends['most_active_chats'].append(chat_data)
+            
+    except Exception as e:
+        logger.warning(f"Error gathering development trends: {e}")
+        trends['error'] = str(e)
+    
+    return trends
+
+
+def enhance_workspace_analysis(workspace_info: Dict[str, Any], working_dir: str) -> Dict[str, Any]:
+    """Add enhanced analysis to workspace info."""
+    import os
+    import glob
+    
+    try:
+        # Code complexity metrics
+        python_files = glob.glob(os.path.join(working_dir, "**/*.py"), recursive=True)
+        workspace_info['complexity_metrics'] = {
+            'total_python_files': len(python_files),
+            'avg_lines_per_file': 0,
+            'large_files': []  # Files > 500 lines
+        }
+        
+        total_lines = 0
+        for py_file in python_files[:20]:  # Limit to first 20 files for performance
+            try:
+                with open(py_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    lines = len(f.readlines())
+                    total_lines += lines
+                    if lines > 500:
+                        rel_path = os.path.relpath(py_file, working_dir)
+                        workspace_info['complexity_metrics']['large_files'].append({
+                            'file': rel_path,
+                            'lines': lines
+                        })
+            except Exception:
+                continue
+        
+        if python_files:
+            workspace_info['complexity_metrics']['avg_lines_per_file'] = round(total_lines / min(len(python_files), 20), 1)
+        
+        # Quality indicators
+        workspace_info['quality_indicators'] = {
+            'has_tests': any(
+                'test' in f.lower() for f in os.listdir(working_dir) 
+                if os.path.isdir(os.path.join(working_dir, f))
+            ),
+            'has_docs': any(
+                f.lower() in ['docs', 'documentation', 'readme.md']
+                for f in os.listdir(working_dir)
+            ),
+            'has_config': any(
+                f in os.listdir(working_dir)
+                for f in ['pyproject.toml', 'setup.py', 'requirements.txt', 'package.json']
+            ),
+            'has_ci': any(
+                f in os.listdir(working_dir)
+                for f in ['.github', '.gitlab-ci.yml', '.travis.yml']
+            )
+        }
+        
+        # Development activity indicators
+        if workspace_info.get('recent_commits'):
+            workspace_info['development_activity'] = {
+                'commit_count_last_10': len(workspace_info['recent_commits']),
+                'recent_commit_messages': workspace_info['recent_commits'][:3]  # Last 3 commits
+            }
+    
+    except Exception as e:
+        workspace_info['enhancement_error'] = str(e)
+    
+    return workspace_info
