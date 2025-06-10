@@ -1026,21 +1026,12 @@ class MessageHandler:
             if not self.notion_scout:
                 return None
 
-            # Check if specific project mentioned and get db_filter
-            text_lower = processed_text.lower()
-            db_filter = None
-            for project_name in ["psyoptimal", "flextrip", "psy", "flex"]:
-                if project_name in text_lower:
-                    from ..notion.utils import resolve_project_name
-
-                    resolved_name, db_id = resolve_project_name(project_name)
-                    if db_id:
-                        db_filter = db_id[:8]
-                        break
+            # Note: Project filtering is handled automatically through chat-to-workspace mapping
+            # Each chat is already tied to its specific workspace in config/workspace_config.json
 
             # Get answer from Notion Scout using the query_all_accessible_databases method
             answer = await self.notion_scout.query_all_accessible_databases(
-                processed_text, db_filter=db_filter
+                processed_text, db_filter=None
             )
 
             return answer
