@@ -1,71 +1,10 @@
 """Utility functions for Telegram integration."""
 
 
-def is_notion_question(text: str) -> bool:
-    """Detect if a message is asking about Notion."""
-    notion_keywords = [
-        "notion",
-        "task",
-        "project",
-        "database",
-        "milestone",
-        "status",
-        "priority",
-        "deadline",
-        "due",
-        "todo",
-        "progress",
-        "development",
-        "psyoptimal",
-        "flextrip",
-        "psy",
-        "flex",
-    ]
-
-    # Refresh/update patterns that should trigger fresh Notion queries
-    refresh_patterns = [
-        "check again",
-        "check notion",
-        "re-check",
-        "refresh",
-        "update",
-        "latest",
-        "current status",
-        "current state",
-        "re-query",
-        "look again",
-        "verify",
-        "double check",
-        "recent",
-        "now",
-        "currently",
-    ]
-
-    text_lower = text.lower()
-    return any(keyword in text_lower for keyword in notion_keywords) or any(
-        pattern in text_lower for pattern in refresh_patterns
-    )
+# Removed hardcoded keyword detection - PM task relevance determined by Valor agent intelligence
 
 
-def is_user_priority_question(text: str) -> bool:
-    """Detect if a message is asking about user's work priorities or next tasks."""
-    priority_patterns = [
-        "what should i work on",
-        "what am i working on",
-        "what are you working on",
-        "what will you work on",
-        "what should you work on",
-        "what's next",
-        "whats next",
-        "next priority",
-        "next task",
-        "upcoming work",
-        "work on next",
-        "priorities",
-        "roadmap",
-    ]
-    text_lower = text.lower()
-    return any(pattern in text_lower for pattern in priority_patterns)
+# Removed hardcoded priority question detection - Valor agent handles PM context intelligently
 
 
 async def generate_catchup_response(missed_messages: list[str], anthropic_client) -> str:

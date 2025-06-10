@@ -7,7 +7,7 @@ from pyrogram.enums import ChatType
 from tools.link_analysis_tool import extract_urls, is_url_only_message, store_link_with_analysis
 
 # All functionality now handled by valor_agent (telegram_chat_agent)
-from .utils import is_user_priority_question
+# Removed keyword-based priority detection - Valor agent handles PM task relevance intelligently
 
 logger = logging.getLogger(__name__)
 
@@ -664,19 +664,13 @@ class MessageHandler:
         try:
             from agents.valor.handlers import handle_telegram_message_with_intent
 
-            # === STEP 17.4.1: PRIORITY QUESTION DETECTION ===
-            print("🎯 Checking if message is a priority question...")
-            is_priority = (
-                is_user_priority_question(processed_text)
-                if "is_user_priority_question" in globals()
-                else False
-            )
-            print(f"   Is priority question: {is_priority}")
+            # === STEP 17.4.1: INTELLIGENT RELEVANCE DETECTION ===
+            print("🎯 Agent will determine PM task relevance intelligently...")
 
-            # === STEP 17.4.2: NOTION CONTEXT RETRIEVAL ===
-            print("📝 Retrieving Notion context...")
+            # === STEP 17.4.2: PROJECT CONTEXT (PLACEHOLDER) ===
+            print("📝 Project context retrieval - awaiting revolutionary rebuild...")
             notion_data = None
-            if self.notion_scout:
+            # PLACEHOLDER: Living project context will replace notion_scout
                 try:
                     is_private_chat = message.chat.type == ChatType.PRIVATE
                     if not is_private_chat:
@@ -878,16 +872,11 @@ class MessageHandler:
             # Use valor agent for message processing
             from agents.valor.handlers import handle_telegram_message
 
-            # Determine if this might be a priority question for context
-            is_priority = (
-                is_user_priority_question(processed_text)
-                if "is_user_priority_question" in globals()
-                else False
-            )
+            # Agent will determine PM task relevance contextually
 
-            # Get notion data - prioritize group-specific database, fallback to priority question detection
+            # PLACEHOLDER: Project context integration
             notion_data = None
-            if self.notion_scout:
+            # Revolutionary living project context will replace this section
                 try:
                     # For group chats, use the group-specific Notion database
                     is_private_chat = message.chat.type == ChatType.PRIVATE
