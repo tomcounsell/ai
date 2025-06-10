@@ -316,7 +316,7 @@ async def handle_user_priority_question(
         context_has_project_info = any(
             keyword in msg["content"].lower()
             for msg in context_messages[-5:]
-            for keyword in ["project", "task", "working on", "psyoptimal", "flextrip"]
+            for keyword in ["project", "task", "working on", "status", "priority", "dev", "development"]
         )
         if not context_has_project_info:
             notion_data = "Notion data unavailable in current implementation"

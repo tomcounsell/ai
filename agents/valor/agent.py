@@ -29,7 +29,7 @@ from tools.valor_delegation_tool import spawn_valor_session
 from tools.image_analysis_tool import analyze_image
 from tools.image_generation_tool import generate_image
 from tools.link_analysis_tool import extract_urls, search_stored_links, store_link_with_analysis
-from tools.notion_tool import query_psyoptimal_workspace
+# Removed hardcoded PsyOPTIMAL import - now using workspace-aware MCP tools
 from tools.search_tool import search_web
 from tools.telegram_history_tool import search_telegram_history, get_telegram_context_summary
 
@@ -656,11 +656,14 @@ def query_notion_projects(
     ctx: RunContext[ValorContext],
     question: str,
 ) -> str:
-    """Query the PsyOPTIMAL workspace for tasks, status, and priorities.
+    """Query the workspace associated with this chat for tasks, status, and priorities.
 
-    This tool searches through the PsyOPTIMAL Notion database to answer questions
-    about tasks, project status, priorities, and development work using AI-powered
-    analysis of the database content.
+    This tool searches through the appropriate Notion database based on the chat's 
+    workspace mapping to answer questions about tasks, project status, priorities, 
+    and development work using AI-powered analysis of the database content.
+
+    WORKSPACE ISOLATION: This tool automatically determines the correct workspace
+    based on the chat context and enforces strict access controls.
 
     Use this when someone asks about:
     - Project status or progress
@@ -675,15 +678,32 @@ def query_notion_projects(
         question: The question about projects or tasks.
 
     Returns:
-        str: AI-generated analysis of PsyOPTIMAL database with specific task details.
+        str: AI-generated analysis of the authorized workspace database with specific task details.
 
     Example:
         >>> query_notion_projects(ctx, "What tasks are ready for dev?")
-        '🎯 **PsyOPTIMAL Status**\n\nFound 3 tasks ready for development...'
+        '🎯 **Project Status**\n\nFound 3 tasks ready for development...'
     """
     try:
-        # Query the PsyOPTIMAL workspace using the unified notion tool
-        result = query_psyoptimal_workspace(question)
+        # Use workspace-aware MCP tool with proper access validation
+        from mcp_servers.pm_tools import query_notion_projects as mcp_query_notion
+        from utilities.workspace_validator import get_workspace_validator
+        
+        # Get chat context
+        chat_id = str(ctx.deps.chat_id) if ctx.deps.chat_id else ""
+        
+        # Determine workspace for this chat
+        if not chat_id:
+            return "❌ Unable to determine workspace: No chat context available"
+        
+        validator = get_workspace_validator()
+        workspace_name = validator.get_workspace_for_chat(chat_id)
+        
+        if not workspace_name:
+            return "❌ Access denied: This chat is not mapped to any workspace"
+        
+        # Query the workspace with proper validation
+        result = mcp_query_notion(workspace_name, question, chat_id)
         return result
     except Exception as e:
         error_str = str(e)

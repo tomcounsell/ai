@@ -750,8 +750,8 @@ def daydream_and_reflect():
         # Gather daydream context
         daydream_context = gather_daydream_context()
         
-        # Use Ollama for creative reflection
-        insights = ollama_daydream_analysis(daydream_context)
+        # Use Aider for creative codebase reflection
+        insights = aider_daydream_analysis(daydream_context)
         
         # Log the AI insights
         log_daydream_insights(insights)
@@ -942,39 +942,87 @@ def analyze_workspace_for_daydream(workspace_name: str, working_dir: str) -> Dic
     return workspace_info
 
 
-def ollama_daydream_analysis(context: Dict[str, Any]) -> str:
-    """Use Ollama to perform creative analysis and generate insights."""
+def aider_daydream_analysis(context: Dict[str, Any]) -> str:
+    """Use Aider to perform creative codebase analysis and generate insights."""
+    import subprocess
+    import tempfile
+    import os
+    
     try:
-        import requests
-        import json
+        # Create a comprehensive analysis prompt for Aider
+        analysis_prompt = build_aider_daydream_prompt(context)
         
-        # Prepare the daydream prompt
-        prompt = build_daydream_prompt(context)
+        # Create temporary file for the prompt
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+            f.write(analysis_prompt)
+            prompt_file = f.name
         
-        # Call local Ollama
-        response = requests.post(
-            'http://localhost:11434/api/generate',
-            json={
-                'model': 'gemma3:12b-it-qat',  # Use available Gemma model for daydreaming
-                'prompt': prompt,
-                'stream': False,
-                'options': {
-                    'temperature': 0.8,  # More creative
-                    'top_p': 0.9,
-                    'max_tokens': 500
-                }
-            },
-            timeout=60
-        )
+        # Create output file for insights
+        output_file = 'logs/daydream_insights.md'
         
-        if response.status_code == 200:
-            result = response.json()
-            return result.get('response', 'No insights generated')
-        else:
-            return f"Ollama request failed: {response.status_code}"
+        try:
+            # Run Aider with our analysis prompt
+            # Include key files for comprehensive analysis
+            key_files = [
+                'main.py',
+                'tasks/promise_tasks.py', 
+                'agents/valor/agent.py',
+                'mcp_servers/social_tools.py',
+                'integrations/telegram/handlers.py',
+                'utilities/database.py',
+                'CLAUDE.md',
+                'config/workspace_config.json'
+            ]
             
+            # Filter to only existing files
+            existing_files = [f for f in key_files if os.path.exists(f)]
+            
+            cmd = [
+                '/Users/valorengels/.local/bin/aider',
+                '--model', 'ollama_chat/gemma3:12b-it-qat',
+                '--no-git',
+                '--yes',
+                '--message', f'Read the comprehensive analysis prompt from {prompt_file}. Then explore this AI agent codebase and write detailed insights to {output_file}. Focus on the architecture, patterns, and opportunities for this conversational AI system.'
+            ] + existing_files
+            
+            # Set environment variables
+            env = os.environ.copy()
+            env['OLLAMA_API_BASE'] = 'http://127.0.0.1:11434'
+            
+            # Run Aider with timeout
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+                env=env,
+                cwd=os.getcwd()
+            )
+            
+            # Check if analysis was written to output file
+            if os.path.exists(output_file):
+                with open(output_file, 'r') as f:
+                    insights = f.read()
+                    if insights.strip():
+                        return insights
+            
+            # Fall back to stdout if no file was created
+            if result.stdout:
+                return f"Aider Analysis:\n{result.stdout}"
+            elif result.stderr:
+                return f"Aider encountered issues:\n{result.stderr}"
+            else:
+                return "Aider completed but generated no output"
+                
+        finally:
+            # Clean up temporary prompt file
+            if os.path.exists(prompt_file):
+                os.unlink(prompt_file)
+            
+    except subprocess.TimeoutExpired:
+        return "Aider analysis timed out after 5 minutes"
     except Exception as e:
-        return f"Daydream analysis failed: {str(e)}"
+        return f"Aider daydream analysis failed: {str(e)}"
 
 
 def build_daydream_prompt(context: Dict[str, Any]) -> str:
@@ -1059,6 +1107,115 @@ Time for creative reflection! As an intelligent development system, provide insi
 Respond as Valor would - analytical yet creative, combining German engineering precision with California innovation mindset. Focus on actionable insights and creative connections. Keep it under 400 words and avoid generic advice.
 
 Begin your reflection:"""
+
+    return prompt
+
+
+def build_aider_daydream_prompt(context: Dict[str, Any]) -> str:
+    """Build a comprehensive analysis prompt specifically for Aider codebase exploration."""
+    
+    # Summarize workspace context for Aider
+    workspace_summary = []
+    for name, info in context['workspace_analysis'].items():
+        if info.get('exists'):
+            tech_stack = ', '.join(info.get('tech_stack', []))
+            complexity = info.get('complexity_metrics', {})
+            quality = info.get('quality_indicators', {})
+            
+            quality_items = [k.replace('has_', '') for k, v in quality.items() if v]
+            files_analyzed = complexity.get('files_analyzed', 0)
+            total_files = complexity.get('total_python_files', 0)
+            avg_lines = complexity.get('avg_lines_per_file', 0)
+            
+            workspace_summary.append(f"""
+**{name}:**
+- Tech Stack: {tech_stack}
+- Quality: {', '.join(quality_items) if quality_items else 'None detected'}
+- Code Metrics: {files_analyzed}/{total_files} files analyzed, {avg_lines} avg lines/file
+- Directory: {info.get('directory', 'Unknown')}""")
+    
+    # System performance summary
+    metrics_summary = ""
+    if 'system_metrics' in context and context['system_metrics']:
+        metrics = context['system_metrics']
+        success_rate = metrics.get('success_rate', 0)
+        task_types = metrics.get('task_types', {})
+        metrics_summary = f"""
+**System Performance:**
+- Success Rate: {success_rate}%
+- Task Distribution: {dict(list(task_types.items())[:3]) if task_types else 'No data'}
+- Recent Activity: {len(context.get('recent_activity', []))} tasks in last 7 days"""
+    
+    # Recent development activity
+    activity_summary = ""
+    recent_activities = context.get('recent_activity', [])[:5]
+    if recent_activities:
+        activity_lines = []
+        for activity in recent_activities:
+            status_emoji = "✅" if activity['status'] == 'completed' else "⏳" if activity['status'] == 'in_progress' else "❌"
+            activity_lines.append(f"- {status_emoji} {activity['task_type']}: {activity['task_description'][:60]}...")
+        activity_summary = f"""
+**Recent Development Activity:**
+{chr(10).join(activity_lines)}"""
+    
+    prompt = f"""# Aider Daydreaming Analysis Request
+
+You are Valor Engels, an AI system performing deep codebase reflection and creative analysis. You have been given context about the current development environment and need to provide thoughtful insights.
+
+## Workspace Analysis Context
+{chr(10).join(workspace_summary) if workspace_summary else '- No workspaces analyzed this cycle'}
+
+{metrics_summary}
+
+{activity_summary}
+
+## Analysis Instructions
+
+Please perform a comprehensive analysis of this codebase with the following focus areas:
+
+### 1. Architecture Patterns & Design
+- Examine the codebase structure and identify architectural patterns
+- Look for design patterns, modularity, and code organization
+- Assess the overall system design and component relationships
+
+### 2. Code Quality & Technical Health  
+- Review code complexity, maintainability, and readability
+- Identify potential technical debt or areas for improvement
+- Assess testing coverage and documentation quality
+
+### 3. Development Velocity & Productivity
+- Analyze recent development patterns and commit history
+- Evaluate development workflow efficiency
+- Identify bottlenecks or optimization opportunities
+
+### 4. Technology Stack & Dependencies
+- Review technology choices and their appropriateness
+- Examine dependencies and potential upgrade paths
+- Assess security and performance implications
+
+### 5. Strategic Opportunities
+- Identify areas for innovation or enhancement
+- Suggest architectural improvements or refactoring opportunities
+- Recommend process or tooling improvements
+
+### 6. Future Direction & Vision
+- Propose strategic development directions
+- Identify emerging patterns or opportunities
+- Suggest long-term architectural evolution paths
+
+## Output Format
+
+Write your analysis as a comprehensive markdown document to `logs/daydream_insights.md`. Structure it with clear sections and actionable insights. Be specific about file locations, code patterns, and concrete recommendations.
+
+Focus on:
+- **Specific observations** about the codebase
+- **Actionable recommendations** for improvement
+- **Strategic insights** about future development
+- **Technical opportunities** for optimization
+
+Respond as Valor would - analytical yet creative, combining German engineering precision with California innovation mindset. Provide concrete, implementable suggestions based on actual code exploration.
+
+Begin your analysis by exploring the codebase structure and then proceed with your comprehensive assessment."""
 
     return prompt
 

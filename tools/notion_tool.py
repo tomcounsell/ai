@@ -30,19 +30,8 @@ def query_notion_workspace(workspace_name: str, question: str) -> str:
     return query_notion_workspace_sync(workspace_name, question)
 
 
-def query_psyoptimal_workspace(question: str) -> str:
-    """Query the PsyOPTIMAL workspace specifically.
-
-    This is a convenience function that queries the PsyOPTIMAL workspace
-    with a hardcoded workspace name, as specified for the tool registration.
-
-    Args:
-        question: Natural language question about PsyOPTIMAL project data
-
-    Returns:
-        str: AI-generated answer about PsyOPTIMAL tasks and priorities
-    """
-    return query_notion_workspace("PsyOPTIMAL", question)
+# REMOVED: query_psyoptimal_workspace() function was causing workspace isolation violations
+# All workspace queries should now use the workspace-aware MCP tools with proper access validation
 
 
 def list_available_workspaces() -> str:
