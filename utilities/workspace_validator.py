@@ -512,12 +512,32 @@ def validate_telegram_environment() -> Dict[str, str]:
             logger.warning("TELEGRAM_ALLOWED_GROUPS environment variable not configured")
         else:
             try:
-                # Parse comma-separated group chat IDs
-                group_ids = [int(group_id.strip()) for group_id in allowed_groups_env.split(",") if group_id.strip()]
-                validation_results["allowed_groups"] = "configured"
-                validation_results["group_count"] = str(len(group_ids))
-                logger.info(f"Telegram whitelist configured for {len(group_ids)} groups: {group_ids}")
-            except ValueError as e:
+                # Parse comma-separated workspace names and map to chat IDs
+                workspace_names = [name.strip() for name in allowed_groups_env.split(",") if name.strip()]
+                
+                # Load workspace config to resolve names to chat IDs
+                import json
+                from pathlib import Path
+                config_file = Path(__file__).parent.parent / "config" / "workspace_config.json"
+                if config_file.exists():
+                    with open(config_file) as f:
+                        config = json.load(f)
+                    
+                    workspaces = config.get("workspaces", {})
+                    group_ids = []
+                    
+                    for workspace_name in workspace_names:
+                        if workspace_name in workspaces:
+                            chat_id = workspaces[workspace_name].get("telegram_chat_id")
+                            if chat_id:
+                                group_ids.append(int(chat_id))
+                    
+                    validation_results["allowed_groups"] = "configured"
+                    validation_results["group_count"] = str(len(group_ids))
+                    logger.info(f"Telegram whitelist configured for {len(group_ids)} groups: {group_ids}")
+                else:
+                    raise ValueError("Workspace config not found")
+            except (ValueError, FileNotFoundError) as e:
                 validation_results["allowed_groups"] = "invalid_format"
                 validation_results["errors"].append(f"Invalid TELEGRAM_ALLOWED_GROUPS format: {e}")
                 logger.error(f"Invalid TELEGRAM_ALLOWED_GROUPS format: {e}")
@@ -588,16 +608,38 @@ def validate_chat_whitelist_access(chat_id: int, is_private: bool = False, usern
                 return False
             
             try:
-                allowed_group_ids = [int(group_id.strip()) for group_id in allowed_groups_env.split(",") if group_id.strip()]
-                is_allowed = chat_id in allowed_group_ids
+                # Parse workspace names and map to chat IDs
+                workspace_names = [name.strip() for name in allowed_groups_env.split(",") if name.strip()]
                 
-                if is_allowed:
-                    logger.debug(f"Group access granted for chat {chat_id} (whitelisted)")
+                # Load workspace config to resolve names to chat IDs
+                import json
+                from pathlib import Path
+                config_file = Path(__file__).parent.parent / "config" / "workspace_config.json"
+                if config_file.exists():
+                    with open(config_file) as f:
+                        config = json.load(f)
+                    
+                    workspaces = config.get("workspaces", {})
+                    allowed_group_ids = []
+                    
+                    for workspace_name in workspace_names:
+                        if workspace_name in workspaces:
+                            workspace_chat_id = workspaces[workspace_name].get("telegram_chat_id")
+                            if workspace_chat_id:
+                                allowed_group_ids.append(int(workspace_chat_id))
+                    
+                    is_allowed = chat_id in allowed_group_ids
+                    
+                    if is_allowed:
+                        logger.debug(f"Group access granted for chat {chat_id} (whitelisted)")
+                    else:
+                        logger.debug(f"Group access denied for chat {chat_id} (not whitelisted)")
+                    
+                    return is_allowed
                 else:
-                    logger.debug(f"Group access denied for chat {chat_id} (not whitelisted)")
-                
-                return is_allowed
-            except ValueError as e:
+                    logger.error(f"Workspace config not found, denying access to chat {chat_id}")
+                    return False
+            except (ValueError, FileNotFoundError) as e:
                 logger.error(f"Invalid TELEGRAM_ALLOWED_GROUPS format, denying access to chat {chat_id}: {e}")
                 return False
     
