@@ -1,7 +1,32 @@
 """Notion integration utilities."""
 
 import json
+import re
 from pathlib import Path
+
+
+def extract_database_id_from_url(notion_db_url: str) -> str:
+    """Extract database ID from Notion URL.
+    
+    Notion URLs contain database IDs with hyphens removed.
+    This function extracts the ID and adds hyphens back to create proper UUID format.
+    
+    Example:
+        URL: https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c
+        Returns: 1d22bc89-4d10-8079-8dcb-e7813b006c5c
+    """
+    if not notion_db_url or notion_db_url == "****":
+        return ""
+    
+    # Extract the database ID part from URL (last 32 characters without hyphens)
+    # Pattern: Extract 32-character hex string from end of URL path
+    match = re.search(r'/([a-f0-9]{32})(?:\?|$|#)', notion_db_url)
+    if match:
+        db_id_no_hyphens = match.group(1)
+        # Add hyphens to create proper UUID format: 8-4-4-4-12
+        return f"{db_id_no_hyphens[:8]}-{db_id_no_hyphens[8:12]}-{db_id_no_hyphens[12:16]}-{db_id_no_hyphens[16:20]}-{db_id_no_hyphens[20:]}"
+    
+    return ""
 
 
 def load_project_mapping():
@@ -19,9 +44,11 @@ def load_project_mapping():
                 aliases = {}
                 
                 for workspace_name, workspace_data in workspaces.items():
+                    notion_db_url = workspace_data.get("notion_db_url", "")
+                    database_id = extract_database_id_from_url(notion_db_url)
                     projects[workspace_name] = {
-                        "database_id": workspace_data["database_id"],
-                        "url": workspace_data.get("url", ""),
+                        "database_id": database_id,
+                        "url": notion_db_url,
                         "description": workspace_data.get("description", "")
                     }
                     
@@ -79,7 +106,9 @@ def get_telegram_group_project(chat_id: int) -> tuple[str | None, str | None]:
                 if chat_id_str in telegram_groups:
                     project_name = telegram_groups[chat_id_str]
                     if project_name in workspaces:
-                        return project_name, workspaces[project_name]["database_id"]
+                        notion_db_url = workspaces[project_name].get("notion_db_url", "")
+                        database_id = extract_database_id_from_url(notion_db_url)
+                        return project_name, database_id
                 
                 return None, None
         except Exception:

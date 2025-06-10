@@ -69,10 +69,15 @@ def _resolve_workspace_context(chat_id: int) -> Dict[str, Any]:
             logger.warning(f"Workspace '{workspace_name}' not found in config, using default")
             return default_context
         
+        # Extract database_id from notion_db_url
+        from integrations.notion.utils import extract_database_id_from_url
+        notion_db_url = workspace.get('notion_db_url', '')
+        database_id = extract_database_id_from_url(notion_db_url)
+        
         return {
             'working_directory': workspace.get('working_directory', default_context['working_directory']),
             'workspace_type': workspace.get('workspace_type', default_context['workspace_type']),
-            'database_id': workspace.get('database_id'),
+            'database_id': database_id,
             'workspace_name': workspace_name
         }
         

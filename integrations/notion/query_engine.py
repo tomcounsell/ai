@@ -16,6 +16,8 @@ import anthropic
 import requests
 from dotenv import load_dotenv
 
+from .utils import extract_database_id_from_url
+
 # Load environment variables
 load_dotenv()
 
@@ -35,9 +37,11 @@ def load_workspace_settings() -> Tuple[Dict[str, Dict[str, str]], Dict[str, str]
                 workspace_aliases = {}
                 
                 for workspace_name, workspace_data in workspaces.items():
+                    notion_db_url = workspace_data.get("notion_db_url", "")
+                    database_id = extract_database_id_from_url(notion_db_url)
                     workspace_settings[workspace_name] = {
-                        "database_id": workspace_data["database_id"],
-                        "url": workspace_data.get("url", ""),
+                        "database_id": database_id,
+                        "url": notion_db_url,
                         "description": workspace_data.get("description", "")
                     }
                     
