@@ -5,6 +5,22 @@ import re
 from pathlib import Path
 
 
+def derive_workspace_type_from_directory(working_directory: str) -> str:
+    """Derive workspace type from working directory path.
+    
+    Args:
+        working_directory: Full path to workspace directory
+        
+    Returns:
+        Workspace type derived from directory name (lowercased)
+    """
+    if not working_directory:
+        return "unknown"
+    
+    # Extract the last directory component and return lowercase
+    return working_directory.rstrip('/').split('/')[-1].lower()
+
+
 def extract_database_id_from_url(notion_db_url: str) -> str:
     """Extract database ID from Notion URL.
     

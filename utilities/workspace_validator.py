@@ -16,11 +16,12 @@ from dataclasses import dataclass
 from enum import Enum
 
 class WorkspaceType(Enum):
+    AI = "ai"
     DECKFUSION = "deckfusion"
     PSYOPTIMAL = "psyoptimal"
     FLEXTRIP = "flextrip"
-    YUDAME = "yudame"
     VERKSTAD = "verkstad"
+    TEST = "test"
 
 
 @dataclass
