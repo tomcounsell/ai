@@ -201,7 +201,7 @@ async def main():
     # Initialize test runner
     runner = E2ETestRunner(
         anthropic_client=anthropic_client,
-        notion_scout=None,  # Could add NotionScout for integration tests
+        # Notion functionality now handled through MCP pm_tools server
     )
 
     # Get test scenarios

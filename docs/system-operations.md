@@ -101,19 +101,11 @@ python main.py & PID=$! && sleep 3 && curl -s http://localhost:9000/health && ki
 #### Running UV Script Agents
 
 ```bash
-# Notion Scout with project queries
-uv run agents/notion_scout.py --project PsyOPTIMAL "What tasks are ready for dev?"
-uv run agents/notion_scout.py --project FlexTrip "Show me project status"
-
-# Project aliases supported
-uv run agents/notion_scout.py --project psy "Quick status check"
-uv run agents/notion_scout.py --project flex "What's the priority?"
-
-# Telegram chat agent testing
-uv run agents/telegram_chat_agent.py
-
 # Valor agent standalone testing
 uv run agents/valor_agent.py
+
+# Note: Project queries are now handled through MCP tools in the unified system
+# Use the pm_tools MCP server for Notion workspace queries instead of separate scripts
 ```
 
 #### Agent Demo and Testing

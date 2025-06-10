@@ -139,7 +139,8 @@ Be decisive and pick the most likely intent even if uncertain."""
 
     async def __aenter__(self):
         """Async context manager entry."""
-        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30.0))
+        # Increased timeout to handle resource contention from multiple aider processes
+        self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60.0))
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -185,10 +186,20 @@ Be decisive and pick the most likely intent even if uncertain."""
 
             logger.debug(f"Prepared user prompt: {user_prompt}")
 
-            # Make request to Ollama
+            # Make request to Ollama with retry for timeouts
             logger.debug(f"Making Ollama request to {self.ollama_url} with model {self.model_name}")
-            response = await self._make_ollama_request(user_prompt)
-            logger.debug(f"Ollama response received: {response[:200]}...")
+            max_retries = 2
+            for attempt in range(max_retries + 1):
+                try:
+                    response = await self._make_ollama_request(user_prompt)
+                    logger.debug(f"Ollama response received: {response[:200]}...")
+                    break
+                except Exception as e:
+                    if ("timeout" in str(e).lower() or "TimeoutError" in str(e)) and attempt < max_retries:
+                        logger.warning(f"Ollama timeout on attempt {attempt + 1}/{max_retries + 1}, retrying...")
+                        continue
+                    else:
+                        raise
 
             # Parse the response
             logger.debug("Parsing Ollama response")
@@ -201,7 +212,10 @@ Be decisive and pick the most likely intent even if uncertain."""
 
         except Exception as e:
             error_msg = str(e) if e else "Unknown error"
-            logger.error(f"Intent classification failed: {error_msg}", exc_info=True)
+            if "TimeoutError" in str(e) or "timeout" in str(e).lower():
+                logger.warning(f"Ollama timeout (resource contention from multiple aider processes): {error_msg}")
+            else:
+                logger.error(f"Intent classification failed: {error_msg}", exc_info=True)
             logger.debug(f"Message that failed: '{message[:100]}...'")
             logger.debug(f"Context that failed: {context}")
             # Fallback to GPT-3.5 Turbo classification
@@ -211,7 +225,8 @@ Be decisive and pick the most likely intent even if uncertain."""
         """Make a request to the Ollama API."""
         logger.debug(f"Creating Ollama request session if needed")
         if not self.session:
-            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30.0))
+            # Increased timeout to handle resource contention from multiple aider processes
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60.0))
 
         payload = {
             "model": self.model_name,

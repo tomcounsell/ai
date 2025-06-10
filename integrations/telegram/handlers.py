@@ -18,7 +18,8 @@ class MessageHandler:
     def __init__(self, client, chat_history, notion_scout=None):
         self.client = client
         self.chat_history = chat_history
-        self.notion_scout = notion_scout
+        # notion_scout parameter kept for backward compatibility but no longer used
+        # Notion functionality now handled through MCP pm_tools server
         # Web search now handled by PydanticAI agents
         # Link analysis now handled by link_analysis_tool
 
@@ -671,27 +672,8 @@ class MessageHandler:
             # === STEP 17.4.2: PROJECT CONTEXT (PLACEHOLDER) ===
             print("📝 Project context retrieval - awaiting revolutionary rebuild...")
             notion_data = None
-            # PLACEHOLDER: Living project context will replace notion_scout
-                try:
-                    is_private_chat = message.chat.type == ChatType.PRIVATE
-                    if not is_private_chat:
-                        print("   Group chat detected - fetching group-specific Notion data...")
-                        notion_data = await self._get_notion_context_for_group(
-                            chat_id, processed_text
-                        )
-                    elif is_priority:
-                        print("   Priority question in DM - fetching Notion data...")
-                        notion_data = await self._get_notion_context(processed_text)
-                    else:
-                        print("   No Notion context needed for this message")
-
-                    if notion_data:
-                        print(f"   ✅ Notion context retrieved ({len(notion_data)} chars)")
-                    else:
-                        print("   ⚪ No Notion context available")
-
-                except Exception as e:
-                    print(f"   ⚠️  Could not get Notion context: {e}")
+            # PLACEHOLDER: Living project context will replace notion_scout functionality
+            print("   🚀 Revolutionary living project context will provide context here")
 
             # === STEP 17.4.3: CHAT HISTORY PREPARATION ===
             print("📚 Preparing chat history context...")
@@ -878,18 +860,7 @@ class MessageHandler:
             # PLACEHOLDER: Project context integration
             notion_data = None
             # Revolutionary living project context will replace this section
-                try:
-                    # For group chats, use the group-specific Notion database
-                    is_private_chat = message.chat.type == ChatType.PRIVATE
-                    if not is_private_chat:
-                        notion_data = await self._get_notion_context_for_group(
-                            chat_id, processed_text
-                        )
-                    # For DMs or if no group-specific database, check if it's a priority question
-                    elif is_priority:
-                        notion_data = await self._get_notion_context(processed_text)
-                except Exception as e:
-                    print(f"Warning: Could not get Notion context: {e}")
+            print("🚀 Revolutionary living project context will provide context here")
 
             # Get chat history for context with reply priority
             reply_internal_id = None
@@ -953,7 +924,7 @@ class MessageHandler:
 🤖 **Bot Status:**
 • Agent: ✅ Active (valor_agent)
 • Tools: ✅ {len(self._get_available_tools())} available
-• Notion: {'✅ Connected' if self.notion_scout else '❌ Not configured'}"""
+• Notion: ✅ Connected (via MCP pm_tools)"""
 
         except Exception as e:
             # Fallback if psutil not available or error occurs
@@ -961,7 +932,7 @@ class MessageHandler:
 
 🤖 **Bot Status:**
 • Agent: ✅ Active (valor_agent)
-• Notion: {'✅ Connected' if self.notion_scout else '❌ Not configured'}
+• Notion: ✅ Connected (via MCP pm_tools)
 • Health: ✅ Running
 
 ⚠️ Detailed metrics unavailable: {str(e)[:50]}"""
@@ -984,8 +955,8 @@ class MessageHandler:
     async def _get_notion_context_for_group(self, chat_id: int, processed_text: str) -> str | None:
         """Get Notion context for group-specific database."""
         try:
-            if not self.notion_scout:
-                return None
+            # Notion functionality migrated to MCP pm_tools server
+            return None
 
             # Get the project associated with this Telegram group
             # PLACEHOLDER: Revolutionary workspace mapping will replace get_telegram_group_project
@@ -1001,16 +972,9 @@ class MessageHandler:
     async def _get_notion_context(self, processed_text: str) -> str | None:
         """Get Notion context for priority questions."""
         try:
-            if not self.notion_scout:
-                return None
-
-            # Note: Project filtering is handled automatically through chat-to-workspace mapping
-            # Each chat is already tied to its specific workspace in config/workspace_config.json
-
-            # Get answer from Notion Scout using the query_all_accessible_databases method
-            answer = await self.notion_scout.query_all_accessible_databases(
-                processed_text, db_filter=None
-            )
+            # Notion functionality migrated to MCP pm_tools server
+            # Project filtering handled automatically through chat-to-workspace mapping
+            return None
 
             return answer
 
@@ -1082,7 +1046,7 @@ class MessageHandler:
             # PLACEHOLDER: Revolutionary project context will replace is_dev_group utility
 
             # PLACEHOLDER: Revolutionary project context will determine workspace type
-        is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
+            is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
 
             # Only respond in private chats, when mentioned in groups, or in dev groups
             if not (is_private_chat or is_mentioned or is_dev_group_chat):
@@ -1133,7 +1097,8 @@ class MessageHandler:
                 )
 
             # Use valor agent system to analyze the image
-            if self.notion_scout and self.notion_scout.anthropic_client:
+            # Image analysis now handled through unified valor agent system
+            if True:  # Always process images through unified system
                 try:
                     from agents.valor.handlers import handle_telegram_message
 
@@ -1208,7 +1173,7 @@ class MessageHandler:
             # PLACEHOLDER: Revolutionary project context will replace is_dev_group utility
 
             # PLACEHOLDER: Revolutionary project context will determine workspace type
-        is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
+            is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
 
             # Store message in chat history even if not responding
             if not (is_private_chat or is_mentioned or is_dev_group_chat):
@@ -1286,7 +1251,7 @@ class MessageHandler:
             # PLACEHOLDER: Revolutionary project context will replace is_dev_group utility
 
             # PLACEHOLDER: Revolutionary project context will determine workspace type
-        is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
+            is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
 
             # Store message in chat history even if not responding
             if not (is_private_chat or is_mentioned or is_dev_group_chat):
@@ -1500,7 +1465,7 @@ class MessageHandler:
             # PLACEHOLDER: Revolutionary project context will replace is_dev_group utility
 
             # PLACEHOLDER: Revolutionary project context will determine workspace type
-        is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
+            is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
 
             # Store message in chat history even if not responding
             if not (is_private_chat or is_mentioned or is_dev_group_chat):

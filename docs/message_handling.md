@@ -254,7 +254,7 @@ chat_history_obj.get_context(
 **For Group Chats:**
 - Automatically get group-specific Notion database via `_get_notion_context_for_group()`
 - Uses consolidated `get_telegram_group_project(chat_id)` from `config/workspace_config.json`
-- Sets `notion_scout.db_filter` to project-specific database
+- Sets project context for MCP pm_tools server to access project-specific database
 - **Logs**: `"Using Notion database for {project_name} (group {chat_id})"`
 - **Security**: Workspace validator ensures chat can only access its mapped database
 

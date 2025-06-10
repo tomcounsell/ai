@@ -12,7 +12,8 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from integrations.notion.query_engine import get_notion_engine
+# Revolutionary living project context - replaced query_engine
+# from integrations.notion.query_engine import get_notion_engine
 from integrations.telegram.client import TelegramClient
 from utilities.database import init_database, get_pending_server_tasks, update_server_task_status
 from utilities.monitoring.resource_monitor import resource_monitor, ResourceLimits
@@ -47,7 +48,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 telegram_client = None
-notion_engine = None
+# Revolutionary living project context - replaced notion_engine
+# notion_engine = None
 _shutdown_requested = False
 auto_restart_manager = None
 
@@ -62,7 +64,7 @@ class AuthPassword(BaseModel):
 
 async def start_telegram_client():
     """Initialize the Telegram client."""
-    global telegram_client, notion_engine, auto_restart_manager
+    global telegram_client, auto_restart_manager
 
     # Initialize database tables including promises
     logger.info("🗄️  Initializing database...")
@@ -87,16 +89,12 @@ async def start_telegram_client():
     auto_restart_manager = initialize_auto_restart(resource_monitor)
     logger.info("✅ Resource monitoring and auto-restart protection enabled")
 
-    # Initialize Notion query engine
-    notion_engine = get_notion_engine()
-    if notion_engine:
-        logger.info("📚 Notion query engine initialized successfully")
-    else:
-        logger.warning("⚠️  Notion query engine not initialized - missing API keys")
+    # Revolutionary living project context - no need for separate notion_engine
+    logger.info("🚀 Living project context system available via MCP tools")
 
     # Initialize Telegram client
     telegram_client = TelegramClient()
-    success = await telegram_client.initialize(notion_engine)
+    success = await telegram_client.initialize(None)  # No longer needs notion_engine
 
     if success:
         logger.info("🤖 Telegram integration initialized successfully")

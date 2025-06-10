@@ -77,7 +77,8 @@ async def parallel_persona_workflow(problem: str) -> str:
         hg_wells_agent.run(f"Strategic analysis: {problem}"),
         valor_agent.run(f"Technical analysis: {problem}"),
         technical_advisor_agent.run(f"Architecture review: {problem}"),
-        notion_scout_agent.run(f"Project context: {problem}")
+        # Project context now handled through pm_tools MCP server
+        valor_agent.run_with_tools(f"Project context analysis: {problem}")
     ]
 
     results = await asyncio.gather(*tasks)

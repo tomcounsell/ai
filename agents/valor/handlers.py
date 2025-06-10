@@ -309,9 +309,9 @@ async def handle_user_priority_question(
     question: str, chat_id: int, chat_history_obj, notion_scout=None, username: str | None = None
 ) -> str:
     """Handle user priority questions - wrapper for backward compatibility."""
-    # Check if there's project context in recent conversation
+    # notion_scout parameter kept for backward compatibility but no longer used
+    # Notion functionality now handled through MCP pm_tools server
     notion_data = None
-    if notion_scout and chat_history_obj:
         context_messages = chat_history_obj.get_context(chat_id)
         context_has_project_info = any(
             keyword in msg["content"].lower()

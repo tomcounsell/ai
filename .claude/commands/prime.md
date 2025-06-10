@@ -46,7 +46,7 @@ ls -la agents/ mcp_servers/ utilities/
   │   ├── agent.py          # Core conversational AI with tool integration
   │   ├── handlers.py       # Telegram message handlers with intent preprocessing
   │   └── persona.md        # Valor Engels persona definition
-  └── notion_scout.py        # Notion database query agent
+  └── uh oh .py        # Notion database query agent
 
 /mcp_servers/              # MCP tool servers for Claude Code integration
   ├── social_tools.py       # Web search, image generation, link analysis
@@ -92,7 +92,7 @@ system.db                   # **PRIMARY DATABASE** - Unified SQLite storage
 
 **Core Tables**:
 - **`token_usage`** - AI model usage tracking with cost monitoring
-- **`links`** - URL analysis and storage with AI-powered content analysis  
+- **`links`** - URL analysis and storage with AI-powered content analysis
 - **`projects`** - Project metadata and configurations
 - **`hosts`** - AI provider configurations (Anthropic, OpenAI, Ollama)
 - **`models`** - AI model pricing and metadata
@@ -139,7 +139,7 @@ USER_REQUEST: {message}
 ## 🛠️ MCP Tool Servers (Claude Code Integration)
 
 ### social-tools MCP Server
-- **Web Search**: Current information via Perplexity AI  
+- **Web Search**: Current information via Perplexity AI
 - **Image Generation**: DALL-E 3 with local file management
 - **Image Analysis**: GPT-4o vision with context-aware prompting
 - **Link Analysis**: Automatic URL analysis and storage
@@ -202,7 +202,7 @@ scripts/update_mcp.sh
 uv run agents/valor_agent.py
 
 # Query Notion projects
-uv run agents/notion_scout.py --project PsyOPTIMAL "What tasks are ready for dev?"
+# Project queries now handled through MCP pm_tools server
 
 # Run comprehensive demo
 scripts/demo_agent.sh
@@ -267,7 +267,7 @@ cd tests && python run_tests.py
 ## 💡 Current State Summary
 
 **Primary Interface**: Claude Code with MCP tool integration
-**Core Agent**: Valor Engels conversational development persona  
+**Core Agent**: Valor Engels conversational development persona
 **Architecture**: Unified system with production optimization
 **Performance**: 97-99% context compression, 2.21s streaming, >95% success rates
 **Integration**: Telegram, Notion, web search, image generation/analysis

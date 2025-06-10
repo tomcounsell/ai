@@ -14,7 +14,8 @@ scripts/start.sh
 
 # Test unified system
 uv run agents/valor_agent.py
-uv run agents/notion_scout.py --project psy "What tasks are ready for dev?"
+
+# Note: Project queries now handled through MCP pm_tools server
 
 # Run comprehensive tests
 python tests/run_tests.py
@@ -42,8 +43,7 @@ The system provides seamless integration between conversation and development th
   ├── context_window_manager.py    # Intelligent conversation optimization
   ├── streaming_optimizer.py       # Performance-optimized streaming
   ├── resource_monitor.py          # Production monitoring and cleanup
-  ├── integrated_monitoring.py     # Unified system orchestration
-  └── notion_scout.py              # Notion database query agent
+  └── integrated_monitoring.py     # Unified system orchestration
 
 /mcp_servers/              # MCP tool servers for Claude Code
   ├── social_tools.py       # Web search, image generation, link analysis
@@ -102,7 +102,7 @@ python tests/test_context_injection.py         # Context management
 
 # Agent testing directly
 uv run agents/valor_agent.py                   # Test unified agent
-uv run agents/notion_scout.py --project psy "Status check"  # Test Notion integration
+# Note: Notion integration now handled through MCP pm_tools server
 ```
 
 ## 📊 Performance Metrics

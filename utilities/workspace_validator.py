@@ -71,14 +71,16 @@ class WorkspaceResolver:
             try:
                 chat_id_int = int(chat_id)
                 
-                # Import here to avoid circular imports
-                from integrations.notion.utils import get_workspace_working_directory, get_telegram_group_project
+                # Get workspace from consolidated config
+                validator = get_workspace_validator()
+                workspace_name = validator.get_workspace_for_chat(str(chat_id_int))
                 
-                # Try group workspace first
-                workspace_dir = get_workspace_working_directory(chat_id_int)
-                if workspace_dir:
-                    project_name, _ = get_telegram_group_project(chat_id_int)
-                    return workspace_dir, f"Workspace: {project_name or 'Unknown'}"
+                if workspace_name and workspace_name in validator.workspaces:
+                    workspace = validator.workspaces[workspace_name]
+                    # Use first allowed directory as working directory
+                    if workspace.allowed_directories:
+                        workspace_dir = workspace.allowed_directories[0]
+                        return workspace_dir, f"Workspace: {workspace_name}"
                     
                 # Try DM directory for private chats
                 if username and not is_group_chat:
@@ -121,10 +123,10 @@ class WorkspaceResolver:
         if chat_id:
             try:
                 chat_id_int = int(chat_id)
-                from integrations.notion.utils import get_telegram_group_project
-                project_name, _ = get_telegram_group_project(chat_id_int)
-                if project_name:
-                    workspace_name = project_name
+                validator = get_workspace_validator()
+                workspace_name = validator.get_workspace_for_chat(str(chat_id_int))
+                if not workspace_name:
+                    workspace_name = "Unknown"
             except Exception:
                 pass
         
@@ -169,9 +171,8 @@ class WorkspaceValidator:
         # Load workspaces from the new consolidated config format
         for workspace_name, workspace_data in config.get("workspaces", {}).items():
             # Derive workspace_type from working_directory
-            from integrations.notion.utils import derive_workspace_type_from_directory
             working_directory = workspace_data.get("working_directory", "")
-            workspace_type_str = derive_workspace_type_from_directory(working_directory)
+            workspace_type_str = self._derive_workspace_type_from_directory(working_directory)
             
             # Map workspace_type string to enum
             if workspace_type_str == "deckfusion":
@@ -196,9 +197,8 @@ class WorkspaceValidator:
                 telegram_chat_id = str(telegram_chat_id)
             
             # Extract database_id from notion_db_url
-            from integrations.notion.utils import extract_database_id_from_url
             notion_db_url = workspace_data.get("notion_db_url", "")
-            database_id = extract_database_id_from_url(notion_db_url)
+            database_id = self._extract_database_id_from_url(notion_db_url)
             
             workspaces[workspace_name] = WorkspaceConfig(
                 name=workspace_name,
@@ -210,6 +210,55 @@ class WorkspaceValidator:
             )
         
         return workspaces
+    
+    def _derive_workspace_type_from_directory(self, working_directory: str) -> str:
+        """Derive workspace type from working directory path"""
+        if not working_directory:
+            return "unknown"
+        
+        # Extract the directory name from the path
+        from pathlib import Path
+        dir_name = Path(working_directory).name.lower()
+        
+        # Map directory names to workspace types
+        if dir_name in ["deckfusion"]:
+            return "deckfusion"
+        elif dir_name in ["psyoptimal"]:
+            return "psyoptimal"
+        elif dir_name in ["flextrip"]:
+            return "flextrip"
+        elif dir_name in ["ai", "yudame"]:
+            return "ai"
+        elif dir_name in ["verkstad"]:
+            return "verkstad"
+        elif dir_name in ["test"]:
+            return "test"
+        else:
+            return "unknown"
+    
+    def _extract_database_id_from_url(self, notion_db_url: str) -> str:
+        """Extract database ID from Notion database URL"""
+        if not notion_db_url:
+            return ""
+        
+        # Extract UUID from URL (format: https://www.notion.so/workspace/database_id?v=view_id)
+        import re
+        
+        # Match UUID pattern with hyphens
+        uuid_pattern = r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+        match = re.search(uuid_pattern, notion_db_url)
+        
+        if match:
+            return match.group(0)
+        
+        # Fallback: try to extract from path segments
+        parts = notion_db_url.split('/')
+        for part in parts:
+            if len(part) == 32 and all(c in '0123456789abcdef' for c in part.lower()):
+                # Convert 32-char hex to UUID format
+                return f"{part[:8]}-{part[8:12]}-{part[12:16]}-{part[16:20]}-{part[20:]}"
+        
+        return ""
     
     def _build_chat_mapping(self) -> Dict[str, str]:
         """Build mapping from chat IDs to workspace names"""

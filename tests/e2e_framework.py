@@ -263,7 +263,8 @@ class E2ETestRunner:
 
     def __init__(self, anthropic_client=None, notion_scout=None):
         self.anthropic_client = anthropic_client
-        self.notion_scout = notion_scout
+        # notion_scout parameter kept for backward compatibility but no longer used
+        # Notion functionality now handled through MCP pm_tools server
         self.evaluator = LLMEvaluator()
         self.results = []
 

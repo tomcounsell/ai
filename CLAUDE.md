@@ -87,15 +87,11 @@ python integrations/telegram/auth.py
 
 ### Agent Execution
 ```bash
-# Run UV script agents directly
-uv run agents/notion_scout.py --project PsyOPTIMAL "What tasks are ready for dev?"
-uv run agents/notion_scout.py --project FlexTrip "Show me project status"
-
-# Available project aliases: psy, optimal, flex, trip
-uv run agents/notion_scout.py --project psy "Quick status check"
-
 # Test PydanticAI Telegram chat agent
 uv run agents/valor_agent.py
+
+# Note: Project queries now handled through unified MCP system
+# Use pm_tools MCP server for Notion workspace queries
 
 # Run comprehensive agent demo
 scripts/demo_agent.sh
@@ -142,8 +138,7 @@ This codebase implements a **production-ready unified system** with Claude Code 
   ├── context_window_manager.py    # Intelligent conversation optimization
   ├── streaming_optimizer.py       # Performance-optimized streaming
   ├── resource_monitor.py          # Production monitoring and cleanup
-  ├── integrated_monitoring.py     # Unified system orchestration
-  └── notion_scout.py              # Notion database query agent
+  └── integrated_monitoring.py     # Unified system orchestration
 
 /integrations/              # Enhanced with intent recognition
   ├── ollama_intent.py       # Ollama-based intent classification
