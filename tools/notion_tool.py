@@ -30,10 +30,6 @@ def query_notion_workspace(workspace_name: str, question: str) -> str:
     return query_notion_workspace_sync(workspace_name, question)
 
 
-# REMOVED: query_psyoptimal_workspace() function was causing workspace isolation violations
-# All workspace queries should now use the workspace-aware MCP tools with proper access validation
-
-
 def list_available_workspaces() -> str:
     """List all available Notion workspaces.
     

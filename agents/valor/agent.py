@@ -29,7 +29,6 @@ from tools.valor_delegation_tool import spawn_valor_session
 from tools.image_analysis_tool import analyze_image
 from tools.image_generation_tool import generate_image
 from tools.link_analysis_tool import extract_urls, search_stored_links, store_link_with_analysis
-# Removed hardcoded PsyOPTIMAL import - now using workspace-aware MCP tools
 from tools.search_tool import search_web
 from tools.telegram_history_tool import search_telegram_history, get_telegram_context_summary
 
