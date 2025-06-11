@@ -3,6 +3,14 @@ Ollama-based intent recognition for preprocessing Telegram messages.
 
 This module provides intent classification using local Ollama models to determine
 the appropriate response strategy and tool access for incoming messages.
+
+DEFINITIVE TIMEOUT & FAILURE STRATEGY:
+- 45-second timeout: Accommodates cold starts (15-30s) while detecting real issues
+- No quick fallbacks: Local Ollama is reliable; failures indicate system problems  
+- System repair delegation: Ollama failures trigger Claude Code investigation tasks
+- Approach: Wait patiently → Detect real issues → Delegate system repair → Temporary fallback
+
+This strategy prioritizes local inference reliability over quick external API fallbacks.
 """
 
 import json
@@ -186,20 +194,22 @@ Be decisive and pick the most likely intent even if uncertain."""
 
             logger.debug(f"Prepared user prompt: {user_prompt}")
 
-            # Make request to Ollama with retry for timeouts
+            # Make request to Ollama with patience for cold starts
             logger.debug(f"Making Ollama request to {self.ollama_url} with model {self.model_name}")
-            max_retries = 2
-            for attempt in range(max_retries + 1):
-                try:
-                    response = await self._make_ollama_request(user_prompt)
-                    logger.debug(f"Ollama response received: {response[:200]}...")
-                    break
-                except Exception as e:
-                    if ("timeout" in str(e).lower() or "TimeoutError" in str(e)) and attempt < max_retries:
-                        logger.warning(f"Ollama timeout on attempt {attempt + 1}/{max_retries + 1}, retrying...")
-                        continue
-                    else:
-                        raise
+            try:
+                response = await self._make_ollama_request(user_prompt)
+                logger.debug(f"Ollama response received: {response[:200]}...")
+            except Exception as e:
+                # DEFINITIVE FAILURE HANDLING STRATEGY:
+                # Local Ollama is reliable - failures indicate system issues requiring investigation
+                logger.error(f"Ollama system failure detected: {str(e)[:200]}...")
+                
+                # Delegate system debugging to Claude Code instead of external API fallback
+                await self._delegate_ollama_system_repair(str(e), message, context)
+                
+                # Temporary fallback while system repair is in progress
+                logger.warning("Using temporary GPT-3.5 fallback while Ollama system repair is delegated")
+                return await self._gpt_fallback_classification(message, context)
 
             # Parse the response
             logger.debug("Parsing Ollama response")
@@ -212,21 +222,38 @@ Be decisive and pick the most likely intent even if uncertain."""
 
         except Exception as e:
             error_msg = str(e) if e else "Unknown error"
-            if "TimeoutError" in str(e) or "timeout" in str(e).lower():
-                logger.warning(f"Ollama timeout (resource contention from multiple aider processes): {error_msg}")
-            else:
-                logger.error(f"Intent classification failed: {error_msg}", exc_info=True)
+            
+            # DEFINITIVE ERROR HANDLING APPROACH:
+            # Local Ollama failures are rare and indicate system issues requiring investigation
+            logger.error(f"Ollama intent classification system failure: {error_msg}", exc_info=True)
             logger.debug(f"Message that failed: '{message[:100]}...'")
             logger.debug(f"Context that failed: {context}")
-            # Fallback to GPT-3.5 Turbo classification
+            
+            # Delegate system repair instead of silent fallback
+            await self._delegate_ollama_system_repair(error_msg, message, context)
+            
+            # Temporary GPT-3.5 fallback while system repair is in progress
+            logger.warning("Using temporary external API fallback while Ollama system repair is delegated")
             return await self._gpt_fallback_classification(message, context)
 
     async def _make_ollama_request(self, prompt: str) -> str:
         """Make a request to the Ollama API."""
         logger.debug(f"Creating Ollama request session if needed")
         if not self.session:
-            # Increased timeout to handle resource contention from multiple aider processes
-            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60.0))
+            # DEFINITIVE TIMEOUT DECISION: 45 seconds
+            # 
+            # Reasoning:
+            # - Local Ollama cold start can take 15-30 seconds for large models
+            # - Local Ollama is reliable and virtually never fails in practice
+            # - Ollama failures indicate system issues requiring dev intervention
+            # - Better to wait for reliable local inference than fall back to external API
+            # - If Ollama truly fails, we delegate to Claude Code for system debugging
+            # 
+            # This timeout balances:
+            # ✅ Accommodating cold starts (up to 30s)
+            # ✅ Detecting genuine system issues (beyond 45s likely indicates problems)
+            # ✅ Maintaining user experience (45s is acceptable for intent classification)
+            self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45.0))
 
         payload = {
             "model": self.model_name,
@@ -501,6 +528,78 @@ Be decisive and pick the most likely intent even if uncertain."""
         except Exception as e:
             logger.debug(f"Ollama not available: {e}")
             return False
+
+    async def _delegate_ollama_system_repair(self, error_message: str, message: str, context: dict):
+        """
+        Delegate Ollama system debugging to Claude Code for investigation and repair.
+        
+        This is called when Ollama fails, which indicates a genuine system issue
+        that requires developer attention rather than simple API fallback.
+        """
+        try:
+            from utilities.promise_manager_huey import create_promise
+            
+            # Extract chat context if available
+            chat_id = context.get('chat_id', 0)
+            
+            repair_task = f"""
+OLLAMA SYSTEM FAILURE - IMMEDIATE INVESTIGATION REQUIRED
+
+**Failure Context:**
+- Error: {error_message}
+- Message being classified: "{message[:200]}..."
+- Context: {context}
+
+**Investigation Required:**
+1. Check Ollama service status: `ps aux | grep ollama`
+2. Test Ollama API manually: `curl -X POST http://localhost:11434/api/generate -d '{{"model":"llama3.2:3b","prompt":"test"}}'`
+3. Review Ollama logs for errors
+4. Check disk space and memory usage
+5. Verify model availability: `ollama list`
+6. Test model loading: `ollama run llama3.2:3b "test"`
+
+**System Diagnostics:**
+- Check /Applications/Ollama.app/Contents/Resources/ollama status
+- Verify port 11434 availability: `lsof -i :11434`
+- Check system resources: memory, CPU, disk space
+- Review recent system changes that might affect Ollama
+
+**Resolution Actions:**
+- Restart Ollama service if needed
+- Reload models if corrupted
+- Fix configuration issues
+- Update Ollama if outdated
+- Document root cause and prevention
+
+**Priority:** CRITICAL - Ollama failures block intent classification for all users
+**Expected Resolution Time:** < 30 minutes
+
+This failure suggests a system-level issue requiring immediate attention.
+Local Ollama is normally reliable, so investigate thoroughly.
+"""
+            
+            # Create high-priority promise for system repair
+            promise_id = create_promise(
+                chat_id=chat_id or 0,  # Use system chat if no specific chat
+                task_description="URGENT: Ollama System Failure Investigation",
+                task_type="system_repair", 
+                metadata={
+                    "error_type": "ollama_failure",
+                    "priority": "critical",
+                    "service": "ollama_intent_classification",
+                    "requires_immediate_attention": True,
+                    "full_investigation_task": repair_task,
+                    "affected_users": "all_telegram_users"
+                }
+            )
+            
+            logger.critical(f"🚨 Created CRITICAL system repair promise {promise_id} for Ollama failure")
+            logger.critical(f"   Error: {error_message[:100]}...")
+            logger.critical(f"   This affects all intent classification - immediate investigation required")
+            
+        except Exception as delegation_error:
+            logger.error(f"Failed to delegate Ollama system repair: {delegation_error}")
+            logger.error(f"Original Ollama error: {error_message}")
 
 
 # Singleton instance for use throughout the application
