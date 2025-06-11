@@ -1162,5 +1162,65 @@ def execute_bug_report_with_screenshot(
         return f"❌ Bug report workflow error: {str(e)}"
 
 
+@mcp.tool()
+def trigger_error_recovery_analysis(error_description: str, chat_id: str = "") -> str:
+    """Trigger manual error recovery analysis for system issues.
+    
+    Args:
+        error_description: Description of the error or issue to investigate
+        chat_id: Optional chat ID context
+    
+    Returns:
+        str: Recovery analysis result
+    """
+    try:
+        from tools.valor_delegation_tool import spawn_valor_session
+        
+        recovery_task = f"""
+Investigate and provide analysis for this reported system issue:
+
+**Issue Description:**
+{error_description}
+
+**Chat Context:** {chat_id if chat_id else 'N/A'}
+
+**Analysis Task:**
+1. Search the codebase for potential causes of this issue
+2. Check recent logs for related errors (logs/system.log, logs/tasks.log)
+3. Look for error patterns in integrations/telegram/handlers.py
+4. Check if utilities/auto_error_recovery.py is functioning correctly
+5. Identify any missing variable definitions or import issues
+6. Test for syntax/indentation problems
+7. Provide specific recommendations for fixing
+8. If appropriate, implement a fix immediately
+9. Test the fix if implemented
+
+**Focus Areas:**
+- Error patterns in Telegram handlers
+- Auto-recovery system effectiveness  
+- Missing variable definitions (like is_priority issues)
+- Timeout and connectivity issues
+- System stability and reliability
+
+Provide a comprehensive analysis and implement fixes where possible.
+"""
+        
+        print(f"🔍 Triggering error recovery analysis...")
+        print(f"   Error description: {error_description[:100]}...")
+        print(f"   Chat context: {chat_id}")
+        
+        result = spawn_valor_session(
+            task_description=recovery_task,
+            target_directory="/Users/valorengels/src/ai",
+            specific_instructions="Focus on error recovery, system reliability, and immediate fixes",
+            force_sync=True
+        )
+        
+        return f"🔍 **Error Recovery Analysis**\n\n{result}"
+        
+    except Exception as e:
+        return f"❌ Error recovery analysis failed: {str(e)}"
+
+
 if __name__ == "__main__":
     mcp.run()

@@ -668,6 +668,9 @@ class MessageHandler:
 
             # === STEP 17.4.1: INTELLIGENT RELEVANCE DETECTION ===
             print("🎯 Agent will determine PM task relevance intelligently...")
+            
+            # Determine if this is a priority question based on intent
+            is_priority = intent_result and intent_result.intent.value == "project_query"
 
             # === STEP 17.4.2: PROJECT CONTEXT (PLACEHOLDER) ===
             print("📝 Project context retrieval - awaiting revolutionary rebuild...")
@@ -746,10 +749,35 @@ class MessageHandler:
 
             print("Full error traceback:")
             print(traceback.format_exc())
-            print("🔄 Falling back to regular handler...")
-            await self._handle_with_valor_agent(
-                message, chat_id, processed_text, reply_to_telegram_message_id
+            
+            # Use automatic error recovery system
+            from utilities.auto_error_recovery import auto_recovery
+            
+            context = {
+                'username': message.from_user.username if message.from_user else None,
+                'function_name': '_handle_with_valor_agent_intent',
+                'input_data': {
+                    'processed_text': processed_text[:200],
+                    'chat_id': chat_id,
+                    'intent': intent_result.intent.value if intent_result else None,
+                    'reply_to_message_id': reply_to_telegram_message_id
+                }
+            }
+            
+            recovery_attempted = await auto_recovery.handle_error_with_recovery(
+                error=e,
+                chat_id=chat_id,
+                reply_function=lambda msg: self._safe_reply(message, msg, "Error Recovery"),
+                chat_history_obj=self.chat_history,
+                context=context
             )
+            
+            # Fall back to regular handler if recovery didn't handle it
+            if not recovery_attempted:
+                print("🔄 Falling back to regular handler...")
+                await self._handle_with_valor_agent(
+                    message, chat_id, processed_text, reply_to_telegram_message_id
+                )
 
     async def _route_message_with_intent(
         self,
@@ -856,6 +884,8 @@ class MessageHandler:
             from agents.valor.handlers import handle_telegram_message
 
             # Agent will determine PM task relevance contextually
+            # Default to False since this method doesn't have intent classification
+            is_priority = False
 
             # PLACEHOLDER: Project context integration
             notion_data = None
@@ -891,9 +921,26 @@ class MessageHandler:
             await self._process_agent_response(message, chat_id, answer)
 
         except Exception as e:
-            error_msg = f"❌ Error processing message: {str(e)}"
-            await self._safe_reply(message, error_msg, "❌ Error processing message")
-            self.chat_history.add_message(chat_id, "assistant", error_msg)
+            # Use automatic error recovery system
+            from utilities.auto_error_recovery import auto_recovery
+            
+            context = {
+                'username': message.from_user.username if message.from_user else None,
+                'function_name': '_handle_with_valor_agent',
+                'input_data': {
+                    'processed_text': processed_text[:200],
+                    'chat_id': chat_id,
+                    'reply_to_message_id': reply_to_telegram_message_id
+                }
+            }
+            
+            await auto_recovery.handle_error_with_recovery(
+                error=e,
+                chat_id=chat_id,
+                reply_function=lambda msg: self._safe_reply(message, msg, "Error Recovery"),
+                chat_history_obj=self.chat_history,
+                context=context
+            )
 
     async def _handle_ping(self, message, chat_id: int):
         """Handle ping command with system health metrics."""
