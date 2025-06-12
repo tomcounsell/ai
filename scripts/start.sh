@@ -47,24 +47,28 @@ start_huey() {
     mkdir -p "$PROJECT_ROOT/data" "$PROJECT_ROOT/logs"
     
     # Start Huey consumer in background with auto-restart protection
-    (
+    # Use nohup and redirect output to prevent terminal hanging
+    LOGS_DIR="$PROJECT_ROOT/logs"
+    HUEY_SCRIPT="$PROJECT_ROOT/huey_consumer.py"
+    
+    nohup bash -c "
         while true; do
-            echo "🚀 Starting Huey consumer (auto-restart enabled)..."
-            python "$PROJECT_ROOT/huey_consumer.py" tasks.huey_config.huey \
+            echo '🚀 Starting Huey consumer (auto-restart enabled)...' >> '$LOGS_DIR/tasks.log'
+            python '$HUEY_SCRIPT' tasks.huey_config.huey \
                 -w 1 \
                 -k thread \
-                -v
+                -v >> '$LOGS_DIR/tasks.log' 2>&1
             
-            EXIT_CODE=$?
-            if [ $EXIT_CODE -eq 0 ]; then
-                echo "✅ Huey consumer exited cleanly"
+            EXIT_CODE=\$?
+            if [ \$EXIT_CODE -eq 0 ]; then
+                echo '✅ Huey consumer exited cleanly' >> '$LOGS_DIR/tasks.log'
                 break
             else
-                echo "⚠️  Huey consumer crashed (exit code: $EXIT_CODE), restarting in 3 seconds..."
+                echo '⚠️  Huey consumer crashed (exit code: '\$EXIT_CODE'), restarting in 3 seconds...' >> '$LOGS_DIR/tasks.log'
                 sleep 3
             fi
         done
-    ) &
+    " > /dev/null 2>&1 &
     
     HUEY_PID=$!
     echo $HUEY_PID > "$PROJECT_ROOT/huey.pid"
