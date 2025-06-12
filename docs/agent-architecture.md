@@ -166,6 +166,108 @@ class IntegratedMonitoringSystem:
 - **Comprehensive metrics**: JSON export for monitoring and analysis
 - **Asynchronous task execution**: Integration with [Promise Queue](promise-queue.md) for background processing
 
+## Unified Daydream System
+
+The system includes an **intelligent daydream and reflection system** that performs autonomous codebase analysis every 6 hours with integrated cleanup lifecycle management.
+
+### Architecture Overview
+
+```python
+@dataclass
+class DaydreamSession:
+    """Session-based tracking for unified daydream execution"""
+    session_id: str
+    start_time: datetime
+    phase: str
+    workspace_analysis: Dict[str, Any]
+    system_metrics: Dict[str, Any]
+    insights: str
+    cleanup_summary: Dict[str, Any]
+
+class UnifiedDaydreamSystem:
+    """Unified system replacing 10+ scattered functions"""
+    
+    def _check_system_readiness(self, session: DaydreamSession) -> bool
+    def _cleanup_before_analysis(self, session: DaydreamSession) -> None
+    def _gather_comprehensive_context(self, session: DaydreamSession) -> None
+    def _execute_ai_analysis(self, session: DaydreamSession) -> None
+    def _process_insights_and_output(self, session: DaydreamSession) -> None
+    def _cleanup_after_analysis(self, session: DaydreamSession) -> None
+```
+
+### 6-Phase Execution Lifecycle
+
+#### Phase 1: System Readiness Check
+- **Purpose**: Ensure system is idle for resource-intensive analysis
+- **Logic**: Skip if >5 pending tasks to avoid system overload
+- **Validation**: Database health, Ollama availability, resource capacity
+
+#### Phase 2: Pre-Analysis Cleanup ⭐
+- **Claude Code Process Management**: Kill processes >24 hours old
+- **Aider Session Cleanup**: Remove orphaned analysis processes  
+- **Temp File Management**: Clean analysis artifacts from `/tmp/`
+- **Memory Optimization**: Free resources before intensive operations
+- **Statistics Tracking**: Record cleanup effectiveness for monitoring
+
+#### Phase 3: Comprehensive Context Gathering
+- **Workspace Analysis**: Git status, tech stack detection, file metrics
+- **System Metrics**: Promise queue statistics, success rates, task distribution
+- **Development Trends**: Weekly completion patterns, productivity analysis
+- **Recent Activity**: Last 7 days of development work and patterns
+
+#### Phase 4: AI Analysis Execution
+- **Unified Prompt Building**: Consolidates duplicate prompt builders
+- **Ollama + Aider Integration**: Gemma3 12B model for architectural insights
+- **Timeout Management**: 5-minute hard limit with graceful degradation
+- **Resource Monitoring**: Track analysis performance and resource usage
+
+#### Phase 5: Output Processing & Archival
+- **Console Logging**: Formatted insights with session correlation
+- **File Management**: Write to `logs/daydream_insights.md`
+- **Archival System**: Timestamped backups with rotation (keep last 10)
+- **Session Summaries**: Performance metrics and analysis quality
+
+#### Phase 6: Post-Analysis Cleanup ⭐
+- **Current Session Cleanup**: Terminate active Aider processes
+- **Resource Reset**: Clean temporary files and reset state
+- **Archival Management**: Rotate large insight files
+- **State Preparation**: Ready system for next cycle
+
+### Key Benefits
+
+#### Resource Management
+- **Process Control**: Prevents Claude Code process accumulation (was 25+ processes)
+- **Memory Efficiency**: Integrated cleanup prevents resource leaks
+- **Scheduled Maintenance**: Natural 6-hour cleanup cycles
+- **Emergency Recovery**: Comprehensive failure handling
+
+#### Architectural Improvements
+- **Unified Codebase**: Single class replaces 10+ scattered functions
+- **Session Tracking**: Correlation IDs for debugging and monitoring
+- **Error Recovery**: Emergency cleanup and graceful degradation
+- **Performance Monitoring**: Comprehensive timing and resource metrics
+
+#### Operational Excellence
+- **Automated Maintenance**: No manual process management required
+- **Intelligent Scheduling**: Only runs when system is idle
+- **Comprehensive Logging**: Full session lifecycle tracking
+- **Production Ready**: Error handling, timeouts, and recovery
+
+### Performance Metrics
+
+#### Live System Results
+- **Session Execution**: 6-phase lifecycle completing successfully
+- **Context Gathering**: 6 workspaces analyzed in ~3 seconds
+- **Cleanup Effectiveness**: 1 Aider process eliminated per cycle
+- **AI Analysis**: 5-minute timeout with graceful handling
+- **Session Correlation**: All logs tagged with unique session IDs
+
+#### Resource Management
+- **Process Detection**: Identifies and tracks 26+ Claude processes
+- **Cleanup Integration**: Manages Aider processes between sessions
+- **Memory Efficiency**: Optimizes resource usage before intensive operations
+- **State Management**: Clean session transitions with correlation tracking
+
 ## Performance Achievements
 
 ### Production Benchmarks

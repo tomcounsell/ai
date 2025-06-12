@@ -387,11 +387,56 @@ sqlite3 system.db "SELECT status, COUNT(*) as count FROM promises GROUP BY statu
 ps aux | grep huey_consumer
 
 # Monitor Huey logs
-tail -f logs/huey.log
+tail -f logs/tasks.log
 
 # View recent completed promises
 sqlite3 system.db "SELECT task_description, completed_at, result_summary FROM promises WHERE status='completed' ORDER BY completed_at DESC LIMIT 5;"
 ```
+
+### Unified Daydream System Monitoring
+
+Monitor the intelligent daydream and reflection system:
+
+```bash
+# Monitor current daydream session execution
+tail -f logs/tasks.log | grep "🧠\|🧹"
+
+# Check session correlation and phase transitions
+grep "Session.*:" logs/tasks.log | tail -10
+
+# View cleanup statistics
+grep "cleanup complete:" logs/tasks.log | tail -5
+
+# Check daydream insights files
+ls -la logs/daydream_insights*.md
+
+# View latest AI-generated insights
+cat logs/daydream_insights.md
+
+# Monitor process management effectiveness
+echo "Claude processes: $(ps aux | grep claude | grep -v grep | wc -l)"
+echo "Aider processes: $(ps aux | grep aider | grep -v grep | wc -l)"
+
+# Check daydream session performance
+grep "Session.*complete" logs/tasks.log | tail -5
+```
+
+### Daydream System Features
+
+**Automatic Execution:**
+- Runs every 6 hours (00:00, 06:00, 12:00, 18:00)
+- 6-phase execution with integrated cleanup
+- Session-based tracking with correlation IDs
+
+**Resource Management:**
+- Pre-analysis cleanup of old processes
+- Post-analysis resource reset
+- Emergency cleanup for failed sessions
+
+**Performance Monitoring:**
+- Session timing and resource usage
+- Cleanup effectiveness statistics
+- AI analysis quality metrics
 
 For detailed promise queue operations, see [Promise Queue Documentation](promise-queue.md).
 

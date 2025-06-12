@@ -375,15 +375,60 @@ tail -f logs/system.log
 # Monitor task execution (Huey worker, promise processing)
 tail -f logs/tasks.log
 
+# Monitor unified daydream sessions
+tail -f logs/tasks.log | grep "🧠\|🧹"
+
 # Monitor both simultaneously
 tail -f logs/system.log logs/tasks.log
 ```
+
+## Unified Daydream System
+
+The system includes an **intelligent daydream and reflection system** that runs every 6 hours (00:00, 06:00, 12:00, 18:00) with integrated cleanup lifecycle management.
+
+### Architecture
+
+**6-Phase Execution:**
+1. **System Readiness Check** - Ensure system is idle for analysis
+2. **Pre-Analysis Cleanup** - Clean old processes and temp files
+3. **Context Gathering** - Analyze workspaces, metrics, and trends
+4. **AI Analysis** - Ollama + Aider generate architectural insights
+5. **Output Processing** - Log insights and manage archival
+6. **Post-Analysis Cleanup** - Resource cleanup and state reset
+
+### Monitoring Commands
+
+```bash
+# Monitor current daydream session
+tail -f logs/tasks.log | grep "Session.*:"
+
+# Check daydream insights
+ls -la logs/daydream_insights*.md
+
+# View latest insights
+cat logs/daydream_insights.md
+
+# Check cleanup statistics
+grep "cleanup complete:" logs/tasks.log | tail -5
+
+# Monitor session correlation
+grep "🧠 Session" logs/tasks.log | tail -10
+```
+
+### Features
+
+- **Integrated Cleanup**: Automatically manages Claude Code and Aider processes
+- **Session Tracking**: Correlation IDs for debugging and monitoring
+- **Resource Management**: Memory and process optimization
+- **Error Recovery**: Emergency cleanup for failed sessions
+- **Workspace Analysis**: Comprehensive codebase pattern recognition
+- **Performance Monitoring**: Session timing and resource usage
 
 ## Database Queries and Monitoring
 
 ### Promise Queue Database Queries
 
-The system uses SQLite databases for promise queue management and system monitoring.
+The system uses SQLite databases for promise queue management, system monitoring, and daydream session tracking.
 
 #### Database Schema Reference
 ```sql
