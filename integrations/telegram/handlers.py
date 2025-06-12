@@ -68,8 +68,12 @@ class MessageHandler:
             if self.use_unified_processor and self.processor:
                 # Use new unified processor
                 self.unified_messages += 1
-                # Create update-like object for unified processor
-                update_obj = type('Update', (), {'message': message})()
+                # Create update-like object for unified processor with proper message attribute
+                class UpdateWrapper:
+                    def __init__(self, message):
+                        self.message = message
+                
+                update_obj = UpdateWrapper(message)
                 result = await self.processor.process_message(update_obj, client)
 
                 # Log result
