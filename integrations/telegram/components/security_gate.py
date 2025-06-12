@@ -111,7 +111,15 @@ class SecurityGate:
 
     def _check_dm_whitelist(self, username: str, user_id: int) -> bool:
         """Check if user is allowed to send DMs."""
-        config = self.workspace_validator.config
+        # Load config directly since workspace_validator doesn't expose it
+        import json
+        try:
+            with open(self.workspace_validator.config_path) as f:
+                config = json.load(f)
+        except Exception:
+            # Default to empty config if loading fails
+            config = {}
+            
         dm_whitelist = config.get("dm_whitelist", {})
 
         # Check username whitelist

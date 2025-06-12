@@ -55,7 +55,7 @@ class MessageHandler:
             )
             logger.info("Unified message processor initialized")
 
-    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+    async def handle_message(self, client, message) -> ProcessingResult:
         """
         Simplified entry point - delegates to unified processor.
 
@@ -68,7 +68,9 @@ class MessageHandler:
             if self.use_unified_processor and self.processor:
                 # Use new unified processor
                 self.unified_messages += 1
-                result = await self.processor.process_message(update, context)
+                # Create update-like object for unified processor
+                update_obj = type('Update', (), {'message': message})()
+                result = await self.processor.process_message(update_obj, client)
 
                 # Log result
                 if result.success:
@@ -94,12 +96,12 @@ class MessageHandler:
             logger.error(f"❌ Unexpected error in message processing: {str(e)}", exc_info=True)
 
             # Try to send error response
-            if update.message and update.message.chat_id:
+            if message and message.chat and message.chat.id:
                 try:
-                    await self.bot.send_message(
-                        chat_id=update.message.chat_id,
+                    await client.send_message(
+                        chat_id=message.chat.id,
                         text="❌ Sorry, an unexpected error occurred. Please try again.",
-                        reply_to_message_id=update.message.message_id,
+                        reply_to_message_id=message.id,
                     )
                 except Exception as send_error:
                     logger.error(f"Failed to send error message: {send_error}")
