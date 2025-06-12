@@ -350,42 +350,42 @@ async def _async_scan_chat(chat_id: int) -> None:
             # Wrap the entire history iteration in a timeout
             async for message in client.client.get_chat_history(chat_id):
                 messages_scanned += 1
-            
-            # Stop if we've reached our last seen message
-            if last_seen_id and message.id <= last_seen_id:
-                logger.info(f"Reached last seen message {last_seen_id}, stopping scan")
-                break
-            
-            # Skip non-text messages
-            if not message.text:
-                continue
-            
-            # Store as missed message
-            missed_msg = MissedMessage(
-                chat_id=chat_id,
-                message_id=message.id,
-                text=message.text,
-                sender_username=getattr(message.from_user, 'username', None) if message.from_user else None,
-                timestamp=message.date,
-                chat_type='private' if message.chat.type == ChatType.PRIVATE else 'group',
-                metadata={
-                    'scan_time': datetime.now(timezone.utc).isoformat(),
-                    'message_type': 'text'
-                }
-            )
-            
-            # Queue for processing
-            queue_missed_message(
-                chat_id=missed_msg.chat_id,
-                message_id=missed_msg.message_id,
-                message_text=missed_msg.text,
-                sender_username=missed_msg.sender_username,
-                original_timestamp=missed_msg.timestamp.isoformat(),
-                metadata=missed_msg.metadata
-            )
-            
-            missed_messages.append(missed_msg)
-            
+                
+                # Stop if we've reached our last seen message
+                if last_seen_id and message.id <= last_seen_id:
+                    logger.info(f"Reached last seen message {last_seen_id}, stopping scan")
+                    break
+                
+                # Skip non-text messages
+                if not message.text:
+                    continue
+                
+                # Store as missed message
+                missed_msg = MissedMessage(
+                    chat_id=chat_id,
+                    message_id=message.id,
+                    text=message.text,
+                    sender_username=getattr(message.from_user, 'username', None) if message.from_user else None,
+                    timestamp=message.date,
+                    chat_type='private' if message.chat.type == ChatType.PRIVATE else 'group',
+                    metadata={
+                        'scan_time': datetime.now(timezone.utc).isoformat(),
+                        'message_type': 'text'
+                    }
+                )
+                
+                # Queue for processing
+                queue_missed_message(
+                    chat_id=missed_msg.chat_id,
+                    message_id=missed_msg.message_id,
+                    message_text=missed_msg.text,
+                    sender_username=missed_msg.sender_username,
+                    original_timestamp=missed_msg.timestamp.isoformat(),
+                    metadata=missed_msg.metadata
+                )
+                
+                missed_messages.append(missed_msg)
+                
                 # Safety limit to prevent runaway scans
                 if messages_scanned >= 1000:
                     logger.warning(f"Hit scan limit for chat {chat_id}, stopping")
