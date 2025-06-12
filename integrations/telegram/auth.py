@@ -149,16 +149,27 @@ async def main():
         print("\n🎉 Authorization already complete!")
         print("The bot can connect using the existing session.")
 
+        # Check if running in non-interactive mode (like from start.sh)
+        import sys
+        if not sys.stdin.isatty():
+            print("👍 Using existing session (non-interactive mode).")
+            return True
+
         while True:
-            choice = input("\nDo you want to re-authorize anyway? (y/n): ").lower().strip()
-            if choice in ["n", "no"]:
-                print("👍 Using existing session.")
+            try:
+                choice = input("\nDo you want to re-authorize anyway? (y/n): ").lower().strip()
+                if choice in ["n", "no"]:
+                    print("👍 Using existing session.")
+                    return True
+                elif choice in ["y", "yes"]:
+                    print("🔄 Proceeding with re-authorization...")
+                    break
+                else:
+                    print("Please enter 'y' or 'n'")
+            except EOFError:
+                # Handle EOF when running non-interactively
+                print("👍 Using existing session (EOF detected).")
                 return True
-            elif choice in ["y", "yes"]:
-                print("🔄 Proceeding with re-authorization...")
-                break
-            else:
-                print("Please enter 'y' or 'n'")
 
     # Perform authorization
     success = await authorize_telegram_client()
