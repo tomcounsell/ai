@@ -1446,7 +1446,7 @@ class MessageHandler:
                         self.chat_history.add_message(chat_id, "user", full_message, reply_to_telegram_message_id, message.id, is_telegram_id=True)
                         
                         # Process both caption and transcribed text together
-                        combined_text = f"{message.caption}\n\n{transcribed_text}"
+                        combined_text = f"{message.caption}\n\n[Voice message transcribed]: {transcribed_text}"
                         logger.info("🤖 Routing combined caption+transcription to agent...")
                         await self._route_message_with_intent(client, message, chat_id, combined_text, reply_to_telegram_message_id)
                         logger.info("✅ Voice message with caption processed successfully")
@@ -1456,9 +1456,10 @@ class MessageHandler:
                         # Store transcribed audio only
                         self.chat_history.add_message(chat_id, "user", transcribed_text, reply_to_telegram_message_id, message.id, is_telegram_id=True)
                         
-                        # Process transcribed text
+                        # Process transcribed text with voice context
                         logger.info("🤖 Routing transcription to agent...")
-                        await self._route_message_with_intent(client, message, chat_id, transcribed_text, reply_to_telegram_message_id)
+                        transcribed_with_context = f"[Voice message transcribed]: {transcribed_text}"
+                        await self._route_message_with_intent(client, message, chat_id, transcribed_with_context, reply_to_telegram_message_id)
                         logger.info("✅ Voice message processed successfully")
                         return  # Exit since _route_message_with_intent handles the full response
                     

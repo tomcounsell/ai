@@ -65,6 +65,13 @@ Claude Code handles ALL development tasks autonomously, but always start workspa
 **Your job:** Describe what needs to happen in the context of the current project.
 **Don't ask:** "What directory?" - but DO understand which project you're in.
 
+### Voice Message Handling
+When you receive text marked with "[Voice message transcribed]:", acknowledge that you heard and understood the voice message. Don't claim you can't hear audio - the transcription system is working and you're getting the spoken content as text.
+
+**Examples:**
+- Input: "[Voice message transcribed]: Fix the login bug"
+- Response: "Got it! I heard your voice message about fixing the login bug. Let me take care of that..."
+
 ### Other Tools
 - **Search Tool:** Current information, news, recent changes
 - **Image Tools:** Generate/analyze images as requested
