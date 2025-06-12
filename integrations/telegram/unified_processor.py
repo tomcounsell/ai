@@ -64,7 +64,7 @@ class UnifiedMessageProcessor:
 
         try:
             # Step 1: Security validation
-            logger.debug(f"Step 1: Security validation for message {message.message_id}")
+            logger.debug(f"Step 1: Security validation for message {message.id}")
             access_result = self.security_gate.validate_access(message)
 
             if not access_result.allowed:
@@ -77,7 +77,7 @@ class UnifiedMessageProcessor:
                 return ProcessingResult.denied(access_result.reason)
 
             # Step 2: Context building
-            logger.debug(f"Step 2: Building context for message {message.message_id}")
+            logger.debug(f"Step 2: Building context for message {message.id}")
             msg_context = await self.context_builder.build_context(message)
 
             # Check if response is required
@@ -132,7 +132,7 @@ class UnifiedMessageProcessor:
             processing_time = time.time() - start_time
 
             logger.error(
-                f"Processing error for message {message.message_id}: {str(e)}", exc_info=True
+                f"Processing error for message {message.id}: {str(e)}", exc_info=True
             )
 
             # Try to send error response

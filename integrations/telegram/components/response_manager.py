@@ -72,7 +72,7 @@ class ResponseManager:
 
             # Send main response
             main_result = await self._send_messages(
-                context.chat_id, formatted_messages, reply_to_message_id=context.message.message_id
+                context.chat_id, formatted_messages, reply_to_message_id=context.message.id
             )
 
             if not main_result.success:
@@ -91,7 +91,7 @@ class ResponseManager:
             # Add reactions if specified
             if response.reactions:
                 await self._add_reactions(
-                    context.chat_id, context.message.message_id, response.reactions
+                    context.chat_id, context.message.id, response.reactions
                 )
 
             # Store conversation history
@@ -273,7 +273,7 @@ class ResponseManager:
                 """,
                     (
                         context.chat_id,
-                        context.message.message_id,
+                        context.message.id,
                         context.username,
                         context.cleaned_text,
                         False,

@@ -199,7 +199,7 @@ class ContextBuilder:
 
         reply_msg = message.reply_to_message
         reply_context = {
-            "message_id": reply_msg.message_id,
+            "message_id": reply_msg.id,
             "text": get_message_text(reply_msg),
             "username": reply_msg.from_user.username if reply_msg.from_user else None,
             "is_bot": reply_msg.from_user.is_bot if reply_msg.from_user else False,
