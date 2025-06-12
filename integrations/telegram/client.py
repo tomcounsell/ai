@@ -57,10 +57,17 @@ class TelegramClient:
             await self.client.start()
             logger.info("Telegram client started successfully")
 
-            # Initialize unified message handler
+            # Initialize unified message handler with Valor agent
+            try:
+                from agents.valor.agent import valor_agent
+                agent_instance = valor_agent
+            except ImportError:
+                logger.warning("Could not import Valor agent, using None")
+                agent_instance = None
+                
             self.message_handler = MessageHandler(
                 telegram_bot=self.client,
-                valor_agent=None,  # Will be set later when agent is available
+                valor_agent=agent_instance,
             )
             await self.message_handler.initialize()
 
