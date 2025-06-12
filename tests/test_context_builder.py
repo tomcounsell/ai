@@ -7,7 +7,9 @@ from datetime import datetime
 from unittest.mock import Mock, AsyncMock, patch
 
 import pytest
-from telegram.constants import MessageEntityType
+# Mock MessageEntityType since we're using pyrogram
+class MessageEntityType:
+    MENTION = "mention"
 
 from integrations.telegram.components.context_builder import ContextBuilder
 from integrations.telegram.models import MessageContext, MediaInfo, MessageType

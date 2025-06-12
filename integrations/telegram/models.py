@@ -8,9 +8,9 @@ all components of the refactored system.
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any
 
-from telegram import Message as TelegramMessage
+# Using pyrogram, not python-telegram-bot
+from typing import Any, Any as TelegramMessage
 
 
 class MessageType(Enum):
@@ -28,7 +28,7 @@ class MessageType(Enum):
     UNKNOWN = "unknown"
 
 
-class Priority(Enum):
+class ProcessingPriority(Enum):
     """Message processing priority levels."""
 
     CRITICAL = "critical"  # System messages, errors
@@ -123,7 +123,7 @@ class ProcessingPlan:
     intent: Intent | None = None
     agent_config: AgentConfig = field(default_factory=AgentConfig)
     response_format: ResponseFormat = ResponseFormat.TEXT
-    priority: Priority = Priority.MEDIUM
+    priority: ProcessingPriority = ProcessingPriority.MEDIUM
     special_handlers: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 

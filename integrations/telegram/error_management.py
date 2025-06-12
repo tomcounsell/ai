@@ -9,7 +9,19 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Any
 
-from telegram.error import BadRequest, NetworkError, TimedOut
+
+# Using generic exceptions since we're using pyrogram
+class BadRequest(Exception):  # noqa: N818
+    pass
+
+
+class NetworkError(Exception):
+    pass
+
+
+class TimedOut(Exception):  # noqa: N818
+    pass
+
 
 from integrations.telegram.models import MessageContext
 

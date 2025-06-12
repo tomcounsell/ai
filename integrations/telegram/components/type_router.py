@@ -10,8 +10,8 @@ import re
 from integrations.telegram.models import (
     MessageContext,
     MessageType,
-    Priority,
     ProcessingPlan,
+    ProcessingPriority,
     ResponseFormat,
 )
 
@@ -151,7 +151,7 @@ class TypeRouter:
         caption = context.message.caption or ""
         if "analyze" in caption.lower() or "what" in caption.lower():
             plan.metadata["analysis_requested"] = True
-            plan.priority = Priority.HIGH
+            plan.priority = ProcessingPriority.HIGH
 
     def _route_document(self, context: MessageContext, plan: ProcessingPlan):
         """Route document messages."""
@@ -204,15 +204,15 @@ class TypeRouter:
                 plan.metadata.get("analysis_requested"),
             ]
         ):
-            plan.priority = Priority.HIGH
+            plan.priority = ProcessingPriority.HIGH
 
         # Medium priority (default)
         elif any([context.is_mention, context.is_dev_group, plan.metadata.get("likely_question")]):
-            plan.priority = Priority.MEDIUM
+            plan.priority = ProcessingPriority.MEDIUM
 
         # Low priority
         else:
-            plan.priority = Priority.LOW
+            plan.priority = ProcessingPriority.LOW
 
     def _requires_intent_classification(
         self, context: MessageContext, plan: ProcessingPlan

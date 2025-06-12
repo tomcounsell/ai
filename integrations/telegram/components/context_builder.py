@@ -8,11 +8,11 @@ a single, consistent component.
 import logging
 import re
 from datetime import datetime
-from typing import Any
 
-from telegram import Message as TelegramMessage
-from telegram.constants import MessageEntityType
+# Using pyrogram Message type
+from typing import Any, Any as TelegramMessage
 
+# MessageEntityType will be handled differently with pyrogram
 from integrations.telegram.models import MediaInfo, MessageContext, MessageType
 from integrations.telegram.utils import get_message_text
 from utilities.workspace_validator import get_workspace_validator
@@ -169,7 +169,7 @@ class ContextBuilder:
         # Check for bot mention in entities
         if message.entities:
             for entity in message.entities:
-                if entity.type == MessageEntityType.MENTION:
+                if hasattr(entity, "type") and entity.type == "mention":
                     mention_text = text[entity.offset : entity.offset + entity.length]
                     if mention_text.lower() == f"@{self.bot_username.lower()}":
                         is_mention = True

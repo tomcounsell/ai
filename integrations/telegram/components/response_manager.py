@@ -8,9 +8,26 @@ import asyncio
 import logging
 from datetime import datetime
 
-from telegram import Bot
-from telegram.constants import ParseMode
-from telegram.error import BadRequest, NetworkError, TimedOut
+# Using pyrogram instead of python-telegram-bot
+from typing import Any
+
+
+# Mock telegram exceptions for compatibility
+class BadRequest(Exception):  # noqa: N818
+    pass
+
+
+class NetworkError(Exception):
+    pass
+
+
+class TimedOut(Exception):  # noqa: N818
+    pass
+
+
+class ParseMode:
+    MARKDOWN = "markdown"
+
 
 from integrations.telegram.models import (
     AgentResponse,
@@ -25,7 +42,7 @@ logger = logging.getLogger(__name__)
 class ResponseManager:
     """Unified response delivery with error handling."""
 
-    def __init__(self, telegram_bot: Bot | None = None):
+    def __init__(self, telegram_bot: Any | None = None):
         """Initialize with optional Telegram bot instance."""
         self.bot = telegram_bot
         self.max_message_length = 4096  # Telegram limit

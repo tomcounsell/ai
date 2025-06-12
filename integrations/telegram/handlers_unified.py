@@ -6,8 +6,15 @@ This replaces the 1,994-line monolithic handler with a clean delegation pattern.
 
 import logging
 
-from telegram import Bot, Update
-from telegram.ext import ContextTypes, MessageHandler as TelegramMessageHandler, filters
+# Using pyrogram in this project
+from typing import Any
+
+# Mock telegram types for compatibility
+Bot = Any
+Update = Any
+ContextTypes = type("ContextTypes", (), {"DEFAULT_TYPE": Any})
+TelegramMessageHandler = Any
+filters = type("filters", (), {"ALL": True})
 
 from integrations.telegram.models import ProcessingResult
 from integrations.telegram.unified_processor import (

@@ -9,7 +9,8 @@ import logging
 import os
 from datetime import datetime, timedelta
 
-from telegram import Message as TelegramMessage
+# Using pyrogram Message type
+from typing import Any as TelegramMessage
 
 from integrations.telegram.models import AccessResult
 from utilities.workspace_validator import WorkspaceValidator, get_workspace_validator

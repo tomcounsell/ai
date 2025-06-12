@@ -8,8 +8,9 @@ import asyncio
 import logging
 import time
 
-from telegram import Bot, Update
-from telegram.ext import ContextTypes
+# Using pyrogram in this project, not python-telegram-bot
+# These will be passed in as parameters
+from typing import Any
 
 from integrations.telegram.components import (
     AgentOrchestrator,
@@ -35,7 +36,7 @@ class UnifiedMessageProcessor:
     5. Response delivery
     """
 
-    def __init__(self, telegram_bot: Bot | None = None, valor_agent=None):
+    def __init__(self, telegram_bot: Any | None = None, valor_agent=None):
         """Initialize processor with all components."""
         self.security_gate = SecurityGate()
         self.context_builder = ContextBuilder()
@@ -48,9 +49,7 @@ class UnifiedMessageProcessor:
         self.error_count = 0
         self.total_processing_time = 0
 
-    async def process_message(
-        self, update: Update, context: ContextTypes.DEFAULT_TYPE
-    ) -> ProcessingResult:
+    async def process_message(self, update: Any, context: Any) -> ProcessingResult:
         """
         Unified 5-step processing pipeline.
 
@@ -215,7 +214,7 @@ class UnifiedMessageProcessor:
         return health
 
 
-async def create_unified_processor(bot: Bot, valor_agent=None) -> UnifiedMessageProcessor:
+async def create_unified_processor(bot: Any, valor_agent=None) -> UnifiedMessageProcessor:
     """Factory function to create and initialize processor."""
     processor = UnifiedMessageProcessor(telegram_bot=bot, valor_agent=valor_agent)
 
