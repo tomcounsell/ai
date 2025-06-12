@@ -26,7 +26,7 @@ class TimedOut(Exception):  # noqa: N818
 
 
 class ParseMode:
-    MARKDOWN = "markdown"
+    MARKDOWN = "MarkdownV2"  # Pyrogram uses MarkdownV2, not "markdown"
 
 
 from integrations.telegram.models import (
@@ -177,10 +177,10 @@ class ResponseManager:
                     sent_message = await self.bot.send_message(
                         chat_id=chat_id,
                         text=message,
-                        parse_mode=ParseMode.MARKDOWN,
+                        parse_mode=None,  # Disable markdown for now to avoid format errors
                         reply_to_message_id=reply_to,
                     )
-                    last_message_id = sent_message.message_id
+                    last_message_id = sent_message.id
                     break
 
                 except BadRequest as e:
@@ -190,7 +190,7 @@ class ResponseManager:
                             sent_message = await self.bot.send_message(
                                 chat_id=chat_id, text=message, reply_to_message_id=reply_to
                             )
-                            last_message_id = sent_message.message_id
+                            last_message_id = sent_message.id
                             break
                         except Exception:
                             pass
