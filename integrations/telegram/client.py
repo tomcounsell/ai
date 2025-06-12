@@ -49,7 +49,9 @@ class TelegramClient:
                 api_id=int(api_id), 
                 api_hash=api_hash, 
                 workdir=self.workdir,
-                max_concurrent_transmissions=1  # Reduce concurrent transmissions to prevent locks
+                max_concurrent_transmissions=1,  # Reduce concurrent transmissions to prevent locks
+                sleep_threshold=60,  # Prevent flood wait issues
+                no_updates=False  # Ensure we receive updates
             )
 
             # Start the client

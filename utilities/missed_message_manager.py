@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Any
 from dataclasses import dataclass
+from collections import defaultdict
 
 from pyrogram.enums import ChatType
 from huey import crontab
@@ -24,6 +25,11 @@ from utilities.database import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Circuit breaker for failing chats
+CHAT_FAILURE_COUNT = defaultdict(int)
+CHAT_FAILURE_THRESHOLD = 3
+CHAT_FAILURE_TIMEOUT = 300  # 5 minutes
 
 
 @dataclass
@@ -120,6 +126,11 @@ class MissedMessageManager:
         
         Called when user sends a new message to trigger processing.
         """
+        # Check circuit breaker
+        if self._is_chat_circuit_broken(chat_id):
+            self.logger.warning(f"Circuit breaker active for chat {chat_id} - skipping missed message processing")
+            return
+        
         pending_messages = get_pending_missed_messages(chat_id)
         
         if not pending_messages:
@@ -164,9 +175,15 @@ class MissedMessageManager:
                 update_message_queue_status(msg['id'], 'failed', str(e))
     
     async def _get_chat_info(self, chat_id: int) -> Dict[str, Any]:
-        """Get chat information for message filtering."""
+        """Get chat information for message filtering with timeout protection."""
+        import asyncio
+        
         try:
-            chat = await self.client.get_chat(chat_id)
+            # Add timeout to prevent hanging on get_chat API call
+            chat = await asyncio.wait_for(
+                self.client.get_chat(chat_id),
+                timeout=5.0  # 5 second timeout
+            )
             is_private_chat = chat.type == ChatType.PRIVATE
             
             # Check if dev group
@@ -178,8 +195,16 @@ class MissedMessageManager:
                 'is_dev_group': is_dev_group_chat,
                 'chat_title': getattr(chat, 'title', 'DM')
             }
+        except asyncio.TimeoutError:
+            self.logger.warning(f"Timeout getting chat info for {chat_id} - using defaults")
+            return {
+                'chat_type': 'unknown',
+                'is_dev_group': False,
+                'chat_title': 'Unknown'
+            }
         except Exception as e:
             self.logger.warning(f"Could not get chat info for {chat_id}: {e}")
+            self._record_chat_failure(chat_id)
             return {
                 'chat_type': 'unknown',
                 'is_dev_group': False,
@@ -195,7 +220,12 @@ class MissedMessageManager:
         
         # Regular groups: only messages with bot mentions
         try:
-            me = await self.client.get_me()
+            # Add timeout to get_me call
+            import asyncio
+            me = await asyncio.wait_for(
+                self.client.get_me(),
+                timeout=5.0
+            )
             bot_username = me.username
             
             relevant = []
@@ -220,6 +250,30 @@ class MissedMessageManager:
             f"I was offline and missed {len(messages)} messages. "
             f"Recent messages were: {'; '.join(recent)}"
         )
+    
+    def _is_chat_circuit_broken(self, chat_id: int) -> bool:
+        """Check if circuit breaker is active for a chat."""
+        import time
+        failure_info = CHAT_FAILURE_COUNT.get(chat_id, {'count': 0, 'last_failure': 0})
+        
+        # Reset if timeout has passed
+        if time.time() - failure_info.get('last_failure', 0) > CHAT_FAILURE_TIMEOUT:
+            CHAT_FAILURE_COUNT.pop(chat_id, None)
+            return False
+        
+        return failure_info.get('count', 0) >= CHAT_FAILURE_THRESHOLD
+    
+    def _record_chat_failure(self, chat_id: int) -> None:
+        """Record a failure for circuit breaker."""
+        import time
+        if chat_id not in CHAT_FAILURE_COUNT:
+            CHAT_FAILURE_COUNT[chat_id] = {'count': 0, 'last_failure': 0}
+        
+        CHAT_FAILURE_COUNT[chat_id]['count'] += 1
+        CHAT_FAILURE_COUNT[chat_id]['last_failure'] = time.time()
+        
+        if CHAT_FAILURE_COUNT[chat_id]['count'] >= CHAT_FAILURE_THRESHOLD:
+            self.logger.warning(f"Circuit breaker tripped for chat {chat_id} after {CHAT_FAILURE_THRESHOLD} failures")
 
 
 # Huey background tasks
@@ -291,9 +345,11 @@ async def _async_scan_chat(chat_id: int) -> None:
         missed_messages = []
         messages_scanned = 0
         
-        # Scan message history
-        async for message in client.client.get_chat_history(chat_id):
-            messages_scanned += 1
+        # Scan message history with timeout protection
+        try:
+            # Wrap the entire history iteration in a timeout
+            async for message in client.client.get_chat_history(chat_id):
+                messages_scanned += 1
             
             # Stop if we've reached our last seen message
             if last_seen_id and message.id <= last_seen_id:
@@ -330,10 +386,15 @@ async def _async_scan_chat(chat_id: int) -> None:
             
             missed_messages.append(missed_msg)
             
-            # Safety limit to prevent runaway scans
-            if messages_scanned >= 1000:
-                logger.warning(f"Hit scan limit for chat {chat_id}, stopping")
-                break
+                # Safety limit to prevent runaway scans
+                if messages_scanned >= 1000:
+                    logger.warning(f"Hit scan limit for chat {chat_id}, stopping")
+                    break
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout while scanning chat {chat_id} history - processed {messages_scanned} messages")
+        except Exception as e:
+            logger.error(f"Error scanning chat {chat_id} history: {e}")
+            raise
         
         # Update state
         if missed_messages:

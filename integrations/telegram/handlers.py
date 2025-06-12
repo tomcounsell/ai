@@ -348,7 +348,9 @@ class MessageHandler:
             reply_to_telegram_message_id = getattr(message.reply_to_message, "id", None)
 
         # === STEP 13: NEW MISSED MESSAGE SYSTEM INTEGRATION ===
-        await self._handle_missed_messages_new_system(client, chat_id, message)
+        # Make this non-blocking to prevent hanging the main message flow
+        import asyncio
+        asyncio.create_task(self._handle_missed_messages_new_system(client, chat_id, message))
 
         # === STEP 14: MENTION DETECTION AND TEXT PROCESSING ===
         logger.debug("🏷️  Processing mentions and cleaning message text...")
