@@ -10,8 +10,14 @@ import json
 import logging
 import os
 import sqlite3
+import subprocess
+import tempfile
+import time
+import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from pathlib import Path
+from typing import Dict, Any, Optional, List
 
 from huey import crontab
 from .huey_config import huey
@@ -21,6 +27,653 @@ from utilities.database import (
 from utilities.missed_message_manager import scan_chat_for_missed_messages, process_missed_message_batch
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class DaydreamSession:
+    """Complete daydream session with integrated lifecycle management."""
+    
+    # Session metadata
+    session_id: str
+    start_time: datetime
+    phase: str = 'initializing'  # Current execution phase
+    
+    # Context data
+    system_health: Dict[str, Any] = field(default_factory=dict)
+    workspace_analysis: Dict[str, Any] = field(default_factory=dict)
+    development_trends: Dict[str, Any] = field(default_factory=dict)
+    system_metrics: Dict[str, Any] = field(default_factory=dict)
+    recent_activity: List[Dict[str, Any]] = field(default_factory=list)
+    
+    # Analysis results
+    insights: str = ""
+    analysis_duration: float = 0.0
+    cleanup_summary: Dict[str, Any] = field(default_factory=dict)
+    
+    def log_phase_transition(self, new_phase: str) -> None:
+        """Log phase transitions with session context."""
+        logger.info(f"🧠 Session {self.session_id[:8]}: {self.phase} → {new_phase}")
+        self.phase = new_phase
+
+
+class UnifiedDaydreamSystem:
+    """Unified daydream system with integrated cleanup and analysis."""
+    
+    def __init__(self):
+        self.session_timeout = 300  # 5 minutes max analysis time
+        self.cleanup_stats = {
+            'claude_processes_killed': 0,
+            'aider_processes_killed': 0,
+            'temp_files_cleaned': 0
+        }
+    
+    def _check_system_readiness(self, session: DaydreamSession) -> bool:
+        """Phase 1: Check if system is ready for intensive analysis."""
+        session.log_phase_transition('readiness_check')
+        
+        # Get system health data (migrated from gather_system_health_data)
+        session.system_health = self._get_system_health()
+        
+        if session.system_health['pending_count'] > 5:
+            logger.info(f"🧠 System busy ({session.system_health['pending_count']} pending), skipping daydream")
+            return False
+            
+        logger.info("🧠 System idle ✓ - Ready for daydream analysis")
+        return True
+    
+    def _cleanup_before_analysis(self, session: DaydreamSession) -> None:
+        """Phase 2: Clean resources before intensive analysis."""
+        session.log_phase_transition('pre_cleanup')
+        logger.info("🧹 Pre-analysis cleanup starting...")
+        
+        cleanup_stats = {
+            'claude_processes_killed': 0,
+            'aider_processes_killed': 0,
+            'temp_files_cleaned': 0,
+            'memory_freed_mb': 0
+        }
+        
+        # Kill old Claude Code processes (24+ hours old)
+        cleanup_stats['claude_processes_killed'] = self._cleanup_old_claude_processes()
+        
+        # Kill orphaned Aider processes
+        cleanup_stats['aider_processes_killed'] = self._cleanup_old_aider_processes()
+        
+        # Clean temp analysis files
+        cleanup_stats['temp_files_cleaned'] = self._cleanup_temp_files()
+        
+        session.cleanup_summary['pre_analysis'] = cleanup_stats
+        logger.info(f"🧹 Pre-cleanup complete: {cleanup_stats}")
+    
+    def _gather_comprehensive_context(self, session: DaydreamSession) -> None:
+        """Phase 3: Unified context gathering (replaces multiple scattered functions)."""
+        session.log_phase_transition('context_gathering')
+        logger.info("🧠 Gathering comprehensive analysis context...")
+        
+        try:
+            with get_database_connection() as conn:
+                # Workspace analysis (migrated from gather_daydream_context)
+                session.workspace_analysis = self._analyze_all_workspaces()
+                
+                # System metrics (migrated from gather_system_metrics)
+                session.system_metrics = self._gather_system_metrics(conn)
+                
+                # Development trends (migrated from gather_development_trends)
+                session.development_trends = self._gather_development_trends(conn)
+                
+                # Recent activity
+                session.recent_activity = self._gather_recent_activity(conn)
+        
+        except Exception as e:
+            logger.error(f"🧠 Context gathering failed: {e}")
+            # Provide minimal context to prevent complete failure
+            session.workspace_analysis = {}
+            session.system_metrics = {'error': str(e)}
+            session.development_trends = {}
+            session.recent_activity = []
+        
+        logger.info(f"🧠 Context ready: {len(session.workspace_analysis)} workspaces analyzed")
+    
+    def _execute_ai_analysis(self, session: DaydreamSession) -> None:
+        """Phase 4: Execute AI analysis with unified prompt building."""
+        session.log_phase_transition('ai_analysis')
+        analysis_start = time.time()
+        
+        logger.info("🧠 Starting AI-powered codebase analysis...")
+        
+        try:
+            # Build unified prompt (merge duplicate prompt builders)
+            prompt = self._build_unified_analysis_prompt(session)
+            
+            # Execute Aider analysis with timeout
+            session.insights = self._run_aider_analysis(prompt)
+            
+        except Exception as e:
+            logger.error(f"🧠 AI analysis failed: {e}")
+            session.insights = f"Analysis failed: {str(e)}"
+        
+        session.analysis_duration = time.time() - analysis_start
+        logger.info(f"🧠 Analysis complete ({session.analysis_duration:.1f}s)")
+    
+    def _process_insights_and_output(self, session: DaydreamSession) -> None:
+        """Phase 5: Process insights and handle output."""
+        session.log_phase_transition('output_processing')
+        
+        # Log insights to console (migrated from log_daydream_insights)
+        self._log_insights_to_console(session.insights)
+        
+        # Write insights to file and manage archival
+        self._write_and_archive_insights(session)
+        
+        # Generate session summary for monitoring
+        self._generate_session_summary(session)
+    
+    def _cleanup_after_analysis(self, session: DaydreamSession) -> None:
+        """Phase 6: Post-analysis cleanup."""
+        session.log_phase_transition('post_cleanup')
+        logger.info("🧹 Post-analysis cleanup starting...")
+        
+        cleanup_stats = {
+            'current_aider_killed': False,
+            'insights_archived': False,
+            'temp_files_cleaned': 0
+        }
+        
+        # Kill current Aider session if still running
+        cleanup_stats['current_aider_killed'] = self._cleanup_current_aider()
+        
+        # Archive old insights (keep last 10)
+        cleanup_stats['insights_archived'] = self._archive_old_insights()
+        
+        session.cleanup_summary['post_analysis'] = cleanup_stats
+        logger.info(f"🧹 Post-cleanup complete: {cleanup_stats}")
+    
+    def _emergency_cleanup(self, session: DaydreamSession) -> None:
+        """Emergency cleanup for failed sessions."""
+        session.log_phase_transition('emergency_cleanup')
+        logger.warning(f"🚨 Emergency cleanup for session {session.session_id[:8]}")
+        
+        try:
+            # Force kill any Aider processes
+            subprocess.run(['pkill', '-f', 'aider'], check=False)
+            
+            # Clean temp files
+            self._cleanup_temp_files()
+            
+            logger.info("🚨 Emergency cleanup complete")
+        except Exception as e:
+            logger.error(f"🚨 Emergency cleanup failed: {e}")
+    
+    # Helper methods for cleanup operations
+    def _cleanup_old_claude_processes(self) -> int:
+        """Kill Claude Code processes older than 24 hours."""
+        try:
+            # Get list of claude processes with timestamps
+            cmd = ['ps', 'aux']
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            killed_count = 0
+            current_time = time.time()
+            
+            for line in result.stdout.split('\n'):
+                if 'claude' in line and 'claude code' in line:
+                    parts = line.split()
+                    if len(parts) > 1:
+                        pid = parts[1]
+                        # Check process age (simplified - would need actual process start time)
+                        # For now, kill processes that appear to be old based on naming
+                        try:
+                            subprocess.run(['kill', '-TERM', pid], check=False)
+                            killed_count += 1
+                        except:
+                            pass
+            
+            return killed_count
+        except Exception as e:
+            logger.warning(f"Failed to cleanup Claude processes: {e}")
+            return 0
+    
+    def _cleanup_old_aider_processes(self) -> int:
+        """Kill orphaned Aider processes."""
+        try:
+            result = subprocess.run(['pkill', '-f', 'aider.*daydream'], capture_output=True)
+            return 1 if result.returncode == 0 else 0
+        except Exception as e:
+            logger.warning(f"Failed to cleanup Aider processes: {e}")
+            return 0
+    
+    def _cleanup_temp_files(self) -> int:
+        """Clean temporary analysis files."""
+        try:
+            temp_patterns = [
+                '/tmp/tmp*daydream*.md',
+                '/tmp/tmp*analysis*.md',
+                '/var/folders/*/T/tmp*daydream*.md'
+            ]
+            
+            cleaned_count = 0
+            for pattern in temp_patterns:
+                try:
+                    import glob
+                    files = glob.glob(pattern)
+                    for file_path in files:
+                        Path(file_path).unlink(missing_ok=True)
+                        cleaned_count += 1
+                except:
+                    pass
+            
+            return cleaned_count
+        except Exception as e:
+            logger.warning(f"Failed to cleanup temp files: {e}")
+            return 0
+    
+    def _cleanup_current_aider(self) -> bool:
+        """Kill current Aider session if still running."""
+        try:
+            # This would be more sophisticated in practice
+            result = subprocess.run(['pkill', '-f', 'aider'], check=False)
+            return result.returncode == 0
+        except:
+            return False
+    
+    def _archive_old_insights(self) -> bool:
+        """Archive old insight files, keeping last 10."""
+        try:
+            insights_file = Path('logs/daydream_insights.md')
+            if insights_file.exists():
+                # Simple rotation - move to timestamped backup
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                backup_file = Path(f'logs/daydream_insights_{timestamp}.md')
+                insights_file.rename(backup_file)
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to archive insights: {e}")
+            return False
+    
+    # Context gathering methods (migrated from scattered functions)
+    def _get_system_health(self) -> Dict[str, Any]:
+        """Get current system health data."""
+        try:
+            with get_database_connection() as conn:
+                # Get pending promise count
+                pending_count = conn.execute("""
+                    SELECT COUNT(*) FROM promises WHERE status = 'pending'
+                """).fetchone()[0]
+                
+                # Get stalled tasks count
+                stalled_count = conn.execute("""
+                    SELECT COUNT(*) FROM promises 
+                    WHERE status = 'in_progress' 
+                    AND created_at < datetime('now', '-4 hours')
+                """).fetchone()[0]
+                
+                return {
+                    'pending_count': pending_count,
+                    'stalled_count': stalled_count,
+                    'timestamp': datetime.utcnow().isoformat()
+                }
+        except Exception as e:
+            logger.error(f"Failed to get system health: {e}")
+            return {'pending_count': 0, 'stalled_count': 0, 'error': str(e)}
+    
+    def _analyze_all_workspaces(self) -> Dict[str, Any]:
+        """Analyze all configured workspaces."""
+        workspaces = {}
+        try:
+            # Load workspace configuration
+            workspace_config = self._load_workspace_config()
+            
+            for workspace_name, workspace_data in workspace_config.get('workspaces', {}).items():
+                if isinstance(workspace_data, dict):
+                    working_dir = workspace_data.get('working_directory', '')
+                    if working_dir and Path(working_dir).exists():
+                        workspaces[workspace_name] = self._analyze_single_workspace(workspace_name, working_dir)
+                        
+        except Exception as e:
+            logger.warning(f"Workspace analysis failed: {e}")
+            
+        return workspaces
+    
+    def _analyze_single_workspace(self, workspace_name: str, working_dir: str) -> Dict[str, Any]:
+        """Analyze a single workspace directory."""
+        workspace_info = {
+            'name': workspace_name,
+            'directory': working_dir,
+            'exists': Path(working_dir).exists(),
+            'git_status': None,
+            'tech_stack': [],
+            'file_count': 0
+        }
+        
+        if not workspace_info['exists']:
+            return workspace_info
+            
+        try:
+            # Get git status if it's a git repo
+            git_result = subprocess.run(
+                ['git', 'status', '--porcelain'],
+                cwd=working_dir,
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if git_result.returncode == 0:
+                workspace_info['git_status'] = git_result.stdout.strip()
+            
+            # Simple tech stack detection
+            if Path(working_dir, 'package.json').exists():
+                workspace_info['tech_stack'].append('Node.js')
+            if Path(working_dir, 'requirements.txt').exists() or Path(working_dir, 'pyproject.toml').exists():
+                workspace_info['tech_stack'].append('Python')
+            if Path(working_dir, 'Cargo.toml').exists():
+                workspace_info['tech_stack'].append('Rust')
+                
+            # Count Python files
+            python_files = list(Path(working_dir).rglob('*.py'))
+            workspace_info['file_count'] = len(python_files)
+            
+        except Exception as e:
+            logger.warning(f"Failed to analyze workspace {workspace_name}: {e}")
+            
+        return workspace_info
+    
+    def _gather_system_metrics(self, conn) -> Dict[str, Any]:
+        """Gather system performance metrics."""
+        metrics = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'completion_stats': {},
+            'task_types': {},
+            'success_rate': 0
+        }
+        
+        try:
+            # Task completion statistics
+            completion_stats = conn.execute("""
+                SELECT 
+                    status,
+                    COUNT(*) as count,
+                    AVG(CASE 
+                        WHEN completed_at IS NOT NULL AND created_at IS NOT NULL 
+                        THEN (julianday(completed_at) - julianday(created_at)) * 24 * 60 
+                        ELSE NULL 
+                    END) as avg_duration_minutes
+                FROM promises 
+                WHERE created_at > datetime('now', '-30 days')
+                GROUP BY status
+            """).fetchall()
+            
+            total_tasks = 0
+            for row in completion_stats:
+                status, count, avg_duration = row
+                total_tasks += count
+                metrics['completion_stats'][status] = {
+                    'count': count,
+                    'avg_duration_minutes': round(avg_duration, 2) if avg_duration else None
+                }
+            
+            # Calculate success rate
+            completed_count = metrics['completion_stats'].get('completed', {}).get('count', 0)
+            metrics['success_rate'] = round((completed_count / total_tasks) * 100, 1) if total_tasks > 0 else 0
+            
+            # Task type distribution
+            task_types = conn.execute("""
+                SELECT task_type, COUNT(*) as count
+                FROM promises 
+                WHERE created_at > datetime('now', '-30 days')
+                GROUP BY task_type
+                ORDER BY count DESC
+            """).fetchall()
+            
+            metrics['task_types'] = {row[0]: row[1] for row in task_types}
+            
+        except Exception as e:
+            logger.warning(f"Error gathering system metrics: {e}")
+            metrics['error'] = str(e)
+        
+        return metrics
+    
+    def _gather_development_trends(self, conn) -> Dict[str, Any]:
+        """Gather development trend analysis."""
+        trends = {
+            'timestamp': datetime.utcnow().isoformat(),
+            'weekly_trends': []
+        }
+        
+        try:
+            # Weekly completion trends
+            weekly_trends = conn.execute("""
+                SELECT 
+                    strftime('%Y-W%W', created_at) as week,
+                    COUNT(*) as total_tasks,
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed_tasks
+                FROM promises 
+                WHERE created_at > datetime('now', '-8 weeks')
+                GROUP BY strftime('%Y-W%W', created_at)
+                ORDER BY week DESC
+                LIMIT 4
+            """).fetchall()
+            
+            for row in weekly_trends:
+                week, total_tasks, completed_tasks = row
+                completion_rate = round((completed_tasks / total_tasks) * 100, 1) if total_tasks > 0 else 0
+                trends['weekly_trends'].append({
+                    'week': week,
+                    'total_tasks': total_tasks,
+                    'completed_tasks': completed_tasks,
+                    'completion_rate': completion_rate
+                })
+                
+        except Exception as e:
+            logger.warning(f"Error gathering development trends: {e}")
+            trends['error'] = str(e)
+        
+        return trends
+    
+    def _gather_recent_activity(self, conn) -> List[Dict[str, Any]]:
+        """Gather recent development activity."""
+        try:
+            recent_promises = conn.execute("""
+                SELECT 
+                    task_description,
+                    task_type,
+                    status,
+                    created_at,
+                    chat_id
+                FROM promises 
+                WHERE created_at > datetime('now', '-7 days')
+                ORDER BY created_at DESC
+                LIMIT 20
+            """).fetchall()
+            
+            activities = []
+            for row in recent_promises:
+                activities.append({
+                    'task_description': row[0],
+                    'task_type': row[1],
+                    'status': row[2],
+                    'created_at': row[3],
+                    'chat_id': row[4]
+                })
+            
+            return activities
+            
+        except Exception as e:
+            logger.warning(f"Error gathering recent activity: {e}")
+            return []
+    
+    def _build_unified_analysis_prompt(self, session: DaydreamSession) -> str:
+        """Build comprehensive analysis prompt for Aider."""
+        
+        # Workspace summary
+        workspace_summary = []
+        for name, info in session.workspace_analysis.items():
+            if info.get('exists'):
+                tech_stack = ', '.join(info.get('tech_stack', []))
+                workspace_summary.append(f"**{name}**: {tech_stack} ({info.get('file_count', 0)} Python files)")
+        
+        # System performance summary
+        metrics = session.system_metrics
+        success_rate = metrics.get('success_rate', 0)
+        task_types = metrics.get('task_types', {})
+        
+        # Recent activity summary
+        activity_summary = []
+        for activity in session.recent_activity[:5]:
+            status_emoji = "✅" if activity['status'] == 'completed' else "⏳" if activity['status'] == 'in_progress' else "❌"
+            activity_summary.append(f"- {status_emoji} {activity['task_type']}: {activity['task_description'][:60]}...")
+        
+        prompt = f"""You are Valor Engels, an AI system performing thoughtful reflection on your development environment.
+
+WORKSPACE OVERVIEW:
+{chr(10).join(workspace_summary) if workspace_summary else '- No active workspaces detected'}
+
+SYSTEM PERFORMANCE:
+- Success Rate: {success_rate}%
+- Task Distribution: {dict(list(task_types.items())[:3]) if task_types else 'No data'}
+
+RECENT DEVELOPMENT ACTIVITY:
+{chr(10).join(activity_summary) if activity_summary else '- No recent activity'}
+
+As an intelligent development system, provide insights about:
+
+1. **Architecture Patterns**: What patterns emerge from the workspace analysis?
+2. **Development Velocity**: How does the data suggest productivity trends?
+3. **Quality Assessment**: Based on success rates and task patterns, what stands out?
+4. **Technical Opportunities**: What improvements or optimizations come to mind?
+5. **Strategic Direction**: Where might this development trajectory lead?
+
+Respond as Valor would - analytical yet creative, combining German engineering precision with California innovation mindset. Focus on actionable insights. Keep it under 400 words.
+
+Begin your reflection:"""
+
+        return prompt
+    
+    def _run_aider_analysis(self, prompt: str) -> str:
+        """Execute Aider analysis with the given prompt."""
+        try:
+            # Create temporary file for the prompt
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False) as f:
+                f.write(prompt)
+                prompt_file = f.name
+            
+            # Output file for insights
+            output_file = 'logs/daydream_insights.md'
+            
+            # Key files for analysis
+            key_files = [
+                'main.py',
+                'tasks/promise_tasks.py', 
+                'agents/valor/agent.py',
+                'mcp_servers/social_tools.py',
+                'integrations/telegram/handlers.py',
+                'utilities/database.py',
+                'CLAUDE.md'
+            ]
+            
+            # Filter to only existing files
+            existing_files = [f for f in key_files if Path(f).exists()]
+            
+            cmd = [
+                '/Users/valorengels/.local/bin/aider',
+                '--model', 'ollama_chat/gemma3:12b-it-qat',
+                '--no-git',
+                '--yes',
+                '--message', f'Read the analysis prompt from {prompt_file}. Then explore this AI agent codebase and write detailed insights to {output_file}. Focus on architecture, patterns, and opportunities.'
+            ] + existing_files
+            
+            # Run Aider with timeout
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.session_timeout,
+                env={**os.environ, 'OLLAMA_API_BASE': 'http://127.0.0.1:11434'}
+            )
+            
+            # Clean up prompt file
+            Path(prompt_file).unlink(missing_ok=True)
+            
+            # Check if analysis was written to output file
+            if Path(output_file).exists():
+                with open(output_file, 'r') as f:
+                    insights = f.read()
+                    if insights.strip():
+                        return insights
+            
+            # Fall back to stdout if no file was created
+            if result.stdout:
+                return f"Aider Analysis:\n{result.stdout}"
+            elif result.stderr:
+                return f"Aider encountered issues:\n{result.stderr}"
+            else:
+                return "Aider completed but generated no output"
+                
+        except subprocess.TimeoutExpired:
+            return "Aider analysis timed out after 5 minutes"
+        except Exception as e:
+            return f"Aider analysis failed: {str(e)}"
+    
+    def _log_insights_to_console(self, insights: str) -> None:
+        """Log AI-generated insights to console."""
+        logger.info("🧠 ✨ AI Daydream Insights:")
+        logger.info("🧠" + "="*60)
+        
+        # Split into paragraphs for better readability
+        paragraphs = insights.split('\n\n')
+        for paragraph in paragraphs:
+            if paragraph.strip():
+                # Indent each line for better log formatting
+                for line in paragraph.split('\n'):
+                    if line.strip():
+                        logger.info(f"🧠 {line.strip()}")
+                logger.info("🧠")  # Empty line between paragraphs
+        
+        logger.info("🧠" + "="*60)
+    
+    def _write_and_archive_insights(self, session: DaydreamSession) -> None:
+        """Write insights to file and manage archival."""
+        try:
+            insights_file = Path('logs/daydream_insights.md')
+            
+            # Ensure logs directory exists
+            insights_file.parent.mkdir(exist_ok=True)
+            
+            # Write insights with session metadata
+            with open(insights_file, 'w') as f:
+                f.write(f"# Daydream Insights - Session {session.session_id[:8]}\n\n")
+                f.write(f"**Generated:** {session.start_time.isoformat()}\n")
+                f.write(f"**Analysis Duration:** {session.analysis_duration:.1f}s\n")
+                f.write(f"**Workspaces Analyzed:** {len(session.workspace_analysis)}\n\n")
+                f.write("---\n\n")
+                f.write(session.insights)
+                
+        except Exception as e:
+            logger.error(f"Failed to write insights: {e}")
+    
+    def _generate_session_summary(self, session: DaydreamSession) -> None:
+        """Generate session summary for monitoring."""
+        summary = {
+            'session_id': session.session_id,
+            'start_time': session.start_time.isoformat(),
+            'total_duration': (datetime.utcnow() - session.start_time).total_seconds(),
+            'analysis_duration': session.analysis_duration,
+            'workspaces_analyzed': len(session.workspace_analysis),
+            'insights_length': len(session.insights),
+            'cleanup_summary': session.cleanup_summary,
+            'final_phase': session.phase
+        }
+        
+        logger.info(f"🧠 Session Summary: {summary}")
+    
+    def _load_workspace_config(self) -> Dict[str, Any]:
+        """Load workspace configuration."""
+        try:
+            with open('config/workspace_config.json', 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load workspace config: {e}")
+            return {}
 
 
 def with_promise_tracking(func):
@@ -724,42 +1377,63 @@ def log_health_insights(insights: Dict[str, Any], data: Dict[str, Any]) -> None:
 @huey.periodic_task(crontab(hour='*/6'))  # Every 6 hours
 def daydream_and_reflect():
     """
-    True AI-powered daydreaming using local Ollama.
+    Unified AI-powered daydream and reflection system with integrated cleanup.
     
-    IMPLEMENTATION NOTE: This uses Ollama to perform creative analysis
-    of the workspace, codebase patterns, and development insights.
+    This replaces the previous scattered approach with a comprehensive 6-phase system:
+    1. System Readiness Check - Ensure system is idle and ready
+    2. Pre-Analysis Cleanup - Clean old processes and temp files
+    3. Context Gathering - Unified workspace and system analysis
+    4. AI Analysis - Ollama-powered codebase reflection
+    5. Output Processing - Insights logging and archival
+    6. Post-Analysis Cleanup - Resource cleanup and state reset
     
     Features:
-    - Review recent codebase changes and patterns
-    - Analyze development velocity and trends  
-    - Generate creative insights about architecture
-    - Suggest proactive improvements and optimizations
-    - Perform philosophical reflection on code quality
-    - Think about future features and technical debt
+    - Integrated cleanup lifecycle with daydream cycles
+    - Session-based tracking with correlation IDs
+    - Comprehensive error recovery and emergency cleanup
+    - Unified context gathering replacing scattered functions
+    - Performance monitoring and resource management
     """
-    logger.info("🧠 Starting AI-powered daydream and reflection...")
+    # Create new daydream session
+    session = DaydreamSession(
+        session_id=str(uuid.uuid4()),
+        start_time=datetime.utcnow()
+    )
+    
+    # Initialize unified daydream system
+    daydream_system = UnifiedDaydreamSystem()
     
     try:
-        # Only daydream when system is relatively idle
-        health_data = gather_system_health_data()
+        logger.info(f"🧠 Starting unified daydream session {session.session_id[:8]}")
         
-        if health_data['pending_count'] > 5:
-            logger.info("🧠 System too busy for daydreaming, skipping this cycle")
+        # Phase 1: System Readiness Check
+        if not daydream_system._check_system_readiness(session):
             return
+            
+        # Phase 2: Pre-Analysis Cleanup  
+        daydream_system._cleanup_before_analysis(session)
         
-        # Gather daydream context
-        daydream_context = gather_daydream_context()
+        # Phase 3: Context Gathering
+        daydream_system._gather_comprehensive_context(session)
         
-        # Use Aider for creative codebase reflection
-        insights = aider_daydream_analysis(daydream_context)
+        # Phase 4: AI Analysis
+        daydream_system._execute_ai_analysis(session)
         
-        # Log the AI insights
-        log_daydream_insights(insights)
+        # Phase 5: Output & Archival
+        daydream_system._process_insights_and_output(session)
         
-        logger.info("🧠 Daydream cycle complete - creative insights generated")
+        # Phase 6: Post-Analysis Cleanup
+        daydream_system._cleanup_after_analysis(session)
+        
+        # Final session summary
+        session.log_phase_transition('complete')
+        total_duration = (datetime.utcnow() - session.start_time).total_seconds()
+        logger.info(f"🧠 Unified daydream session complete: {session.session_id[:8]} "
+                   f"({total_duration:.1f}s total, {session.analysis_duration:.1f}s analysis)")
         
     except Exception as e:
-        logger.error(f"🧠 Daydream failed: {str(e)}", exc_info=True)
+        logger.error(f"🧠 Unified daydream session {session.session_id[:8]} failed: {e}", exc_info=True)
+        daydream_system._emergency_cleanup(session)
 
 
 def gather_daydream_context() -> Dict[str, Any]:

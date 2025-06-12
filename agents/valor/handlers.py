@@ -312,14 +312,14 @@ async def handle_user_priority_question(
     # notion_scout parameter kept for backward compatibility but no longer used
     # Notion functionality now handled through MCP pm_tools server
     notion_data = None
-        context_messages = chat_history_obj.get_context(chat_id)
-        context_has_project_info = any(
-            keyword in msg["content"].lower()
-            for msg in context_messages[-5:]
-            for keyword in ["project", "task", "working on", "status", "priority", "dev", "development"]
-        )
-        if not context_has_project_info:
-            notion_data = "Notion data unavailable in current implementation"
+    context_messages = chat_history_obj.get_context(chat_id)
+    context_has_project_info = any(
+        keyword in msg["content"].lower()
+        for msg in context_messages[-5:]
+        for keyword in ["project", "task", "working on", "status", "priority", "dev", "development"]
+    )
+    if not context_has_project_info:
+        notion_data = "Notion data unavailable in current implementation"
 
     return await handle_telegram_message(
         message=question,
