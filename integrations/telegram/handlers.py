@@ -1092,10 +1092,9 @@ class MessageHandler:
                 reply_to_telegram_message_id = getattr(message.reply_to_message, "id", None)
 
             # Check if this is a dev group that should handle all messages
-            # PLACEHOLDER: Revolutionary project context will replace is_dev_group utility
-
-            # PLACEHOLDER: Revolutionary project context will determine workspace type
-            is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
+            from utilities.workspace_validator import get_workspace_for_chat
+            workspace_info = get_workspace_for_chat(str(chat_id))
+            is_dev_group_chat = workspace_info.get('is_dev_group', False) if workspace_info else False
 
             # Only respond in private chats, when mentioned in groups, or in dev groups
             if not (is_private_chat or is_mentioned or is_dev_group_chat):
@@ -1219,10 +1218,9 @@ class MessageHandler:
                 reply_to_telegram_message_id = getattr(message.reply_to_message, "id", None)
 
             # Check if this is a dev group that should handle all messages
-            # PLACEHOLDER: Revolutionary project context will replace is_dev_group utility
-
-            # PLACEHOLDER: Revolutionary project context will determine workspace type
-            is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
+            from utilities.workspace_validator import get_workspace_for_chat
+            workspace_info = get_workspace_for_chat(str(chat_id))
+            is_dev_group_chat = workspace_info.get('is_dev_group', False) if workspace_info else False
 
             # Store message in chat history even if not responding
             if not (is_private_chat or is_mentioned or is_dev_group_chat):
@@ -1297,10 +1295,9 @@ class MessageHandler:
                 reply_to_telegram_message_id = getattr(message.reply_to_message, "id", None)
 
             # Check if this is a dev group that should handle all messages
-            # PLACEHOLDER: Revolutionary project context will replace is_dev_group utility
-
-            # PLACEHOLDER: Revolutionary project context will determine workspace type
-            is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
+            from utilities.workspace_validator import get_workspace_for_chat
+            workspace_info = get_workspace_for_chat(str(chat_id))
+            is_dev_group_chat = workspace_info.get('is_dev_group', False) if workspace_info else False
 
             # Store message in chat history even if not responding
             if not (is_private_chat or is_mentioned or is_dev_group_chat):
@@ -1511,10 +1508,9 @@ class MessageHandler:
                 reply_to_telegram_message_id = getattr(message.reply_to_message, "id", None)
 
             # Check if this is a dev group that should handle all messages
-            # PLACEHOLDER: Revolutionary project context will replace is_dev_group utility
-
-            # PLACEHOLDER: Revolutionary project context will determine workspace type
-            is_dev_group_chat = False  # Will be replaced with intelligent workspace detection
+            from utilities.workspace_validator import get_workspace_for_chat
+            workspace_info = get_workspace_for_chat(str(chat_id))
+            is_dev_group_chat = workspace_info.get('is_dev_group', False) if workspace_info else False
 
             # Store message in chat history even if not responding
             if not (is_private_chat or is_mentioned or is_dev_group_chat):
