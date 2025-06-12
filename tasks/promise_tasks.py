@@ -1215,8 +1215,10 @@ def system_health_check():
 
 def gather_system_health_data() -> Dict[str, Any]:
     """Gather current system state for health analysis."""
-    with get_database_connection() as conn:
-        conn.row_factory = sqlite3.Row  # Enable dict-like access
+    conn = get_database_connection()
+    conn.row_factory = sqlite3.Row  # Enable dict-like access
+    
+    try:
         
         # Promise queue analysis
         queue_stats = conn.execute("""
@@ -1263,16 +1265,18 @@ def gather_system_health_data() -> Dict[str, Any]:
             WHERE created_at > datetime('now', '-24 hours')
             GROUP BY status
         """).fetchall()
-    
-    return {
-        'timestamp': datetime.utcnow().isoformat(),
-        'queue_stats': [dict(row) for row in queue_stats] if queue_stats else [],
-        'workspace_activity': [dict(row) for row in recent_activity] if recent_activity else [],
-        'pending_count': pending_count,
-        'stalled_count': stalled_count,
-        'completion_stats': [dict(row) for row in completion_stats] if completion_stats else [],
-        'queue_summary': f"{pending_count} pending, {stalled_count} stalled"
-    }
+        
+        return {
+            'timestamp': datetime.utcnow().isoformat(),
+            'queue_stats': [dict(row) for row in queue_stats] if queue_stats else [],
+            'workspace_activity': [dict(row) for row in recent_activity] if recent_activity else [],
+            'pending_count': pending_count,
+            'stalled_count': stalled_count,
+            'completion_stats': [dict(row) for row in completion_stats] if completion_stats else [],
+            'queue_summary': f"{pending_count} pending, {stalled_count} stalled"
+        }
+    finally:
+        conn.close()
 
 
 def analyze_system_health(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1374,7 +1378,7 @@ def log_health_insights(insights: Dict[str, Any], data: Dict[str, Any]) -> None:
         logger.info("💓 🚨 [Health check would trigger alert if messaging was enabled]")
 
 
-@huey.periodic_task(crontab(hour='*/6'))  # Every 6 hours
+@huey.periodic_task(crontab(minute=0, hour='*/6'))  # Every 6 hours at minute 0
 def daydream_and_reflect():
     """
     Unified AI-powered daydream and reflection system with integrated cleanup.
