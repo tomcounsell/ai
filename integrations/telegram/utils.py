@@ -1,6 +1,15 @@
 """Utility functions for Telegram integration."""
 
 
+def get_message_text(message):
+    """Extract text from a message object."""
+    if hasattr(message, "text"):
+        return message.text or ""
+    if hasattr(message, "caption"):
+        return message.caption or ""
+    return ""
+
+
 # Removed hardcoded keyword detection - PM task relevance determined by Valor agent intelligence
 
 

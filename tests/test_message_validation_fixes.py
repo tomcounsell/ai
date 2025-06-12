@@ -8,6 +8,7 @@ by validating message content before sending to Telegram API.
 import pytest
 from unittest.mock import Mock, AsyncMock
 
+# This test is for the legacy handler - using the new unified handler
 from integrations.telegram.handlers import MessageHandler
 
 
@@ -20,8 +21,8 @@ class TestMessageValidation:
         self.mock_chat_history = Mock()
         
         self.handler = MessageHandler(
-            client=self.mock_client,
-            chat_history=self.mock_chat_history
+            telegram_bot=self.mock_client,
+            valor_agent=None
         )
 
     def test_validate_message_content_empty_string(self):
@@ -213,8 +214,8 @@ class TestEdgeCasesValidation:
         self.mock_chat_history = Mock()
         
         self.handler = MessageHandler(
-            client=self.mock_client,
-            chat_history=self.mock_chat_history
+            telegram_bot=self.mock_client,
+            valor_agent=None
         )
 
     def test_validate_content_with_only_emojis(self):
