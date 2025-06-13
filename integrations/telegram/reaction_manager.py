@@ -27,30 +27,30 @@ logger = logging.getLogger(__name__)
 class ReactionManager:
     """Orchestrates the sophisticated emoji reaction workflow."""
     
-    # Intent-based emoji mapping for work indicators
+    # Intent-based emoji mapping for work indicators - using only VALID Telegram reactions
     INTENT_EMOJI_MAP = {
-        "general_development": "👨‍💻",
-        "web_search": "🔍", 
-        "image_analysis": "👁️",
-        "data_analysis": "📊",
-        "system_maintenance": "🔧",
-        "documentation": "📚",
-        "testing": "🧪",
-        "debugging": "🐛",
-        "deployment": "🚀",
-        "planning": "🧠",
-        "question_answering": "💬",
-        "file_processing": "📁",
-        "notification": "🔔",
-        "urgent": "🚨"
+        "general_development": "👨‍💻",  # Valid
+        "web_search": "🤔",          # Valid (thinking for search)
+        "image_analysis": "👀",      # Valid (eyes for analysis)
+        "data_analysis": "🤓",       # Valid (nerd face for data work)
+        "system_maintenance": "🤝",  # Valid (handshake for maintenance)
+        "documentation": "✍",       # Valid (writing hand)
+        "testing": "🤡",            # Valid (testing can be clowny)
+        "debugging": "😡",          # Valid (angry at bugs)
+        "deployment": "🎉",         # Valid (celebration for deployment)
+        "planning": "🤔",           # Valid (thinking)
+        "question_answering": "🤗", # Valid (helpful hugging face)
+        "file_processing": "👻",    # Valid (ghost for file handling)
+        "notification": "⚡",        # Valid (lightning for alerts)
+        "urgent": "🔥"              # Valid (fire for urgency)
     }
     
-    # Standard workflow emojis
-    READ_RECEIPT_EMOJI = "👀"
-    PROGRESS_EMOJI = "⏳" 
-    SUCCESS_EMOJI = "👍"
-    ERROR_EMOJI = "❌"
-    RECOVERY_EMOJI = "🔄"
+    # Standard workflow emojis - using only VALID Telegram reactions
+    READ_RECEIPT_EMOJI = "👀"  # Valid
+    PROGRESS_EMOJI = "🤔"      # Valid (thinking face for progress)
+    SUCCESS_EMOJI = "👍"       # Valid  
+    ERROR_EMOJI = "😡"         # Valid (angry face for errors)
+    RECOVERY_EMOJI = "🤝"      # Valid (handshake for recovery/fixing)
     
     def __init__(self, client: Client, ollama_classifier=None, promise_manager=None):
         """Initialize with Telegram client and optional integrations."""
@@ -142,10 +142,10 @@ class ReactionManager:
             return False
             
         try:
-            await self.client.set_message_reaction(
+            await self.client.send_reaction(
                 chat_id=chat_id,
                 message_id=message_id,
-                reaction=emoji
+                emoji=emoji
             )
             
             # Track this reaction
@@ -159,10 +159,10 @@ class ReactionManager:
             await asyncio.sleep(e.value)
             # Retry once
             try:
-                await self.client.set_message_reaction(
+                await self.client.send_reaction(
                     chat_id=chat_id,
                     message_id=message_id,
-                    reaction=emoji
+                    emoji=emoji
                 )
                 self.message_reactions[message_key].add(reaction_type)
                 return True
@@ -181,10 +181,10 @@ class ReactionManager:
     async def _remove_reaction_safe(self, chat_id: int, message_id: int, emoji: str) -> bool:
         """Safely remove reaction with error handling."""
         try:
-            await self.client.set_message_reaction(
+            await self.client.send_reaction(
                 chat_id=chat_id,
                 message_id=message_id,
-                reaction=""  # Empty string removes reactions
+                emoji=""  # Empty string removes reactions
             )
             logger.debug(f"🗑️ Removed {emoji} reaction from message {chat_id}:{message_id}")
             return True
