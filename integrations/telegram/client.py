@@ -53,15 +53,9 @@ class TelegramClient:
                 no_updates=False,  # Ensure we receive updates
             )
 
-            # Start the client with non-interactive handling
-            try:
-                await self.client.start()
-                logger.info("Telegram client started successfully")
-            except EOFError:
-                # Handle non-interactive environment - try to continue without authentication
-                logger.warning("Non-interactive environment detected - attempting to continue with limited functionality")
-                # For testing purposes, create a mock session to prevent complete failure
-                return False
+            # Start the client
+            await self.client.start()
+            logger.info("Telegram client started successfully")
 
             # Initialize unified message handler with Valor agent
             try:
