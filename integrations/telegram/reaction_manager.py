@@ -73,10 +73,11 @@ class ReactionManager:
             return False
             
         # Use the emoji from intent result or fallback to our mapping
-        emoji = intent.suggested_emoji if hasattr(intent, 'suggested_emoji') and intent.suggested_emoji else self.INTENT_EMOJI_MAP.get(intent.intent.value, "🧠")
+        intent_value = intent.intent.value if hasattr(intent, 'intent') and intent.intent else str(intent)
+        emoji = intent.suggested_emoji if hasattr(intent, 'suggested_emoji') and intent.suggested_emoji else self.INTENT_EMOJI_MAP.get(intent_value, "🧠")
         
         return await self._add_reaction_safe(
-            chat_id, message_id, emoji, f"intent_{intent.intent.value}"
+            chat_id, message_id, emoji, f"intent_{intent_value}"
         )
         
     async def add_progress_reaction(self, chat_id: int, message_id: int, work_type: str = "processing") -> bool:
