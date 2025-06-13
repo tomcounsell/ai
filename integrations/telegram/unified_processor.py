@@ -124,7 +124,7 @@ class UnifiedMessageProcessor:
                         await self.reaction_manager.add_intent_reaction(
                             message.chat.id, message.id, intent
                         )
-                        logger.debug(f"🧠 Added intent reaction for {intent.intent_type}")
+                        logger.debug(f"🧠 Added intent reaction for {intent.intent.value if intent.intent else 'unknown'}")
                         plan.intent = intent
                 except Exception as intent_error:
                     logger.warning(f"Intent classification failed: {intent_error}")
