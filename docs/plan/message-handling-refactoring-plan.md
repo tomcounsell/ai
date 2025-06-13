@@ -14,6 +14,49 @@
 
 ## Current State Analysis
 
+### Critical Issue: Broken Emoji Reaction System
+
+**URGENT**: The sophisticated emoji reaction workflow is partially implemented but critically broken. The system should follow this workflow:
+
+1. **👀 Read Receipt**: Eyes emoji reaction when message first received
+2. **Ollama Intent Classification**: Local intent detection with emoji mapping
+3. **👨‍💻 Work Indicator**: Intent-specific reaction (coding, searching, etc.)
+4. **Claude Code Integration**: Unified system with intent and prompt templates
+5. **👍/❌ Completion Status**: Success or error reactions
+6. **🔄 Error Recovery**: Automatic bug fixing when errors occur
+7. **🔄 Huey Queue**: Promise-based async work management
+
+#### ✅ What's Currently Working:
+- **Ollama Intent Classification** (`integrations/ollama_intent.py`): Fully implemented with local models
+- **Emoji Mapping** (`integrations/telegram/emoji_mapping.py`): 72 valid reactions with descriptions
+- **Promise Queue** (`tasks/promise_tasks.py`): Huey-based async task management
+- **Response Manager Reactions** (`integrations/telegram/components/response_manager.py`): Has `_add_reactions()` method
+
+#### ❌ What's Critically Broken:
+1. **Missing `reaction_manager.py`**: Referenced but doesn't exist
+   ```python
+   from .reaction_manager import add_message_received_reaction  # FILE NOT FOUND
+   ```
+
+2. **No Read Receipt System**: Missing 👀 emoji on message receipt
+
+3. **Broken Intent→Reaction Bridge**: Ollama classification doesn't trigger reactions
+
+4. **No Status Tracking**: Missing 👍 success / ❌ error reactions
+
+5. **No Progress Indicators**: Missing 👨‍💻 work-in-progress reactions
+
+6. **Incomplete Promise Integration**: Promise status changes don't trigger reactions
+
+7. **No Error Recovery Loop**: System doesn't automatically fix errors
+
+#### 🚨 Priority Fix Required:
+The **`reaction_manager.py`** must be implemented to orchestrate:
+- Initial read receipts (👀)
+- Intent-based work indicators (👨‍💻, 🔍, etc.)
+- Promise status reactions (⏳ → 👍/❌)
+- Error recovery workflow
+
 ### Files Requiring Refactoring
 
 #### Primary Targets (High Priority)
@@ -65,6 +108,219 @@
 - Context injection in MCP tools
 - Background context rebuilding
 - Intent classification context
+
+## Phase 0: URGENT - Fix Broken Emoji Reaction System (Priority)
+
+### 0.1 Implement Missing ReactionManager
+
+**File**: `integrations/telegram/reaction_manager.py`
+```python
+class ReactionManager:
+    """Orchestrates the sophisticated emoji reaction workflow."""
+    
+    def __init__(self, client, ollama_classifier, promise_manager):
+        self.client = client
+        self.ollama_classifier = ollama_classifier  
+        self.promise_manager = promise_manager
+        
+    async def add_read_receipt(self, chat_id: int, message_id: int):
+        """Step 1: Add 👀 eyes emoji when message received."""
+        
+    async def add_intent_reaction(self, chat_id: int, message_id: int, intent: Intent):
+        """Step 2: Add work indicator based on Ollama intent classification."""
+        # 👨‍💻 for coding, 🔍 for search, 🧠 for analysis, etc.
+        
+    async def add_progress_reaction(self, chat_id: int, message_id: int, work_type: str):
+        """Step 3: Add ⏳ or work-specific progress indicator."""
+        
+    async def add_completion_reaction(self, chat_id: int, message_id: int, success: bool, error: Exception = None):
+        """Step 4: Add 👍 for success or ❌ for error."""
+        
+    async def trigger_error_recovery(self, chat_id: int, message_id: int, error: Exception):
+        """Step 5: Start automated error recovery workflow."""
+        
+    async def monitor_promise_status(self, promise_id: str, chat_id: int, message_id: int):
+        """Step 6: Monitor Huey promise and update reactions accordingly."""
+```
+
+**Fixes**: 
+- Missing `add_message_received_reaction` import error
+- No read receipt system (👀)
+- No intent-based reactions (👨‍💻, 🔍, etc.)
+- No status completion reactions (👍/❌)
+
+**Timeline**: Day 1-2 (URGENT)
+
+### 0.2 Integrate ReactionManager into UnifiedProcessor
+
+**Modify**: `integrations/telegram/unified_processor.py`
+```python
+class UnifiedMessageProcessor:
+    def __init__(self, telegram_bot: Any | None = None, valor_agent=None):
+        # ... existing components ...
+        self.reaction_manager = ReactionManager(telegram_bot, ollama_classifier, promise_manager)
+        
+    async def process_message(self, update: Any, context: Any) -> ProcessingResult:
+        message = update.message
+        
+        # Step 0: Immediate read receipt
+        await self.reaction_manager.add_read_receipt(message.chat.id, message.id)
+        
+        # Step 1: Security validation
+        access_result = self.security_gate.validate_access(message)
+        if not access_result.allowed:
+            await self.reaction_manager.add_completion_reaction(
+                message.chat.id, message.id, success=False, 
+                error=Exception(access_result.reason)
+            )
+            return ProcessingResult.denied(access_result.reason)
+            
+        # Step 2: Context building  
+        context = self.context_builder.build_context(message)
+        
+        # Step 3: Type routing + Intent classification
+        plan = self.type_router.route_message(context)
+        if plan.requires_intent:
+            intent = await self.ollama_classifier.classify_intent(context.cleaned_text)
+            await self.reaction_manager.add_intent_reaction(message.chat.id, message.id, intent)
+            plan.intent = intent
+        
+        # Step 4: Agent processing with progress indicator
+        try:
+            await self.reaction_manager.add_progress_reaction(message.chat.id, message.id, "agent_processing")
+            response = await self.agent_orchestrator.process_with_agent(context, plan)
+            
+            # Step 5: Response delivery
+            result = await self.response_manager.deliver_response(response, context)
+            
+            # Step 6: Success reaction
+            await self.reaction_manager.add_completion_reaction(message.chat.id, message.id, success=True)
+            
+            return result
+            
+        except Exception as e:
+            # Step 6: Error reaction + recovery
+            await self.reaction_manager.add_completion_reaction(message.chat.id, message.id, success=False, error=e)
+            await self.reaction_manager.trigger_error_recovery(message.chat.id, message.id, e)
+            raise
+```
+
+**Timeline**: Day 2-3 (URGENT)
+
+### 0.3 Connect Ollama Intent Classification to Reactions
+
+**Modify**: `integrations/ollama_intent.py`
+```python
+class OllamaIntentClassifier:
+    INTENT_EMOJI_MAP = {
+        "general_development": "👨‍💻",
+        "web_search": "🔍", 
+        "image_analysis": "👁️",
+        "data_analysis": "📊",
+        "system_maintenance": "🔧",
+        "documentation": "📚",
+        "testing": "🧪",
+        "debugging": "🐛",
+        "deployment": "🚀",
+        "planning": "🧠"
+    }
+    
+    async def classify_intent_with_reaction(self, text: str, chat_id: int, message_id: int, reaction_manager) -> Intent:
+        """Classify intent and trigger appropriate reaction."""
+        intent = await self.classify_intent(text)
+        
+        if intent and intent.intent_type in self.INTENT_EMOJI_MAP:
+            emoji = self.INTENT_EMOJI_MAP[intent.intent_type]
+            await reaction_manager.add_intent_reaction(chat_id, message_id, emoji)
+            
+        return intent
+```
+
+**Timeline**: Day 3 (URGENT)
+
+### 0.4 Connect Promise Status to Reactions
+
+**Modify**: `tasks/promise_tasks.py`
+```python
+@huey.task()
+def update_promise_status_with_reactions(promise_id: str, status: str, chat_id: int = None, message_id: int = None):
+    """Update promise status and trigger appropriate reactions."""
+    # Update promise in database
+    update_promise_status(promise_id, status)
+    
+    # Trigger reaction if Telegram context available
+    if chat_id and message_id:
+        from integrations.telegram.reaction_manager import ReactionManager
+        from integrations.telegram.client import telegram_client
+        
+        reaction_manager = ReactionManager(telegram_client.client, None, None)
+        
+        if status == "completed":
+            asyncio.create_task(reaction_manager.add_completion_reaction(chat_id, message_id, success=True))
+        elif status == "failed":
+            asyncio.create_task(reaction_manager.add_completion_reaction(chat_id, message_id, success=False))
+        elif status == "in_progress":
+            asyncio.create_task(reaction_manager.add_progress_reaction(chat_id, message_id, "promise_work"))
+```
+
+**Timeline**: Day 3-4 (URGENT)
+
+### 0.5 Implement Error Recovery Workflow
+
+**File**: `integrations/telegram/error_recovery.py`
+```python
+class ErrorRecoveryWorkflow:
+    """Automated error recovery and bug fixing."""
+    
+    def __init__(self, claude_code_delegator, promise_manager):
+        self.claude_code_delegator = claude_code_delegator
+        self.promise_manager = promise_manager
+        
+    async def start_recovery(self, error: Exception, context: MessageContext, chat_id: int, message_id: int):
+        """Start automated error recovery process."""
+        
+        # Create recovery promise
+        recovery_promise = await self.promise_manager.create_promise(
+            "error_recovery",
+            {
+                "error": str(error),
+                "context": context.to_dict(),
+                "chat_id": chat_id,
+                "message_id": message_id
+            }
+        )
+        
+        # Delegate to Claude Code for automated fixing
+        recovery_instructions = f"""
+        URGENT ERROR RECOVERY NEEDED:
+        
+        Error: {error}
+        Context: {context.cleaned_text}
+        
+        Please:
+        1. Analyze the error and its root cause
+        2. Fix any code issues that caused this error
+        3. Test the fix to ensure it works
+        4. Report back with the solution
+        
+        This is an automated error recovery triggered by the Telegram reaction system.
+        """
+        
+        # This should trigger Claude Code to actually fix the error
+        result = await self.claude_code_delegator.delegate_task(
+            recovery_instructions,
+            context.working_directory,
+            "error_recovery"
+        )
+        
+        # Update promise status based on recovery result
+        if result.success:
+            await self.promise_manager.complete_promise(recovery_promise.id, result.output)
+        else:
+            await self.promise_manager.fail_promise(recovery_promise.id, result.error)
+```
+
+**Timeline**: Day 4-5 (URGENT)
 
 ## Phase 1: Foundation Components (Week 1)
 
@@ -491,12 +747,30 @@ async def process_with_agent(self, context: MessageContext, plan: ProcessingPlan
 **Risk Level**: Medium (gradual migration reduces risk)
 **Impact**: High (major maintainability and performance improvements)
 
+## URGENT PRIORITY: Emoji Reaction System
+
+**CRITICAL**: Before proceeding with the full refactoring plan, the broken emoji reaction system must be fixed immediately. The sophisticated workflow described (👀 → intent classification → 👨‍💻 → 👍/❌) is essential for system functionality.
+
+### Immediate Actions Required:
+
+1. **Day 1-2**: Implement `reaction_manager.py` to fix missing import error
+2. **Day 2-3**: Integrate ReactionManager into UnifiedProcessor for read receipts
+3. **Day 3**: Connect Ollama intent classification to trigger work indicator reactions
+4. **Day 3-4**: Connect Promise status updates to completion reactions
+5. **Day 4-5**: Implement automated error recovery workflow
+
+### Current System Status:
+- ❌ **Broken**: Reaction system completely non-functional
+- ✅ **Working**: Ollama intent classification, emoji mapping, promise queue
+- 🔧 **Missing**: Orchestration layer (`reaction_manager.py`)
+
 ## Next Steps
 
-1. **Review and approve** this refactoring plan
-2. **Set up development branch** for refactoring work
-3. **Begin Phase 1** with foundation component implementation
-4. **Establish monitoring** to track migration progress
-5. **Schedule regular reviews** to ensure timeline adherence
+1. **URGENT**: Fix broken emoji reaction system (Phase 0)
+2. **Review and approve** this refactoring plan
+3. **Set up development branch** for refactoring work
+4. **Begin Phase 1** with foundation component implementation
+5. **Establish monitoring** to track migration progress
+6. **Schedule regular reviews** to ensure timeline adherence
 
-This plan provides a structured approach to eliminating the message handling complexity while maintaining system stability and performance throughout the transition.
+This plan provides a structured approach to eliminating the message handling complexity while maintaining system stability and performance throughout the transition. However, **the emoji reaction system must be fixed first** as it's currently completely broken despite having partial implementation.
