@@ -155,6 +155,8 @@ logs/
 
 # SQLite databases - data files not for version control
 *.db
+*.db-shm
+*.db-wal
 system.db
 
 # Test results JSON files
