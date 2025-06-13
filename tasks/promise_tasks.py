@@ -29,6 +29,39 @@ from utilities.missed_message_manager import scan_chat_for_missed_messages, proc
 logger = logging.getLogger(__name__)
 
 
+def update_promise_status_with_reactions(promise_id: str, status: str, chat_id: int = None, message_id: int = None, result: str = None):
+    """Update promise status and trigger appropriate reactions if Telegram context available."""
+    try:
+        # Update promise in database
+        update_promise_status(promise_id, status, result)
+        
+        # Trigger reaction if Telegram context available
+        if chat_id and message_id:
+            try:
+                import asyncio
+                from integrations.telegram.client import telegram_client
+                from integrations.telegram.reaction_manager import ReactionManager
+                
+                if telegram_client and telegram_client.client:
+                    reaction_manager = ReactionManager(telegram_client.client)
+                    
+                    if status == "completed":
+                        asyncio.create_task(reaction_manager.add_completion_reaction(chat_id, message_id, success=True))
+                    elif status == "failed":
+                        error = Exception(result) if result else Exception("Promise failed")
+                        asyncio.create_task(reaction_manager.add_completion_reaction(chat_id, message_id, success=False, error=error))
+                    elif status == "in_progress":
+                        asyncio.create_task(reaction_manager.add_progress_reaction(chat_id, message_id, "promise_work"))
+                        
+                    logger.debug(f"Triggered reaction for promise {promise_id} status {status}")
+                    
+            except Exception as reaction_error:
+                logger.warning(f"Could not trigger reaction for promise {promise_id}: {reaction_error}")
+                
+    except Exception as e:
+        logger.error(f"Failed to update promise status with reactions: {e}")
+
+
 @dataclass
 class DaydreamSession:
     """Complete daydream session with integrated lifecycle management."""

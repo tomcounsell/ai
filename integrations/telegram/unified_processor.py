@@ -20,6 +20,8 @@ from integrations.telegram.components import (
     TypeRouter,
 )
 from integrations.telegram.models import ProcessingResult
+from integrations.telegram.reaction_manager import ReactionManager
+from integrations.ollama_intent import OllamaIntentClassifier
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,10 @@ class UnifiedMessageProcessor:
         self.type_router = TypeRouter()
         self.agent_orchestrator = AgentOrchestrator(valor_agent=valor_agent)
         self.response_manager = ResponseManager(telegram_bot=telegram_bot)
+        
+        # Initialize sophisticated emoji reaction system
+        self.reaction_manager = ReactionManager(telegram_bot) if telegram_bot else None
+        self.ollama_classifier = OllamaIntentClassifier()
 
         # Metrics
         self.processed_count = 0
@@ -63,11 +69,23 @@ class UnifiedMessageProcessor:
             return ProcessingResult.failed("No message in update")
 
         try:
+            # Step 0: Immediate read receipt (👀)
+            if self.reaction_manager:
+                await self.reaction_manager.add_read_receipt(message.chat.id, message.id)
+                logger.debug(f"👀 Added read receipt for message {message.id}")
+            
             # Step 1: Security validation
             logger.debug(f"Step 1: Security validation for message {message.id}")
             access_result = self.security_gate.validate_access(message)
 
             if not access_result.allowed:
+                # Add error reaction for access denied
+                if self.reaction_manager:
+                    await self.reaction_manager.add_completion_reaction(
+                        message.chat.id, message.id, success=False, 
+                        error=Exception(access_result.reason)
+                    )
+                
                 # Skip silently for bot messages and old messages
                 if access_result.metadata.get("skip_silently"):
                     logger.debug(f"Silently skipping message: {access_result.reason}")
@@ -89,7 +107,7 @@ class UnifiedMessageProcessor:
                     context=msg_context,
                 )
 
-            # Step 3: Type routing
+            # Step 3: Type routing + Intent classification
             logger.debug(f"Step 3: Routing message type {msg_context.media_info}")
             plan = await self.type_router.route_message(msg_context)
             logger.info(
@@ -97,9 +115,28 @@ class UnifiedMessageProcessor:
                 f"priority={plan.priority.value}, "
                 f"requires_agent={plan.requires_agent}"
             )
+            
+            # Intent classification with reaction if needed
+            if plan.requires_agent and msg_context.cleaned_text:
+                try:
+                    intent = await self.ollama_classifier.classify_intent(msg_context.cleaned_text)
+                    if intent and self.reaction_manager:
+                        await self.reaction_manager.add_intent_reaction(
+                            message.chat.id, message.id, intent
+                        )
+                        logger.debug(f"🧠 Added intent reaction for {intent.intent_type}")
+                        plan.intent = intent
+                except Exception as intent_error:
+                    logger.warning(f"Intent classification failed: {intent_error}")
 
-            # Step 4: Agent processing
+            # Step 4: Agent processing with progress indicator
             logger.debug("Step 4: Processing with agent orchestrator")
+            if self.reaction_manager:
+                await self.reaction_manager.add_progress_reaction(
+                    message.chat.id, message.id, "agent_processing"
+                )
+                logger.debug("⏳ Added progress reaction for agent processing")
+                
             agent_response = await self.agent_orchestrator.process_with_agent(msg_context, plan)
 
             # Step 5: Response delivery
@@ -107,6 +144,13 @@ class UnifiedMessageProcessor:
             delivery_result = await self.response_manager.deliver_response(
                 agent_response, msg_context
             )
+
+            # Step 6: Success completion reaction (👍)
+            if self.reaction_manager:
+                await self.reaction_manager.add_completion_reaction(
+                    message.chat.id, message.id, success=True
+                )
+                logger.debug("👍 Added success completion reaction")
 
             # Record metrics
             processing_time = time.time() - start_time
@@ -134,6 +178,13 @@ class UnifiedMessageProcessor:
             logger.error(
                 f"Processing error for message {message.id}: {str(e)}", exc_info=True
             )
+            
+            # Step 6: Error completion reaction (❌) + Recovery trigger
+            if self.reaction_manager:
+                await self.reaction_manager.add_completion_reaction(
+                    message.chat.id, message.id, success=False, error=e
+                )
+                logger.debug(f"❌ Added error completion reaction for {type(e).__name__}")
 
             # Try to send error response
             if "msg_context" in locals():
