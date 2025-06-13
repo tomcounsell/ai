@@ -311,7 +311,8 @@ class AgentOrchestrator:
     async def _apply_intent_optimization(self, agent, intent: Intent, context: MessageContext) -> str | None:
         """Apply intent-specific system prompt optimization."""
         try:
-            from integrations.intent_prompts import get_intent_system_prompt
+            from integrations.intent_prompts import get_intent_system_prompt, get_intent_guidance
+            from integrations.ollama_intent import IntentResult, MessageIntent
             
             prompt_context = {
                 "chat_id": context.chat_id,
@@ -323,11 +324,20 @@ class AgentOrchestrator:
                 "message_length": len(context.cleaned_text)
             }
             
-            intent_prompt = get_intent_system_prompt(intent, prompt_context)
+            # Handle both Intent enum and IntentResult objects
+            intent_prompt = None
+            if hasattr(intent, 'intent') and hasattr(intent, 'confidence'):
+                # This is an IntentResult object
+                intent_prompt = get_intent_system_prompt(intent, prompt_context)
+            else:
+                # This is an Intent enum - use the simpler guidance function
+                intent_guidance = get_intent_guidance(MessageIntent.CASUAL_CHAT)  # Default fallback
+                if intent_guidance:
+                    intent_prompt = f"Task guidance: {intent_guidance}"
             if intent_prompt:
                 original_prompt = agent.system_prompt
                 agent.system_prompt = intent_prompt
-                logger.debug(f"🎯 Applied intent-specific prompt for {intent.value}")
+                logger.debug(f"🎯 Applied intent-specific prompt for {intent.value if hasattr(intent, 'value') else str(intent)}")
                 return original_prompt
             
         except Exception as e:
