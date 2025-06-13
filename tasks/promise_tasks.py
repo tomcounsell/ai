@@ -1261,49 +1261,49 @@ def gather_system_health_data() -> Dict[str, Any]:
             GROUP BY status, task_type
         """).fetchall()
         
-        # Recent activity by workspace (via chat_id mapping)
-        recent_activity = conn.execute("""
-            SELECT 
-                chat_id,
-                COUNT(*) as tasks,
-                task_type,
-                MAX(created_at) as last_activity
-            FROM promises 
-            WHERE created_at > datetime('now', '-7 days')
-            GROUP BY chat_id, task_type
-            ORDER BY last_activity DESC
-        """).fetchall()
-        
-        # System health indicators
-        pending_count = conn.execute("""
-            SELECT COUNT(*) FROM promises WHERE status = 'pending'
-        """).fetchone()[0]
-        
-        stalled_count = conn.execute("""
-            SELECT COUNT(*) FROM promises 
-            WHERE status = 'in_progress' 
-            AND created_at < datetime('now', '-4 hours')
-        """).fetchone()[0]
-        
-        # Recent completion rate
-        completion_stats = conn.execute("""
-            SELECT 
-                status,
-                COUNT(*) as count
-            FROM promises 
-            WHERE created_at > datetime('now', '-24 hours')
-            GROUP BY status
-        """).fetchall()
-        
-        return {
-            'timestamp': datetime.utcnow().isoformat(),
-            'queue_stats': [dict(row) for row in queue_stats] if queue_stats else [],
-            'workspace_activity': [dict(row) for row in recent_activity] if recent_activity else [],
-            'pending_count': pending_count,
-            'stalled_count': stalled_count,
-            'completion_stats': [dict(row) for row in completion_stats] if completion_stats else [],
-            'queue_summary': f"{pending_count} pending, {stalled_count} stalled"
-        }
+            # Recent activity by workspace (via chat_id mapping)
+            recent_activity = conn.execute("""
+                SELECT 
+                    chat_id,
+                    COUNT(*) as tasks,
+                    task_type,
+                    MAX(created_at) as last_activity
+                FROM promises 
+                WHERE created_at > datetime('now', '-7 days')
+                GROUP BY chat_id, task_type
+                ORDER BY last_activity DESC
+            """).fetchall()
+            
+            # System health indicators
+            pending_count = conn.execute("""
+                SELECT COUNT(*) FROM promises WHERE status = 'pending'
+            """).fetchone()[0]
+            
+            stalled_count = conn.execute("""
+                SELECT COUNT(*) FROM promises 
+                WHERE status = 'in_progress' 
+                AND created_at < datetime('now', '-4 hours')
+            """).fetchone()[0]
+            
+            # Recent completion rate
+            completion_stats = conn.execute("""
+                SELECT 
+                    status,
+                    COUNT(*) as count
+                FROM promises 
+                WHERE created_at > datetime('now', '-24 hours')
+                GROUP BY status
+            """).fetchall()
+            
+            return {
+                'timestamp': datetime.utcnow().isoformat(),
+                'queue_stats': [dict(row) for row in queue_stats] if queue_stats else [],
+                'workspace_activity': [dict(row) for row in recent_activity] if recent_activity else [],
+                'pending_count': pending_count,
+                'stalled_count': stalled_count,
+                'completion_stats': [dict(row) for row in completion_stats] if completion_stats else [],
+                'queue_summary': f"{pending_count} pending, {stalled_count} stalled"
+            }
         except Exception as e:
             logger.error(f"Failed to gather system health data: {e}")
             return {'pending_count': 0, 'stalled_count': 0, 'error': str(e)}
