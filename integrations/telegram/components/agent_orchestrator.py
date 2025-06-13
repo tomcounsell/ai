@@ -194,7 +194,7 @@ class AgentOrchestrator:
             valor_ctx = ValorContext(
                 chat_id=agent_context.get("chat_id"),
                 username=agent_context.get("username"),
-                is_group_chat=context.chat_type != "private",
+                is_group_chat=not context.is_private_chat,
                 chat_history=agent_context.get("chat_history", []),
                 chat_history_obj=agent_context.get("chat_history_obj"),
                 notion_data=agent_context.get("notion_data"),
@@ -316,7 +316,7 @@ class AgentOrchestrator:
             prompt_context = {
                 "chat_id": context.chat_id,
                 "username": context.username,
-                "is_group_chat": context.chat_type != "private",
+                "is_group_chat": not context.is_private_chat,
                 "has_image": context.media_info is not None,
                 "has_links": any(url in context.cleaned_text.lower() 
                                for url in ["http://", "https://", "www."]),
@@ -393,7 +393,7 @@ class AgentOrchestrator:
         valor_ctx = ValorContext(
             chat_id=agent_context.get("chat_id"),
             username=agent_context.get("username"),
-            is_group_chat=context.chat_type != "private",
+            is_group_chat=not context.is_private_chat,
             chat_history=agent_context.get("chat_history", []),
             chat_history_obj=agent_context.get("chat_history_obj"),
             notion_data=agent_context.get("notion_data"),
