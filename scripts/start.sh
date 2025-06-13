@@ -240,9 +240,68 @@ if ! check_telegram_auth; then
     fi
 fi
 
-# Function to prevent database locks by cleaning up stale processes
-prevent_database_locks() {
-    echo "🔧 Checking for potential database lock issues..."
+# Function to recover from database locks
+recover_database_locks() {
+    echo "🔧 Checking for database lock issues and recovering..."
+    
+    # List of database files to check
+    DB_FILES=(
+        "$PROJECT_ROOT/data/system.db"
+        "$PROJECT_ROOT/data/huey.db"
+        "$PROJECT_ROOT/system.db"
+        "$PROJECT_ROOT/utilities/system.db"
+        "$PROJECT_ROOT/utilities/token_usage.db"
+    )
+    
+    # Check each database for locks
+    for DB_FILE in "${DB_FILES[@]}"; do
+        if [ -f "$DB_FILE" ]; then
+            echo "🔍 Checking locks on $(basename "$DB_FILE")..."
+            
+            # Find processes holding locks on this database
+            LOCKING_PIDS=$(lsof "$DB_FILE" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)
+            if [ -n "$LOCKING_PIDS" ]; then
+                echo "⚠️  Found processes locking $(basename "$DB_FILE"): $LOCKING_PIDS"
+                echo "🛑 Terminating locking processes..."
+                echo "$LOCKING_PIDS" | xargs kill -TERM 2>/dev/null
+                sleep 2
+                
+                # Force kill if still running
+                STILL_RUNNING=$(echo "$LOCKING_PIDS" | xargs ps -p 2>/dev/null | wc -l)
+                if [ "$STILL_RUNNING" -gt 1 ]; then
+                    echo "🔥 Force killing stubborn processes..."
+                    echo "$LOCKING_PIDS" | xargs kill -9 2>/dev/null
+                    sleep 1
+                fi
+                echo "✅ Released locks on $(basename "$DB_FILE")"
+            fi
+            
+            # Check for SQLite journal/WAL files that might be causing issues
+            WAL_FILE="${DB_FILE}-wal"
+            SHM_FILE="${DB_FILE}-shm"
+            JOURNAL_FILE="${DB_FILE}-journal"
+            
+            if [ -f "$WAL_FILE" ] || [ -f "$SHM_FILE" ] || [ -f "$JOURNAL_FILE" ]; then
+                echo "🔄 Found SQLite transaction files for $(basename "$DB_FILE")"
+                
+                # Try to recover using SQLite WAL checkpoint
+                if command -v sqlite3 &> /dev/null; then
+                    echo "🛠️  Attempting WAL checkpoint recovery..."
+                    sqlite3 "$DB_FILE" "PRAGMA wal_checkpoint(TRUNCATE);" 2>/dev/null || true
+                    sqlite3 "$DB_FILE" "VACUUM;" 2>/dev/null || true
+                    echo "✅ WAL checkpoint recovery completed"
+                else
+                    echo "⚠️  sqlite3 not available, manual cleanup of transaction files..."
+                    # Only remove if no processes are using the database
+                    if [ -z "$(lsof "$DB_FILE" 2>/dev/null)" ]; then
+                        [ -f "$WAL_FILE" ] && rm -f "$WAL_FILE" && echo "  Removed $(basename "$WAL_FILE")"
+                        [ -f "$SHM_FILE" ] && rm -f "$SHM_FILE" && echo "  Removed $(basename "$SHM_FILE")"
+                        [ -f "$JOURNAL_FILE" ] && rm -f "$JOURNAL_FILE" && echo "  Removed $(basename "$JOURNAL_FILE")"
+                    fi
+                fi
+            fi
+        fi
+    done
     
     # Clean up any processes holding the Telegram session file
     SESSION_FILE="$PROJECT_ROOT/ai_project_bot.session"
@@ -250,29 +309,93 @@ prevent_database_locks() {
         LOCKING_PIDS=$(lsof "$SESSION_FILE" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)
         if [ -n "$LOCKING_PIDS" ]; then
             echo "⚠️  Found processes holding Telegram session file, cleaning up..."
-            echo "$LOCKING_PIDS" | xargs kill -9 2>/dev/null
-            sleep 1
+            echo "$LOCKING_PIDS" | xargs kill -TERM 2>/dev/null
+            sleep 2
+            # Force kill if needed
+            echo "$LOCKING_PIDS" | xargs kill -9 2>/dev/null || true
             echo "✅ Session file cleanup complete"
         fi
     fi
     
     # Check for orphaned Python processes that might interfere
-    ORPHANED_PYTHON=$(pgrep -f "python.*main.py" 2>/dev/null)
+    ORPHANED_PYTHON=$(pgrep -f "python.*(main\.py|huey_consumer\.py)" 2>/dev/null)
     if [ -n "$ORPHANED_PYTHON" ]; then
         echo "⚠️  Found orphaned Python processes, cleaning up..."
-        echo "$ORPHANED_PYTHON" | xargs kill -9 2>/dev/null
-        sleep 1
+        echo "$ORPHANED_PYTHON" | xargs kill -TERM 2>/dev/null
+        sleep 2
+        echo "$ORPHANED_PYTHON" | xargs kill -9 2>/dev/null || true
         echo "✅ Orphaned process cleanup complete"
     fi
     
-    echo "✅ Database lock prevention check complete"
+    # Remove stale PID files
+    [ -f "$PID_FILE" ] && rm -f "$PID_FILE" && echo "✅ Removed stale FastAPI PID file"
+    [ -f "$PROJECT_ROOT/huey.pid" ] && rm -f "$PROJECT_ROOT/huey.pid" && echo "✅ Removed stale Huey PID file"
+    
+    echo "✅ Database lock recovery completed"
+}
+
+# Function to test database connectivity
+test_database_connectivity() {
+    echo "🔍 Testing database connectivity..."
+    
+    # Test main system database
+    SYSTEM_DB="$PROJECT_ROOT/data/system.db"
+    if [ -f "$SYSTEM_DB" ]; then
+        if command -v sqlite3 &> /dev/null; then
+            if sqlite3 "$SYSTEM_DB" "SELECT 1;" &>/dev/null; then
+                echo "✅ System database accessible"
+            else
+                echo "❌ System database locked or corrupted"
+                return 1
+            fi
+        else
+            echo "⚠️  sqlite3 not available for database testing"
+        fi
+    fi
+    
+    # Test Huey database
+    HUEY_DB="$PROJECT_ROOT/data/huey.db"
+    if [ -f "$HUEY_DB" ]; then
+        if command -v sqlite3 &> /dev/null; then
+            if sqlite3 "$HUEY_DB" "SELECT 1;" &>/dev/null; then
+                echo "✅ Huey database accessible"
+            else
+                echo "❌ Huey database locked or corrupted"
+                return 1
+            fi
+        fi
+    fi
+    
+    return 0
 }
 
 echo "✅ Telegram authentication verified"
 echo ""
 
-# Prevent database locks before starting
-prevent_database_locks
+# Recover from any database locks before starting
+recover_database_locks
+echo ""
+
+# Test database connectivity
+if ! test_database_connectivity; then
+    echo "❌ Database connectivity issues detected"
+    echo "🔄 Attempting recovery..."
+    recover_database_locks
+    echo ""
+    
+    # Test again after recovery
+    if ! test_database_connectivity; then
+        echo "❌ Unable to recover database connectivity"
+        echo "💡 Manual intervention may be required"
+        echo ""
+        echo "Try these steps:"
+        echo "1. Stop all processes: scripts/stop.sh"
+        echo "2. Check for database locks: lsof data/*.db"
+        echo "3. Restart: scripts/start.sh"
+        exit 1
+    fi
+    echo "✅ Database recovery successful"
+fi
 echo ""
 
 # Start Huey consumer first
