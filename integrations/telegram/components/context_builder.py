@@ -87,13 +87,31 @@ class ContextBuilder:
             if workspace:
                 workspace_info["workspace"] = workspace
 
-                # Get working directory
-                working_dir = self.workspace_validator.get_working_directory(str(chat_id))
-                if working_dir:
-                    workspace_info["working_directory"] = working_dir
+                # Get working directory using WorkspaceResolver
+                try:
+                    from utilities.workspace_validator import WorkspaceResolver
+                    working_dir, _ = WorkspaceResolver.resolve_working_directory(
+                        chat_id=str(chat_id),
+                        is_group_chat=chat_id < 0
+                    )
+                    if working_dir:
+                        workspace_info["working_directory"] = working_dir
+                except Exception as e:
+                    logger.debug(f"Could not resolve working directory for chat {chat_id}: {e}")
 
                 # Check if dev group
-                config = self.workspace_validator.config
+                # Get config through file access instead of attribute access
+                try:
+                    import json
+                    from pathlib import Path
+                    config_file = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
+                    if config_file.exists():
+                        with open(config_file) as f:
+                            config = json.load(f)
+                    else:
+                        config = {"workspaces": {}}
+                except Exception:
+                    config = {"workspaces": {}}
                 workspaces = config.get("workspaces", {})
                 workspace_config = workspaces.get(workspace, {})
                 workspace_info["is_dev_group"] = workspace_config.get("is_dev_group", False)
@@ -221,15 +239,15 @@ class ContextBuilder:
     def _extract_media_info(self, message: TelegramMessage) -> MediaInfo | None:
         """Extract media information from message."""
         if message.photo:
-            # Use largest photo
-            photo = message.photo[-1]
+            # In Pyrogram, message.photo is a Photo object, not a list
+            photo = message.photo
             return MediaInfo(
                 media_type=MessageType.PHOTO,
                 file_id=photo.file_id,
                 file_unique_id=photo.file_unique_id,
-                file_size=photo.file_size,
-                width=photo.width,
-                height=photo.height,
+                file_size=getattr(photo, 'file_size', 0),
+                width=getattr(photo, 'width', 0),
+                height=getattr(photo, 'height', 0),
             )
 
         elif message.document:

@@ -109,8 +109,12 @@ async def start_telegram_client():
             logger.warning(f"⚠️  Could not schedule startup promise recovery: {recovery_error}")
     else:
         logger.error("❌ Failed to initialize Telegram integration")
-        logger.error("🛑 SERVER CANNOT FUNCTION WITHOUT TELEGRAM - SHUTTING DOWN")
-        raise RuntimeError("Telegram integration failed - server cannot operate without it")
+        # For testing purposes, allow server to start in limited mode
+        if os.getenv("TESTING_MODE", "false").lower() == "true":
+            logger.warning("🔄 TESTING MODE: Continuing without Telegram (limited functionality)")
+        else:
+            logger.error("🛑 SERVER CANNOT FUNCTION WITHOUT TELEGRAM - SHUTTING DOWN")
+            raise RuntimeError("Telegram integration failed - server cannot operate without it")
 
 
 async def process_pending_server_tasks():
