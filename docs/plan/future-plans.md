@@ -249,6 +249,65 @@ class AgentAnalytics:
 - Cross-agent error recovery
 - User experience preservation during failures
 
+## Immediate Error Recovery Integration
+
+### UnifiedMessageProcessor Auto-Recovery Integration
+
+**Critical Gap Identified**: Current system lacks automatic error recovery for basic messaging failures.
+
+**Required Implementation**:
+1. **Integrate AutoErrorRecovery into UnifiedMessageProcessor**
+   - Replace basic error logging with intelligent error analysis
+   - Add automatic error categorization and fixing
+   - Implement user-friendly "I'm fixing this" messaging
+
+2. **Enhanced Error Detection and Recovery**
+   ```python
+   # Current: Basic error logging only
+   except Exception as e:
+       logger.error(f"Processing error: {str(e)}")
+       return generic_error_response
+   
+   # Needed: Intelligent auto-recovery
+   except Exception as e:
+       error_context = build_error_context(e, msg_context)
+       recovery_action = auto_recovery.determine_action(error_context)
+       
+       if recovery_action == RecoveryAction.AUTO_FIX:
+           await auto_recovery.attempt_immediate_fix(error_context)
+           return "🔧 I found and fixed a bug. Please try again!"
+       elif recovery_action == RecoveryAction.CREATE_PROMISE:
+           await auto_recovery.create_recovery_promise(error_context)
+           return "⚡ I'm analyzing this error and will fix it automatically."
+   ```
+
+3. **End-to-End Error Recovery Testing**
+   - **Basic messaging handling ability tests** (as requested)
+   - AttributeError recovery scenarios
+   - Import error detection and fixing
+   - Syntax error auto-correction
+   - Timeout handling with automatic optimization
+
+4. **Self-Healing Message Processing**
+   - Automatic detection of common code errors
+   - Background promise creation for complex issues
+   - System restart coordination for critical fixes
+   - User notification with recovery progress
+
+5. **Production Error Monitoring**
+   - Real-time error pattern detection
+   - Automatic error trend analysis
+   - Proactive system health validation
+   - Performance regression prevention
+
+**Implementation Priority**: **HIGH** - Critical for production reliability
+
+**Success Criteria**:
+- Zero user-visible errors for common code bugs
+- <30 second recovery time for auto-fixable issues
+- 100% test coverage for basic messaging error scenarios
+- User-friendly error communication in all failure modes
+
 ## Integration Ecosystem Expansion
 
 ### External Service Integrations
