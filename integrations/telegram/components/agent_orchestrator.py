@@ -140,7 +140,7 @@ class AgentOrchestrator:
             "chat_history": context.chat_history,
             "workspace": context.workspace,
             "working_directory": context.working_directory,
-            "is_priority_question": plan.priority.value in ["high", "critical"],
+            "is_priority_question": (plan.priority.value if hasattr(plan.priority, 'value') else str(plan.priority)) in ["high", "critical"],
             "message_text": context.cleaned_text,
         }
 
@@ -265,7 +265,7 @@ class AgentOrchestrator:
         
         # Add intent context if available
         if plan.intent and plan.intent != Intent.UNKNOWN:
-            intent_info = f"Detected Intent: {plan.intent.value}"
+            intent_info = f"Detected Intent: {plan.intent.intent.value if hasattr(plan.intent, 'intent') and plan.intent.intent else str(plan.intent)}"
             if hasattr(plan, 'intent_confidence'):
                 intent_info += f" (confidence: {plan.intent_confidence:.2f})"
             message_parts.append(intent_info)
