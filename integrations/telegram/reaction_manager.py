@@ -19,7 +19,7 @@ from pyrogram import Client
 from pyrogram.errors import FloodWait, BadRequest
 
 from .emoji_mapping import VALID_TELEGRAM_REACTIONS
-from integrations.ollama_intent import Intent
+from integrations.ollama_intent import IntentResult
 
 logger = logging.getLogger(__name__)
 
@@ -67,15 +67,16 @@ class ReactionManager:
             chat_id, message_id, self.READ_RECEIPT_EMOJI, "read_receipt"
         )
         
-    async def add_intent_reaction(self, chat_id: int, message_id: int, intent: Intent) -> bool:
+    async def add_intent_reaction(self, chat_id: int, message_id: int, intent: IntentResult) -> bool:
         """Step 2: Add work indicator based on Ollama intent classification."""
-        if not intent or not intent.intent_type:
+        if not intent or not intent.intent:
             return False
             
-        emoji = self.INTENT_EMOJI_MAP.get(intent.intent_type, "🧠")
+        # Use the emoji from intent result or fallback to our mapping
+        emoji = intent.suggested_emoji if hasattr(intent, 'suggested_emoji') and intent.suggested_emoji else self.INTENT_EMOJI_MAP.get(intent.intent.value, "🧠")
         
         return await self._add_reaction_safe(
-            chat_id, message_id, emoji, f"intent_{intent.intent_type}"
+            chat_id, message_id, emoji, f"intent_{intent.intent.value}"
         )
         
     async def add_progress_reaction(self, chat_id: int, message_id: int, work_type: str = "processing") -> bool:
@@ -247,7 +248,7 @@ async def add_message_received_reaction(client: Client, chat_id: int, message_id
     return await reaction_manager.add_read_receipt(chat_id, message_id)
 
 
-async def add_intent_based_reaction(client: Client, chat_id: int, message_id: int, intent: Intent) -> bool:
+async def add_intent_based_reaction(client: Client, chat_id: int, message_id: int, intent: IntentResult) -> bool:
     """Add intent-based reaction - convenience function."""
     reaction_manager = ReactionManager(client)
     return await reaction_manager.add_intent_reaction(chat_id, message_id, intent)

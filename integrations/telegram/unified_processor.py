@@ -21,7 +21,7 @@ from integrations.telegram.components import (
 )
 from integrations.telegram.models import ProcessingResult
 from integrations.telegram.reaction_manager import ReactionManager
-from integrations.ollama_intent import OllamaIntentClassifier
+from integrations.ollama_intent import OllamaIntentClassifier, IntentResult
 
 logger = logging.getLogger(__name__)
 
