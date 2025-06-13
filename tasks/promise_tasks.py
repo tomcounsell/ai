@@ -144,10 +144,11 @@ class UnifiedDaydreamSystem:
         logger.info("🧠 Gathering comprehensive analysis context...")
         
         try:
-            with get_database_connection(timeout=60) as conn:  # Longer timeout for analysis
-                # Workspace analysis (migrated from gather_daydream_context)
-                session.workspace_analysis = self._analyze_all_workspaces()
-                
+            # Workspace analysis (migrated from gather_daydream_context) - MOVED OUTSIDE DB TRANSACTION
+            session.workspace_analysis = self._analyze_all_workspaces()
+            
+            # Database operations with minimal transaction scope
+            with get_database_connection(timeout=5) as conn:  # Reduced from 60s to 5s
                 # System metrics (migrated from gather_system_metrics)
                 session.system_metrics = self._gather_system_metrics(conn)
                 
@@ -218,6 +219,13 @@ class UnifiedDaydreamSystem:
         # Archive old insights (keep last 10)
         cleanup_stats['insights_archived'] = self._archive_old_insights()
         
+        # Checkpoint WAL to prevent database file growth
+        from utilities.database import checkpoint_wal_database
+        if checkpoint_wal_database():
+            cleanup_stats['wal_checkpointed'] = True
+        else:
+            cleanup_stats['wal_checkpoint_failed'] = True
+        
         session.cleanup_summary['post_analysis'] = cleanup_stats
         logger.info(f"🧹 Post-cleanup complete: {cleanup_stats}")
     
@@ -232,6 +240,10 @@ class UnifiedDaydreamSystem:
             
             # Clean temp files
             self._cleanup_temp_files()
+            
+            # Checkpoint WAL during emergency cleanup
+            from utilities.database import checkpoint_wal_database
+            checkpoint_wal_database()
             
             logger.info("🚨 Emergency cleanup complete")
         except Exception as e:
@@ -1555,38 +1567,41 @@ def gather_daydream_context() -> Dict[str, Any]:
         # Get workspace configurations
         workspace_config = load_workspace_config()
         
-        # Get recent promise activity and workspace priorities for trend analysis
-        with get_database_connection() as conn:
-            # Analyze workspaces iteratively - prioritize by config + activity
+        # Get workspace priorities from database (quick operation)
+        workspace_priorities = []
+        with get_database_connection(timeout=3) as conn:
             workspaces = workspace_config.get('workspaces', {})
             workspace_priorities = get_workspace_priorities(conn, workspaces)
-            
-            # Rotate through workspaces to ensure all get analyzed over time
-            analyzed_count = 0
-            max_workspaces_per_cycle = 3
-            
-            # Use current hour to determine rotation offset for fair distribution
-            from datetime import datetime as dt
-            current_hour = dt.utcnow().hour
-            rotation_offset = (current_hour // 6) % len(workspace_priorities) if workspace_priorities else 0
-            
-            # Create rotated list starting from offset
-            rotated_priorities = workspace_priorities[rotation_offset:] + workspace_priorities[:rotation_offset]
-            
-            for workspace_name, workspace_data in rotated_priorities[:max_workspaces_per_cycle]:
-                if isinstance(workspace_data, dict) and workspace_data.get('working_directory'):
-                    try:
-                        logger.info(f"🧠 Analyzing workspace: {workspace_name}")
-                        workspace_context = analyze_workspace_for_daydream(
-                            workspace_name, 
-                            workspace_data['working_directory']
-                        )
-                        context['workspace_analysis'][workspace_name] = workspace_context
-                        analyzed_count += 1
-                    except Exception as e:
-                        logger.warning(f"Failed to analyze workspace {workspace_name}: {e}")
-            
-            logger.info(f"🧠 Analyzed {analyzed_count}/{len(workspaces)} workspaces this cycle")
+        
+        # Analyze workspaces OUTSIDE database transaction
+        analyzed_count = 0
+        max_workspaces_per_cycle = 3
+        
+        # Use current hour to determine rotation offset for fair distribution
+        from datetime import datetime as dt
+        current_hour = dt.utcnow().hour
+        rotation_offset = (current_hour // 6) % len(workspace_priorities) if workspace_priorities else 0
+        
+        # Create rotated list starting from offset
+        rotated_priorities = workspace_priorities[rotation_offset:] + workspace_priorities[:rotation_offset]
+        
+        for workspace_name, workspace_data in rotated_priorities[:max_workspaces_per_cycle]:
+            if isinstance(workspace_data, dict) and workspace_data.get('working_directory'):
+                try:
+                    logger.info(f"🧠 Analyzing workspace: {workspace_name}")
+                    workspace_context = analyze_workspace_for_daydream(
+                        workspace_name, 
+                        workspace_data['working_directory']
+                    )
+                    context['workspace_analysis'][workspace_name] = workspace_context
+                    analyzed_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to analyze workspace {workspace_name}: {e}")
+        
+        logger.info(f"🧠 Analyzed {analyzed_count}/{len(workspace_priorities)} workspaces this cycle")
+        
+        # Get database metrics in separate transaction
+        with get_database_connection(timeout=3) as conn:
             
             # Get recent promises with proper column mapping
             recent_promises = conn.execute("""

@@ -21,7 +21,7 @@ def get_database_path() -> Path:
     return Path("system.db")
 
 
-def get_database_connection(db_path: Optional[str] = None, timeout: int = 30) -> sqlite3.Connection:
+def get_database_connection(db_path: Optional[str] = None, timeout: int = 5) -> sqlite3.Connection:
     """Get a connection to the shared system database with optimized settings.
     
     Args:
@@ -39,7 +39,7 @@ def get_database_connection(db_path: Optional[str] = None, timeout: int = 30) ->
     
     # Apply optimized PRAGMA settings for concurrency and performance
     conn.execute("PRAGMA journal_mode = WAL")          # Enable WAL mode for better concurrency
-    conn.execute("PRAGMA busy_timeout = 30000")        # 30 second busy timeout
+    conn.execute("PRAGMA busy_timeout = 5000")         # 5 second busy timeout
     conn.execute("PRAGMA synchronous = NORMAL")        # Balance safety and performance
     conn.execute("PRAGMA cache_size = -64000")         # 64MB cache size
     conn.execute("PRAGMA temp_store = MEMORY")         # Store temp tables in memory
@@ -48,8 +48,26 @@ def get_database_connection(db_path: Optional[str] = None, timeout: int = 30) ->
     return conn
 
 
+def checkpoint_wal_database(db_path: Optional[str] = None) -> bool:
+    """Checkpoint WAL file to reduce size and improve performance.
+    
+    Should be called periodically to prevent WAL files from growing too large.
+    Returns True if checkpoint was successful.
+    """
+    try:
+        with get_database_connection(db_path, timeout=3) as conn:
+            # TRUNCATE mode forces all WAL data to be written to main database
+            result = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if result and result[0] == 0:  # 0 means success
+                return True
+            return False
+    except Exception as e:
+        logger.warning(f"WAL checkpoint failed: {e}")
+        return False
+
+
 @contextmanager
-def database_transaction(db_path: Optional[str] = None, timeout: int = 30):
+def database_transaction(db_path: Optional[str] = None, timeout: int = 5):
     """Context manager for database transactions with proper cleanup.
     
     Args:
