@@ -28,7 +28,7 @@ def process_missed_message(message_id: int):
     logger.info(f"📬 STARTING MISSED MESSAGE PROCESSING | Message ID: {message_id}")
     
     try:
-        with get_database_connection() as conn:
+        with get_database_connection(timeout=30) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             
@@ -114,7 +114,7 @@ def cleanup_old_messages():
     """
     cutoff_date = datetime.utcnow() - timedelta(days=7)
     
-    with get_database_connection() as conn:
+    with get_database_connection(timeout=30) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             DELETE FROM message_queue 

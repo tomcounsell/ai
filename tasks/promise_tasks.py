@@ -111,7 +111,7 @@ class UnifiedDaydreamSystem:
         logger.info("🧠 Gathering comprehensive analysis context...")
         
         try:
-            with get_database_connection() as conn:
+            with get_database_connection(timeout=60) as conn:  # Longer timeout for analysis
                 # Workspace analysis (migrated from gather_daydream_context)
                 session.workspace_analysis = self._analyze_all_workspaces()
                 
@@ -1069,7 +1069,7 @@ def cleanup_old_promises():
     """
     cutoff_date = datetime.utcnow() - timedelta(days=7)
     
-    with get_database_connection() as conn:
+    with get_database_connection(timeout=30) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             DELETE FROM promises 
@@ -1102,7 +1102,7 @@ def resume_stalled_promises():
     # Find promises marked as in_progress for too long (original logic)
     stalled_cutoff = datetime.utcnow() - timedelta(hours=4)
     
-    with get_database_connection() as conn:
+    with get_database_connection(timeout=30) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id FROM promises 
@@ -1122,7 +1122,7 @@ def resume_stalled_promises():
     # Find pending promises that were never processed after server restart
     orphaned_cutoff = datetime.utcnow() - timedelta(minutes=5)
     
-    with get_database_connection() as conn:
+    with get_database_connection(timeout=30) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id FROM promises 
@@ -1154,7 +1154,7 @@ def startup_promise_recovery():
     recovered_count = 0
     
     # Find all pending promises (may have been orphaned during restart)
-    with get_database_connection() as conn:
+    with get_database_connection(timeout=30) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, task_description, created_at FROM promises 
@@ -1178,6 +1178,36 @@ def startup_promise_recovery():
         recovered_count += 1
     
     logger.info(f"✅ Startup promise recovery complete: {recovered_count} promises scheduled for execution")
+
+
+@huey.periodic_task(crontab(minute='*/15'))
+def checkpoint_databases():
+    """
+    Perform WAL checkpoint to prevent WAL files from growing too large.
+    
+    This task runs every 15 minutes to checkpoint the WAL files,
+    which helps prevent database locks and improves performance.
+    """
+    try:
+        import sqlite3
+        
+        # Checkpoint system database
+        with get_database_connection() as conn:
+            result = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            if result:
+                logger.debug(f"System DB checkpoint: {result[0]} pages written, {result[1]} pages checkpointed")
+        
+        # Checkpoint Huey database
+        huey_db_path = os.environ.get('HUEY_DB_PATH', 'data/huey.db')
+        with sqlite3.connect(huey_db_path, timeout=30) as conn:
+            # Apply optimizations to ensure consistency
+            conn.execute("PRAGMA busy_timeout = 30000")
+            result = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+            if result:
+                logger.debug(f"Huey DB checkpoint: {result[0]} pages written, {result[1]} pages checkpointed")
+                
+    except Exception as e:
+        logger.warning(f"Database checkpoint failed: {e}")
 
 
 @huey.periodic_task(crontab(minute='*/15'))
@@ -1215,10 +1245,10 @@ def system_health_check():
 
 def gather_system_health_data() -> Dict[str, Any]:
     """Gather current system state for health analysis."""
-    conn = get_database_connection()
-    conn.row_factory = sqlite3.Row  # Enable dict-like access
-    
-    try:
+    with get_database_connection(timeout=30) as conn:
+        conn.row_factory = sqlite3.Row  # Enable dict-like access
+        
+        try:
         
         # Promise queue analysis
         queue_stats = conn.execute("""
@@ -1266,17 +1296,18 @@ def gather_system_health_data() -> Dict[str, Any]:
             GROUP BY status
         """).fetchall()
         
-        return {
-            'timestamp': datetime.utcnow().isoformat(),
-            'queue_stats': [dict(row) for row in queue_stats] if queue_stats else [],
-            'workspace_activity': [dict(row) for row in recent_activity] if recent_activity else [],
-            'pending_count': pending_count,
-            'stalled_count': stalled_count,
-            'completion_stats': [dict(row) for row in completion_stats] if completion_stats else [],
-            'queue_summary': f"{pending_count} pending, {stalled_count} stalled"
-        }
-    finally:
-        conn.close()
+            return {
+                'timestamp': datetime.utcnow().isoformat(),
+                'queue_stats': [dict(row) for row in queue_stats] if queue_stats else [],
+                'workspace_activity': [dict(row) for row in recent_activity] if recent_activity else [],
+                'pending_count': pending_count,
+                'stalled_count': stalled_count,
+                'completion_stats': [dict(row) for row in completion_stats] if completion_stats else [],
+                'queue_summary': f"{pending_count} pending, {stalled_count} stalled"
+            }
+        except Exception as e:
+            logger.error(f"Failed to gather system health data: {e}")
+            return {'pending_count': 0, 'stalled_count': 0, 'error': str(e)}
 
 
 def analyze_system_health(data: Dict[str, Any]) -> Dict[str, Any]:

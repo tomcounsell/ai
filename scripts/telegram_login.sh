@@ -28,6 +28,33 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 echo -e "${BLUE}🤖 Telegram Bot Authorization${NC}"
 echo "================================"
+
+# Function to unlock databases before attempting authorization
+unlock_databases() {
+    echo -e "${YELLOW}🔧 Checking for database locks...${NC}"
+    
+    # Kill any processes holding database locks
+    DB_LOCKS=$(lsof "$PROJECT_ROOT/data/"*.db 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)
+    if [ -n "$DB_LOCKS" ]; then
+        echo -e "${YELLOW}⚠️  Found processes locking databases, terminating...${NC}"
+        echo "$DB_LOCKS" | xargs kill -9 2>/dev/null || true
+        sleep 1
+        echo -e "${GREEN}✅ Database locks cleared${NC}"
+    fi
+    
+    # Also check session file locks
+    SESSION_LOCKS=$(lsof "$PROJECT_ROOT/ai_project_bot.session" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)
+    if [ -n "$SESSION_LOCKS" ]; then
+        echo -e "${YELLOW}⚠️  Found processes locking session file, terminating...${NC}"
+        echo "$SESSION_LOCKS" | xargs kill -9 2>/dev/null || true
+        sleep 1
+        echo -e "${GREEN}✅ Session file locks cleared${NC}"
+    fi
+}
+
+# Unlock databases first
+unlock_databases
+echo ""
 echo ""
 
 # Check if we're in the right directory

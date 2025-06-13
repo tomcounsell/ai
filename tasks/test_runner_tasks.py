@@ -330,7 +330,7 @@ def nightly_test_run():
         'is_nightly': True
     }
     
-    with get_database_connection() as conn:
+    with get_database_connection(timeout=30) as conn:
         conn.execute(
             "UPDATE promises SET metadata = ? WHERE id = ?",
             (json.dumps(metadata), promise_id)

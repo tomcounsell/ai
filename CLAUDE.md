@@ -46,4 +46,5 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Test the happy path thoroughly; edge cases are secondary
 - Use actual services (Notion, Perplexity, Claude) rather than mocks when possible
 
-[Rest of the file remains unchanged]
+### Telegram Integration
+- If Telegram auth doesn't work, just give up. Human action is needed

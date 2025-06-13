@@ -8,6 +8,7 @@ token usage tracking, link analysis, and other persistent storage needs.
 import sqlite3
 import os
 import logging
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -20,19 +21,58 @@ def get_database_path() -> Path:
     return Path("system.db")
 
 
-def get_database_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
-    """Get a connection to the shared system database.
+def get_database_connection(db_path: Optional[str] = None, timeout: int = 30) -> sqlite3.Connection:
+    """Get a connection to the shared system database with optimized settings.
     
     Args:
         db_path: Optional custom database path. If None, uses default system.db
+        timeout: Connection timeout in seconds (default: 30)
         
     Returns:
-        sqlite3.Connection: Database connection
+        sqlite3.Connection: Database connection with optimized PRAGMA settings
     """
     if db_path is None:
         db_path = get_database_path()
     
-    return sqlite3.connect(db_path)
+    # Create connection with timeout
+    conn = sqlite3.connect(db_path, timeout=timeout)
+    
+    # Apply optimized PRAGMA settings for concurrency and performance
+    conn.execute("PRAGMA journal_mode = WAL")          # Enable WAL mode for better concurrency
+    conn.execute("PRAGMA busy_timeout = 30000")        # 30 second busy timeout
+    conn.execute("PRAGMA synchronous = NORMAL")        # Balance safety and performance
+    conn.execute("PRAGMA cache_size = -64000")         # 64MB cache size
+    conn.execute("PRAGMA temp_store = MEMORY")         # Store temp tables in memory
+    conn.execute("PRAGMA mmap_size = 268435456")       # 256MB memory-mapped I/O
+    
+    return conn
+
+
+@contextmanager
+def database_transaction(db_path: Optional[str] = None, timeout: int = 30):
+    """Context manager for database transactions with proper cleanup.
+    
+    Args:
+        db_path: Optional custom database path. If None, uses default system.db
+        timeout: Connection timeout in seconds (default: 30)
+        
+    Yields:
+        sqlite3.Connection: Database connection within transaction
+        
+    Example:
+        with database_transaction() as conn:
+            conn.execute("INSERT INTO table VALUES (?)", (value,))
+            # Transaction automatically committed on success, rolled back on error
+    """
+    conn = get_database_connection(db_path, timeout)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_database() -> None:

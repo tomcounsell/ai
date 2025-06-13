@@ -228,16 +228,9 @@ fi
 
 # Check Telegram authentication before starting server
 if ! check_telegram_auth; then
-    if ! authenticate_telegram; then
-        echo ""
-        echo "❌ Cannot start server without Telegram authentication"
-        echo ""
-        echo "To fix this:"
-        echo "1. Run: scripts/telegram_login.sh"
-        echo "2. Enter your phone number and verification code"
-        echo "3. Run: scripts/start.sh again"
-        exit 1
-    fi
+    echo "⚠️  Telegram authentication failed"
+    echo "🔄 Continuing in degraded mode (limited functionality)"
+    echo ""
 fi
 
 # Function to recover from database locks
