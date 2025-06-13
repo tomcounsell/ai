@@ -146,7 +146,7 @@ class AgentOrchestrator:
 
         # Add intent information
         if plan.intent:
-            valor_context["detected_intent"] = plan.intent.value
+            valor_context["detected_intent"] = plan.intent.intent.value if hasattr(plan.intent, 'intent') and plan.intent.intent else str(plan.intent)
 
         # Add reply context
         if context.reply_context:
