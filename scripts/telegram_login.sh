@@ -42,14 +42,23 @@ unlock_databases() {
         echo -e "${GREEN}✅ Database locks cleared${NC}"
     fi
     
-    # Also check session file locks
-    SESSION_LOCKS=$(lsof "$PROJECT_ROOT/ai_project_bot.session" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)
-    if [ -n "$SESSION_LOCKS" ]; then
-        echo -e "${YELLOW}⚠️  Found processes locking session file, terminating...${NC}"
-        echo "$SESSION_LOCKS" | xargs kill -9 2>/dev/null || true
-        sleep 1
-        echo -e "${GREEN}✅ Session file locks cleared${NC}"
-    fi
+    # Also check session file locks (both old and new locations)
+    SESSION_FILES=(
+        "$PROJECT_ROOT/ai_project_bot.session"
+        "$PROJECT_ROOT/telegram_sessions/ai_project_bot.session"
+    )
+    
+    for SESSION_FILE in "${SESSION_FILES[@]}"; do
+        if [ -f "$SESSION_FILE" ]; then
+            SESSION_LOCKS=$(lsof "$SESSION_FILE" 2>/dev/null | awk 'NR>1 {print $2}' | sort -u)
+            if [ -n "$SESSION_LOCKS" ]; then
+                echo -e "${YELLOW}⚠️  Found processes locking $(basename "$SESSION_FILE"), terminating...${NC}"
+                echo "$SESSION_LOCKS" | xargs kill -9 2>/dev/null || true
+                sleep 1
+                echo -e "${GREEN}✅ Session file locks cleared${NC}"
+            fi
+        fi
+    done
 }
 
 # Unlock databases first

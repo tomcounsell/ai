@@ -1249,9 +1249,8 @@ def gather_system_health_data() -> Dict[str, Any]:
         conn.row_factory = sqlite3.Row  # Enable dict-like access
         
         try:
-        
-        # Promise queue analysis
-        queue_stats = conn.execute("""
+            # Promise queue analysis
+            queue_stats = conn.execute("""
             SELECT 
                 status,
                 COUNT(*) as count,
@@ -1296,15 +1295,15 @@ def gather_system_health_data() -> Dict[str, Any]:
             GROUP BY status
         """).fetchall()
         
-            return {
-                'timestamp': datetime.utcnow().isoformat(),
-                'queue_stats': [dict(row) for row in queue_stats] if queue_stats else [],
-                'workspace_activity': [dict(row) for row in recent_activity] if recent_activity else [],
-                'pending_count': pending_count,
-                'stalled_count': stalled_count,
-                'completion_stats': [dict(row) for row in completion_stats] if completion_stats else [],
-                'queue_summary': f"{pending_count} pending, {stalled_count} stalled"
-            }
+        return {
+            'timestamp': datetime.utcnow().isoformat(),
+            'queue_stats': [dict(row) for row in queue_stats] if queue_stats else [],
+            'workspace_activity': [dict(row) for row in recent_activity] if recent_activity else [],
+            'pending_count': pending_count,
+            'stalled_count': stalled_count,
+            'completion_stats': [dict(row) for row in completion_stats] if completion_stats else [],
+            'queue_summary': f"{pending_count} pending, {stalled_count} stalled"
+        }
         except Exception as e:
             logger.error(f"Failed to gather system health data: {e}")
             return {'pending_count': 0, 'stalled_count': 0, 'error': str(e)}
@@ -1407,6 +1406,43 @@ def log_health_insights(insights: Dict[str, Any], data: Dict[str, Any]) -> None:
     )
     if would_alert:
         logger.info("💓 🚨 [Health check would trigger alert if messaging was enabled]")
+
+
+@huey.periodic_task(crontab(minute='*/15'))  # Every 15 minutes
+def maintain_database_wal():
+    """
+    Periodic WAL checkpoint to prevent database lock issues.
+    
+    This task ensures SQLite WAL files don't grow too large and cause
+    performance issues or lock conflicts during restarts.
+    """
+    try:
+        import sqlite3
+        from utilities.database import get_database_path
+        
+        # Databases to maintain
+        databases = [
+            str(get_database_path()),  # Main system database
+            'data/huey.db',           # Huey task queue database
+            'utilities/system.db',     # Utilities database
+            'utilities/token_usage.db' # Token tracking database
+        ]
+        
+        for db_path in databases:
+            if os.path.exists(db_path):
+                try:
+                    conn = sqlite3.connect(db_path, timeout=5)
+                    # Perform WAL checkpoint to commit pending transactions
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    conn.close()
+                    logger.debug(f"WAL checkpoint completed for {db_path}")
+                except Exception as e:
+                    logger.warning(f"WAL checkpoint failed for {db_path}: {e}")
+        
+        logger.debug("Database WAL maintenance completed")
+        
+    except Exception as e:
+        logger.error(f"Database WAL maintenance failed: {e}")
 
 
 @huey.periodic_task(crontab(minute=0, hour='*/6'))  # Every 6 hours at minute 0

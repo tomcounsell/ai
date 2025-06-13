@@ -18,10 +18,27 @@ class TelegramClient:
     def __init__(self, workdir: str = "/Users/valorengels/src/ai"):
         self.client: Client | None = None
         self.workdir = workdir
+        # Isolate Telegram session to prevent database conflicts with main system
+        self.telegram_session_dir = os.path.join(workdir, "telegram_sessions")
+        os.makedirs(self.telegram_session_dir, exist_ok=True)
+        self._migrate_existing_session()
         self.chat_history = ChatHistoryManager()
         self.message_handler: MessageHandler | None = None
         self.bot_start_time = None
         self._active_handlers = set()  # Track active message handlers
+
+    def _migrate_existing_session(self):
+        """Migrate existing session file to isolated directory."""
+        old_session_path = os.path.join(self.workdir, "ai_project_bot.session")
+        new_session_path = os.path.join(self.telegram_session_dir, "ai_project_bot.session")
+        
+        if os.path.exists(old_session_path) and not os.path.exists(new_session_path):
+            try:
+                import shutil
+                shutil.move(old_session_path, new_session_path)
+                logger.info(f"Migrated Telegram session to isolated directory: {self.telegram_session_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to migrate session file: {e}")
 
     async def initialize(self, notion_scout=None) -> bool:
         """Initialize the Telegram client with proper configuration."""
@@ -42,12 +59,12 @@ class TelegramClient:
                 logger.error("Telegram credentials not found in environment variables")
                 return False
 
-            # Create client with better session handling to prevent database locks
+            # Create client with isolated session storage to prevent database conflicts
             self.client = Client(
                 "ai_project_bot",
                 api_id=int(api_id),
                 api_hash=api_hash,
-                workdir=self.workdir,
+                workdir=self.telegram_session_dir,  # Isolated session directory
                 max_concurrent_transmissions=1,  # Reduce concurrent transmissions to prevent locks
                 sleep_threshold=60,  # Prevent flood wait issues
                 no_updates=False,  # Ensure we receive updates

@@ -50,15 +50,18 @@ async def authorize_telegram_client():
     print(f"✅ API ID: {api_id}")
     print(f"✅ API Hash: {'*' * (len(api_hash) - 4) + api_hash[-4:]}")
 
-    # Set working directory to project root
+    # Set working directory to project root and create isolated session directory
     workdir = str(Path(__file__).parent.parent.parent)
+    telegram_session_dir = os.path.join(workdir, "telegram_sessions")
+    os.makedirs(telegram_session_dir, exist_ok=True)
     print(f"📁 Working directory: {workdir}")
+    print(f"📁 Session directory: {telegram_session_dir}")
 
     try:
         print("\n🚀 Creating Telegram client...")
 
-        # Create client with same session name as used in production
-        client = Client("ai_project_bot", api_id=int(api_id), api_hash=api_hash, workdir=workdir)
+        # Create client with isolated session storage to prevent database conflicts
+        client = Client("ai_project_bot", api_id=int(api_id), api_hash=api_hash, workdir=telegram_session_dir)
 
         print("📱 Starting authorization process...")
         print("\nThis will prompt for:")
