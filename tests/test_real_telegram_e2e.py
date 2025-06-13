@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from pyrogram.types import Message, User, Chat, Photo
 
 # Import ALL real system components - NO MOCKS
@@ -58,7 +59,7 @@ class TestRealTelegramEndToEnd:
         # Cleanup after tests
         print("✅ Test environment cleaned up")
 
-    @pytest.fixture
+    @pytest_asyncio.fixture
     async def real_telegram_client(self):
         """Create and initialize real Telegram client."""
         client = TelegramClient()

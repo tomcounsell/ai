@@ -22,8 +22,20 @@ class ChatHistoryManager:
             if self.history_file.exists():
                 with open(self.history_file) as f:
                     data = json.load(f)
-                    # Convert string keys back to int
-                    self.chat_histories = {int(k): v for k, v in data.items()}
+                    # Convert string keys back to int and ensure timestamps are floats
+                    self.chat_histories = {}
+                    for k, v in data.items():
+                        chat_id = int(k)
+                        messages = []
+                        for msg in v:
+                            # Ensure timestamp is a float, not a string
+                            if "timestamp" in msg:
+                                try:
+                                    msg["timestamp"] = float(msg["timestamp"])
+                                except (ValueError, TypeError):
+                                    msg["timestamp"] = 0.0
+                            messages.append(msg)
+                        self.chat_histories[chat_id] = messages
                     print(f"Loaded chat history for {len(self.chat_histories)} conversations")
             else:
                 self.chat_histories = {}
@@ -207,13 +219,13 @@ class ChatHistoryManager:
                 for msg in reversed(older_messages):  # Start from most recent
                     if len(temporal_messages) >= max_context_messages - len(priority_messages):
                         break
-                    if current_time - msg.get("timestamp", 0) <= max_age_seconds:
+                    if current_time - float(msg.get("timestamp", 0)) <= max_age_seconds:
                         temporal_messages.insert(-len(guaranteed_messages), msg)  # Insert before guaranteed messages
         
         # Combine priority (reply chain) + temporal context
         # Sort by timestamp to maintain chronological order
         all_context_messages = priority_messages + temporal_messages
-        all_context_messages.sort(key=lambda x: x.get("timestamp", 0))
+        all_context_messages.sort(key=lambda x: float(x.get("timestamp", 0)))
         
         # Remove duplicates while preserving order
         seen_message_ids = set()
@@ -229,7 +241,7 @@ class ChatHistoryManager:
         temporal_count = len(final_messages) - reply_count
         debug_info = []
         for m in final_messages:
-            age_hours = (current_time - m.get("timestamp", 0)) / 3600
+            age_hours = (current_time - float(m.get("timestamp", 0))) / 3600
             msg_type = "reply-chain" if m in priority_messages else "temporal"
             debug_info.append(f"{m['role']}: {m['content'][:30]}... ({age_hours:.1f}h ago, {msg_type})")
         
@@ -266,7 +278,7 @@ class ChatHistoryManager:
             older_messages = all_messages[:-always_include_last] if len(all_messages) > always_include_last else []
             
             for msg in reversed(older_messages):  # Start from most recent of the older messages
-                if current_time - msg.get("timestamp", 0) <= max_age_seconds:
+                if current_time - float(msg.get("timestamp", 0)) <= max_age_seconds:
                     additional_messages.insert(0, msg)  # Insert at beginning to maintain order
                     if len(additional_messages) >= remaining_slots:
                         break
@@ -277,7 +289,7 @@ class ChatHistoryManager:
         # Debug: Show messages with timestamps and categorization
         raw_debug = []
         for i, m in enumerate(recent_messages):
-            age_hours = (current_time - m.get("timestamp", 0)) / 3600
+            age_hours = (current_time - float(m.get("timestamp", 0))) / 3600
             category = "guaranteed" if i >= len(additional_messages) else "recent"
             raw_debug.append(f"{m['role']}: {m['content'][:30]}... ({age_hours:.1f}h ago, {category})")
         print(f"🔍 Context messages ({len(recent_messages)}, {guaranteed_count} guaranteed + {len(additional_messages)} recent): {raw_debug}")
@@ -303,13 +315,13 @@ class ChatHistoryManager:
         matches = []
         for msg in self.chat_histories[chat_id]:
             # Skip messages that are too old
-            if current_time - msg.get("timestamp", 0) > max_age_seconds:
+            if current_time - float(msg.get("timestamp", 0)) > max_age_seconds:
                 continue
                 
             # Search in message content
             content = msg.get("content", "").lower()
             if query_lower in content:
-                age_hours = (current_time - msg.get("timestamp", 0)) / 3600
+                age_hours = (current_time - float(msg.get("timestamp", 0))) / 3600
                 # Score by relevance (exact match bonus) and recency
                 relevance_score = content.count(query_lower)
                 recency_score = max(0, 1 - (age_hours / (max_age_days * 24)))  # Decay over time

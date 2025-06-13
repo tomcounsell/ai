@@ -45,6 +45,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Focus on testing real integrations and end-to-end functionality
 - Test the happy path thoroughly; edge cases are secondary
 - Use actual services (Notion, Perplexity, Claude) rather than mocks when possible
+- When you write a test, run the test to view results
+- **Don't be tempted to simplify tests to get them working. Don't take shortcuts or cheat**
 
 ### Telegram Integration
 - If Telegram auth doesn't work, just give up. Human action is needed

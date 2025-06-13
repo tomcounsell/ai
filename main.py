@@ -419,6 +419,120 @@ async def cancel_restart():
         raise HTTPException(status_code=500, detail=f"Failed to cancel restart: {e}")
 
 
+class TrueE2ETestRequest(BaseModel):
+    """Request model for TRUE E2E test."""
+    test_message: str = "🧪 TRUE E2E API Test: Validate complete message processing pipeline"
+    wait_seconds: int = 3
+
+
+@app.post("/test/true-e2e")
+async def run_true_e2e_test(request: TrueE2ETestRequest):
+    """
+    Run TRUE E2E test using existing TelegramClient.
+    
+    Sends a real message through the existing Telegram connection,
+    waits for processing, and validates the response.
+    """
+    global telegram_client
+    
+    if not telegram_client or not telegram_client.client:
+        raise HTTPException(status_code=503, detail="Telegram client not available")
+    
+    if not telegram_client.is_connected:
+        raise HTTPException(status_code=503, detail="Telegram client not connected")
+    
+    try:
+        # Get bot user info
+        me = await telegram_client.client.get_me()
+        test_start_time = datetime.now()
+        
+        logger.info(f"🧪 Starting TRUE E2E test as @{me.username} (ID: {me.id})")
+        
+        # Step 1: Send real message to self
+        test_message = f"{request.test_message} (Started: {test_start_time.strftime('%H:%M:%S')})"
+        sent_message = await telegram_client.client.send_message("me", test_message)
+        
+        logger.info(f"📤 Sent TRUE E2E test message with ID: {sent_message.id}")
+        
+        # Step 2: Wait for processing
+        await asyncio.sleep(request.wait_seconds)
+        
+        # Step 3: Check chat history for processing
+        chat_history = telegram_client.chat_history
+        test_message_found = False
+        response_found = False
+        latest_response = None
+        
+        if me.id in chat_history.chat_histories:
+            recent_messages = chat_history.chat_histories[me.id][-10:]  # Last 10 messages
+            
+            for msg in recent_messages:
+                content = msg.get("content", "")
+                
+                # Check if our test message was recorded
+                if test_message in content:
+                    test_message_found = True
+                    logger.info(f"✅ Test message found in chat history")
+                
+                # Check for recent agent response
+                elif (msg.get("role") == "assistant" and 
+                      len(content) > 20):
+                    response_found = True
+                    latest_response = content[:200] + ("..." if len(content) > 200 else "")
+                    logger.info(f"✅ Agent response found: {latest_response}")
+        
+        # Step 4: Check recent Telegram messages
+        telegram_response_found = False
+        telegram_response = None
+        
+        try:
+            async for message in telegram_client.client.get_chat_history("me", limit=5):
+                # Look for bot responses (messages from our bot user)
+                if (message.from_user and 
+                    message.from_user.id == me.id and 
+                    message.text and 
+                    message.text != test_message):
+                    telegram_response_found = True
+                    telegram_response = message.text[:200] + ("..." if len(message.text) > 200 else "")
+                    logger.info(f"✅ Telegram response found: {telegram_response}")
+                    break
+        except Exception as e:
+            logger.warning(f"Could not check Telegram history: {e}")
+        
+        # Step 5: Build results
+        test_duration = (datetime.now() - test_start_time).total_seconds()
+        
+        result = {
+            "status": "completed",
+            "test_duration_seconds": test_duration,
+            "bot_user": f"@{me.username}",
+            "bot_id": me.id,
+            "sent_message_id": sent_message.id,
+            "message_processing": {
+                "test_message_found": test_message_found,
+                "agent_response_found": response_found,
+                "latest_agent_response": latest_response
+            },
+            "telegram_validation": {
+                "telegram_response_found": telegram_response_found,
+                "telegram_response": telegram_response
+            },
+            "overall_success": test_message_found and (response_found or telegram_response_found),
+            "timestamp": test_start_time.isoformat()
+        }
+        
+        if result["overall_success"]:
+            logger.info("🎉 TRUE E2E test PASSED - Complete pipeline working!")
+        else:
+            logger.warning("⚠️ TRUE E2E test PARTIAL - Some components may need attention")
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"❌ TRUE E2E test failed: {e}")
+        raise HTTPException(status_code=500, detail=f"TRUE E2E test error: {str(e)}")
+
+
 if __name__ == "__main__":
     # Disable reload to prevent session file changes from triggering restarts
     uvicorn.run("main:app", host="0.0.0.0", port=9000, reload=False, log_level="info")
