@@ -232,7 +232,7 @@ class AgentOrchestrator:
                 agent_response = self._parse_agent_response(response_text)
                 agent_response.metadata.update({
                     "tools_used": tool_actions,
-                    "intent": plan.intent.value if plan.intent else None,
+                    "intent": plan.intent.intent.value if hasattr(plan.intent, 'intent') and plan.intent.intent else str(plan.intent) if plan.intent else None,
                     "context_size": len(enhanced_message),
                     "model": "claude-3-5-sonnet-20241022"
                 })
