@@ -250,8 +250,8 @@ class ResponseManager:
         for reaction in reactions:
             if reaction in valid_reactions:
                 try:
-                    await self.bot.set_message_reaction(
-                        chat_id=chat_id, message_id=message_id, reaction=reaction
+                    await self.bot.send_reaction(
+                        chat_id=chat_id, message_id=message_id, emoji=reaction
                     )
                 except Exception as e:
                     logger.debug(f"Failed to add reaction {reaction}: {str(e)}")
