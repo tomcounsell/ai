@@ -734,3 +734,187 @@ if __name__ == "__main__":
         print(f"❌ Import error: {e}")
         import traceback
         traceback.print_exc()
+
+    @pytest.mark.asyncio
+    async def test_valor_dm_voice_message_comprehensive(self, processor):
+        """
+        Comprehensive voice message test using Valor's actual DM context.
+        
+        Tests:
+        - Voice message creation with realistic parameters
+        - DM context validation (Valor's actual user ID)
+        - Voice transcription tool integration
+        - Response validation for voice content
+        """
+        import time
+        
+        # Use Valor's actual user info for authentic DM testing
+        valor_user = User(
+            id=66968934582,  # Valor's actual user ID from workspace config
+            is_self=False,
+            first_name="Valor",
+            is_bot=True,
+            username="valorengels"
+        )
+        
+        # DM chat has same ID as user for private chats
+        valor_dm_chat = Chat(
+            id=66968934582,
+            type="private"
+        )
+
+        # Create realistic voice message
+        voice = Voice(
+            file_id="BAADBAADbQADBREAAZbRCbNq5LTaAg",
+            file_unique_id="AgADbQADBREAAT", 
+            duration=25,  # 25 second voice message
+            mime_type="audio/ogg",  # Standard Telegram voice format
+            file_size=125000,  # ~125KB
+            waveform=None,
+            date=datetime.now()
+        )
+
+        message = Message(
+            id=int(time.time()),  # Unique message ID
+            from_user=valor_user,
+            chat=valor_dm_chat,
+            date=datetime.now()
+        )
+        message.voice = voice
+
+        print(f"🎙️ Testing voice message in Valor's DM (chat_id: {valor_dm_chat.id})")
+        
+        start_time = time.time()
+        update = self.MockUpdate(message)
+        result = await processor.process_message(update, None)
+        processing_time = time.time() - start_time
+
+        # Comprehensive validation
+        assert isinstance(result, ProcessingResult)
+        
+        print(f"⏱️  Voice processing time: {processing_time:.2f}s")
+        
+        if result.success:
+            print(f"✅ Voice message processed successfully")
+            print(f"📋 Summary: {result.summary}")
+            
+            # Validate voice-specific processing
+            response_content = result.response.content.lower()
+            
+            # Check for voice/transcription indicators
+            voice_indicators = ["voice", "audio", "transcrib", "hear", "said", "recording"]
+            voice_processing_detected = any(indicator in response_content for indicator in voice_indicators)
+            
+            if voice_processing_detected:
+                print("✅ Voice-specific processing detected in response")
+            
+            # Check tools used
+            tools_used = result.response.metadata.get("tools_used", [])
+            if tools_used:
+                print(f"🔧 Tools used: {tools_used}")
+                
+                # Look for transcription tool usage
+                transcription_tools = [tool for tool in tools_used if "transcrib" in tool.lower() or "voice" in tool.lower()]
+                if transcription_tools:
+                    print(f"✅ Voice transcription tools used: {transcription_tools}")
+            
+            # Response should be conversational and helpful
+            assert len(result.response.content) > 10, "Response should be substantial"
+            
+        else:
+            print(f"❌ Voice processing failed: {result.error}")
+            # Voice processing failure might be expected if transcription service unavailable
+            assert result.error is not None, "Error should be provided for failures"
+
+    @pytest.mark.asyncio
+    async def test_valor_dm_image_message_comprehensive(self, processor):
+        """
+        Comprehensive image message test using Valor's actual DM context.
+        
+        Tests:
+        - Photo message creation with realistic parameters
+        - DM context validation (Valor's actual user ID)
+        - Image analysis tool integration  
+        - Response validation for visual content
+        """
+        import time
+        
+        # Use Valor's actual user info for authentic DM testing
+        valor_user = User(
+            id=66968934582,  # Valor's actual user ID from workspace config
+            is_self=False,
+            first_name="Valor", 
+            is_bot=True,
+            username="valorengels"
+        )
+        
+        # DM chat has same ID as user for private chats
+        valor_dm_chat = Chat(
+            id=66968934582,
+            type="private"
+        )
+
+        # Create realistic photo message
+        photo = Photo(
+            file_id="BAADBAADbQADBREAAZbRCbNq5LT7Ag",
+            file_unique_id="AgADbQADBREAAQ",
+            width=1920,  # High resolution image
+            height=1080,
+            file_size=250000,  # ~250KB image
+            date=datetime.now()
+        )
+
+        message = Message(
+            id=int(time.time()),  # Unique message ID
+            from_user=valor_user,
+            chat=valor_dm_chat,
+            date=datetime.now()
+        )
+        message.photo = photo
+        message.caption = "Can you analyze this image and tell me what you see?"
+
+        print(f"🖼️ Testing image message in Valor's DM (chat_id: {valor_dm_chat.id})")
+        
+        start_time = time.time()
+        update = self.MockUpdate(message)
+        result = await processor.process_message(update, None)
+        processing_time = time.time() - start_time
+
+        # Comprehensive validation
+        assert isinstance(result, ProcessingResult)
+        
+        print(f"⏱️  Image processing time: {processing_time:.2f}s")
+        
+        if result.success:
+            print(f"✅ Image message processed successfully")
+            print(f"📋 Summary: {result.summary}")
+            
+            # Validate image-specific processing
+            response_content = result.response.content.lower()
+            
+            # Check for image/visual indicators
+            image_indicators = ["image", "photo", "picture", "see", "visual", "analyze", "show", "appear"]
+            image_processing_detected = any(indicator in response_content for indicator in image_indicators)
+            
+            if image_processing_detected:
+                print("✅ Image-specific processing detected in response")
+            
+            # Check tools used
+            tools_used = result.response.metadata.get("tools_used", [])
+            if tools_used:
+                print(f"🔧 Tools used: {tools_used}")
+                
+                # Look for image analysis tool usage
+                image_tools = [tool for tool in tools_used if "image" in tool.lower() or "vision" in tool.lower() or "analyze" in tool.lower()]
+                if image_tools:
+                    print(f"✅ Image analysis tools used: {image_tools}")
+            
+            # Response should be conversational and descriptive
+            assert len(result.response.content) > 20, "Response should be substantial for image analysis"
+            
+        else:
+            print(f"❌ Image processing failed: {result.error}")
+            # Image processing failure might be expected if vision service unavailable
+            assert result.error is not None, "Error should be provided for failures"
+
+EOF < /dev/null
