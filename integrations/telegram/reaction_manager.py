@@ -18,7 +18,7 @@ from datetime import datetime
 from pyrogram import Client
 from pyrogram.errors import FloodWait, BadRequest
 
-from .emoji_mapping import VALID_TELEGRAM_REACTIONS
+from .emoji_mapping import VALID_TELEGRAM_REACTIONS, get_safe_reaction_emoji
 from integrations.ollama_intent import IntentResult
 
 logger = logging.getLogger(__name__)
@@ -137,10 +137,11 @@ class ReactionManager:
             logger.debug(f"Reaction {reaction_type} already exists for message {message_key}")
             return True
             
-        # Validate emoji is supported
-        if emoji not in VALID_TELEGRAM_REACTIONS:
-            logger.warning(f"Emoji {emoji} not in valid Telegram reactions")
-            return False
+        # Get safe emoji (with fallbacks for problematic ones)
+        safe_emoji = get_safe_reaction_emoji(emoji)
+        if safe_emoji != emoji:
+            logger.debug(f"Using fallback emoji {safe_emoji} instead of {emoji}")
+            emoji = safe_emoji
             
         try:
             await self.client.send_reaction(
@@ -172,7 +173,26 @@ class ReactionManager:
                 return False
                 
         except BadRequest as e:
+            error_msg = str(e).lower()
             logger.warning(f"BadRequest adding reaction {emoji}: {e}")
+            
+            # If reaction is invalid, try a safe fallback
+            if "reaction_invalid" in error_msg or "invalid reaction" in error_msg:
+                fallback_emoji = "👍"  # Ultra-safe fallback
+                if emoji != fallback_emoji:
+                    logger.info(f"Trying safe fallback emoji {fallback_emoji} for failed {emoji}")
+                    try:
+                        await self.client.send_reaction(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            emoji=fallback_emoji
+                        )
+                        self.message_reactions[message_key].add(reaction_type)
+                        logger.debug(f"✅ Added fallback {fallback_emoji} reaction ({reaction_type})")
+                        return True
+                    except Exception as fallback_error:
+                        logger.error(f"Even fallback emoji failed: {fallback_error}")
+            
             return False
             
         except Exception as e:
@@ -214,8 +234,7 @@ class ReactionManager:
                 chat_history=[],
                 reply_context=None,
                 media_info=None,
-                timestamp=datetime.now(),
-                requires_response=False
+                timestamp=datetime.now()
             )
             
             # Start error recovery workflow in background

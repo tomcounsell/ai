@@ -21,7 +21,7 @@ def get_database_path() -> Path:
     return Path("system.db")
 
 
-def get_database_connection(db_path: Optional[str] = None, timeout: int = 5) -> sqlite3.Connection:
+def get_database_connection(db_path: Optional[str] = None, timeout: int = 30) -> sqlite3.Connection:
     """Get a connection to the shared system database with optimized settings.
     
     Args:
@@ -39,13 +39,41 @@ def get_database_connection(db_path: Optional[str] = None, timeout: int = 5) -> 
     
     # Apply optimized PRAGMA settings for concurrency and performance
     conn.execute("PRAGMA journal_mode = WAL")          # Enable WAL mode for better concurrency
-    conn.execute("PRAGMA busy_timeout = 5000")         # 5 second busy timeout
+    conn.execute("PRAGMA busy_timeout = 30000")        # 30 second busy timeout
     conn.execute("PRAGMA synchronous = NORMAL")        # Balance safety and performance
     conn.execute("PRAGMA cache_size = -64000")         # 64MB cache size
     conn.execute("PRAGMA temp_store = MEMORY")         # Store temp tables in memory
     conn.execute("PRAGMA mmap_size = 268435456")       # 256MB memory-mapped I/O
     
     return conn
+
+
+@contextmanager
+def database_connection(db_path: Optional[str] = None, timeout: int = 30):
+    """Context manager for safe database operations with automatic cleanup.
+    
+    Args:
+        db_path: Optional custom database path
+        timeout: Connection timeout in seconds
+        
+    Yields:
+        sqlite3.Connection: Database connection
+    """
+    conn = None
+    try:
+        conn = get_database_connection(db_path, timeout)
+        yield conn
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        logger.error(f"Database operation failed: {e}")
+        raise
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception as e:
+                logger.error(f"Error closing database connection: {e}")
 
 
 def checkpoint_wal_database(db_path: Optional[str] = None) -> bool:
@@ -64,6 +92,22 @@ def checkpoint_wal_database(db_path: Optional[str] = None) -> bool:
     except Exception as e:
         logger.warning(f"WAL checkpoint failed: {e}")
         return False
+
+
+def periodic_database_maintenance():
+    """Perform periodic database maintenance to prevent locks and improve performance."""
+    try:
+        # Checkpoint WAL to prevent it from growing too large
+        if checkpoint_wal_database():
+            logger.debug("Database WAL checkpoint completed successfully")
+        
+        # Analyze database to update statistics
+        with database_connection(timeout=10) as conn:
+            conn.execute("ANALYZE")
+            logger.debug("Database analysis completed")
+            
+    except Exception as e:
+        logger.warning(f"Database maintenance failed: {e}")
 
 
 @contextmanager

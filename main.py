@@ -268,6 +268,21 @@ def handle_shutdown_signal(signum, frame):
     _shutdown_requested = True
 
 
+async def periodic_database_maintenance_task():
+    """Periodically perform database maintenance to prevent locks"""
+    await asyncio.sleep(60)  # Wait 1 minute before first maintenance
+    
+    while True:
+        try:
+            from utilities.database import periodic_database_maintenance
+            periodic_database_maintenance()
+            logger.debug("🗄️ Database maintenance completed")
+        except Exception as e:
+            logger.warning(f"Database maintenance failed: {e}")
+        
+        await asyncio.sleep(600)  # Every 10 minutes
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle startup and shutdown events with graceful message processing protection"""
@@ -284,6 +299,10 @@ async def lifespan(app: FastAPI):
     # Start periodic health check
     health_task = asyncio.create_task(periodic_health_check())
     logger.info("💓 Periodic health monitoring started (every 5 minutes)")
+    
+    # Start periodic database maintenance
+    database_maintenance_task = asyncio.create_task(periodic_database_maintenance_task())
+    logger.info("🗄️ Periodic database maintenance started (every 10 minutes)")
 
     yield
 

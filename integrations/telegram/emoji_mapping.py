@@ -135,3 +135,36 @@ def is_valid_reaction(emoji: str) -> bool:
         True if the emoji can be used as a Telegram reaction
     """
     return emoji in VALID_TELEGRAM_REACTIONS
+
+
+# Fallback mappings for emojis that sometimes fail
+EMOJI_FALLBACKS = {
+    "👀": "👍",  # Eyes -> thumbs up
+    "😡": "😐",  # Angry -> neutral (sometimes API rejects anger)
+    "🤬": "😐",  # Cursing -> neutral
+    "🤮": "😐",  # Vomiting -> neutral
+    "💩": "💯",  # Not in our list, but if somehow used
+    "🖕": "👎",  # Not in our list, but if somehow used
+}
+
+
+def get_safe_reaction_emoji(emoji: str) -> str:
+    """
+    Get a safe emoji for reactions, with fallbacks for problematic ones.
+    
+    Args:
+        emoji: Original emoji to use
+        
+    Returns:
+        Safe emoji that should work with Telegram API
+    """
+    # First check if the emoji is valid
+    if emoji in VALID_TELEGRAM_REACTIONS:
+        return emoji
+    
+    # If not valid, try to find a fallback
+    if emoji in EMOJI_FALLBACKS:
+        return EMOJI_FALLBACKS[emoji]
+    
+    # Default fallback
+    return "👍"

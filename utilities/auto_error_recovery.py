@@ -256,7 +256,7 @@ This is a critical syntax fix.
     async def _create_recovery_promise(self, error_context: ErrorContext, chat_id: int):
         """Create a background promise to fix the error"""
         
-        from utilities.promise_manager_huey import create_promise
+        from utilities.promise_manager_huey import PromiseManager
         
         recovery_task = f"""
 Investigate and fix this error that occurred in the AI system:
@@ -287,7 +287,8 @@ This error affected user experience and should be prioritized for fixing.
 """
         
         try:
-            promise_id = create_promise(
+            promise_manager = PromiseManager()
+            promise_id = promise_manager.create_promise(
                 chat_id=chat_id,
                 task_description=f"Auto-fix error: {error_context.error_type}",
                 task_type="error_recovery",

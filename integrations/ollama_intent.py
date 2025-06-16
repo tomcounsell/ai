@@ -537,7 +537,7 @@ Be decisive and pick the most likely intent even if uncertain."""
         that requires developer attention rather than simple API fallback.
         """
         try:
-            from utilities.promise_manager_huey import create_promise
+            from utilities.promise_manager_huey import PromiseManager
             
             # Extract chat context if available
             chat_id = context.get('chat_id', 0)
@@ -579,7 +579,8 @@ Local Ollama is normally reliable, so investigate thoroughly.
 """
             
             # Create high-priority promise for system repair
-            promise_id = create_promise(
+            promise_manager = PromiseManager()
+            promise_id = promise_manager.create_promise(
                 chat_id=chat_id or 0,  # Use system chat if no specific chat
                 task_description="URGENT: Ollama System Failure Investigation",
                 task_type="system_repair", 
