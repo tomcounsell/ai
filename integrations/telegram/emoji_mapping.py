@@ -137,9 +137,9 @@ def is_valid_reaction(emoji: str) -> bool:
     return emoji in VALID_TELEGRAM_REACTIONS
 
 
-# Fallback mappings for emojis that sometimes fail
+# Fallback mappings for emojis that sometimes fail  
 EMOJI_FALLBACKS = {
-    "👀": "👍",  # Eyes -> thumbs up
+    # Removed 👀 fallback - if eyes fail, we want it to fail, not fallback to thumbs up
     "😡": "😐",  # Angry -> neutral (sometimes API rejects anger)
     "🤬": "😐",  # Cursing -> neutral
     "🤮": "😐",  # Vomiting -> neutral

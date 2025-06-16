@@ -105,14 +105,16 @@ class ContextBuilder:
                 try:
                     import json
                     from pathlib import Path
-                    config_file = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
+                    config_file = Path(__file__).parent.parent.parent.parent / "config" / "workspace_config.json"
                     if config_file.exists():
                         with open(config_file) as f:
                             config = json.load(f)
                     else:
                         config = {"workspaces": {}}
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"Error loading workspace config: {e}")
                     config = {"workspaces": {}}
+                    
                 workspaces = config.get("workspaces", {})
                 workspace_config = workspaces.get(workspace, {})
                 workspace_info["is_dev_group"] = workspace_config.get("is_dev_group", False)

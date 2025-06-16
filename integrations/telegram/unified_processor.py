@@ -69,24 +69,12 @@ class UnifiedMessageProcessor:
             return ProcessingResult.failed("No message in update")
 
         try:
-            # Step 0: Immediate read receipt (👀)
-            if self.reaction_manager:
-                await self.reaction_manager.add_read_receipt(message.chat.id, message.id)
-                logger.debug(f"👀 Added read receipt for message {message.id}")
-            
             # Step 1: Security validation
             logger.debug(f"Step 1: Security validation for message {message.id}")
             access_result = self.security_gate.validate_access(message)
 
             if not access_result.allowed:
-                # Add error reaction for access denied
-                if self.reaction_manager:
-                    await self.reaction_manager.add_completion_reaction(
-                        message.chat.id, message.id, success=False, 
-                        error=Exception(access_result.reason)
-                    )
-                
-                # Skip silently for bot messages and old messages
+                # Skip silently for bot messages and old messages - no reactions needed
                 if access_result.metadata.get("skip_silently"):
                     logger.debug(f"Silently skipping message: {access_result.reason}")
                 else:
@@ -98,14 +86,20 @@ class UnifiedMessageProcessor:
             logger.debug(f"Step 2: Building context for message {message.id}")
             msg_context = await self.context_builder.build_context(message)
 
-            # Check if response is required
+            # Check if response is required BEFORE adding any reactions
             if not msg_context.requires_response:
-                logger.debug(f"Message does not require response: is_dev_group={msg_context.is_dev_group}, is_mention={msg_context.is_mention}, is_private_chat={msg_context.is_private_chat}")
+                logger.info(f"Message {message.id} in chat {msg_context.chat_id} does not require response - DM: {msg_context.is_private_chat}, Dev Group: {msg_context.is_dev_group}, Mention: {msg_context.is_mention}, Workspace: {msg_context.workspace}")
                 return ProcessingResult(
                     success=True,
                     summary="Message processed, no response needed",
                     context=msg_context,
                 )
+
+            # Step 2.5: Add read receipt ONLY for messages that require response
+            if self.reaction_manager:
+                await self.reaction_manager.add_read_receipt(message.chat.id, message.id)
+                logger.info(f"👀 Added read receipt for message {message.id} in chat {msg_context.chat_id} (DM: {msg_context.is_private_chat}, Dev Group: {msg_context.is_dev_group}, Mention: {msg_context.is_mention}, Workspace: {msg_context.workspace})")
+            
 
             # Step 3: Type routing + Intent classification
             logger.debug(f"Step 3: Routing message type {msg_context.media_info}")
