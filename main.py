@@ -10,7 +10,10 @@ from datetime import datetime
 import uvicorn
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+import re
+from pathlib import Path
 
 # Revolutionary living project context - replaced query_engine
 # from integrations.notion.query_engine import get_notion_engine
@@ -531,6 +534,254 @@ async def run_true_e2e_test(request: TrueE2ETestRequest):
     except Exception as e:
         logger.error(f"❌ TRUE E2E test failed: {e}")
         raise HTTPException(status_code=500, detail=f"TRUE E2E test error: {str(e)}")
+
+
+def get_daydream_insights():
+    """Get all daydream insight files sorted by most recent first."""
+    logs_dir = Path("logs")
+    
+    if not logs_dir.exists():
+        return []
+    
+    # Find all daydream insight files
+    daydream_files = list(logs_dir.glob("daydream_insights_*.md"))
+    
+    # Sort by modification time (most recent first)
+    daydream_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+    
+    insights = []
+    for file_path in daydream_files:
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Parse the daydream file
+            session_id = ""
+            generated_time = ""
+            duration = ""
+            workspaces = ""
+            insights_content = ""
+            
+            lines = content.split('\n')
+            for i, line in enumerate(lines):
+                if line.startswith("# Daydream Insights - Session"):
+                    session_id = line.split("Session ")[-1] if "Session " in line else "Unknown"
+                elif line.startswith("**Generated:**"):
+                    generated_time = line.replace("**Generated:**", "").strip()
+                elif line.startswith("**Analysis Duration:**"):
+                    duration = line.replace("**Analysis Duration:**", "").strip()
+                elif line.startswith("**Workspaces Analyzed:**"):
+                    workspaces = line.replace("**Workspaces Analyzed:**", "").strip()
+                elif line.startswith("---") and i > 5:  # Content starts after the metadata section
+                    insights_content = '\n'.join(lines[i+2:]).strip()
+                    break
+            
+            # Determine status based on content
+            status = "completed"
+            if "timed out" in insights_content.lower() or "timeout" in insights_content.lower():
+                status = "timed_out"
+            elif not insights_content or len(insights_content) < 50:
+                status = "failed"
+            
+            insights.append({
+                "session_id": session_id,
+                "filename": file_path.name,
+                "generated_time": generated_time,
+                "duration": duration,
+                "workspaces_analyzed": workspaces,
+                "status": status,
+                "content": insights_content,
+                "file_size": file_path.stat().st_size,
+                "last_modified": file_path.stat().st_mtime
+            })
+        except Exception as e:
+            logger.error(f"Error reading daydream file {file_path}: {e}")
+            continue
+    
+    return insights
+
+
+@app.get("/daydreams", response_class=HTMLResponse)
+async def get_daydreams():
+    """Get all daydream insights in a beautiful, human-readable HTML format."""
+    try:
+        insights = get_daydream_insights()
+        
+        if not insights:
+            html_content = """
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>🧠 Valor's Daydreams</title>
+                <style>
+                    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                           margin: 40px; background: #f8f9fa; color: #2c3e50; }
+                    .container { max-width: 900px; margin: 0 auto; background: white; 
+                                border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); padding: 40px; }
+                    h1 { color: #e74c3c; text-align: center; margin-bottom: 20px; }
+                    .empty { text-align: center; color: #7f8c8d; font-style: italic; margin: 60px 0; }
+                </style>
+            </head>
+            <body>
+                <div class="container">
+                    <h1>🧠 Valor's Daydreams</h1>
+                    <div class="empty">
+                        <p>No daydream insights found yet...</p>
+                        <p>My daydream system runs every 6 hours to generate architectural insights.</p>
+                    </div>
+                </div>
+            </body>
+            </html>
+            """
+            return html_content
+        
+        # Generate HTML for insights
+        insights_html = ""
+        for insight in insights:
+            status_color = {
+                "completed": "#27ae60",
+                "timed_out": "#f39c12", 
+                "failed": "#e74c3c"
+            }.get(insight["status"], "#7f8c8d")
+            
+            status_emoji = {
+                "completed": "✅",
+                "timed_out": "⏱️",
+                "failed": "❌"
+            }.get(insight["status"], "❓")
+            
+            # Format the content for HTML display
+            content_html = insight["content"].replace('\n', '<br>') if insight["content"] else "<em>No insights generated</em>"
+            
+            # Format timestamp nicely
+            try:
+                if insight["generated_time"]:
+                    # Parse ISO timestamp and format it nicely
+                    from datetime import datetime
+                    timestamp = datetime.fromisoformat(insight["generated_time"].replace('Z', '+00:00'))
+                    formatted_time = timestamp.strftime("%B %d, %Y at %I:%M %p UTC")
+                else:
+                    formatted_time = "Unknown time"
+            except:
+                formatted_time = insight["generated_time"] or "Unknown time"
+            
+            insights_html += f"""
+            <div class="insight-card">
+                <div class="insight-header">
+                    <h3>{status_emoji} Session {insight["session_id"][:8]}...</h3>
+                    <div class="metadata">
+                        <span class="status" style="color: {status_color}">● {insight["status"].title()}</span>
+                        <span class="time">{formatted_time}</span>
+                    </div>
+                </div>
+                <div class="insight-stats">
+                    <span><strong>Duration:</strong> {insight["duration"]}</span>
+                    <span><strong>Workspaces:</strong> {insight["workspaces_analyzed"]}</span>
+                    <span><strong>File:</strong> {insight["filename"]}</span>
+                </div>
+                <div class="insight-content">
+                    {content_html}
+                </div>
+            </div>
+            """
+        
+        html_content = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>🧠 Valor's Daydreams</title>
+            <meta charset="UTF-8">
+            <style>
+                body {{ 
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+                    margin: 0; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                    color: #2c3e50; min-height: 100vh; padding: 20px; box-sizing: border-box;
+                }}
+                .container {{ 
+                    max-width: 1000px; margin: 0 auto; 
+                }}
+                .header {{
+                    background: rgba(255,255,255,0.95); border-radius: 16px; 
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.1); padding: 30px; 
+                    margin-bottom: 30px; text-align: center; backdrop-filter: blur(10px);
+                }}
+                h1 {{ 
+                    color: #2c3e50; margin: 0; font-size: 2.5em; font-weight: 700;
+                    background: linear-gradient(45deg, #667eea, #764ba2);
+                    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+                }}
+                .subtitle {{ 
+                    color: #7f8c8d; margin-top: 10px; font-size: 1.1em; 
+                }}
+                .insight-card {{ 
+                    background: rgba(255,255,255,0.95); border-radius: 16px; 
+                    box-shadow: 0 8px 32px rgba(0,0,0,0.1); padding: 25px; 
+                    margin-bottom: 25px; backdrop-filter: blur(10px);
+                    transition: transform 0.2s ease, box-shadow 0.2s ease;
+                }}
+                .insight-card:hover {{
+                    transform: translateY(-2px); 
+                    box-shadow: 0 12px 40px rgba(0,0,0,0.15);
+                }}
+                .insight-header {{ 
+                    display: flex; justify-content: space-between; align-items: center; 
+                    margin-bottom: 15px; flex-wrap: wrap;
+                }}
+                .insight-header h3 {{ 
+                    margin: 0; color: #2c3e50; font-size: 1.3em;
+                }}
+                .metadata {{ 
+                    display: flex; gap: 20px; align-items: center; flex-wrap: wrap;
+                }}
+                .status {{ 
+                    font-weight: 600; font-size: 0.9em;
+                }}
+                .time {{ 
+                    color: #7f8c8d; font-size: 0.9em;
+                }}
+                .insight-stats {{ 
+                    display: flex; gap: 20px; margin-bottom: 20px; 
+                    flex-wrap: wrap; font-size: 0.9em; color: #5a6c7d;
+                }}
+                .insight-stats span {{
+                    background: #f8f9fa; padding: 5px 12px; border-radius: 20px;
+                }}
+                .insight-content {{ 
+                    line-height: 1.6; color: #34495e; 
+                    border-left: 4px solid #3498db; padding-left: 20px;
+                    background: #f8f9fa; padding: 20px; border-radius: 8px;
+                }}
+                .footer {{
+                    text-align: center; color: rgba(255,255,255,0.8); 
+                    margin-top: 40px; font-size: 0.9em;
+                }}
+                @media (max-width: 768px) {{
+                    .insight-header {{ flex-direction: column; align-items: flex-start; }}
+                    .metadata {{ margin-top: 10px; }}
+                    .insight-stats {{ flex-direction: column; gap: 10px; }}
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="header">
+                    <h1>🧠 Valor's Daydreams</h1>
+                    <p class="subtitle">AI-powered architectural insights and codebase reflections • Updates every 6 hours</p>
+                </div>
+                {insights_html}
+                <div class="footer">
+                    <p>🤖 Generated by Valor's unified daydream system • {len(insights)} sessions captured</p>
+                </div>
+            </div>
+        </body>
+        </html>
+        """
+        
+        return html_content
+        
+    except Exception as e:
+        logger.error(f"Error generating daydreams page: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate daydreams: {str(e)}")
 
 
 if __name__ == "__main__":
