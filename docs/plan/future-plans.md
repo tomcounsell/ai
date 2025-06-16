@@ -185,6 +185,99 @@ def format_multi_persona_response(responses: dict) -> str:
 - Context-aware tool recommendations
 - Preemptive information gathering
 
+## Memory Intelligence Architecture (Mem0 Integration)
+
+### Hybrid Memory System Design
+
+**Strategic Architecture**:
+```python
+class MemoryEnhancedAgent:
+    """Agent with Mem0 intelligence + SQLite system data"""
+    
+    def __init__(self, agent_name: str, workspace: str):
+        # Mem0 for intelligent conversation memory
+        self.mem0_client = MemzeroClient()
+        self.agent_memory = f"{workspace}:{agent_name}"
+        self.shared_memory = f"{workspace}:shared"
+        
+        # SQLite for system operations (unchanged)
+        self.system_db = get_database_connection()
+        
+    async def run_with_memory(self, message: str, user_id: str):
+        # Intelligent memory retrieval
+        personal_context = await self.mem0_client.search(
+            message, user_id=user_id, memory_space=self.agent_memory
+        )
+        shared_context = await self.mem0_client.search(
+            message, user_id=user_id, memory_space=self.shared_memory  
+        )
+        
+        # Enhanced agent context
+        enriched_context = personal_context + shared_context
+        response = await self.agent.run(message, memory_context=enriched_context)
+        
+        # Store new insights and decisions
+        await self.mem0_client.add(response, user_id=user_id, 
+                                   memory_space=self.agent_memory)
+        return response
+```
+
+### Memory-Driven Agent Coordination
+
+**Cross-Agent Memory Sharing**:
+```python
+class SystemOrchestrator:
+    """Memory-aware multi-agent coordination"""
+    
+    async def route_with_memory(self, message: str, user_id: str):
+        # Query shared project memory
+        project_context = await self.mem0_client.search(
+            message, user_id=user_id, memory_space="project:shared"
+        )
+        
+        # Determine best agent based on memory + current request
+        if "strategic" in project_context or "planning" in message:
+            return await self.hg_wells_agent.run_with_memory(message, user_id)
+        elif "technical" in project_context or "code" in message:
+            return await self.valor_agent.run_with_memory(message, user_id)
+        
+        # Default to Valor with full memory context
+        return await self.valor_agent.run_with_memory(message, user_id)
+```
+
+### Memory Categories and Organization
+
+**Memory Namespace Structure**:
+- `{workspace}:shared` - Cross-agent project decisions and context
+- `{workspace}:valor` - Valor-specific user interactions and preferences  
+- `{workspace}:hg_wells` - Strategic planning and operational decisions
+- `{workspace}:technical_advisor` - Code reviews and architectural guidance
+- `global:{user_id}` - Cross-project user preferences and patterns
+
+**Memory Content Categories**:
+- **User Preferences**: Coding styles, communication preferences, tool usage patterns
+- **Project Decisions**: Architecture choices, trade-offs, rejected alternatives
+- **Team Dynamics**: Collaboration patterns, expertise areas, communication styles  
+- **Technical Context**: Codebase patterns, testing approaches, deployment strategies
+- **Learning History**: User skill development, concept understanding, help patterns
+
+### Implementation Benefits
+
+**Immediate Value (Phase 1)**:
+- Agents remember user preferences across sessions
+- Project context persists beyond individual conversations
+- Intelligent retrieval replaces manual context rebuilding
+
+**Advanced Intelligence (Phase 2+)**:
+- Cross-agent learning from shared experiences
+- Predictive assistance based on memory patterns
+- Memory-driven automation and decision support
+
+**Enterprise Capabilities (Phase 3+)**:
+- Multi-tenant memory isolation
+- Compliance and governance for memory data
+- Advanced analytics on decision patterns and outcomes
+
 ## Technical Infrastructure Expansion
 
 ### Configuration Management System
@@ -312,9 +405,16 @@ class AgentAnalytics:
 
 ### External Service Integrations
 
+**Mem0 Memory Intelligence Integration** ⭐ **NEW PRIORITY**:
+- AI-powered conversation memory with semantic search
+- Cross-agent context sharing and collaboration memory
+- Persistent user preferences and project-specific memory
+- Multi-tenant memory isolation for enterprise deployments
+- Memory-driven agent routing and intelligent tool selection
+
 **Enhanced Notion Integration**:
 - Real-time database synchronization
-- Advanced query capabilities
+- Advanced query capabilities  
 - Cross-project relationship mapping
 
 **Development Tool Integration**:
@@ -422,21 +522,37 @@ class MultiAgentTestScenario:
 ### Phase-Based Development
 
 **Phase 1: Multi-Agent Foundation**
+- **Mem0 Memory Integration** (NEW - Week 1-4)
+  - Replace ChatHistoryManager with Mem0 intelligent conversation memory
+  - Implement user-specific memory spaces in ValorContext  
+  - Memory-aware tool enhancement for existing agents
 - H.G. Wells agent implementation
 - SystemOrchestrator basic functionality
 - Multi-agent workflow patterns
 
 **Phase 2: Advanced Collaboration**
+- **Cross-Agent Memory Sharing** (Week 5-8)
+  - Memory-shared agent implementations
+  - Project-specific memory namespaces
+  - Memory-driven agent selection and routing
 - Cross-agent communication protocols
 - Advanced tool orchestration
 - User experience enhancements
 
 **Phase 3: Enterprise Features**
+- **Memory Intelligence & Analytics** (Week 9-12)
+  - Multi-tenant memory isolation
+  - Memory governance and compliance
+  - Advanced memory usage analytics
 - Configuration management system
 - Advanced monitoring and analytics
 - Production scaling infrastructure
 
 **Phase 4: AI-Driven Optimization**
+- **Predictive Memory Systems** (Week 13+)
+  - Memory-driven predictive assistance
+  - Auto-categorization of important decisions
+  - Autonomous memory optimization
 - Learning and adaptation systems
 - Predictive capabilities
 - Autonomous improvement
