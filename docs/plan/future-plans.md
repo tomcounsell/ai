@@ -185,18 +185,43 @@ def format_multi_persona_response(responses: dict) -> str:
 - Context-aware tool recommendations
 - Preemptive information gathering
 
-## Memory Intelligence Architecture (Mem0 Integration)
+## Memory Intelligence Architecture (Mem0 Open Source Integration)
 
-### Hybrid Memory System Design
+### Self-Hosted Memory System Design
 
-**Strategic Architecture**:
+**Strategic Architecture** (Self-Hosted with Custom LLMs):
 ```python
 class MemoryEnhancedAgent:
-    """Agent with Mem0 intelligence + SQLite system data"""
+    """Agent with self-hosted Mem0 + our LLMs + SQLite system data"""
     
     def __init__(self, agent_name: str, workspace: str):
-        # Mem0 for intelligent conversation memory
-        self.mem0_client = MemzeroClient()
+        # Self-hosted Mem0 with our Claude models
+        from mem0 import Memory
+        self.mem0_client = Memory(
+            config={
+                "llm": {
+                    "provider": "anthropic",
+                    "config": {
+                        "model": "claude-3-5-sonnet-20241022",
+                        "api_key": os.getenv("ANTHROPIC_API_KEY")
+                    }
+                },
+                "vector_store": {
+                    "provider": "qdrant",  # Self-hosted vector DB
+                    "config": {
+                        "host": "localhost",
+                        "port": 6333,
+                        "collection_name": f"mem0_{workspace}"
+                    }
+                },
+                "embedder": {
+                    "provider": "huggingface",
+                    "config": {
+                        "model": "sentence-transformers/all-MiniLM-L6-v2"
+                    }
+                }
+            }
+        )
         self.agent_memory = f"{workspace}:{agent_name}"
         self.shared_memory = f"{workspace}:shared"
         
@@ -217,8 +242,7 @@ class MemoryEnhancedAgent:
         response = await self.agent.run(message, memory_context=enriched_context)
         
         # Store new insights and decisions
-        await self.mem0_client.add(response, user_id=user_id, 
-                                   memory_space=self.agent_memory)
+        self.mem0_client.add(response, user_id=user_id)
         return response
 ```
 
@@ -230,9 +254,9 @@ class SystemOrchestrator:
     """Memory-aware multi-agent coordination"""
     
     async def route_with_memory(self, message: str, user_id: str):
-        # Query shared project memory
-        project_context = await self.mem0_client.search(
-            message, user_id=user_id, memory_space="project:shared"
+        # Query shared project memory  
+        project_context = self.mem0_client.search(
+            message, user_id=user_id
         )
         
         # Determine best agent based on memory + current request
@@ -261,22 +285,103 @@ class SystemOrchestrator:
 - **Technical Context**: Codebase patterns, testing approaches, deployment strategies
 - **Learning History**: User skill development, concept understanding, help patterns
 
+### Self-Hosting Infrastructure Requirements
+
+**Core Infrastructure Stack**:
+```yaml
+# docker-compose.yml for Mem0 infrastructure
+version: '3.8'
+services:
+  qdrant:
+    image: qdrant/qdrant
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+
+  mem0-app:
+    build: .
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    depends_on:
+      - qdrant
+    volumes:
+      - ./mem0_data:/app/data
+
+volumes:
+  qdrant_storage:
+```
+
+**Installation & Configuration**:
+```bash
+# Install Mem0 open source
+pip install mem0ai
+
+# Install vector database
+docker run -p 6333:6333 qdrant/qdrant
+
+# Install embedding models locally
+pip install sentence-transformers
+```
+
+**Configuration Template**:
+```python
+# config/mem0_config.py
+MEM0_CONFIG = {
+    "llm": {
+        "provider": "anthropic",
+        "config": {
+            "model": "claude-3-5-sonnet-20241022",
+            "api_key": os.getenv("ANTHROPIC_API_KEY"),
+            "temperature": 0.1,  # Lower for consistent memory formation
+            "max_tokens": 2000
+        }
+    },
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {
+            "host": os.getenv("QDRANT_HOST", "localhost"),
+            "port": int(os.getenv("QDRANT_PORT", 6333)),
+            "collection_name": "mem0_memories",
+            "vector_size": 384,  # For sentence-transformers/all-MiniLM-L6-v2
+            "distance": "cosine"
+        }
+    },
+    "embedder": {
+        "provider": "huggingface",
+        "config": {
+            "model": "sentence-transformers/all-MiniLM-L6-v2"
+        }
+    }
+}
+```
+
 ### Implementation Benefits
 
 **Immediate Value (Phase 1)**:
-- Agents remember user preferences across sessions
-- Project context persists beyond individual conversations
-- Intelligent retrieval replaces manual context rebuilding
+- **Full Data Control**: All memory data stays on our infrastructure
+- **Cost Efficiency**: No per-memory storage costs, only our LLM API usage
+- **Custom LLM Integration**: Use our preferred Claude models for memory processing
+- **Agents remember user preferences across sessions**
+- **Project context persists beyond individual conversations**
+- **Intelligent retrieval replaces manual context rebuilding**
 
 **Advanced Intelligence (Phase 2+)**:
-- Cross-agent learning from shared experiences
-- Predictive assistance based on memory patterns
-- Memory-driven automation and decision support
+- **Privacy & Security**: Complete control over sensitive conversation data
+- **Custom Memory Models**: Train domain-specific embedding models
+- **Cross-agent learning from shared experiences**
+- **Predictive assistance based on memory patterns**
+- **Memory-driven automation and decision support**
 
 **Enterprise Capabilities (Phase 3+)**:
-- Multi-tenant memory isolation
-- Compliance and governance for memory data
-- Advanced analytics on decision patterns and outcomes
+- **Multi-tenant memory isolation with workspace-based collections**
+- **Compliance and governance for memory data**
+- **Advanced analytics on decision patterns and outcomes**
+- **Offline operation capability for secure environments**
 
 ## Technical Infrastructure Expansion
 
@@ -521,41 +626,48 @@ class MultiAgentTestScenario:
 
 ### Phase-Based Development
 
-**Phase 1: Multi-Agent Foundation**
-- **Mem0 Memory Integration** (NEW - Week 1-4)
+**Phase 1: Self-Hosted Memory Foundation** 
+- **Mem0 Open Source Setup** (NEW - Week 1-2)
+  - Install and configure self-hosted Qdrant vector database
+  - Deploy Mem0 with Anthropic Claude LLM configuration
+  - Set up local embedding models (sentence-transformers)
+  - Basic memory add/search functionality testing
+- **ChatHistoryManager Replacement** (Week 3-4)
   - Replace ChatHistoryManager with Mem0 intelligent conversation memory
   - Implement user-specific memory spaces in ValorContext  
-  - Memory-aware tool enhancement for existing agents
+  - Memory-aware tool enhancement for existing Valor agent
 - H.G. Wells agent implementation
 - SystemOrchestrator basic functionality
-- Multi-agent workflow patterns
 
-**Phase 2: Advanced Collaboration**
+**Phase 2: Multi-Agent Memory Integration**
 - **Cross-Agent Memory Sharing** (Week 5-8)
-  - Memory-shared agent implementations
-  - Project-specific memory namespaces
+  - Memory-shared agent implementations with workspace isolation
+  - Project-specific memory collections in Qdrant
   - Memory-driven agent selection and routing
+  - Workspace-based memory namespaces
 - Cross-agent communication protocols
 - Advanced tool orchestration
 - User experience enhancements
 
-**Phase 3: Enterprise Features**
-- **Memory Intelligence & Analytics** (Week 9-12)
-  - Multi-tenant memory isolation
-  - Memory governance and compliance
-  - Advanced memory usage analytics
+**Phase 3: Production Self-Hosted Infrastructure**
+- **Scalable Memory Architecture** (Week 9-12)
+  - Multi-tenant memory isolation with collection-per-workspace
+  - Memory backup and disaster recovery systems
+  - Advanced memory usage analytics and monitoring
+  - Custom embedding model training for domain-specific memory
 - Configuration management system
-- Advanced monitoring and analytics
-- Production scaling infrastructure
+- Production monitoring and health checks
+- Performance optimization and caching
 
-**Phase 4: AI-Driven Optimization**
-- **Predictive Memory Systems** (Week 13+)
+**Phase 4: Advanced Memory Intelligence**
+- **Custom Memory Models** (Week 13+)
+  - Domain-specific embedding models for technical conversations
   - Memory-driven predictive assistance
-  - Auto-categorization of important decisions
-  - Autonomous memory optimization
-- Learning and adaptation systems
-- Predictive capabilities
-- Autonomous improvement
+  - Auto-categorization of important decisions with custom classifiers
+  - Autonomous memory optimization and cleanup
+- Advanced analytics on decision patterns
+- Custom memory search algorithms
+- Offline-capable memory systems
 
 ### Success Metrics and Validation
 
