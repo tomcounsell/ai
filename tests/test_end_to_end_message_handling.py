@@ -916,5 +916,3 @@ if __name__ == "__main__":
             print(f"❌ Image processing failed: {result.error}")
             # Image processing failure might be expected if vision service unavailable
             assert result.error is not None, "Error should be provided for failures"
-
-EOF < /dev/null
