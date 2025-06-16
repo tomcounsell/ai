@@ -50,3 +50,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Telegram Integration
 - If Telegram auth doesn't work, just give up. Human action is needed
+
+### Server Development
+- Use the stop and start scripts to restart the server after making changes

@@ -77,10 +77,11 @@ class MessageHandler:
                 result = await self.processor.process_message(update_obj, client)
 
                 # Log result
+                chat_id = message.chat.id if message and message.chat else "Unknown"
                 if result.success:
-                    logger.info(f"✅ Message processed successfully: {result.summary}")
+                    logger.info(f"✅ Message processed successfully (chat_id={chat_id}): {result.summary}")
                 else:
-                    logger.warning(f"⚠️ Message processing failed: {result.error}")
+                    logger.warning(f"⚠️ Message processing failed (chat_id={chat_id}): {result.error}")
 
                 return result
 
