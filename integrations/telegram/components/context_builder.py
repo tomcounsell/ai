@@ -84,6 +84,7 @@ class ContextBuilder:
         try:
             # Get workspace name
             workspace = self.workspace_validator.get_workspace_for_chat(str(chat_id))
+            logger.debug(f"Chat ID {chat_id} mapped to workspace: {workspace}")
             if workspace:
                 workspace_info["workspace"] = workspace
 
@@ -115,6 +116,7 @@ class ContextBuilder:
                 workspaces = config.get("workspaces", {})
                 workspace_config = workspaces.get(workspace, {})
                 workspace_info["is_dev_group"] = workspace_config.get("is_dev_group", False)
+                logger.debug(f"Workspace '{workspace}' config: is_dev_group={workspace_info['is_dev_group']}")
 
         except Exception as e:
             logger.error(f"Error extracting workspace for chat {chat_id}: {str(e)}")

@@ -100,7 +100,7 @@ class UnifiedMessageProcessor:
 
             # Check if response is required
             if not msg_context.requires_response:
-                logger.debug("Message does not require response")
+                logger.debug(f"Message does not require response: is_dev_group={msg_context.is_dev_group}, is_mention={msg_context.is_mention}, is_private_chat={msg_context.is_private_chat}")
                 return ProcessingResult(
                     success=True,
                     summary="Message processed, no response needed",
