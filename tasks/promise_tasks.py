@@ -93,7 +93,7 @@ class UnifiedDaydreamSystem:
     """Unified daydream system with integrated cleanup and analysis."""
     
     def __init__(self):
-        self.session_timeout = 300  # 5 minutes max analysis time
+        self.session_timeout = 7200  # 2 hours max analysis time
         self.cleanup_stats = {
             'claude_processes_killed': 0,
             'aider_processes_killed': 0,
@@ -655,7 +655,7 @@ Begin your reflection:"""
                 return "Aider completed but generated no output"
                 
         except subprocess.TimeoutExpired:
-            return "Aider analysis timed out after 5 minutes"
+            return "Aider analysis timed out after 2 hours"
         except Exception as e:
             return f"Aider analysis failed: {str(e)}"
     
@@ -1787,7 +1787,7 @@ def aider_daydream_analysis(context: Dict[str, Any]) -> str:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300,  # 5 minute timeout
+                timeout=7200,  # 2 hour timeout
                 env=env,
                 cwd=os.getcwd()
             )
@@ -1813,7 +1813,7 @@ def aider_daydream_analysis(context: Dict[str, Any]) -> str:
                 os.unlink(prompt_file)
             
     except subprocess.TimeoutExpired:
-        return "Aider analysis timed out after 5 minutes"
+        return "Aider analysis timed out after 2 hours"
     except Exception as e:
         return f"Aider daydream analysis failed: {str(e)}"
 
