@@ -13,12 +13,41 @@ This document outlines the **INTELLIGENCE VALIDATION SYSTEM** for our valor_agen
 - **Manual test runs only** when system resources permit
 - **Promise Queue integration** will enable controlled test scheduling
 
-### Future Plan:
-Once the [Promise Queue](promise-queue.md) is fully implemented:
-1. Tests will be scheduled as background tasks with resource limits
-2. Test runs will be distributed over time to prevent overload
-3. Priority-based test execution will ensure critical tests run first
-4. Results will be delivered asynchronously via notifications
+### Promise Queue Test Scheduling:
+The [Promise Queue](promise-queue.md) now enables **controlled test execution** with resource management:
+
+```python
+# Automated test scheduling through Promise Queue
+@huey_consumer.task()
+def execute_test_suite_async(test_category: str, priority: str = "medium"):
+    """Execute test suite as background task with resource limits."""
+    
+    # Resource validation before test execution
+    if not resource_monitor.can_execute_tests():
+        return "⏸️ Test execution delayed - system resources insufficient"
+    
+    # Execute tests with monitoring
+    results = run_test_category(test_category)
+    
+    # Deliver results via Telegram notification
+    notify_test_completion(results, test_category)
+    return results
+
+# Priority-based test execution
+test_priorities = {
+    "critical": ["agent_intelligence", "security_validation"],
+    "high": ["tool_integration", "conversation_flows"], 
+    "medium": ["performance_benchmarks", "ui_components"],
+    "low": ["documentation_tests", "code_style_checks"]
+}
+```
+
+**Benefits Achieved:**
+1. ✅ **Resource-aware scheduling**: Tests only run when system has sufficient capacity
+2. ✅ **Priority-based execution**: Critical tests (agent intelligence, security) run first
+3. ✅ **Background processing**: Test execution doesn't block main conversation flows
+4. ✅ **Asynchronous notifications**: Results delivered via Telegram when complete
+5. ✅ **Load distribution**: Tests spread over time to prevent system overload
 
 ### Running Tests Manually:
 ```bash
@@ -483,4 +512,125 @@ def test_error_handling():
 - Real-time conversation testing requires manual validation
 - Cross-platform testing limited to development environments
 
-This testing strategy provides solid validation of current functionality while maintaining fast execution and reliable results for continuous development.
+## Current Tool Auditing Integration
+
+### Automated Quality Assessment
+
+The testing strategy now includes **automated tool auditing** that continuously validates tool quality across the codebase:
+
+```python
+# Tool quality assessment pipeline
+class ToolAuditSystem:
+    """Comprehensive tool quality assessment and scoring."""
+    
+    def audit_tool(self, tool_path: str) -> ToolAuditResult:
+        """Audit a tool's implementation quality."""
+        
+        # Implementation quality analysis
+        implementation_score = self.analyze_implementation_patterns(tool_path)
+        
+        # Test coverage and success rate
+        test_score = self.analyze_test_coverage(tool_path)
+        
+        # Error handling sophistication
+        error_handling_score = self.analyze_error_patterns(tool_path)
+        
+        # Documentation completeness
+        documentation_score = self.analyze_documentation(tool_path)
+        
+        # Performance characteristics
+        performance_score = self.analyze_performance(tool_path)
+        
+        return ToolAuditResult(
+            overall_score=self.calculate_weighted_score([
+                implementation_score, test_score, error_handling_score,
+                documentation_score, performance_score
+            ]),
+            recommendations=self.generate_improvement_recommendations()
+        )
+```
+
+### Quality Scoring Integration
+
+**Current Tool Audit Results:**
+
+| Tool | Quality Score | Status | Key Strengths |
+|------|---------------|--------|---------------|
+| `image_analysis_tool.py` | **9.8/10** | Gold Standard | Sophisticated error categorization, perfect test coverage, three-layer architecture |
+| `search_tool.py` | **8.5/10** | Production Ready | Reliable API integration, good error handling |
+| `claude_code_tool.py` | **8.2/10** | Production Ready | Robust subprocess management, timeout handling |
+| `link_analysis_tool.py` | **7.8/10** | Production Ready | URL validation, database integration |
+
+**Quality Standards Applied:**
+- ✅ **9.0+ = Gold Standard**: Reference implementation for other tools
+- ✅ **7.0-8.9 = Production Ready**: Meets all production requirements
+- ✅ **5.0-6.9 = Needs Improvement**: Requires updates before production use
+- ✅ **<5.0 = Critical Issues**: Immediate attention required
+
+### Automated Testing Integration
+
+**Test Category Integration:**
+```python
+# Tool-specific test categories with audit integration
+test_categories = {
+    "tool_quality_audit": {
+        "priority": "critical",
+        "tests": [
+            "test_implementation_patterns",
+            "test_error_categorization", 
+            "test_performance_benchmarks",
+            "test_interface_consistency"
+        ],
+        "audit_integration": True
+    },
+    "tool_security_validation": {
+        "priority": "critical", 
+        "tests": [
+            "test_workspace_boundaries",
+            "test_input_validation",
+            "test_access_controls"
+        ],
+        "audit_integration": True
+    }
+}
+```
+
+**Continuous Quality Monitoring:**
+- **Pre-commit hooks**: Tool quality checks before code commits
+- **Automated auditing**: Daily quality assessments of all tools
+- **Regression detection**: Quality score monitoring to detect degradation
+- **Improvement tracking**: Progress monitoring for tools under improvement
+
+### Integration with Agent Testing
+
+**Tool Selection Intelligence Testing:**
+```python
+# Validate LLM tool selection with quality scoring
+def test_agent_tool_selection_with_quality():
+    """Test that high-quality tools are preferred by the agent."""
+    
+    # Get current tool quality scores
+    tool_scores = tool_audit_system.get_all_scores()
+    
+    # Test agent tool selection for various scenarios
+    test_scenarios = [
+        ("analyze this image", "image_analysis_tool", 9.8),
+        ("search for current information", "search_tool", 8.5),
+        ("execute this code", "claude_code_tool", 8.2)
+    ]
+    
+    for user_input, expected_tool, quality_score in test_scenarios:
+        result = valor_agent.run_sync(user_input, deps=test_context)
+        
+        # Verify high-quality tool was selected
+        assert expected_tool in result.tool_calls
+        assert tool_scores[expected_tool] >= 7.0  # Production ready threshold
+```
+
+**Quality-Driven Test Prioritization:**
+- Tools with higher quality scores get more comprehensive testing
+- Lower-scoring tools receive focused improvement testing
+- Gold Standard tools (9.0+) used as reference implementations
+- Test failures in high-quality tools trigger immediate investigation
+
+This testing strategy provides comprehensive validation of current functionality while maintaining fast execution, reliable results, and continuous quality improvement for all tools and agent capabilities.

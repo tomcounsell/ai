@@ -123,9 +123,9 @@ delivery_result = await self.response_manager.deliver_response(agent_response, m
 - **History storage**: Conversation tracking and persistence
 - **Monitoring**: Response time tracking and health metrics
 
-## Legacy Flow Reference (Preserved)
+## Legacy Flow Reference (Archived)
 
-The original 19-step complex flow has been preserved in `handlers_legacy.py` for reference and rollback capability. The legacy system included:
+The original 19-step complex flow has been completely replaced by the unified architecture. The legacy system has been archived and included:
 
 - Complex mention processing across multiple methods
 - Scattered access control logic
@@ -144,90 +144,11 @@ The original 19-step complex flow has been preserved in `handlers_legacy.py` for
 | **Test coverage** | Limited | >90% comprehensive |
 | **Debugging** | Complex flow | Linear pipeline |
 
-#### Dev Group Detection
+## Context Enhancement and Processing Features
 
-Dev groups are identified by the `is_dev_group` flag in their workspace configuration:
+The unified system provides sophisticated context management and processing capabilities:
 
-```python
-def is_dev_group(chat_id: int) -> bool:
-    """Check if a Telegram chat ID is a dev group that should handle all messages."""
-    config_file = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
-
-    try:
-        with open(config_file) as f:
-            data = json.load(f)
-            telegram_groups = data.get("telegram_groups", {})
-            workspaces = data.get("workspaces", {})
-
-            chat_id_str = str(chat_id)
-            if chat_id_str in telegram_groups:
-                project_name = telegram_groups[chat_id_str]
-                if project_name in workspaces:
-                    workspace_data = workspaces[project_name]
-                    return workspace_data.get("is_dev_group", False)
-
-            return False
-    except Exception:
-        return False
-```
-
-### 7. Message Storage
-
-```python
-self.chat_history.add_message(chat_id, "user", processed_text)
-```
-
-Store the processed user message in chat history (with mentions removed).
-
-### 8. Special Content Handling
-
-#### Link-Only Messages:
-```python
-if is_url_only_message(processed_text):
-    await self._handle_link_message(message, chat_id, processed_text)
-    return
-```
-
-**Link handling process:**
-- Extract URL from message
-- Store link with AI analysis via `store_link_with_analysis()`
-- Reply with "thx, saved." or "thx, saved. (had trouble analyzing)"
-- Store response in chat history
-- Return (don't continue to agent processing)
-
-### 9. Message Routing
-
-```python
-await self._route_message(message, chat_id, processed_text)
-```
-
-#### Health Check (Ping):
-```python
-if text == "ping":
-    await self._handle_ping(message, chat_id)
-    return
-```
-
-**Ping response includes:**
-- System health metrics (CPU, memory, disk, uptime)
-- Bot status and available tools
-- Notion connection status
-
-#### Standard Processing:
-All other messages route to `_handle_with_valor_agent()`.
-
-### 10. Valor Agent Processing
-
-```python
-await self._handle_with_valor_agent(message, chat_id, processed_text)
-```
-
-#### Priority Question Detection:
-```python
-is_priority = is_user_priority_question(processed_text)
-```
-
-#### Context Enhancement with Message History:
+### Message History and Context
 
 **Recent Chat Context (Always Applied):**
 ```python
@@ -321,78 +242,40 @@ def get_conversation_context(ctx, hours_back: int = 24)
 - **Scope**: Configurable hours back (default 24 hours)
 - **Returns**: Formatted conversation summary with timestamps
 
-#### Agent Invocation:
-```python
-from agents.valor.handlers import handle_telegram_message
+### Agent Integration
 
-answer = await handle_telegram_message(
-    message=processed_text,
-    chat_id=chat_id,
-    username=message.from_user.username,
-    is_group_chat=not is_private_chat,
-    chat_history_obj=self.chat_history,
-    notion_data=notion_data,
-    is_priority_question=is_priority,
-)
-```
-
-### 11. Response Processing
+The unified system integrates seamlessly with the valor_agent through the AgentOrchestrator component:
 
 ```python
-await self._process_agent_response(message, chat_id, answer)
+# Unified agent processing with enhanced context
+agent_response = await self.agent_orchestrator.process_with_agent(msg_context, plan)
 ```
 
-#### Image Generation Handling:
-- Check for special format: `"TELEGRAM_IMAGE_GENERATED|{path}|{caption}"`
-- Send image via `client.send_photo()`
-- Clean up temporary image file
-- Store caption in chat history
+**Key Integration Features:**
+- **Single agent routing**: Unified entry point for all agent interactions
+- **Context injection**: Enhanced prompts with chat_id, username, history
+- **Notion integration**: Workspace-specific database queries
+- **Priority detection**: Smart handling for priority questions
+- **Streaming support**: Real-time response delivery
 
-#### Text Response Handling:
-- Split long messages (>4000 chars) into multiple parts
-- Send via `message.reply()`
-- Store full response in chat history
+### Response Handling
 
-#### Error Handling:
-- Catch all exceptions during agent processing
-- Send error message: `"❌ Error processing message: {error}"`
-- Store error in chat history
+The ResponseManager component handles all output formatting and delivery:
 
-### 12. Post-Response Log Review and Anomaly Detection
+**Image Generation Support:**
+- Special format handling: `"TELEGRAM_IMAGE_GENERATED|{path}|{caption}"`
+- Automatic image upload and cleanup
+- Caption storage in chat history
 
-After sending the final response, the system performs an automated log review to identify and fix any anomalies:
+**Text Response Processing:**
+- Message splitting for Telegram limits (>4000 chars)
+- Streaming response support
+- Full conversation history tracking
 
-```python
-await self._review_server_logs_for_anomalies(chat_id)
-```
-
-#### Log Review Process:
-- **Scan recent server logs** (last 5 minutes) for error messages, warnings, and anomalies
-- **Identify patterns** that might indicate systemic issues requiring fixes
-- **Common anomaly types detected:**
-  - Empty error messages from intent classification
-  - Invalid Telegram reaction emojis causing "REACTION_INVALID" errors
-  - Database lock issues and session conflicts
-  - NotionQueryEngine API method errors
-  - Missing user ID fallback scenarios
-  - Startup validation failures
-
-#### Automated Fix Implementation:
-- **Apply immediate fixes** for known issues (e.g., session cleanup, reaction emoji updates)
-- **Update error handling** to prevent similar issues in future messages
-- **Document all fixes** in `docs/logs-bugfixes.md` with:
-  - Error description and frequency
-  - Root cause analysis
-  - Applied fix details
-  - Prevention measures implemented
-
-#### Prevention and Monitoring:
-- **Real-time monitoring** for recurring error patterns
-- **Proactive session cleanup** to prevent database locks
-- **Enhanced error logging** with detailed context for future debugging
-- **Automatic system health validation** after applying fixes
-
-This final step ensures continuous system improvement and prevents accumulation of unresolved anomalies.
+**Error Recovery:**
+- Graceful error handling with user-friendly messages
+- Comprehensive error logging and monitoring
+- Automatic retry mechanisms where appropriate
 
 ## Configuration
 

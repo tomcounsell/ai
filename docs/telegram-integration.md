@@ -363,7 +363,7 @@ def is_dev_group(chat_id: int) -> bool:
 
 ### Enhanced DM User Whitelisting Security
 
-Direct messages now use **dual whitelist support** with both username and user ID-based access control:
+Direct messages now use **dual whitelist support** with both username and user ID-based access control, plus additional recent security enhancements:
 
 ```python
 def validate_dm_user_access(username: str, chat_id: int) -> bool:
@@ -719,6 +719,75 @@ Image analysis: {image_analysis_result}
 - **Error recovery**: Graceful fallbacks when image or text processing fails
 
 For detailed technical implementation, see [Telegram Mixed Content Message Handling Guide](telegram-image-text-analysis.md).
+
+## MCP (Model Context Protocol) Integration
+
+### Direct Claude Code Integration
+
+The Telegram integration now includes seamless MCP tool integration for enhanced development capabilities:
+
+```python
+# MCP tools automatically available through valor_agent
+@valor_agent.tool
+def execute_development_task(ctx: RunContext[TelegramChatContext], task: str) -> str:
+    """Execute development tasks using MCP tools through Claude Code delegation."""
+    # Automatically routes to appropriate MCP server tools
+    return delegate_to_claude_code_with_mcp(task, ctx.deps.chat_id)
+```
+
+**Available MCP Tool Categories:**
+- **Development Tools**: File operations, code execution, testing frameworks
+- **Project Management**: Notion integration, task tracking, workspace management  
+- **System Operations**: Server monitoring, log analysis, resource management
+- **AI Capabilities**: Image analysis, screenshot processing, content generation
+
+**Key MCP Features:**
+- **Auto-discovery**: New MCP servers automatically integrate with valor_agent
+- **Context preservation**: Chat context flows seamlessly to Claude Code sessions
+- **Security boundaries**: Workspace isolation maintained across MCP operations
+- **Error handling**: Graceful degradation when MCP tools are unavailable
+
+### MCP Tool Categories Integration
+
+```python
+# Development tools integration
+development_tools = [
+    "create_file", "read_file", "edit_file", "delete_file",
+    "run_command", "search_files", "analyze_codebase"
+]
+
+# Project management tools  
+pm_tools = [
+    "query_notion_database", "create_notion_page", 
+    "update_project_status", "get_team_metrics"
+]
+
+# AI capability tools
+ai_tools = [
+    "analyze_image", "generate_screenshot", "process_document",
+    "summarize_conversation", "extract_insights"
+]
+```
+
+**Automatic Tool Routing:**
+- LLM intelligence determines appropriate MCP tool usage
+- No keyword patterns or manual routing required
+- Context-aware tool selection based on conversation flow
+- Seamless integration with existing Telegram conversation patterns
+
+### Recent Security Enhancements
+
+**Enhanced Access Control:**
+- **Workspace validation**: All operations validate workspace access permissions
+- **Cross-workspace protection**: Prevents unauthorized data access between projects
+- **Audit logging**: Comprehensive logging of all MCP tool usage for security monitoring
+- **Rate limiting**: Built-in protection against tool abuse or excessive usage
+
+**Recent Updates:**
+- **Self-ping capability**: Bot can message itself for end-to-end system validation
+- **Enhanced error categorization**: Sophisticated error handling with user-friendly messages
+- **Dynamic whitelist management**: Runtime whitelist updates without server restart
+- **Improved bot detection**: Enhanced user ID and username validation
 
 ## Benefits of Current Architecture
 

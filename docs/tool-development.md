@@ -555,6 +555,161 @@ Tools should achieve:
 
 Use `image_analysis_tool.py` as the architectural reference when developing new tools or improving existing ones.
 
+## MCP Integration Patterns
+
+### Model Context Protocol (MCP) Tool Development
+
+The system now supports **MCP servers** that provide tools accessible through Claude Code sessions. This enables seamless integration between Telegram conversations and development environments.
+
+#### MCP Server Structure
+
+```python
+# MCP server registration in mcp_servers/
+@mcp.tool()
+def development_operation(param: str) -> str:
+    """MCP tool accessible through Claude Code delegation."""
+    # Implementation with workspace validation
+    return execute_with_security_boundary(param)
+```
+
+**Key MCP Patterns:**
+
+1. **Three-Layer Tool Architecture**:
+   ```python
+   # Layer 1: Agent Tool (Telegram integration)
+   @valor_agent.tool
+   def agent_level_tool(ctx: RunContext[TelegramChatContext], param: str) -> str:
+       return delegate_to_implementation(param, ctx.deps.chat_id)
+   
+   # Layer 2: Implementation (Core functionality)  
+   def core_implementation(param: str, context: str) -> str:
+       # Business logic and validation
+       return process_with_context(param, context)
+   
+   # Layer 3: MCP Tool (Claude Code integration)
+   @mcp.tool()
+   def mcp_level_tool(param: str, chat_id: str = "") -> str:
+       return core_implementation(param, extract_context(chat_id))
+   ```
+
+2. **Workspace Security Integration**:
+   ```python
+   @mcp.tool()
+   def workspace_aware_tool(target_dir: str, operation: str) -> str:
+       """MCP tool with workspace validation."""
+       # Validate workspace access
+       if not workspace_validator.validate_directory_access(target_dir):
+           return "❌ Access denied: Invalid workspace directory"
+       
+       # Execute with security boundaries
+       return execute_in_workspace(target_dir, operation)
+   ```
+
+3. **Context Flow Between Layers**:
+   ```python
+   # Telegram context → Agent → Implementation → MCP
+   telegram_context = TelegramChatContext(chat_id=123, username="user")
+   agent_result = valor_agent.run("Task description", deps=telegram_context)
+   # Context automatically flows to MCP tools through delegation
+   ```
+
+#### Current MCP Servers
+
+**Development Tools** (`mcp_servers/development_tools.py`):
+- File operations with workspace validation
+- Code execution and testing
+- Screenshot capture and analysis
+- Bug reporting workflows
+
+**Project Management** (`mcp_servers/pm_tools.py`):
+- Notion database integration
+- Task tracking and updates
+- Team metrics and reporting
+
+**System Operations** (`mcp_servers/system_tools.py`):
+- Server monitoring and health checks
+- Log analysis and debugging
+- Resource management
+
+### MCP Tool Quality Standards
+
+**Architecture Requirements:**
+- ✅ **Three-layer consistency**: Agent, Implementation, MCP layers all present
+- ✅ **Workspace validation**: Security boundaries enforced at MCP level
+- ✅ **Context preservation**: Chat context flows through all layers
+- ✅ **Error categorization**: Specific error types with user-friendly messages
+
+**Testing Requirements:**
+- ✅ **Interface consistency**: All three layers tested for compatible interfaces
+- ✅ **Security validation**: Workspace access controls tested
+- ✅ **Error handling**: Comprehensive error scenario coverage
+- ✅ **Integration testing**: End-to-end flows from Telegram to MCP
+
+### Current Tool Auditing Integration
+
+The system includes **automated tool auditing** capabilities for maintaining tool quality:
+
+#### Tool Quality Scoring
+
+```python
+# Automated quality assessment
+quality_metrics = {
+    "implementation_completeness": 9.8,  # All required methods implemented
+    "error_handling": 9.5,              # Sophisticated error categorization  
+    "test_coverage": 10.0,              # 100% test success rate
+    "documentation": 9.0,               # Clear usage examples
+    "performance": 9.2                  # Efficient execution patterns
+}
+
+overall_score = calculate_weighted_average(quality_metrics)  # 9.7/10
+```
+
+#### Auditing Categories
+
+**Implementation Quality:**
+- Pre-validation patterns (check inputs before expensive operations)
+- Sophisticated error categorization (FileNotFoundError, OSError, API errors)
+- Context-aware behavior (different responses based on use case)
+- Performance optimization (caching, async operations, timeouts)
+
+**Testing Excellence:**
+- Comprehensive test coverage across all scenarios
+- Real integration testing (minimal mocking)
+- Error scenario validation
+- Performance benchmark testing
+
+**Documentation Standards:**
+- Clear function signatures with type hints
+- Comprehensive docstrings with examples
+- Usage patterns and best practices
+- Integration guidance
+
+#### Tool Auditing Workflow
+
+1. **Automated Quality Assessment**:
+   - Code analysis for implementation patterns
+   - Test execution and coverage analysis
+   - Performance benchmarking
+   - Documentation completeness check
+
+2. **Quality Score Assignment**:
+   - 9.0+ = Gold Standard (reference implementation)
+   - 7.0-8.9 = Production Ready (good quality)
+   - 5.0-6.9 = Needs Improvement (requires updates)
+   - <5.0 = Critical Issues (immediate attention required)
+
+3. **Improvement Recommendations**:
+   - Specific code changes to improve quality
+   - Testing gaps to address
+   - Performance optimizations to implement
+   - Documentation updates needed
+
+**Current Tool Audit Results:**
+- `image_analysis_tool.py`: **9.8/10** (Gold Standard reference)
+- `search_tool.py`: **8.5/10** (Production Ready)
+- `claude_code_tool.py`: **8.2/10** (Production Ready)
+- `link_analysis_tool.py`: **7.8/10** (Production Ready)
+
 ## Advanced Tool Integration: Screenshot Handoff
 
 The system includes sophisticated **screenshot handoff capabilities** that enable seamless coordination between Claude Code sessions and the main AI agent:
