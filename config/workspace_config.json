@@ -116,8 +116,12 @@
         "description": "Tom Counsell - User ID fallback (no public username)",
         "working_directory": "/Users/valorengels/src/ai"
       },
-      "66968934582": {
+      "6914249008": {
         "description": "Bot self (valorengels) - for self-ping tests",
+        "working_directory": "/Users/valorengels/src/ai"
+      },
+      "66968934582": {
+        "description": "Bot self (valorengels) - legacy user ID",
         "working_directory": "/Users/valorengels/src/ai"
       }
     }

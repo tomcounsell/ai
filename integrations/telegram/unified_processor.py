@@ -269,6 +269,15 @@ async def create_unified_processor(bot: Any, valor_agent=None) -> UnifiedMessage
     """Factory function to create and initialize processor."""
     processor = UnifiedMessageProcessor(telegram_bot=bot, valor_agent=valor_agent)
 
+    # Set bot info for self-message detection
+    if bot:
+        try:
+            me = await bot.get_me()
+            processor.security_gate.set_bot_info(me.id, me.username)
+            logger.info(f"UnifiedMessageProcessor: Bot self-detection configured - ID: {me.id}, Username: {me.username}")
+        except Exception as e:
+            logger.error(f"Failed to get bot info for self-message detection: {e}")
+
     # Perform initial health check
     health = await processor.health_check()
     if health["status"] != "healthy":

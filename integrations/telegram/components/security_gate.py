@@ -26,6 +26,10 @@ class SecurityGate:
         self.workspace_validator = workspace_validator or get_workspace_validator()
         self.bot_user_id = int(os.getenv("TELEGRAM_BOT_USER_ID", "0"))
         self.bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "valoraibot")
+        
+        # Dynamic bot info (will be set by the client during initialization)
+        self._dynamic_bot_user_id = None
+        self._dynamic_bot_username = None
 
         # Rate limiting storage (in production, use Redis)
         self._rate_limits: dict[int, dict[str, any]] = {}
@@ -89,15 +93,43 @@ class SecurityGate:
         if not message.from_user:
             return False
 
-        # Check by user ID (most reliable)
-        if self.bot_user_id and message.from_user.id == self.bot_user_id:
+        user_id = message.from_user.id
+        username = message.from_user.username
+
+        # Check by dynamic user ID (most reliable, set during initialization)
+        if self._dynamic_bot_user_id and user_id == self._dynamic_bot_user_id:
+            logger.debug(f"Detected self-message by dynamic user ID: {user_id}")
             return True
 
-        # Check by username (fallback)
-        if self.bot_username and message.from_user.username == self.bot_username:
+        # Check by dynamic username
+        if self._dynamic_bot_username and username == self._dynamic_bot_username:
+            logger.debug(f"Detected self-message by dynamic username: {username}")
+            return True
+
+        # Check by environment variable user ID (fallback)
+        if self.bot_user_id and user_id == self.bot_user_id:
+            logger.debug(f"Detected self-message by env user ID: {user_id}")
+            return True
+
+        # Check by environment variable username (fallback)
+        if self.bot_username and username == self.bot_username:
+            logger.debug(f"Detected self-message by env username: {username}")
+            return True
+
+        # Additional safety check: check against known bot user ID from config
+        # Updated with actual bot user ID: 6914249008
+        known_bot_user_ids = [6914249008, 66968934582]  # Actual bot ID + legacy from config
+        if user_id in known_bot_user_ids:
+            logger.debug(f"Detected self-message by known bot user ID: {user_id}")
             return True
 
         return False
+
+    def set_bot_info(self, user_id: int, username: str = None):
+        """Set the bot's user info dynamically during initialization."""
+        self._dynamic_bot_user_id = user_id
+        self._dynamic_bot_username = username
+        logger.info(f"SecurityGate: Bot info set - ID: {user_id}, Username: {username}")
 
     def _is_chat_allowed(self, chat_id: int, username: str) -> bool:
         """Check if chat/user is allowed to interact with bot."""
