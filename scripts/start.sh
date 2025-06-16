@@ -369,6 +369,33 @@ echo ""
 recover_database_locks
 echo ""
 
+# Initialize database tables
+initialize_database() {
+    echo "🗄️ Initializing database tables..."
+    cd "$PROJECT_ROOT" || exit 1
+    
+    python -c "
+import sys
+sys.path.insert(0, '.')
+from utilities.database import init_database
+try:
+    init_database()
+    print('✅ Database tables initialized successfully')
+except Exception as e:
+    print(f'❌ Database initialization failed: {e}')
+    sys.exit(1)
+"
+    
+    return $?
+}
+
+# Initialize database before starting
+if ! initialize_database; then
+    echo "❌ Failed to initialize database"
+    exit 1
+fi
+echo ""
+
 # Test database connectivity
 if ! test_database_connectivity; then
     echo "❌ Database connectivity issues detected"
