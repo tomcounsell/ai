@@ -13,13 +13,8 @@ import os
 import time
 from pathlib import Path
 
-from utilities.claude_sdk_wrapper import (
-    ClaudeCodeSDK, 
-    ClaudeTaskOptions, 
-    PermissionMode, 
-    AllowedTool,
-    anyio_run_sync
-)
+from utilities.pure_python_claude import execute_pure_python_task
+from utilities.async_utils import anyio_run_sync
 
 
 def estimate_task_duration(task_description: str, specific_instructions: str | None = None) -> int:
@@ -101,26 +96,14 @@ def spawn_valor_session(
     try:
         start_time = time.time()
         
-        # Configure SDK options with enhanced workspace context
-        options = ClaudeTaskOptions(
-            max_turns=15,
-            working_directory=target_directory,
-            permission_mode=PermissionMode.ACCEPT_EDITS,
-            allowed_tools=[
-                AllowedTool.BASH,
-                AllowedTool.EDITOR, 
-                AllowedTool.FILE_READER
-            ],
-            timeout_minutes=max(2, estimated_duration // 30),
-            chat_id=chat_id  # Enable workspace-aware enhancements
+        # Execute via pure Python Claude (no JavaScript CLI dependency)
+        result = anyio_run_sync(
+            execute_pure_python_task(
+                prompt=full_prompt,
+                working_directory=target_directory,
+                chat_id=chat_id
+            )
         )
-        
-        # Execute via SDK (sync wrapper for compatibility)
-        async def run_task():
-            sdk = ClaudeCodeSDK()
-            return await sdk.execute_task_sync(full_prompt, options)
-        
-        result = anyio_run_sync(run_task)
         
         execution_time = time.time() - start_time
         print(f"✅ SDK delegation completed in {execution_time:.1f}s")
