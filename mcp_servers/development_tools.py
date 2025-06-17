@@ -1107,17 +1107,16 @@ def execute_bug_report_with_screenshot(
         else:
             target_directory = os.getcwd()
 
-        # Import delegation tool
-        from tools.valor_delegation_tool import spawn_valor_session
+        # Import SDK wrapper
+        from utilities.claude_sdk_wrapper import ClaudeCodeSDK, ClaudeTaskOptions, PermissionMode, AllowedTool, anyio_run_sync
 
         # Set environment variable for Claude Code session
         original_task_id = os.environ.get('NOTION_TASK_ID')
         os.environ['NOTION_TASK_ID'] = notion_task_id
 
         try:
-            # Execute Claude Code session with screenshot instructions
-            enhanced_instructions = f"""
-            Create and run a Playwright test to investigate: {task_description}
+            # Execute via SDK with screenshot instructions
+            enhanced_prompt = f"""Create and run a Playwright test to investigate: {task_description}
             
             Requirements:
             1. Navigate to the relevant page/component
@@ -1128,11 +1127,15 @@ def execute_bug_report_with_screenshot(
             The screenshot will be automatically retrieved and uploaded to Telegram with AI analysis.
             """
 
-            delegation_result = spawn_valor_session(
-                task_description=f"Create Playwright test with screenshot for: {task_description}",
-                target_directory=target_directory,
-                specific_instructions=enhanced_instructions,
-                force_sync=True  # Wait for completion
+            options = ClaudeTaskOptions(
+                max_turns=15,
+                working_directory=target_directory,
+                permission_mode=PermissionMode.ACCEPT_EDITS,
+                allowed_tools=[AllowedTool.BASH, AllowedTool.EDITOR, AllowedTool.FILE_READER]
+            )
+
+            delegation_result = anyio_run_sync(
+                ClaudeCodeSDK().execute_task_sync(enhanced_prompt, options)
             )
 
             # Check if screenshot was captured
@@ -1174,10 +1177,9 @@ def trigger_error_recovery_analysis(error_description: str, chat_id: str = "") -
         str: Recovery analysis result
     """
     try:
-        from tools.valor_delegation_tool import spawn_valor_session
+        from utilities.claude_sdk_wrapper import ClaudeCodeSDK, ClaudeTaskOptions, PermissionMode, AllowedTool, anyio_run_sync
         
-        recovery_task = f"""
-Investigate and provide analysis for this reported system issue:
+        recovery_prompt = f"""Investigate and provide analysis for this reported system issue:
 
 **Issue Description:**
 {error_description}
@@ -1203,17 +1205,22 @@ Investigate and provide analysis for this reported system issue:
 - System stability and reliability
 
 Provide a comprehensive analysis and implement fixes where possible.
+Focus on error recovery, system reliability, and immediate fixes.
 """
         
-        print(f"🔍 Triggering error recovery analysis...")
+        print(f"🔍 Triggering SDK-powered error recovery analysis...")
         print(f"   Error description: {error_description[:100]}...")
         print(f"   Chat context: {chat_id}")
         
-        result = spawn_valor_session(
-            task_description=recovery_task,
-            target_directory="/Users/valorengels/src/ai",
-            specific_instructions="Focus on error recovery, system reliability, and immediate fixes",
-            force_sync=True
+        options = ClaudeTaskOptions(
+            max_turns=20,
+            working_directory="/Users/valorengels/src/ai",
+            permission_mode=PermissionMode.ACCEPT_EDITS,
+            allowed_tools=[AllowedTool.BASH, AllowedTool.EDITOR, AllowedTool.FILE_READER]
+        )
+        
+        result = anyio_run_sync(
+            ClaudeCodeSDK().execute_task_sync(recovery_prompt, options)
         )
         
         return f"🔍 **Error Recovery Analysis**\n\n{result}"
