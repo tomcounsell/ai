@@ -200,11 +200,16 @@ class WorkspaceValidator:
             notion_db_url = workspace_data.get("notion_db_url", "")
             database_id = self._extract_database_id_from_url(notion_db_url)
             
+            # Handle both working_directory and allowed_directories formats
+            allowed_dirs = workspace_data.get("allowed_directories", [])
+            if not allowed_dirs and "working_directory" in workspace_data:
+                allowed_dirs = [workspace_data["working_directory"]]
+            
             workspaces[workspace_name] = WorkspaceConfig(
                 name=workspace_name,
                 workspace_type=workspace_type,
                 notion_database_id=database_id,
-                allowed_directories=workspace_data.get("allowed_directories", []),
+                allowed_directories=allowed_dirs,
                 telegram_chat_id=telegram_chat_id,
                 aliases=workspace_data.get("aliases", [])
             )
