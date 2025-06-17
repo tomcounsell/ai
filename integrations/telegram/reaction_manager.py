@@ -36,7 +36,7 @@ class ReactionManager:
         "system_maintenance": "🤝",  # Valid (handshake for maintenance)
         "documentation": "✍",       # Valid (writing hand)
         "testing": "🤡",            # Valid (testing can be clowny)
-        "debugging": "😡",          # Valid (angry at bugs)
+        "debugging": "🤨",          # Valid (suspicious/questioning bugs)
         "deployment": "🎉",         # Valid (celebration for deployment)
         "planning": "🤔",           # Valid (thinking)
         "question_answering": "🤗", # Valid (helpful hugging face)
@@ -49,7 +49,7 @@ class ReactionManager:
     READ_RECEIPT_EMOJI = "👀"  # Valid
     PROGRESS_EMOJI = "🤔"      # Valid (thinking face for progress)
     SUCCESS_EMOJI = "👍"       # Valid  
-    ERROR_EMOJI = "😡"         # Valid (angry face for errors)
+    ERROR_EMOJI = "🤨"         # Valid (raised eyebrow for errors)
     RECOVERY_EMOJI = "🤝"      # Valid (handshake for recovery/fixing)
     
     def __init__(self, client: Client, ollama_classifier=None, promise_manager=None):

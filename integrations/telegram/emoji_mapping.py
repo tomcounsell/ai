@@ -140,11 +140,20 @@ def is_valid_reaction(emoji: str) -> bool:
 # Fallback mappings for emojis that sometimes fail  
 EMOJI_FALLBACKS = {
     # Removed 👀 fallback - if eyes fail, we want it to fail, not fallback to thumbs up
-    "😡": "😐",  # Angry -> neutral (sometimes API rejects anger)
+    "😡": "🤨",  # BLOCKED: Angry -> suspicious/questioning (causes issues, too aggressive)
     "🤬": "😐",  # Cursing -> neutral
     "🤮": "😐",  # Vomiting -> neutral
     "💩": "💯",  # Not in our list, but if somehow used
     "🖕": "👎",  # Not in our list, but if somehow used
+}
+
+# Completely blocked emojis that should never be used
+BLOCKED_EMOJIS = {
+    "😡",  # Angry face - too aggressive, causes self-reaction issues
+    "🤬",  # Face with symbols over mouth - cursing
+    "🤮",  # Face vomiting - gross
+    "💩",  # Pile of poo - offensive
+    "🖕",  # Middle finger - offensive
 }
 
 
