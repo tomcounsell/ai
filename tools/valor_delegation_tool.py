@@ -53,6 +53,7 @@ def spawn_valor_session(
     specific_instructions: str | None = None,
     tools_needed: list[str] | None = None,
     force_sync: bool = False,
+    chat_id: str | None = None,
 ) -> str:
     """
     Spawn Claude Code session using SDK.
@@ -100,7 +101,7 @@ def spawn_valor_session(
     try:
         start_time = time.time()
         
-        # Configure SDK options
+        # Configure SDK options with enhanced workspace context
         options = ClaudeTaskOptions(
             max_turns=15,
             working_directory=target_directory,
@@ -110,7 +111,8 @@ def spawn_valor_session(
                 AllowedTool.EDITOR, 
                 AllowedTool.FILE_READER
             ],
-            timeout_minutes=max(2, estimated_duration // 30)
+            timeout_minutes=max(2, estimated_duration // 30),
+            chat_id=chat_id  # Enable workspace-aware enhancements
         )
         
         # Execute via SDK (sync wrapper for compatibility)

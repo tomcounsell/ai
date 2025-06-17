@@ -1131,7 +1131,8 @@ def execute_bug_report_with_screenshot(
                 max_turns=15,
                 working_directory=target_directory,
                 permission_mode=PermissionMode.ACCEPT_EDITS,
-                allowed_tools=[AllowedTool.BASH, AllowedTool.EDITOR, AllowedTool.FILE_READER]
+                allowed_tools=[AllowedTool.BASH, AllowedTool.EDITOR, AllowedTool.FILE_READER],
+                chat_id=chat_id  # Enable workspace-aware enhancements
             )
 
             delegation_result = anyio_run_sync(
@@ -1216,7 +1217,8 @@ Focus on error recovery, system reliability, and immediate fixes.
             max_turns=20,
             working_directory="/Users/valorengels/src/ai",
             permission_mode=PermissionMode.ACCEPT_EDITS,
-            allowed_tools=[AllowedTool.BASH, AllowedTool.EDITOR, AllowedTool.FILE_READER]
+            allowed_tools=[AllowedTool.BASH, AllowedTool.EDITOR, AllowedTool.FILE_READER],
+            chat_id=chat_id  # Enable workspace-aware enhancements
         )
         
         result = anyio_run_sync(
