@@ -1490,7 +1490,7 @@ def maintain_database_wal():
         logger.error(f"Database WAL maintenance failed: {e}")
 
 
-@huey.periodic_task(crontab(minute=0, hour='*/6'))  # Every 6 hours at minute 0
+@huey.periodic_task(crontab(minute=0, hour='18,21,0,3,6'))  # 6PM, 9PM, 12AM, 3AM, 6AM (non-office hours)
 def daydream_and_reflect():
     """
     Unified AI-powered daydream and reflection system with integrated cleanup.
@@ -1510,6 +1510,12 @@ def daydream_and_reflect():
     - Unified context gathering replacing scattered functions
     - Performance monitoring and resource management
     """
+    # Check if we're in non-office hours (6PM - 8AM)
+    current_hour = datetime.now().hour
+    if 8 <= current_hour < 18:  # 8AM - 6PM are office hours
+        logger.info(f"🧠 Skipping daydream during office hours ({current_hour}:00)")
+        return "Skipped - office hours"
+    
     # Create new daydream session
     session = DaydreamSession(
         session_id=str(uuid.uuid4()),
