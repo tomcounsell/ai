@@ -621,7 +621,7 @@ Begin your reflection:"""
             
             cmd = [
                 '/Users/valorengels/.local/bin/aider',
-                '--model', 'ollama_chat/gemma3:12b-it-qat',
+                '--model', 'ollama_chat/gemma3:4b-it-qat',
                 '--no-git',
                 '--yes',
                 '--message', f'Read the analysis prompt from {prompt_file}. Then explore this AI agent codebase and write detailed insights to {output_file}. Focus on architecture, patterns, and opportunities.'
@@ -1772,7 +1772,7 @@ def aider_daydream_analysis(context: Dict[str, Any]) -> str:
             
             cmd = [
                 '/Users/valorengels/.local/bin/aider',
-                '--model', 'ollama_chat/gemma3:12b-it-qat',
+                '--model', 'ollama_chat/gemma3:4b-it-qat',
                 '--no-git',
                 '--yes',
                 '--message', f'Read the comprehensive analysis prompt from {prompt_file}. Then explore this AI agent codebase and write detailed insights to {output_file}. Focus on the architecture, patterns, and opportunities for this conversational AI system.'

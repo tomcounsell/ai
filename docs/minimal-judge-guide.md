@@ -202,7 +202,7 @@ def test_login_flow():
 ## Model Configuration
 
 ### Text Evaluation
-- **Default model**: `gemma3:12b-it-qat` (good instruction following)
+- **Default model**: `gemma3:4b-it-qat` (good instruction following)
 - **Requirements**: Ollama installed with model available
 - **Timeout**: 30 seconds per evaluation
 
@@ -217,7 +217,7 @@ def test_login_flow():
 curl -fsSL https://ollama.ai/install.sh | sh
 
 # Pull required models
-ollama pull gemma3:12b-it-qat
+ollama pull gemma3:4b-it-qat
 ollama pull granite3.2-vision:latest
 ```
 
@@ -294,7 +294,7 @@ assert result["pass"], result["feedback"]
 # Solution: Install and pull models
 
 curl -fsSL https://ollama.ai/install.sh | sh
-ollama pull gemma3:12b-it-qat
+ollama pull gemma3:4b-it-qat
 ollama pull granite3.2-vision:latest
 ```
 
