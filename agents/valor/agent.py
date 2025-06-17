@@ -518,10 +518,8 @@ def delegate_coding_task(
     try:
         # Use unified workspace resolution
         from utilities.workspace_validator import WorkspaceResolver
-        from utilities.swe_error_recovery import SWEErrorRecovery
-        from utilities.claude_code_session_manager import ClaudeCodeSessionManager
         
-        # Get chat context for session management
+        # Get chat context
         chat_id = str(ctx.deps.chat_id) if ctx.deps.chat_id else None
         username = ctx.deps.username
         
@@ -535,41 +533,34 @@ def delegate_coding_task(
         print(f"📁 Workspace resolved: {context_desc}")
         print(f"🎯 Working directory: {working_dir}")
         
-        # Check for recent session to continue
-        recent_session = ClaudeCodeSessionManager.find_recent_session(
-            chat_id=chat_id,
-            username=username,
-            tool_name="delegate_coding_task",
-            working_directory=working_dir,
-            hours_back=2  # Look for sessions in last 2 hours
-        )
-        
-        # Execute with session management
-        result = _execute_with_session_management(
-            prompt=task_description,
-            working_directory=working_dir,
-            existing_session=recent_session,
-            chat_id=chat_id,
-            username=username,
-            tool_name="delegate_coding_task",
+        # Use the new SDK-powered delegation
+        result = spawn_valor_session(
             task_description=task_description,
-            specific_instructions=specific_instructions
+            target_directory=working_dir,
+            specific_instructions=specific_instructions,
+            force_sync=True,  # Always execute synchronously for immediate results
+            chat_id=chat_id
         )
         
         return result
         
     except Exception as e:
-        # Use intelligent error recovery
         error_message = str(e)
         execution_time = time.time() - start_time
-        recovery_response = SWEErrorRecovery.format_recovery_response(
-            tool_name="delegate_coding_task",
-            task_description=task_description,
-            error_message=error_message,
-            working_directory=working_dir if 'working_dir' in locals() else ".",
-            execution_time=execution_time
-        )
-        return recovery_response
+        
+        print(f"❌ Task failed after {execution_time:.1f}s: {error_message}")
+        return f"""❌ **Development Task Error**
+
+The coding task execution failed: {error_message}
+
+I can provide guidance on this task instead. What specifically do you need help with regarding:
+"{task_description}"?
+
+I can help with:
+- Implementation approach and code examples
+- Architecture recommendations  
+- Debugging strategies
+- Code review and best practices"""
 
 
 @valor_agent.tool
