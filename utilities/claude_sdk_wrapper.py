@@ -98,7 +98,14 @@ class ClaudeCodeSDK:
             async for message in query(prompt=prompt, options=claude_options):
                 # Stream real-time updates
                 if hasattr(message, 'content') and message.content:
-                    yield message.content
+                    # Handle content blocks (AssistantMessage.content is a list)
+                    if isinstance(message.content, list):
+                        for block in message.content:
+                            if hasattr(block, 'text'):  # TextBlock
+                                yield block.text
+                    else:
+                        # Fallback for direct string content
+                        yield message.content
                     
                 # Store for conversation continuity
                 if chat_id:
