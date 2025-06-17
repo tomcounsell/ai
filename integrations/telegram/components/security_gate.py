@@ -53,6 +53,7 @@ class SecurityGate:
         try:
             # Check if bot self-message
             if self.is_bot_self_message(message):
+                logger.info(f"🚫 Blocking bot self-message in chat {message.chat.id}, message {message.id}")
                 return AccessResult(
                     allowed=False, reason="Bot self-message", metadata={"skip_silently": True}
                 )
@@ -95,34 +96,39 @@ class SecurityGate:
 
         user_id = message.from_user.id
         username = message.from_user.username
+        
+        # Enhanced logging for debugging self-reaction issue
+        logger.info(f"🔍 Checking self-message: user_id={user_id}, username={username}, dynamic_bot_id={self._dynamic_bot_user_id}, dynamic_bot_username={self._dynamic_bot_username}")
 
         # Check by dynamic user ID (most reliable, set during initialization)
         if self._dynamic_bot_user_id and user_id == self._dynamic_bot_user_id:
-            logger.debug(f"Detected self-message by dynamic user ID: {user_id}")
+            logger.info(f"✅ Detected self-message by dynamic user ID: {user_id}")
             return True
 
         # Check by dynamic username
         if self._dynamic_bot_username and username == self._dynamic_bot_username:
-            logger.debug(f"Detected self-message by dynamic username: {username}")
+            logger.info(f"✅ Detected self-message by dynamic username: {username}")
             return True
 
         # Check by environment variable user ID (fallback)
         if self.bot_user_id and user_id == self.bot_user_id:
-            logger.debug(f"Detected self-message by env user ID: {user_id}")
+            logger.info(f"✅ Detected self-message by env user ID: {user_id}")
             return True
 
         # Check by environment variable username (fallback)
         if self.bot_username and username == self.bot_username:
-            logger.debug(f"Detected self-message by env username: {username}")
+            logger.info(f"✅ Detected self-message by env username: {username}")
             return True
 
         # Additional safety check: check against known bot user ID from config
         # Updated with actual bot user ID: 6914249008
         known_bot_user_ids = [6914249008, 66968934582]  # Actual bot ID + legacy from config
         if user_id in known_bot_user_ids:
-            logger.debug(f"Detected self-message by known bot user ID: {user_id}")
+            logger.info(f"✅ Detected self-message by known bot user ID: {user_id}")
             return True
 
+        # Not a self-message
+        logger.info(f"❌ Not a self-message: user_id={user_id}, username={username}")
         return False
 
     def set_bot_info(self, user_id: int, username: str = None):
