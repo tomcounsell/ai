@@ -154,7 +154,7 @@ INSTRUCTIONS:
             # Search for files recursively
             for root, dirs, files in os.walk(work_path):
                 # Skip common non-relevant directories
-                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['__pycache__', 'node_modules', '.git']]
+                dirs[:] = [d for d in dirs if not d.startswith('.') and d not in ['__pycache__', 'node_modules', '.git', '.venv', 'venv', '.pytest_cache']]
                 
                 root_path = Path(root)
                 for file in files:
@@ -164,7 +164,8 @@ INSTRUCTIONS:
                     # Check if file name or path contains search terms
                     file_str = str(relative_path).lower()
                     if any(term in file_str for term in search_terms):
-                        search_results.append(f"📁 {relative_path}")
+                        # Prioritize files with "description" in the name
+                        priority = 1000 if "description" in file_str else 100
                         
                         # If it's a reasonable size, read and show full content for relevant files
                         try:
@@ -172,12 +173,19 @@ INSTRUCTIONS:
                                 content = file_path.read_text(encoding='utf-8', errors='ignore')
                                 # Show full content if it contains search terms
                                 if any(term in content.lower() for term in search_terms):
-                                    search_results.append(f"   📄 FULL CONTENT:\n{content}\n" + "="*50 + "\n")
+                                    search_results.append((priority, f"📁 {relative_path}\n   📄 FULL CONTENT:\n{content}\n" + "="*50 + "\n"))
+                                else:
+                                    search_results.append((priority, f"📁 {relative_path}"))
+                            else:
+                                search_results.append((priority, f"📁 {relative_path}"))
                         except Exception:
-                            pass
+                            search_results.append((priority, f"📁 {relative_path}"))
             
             if search_results:
-                return f"RELEVANT FILES FOUND:\n" + "\n".join(search_results[:10])  # Limit results
+                # Sort by priority (highest first) and extract content
+                search_results.sort(key=lambda x: x[0], reverse=True)
+                content_list = [result[1] for result in search_results[:5]]  # Top 5 results only
+                return f"RELEVANT FILES FOUND:\n" + "\n".join(content_list)
             else:
                 return "No obviously relevant files found. You may need to search more broadly."
                 
