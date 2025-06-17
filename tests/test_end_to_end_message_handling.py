@@ -180,7 +180,6 @@ class TestEndToEndMessageHandling:
             forward_signature=None,
             forward_sender_name=None,
             forward_date=None,
-            is_automatic_forward=False,
             reply_markup=None,
             web_page=None
         )
@@ -199,7 +198,7 @@ class TestEndToEndMessageHandling:
         document = Document(
             file_id="BAADBAADbQADBREAAZbRCbNq5LT8Ag",
             file_unique_id="AgADbQADBREAAR",
-            thumb=None,
+            thumbs=None,
             file_name="test_document.pdf",
             mime_type="application/pdf",
             file_size=50000,
@@ -228,7 +227,6 @@ class TestEndToEndMessageHandling:
             forward_signature=None,
             forward_sender_name=None,
             forward_date=None,
-            is_automatic_forward=False,
             reply_markup=None,
             web_page=None
         )
@@ -265,7 +263,6 @@ class TestEndToEndMessageHandling:
             forward_signature=None,
             forward_sender_name=None,
             forward_date=None,
-            is_automatic_forward=False,
             reply_markup=None,
             web_page=None
         )
@@ -301,7 +298,6 @@ class TestEndToEndMessageHandling:
             forward_signature=None,
             forward_sender_name=None,
             forward_date=None,
-            is_automatic_forward=False,
             reply_markup=None,
             web_page=None
         )
@@ -338,7 +334,6 @@ class TestEndToEndMessageHandling:
             forward_signature=None,
             forward_sender_name=None,
             forward_date=None,
-            is_automatic_forward=False,
             reply_markup=None,
             web_page=None
         )
@@ -364,7 +359,6 @@ class TestEndToEndMessageHandling:
             forward_signature=None,
             forward_sender_name=None,
             forward_date=None,
-            is_automatic_forward=False,
             reply_markup=None,
             web_page=None
         )
@@ -391,7 +385,7 @@ class TestEndToEndMessageHandling:
             file_name="test_audio.mp3",
             mime_type="audio/mpeg",
             file_size=5000000,
-            thumb=None,
+            thumbs=None,
             date=datetime.now()
         )
 
@@ -417,7 +411,6 @@ class TestEndToEndMessageHandling:
             forward_signature=None,
             forward_sender_name=None,
             forward_date=None,
-            is_automatic_forward=False,
             reply_markup=None,
             web_page=None
         )
@@ -464,7 +457,6 @@ class TestEndToEndMessageHandling:
             forward_signature=None,
             forward_sender_name=None,
             forward_date=None,
-            is_automatic_forward=False,
             reply_markup=None,
             web_page=None
         )
@@ -484,7 +476,7 @@ class TestEndToEndMessageHandling:
             file_unique_id="AgADbQADBREAAU",
             length=240,  # Square video
             duration=15,
-            thumb=None,
+            thumbs=None,
             file_size=800000,
             date=datetime.now()
         )
@@ -511,7 +503,6 @@ class TestEndToEndMessageHandling:
             forward_signature=None,
             forward_sender_name=None,
             forward_date=None,
-            is_automatic_forward=False,
             reply_markup=None,
             web_page=None
         )
@@ -555,7 +546,6 @@ class TestEndToEndMessageHandling:
             is_creator=False,
             is_scam=False,
             is_fake=False,
-            is_forum=False,
             title=None,
             username="blockeduser",
             first_name="Blocked",
@@ -582,7 +572,6 @@ class TestEndToEndMessageHandling:
             forward_signature=None,
             forward_sender_name=None,
             forward_date=None,
-            is_automatic_forward=False,
             reply_markup=None,
             web_page=None
         )
@@ -622,7 +611,6 @@ class TestEndToEndMessageHandling:
             forward_signature=None,
             forward_sender_name=None,
             forward_date=None,
-            is_automatic_forward=False,
             reply_markup=None,
             web_page=None
         )
@@ -664,8 +652,7 @@ class TestEndToEndMessageHandling:
                 forward_signature=None,
                 forward_sender_name=None,
                 forward_date=None,
-                is_automatic_forward=False,
-                reply_markup=None,
+                    reply_markup=None,
                 web_page=None
             )
             messages.append(self.MockUpdate(message))
