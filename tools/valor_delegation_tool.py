@@ -116,9 +116,11 @@ def spawn_valor_session(
         )
         
         # Execute via SDK (sync wrapper for compatibility)
-        result = anyio_run_sync(
-            ClaudeCodeSDK().execute_task_sync(full_prompt, options)
-        )
+        async def run_task():
+            sdk = ClaudeCodeSDK()
+            return await sdk.execute_task_sync(full_prompt, options)
+        
+        result = anyio_run_sync(run_task)
         
         execution_time = time.time() - start_time
         print(f"✅ SDK delegation completed in {execution_time:.1f}s")

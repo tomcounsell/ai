@@ -13,8 +13,7 @@ from typing import AsyncIterator, Dict, List, Optional, Any
 import logging
 
 try:
-    from claude_code_sdk import query, ClaudeCodeOptions, Message
-    from claude_code_sdk.exceptions import CLINotFoundError, CLIConnectionError, ProcessError, CLIJSONDecodeError
+    from claude_code_sdk import query, ClaudeCodeOptions, Message, CLINotFoundError, CLIConnectionError, ProcessError, CLIJSONDecodeError
     SDK_AVAILABLE = True
 except ImportError:
     SDK_AVAILABLE = False
@@ -96,7 +95,7 @@ class ClaudeCodeSDK:
         try:
             claude_options = self._build_claude_options(options)
             
-            async for message in query(prompt, claude_options):
+            async for message in query(prompt=prompt, options=claude_options):
                 # Stream real-time updates
                 if hasattr(message, 'content') and message.content:
                     yield message.content
