@@ -115,6 +115,11 @@ IMPORTANT TOOL USAGE:
   * The tool spawns Claude Code to actually write code, run tests, and commit changes
   * Always specify target_directory and include detailed requirements in specific_instructions
   * Report actual results from the execution, not plans or intentions
+- For codebase information requests (like finding descriptions, configurations, or documentation):
+  * Use the delegate_coding_task tool to search through the codebase and find specific information
+  * Examples: "Find Team Analysis descriptions", "Show me the config options", "What are the available features"
+  * The tool will search the appropriate workspace and provide specific file contents and explanations
+  * Don't guess at information that could be in the codebase - actually search for it
 - For analyzing shared images, use the analyze_shared_image tool
 - For saving/analyzing links, use the save_link_for_later tool
 - For searching saved links, use the search_saved_links tool
