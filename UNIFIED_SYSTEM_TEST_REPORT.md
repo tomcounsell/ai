@@ -71,7 +71,7 @@ The clean 5-step processing pipeline is fully operational:
 ### ✅ Workspace Isolation
 **Security Features Validated**:
 - **Chat-to-workspace mapping**: Working correctly (e.g., -1002600253717 → PsyOPTIMAL)
-- **Cross-workspace blocking**: DeckFusion chats cannot access PsyOPTIMAL data
+- **Cross-workspace blocking**: Fuse chats cannot access PsyOPTIMAL data
 - **Directory restrictions**: Each workspace has isolated working directories
 - **DM user whitelisting**: Username-based access control functional
 

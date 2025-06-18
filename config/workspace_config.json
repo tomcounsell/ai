@@ -44,18 +44,18 @@
     },
     "Fuse": {
       "notion_db_url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
-      "description": "DeckFusion team chat and project management",
+      "description": "Fuse team chat and project management",
       "working_directory": "/Users/valorengels/src/deckfusion",
       "telegram_chat_id": "-1002374450243",
-      "aliases": ["deckfusion", "DF", "fuse", "toms team"],
+      "aliases": ["fuse", "F"],
       "daydream_priority": 0
     },
     "Fuse Dev": {
       "notion_db_url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
-      "description": "DeckFusion development tasks and management",
+      "description": "Fuse development tasks and management",
       "working_directory": "/Users/valorengels/src/deckfusion",
       "telegram_chat_id": "-1002553869320",
-      "aliases": ["deckfusion dev", "DF dev"],
+      "aliases": ["fuse dev", "F dev"],
       "is_dev_group": true,
       "daydream_priority": 5
     },
@@ -89,10 +89,10 @@
   "telegram_groups": {
     "-1002600253717": "PsyOPTIMAL",
     "-4897329503": "PsyOPTIMAL Dev",
-    "-1002553869320": "DeckFusion Dev",
+    "-1002553869320": "Fuse Dev",
     "-4891178445": "Yudame Dev",
     "-4719889199": "Yudame",
-    "-1002374450243": "Tom's Team",
+    "-1002374450243": "Fuse",
     "-1002455228990": "Verkstad",
     "-4818206585": "Valor Test Team"
   },

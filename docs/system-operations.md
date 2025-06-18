@@ -260,7 +260,7 @@ Configure project workspaces and dev group behavior in `config/workspace_config.
 **Current Dev Groups:**
 - Yudame Dev (-4891178445)
 - PsyOPTIMAL Dev (-4897329503) 
-- DeckFusion Dev (-4851227604)
+- Fuse Dev (-4851227604)
 
 ### Enhanced DM User Whitelisting
 

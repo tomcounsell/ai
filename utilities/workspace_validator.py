@@ -2,7 +2,7 @@
 Workspace Validation System
 
 Enforces strict chat-to-workspace mapping controls to ensure:
-- DeckFusion chat can only access DeckFusion Notion DB
+- Fuse chat can only access Fuse Notion DB
 - PsyOPTIMAL chat can only access PsyOPTIMAL Notion DB  
 - Directory restrictions limit operations to correct workspace paths
 - Validation occurs before any Notion queries or code operations
@@ -17,7 +17,7 @@ from enum import Enum
 
 class WorkspaceType(Enum):
     AI = "ai"
-    DECKFUSION = "deckfusion"
+    FUSE = "fuse"
     PSYOPTIMAL = "psyoptimal"
     FLEXTRIP = "flextrip"
     VERKSTAD = "verkstad"
@@ -175,8 +175,8 @@ class WorkspaceValidator:
             workspace_type_str = self._derive_workspace_type_from_directory(working_directory)
             
             # Map workspace_type string to enum
-            if workspace_type_str == "deckfusion":
-                workspace_type = WorkspaceType.DECKFUSION
+            if workspace_type_str == "fuse":
+                workspace_type = WorkspaceType.FUSE
             elif workspace_type_str == "psyoptimal":
                 workspace_type = WorkspaceType.PSYOPTIMAL
             elif workspace_type_str == "flextrip":
@@ -226,8 +226,8 @@ class WorkspaceValidator:
         dir_name = Path(working_directory).name.lower()
         
         # Map directory names to workspace types
-        if dir_name in ["deckfusion"]:
-            return "deckfusion"
+        if dir_name in ["deckfusion", "fuse"]:
+            return "fuse"
         elif dir_name in ["psyoptimal"]:
             return "psyoptimal"
         elif dir_name in ["flextrip"]:
@@ -404,7 +404,7 @@ class WorkspaceValidator:
         
         # Get all workspace directories except current one
         all_workspace_dirs = [
-            "/Users/valorengels/src/deckfusion",
+            "/Users/valorengels/src/fuse",
             "/Users/valorengels/src/psyoptimal", 
             "/Users/valorengels/src/flextrip",
             "/Users/valorengels/src/ai",
