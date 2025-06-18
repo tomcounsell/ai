@@ -176,11 +176,11 @@ chat_history_obj.get_context(
 - All Telegram chats are mapped to specific workspaces in `config/workspace_config.json`
 - Each workspace has isolated Notion database access and directory restrictions
 - Uses `utilities/workspace_validator.py` for strict access control
-- **Cross-workspace access is blocked** - DeckFusion chats cannot access PsyOPTIMAL data
+- **Cross-workspace access is blocked** - Fuse chats cannot access PsyOPTIMAL data
 
 **Workspace Types:**
 - `psyoptimal` - PsyOPTIMAL project (working directory: `/Users/valorengels/src/psyoptimal/`)
-- `deckfusion` - DeckFusion project (working directory: `/Users/valorengels/src/deckfusion/`)
+- `deckfusion` - Fuse project (working directory: `/Users/valorengels/src/deckfusion/`)
 - `flextrip` - FlexTrip project (working directory: `/Users/valorengels/src/flextrip/`)
 - `yudame` - Yudame project (working directory: `/Users/valorengels/src/ai/`)
 - `verkstad` - Verkstad project (working directory: `/Users/valorengels/src/verkstad/`)
@@ -283,12 +283,12 @@ The ResponseManager component handles all output formatting and delivery:
 
 ```bash
 # Chat filtering for multi-server deployments
-TELEGRAM_ALLOWED_GROUPS=PsyOPTIMAL,DeckFusion Dev  # Comma-separated workspace names
+TELEGRAM_ALLOWED_GROUPS=PsyOPTIMAL,Fuse Dev  # Comma-separated workspace names
 # Note: DMs now use username whitelist in workspace_config.json instead of TELEGRAM_ALLOW_DMS
 
 # Example configurations:
 # Server 1 (PsyOPTIMAL only): TELEGRAM_ALLOWED_GROUPS=PsyOPTIMAL,PsyOPTIMAL Dev
-# Server 2 (DeckFusion only): TELEGRAM_ALLOWED_GROUPS=Tom's Team,DeckFusion Dev
+# Server 2 (Fuse only): TELEGRAM_ALLOWED_GROUPS=Fuse,Fuse Dev
 # Server 3 (DMs only):        TELEGRAM_ALLOWED_GROUPS= (DM users controlled by dm_whitelist)
 ```
 
@@ -308,19 +308,19 @@ TELEGRAM_ALLOWED_GROUPS=PsyOPTIMAL,DeckFusion Dev  # Comma-separated workspace n
       "telegram_chat_ids": ["-1002600253717"],
       "aliases": ["psyoptimal", "PO"]
     },
-    "DeckFusion Dev": {
+    "Fuse Dev": {
       "database_id": "48a27df3-0342-4aa4-bd4c-0dec1ff908f4",
       "url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
-      "description": "DeckFusion development tasks and management",
+      "description": "Fuse development tasks and management",
       "workspace_type": "deckfusion",
       "working_directory": "/Users/valorengels/src/deckfusion",
       "telegram_chat_ids": ["-4851227604"],
-      "aliases": ["deckfusion dev", "DF dev"]
+      "aliases": ["fuse dev", "F dev"]
     }
   },
   "telegram_groups": {
     "-1002600253717": "PsyOPTIMAL",
-    "-4851227604": "DeckFusion Dev",
+    "-4851227604": "Fuse Dev",
     ...
   }
 }
@@ -362,9 +362,9 @@ Dev groups are configured in `config/workspace_config.json` with the `is_dev_gro
       "telegram_chat_ids": ["-4897329503"],
       "is_dev_group": true
     },
-    "DeckFusion Dev": {
+    "Fuse Dev": {
       "database_id": "****",
-      "description": "DeckFusion development tasks and management",
+      "description": "Fuse development tasks and management",
       "telegram_chat_ids": ["-4851227604"],
       "is_dev_group": true
     }
@@ -375,7 +375,7 @@ Dev groups are configured in `config/workspace_config.json` with the `is_dev_gro
 **Current Dev Groups:**
 - **Yudame Dev** (-4891178445) - AI development team
 - **PsyOPTIMAL Dev** (-4897329503) - PsyOPTIMAL development team
-- **DeckFusion Dev** (-4851227604) - DeckFusion development team
+- **Fuse Dev** (-4851227604) - Fuse development team
 
 ### DM User Whitelisting
 
@@ -443,10 +443,10 @@ Based on `scripts/list_telegram_groups.py` output:
 |------------|---------|---------|-----------|---------|
 | **PsyOPTIMAL** | -1002600253717 | 4 | psyoptimal | ✅ Mapped |
 | **PsyOPTIMAL Dev** | -4897329503 | 2 | psyoptimal | ✅ Mapped |
-| **DeckFusion Dev** | -4851227604 | 2 | deckfusion | ✅ Mapped |
+| **Fuse Dev** | -4851227604 | 2 | deckfusion | ✅ Mapped |
 | **Yudame Dev Team** | -4891178445 | 2 | yudame | ✅ Mapped |
 | **Yudame** | -4719889199 | 6 | yudame | ✅ Mapped |
-| **Tom's Team** | -1002374450243 | 6 | deckfusion | ✅ Mapped |
+| **Fuse** | -1002374450243 | 6 | deckfusion | ✅ Mapped |
 | **Verkstad** | -1002455228990 | 7 | verkstad | ✅ Mapped |
 | **PsyOptimal** | -4503471217 | ? | - | ⚠️ Legacy/Unmapped |
 | **Golden Egg** | -1002527205614 | 5 | - | ⚠️ Unmapped |
