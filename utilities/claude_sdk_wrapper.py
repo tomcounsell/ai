@@ -13,9 +13,12 @@ from typing import AsyncIterator, Dict, List, Optional, Any
 import logging
 
 try:
-    from claude_code_sdk import query, ClaudeCodeOptions, Message, CLINotFoundError, CLIConnectionError, ProcessError, CLIJSONDecodeError
-    SDK_AVAILABLE = True
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+    # Disable the problematic JavaScript CLI SDK for now
+    SDK_AVAILABLE = False
 except ImportError:
+    ANTHROPIC_AVAILABLE = False
     SDK_AVAILABLE = False
     # Fallback types for development
     class Message:
@@ -95,23 +98,29 @@ class ClaudeCodeSDK:
         try:
             claude_options = self._build_claude_options(options)
             
+            # Execute query with better error handling
             async for message in query(prompt=prompt, options=claude_options):
-                # Stream real-time updates
-                if hasattr(message, 'content') and message.content:
-                    # Handle content blocks (AssistantMessage.content is a list)
-                    if isinstance(message.content, list):
-                        for block in message.content:
-                            if hasattr(block, 'text'):  # TextBlock
-                                yield block.text
-                    else:
-                        # Fallback for direct string content
-                        yield message.content
-                    
-                # Store for conversation continuity
-                if chat_id:
-                    if chat_id not in self.active_conversations:
-                        self.active_conversations[chat_id] = []
-                    self.active_conversations[chat_id].append(message)
+                try:
+                    # Stream real-time updates
+                    if hasattr(message, 'content') and message.content:
+                        # Handle content blocks (AssistantMessage.content is a list)
+                        if isinstance(message.content, list):
+                            for block in message.content:
+                                if hasattr(block, 'text'):  # TextBlock
+                                    yield block.text
+                        else:
+                            # Fallback for direct string content
+                            yield str(message.content)
+                        
+                    # Store for conversation continuity
+                    if chat_id:
+                        if chat_id not in self.active_conversations:
+                            self.active_conversations[chat_id] = []
+                        self.active_conversations[chat_id].append(message)
+                        
+                except Exception as msg_error:
+                    logger.warning(f"Error processing message: {msg_error}")
+                    continue
                     
         except CLINotFoundError:
             yield "❌ Claude Code CLI not installed. Please run: npm install -g @anthropic-ai/claude-code"
