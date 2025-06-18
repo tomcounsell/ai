@@ -42,15 +42,15 @@
       "is_dev_group": true,
       "daydream_priority": 7
     },
-    "Tom's Team": {
+    "Fuse": {
       "notion_db_url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
       "description": "DeckFusion team chat and project management",
       "working_directory": "/Users/valorengels/src/deckfusion",
       "telegram_chat_id": "-1002374450243",
-      "aliases": ["deckfusion", "DF", "tom", "toms team"],
+      "aliases": ["deckfusion", "DF", "fuse", "toms team"],
       "daydream_priority": 0
     },
-    "DeckFusion Dev": {
+    "Fuse Dev": {
       "notion_db_url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
       "description": "DeckFusion development tasks and management",
       "working_directory": "/Users/valorengels/src/deckfusion",
