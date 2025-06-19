@@ -117,8 +117,33 @@ class ContextBuilder:
                     
                 workspaces = config.get("workspaces", {})
                 workspace_config = workspaces.get(workspace, {})
-                workspace_info["is_dev_group"] = workspace_config.get("is_dev_group", False)
-                logger.info(f"Workspace '{workspace}' config: is_dev_group={workspace_info['is_dev_group']}")
+                
+                # Only set is_dev_group=True if BOTH conditions are met:
+                # 1. Workspace is configured as dev group in config
+                # 2. Chat passes TELEGRAM_ALLOWED_GROUPS security validation
+                config_is_dev_group = workspace_config.get("is_dev_group", False)
+                
+                if config_is_dev_group:
+                    # Check if this chat passes security validation
+                    # Ensure environment is loaded for TELEGRAM_ALLOWED_GROUPS validation
+                    import os
+                    if not os.getenv("TELEGRAM_ALLOWED_GROUPS"):
+                        from dotenv import load_dotenv
+                        load_dotenv()
+                    
+                    from utilities.workspace_validator import validate_chat_whitelist_access
+                    is_private = chat_id > 0
+                    passes_security = validate_chat_whitelist_access(chat_id, is_private, None)
+                    
+                    if passes_security:
+                        workspace_info["is_dev_group"] = True
+                        logger.info(f"Workspace '{workspace}' config: is_dev_group=True (ALLOWED - passes security validation)")
+                    else:
+                        workspace_info["is_dev_group"] = False
+                        logger.warning(f"Workspace '{workspace}' config: is_dev_group=False (DENIED - fails TELEGRAM_ALLOWED_GROUPS validation)")
+                else:
+                    workspace_info["is_dev_group"] = False
+                    logger.info(f"Workspace '{workspace}' config: is_dev_group=False (not configured as dev group)")
 
         except Exception as e:
             logger.error(f"Error extracting workspace for chat {chat_id}: {str(e)}")
