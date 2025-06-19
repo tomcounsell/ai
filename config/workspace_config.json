@@ -48,6 +48,7 @@
       "working_directory": "/Users/valorengels/src/deckfusion",
       "telegram_chat_id": "-1002374450243",
       "aliases": ["fuse", "F"],
+      "is_dev_group": true,
       "daydream_priority": 0
     },
     "Fuse Dev": {
