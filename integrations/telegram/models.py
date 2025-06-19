@@ -72,6 +72,7 @@ class MediaInfo:
     height: int | None = None
     duration: int | None = None
     thumbnail_file_id: str | None = None
+    file_path: str | None = None
 
 
 @dataclass

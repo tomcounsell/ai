@@ -123,6 +123,11 @@ class UnifiedMessageProcessor:
                 except Exception as intent_error:
                     logger.warning(f"Intent classification failed: {intent_error}")
 
+            # Step 3.5: Handle media downloads if required
+            if "media_download_handler" in plan.special_handlers:
+                logger.debug("Step 3.5: Processing media download")
+                msg_context = await self._handle_media_download(msg_context)
+
             # Step 4: Agent processing with progress indicator
             logger.debug("Step 4: Processing with agent orchestrator")
             if self.reaction_manager:
@@ -257,6 +262,44 @@ class UnifiedMessageProcessor:
         # Add more component checks as needed
 
         return health
+
+    async def _handle_media_download(self, context):
+        """
+        Download media files for analysis.
+        
+        Implements the missing media_download_handler that was referenced in the type router.
+        Downloads photo/video files using Pyrogram and stores the file path in MediaInfo.
+        """
+        if not context.media_info:
+            return context
+            
+        # Only download photo and video files
+        from integrations.telegram.models import MessageType
+        if context.media_info.media_type not in [MessageType.PHOTO, MessageType.VIDEO]:
+            return context
+            
+        # Skip if already downloaded
+        if context.media_info.file_path:
+            logger.debug(f"Media already downloaded: {context.media_info.file_path}")
+            return context
+            
+        try:
+            logger.info(f"📥 Downloading {context.media_info.media_type} file...")
+            
+            # Download using Pyrogram - this creates a file in the downloads folder
+            file_path = await context.message.download(in_memory=False)
+            
+            # Store the file path in MediaInfo for agent use
+            context.media_info.file_path = file_path
+            
+            logger.info(f"✅ Downloaded {context.media_info.media_type} to: {file_path}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to download media: {e}")
+            # Don't fail the whole pipeline, just log the error
+            # The agent can still respond about the media type even without the file
+            
+        return context
 
 
 async def create_unified_processor(bot: Any, valor_agent=None) -> UnifiedMessageProcessor:
