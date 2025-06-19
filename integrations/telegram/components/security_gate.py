@@ -25,7 +25,7 @@ class SecurityGate:
         """Initialize SecurityGate with optional workspace validator."""
         self.workspace_validator = workspace_validator or get_workspace_validator()
         self.bot_user_id = int(os.getenv("TELEGRAM_BOT_USER_ID", "0"))
-        self.bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "valoraibot")
+        self.bot_username = os.getenv("TELEGRAM_BOT_USERNAME", "valorengels")
         
         # Dynamic bot info (will be set by the client during initialization)
         self._dynamic_bot_user_id = None

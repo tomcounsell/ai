@@ -27,7 +27,7 @@ class ContextBuilder:
         """Initialize with optional dependencies."""
         self.workspace_validator = workspace_validator or get_workspace_validator()
         self.chat_history_store = chat_history_store  # Will use existing store
-        self.bot_username = "valoraibot"  # TODO: Get from env
+        self.bot_username = "valorengels"  # User account username
 
     async def build_context(self, message: TelegramMessage) -> MessageContext:
         """
