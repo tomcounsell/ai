@@ -139,39 +139,12 @@ class SecurityGate:
 
     def _is_chat_allowed(self, chat_id: int, username: str) -> bool:
         """Check if chat/user is allowed to interact with bot."""
-        # Private chats - check DM whitelist
-        if chat_id > 0:
-            return self._check_dm_whitelist(username, chat_id)
+        # Use the centralized validation function that respects TELEGRAM_ALLOW_DMS
+        from utilities.workspace_validator import validate_chat_whitelist_access
+        
+        is_private = chat_id > 0
+        return validate_chat_whitelist_access(chat_id, is_private, username)
 
-        # Group chats - check workspace configuration
-        workspace = self.workspace_validator.get_workspace_for_chat(str(chat_id))
-        return workspace is not None
-
-    def _check_dm_whitelist(self, username: str, user_id: int) -> bool:
-        """Check if user is allowed to send DMs."""
-        # Load config directly since workspace_validator doesn't expose it
-        import json
-        try:
-            with open(self.workspace_validator.config_path) as f:
-                config = json.load(f)
-        except Exception:
-            # Default to empty config if loading fails
-            config = {}
-            
-        dm_whitelist = config.get("dm_whitelist", {})
-
-        # Check username whitelist
-        allowed_users = dm_whitelist.get("allowed_users", {})
-        if username and username.lower() in [u.lower() for u in allowed_users.keys()]:
-            return True
-
-        # Check user ID whitelist (for users without public usernames)
-        allowed_user_ids = dm_whitelist.get("allowed_user_ids", {})
-        if str(user_id) in allowed_user_ids:
-            return True
-
-        logger.debug(f"DM access denied for @{username} (ID: {user_id})")
-        return False
 
     def _check_rate_limits(self, chat_id: int, username: str) -> AccessResult:
         """Check and update rate limits for chat."""
