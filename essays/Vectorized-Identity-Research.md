@@ -108,7 +108,7 @@ Even in literature and art, the notion of identity transformation is fundamental
 
 Lastly, the emerging field of digital mental health and AI coaching provides early prototypes of using conversational agents for self-improvement. For example, some AI chatbots already engage in motivational interviewing or CBT-style dialogues. Our approach would take this a step further by maintaining a vector representation of the user's identity and progress.
 
-Notably, a 2024 article in Psychology Today described how LLM dialogues can serve as a "mirror" to the self, reflecting a user's thoughts and patterns back in a way that fosters insight[^15][^16]. This supports the idea that an LLM could help externalize one's current self-narrative and even project forward – essentially plotting points in that identity space in an interactive fashion.
+Notably, a 2024 article in Psychology Today described how LLM dialogues can serve as a "mirror" to the self, reflecting a user's thoughts and patterns back in a way that fosters insight[^15]. This supports the idea that an LLM could help externalize one's current self-narrative and even project forward – essentially plotting points in that identity space in an interactive fashion.
 
 ## Research Framing and Collaborative Exploration
 
@@ -198,16 +198,12 @@ By combining the strengths of psychological theory, philosophical reflection, an
 
 [^15]: Nosta, J. (2024). "AI as a Mirror Into the Self." *Psychology Today*. https://www.psychologytoday.com/us/blog/the-digital-self/202409/ai-as-a-mirror-into-the-self
 
-[^16]: Nosta, J. (2024). "AI as a Mirror Into the Self." *Psychology Today*. https://www.psychologytoday.com/us/blog/the-digital-self/202409/ai-as-a-mirror-into-the-self
+[^16]: Publications could emerge in venues ranging from machine learning conferences to psychology journals, demonstrating interdisciplinary impact of personality vectoring research.
 
-[^17]: Yarkoni, T. (2010). "Personality in 100,000 words: A large-scale analysis of personality and word use among bloggers." *Journal of Research in Personality*, 44(3), 363-373.
+[^17]: Kosinski, M., et al. (2013). "Private traits and attributes are predictable from digital records of human behavior." *Proceedings of the National Academy of Sciences*, 110(15), 5802-5805.
 
-[^18]: Nosta, J. (2024). "AI as a Mirror Into the Self." *Psychology Today*. https://www.psychologytoday.com/us/blog/the-digital-self/202409/ai-as-a-mirror-into-the-self
+[^18]: Bleidorn, W., & Hopwood, C. J. (2019). "Using machine learning to advance personality assessment and theory." *Personality and Social Psychology Review*, 23(2), 190-203.
 
 [^19]: Lee, S., et al. (2024). "Large Language Models and Text Embeddings for Detecting Depression and Suicide in Patient Narratives." *JAMA Network Open*, 7(11), e2443919.
 
-[^20]: PMC. "Large Language Models and Text Embeddings for Detecting Depression and Suicide in Patient Narratives." https://pmc.ncbi.nlm.nih.gov/articles/PMC12102709/
-
-[^21]: Cutler, A. (2022). "The Big Five are word vectors." *Vectors of Mind*. https://www.vectorsofmind.com/p/the-big-five-are-word-vectors
-
-[^22]: Greater Good Science Center. "Best Possible Self." *Practice | Greater Good in Action*. https://ggia.berkeley.edu/practice/best_possible_self
+[^20]: Tausczik, Y. R., & Pennebaker, J. W. (2010). "The psychological meaning of words: LIWC and computerized text analysis methods." *Journal of Language and Social Psychology*, 29(1), 24-54.
