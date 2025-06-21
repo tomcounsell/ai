@@ -1,7 +1,7 @@
 # Vectorized Identity and Personality Drift: Modeling Personal Transformation in Semantic Space
 
 **Author:** Tom Counsell, BA CS, RPCV  
-**Date:** January 2025  
+**Date:** June 21, 2025  
 **Keywords:** computational identity, semantic spaces, interdisciplinary research, experimental psychology, AI ethics
 
 ---

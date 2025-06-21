@@ -1,7 +1,7 @@
 # Personality Vectoring
 
 **Author:** Tom Counsell, BA CS, RPCV  
-**Date:** January 2025  
+**Date:** June 21, 2025  
 **Keywords:** personality psychology, semantic vectors, LLMs, personal development, computational psychology
 
 ---

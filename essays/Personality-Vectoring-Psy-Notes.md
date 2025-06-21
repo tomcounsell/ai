@@ -1,7 +1,7 @@
 # Personality Vectoring: Psychological Foundations
 
 **Author:** Tom Counsell, BA CS, RPCV  
-**Date:** January 2025  
+**Date:** June 21, 2025  
 **Keywords:** clinical psychology, Big Five traits, narrative identity, digital therapeutics, ethics
 
 ---

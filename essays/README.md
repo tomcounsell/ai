@@ -10,28 +10,28 @@ This collection presents research essays exploring the intersection of artificia
 ## Table of Contents
 
 ### [Personality Vectoring](./Personality-Vectoring.md)
-*Published: 2025*
+*Published: June 21, 2025*
 
 A foundational exploration of using Large Language Models to guide personal transformation by representing current and aspirational selves as vectors in semantic space. This paper outlines theoretical foundations from psychology and AI, reviews empirical precedents, and proposes a voice-based conversational interface for real-time guidance toward self-defined growth objectives.
 
 **Keywords:** *personality psychology, semantic vectors, LLMs, personal development, computational psychology*
 
 ### [Personality Vectoring: Psychological Foundations](./Personality-Vectoring-Psy-Notes.md)
-*Published: 2025*
+*Published: June 21, 2025*
 
 Comprehensive analysis examining Personality Vectoring from a clinical psychology perspective. Includes theoretical alignment with Big Five personality traits, narrative identity theory, methodological approaches for implementation, empirical evidence from related fields, and ethical considerations for therapeutic applications.
 
 **Keywords:** *clinical psychology, Big Five traits, narrative identity, digital therapeutics, ethics*
 
 ### [Vectorized Identity and Personality Drift: Research Foundation](./Vectorized-Identity-Research.md)
-*Published: 2025*
+*Published: June 21, 2025*
 
 In-depth research paper exploring theoretical and empirical foundations for representing human personality and identity as navigable vectors in high-dimensional semantic space. Presents experimental approaches, interdisciplinary perspectives, collaborative research frameworks, and extensive bibliography spanning psychology, philosophy, and artificial intelligence.
 
 **Keywords:** *computational identity, semantic spaces, interdisciplinary research, experimental psychology, AI ethics*
 
 ### [Context is King: Long Live Context](./Context-is-King.md)
-*Published: 2025*
+*Published: June 21, 2025*
 
 Technical white paper examining advanced approaches to context length extension and long-term memory systems in Large Language Models. Reviews recent innovations including cascading KV caches, infinite retrieval mechanisms, and episodic memory architectures that enable LLMs to maintain persistent context across extended interactions.
 

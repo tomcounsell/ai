@@ -1,7 +1,7 @@
 # Context is King: Long Live Context
 
 **Author:** Tom Counsell, BA CS, RPCV  
-**Date:** January 2025  
+**Date:** June 21, 2025  
 **Keywords:** LLM architecture, context windows, episodic memory, attention mechanisms, long-term AI systems
 
 ---
