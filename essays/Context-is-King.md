@@ -1,5 +1,11 @@
 # Context is King: Long Live Context
 
+**Author:** Tom Counsell, BA CS, RPCV  
+**Date:** January 2025  
+**Keywords:** LLM architecture, context windows, episodic memory, attention mechanisms, long-term AI systems
+
+---
+
 ## Introduction
 
 In the realm of Large Language Models (LLMs), context is king – the information provided in the prompt context largely determines the quality and relevance of an LLM's output. Recent advances have dramatically expanded the amount of context these models can handle in one go, from a few hundred tokens to hundreds of thousands or even millions¹. This expansion allows LLMs to consider entire books, extensive dialogue histories, or vast knowledge bases within a single inference. However, simply increasing context window sizes comes with steep computational costs and new challenges in maintaining performance. To truly "long live context," we need strategies that make an LLM's usable context effectively unbounded in time – allowing it to retain and recall information over long durations and dynamic environments, without suffering exponential slowdowns or degraded accuracy.

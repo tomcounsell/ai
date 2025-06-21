@@ -1,5 +1,11 @@
 # Vectorized Identity and Personality Drift: Modeling Personal Transformation in Semantic Space
 
+**Author:** Tom Counsell, BA CS, RPCV  
+**Date:** January 2025  
+**Keywords:** computational identity, semantic spaces, interdisciplinary research, experimental psychology, AI ethics
+
+---
+
 ## Abstract
 
 This paper explores the theoretical and empirical foundations for representing human personality and identity as navigable vectors in high-dimensional semantic space. We examine how Large Language Models (LLMs) and text embeddings can capture personality traits, track identity changes over time, and potentially guide personal transformation. Drawing from psychological theory, philosophical considerations, and computational methods, we outline experimental approaches, ethical considerations, and interdisciplinary research opportunities for developing AI-assisted personal development tools.
