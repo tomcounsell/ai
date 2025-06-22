@@ -12,6 +12,18 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Audio files and transcription chunks
+*.wav
+*.mp3
+*.m4a
+*.ogg
+*.flac
+*.aac
+transcriptions/**/chunks/
+transcriptions/**/*.wav
+transcriptions/**/*.mp3
+transcriptions/**/*.m4a
+
 # C extensions
 *.so
 
