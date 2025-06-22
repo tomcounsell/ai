@@ -1,8 +1,15 @@
 # Personality Vectoring: Psychological Foundations
+## *Clinical Perspectives on Computational Identity Transformation*
 
-**Author:** Tom Counsell, BA CS, RPCV  
-**Date:** June 21, 2025  
+<div align="center">
+
+**Tom Counsell, BA CS, RPCV**  
+*Independent Research in AI and Human-Computer Interaction*
+
+**Published:** June 21, 2025  
 **Keywords:** clinical psychology, Big Five traits, narrative identity, digital therapeutics, ethics
+
+</div>
 
 ---
 

@@ -1,8 +1,15 @@
 # Context is King: Long Live Context
+## *Advancing Long-Context Memory Systems for Large Language Models*
 
-**Author:** Tom Counsell, BA CS, RPCV  
-**Date:** June 21, 2024  
+<div align="center">
+
+**Tom Counsell, BA CS, RPCV**  
+*Independent Research in AI and Human-Computer Interaction*
+
+**Published:** June 21, 2025  
 **Keywords:** LLM architecture, context windows, episodic memory, attention mechanisms, long-term AI systems
+
+</div>
 
 ---
 
