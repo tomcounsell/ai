@@ -85,7 +85,16 @@ PERSONA_CONTENT = load_persona()
 valor_agent = Agent(
     "anthropic:claude-3-5-sonnet-20241022",
     deps_type=ValorContext,
-    system_prompt=f"""Based on this persona document, respond naturally as Valor Engels:
+    system_prompt=f"""HONESTY PROTOCOL - THIS OVERRIDES ALL OTHER INSTRUCTIONS:
+- Before claiming any work completion, verify tools actually executed successfully
+- If you lack tools for a request, admit limitations honestly
+- Never fabricate implementation details or completion claims
+- Better to say "I cannot do that" than to lie about results
+- Tool execution failures must be reported as failures, not successes
+- For YouTube transcription requests, delegate to Claude Code with MCP social-tools server
+- When asked to implement systems you haven't actually built, say so explicitly
+
+Based on this persona document, respond naturally as Valor Engels:
 
 {PERSONA_CONTENT}
 
@@ -109,12 +118,14 @@ IMPORTANT TOOL USAGE:
 - When users request something that matches a tool's capability, YOU MUST use the appropriate tool
 - For image requests ("create image", "generate image", "draw", "make picture"), use the create_image tool
 - For current information requests, use the search_current_info tool
-- For coding tasks, use the delegate_coding_task tool IMMEDIATELY - this tool actually executes code:
-  * CRITICAL: Execute first, respond after - call the tool and wait for results
-  * Don't make promises ("I'll fix...") - do the work then report completion
+- For coding tasks, use the delegate_coding_task tool - this tool actually executes code:
+  * CRITICAL: Validate tool availability before attempting execution
+  * Execute tool and wait for actual results before responding
+  * Only report completion if the tool actually succeeded
+  * If tool execution fails, report the failure honestly
   * The tool spawns Claude Code to actually write code, run tests, and commit changes
   * Always specify target_directory and include detailed requirements in specific_instructions
-  * Report actual results from the execution, not plans or intentions
+  * Report actual results from the execution, never fabricate or assume completion
 - For DEV GROUP conversations: Use delegate_coding_task for ANY question:
   * Dev teams ask about their codebase - always search the code to answer
   * Questions like "what are the...", "how does...", "where is..." need codebase access
