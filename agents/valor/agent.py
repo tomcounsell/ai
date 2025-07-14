@@ -97,6 +97,67 @@ TELEGRAM IMAGES: If tool returns "TELEGRAM_IMAGE_GENERATED|", return exactly tha
 )
 
 
+@valor_agent.tool
+def delegate_coding_task(
+    ctx: RunContext[ValorContext],
+    task_description: str,
+    target_directory: str = "",
+    specific_instructions: str = "",
+) -> str:
+    """Execute development tasks and codebase searches using Claude Code.
+    
+    For dev groups: Use this for ANY codebase question to search actual code.
+    For development: Executes real coding tasks with commits.
+    
+    Args:
+        ctx: Runtime context with chat information
+        task_description: What to build, fix, or search for
+        target_directory: Optional specific directory (auto-resolved from chat)
+        specific_instructions: Additional requirements or constraints
+        
+    Returns:
+        Actual results from Claude Code execution or search
+    """
+    try:
+        # Get chat context for workspace resolution
+        chat_id = str(ctx.deps.chat_id) if ctx.deps.chat_id else None
+        
+        # Simple workspace resolution using config
+        working_dir = target_directory or "/Users/valorengels/src/ai"  # Default
+        
+        if chat_id:
+            # Load workspace config
+            import json
+            from pathlib import Path
+            
+            config_path = Path(__file__).parent.parent.parent / "config" / "workspace_config.json"
+            if config_path.exists():
+                with open(config_path) as f:
+                    config = json.load(f)
+                
+                # Look up workspace by chat_id
+                for workspace_name, workspace_info in config.get("workspaces", {}).items():
+                    if workspace_info.get("telegram_chat_id") == chat_id:
+                        working_dir = workspace_info.get("working_directory", working_dir)
+                        break
+        
+        # Use Claude Code delegation
+        from tools.valor_delegation_tool import spawn_valor_session
+        
+        result = spawn_valor_session(
+            task_description=task_description,
+            target_directory=working_dir,
+            specific_instructions=specific_instructions,
+            force_sync=True,
+            chat_id=chat_id
+        )
+        
+        return result
+        
+    except Exception as e:
+        return f"❌ **Error**: {str(e)}\n\nCannot access codebase. Check workspace configuration."
+
+
 def _execute_with_session_management(
     prompt: str,
     working_directory: str,
@@ -422,99 +483,6 @@ def analyze_shared_image(
         image_path=image_path, question=question if question else None, context=chat_context
     )
 
-
-@valor_agent.tool
-def delegate_coding_task(
-    ctx: RunContext[ValorContext],
-    task_description: str,
-    target_directory: str = "",
-    specific_instructions: str = "",
-) -> str:
-    """Execute development tasks autonomously using Claude Code sessions.
-
-    This tool spawns a new Claude Code session to actually execute coding tasks rather than 
-    just providing guidance. It performs real work including writing code, running tests, 
-    making git commits, and providing detailed results.
-
-    The tool executes tasks including:
-    - Writing and modifying code files
-    - Running tests and fixing failures
-    - Git operations (commit, branch management)
-    - Dependency management and builds
-    - Code refactoring and optimization
-
-    Use this for ANY development work that needs to be actually completed:
-    - "Fix the login bug" - Will actually fix the bug and commit changes
-    - "Add a dark mode feature" - Will implement the feature with tests
-    - "Refactor the API endpoints" - Will perform refactoring with validation
-    - "Update dependencies and run tests" - Will update deps and ensure tests pass
-    - "Implement user authentication" - Will build complete auth system
-
-    The tool operates in the correct workspace directory and follows project conventions.
-    For Telegram groups, working directory context is automatically determined.
-
-    Args:
-        ctx: The runtime context containing chat information.
-        task_description: What needs to be built, fixed, or implemented.
-        target_directory: (Optional) Specific directory context. If empty and chat_id provided, uses workspace directory.
-        specific_instructions: (Optional) Any additional constraints or preferences.
-
-    Returns:
-        str: Detailed execution results including changes made, tests run, and git status.
-
-    Example:
-        >>> delegate_coding_task(ctx, "Fix the authentication bug")
-        '✅ **Task Completed Successfully**\\n\\nTask: Fix authentication bug...'
-    """
-    import time
-    start_time = time.time()
-    
-    try:
-        # Use unified workspace resolution
-        from utilities.workspace_validator import WorkspaceResolver
-        
-        # Get chat context
-        chat_id = str(ctx.deps.chat_id) if ctx.deps.chat_id else None
-        username = ctx.deps.username
-        
-        working_dir, context_desc = WorkspaceResolver.resolve_working_directory(
-            chat_id=chat_id,
-            username=username,
-            is_group_chat=ctx.deps.is_group_chat,
-            target_directory=target_directory
-        )
-        
-        print(f"📁 Workspace resolved: {context_desc}")
-        print(f"🎯 Working directory: {working_dir}")
-        
-        # Use the new SDK-powered delegation
-        result = spawn_valor_session(
-            task_description=task_description,
-            target_directory=working_dir,
-            specific_instructions=specific_instructions,
-            force_sync=True,  # Always execute synchronously for immediate results
-            chat_id=chat_id
-        )
-        
-        return result
-        
-    except Exception as e:
-        error_message = str(e)
-        execution_time = time.time() - start_time
-        
-        print(f"❌ Task failed after {execution_time:.1f}s: {error_message}")
-        return f"""❌ **Development Task Error**
-
-The coding task execution failed: {error_message}
-
-I can provide guidance on this task instead. What specifically do you need help with regarding:
-"{task_description}"?
-
-I can help with:
-- Implementation approach and code examples
-- Architecture recommendations  
-- Debugging strategies
-- Code review and best practices"""
 
 
 @valor_agent.tool
