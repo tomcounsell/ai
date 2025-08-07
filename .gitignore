@@ -177,3 +177,5 @@ tests/test_results_*.json
 # Huey runtime files
 huey.pid
 data/
+.bmad*
+.claude/commands/BMad**
