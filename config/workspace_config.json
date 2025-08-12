@@ -1,135 +1,314 @@
 {
-  "workspaces": {
-    "Yudame": {
-      "notion_db_url": "https://www.notion.so/yudame/****",
-      "description": "Yudame team chat and project management",
-      "working_directory": "/Users/valorengels/src/ai",
-      "telegram_chat_id": "-4719889199",
-      "aliases": ["yudame"],
-      "daydream_priority": 10
-    },
-    "Yudame Dev": {
-      "notion_db_url": "https://www.notion.so/yudame/****",
-      "description": "Yudame development team tasks and management",
-      "working_directory": "/Users/valorengels/src/ai",
-      "telegram_chat_id": "-4891178445",
-      "aliases": ["yudame dev"],
-      "is_dev_group": true,
-      "daydream_priority": 9
-    },
-    "Verkstad": {
-      "notion_db_url": "https://www.notion.so/yudame/****",
-      "description": "Verkstad project management",
-      "working_directory": "/Users/valorengels/src/verkstad",
-      "telegram_chat_id": "-1002455228990",
-      "aliases": ["verkstad"],
-      "daydream_priority": 7
-    },
-    "PsyOPTIMAL": {
-      "notion_db_url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
-      "description": "PsyOPTIMAL team chat and project management",
-      "working_directory": "/Users/valorengels/src/psyoptimal",
-      "telegram_chat_id": "-1002600253717",
-      "aliases": ["psyoptimal", "PO"],
-      "daydream_priority": 0
-    },
-    "PsyOPTIMAL Dev": {
-      "notion_db_url": "https://www.notion.so/yudame/1d22bc894d1080798dcbe7813b006c5c",
-      "description": "PsyOPTIMAL development tasks and management",
-      "working_directory": "/Users/valorengels/src/psyoptimal",
-      "telegram_chat_id": "-4897329503",
-      "aliases": ["psyoptimal dev", "PO dev"],
-      "is_dev_group": true,
-      "daydream_priority": 7
-    },
-    "Fuse": {
-      "notion_db_url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
-      "description": "Fuse team chat and project management",
-      "working_directory": "/Users/valorengels/src/deckfusion",
-      "telegram_chat_id": "-1002374450243",
-      "aliases": ["fuse", "F"],
-      "daydream_priority": 0
-    },
-    "Fuse Dev": {
-      "notion_db_url": "https://www.notion.so/deckfusion/48a27df303424aa4bd4c0dec1ff908f4",
-      "description": "Fuse development tasks and management",
-      "working_directory": "/Users/valorengels/src/deckfusion",
-      "telegram_chat_id": "-1002553869320",
-      "aliases": ["fuse dev", "F dev"],
-      "is_dev_group": true,
-      "daydream_priority": 5
-    },
-    "FlexTrip": {
-      "notion_db_url": "https://www.notion.so/yudame/****",
-      "description": "FlexTrip team chat and project management",
-      "working_directory": "/Users/valorengels/src/flextrip",
-      "telegram_chat_id": null,
-      "aliases": ["flextrip"],
-      "daydream_priority": 0
-    },
-    "FlexTrip Dev": {
-      "notion_db_url": "https://www.notion.so/yudame/****",
-      "description": "FlexTrip team development tasks and management",
-      "working_directory": "/Users/valorengels/src/flextrip",
-      "telegram_chat_id": null,
-      "aliases": ["flextrip dev"],
-      "is_dev_group": true,
-      "daydream_priority": 0
-    },
-    "Valor Test Team": {
-      "notion_db_url": "https://www.notion.so/yudame/****",
-      "description": "Test group for Valor bot testing and development",
-      "working_directory": "/Users/valorengels/src/test",
-      "telegram_chat_id": "-4818206585",
-      "aliases": ["test", "valor test"],
-      "is_test_group": true,
-      "daydream_priority": 2
-    }
+  "workspace": {
+    "name": "AI Rebuild Workspace",
+    "version": "1.0.0",
+    "description": "Comprehensive AI agent and tool management workspace",
+    "created_at": "2025-01-01T00:00:00Z",
+    "updated_at": "2025-01-01T00:00:00Z"
   },
-  "telegram_groups": {
-    "-1002600253717": "PsyOPTIMAL",
-    "-4897329503": "PsyOPTIMAL Dev",
-    "-1002553869320": "Fuse Dev",
-    "-4891178445": "Yudame Dev",
-    "-4719889199": "Yudame",
-    "-1002374450243": "Fuse",
-    "-1002455228990": "Verkstad",
-    "-4818206585": "Valor Test Team"
-  },
-  "dm_whitelist": {
-    "description": "Users allowed to send direct messages to the bot",
-    "default_working_directory": "/Users/valorengels/src/ai",
-    "allowed_users": {
-      "tomcounsell": {
-        "username": "tomcounsell",
-        "description": "Tom Counsell - Owner and Boss",
-        "working_directory": "/Users/valorengels/src/ai"
+  
+  "agents": {
+    "default_model": "claude-3-sonnet",
+    "max_concurrent": 5,
+    "timeout": 300,
+    "retry_attempts": 3,
+    "available_agents": [
+      {
+        "id": "claude-assistant",
+        "name": "Claude Assistant",
+        "model": "claude-3-sonnet",
+        "description": "General purpose AI assistant",
+        "capabilities": ["text_generation", "analysis", "reasoning", "coding"],
+        "max_tokens": 4096,
+        "temperature": 0.7,
+        "enabled": true
       },
-      "valorengels": {
-        "username": "valorengels",
-        "description": "Bot self - for self-ping tests and system validation",
-        "working_directory": "/Users/valorengels/src/ai"
+      {
+        "id": "code-reviewer",
+        "name": "Code Reviewer",
+        "model": "claude-3-opus",
+        "description": "Specialized code review and analysis agent",
+        "capabilities": ["code_review", "security_analysis", "optimization"],
+        "max_tokens": 8192,
+        "temperature": 0.3,
+        "enabled": true
+      },
+      {
+        "id": "research-agent",
+        "name": "Research Agent",
+        "model": "claude-3-haiku",
+        "description": "Fast research and information gathering",
+        "capabilities": ["research", "summarization", "fact_checking"],
+        "max_tokens": 2048,
+        "temperature": 0.5,
+        "enabled": true
+      }
+    ]
+  },
+  
+  "tools": {
+    "enabled": true,
+    "auto_discovery": true,
+    "tool_directories": [
+      "tools/",
+      "mcp_servers/",
+      "integrations/"
+    ],
+    "available_tools": [
+      {
+        "id": "file-manager",
+        "name": "File Manager",
+        "type": "builtin",
+        "description": "File system operations and management",
+        "capabilities": ["read", "write", "list", "search"],
+        "enabled": true,
+        "config": {
+          "max_file_size": "100MB",
+          "allowed_extensions": ["*"],
+          "restricted_paths": ["/etc", "/sys", "/proc"]
+        }
+      },
+      {
+        "id": "web-search",
+        "name": "Web Search",
+        "type": "api",
+        "description": "Internet search capabilities",
+        "capabilities": ["search", "summarize"],
+        "enabled": true,
+        "config": {
+          "provider": "perplexity",
+          "max_results": 10,
+          "timeout": 30
+        }
+      },
+      {
+        "id": "code-executor",
+        "name": "Code Executor",
+        "type": "sandbox",
+        "description": "Safe code execution environment",
+        "capabilities": ["python", "javascript", "shell"],
+        "enabled": false,
+        "config": {
+          "timeout": 60,
+          "memory_limit": "512MB",
+          "network_access": false
+        }
+      },
+      {
+        "id": "telegram-bot",
+        "name": "Telegram Integration",
+        "type": "integration",
+        "description": "Telegram bot and messaging integration",
+        "capabilities": ["send_message", "receive_message", "file_upload"],
+        "enabled": false,
+        "config": {
+          "webhook_url": null,
+          "polling_interval": 1000,
+          "max_message_length": 4096
+        }
+      },
+      {
+        "id": "notion-sync",
+        "name": "Notion Integration",
+        "type": "integration",
+        "description": "Notion database and page synchronization",
+        "capabilities": ["read_database", "write_page", "sync"],
+        "enabled": false,
+        "config": {
+          "default_database_id": null,
+          "sync_interval": 3600,
+          "auto_create_pages": true
+        }
+      }
+    ]
+  },
+  
+  "workflows": {
+    "enabled": true,
+    "auto_save": true,
+    "max_concurrent": 3,
+    "default_timeout": 600,
+    "templates": [
+      {
+        "id": "code-review-workflow",
+        "name": "Code Review Workflow",
+        "description": "Automated code review process",
+        "steps": [
+          {
+            "id": "analyze",
+            "agent": "code-reviewer",
+            "action": "analyze_code",
+            "timeout": 120
+          },
+          {
+            "id": "security-check",
+            "agent": "code-reviewer", 
+            "action": "security_analysis",
+            "timeout": 60
+          },
+          {
+            "id": "generate-report",
+            "agent": "claude-assistant",
+            "action": "create_report",
+            "timeout": 30
+          }
+        ],
+        "enabled": true
+      },
+      {
+        "id": "research-workflow",
+        "name": "Research Workflow",
+        "description": "Information gathering and analysis process",
+        "steps": [
+          {
+            "id": "search",
+            "tool": "web-search",
+            "action": "search",
+            "timeout": 30
+          },
+          {
+            "id": "analyze",
+            "agent": "research-agent",
+            "action": "analyze_results",
+            "timeout": 60
+          },
+          {
+            "id": "summarize",
+            "agent": "claude-assistant",
+            "action": "create_summary",
+            "timeout": 30
+          }
+        ],
+        "enabled": true
+      }
+    ]
+  },
+  
+  "integrations": {
+    "telegram": {
+      "enabled": false,
+      "bot_token": null,
+      "webhook_url": null,
+      "allowed_users": [],
+      "commands": {
+        "/help": "Show available commands",
+        "/status": "Get system status",
+        "/chat": "Start AI chat session",
+        "/stop": "Stop current session"
       }
     },
-    "allowed_user_ids": {
-      "179144806": {
-        "description": "Tom Counsell - User ID fallback (no public username)",
-        "working_directory": "/Users/valorengels/src/ai"
-      },
-      "6914249008": {
-        "description": "Bot self (valorengels) - for self-ping tests",
-        "working_directory": "/Users/valorengels/src/ai"
-      },
-      "66968934582": {
-        "description": "Bot self (valorengels) - legacy user ID",
-        "working_directory": "/Users/valorengels/src/ai"
+    
+    "notion": {
+      "enabled": false,
+      "workspace_id": null,
+      "default_database": null,
+      "sync_settings": {
+        "auto_sync": false,
+        "sync_interval": 3600,
+        "conflict_resolution": "latest_wins"
+      }
+    },
+    
+    "mcp": {
+      "enabled": true,
+      "server_discovery": true,
+      "auto_connect": false,
+      "servers": [
+        {
+          "name": "filesystem-server",
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-filesystem"],
+          "env": {
+            "ALLOWED_DIRECTORIES": "."
+          },
+          "enabled": true
+        },
+        {
+          "name": "web-search-server",
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-web-search"],
+          "env": {},
+          "enabled": false
+        }
+      ]
+    }
+  },
+  
+  "security": {
+    "sandbox_mode": true,
+    "allowed_domains": [
+      "localhost",
+      "127.0.0.1",
+      "*.anthropic.com",
+      "*.openai.com",
+      "*.perplexity.ai",
+      "*.notion.com",
+      "*.telegram.org"
+    ],
+    "blocked_commands": [
+      "rm -rf",
+      "sudo",
+      "su",
+      "chmod 777",
+      "chown",
+      "mkfs",
+      "dd"
+    ],
+    "file_restrictions": {
+      "max_upload_size": "100MB",
+      "allowed_extensions": [
+        ".txt", ".md", ".py", ".js", ".json", ".yaml", ".yml",
+        ".csv", ".tsv", ".log", ".conf", ".cfg", ".ini"
+      ],
+      "blocked_paths": [
+        "/etc/passwd",
+        "/etc/shadow",
+        "/etc/hosts",
+        "/root",
+        "/sys",
+        "/proc"
+      ]
+    }
+  },
+  
+  "monitoring": {
+    "enabled": true,
+    "log_level": "INFO",
+    "metrics": {
+      "collect_performance": true,
+      "collect_usage": true,
+      "retention_days": 30
+    },
+    "alerts": {
+      "email_enabled": false,
+      "webhook_enabled": false,
+      "thresholds": {
+        "memory_usage": 80,
+        "cpu_usage": 90,
+        "error_rate": 5,
+        "response_time": 5000
       }
     }
   },
-  "deprecated_mappings": {
-    "note": "Groups below were discovered but not mapped to workspaces yet",
-    "-4503471217": "PsyOptimal (legacy)",
-    "-1002527205614": "Golden Egg",
-    "-4785378420": "Golden Egg (legacy)"
+  
+  "backup": {
+    "enabled": true,
+    "auto_backup": true,
+    "backup_interval": 86400,
+    "retention_count": 7,
+    "backup_locations": [
+      "data/backups/"
+    ],
+    "include_files": [
+      "config/",
+      "data/",
+      "logs/"
+    ],
+    "exclude_patterns": [
+      "*.tmp",
+      "*.log",
+      "temp/",
+      ".env"
+    ]
   }
 }
