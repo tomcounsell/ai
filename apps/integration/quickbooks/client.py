@@ -1,5 +1,5 @@
 """
-QuickBooks API client for MCP server.
+QuickBooks API client.
 """
 
 import logging
@@ -32,9 +32,7 @@ class QuickBooksClient:
         
     async def _get_credentials(self) -> tuple[str, str]:
         """Get QuickBooks credentials from database."""
-        # In production, fetch from database
-        # For now, return dummy values
-        from .models import QuickBooksConnection
+        from apps.ai.models import QuickBooksConnection
         
         try:
             connection = await QuickBooksConnection.objects.aget(

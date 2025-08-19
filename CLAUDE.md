@@ -307,11 +307,12 @@ Read these documents when working on specific areas:
 ## QuickBooks MCP Server Specific Guidelines
 
 ### MCP Server Development
-- The MCP server is in `apps/mcp_server/`
-- Main server implementation: `mcp_server.py`
-- QuickBooks API client: `quickbooks_client.py`
-- MCP tools definitions: `mcp_tools.py`
-- Test MCP server locally with: `uv run python -m apps.mcp_server.mcp_server`
+- The MCP server is in `apps/ai/mcp/`
+- Main server implementation: `quickbooks_server.py`
+- QuickBooks API client: `apps/integration/quickbooks/client.py`
+- MCP tools definitions: `quickbooks_tools.py`
+- QuickBooks models: `apps/ai/models/quickbooks.py`
+- Test MCP server locally with: `uv run python -m apps.ai.mcp.quickbooks_server`
 
 ### QuickBooks Integration
 - Use sandbox mode for development (QUICKBOOKS_SANDBOX_MODE=True)
@@ -330,13 +331,13 @@ Read these documents when working on specific areas:
 ### Testing MCP Tools
 ```bash
 # Test individual MCP tools
-uv run python -m pytest apps/mcp_server/tests/test_tools.py
+uv run python -m pytest apps/ai/tests/test_quickbooks_tools.py
 
 # Test QuickBooks client
-uv run python -m pytest apps/mcp_server/tests/test_quickbooks_client.py
+uv run python -m pytest apps/integration/quickbooks/tests/test_client.py
 
 # Test MCP protocol compliance
-uv run python -m pytest apps/mcp_server/tests/test_mcp_protocol.py
+uv run python -m pytest apps/ai/tests/test_mcp_quickbooks.py
 ```
 
 ### Environment Variables for QuickBooks
@@ -357,11 +358,11 @@ QUICKBOOKS_SANDBOX_MODE=True  # Use False for production
 4. MCP server can now access that organization's QuickBooks data
 
 #### Add a new MCP tool
-1. Define tool schema in `mcp_tools.py`
+1. Define tool schema in `apps/ai/mcp/quickbooks_tools.py`
 2. Add tool to `QUICKBOOKS_TOOLS` list
-3. Implement handler in `mcp_server.py`
-4. Add corresponding method in `quickbooks_client.py`
-5. Write tests in `apps/mcp_server/tests/`
+3. Implement handler in `apps/ai/mcp/quickbooks_server.py`
+4. Add corresponding method in `apps/integration/quickbooks/client.py`
+5. Write tests in `apps/ai/tests/` and `apps/integration/quickbooks/tests/`
 
 #### Handle QuickBooks webhooks
 1. Webhook notifications arrive at `/api/webhooks/quickbooks/`

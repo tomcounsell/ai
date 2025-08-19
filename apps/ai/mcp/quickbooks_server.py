@@ -1,5 +1,5 @@
 """
-MCP Server implementation for QuickBooks integration.
+QuickBooks MCP Server implementation.
 """
 
 import asyncio
@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Optional
 from mcp import Resource, Server, Tool
 from mcp.server.stdio import stdio_server
 
-from .mcp_tools import QUICKBOOKS_TOOLS
-from .quickbooks_client import QuickBooksClient
+from .quickbooks_tools import QUICKBOOKS_TOOLS
+from apps.integration.quickbooks.client import QuickBooksClient
 
 logger = logging.getLogger(__name__)
 

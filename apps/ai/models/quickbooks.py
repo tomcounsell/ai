@@ -1,3 +1,7 @@
+"""
+QuickBooks integration models for MCP server.
+"""
+
 from django.contrib.auth import get_user_model
 from django.db import models
 
@@ -90,32 +94,3 @@ class MCPSession(Timestampable, models.Model):
         
     def __str__(self):
         return f"Session {self.session_id} - {self.organization.name}"
-
-
-class APIKey(Timestampable, models.Model):
-    """API keys for organization authentication."""
-    
-    organization = models.ForeignKey(
-        Organization,
-        on_delete=models.CASCADE,
-        related_name="api_keys",
-    )
-    name = models.CharField(max_length=255)
-    key = models.CharField(max_length=255, unique=True)
-    is_active = models.BooleanField(default=True)
-    last_used_at = models.DateTimeField(null=True, blank=True)
-    expires_at = models.DateTimeField(null=True, blank=True)
-    
-    # Permissions
-    permissions = models.JSONField(
-        default=list,
-        help_text="List of allowed MCP tools/resources",
-    )
-    
-    class Meta:
-        ordering = ["-created_at"]
-        verbose_name = "API Key"
-        verbose_name_plural = "API Keys"
-        
-    def __str__(self):
-        return f"{self.name} - {self.organization.name}"
