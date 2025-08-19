@@ -420,3 +420,5 @@ secrets/
 config/workspace_config_local.json
 *.session
 telegram_session.session
+.env.backup
+.mcp.json
