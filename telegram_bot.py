@@ -159,10 +159,11 @@ class TelegramBot:
                 if self.db_manager:
                     try:
                         await self.db_manager.add_chat_message(
-                            chat_id=chat_id,
-                            user_id=str(sender.id),
-                            message=event.text,
-                            role="user"
+                            project_id="telegram",
+                            session_id=chat_id,
+                            role="user",
+                            content=event.text,
+                            metadata={"sender_id": str(sender.id), "sender_name": sender.first_name}
                         )
                     except Exception as e:
                         logger.error(f"Database error: {e}")
@@ -199,13 +200,18 @@ class TelegramBot:
         
     def _generate_demo_response(self, message: str, stats: dict) -> str:
         """Generate a demo response without API keys"""
+        # Get token usage safely
+        token_total = stats.get('token_usage', {}).get('total', 0)
+        token_max = stats.get('token_usage', {}).get('max_tokens', 100000)
+        message_count = stats.get('message_count', {}).get('total', 0)
+        
         return f"""🤖 AI Rebuild Bot (Demo Mode)
 
 Received: "{message[:100]}"
 
 📊 Context Stats:
-• Tokens: {stats['token_usage']['total']}/{stats['token_usage']['max_tokens']}
-• Messages: {stats['message_count']['total']}
+• Tokens: {token_total}/{token_max}
+• Messages: {message_count}
 • Quality: 9.8/10
 
 💡 Note: Running in demo mode. Add API keys to enable full AI responses.
