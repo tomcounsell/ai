@@ -63,6 +63,14 @@ class TelegramBot:
             self.api_hash
         )
         
+        # Get phone and password for auto-login
+        self.phone = os.getenv('TELEGRAM_PHONE')
+        self.password = os.getenv('TELEGRAM_PASSWORD')
+        
+        # Get chat filtering settings
+        self.allowed_groups = os.getenv('TELEGRAM_ALLOWED_GROUPS', '').strip('"').split(',') if os.getenv('TELEGRAM_ALLOWED_GROUPS') else []
+        self.allow_dms = os.getenv('TELEGRAM_ALLOW_DMS', 'false').lower() == 'true'
+        
         # Initialize AI components
         self.db_manager: Optional[DatabaseManager] = None
         self.context_manager: Optional[ContextWindowManager] = None
@@ -88,8 +96,11 @@ class TelegramBot:
         # Initialize components
         await self.initialize_components()
         
-        # Connect to Telegram
-        await self.client.start()
+        # Connect to Telegram with phone and password
+        await self.client.start(
+            phone=lambda: self.phone,
+            password=lambda: self.password
+        )
         
         # Get bot info
         me = await self.client.get_me()
@@ -101,9 +112,22 @@ class TelegramBot:
         async def handle_message(event):
             """Handle incoming messages"""
             try:
-                # Get sender info
+                # Get sender and chat info
                 sender = await event.get_sender()
                 chat = await event.get_chat()
+                
+                # Check if we should handle this message
+                if event.is_private:
+                    # Direct message
+                    if not self.allow_dms:
+                        logger.info(f"Ignoring DM from {sender.first_name} (DMs disabled)")
+                        return
+                elif event.is_group or event.is_channel:
+                    # Group/channel message
+                    chat_title = getattr(chat, 'title', str(chat.id))
+                    if self.allowed_groups and chat_title not in self.allowed_groups:
+                        logger.info(f"Ignoring message from {chat_title} (not in allowed groups)")
+                        return
                 
                 # Log the message
                 logger.info(f"📨 New message from {sender.first_name}: {event.text[:50]}...")
