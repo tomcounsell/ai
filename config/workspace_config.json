@@ -271,8 +271,24 @@
     }
   },
   
+  "database": {
+    "path": "data/ai_rebuild.db",
+    "backup_on_startup": true,
+    "run_migrations": true,
+    "pool_size": 5
+  },
+  
+  "components": {
+    "agents": true,
+    "mcp_servers": true,
+    "telegram": false,
+    "tools": true
+  },
+  
   "monitoring": {
     "enabled": true,
+    "dashboard_port": 8081,
+    "dashboard_host": "localhost",
     "log_level": "INFO",
     "metrics": {
       "collect_performance": true,
