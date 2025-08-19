@@ -1,0 +1,59 @@
+{% comment %}
+Radio Button Set Component
+
+Parameters:
+- field: The form field object (required)
+- label: Label text (optional, uses field.label if not provided)
+- help_text: Help text to display below the field (optional, uses field.help_text if not provided)
+- required: Whether the field is required (optional, defaults to field.field.required)
+- radio_class: Additional CSS classes for the radio elements (optional)
+- label_class: Additional CSS classes for the field label element (optional)
+- option_label_class: Additional CSS classes for the option label elements (optional)
+
+Usage:
+{% include "components/forms/radio_set.html" with field=form.gender %}
+{% include "components/forms/radio_set.html" with field=form.payment_method label="Select Payment Method" %}
+{% endcomment %}
+
+{% with field_id=field.id_for_label %}
+<div class="mb-4">
+  {% with label_text=label|default:field.label %}
+    {% if label_text %}
+      <p class="block text-gray-700 font-semibold mb-2 {% if required|default:field.field.required %}{% else %}font-normal opacity-80{% endif %} {{ label_class }}">
+        {{ label_text }}
+        {% if required|default:field.field.required %}<span class="text-red-500">*</span>{% endif %}
+      </p>
+    {% endif %}
+  {% endwith %}
+
+  <div class="space-y-2">
+    {% for option in field.field.choices %}
+      <div class="flex items-center">
+        <input
+          type="radio"
+          name="{{ field.html_name }}"
+          id="{{ field_id }}_{{ forloop.counter }}"
+          value="{{ option.0 }}"
+          {% if option.0|stringformat:"s" == field.value|stringformat:"s" %}checked{% endif %}
+          {% if required|default:field.field.required %}required{% endif %}
+          class="w-4 h-4 text-blue-600 border-gray-300 focus:ring-2 focus:ring-blue-500
+                 {{ radio_class }}"
+        >
+        <label for="{{ field_id }}_{{ forloop.counter }}" class="ml-2 block text-gray-700 {{ option_label_class }}">
+          {{ option.1 }}
+        </label>
+      </div>
+    {% endfor %}
+  </div>
+
+  {% if field.errors %}
+    <p class="text-red-500 text-sm mt-1">{{ field.errors.0 }}</p>
+  {% endif %}
+
+  {% with help=help_text|default:field.help_text %}
+    {% if help %}
+      <p class="text-gray-500 text-sm mt-1">{{ help }}</p>
+    {% endif %}
+  {% endwith %}
+</div>
+{% endwith %}

@@ -1,0 +1,93 @@
+{% extends "components/_component_base.html" %}
+
+{% comment %}
+  Team Card Component
+  ================
+
+  Purpose:
+  Displays a card with team information, including name, description, and
+  member count. This component can be loaded dynamically via HTMX or included
+  directly in full pages.
+
+  Context Variables:
+  - team: The Team object to display (required)
+  - is_member: Boolean indicating if current user is a member (optional)
+  - is_admin: Boolean indicating if current user is an admin (optional)
+
+  HTMX Integration:
+  - Join/Leave button updates membership via HTMX
+  - Card can be refreshed via HTMX
+
+  Usage:
+  {% include "components/cards/card_team.html" with team=team %}
+{% endcomment %}
+
+{% block content %}
+<div
+  id="team-card-{{ team.id }}"
+  class="team-card {% if is_member %}is-member{% endif %}"
+>
+  <div class="card-header">
+    <h3>{{ team.name }}</h3>
+    {% if team.created_at %}
+    <span class="card-meta">Created {{ team.created_at|date }}</span>
+    {% endif %}
+  </div>
+
+  <div class="card-body">
+    {% if team.description %}
+    <p class="team-description">{{ team.description }}</p>
+    {% endif %}
+
+    <div class="team-stats">
+      <div class="stat-item">
+        <span class="stat-label">Members</span>
+        <span class="stat-value">{{ team.members.count }}</span>
+      </div>
+      {% if team.projects_count %}
+      <div class="stat-item">
+        <span class="stat-label">Projects</span>
+        <span class="stat-value">{{ team.projects_count }}</span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="card-footer">
+    <a
+      href="{% url 'team:detail' team.id %}"
+      class="btn-link"
+    >
+      View Details
+    </a>
+
+    {% if not is_member %}
+    <button
+      hx-post="{% url 'team:join' team.id %}"
+      hx-target="#team-card-{{ team.id }}"
+      class="btn-primary"
+    >
+      Join Team
+    </button>
+    {% elif not is_admin %}
+    <button
+      hx-delete="{% url 'team:leave' team.id %}"
+      hx-target="#team-card-{{ team.id }}"
+      hx-confirm="Are you sure you want to leave this team?"
+      class="btn-outline"
+    >
+      Leave Team
+    </button>
+    {% endif %}
+
+    {% if is_admin %}
+    <a
+      href="{% url 'team:edit' team.id %}"
+      class="btn-secondary"
+    >
+      Manage
+    </a>
+    {% endif %}
+  </div>
+</div>
+{% endblock content %}

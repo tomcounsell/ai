@@ -1,0 +1,133 @@
+{% load i18n %}
+
+<div class="p-4">
+    <div class="mb-4">
+        <h3 class="text-lg font-semibold">{% trans "User Profile" %}</h3>
+        <p class="text-sm text-gray-600 dark:text-gray-400">{% trans "User information and profile details" %}</p>
+    </div>
+
+    <div class="mb-6 grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="border rounded-xs p-4 bg-white dark:bg-gray-800">
+            <h4 class="text-base font-semibold mb-3">{% trans "Personal Information" %}</h4>
+
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Full Name" %}</p>
+                    <p class="mt-1">{{ original.first_name }} {{ original.last_name }}</p>
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Username" %}</p>
+                    <p class="mt-1">{{ original.username }}</p>
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Email" %}</p>
+                    <p class="mt-1">{{ original.email }}</p>
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Joined" %}</p>
+                    <p class="mt-1">{{ original.date_joined|date:"M d, Y" }}</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="border rounded-xs p-4 bg-white dark:bg-gray-800">
+            <h4 class="text-base font-semibold mb-3">{% trans "Account Information" %}</h4>
+
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Status" %}</p>
+                    <p class="mt-1">
+                        {% if original.is_active %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                                {% trans "Active" %}
+                            </span>
+                        {% else %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">
+                                {% trans "Inactive" %}
+                            </span>
+                        {% endif %}
+                    </p>
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Staff Status" %}</p>
+                    <p class="mt-1">
+                        {% if original.is_staff %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                                {% trans "Staff" %}
+                            </span>
+                        {% else %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200">
+                                {% trans "Regular User" %}
+                            </span>
+                        {% endif %}
+                    </p>
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Date Joined" %}</p>
+                    <p class="mt-1">{{ original.date_joined|date:"M d, Y" }}</p>
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Last Login" %}</p>
+                    <p class="mt-1">{{ original.last_login|date:"M d, Y H:i"|default:"-" }}</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="mb-6 border rounded-xs p-4 bg-white dark:bg-gray-800">
+        <h4 class="text-base font-semibold mb-3">{% trans "Biography" %}</h4>
+        <div class="prose dark:prose-dark">
+            {% if original.biography %}
+                <p>{{ original.biography|linebreaks }}</p>
+            {% else %}
+                <p class="text-gray-500 dark:text-gray-400">{% trans "No biography provided." %}</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div class="mb-6 border rounded-xs p-4 bg-white dark:bg-gray-800">
+        <h4 class="text-base font-semibold mb-3">{% trans "System Permissions" %}</h4>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+                <div class="flex items-center">
+                    {% if original.is_staff %}
+                        <span class="material-symbols-outlined text-green-500 mr-2">check_circle</span>
+                    {% else %}
+                        <span class="material-symbols-outlined text-gray-400 mr-2">cancel</span>
+                    {% endif %}
+                    <span>{% trans "Staff" %}</span>
+                </div>
+                <p class="text-xs text-gray-500 dark:text-gray-400 ml-8">{% trans "Can access the admin site" %}</p>
+            </div>
+            <div>
+                <div class="flex items-center">
+                    {% if original.is_superuser %}
+                        <span class="material-symbols-outlined text-green-500 mr-2">check_circle</span>
+                    {% else %}
+                        <span class="material-symbols-outlined text-gray-400 mr-2">cancel</span>
+                    {% endif %}
+                    <span>{% trans "Superuser" %}</span>
+                </div>
+                <p class="text-xs text-gray-500 dark:text-gray-400 ml-8">{% trans "Has all permissions" %}</p>
+            </div>
+            <div>
+                <div class="flex items-center">
+                    {% if original.is_active %}
+                        <span class="material-symbols-outlined text-green-500 mr-2">check_circle</span>
+                    {% else %}
+                        <span class="material-symbols-outlined text-gray-400 mr-2">cancel</span>
+                    {% endif %}
+                    <span>{% trans "Active User" %}</span>
+                </div>
+                <p class="text-xs text-gray-500 dark:text-gray-400 ml-8">{% trans "Can login to site" %}</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="text-right">
+        <a href="{% url 'admin:common_user_change' original.pk %}" class="inline-flex items-center px-4 py-2 border border-gray-300 rounded-xs shadow-xs text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+            {% trans "Edit User" %}
+        </a>
+    </div>
+</div>

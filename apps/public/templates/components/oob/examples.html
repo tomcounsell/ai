@@ -1,0 +1,168 @@
+{% extends base_template %}
+
+{% block title %}HTMX OOB Examples{% endblock %}
+
+{% block header_title %}HTMX Out-of-Band (OOB) Examples{% endblock %}
+{% block header_description %}Demonstrating HTMX's OOB swaps for toasts, alerts, modals, and navigation{% endblock %}
+
+{% block main %}
+<div class="container mx-auto px-4 py-6">
+  <div class="mb-8">
+    <h2 class="text-xl font-semibold mb-4">What is HTMX OOB?</h2>
+    <p class="mb-2">Out-of-Band (OOB) swaps allow you to update multiple elements on a page with a single HTMX request.</p>
+    <p class="mb-4">This is useful for updating components like toast messages, alerts, navigation state, and modals.</p>
+    <div class="bg-blue-50 p-4 rounded-xs border border-blue-200">
+      <h3 class="font-medium text-blue-700 mb-2">How it works:</h3>
+      <p class="text-sm text-blue-800">
+        1. The server includes extra HTML in the response with <code>hx-swap-oob</code> attributes<br>
+        2. HTMX processes these elements and updates the matching elements in the DOM<br>
+        3. The main response content is processed normally based on the <code>hx-target</code>
+      </p>
+    </div>
+  </div>
+
+  <!-- Alerts container for the alert examples -->
+  <div id="alerts-container" class="mb-8">
+    <!-- Alerts will appear here -->
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+    <!-- Toast Examples -->
+    <div class="bg-white p-6 rounded-xs shadow-xs">
+      <h3 class="text-lg font-semibold mb-3">Toast Examples</h3>
+      <p class="mb-4">Show toast notifications with different alert types:</p>
+      <div class="space-y-2">
+        <button hx-get="{% url 'public:oob-toast' %}?type=success"
+                class="px-4 py-2 bg-green-600 text-white rounded-xs hover:bg-green-700">
+          Success Toast
+        </button>
+        <button hx-get="{% url 'public:oob-toast' %}?type=info"
+                class="px-4 py-2 bg-blue-600 text-white rounded-xs hover:bg-blue-700">
+          Info Toast
+        </button>
+        <button hx-get="{% url 'public:oob-toast' %}?type=warning"
+                class="px-4 py-2 bg-yellow-600 text-white rounded-xs hover:bg-yellow-700">
+          Warning Toast
+        </button>
+        <button hx-get="{% url 'public:oob-toast' %}?type=error"
+                class="px-4 py-2 bg-red-600 text-white rounded-xs hover:bg-red-700">
+          Error Toast
+        </button>
+      </div>
+    </div>
+
+    <!-- Alert Examples -->
+    <div class="bg-white p-6 rounded-xs shadow-xs">
+      <h3 class="text-lg font-semibold mb-3">Alert Examples</h3>
+      <p class="mb-4">Show inline alerts with different types:</p>
+      <div class="space-y-2">
+        <button hx-get="{% url 'public:oob-alert' %}?type=success"
+                hx-target="#alerts-container"
+                class="px-4 py-2 bg-green-600 text-white rounded-xs hover:bg-green-700">
+          Success Alert
+        </button>
+        <button hx-get="{% url 'public:oob-alert' %}?type=info"
+                hx-target="#alerts-container"
+                class="px-4 py-2 bg-blue-600 text-white rounded-xs hover:bg-blue-700">
+          Info Alert
+        </button>
+        <button hx-get="{% url 'public:oob-alert' %}?type=warning"
+                hx-target="#alerts-container"
+                class="px-4 py-2 bg-yellow-600 text-white rounded-xs hover:bg-yellow-700">
+          Warning Alert
+        </button>
+        <button hx-get="{% url 'public:oob-alert' %}?type=error"
+                hx-target="#alerts-container"
+                class="px-4 py-2 bg-red-600 text-white rounded-xs hover:bg-red-700">
+          Error Alert
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+    <!-- Navigation Examples -->
+    <div class="bg-white p-6 rounded-xs shadow-xs">
+      <h3 class="text-lg font-semibold mb-3">Navigation Examples</h3>
+      <p class="mb-4">Update the active navigation state:</p>
+      <div class="space-y-2">
+        <button hx-get="{% url 'public:oob-nav' %}?section=home"
+                hx-target="#nav-result"
+                class="px-4 py-2 bg-gray-600 text-white rounded-xs hover:bg-gray-700">
+          Set Home Active
+        </button>
+        <button hx-get="{% url 'public:oob-nav' %}?section=teams"
+                hx-target="#nav-result"
+                class="px-4 py-2 bg-gray-600 text-white rounded-xs hover:bg-gray-700">
+          Set Teams Active
+        </button>
+        <button hx-get="{% url 'public:oob-nav' %}?section=todos"
+                hx-target="#nav-result"
+                class="px-4 py-2 bg-gray-600 text-white rounded-xs hover:bg-gray-700">
+          Set Todos Active
+        </button>
+        <button hx-get="{% url 'public:oob-nav' %}?section=account"
+                hx-target="#nav-result"
+                class="px-4 py-2 bg-gray-600 text-white rounded-xs hover:bg-gray-700">
+          Set Account Active
+        </button>
+      </div>
+      <div id="nav-result" class="mt-4 p-3 bg-gray-50 rounded-xs min-h-(40px)"></div>
+    </div>
+
+    <!-- Modal Examples -->
+    <div class="bg-white p-6 rounded-xs shadow-xs">
+      <h3 class="text-lg font-semibold mb-3">Modal Examples</h3>
+      <p class="mb-4">Show different types of modals:</p>
+      <div class="space-y-2">
+        <button hx-get="{% url 'public:oob-modal' %}?type=basic"
+                hx-target="#modal-container"
+                class="px-4 py-2 bg-slate-600 text-white rounded-xs hover:bg-slate-700">
+          Basic Modal
+        </button>
+        <button hx-get="{% url 'public:oob-modal' %}?type=form"
+                hx-target="#modal-container"
+                class="px-4 py-2 bg-slate-600 text-white rounded-xs hover:bg-slate-700">
+          Form Modal
+        </button>
+        <button hx-get="{% url 'public:oob-modal' %}?type=confirm"
+                hx-target="#modal-container"
+                class="px-4 py-2 bg-slate-600 text-white rounded-xs hover:bg-slate-700">
+          Confirmation Modal
+        </button>
+        <button hx-get="{% url 'public:oob-modal' %}?type=large"
+                hx-target="#modal-container"
+                class="px-4 py-2 bg-slate-600 text-white rounded-xs hover:bg-slate-700">
+          Large Modal
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Combined Example -->
+  <div class="bg-white p-6 rounded-lg shadow-md mb-8">
+    <h3 class="text-lg font-semibold mb-3">Combined OOB Updates</h3>
+    <p class="mb-4">Update multiple elements with a single request:</p>
+    <button hx-get="{% url 'public:oob-combined' %}"
+            hx-target="#combined-result"
+            class="px-4 py-2 bg-purple-600 text-white rounded-xs hover:bg-purple-700">
+      Update Everything
+    </button>
+    <div id="combined-result" class="mt-4 p-3 bg-gray-50 rounded-xs min-h-(60px)"></div>
+  </div>
+
+  <div class="bg-yellow-50 p-6 rounded-xs border border-yellow-200">
+    <h3 class="text-lg font-semibold mb-3 text-yellow-800">Implementation Details</h3>
+    <p class="mb-2 text-yellow-700">This page demonstrates how to use the <code>HTMXView</code> class with OOB swaps:</p>
+    <ul class="list-disc list-inside text-yellow-700 space-y-1 mb-4">
+      <li>Set <code>has_oob = True</code> to enable OOB swaps</li>
+      <li>Set <code>show_toast = True</code> to include toast messages</li>
+      <li>Set <code>active_nav = "section_name"</code> to update navigation</li>
+      <li>Set <code>include_modals = True</code> to include modal container</li>
+    </ul>
+    <p class="text-yellow-700">Check the source code in <code>apps/public/views/components/oob_examples.py</code> for examples.</p>
+  </div>
+</div>
+
+<!-- Modal container is added here via OOB -->
+{% endblock %}

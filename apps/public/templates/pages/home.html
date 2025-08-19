@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% comment %}
+  Home Page
+  =========
+
+  Purpose:
+  The primary landing page for the site that showcases the main message
+  and serves as the entry point for users. This is typically the first page
+  users will see when they visit the site.
+
+  Content:
+  - Main heading: Clear title that introduces the site
+  - (Future content could include: featured sections, call-to-action buttons,
+    promotional content, recent activity, etc.)
+
+  User Experience:
+  - Clean, welcoming interface that clearly communicates the site's purpose
+  - Easy navigation to other key sections of the site
+  - Focused content that guides users to appropriate actions
+
+  Integration:
+  Displays in the main content area of the base template.
+{% endcomment %}
+
+{% block title %}Home{% endblock %}
+
+{% block main_header %}
+  <h1 class="text-3xl font-bold tracking-tight text-slate-600">Welcome to Django Project Template</h1>
+{% endblock %}
+
+{% block content %}
+  <div class="bg-white shadow-xs rounded-xs p-6 mt-4">
+
+    {% if user.is_authenticated %}
+      <div class="border border-gray-200 rounded-xs p-4 mt-6">
+        <h2 class="text-xl font-semibold text-slate-700 mb-3">Your Team</h2>
+        <p class="text-gray-600 mb-3">Access your team workspace</p>
+        {% if user.teams.exists %}
+        <a href="{% url 'public:team-list' %}" class="inline-flex justify-center py-2 px-4 border border-transparent shadow-xs text-sm font-medium rounded-xs text-white bg-slate-700 hover:bg-slate-600 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-2 focus:ring-slate-700">
+          View Team
+        </a>
+        {% else %}
+        <p class="text-gray-500 text-sm">Teams are managed in the admin site</p>
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="text-center mt-6">
+        <p class="text-gray-600 mb-4">Sign in to get started with your workspace</p>
+        <a href="{% url 'public:account-login' %}" class="inline-flex justify-center py-2 px-4 border border-transparent shadow-xs text-sm font-medium rounded-xs text-white bg-slate-700 hover:bg-slate-600 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-2 focus:ring-slate-700">
+          Login
+        </a>
+      </div>
+    {% endif %}
+  </div>
+{% endblock content %}
+
+{% block main_footer %}
+  <div class="text-center py-6 text-sm text-gray-500">
+<!--    Main Content Related Footer Things-->
+  </div>
+{% endblock %}

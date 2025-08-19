@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+
+{% block title %}Reset Password{% endblock %}
+
+{% block main_header %}
+  <h1 class="text-3xl font-bold tracking-tight text-slate-600">Reset Your Password</h1>
+{% endblock %}
+
+{% block content %}
+<div class="flex justify-center">
+  <div class="w-full max-w-md">
+    <div class="bg-white shadow-xs rounded-xs overflow-hidden">
+      <div class="p-6">
+        <p class="text-gray-600 mb-6">
+          Enter your email address below, and we'll send you instructions to reset your password.
+        </p>
+
+        <form method="post">
+          {% load widget_tweaks %}{% csrf_token %}
+
+          <!-- Error Messages -->
+          {% if form.non_field_errors %}
+            <div class="rounded-xs bg-red-50 p-4 mb-6 border border-red-200">
+              <div class="flex">
+                <div class="shrink-0">
+                  <svg class="h-5 w-5 text-red-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+                  </svg>
+                </div>
+                <div class="ml-3">
+                  <h3 class="text-sm font-medium text-red-800">
+                    {{ form.non_field_errors.0 }}
+                  </h3>
+                </div>
+              </div>
+            </div>
+          {% endif %}
+
+          <!-- Email Field -->
+          <div class="mb-6">
+            <label for="{{ form.email.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">
+              Email <span class="text-red-500">*</span>
+            </label>
+            <div class="relative">
+              {{ form.email|add_class:"w-full px-3 py-2 border rounded-xs bg-white focus:outline-hidden focus:ring-2 focus:ring-slate-600 focus:border-slate-600 text-sm" }}
+              <div class="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
+                <i class="fas fa-envelope text-gray-400"></i>
+              </div>
+            </div>
+            {% if form.email.errors %}
+              <p class="text-red-500 text-xs mt-1">{{ form.email.errors.0 }}</p>
+            {% endif %}
+          </div>
+
+          <button type="submit" class="w-full inline-flex justify-center rounded-xs border border-transparent bg-slate-700 px-3 py-2 text-sm font-medium text-white shadow-xs hover:bg-slate-600 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-slate-600">
+            Send Reset Link
+          </button>
+        </form>
+      </div>
+
+      <div class="flex items-center justify-center p-6 bg-gray-50 border-t border-gray-200">
+        <a href="{% url 'public:account-login' %}" class="text-sm font-semibold text-slate-600 hover:text-slate-500">
+          Return to login
+        </a>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

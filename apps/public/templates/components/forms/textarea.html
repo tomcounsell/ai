@@ -1,0 +1,51 @@
+{% comment %}
+Textarea Component
+
+Parameters:
+- field: The form field object (required)
+- label: Label text (optional, uses field.label if not provided)
+- placeholder: Placeholder text (optional)
+- help_text: Help text to display below the field (optional, uses field.help_text if not provided)
+- required: Whether the field is required (optional, defaults to field.field.required)
+- rows: Number of visible rows (optional, defaults to 4)
+- textarea_class: Additional CSS classes for the textarea element (optional)
+- label_class: Additional CSS classes for the label element (optional)
+
+Usage:
+{% include "components/forms/textarea.html" with field=form.description %}
+{% include "components/forms/textarea.html" with field=form.content rows=8 %}
+{% endcomment %}
+
+{% with field_id=field.id_for_label %}
+<div class="mb-4">
+  {% with label_text=label|default:field.label %}
+    {% if label_text %}
+      <label for="{{ field_id }}" class="block text-gray-700 font-semibold mb-2 {% if required|default:field.field.required %}{% else %}font-normal opacity-80{% endif %} {{ label_class }}">
+        {{ label_text }}
+        {% if required|default:field.field.required %}<span class="text-red-500">*</span>{% endif %}
+      </label>
+    {% endif %}
+  {% endwith %}
+
+  <textarea
+    name="{{ field.html_name }}"
+    id="{{ field_id }}"
+    rows="{{ rows|default:4 }}"
+    placeholder="{{ placeholder|default:'' }}"
+    {% if required|default:field.field.required %}required{% endif %}
+    class="w-full px-3 py-2 border {% if field.errors %}border-red-500{% else %}border-gray-300{% endif %}
+           bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:border-blue-500
+           {{ textarea_class }}"
+  >{{ field.value|default:'' }}</textarea>
+
+  {% if field.errors %}
+    <p class="text-red-500 text-sm mt-1">{{ field.errors.0 }}</p>
+  {% endif %}
+
+  {% with help=help_text|default:field.help_text %}
+    {% if help %}
+      <p class="text-gray-500 text-sm mt-1">{{ help }}</p>
+    {% endif %}
+  {% endwith %}
+</div>
+{% endwith %}

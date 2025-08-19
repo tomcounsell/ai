@@ -1,0 +1,81 @@
+{% extends "components/_component_base.html" %}
+
+{#
+  Team Members List Partial
+  ========================
+
+  Purpose:
+  Displays a list of team members with their roles. This component can be
+  loaded dynamically via HTMX or included directly in full pages.
+
+  Context Variables:
+  - members: List of User objects that are members of the team (required)
+  - team: The Team object (optional)
+  - can_manage: Boolean indicating if current user can manage members (optional)
+
+  HTMX Integration:
+  - Refresh button triggers update from server
+  - Remove buttons trigger member removal via HTMX
+
+  Usage:
+  {% include "components/lists/list_team_members.html" with members=team.members.all team=team %}
+#}
+
+{% block content %}
+<div
+  id="team-members-list"
+  class="team-members-container"
+  hx-swap-oob="true"
+>
+  <div class="list-header">
+    <h3>Team Members</h3>
+    {% if can_manage %}
+    <button
+      hx-get="{% if team %}{% url 'team:add_member_form' team.id %}{% endif %}"
+      hx-target="#add-member-form-container"
+      class="btn-small"
+    >
+      Add Member
+    </button>
+    {% endif %}
+  </div>
+
+  <div id="add-member-form-container"></div>
+
+  <ul class="members-list">
+    {% for member in members %}
+    <li class="member-item">
+      <div class="member-info">
+        <span class="member-name">{{ member.get_full_name|default:member.email }}</span>
+        <span class="member-role {% if member.is_admin %}admin{% endif %}">
+          {{ member.get_role_display }}
+        </span>
+      </div>
+
+      {% if can_manage and team %}
+      <button
+        hx-delete="{% url 'team:remove_member' team.id member.id %}"
+        hx-target="#team-members-list"
+        hx-confirm="Are you sure you want to remove this member?"
+        class="btn-danger btn-small"
+      >
+        Remove
+      </button>
+      {% endif %}
+    </li>
+    {% empty %}
+    <li class="empty-message">No members found</li>
+    {% endfor %}
+  </ul>
+
+  <div class="list-footer">
+    <button
+      hx-get="{% if team %}{% url 'team:members' team.id %}{% endif %}"
+      hx-target="#team-members-list"
+      class="btn-refresh"
+    >
+      Refresh
+    </button>
+  </div>
+</div>
+{% endblock content %}

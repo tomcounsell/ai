@@ -1,0 +1,192 @@
+{% extends "base.html" %}
+
+{% comment %}
+  Blog Index Page
+  ==============
+
+  Purpose:
+  Serves as the main entry point to the blog, showcasing recent articles
+  and providing navigation to blog categories and tags. This page aims to
+  engage users with valuable content and establish thought leadership.
+
+  Content:
+  - Featured/recent blog posts
+  - Category filtering options
+  - Tag cloud
+  - Sidebar with popular posts and filters
+
+  User Experience:
+  - Easy content discovery through a grid layout
+  - Filtering options for finding relevant content
+  - Clear visual hierarchy and post previews
+  - Responsive design for all screen sizes
+
+  Integration:
+  Displays in the main content area of the base template.
+  Sidebar is enabled for category/tag filtering.
+  Does not require authentication to view.
+{% endcomment %}
+
+{% block title %}Blog - Latest Articles{% endblock %}
+
+{% block meta_description %}Read our latest articles, tutorials, and insights about our platform, features, and industry best practices.{% endblock %}
+
+{% block content_width %}8{% endblock %}
+
+{% block main_header %}
+  <div>
+    <h1 class="text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">
+      Blog
+    </h1>
+    <p class="mt-4 text-lg text-gray-500">
+      Latest Articles & Insights
+    </p>
+  </div>
+{% endblock %}
+
+{% block content %}
+  <!-- Main Blog Content -->
+  <div class="space-y-10">
+    {% for post in posts %}
+      <article class="flex flex-col bg-white shadow-xs rounded-xs overflow-hidden hover:shadow-xs transition-shadow">
+        <div class="shrink-0">
+          <img class="h-48 w-full object-cover" src="{{ post.image }}" alt="{{ post.title }}">
+        </div>
+        <div class="grow p-6 flex flex-col justify-between">
+          <div class="grow">
+            <div class="flex items-center text-sm text-gray-500 mb-2">
+              <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-800">
+                {{ post.category }}
+              </span>
+              <time datetime="{{ post.published_at|date:'c' }}" class="ml-2">
+                {{ post.published_at|date:"F j, Y" }}
+              </time>
+            </div>
+            <a href="{% url 'public:blog-post' post.slug %}" class="block mt-2">
+              <h2 class="text-xl font-semibold text-gray-900 hover:text-slate-600">
+                {{ post.title }}
+              </h2>
+              <p class="mt-3 text-base text-gray-500 line-clamp-3">
+                {{ post.excerpt }}
+              </p>
+            </a>
+          </div>
+          <div class="mt-6 flex items-center">
+            <div class="flex text-sm text-gray-500">
+              <span>By {{ post.author }}</span>
+            </div>
+            <div class="grow text-right">
+              <a href="{% url 'public:blog-post' post.slug %}" class="text-slate-600 hover:text-slate-800 text-sm font-medium">
+                Read more <span aria-hidden="true">→</span>
+              </a>
+            </div>
+          </div>
+        </div>
+      </article>
+    {% empty %}
+      <div class="text-center p-8 bg-white rounded-xs shadow-xs">
+        <p class="text-gray-500">No blog posts found.</p>
+      </div>
+    {% endfor %}
+
+    <!-- Pagination -->
+    <div class="py-8 flex justify-center">
+      <nav class="inline-flex rounded-xs shadow-xs">
+        <a href="#" class="px-4 py-2 rounded-l-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50">
+          Previous
+        </a>
+        <a href="#" class="px-4 py-2 border-t border-b border-gray-300 bg-white text-slate-600 font-medium">
+          1
+        </a>
+        <a href="#" class="px-4 py-2 border-t border-b border-gray-300 bg-white text-gray-700 hover:bg-gray-50">
+          2
+        </a>
+        <a href="#" class="px-4 py-2 border-t border-b border-gray-300 bg-white text-gray-700 hover:bg-gray-50">
+          3
+        </a>
+        <a href="#" class="px-4 py-2 rounded-r-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50">
+          Next
+        </a>
+      </nav>
+    </div>
+  </div>
+{% endblock content %}
+
+{% block sidebar_enabled %}true{% endblock %}
+
+{% block aside %}
+  <!-- Search -->
+  <div class="bg-white shadow-xs overflow-hidden rounded-xs mb-6">
+    <div class="px-4 py-5 sm:p-6">
+      <h3 class="text-lg font-medium text-gray-900">Search</h3>
+      <div class="mt-4">
+        <form action="{% url 'public:blog' %}" method="get">
+          <div class="relative rounded-xs shadow-xs">
+            <input type="text" name="q" class="form-input py-3 px-4 block w-full rounded-xs transition ease-in-out duration-150 sm:text-sm sm:leading-5" placeholder="Search articles...">
+            <div class="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
+              <i class="fas fa-search text-gray-400"></i>
+            </div>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <!-- Categories -->
+  <div class="bg-white shadow-xs overflow-hidden rounded-xs mb-6">
+    <div class="px-4 py-5 sm:p-6">
+      <h3 class="text-lg font-medium text-gray-900">Categories</h3>
+      <div class="mt-4 space-y-4">
+        {% for category in categories %}
+          <div class="flex justify-between items-center">
+            <a href="?category={{ category.name|urlencode }}" class="text-gray-600 hover:text-slate-600">
+              {{ category.name }}
+            </a>
+            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+              {{ category.count }}
+            </span>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Recent Posts -->
+  <div class="bg-white shadow-xs overflow-hidden rounded-xs mb-6">
+    <div class="px-4 py-5 sm:p-6">
+      <h3 class="text-lg font-medium text-gray-900">Recent Posts</h3>
+      <div class="mt-4 space-y-4">
+        {% for post in recent_posts %}
+          <div class="flex items-center">
+            <div class="shrink-0 h-10 w-10 bg-gray-200 rounded-xs overflow-hidden">
+              <img src="{{ post.image }}" alt="" class="h-full w-full object-cover">
+            </div>
+            <div class="ml-3">
+              <a href="{% url 'public:blog-post' post.slug %}" class="text-sm font-medium text-gray-900 hover:text-slate-600 line-clamp-2">
+                {{ post.title }}
+              </a>
+              <div class="text-xs text-gray-500">
+                {{ post.published_at|date:"M j, Y" }}
+              </div>
+            </div>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Tags -->
+  <div class="bg-white shadow-xs overflow-hidden rounded-xs">
+    <div class="px-4 py-5 sm:p-6">
+      <h3 class="text-lg font-medium text-gray-900">Popular Tags</h3>
+      <div class="mt-4 flex flex-wrap gap-2">
+        {% for tag in tags %}
+          <a href="?tag={{ tag.name|urlencode }}" class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-gray-100 text-gray-800 hover:bg-slate-100 hover:text-slate-800">
+            {{ tag.name }}
+            <span class="ml-1 text-xs text-gray-500">({{ tag.count }})</span>
+          </a>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+{% endblock aside %}

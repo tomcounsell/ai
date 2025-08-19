@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{% block title %}Password Reset Complete{% endblock %}
+
+{% block content %}
+<div class="container mx-auto max-w-md px-4 py-12">
+  <div class="text-center mb-8">
+    <h1 class="text-2xl font-bold mb-2">Password Reset Complete</h1>
+    <p class="text-gray-600">
+      Your password has been set.
+    </p>
+  </div>
+
+  <div class="bg-white rounded-xs shadow-xs p-6">
+    <div class="p-4 bg-green-50 text-green-700 rounded-xs mb-6">
+      <p>
+        Your password has been successfully reset. Your account is now secure with your new password.
+      </p>
+    </div>
+
+    <a href="{% url 'public:account-login' %}" class="block w-full bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded-xs text-center">
+      Log In Now
+    </a>
+  </div>
+</div>
+{% endblock %}

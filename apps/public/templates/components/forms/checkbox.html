@@ -1,0 +1,47 @@
+{% comment %}
+Checkbox Component
+
+Parameters:
+- field: The form field object (required)
+- label: Label text (optional, uses field.label if not provided)
+- help_text: Help text to display below the field (optional, uses field.help_text if not provided)
+- checkbox_class: Additional CSS classes for the checkbox element (optional)
+- label_class: Additional CSS classes for the label element (optional)
+
+Usage:
+{% include "components/forms/checkbox.html" with field=form.is_active %}
+{% include "components/forms/checkbox.html" with field=form.agree_terms label="I agree to the terms and conditions" %}
+{% endcomment %}
+
+{% with field_id=field.id_for_label %}
+<div class="mb-4">
+  <div class="flex items-center">
+    <input
+      type="checkbox"
+      name="{{ field.html_name }}"
+      id="{{ field_id }}"
+      {% if field.value %}checked{% endif %}
+      class="w-4 h-4 text-blue-600 border-gray-300 rounded-xs focus:ring-2 focus:ring-blue-500
+             {{ checkbox_class }}"
+    >
+
+    {% with label_text=label|default:field.label %}
+      {% if label_text %}
+        <label for="{{ field_id }}" class="ml-2 block text-gray-700 {{ label_class }}">
+          {{ label_text }}
+        </label>
+      {% endif %}
+    {% endwith %}
+  </div>
+
+  {% if field.errors %}
+    <p class="text-red-500 text-sm mt-1">{{ field.errors.0 }}</p>
+  {% endif %}
+
+  {% with help=help_text|default:field.help_text %}
+    {% if help %}
+      <p class="text-gray-500 text-sm mt-1 ml-6">{{ help }}</p>
+    {% endif %}
+  {% endwith %}
+</div>
+{% endwith %}

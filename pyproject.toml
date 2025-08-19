@@ -1,0 +1,122 @@
+[build-system]
+requires = ["setuptools>=64.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["apps"]
+
+[project]
+name = "quickbooks"
+version = "0.1.0"
+description = "QuickBooks MCP Server - B2B SaaS for QuickBooks integration via Model Context Protocol"
+readme = "README.md"
+authors = [
+    {name = "Tom Counsell", email = "tom@quickbooks.com"}
+]
+license = "MIT"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Framework :: Django",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "Django>=4.0",
+    "django-extensions",
+    "django-filter",
+    "django-debug-toolbar",
+    "django-cors-headers",
+    "djangorestframework",
+    "djangorestframework-api-key",
+    "psycopg2",
+    "python-dotenv",
+    "dj-database-url",
+    "gunicorn",
+    "whitenoise",
+    "django-storages",
+    "django-widget-tweaks",
+    "django-htmx",
+    "django-unfold",
+    "selenium",
+    "django-tailwind-cli>=4.3.0",
+    "drf-yasg>=1.21.10",
+    "pydantic-ai>=0.7.0",
+    "openai>=1.99.1",
+    "mcp>=1.13.0",
+    "mcp-python>=0.1.4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "django-browser-reload",
+    "Werkzeug",
+    "aider-chat",
+    "black",
+    "flake8",
+    "mypy",
+    "django-stubs",
+    "ipython",
+]
+test = [
+    "pytest",
+    "pytest-cov",
+    "pytest-django",
+    "factory-boy",
+]
+e2e = [
+    "browser-use>=0.1.40",
+    "playwright>=1.40.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/tomcounsell/quickbooks"
+Issues = "https://github.com/tomcounsell/quickbooks/issues"
+
+[tool.black]
+line-length = 88
+target-version = ["py38", "py39", "py310", "py311", "py312"]
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 88
+multi_line_output = 3
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["mypy_django_plugin.main"]
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[tool.django-stubs]
+django_settings_module = "settings"
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "settings"
+python_files = "test_*.py"
+testpaths = ["apps"]
+filterwarnings = [
+    "ignore::RuntimeWarning:django.db.models.fields",
+]
+
+[dependency-groups]
+dev = [
+    "django-browser-reload>=1.18.0",
+    "pre-commit>=4.3.0",
+]
+e2e-testing = [
+    "browser-use>=0.1.40",
+    "playwright>=1.40.0",
+    "pytest-asyncio>=0.23.0",
+]

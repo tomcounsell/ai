@@ -1,0 +1,52 @@
+{% comment %}
+  Modal Containers
+  ===============
+
+  Purpose:
+  Provides containers for primary and secondary modals.
+  Include this partial in your base layout template.
+
+  Usage:
+  1. Include this in your base template:
+     include "layout/modals.html"
+
+  2. Target the modals with HTMX:
+     - For primary modal: hx-target="#primary-modal-container"
+     - For secondary modal: hx-target="#secondary-modal-container"
+
+  3. Always use hx-swap="innerHTML" when loading modals
+{% endcomment %}
+
+<!-- Primary Modal Container (also used for OOB swaps) -->
+<div id="modal-container" class="modal-container"></div>
+
+<!-- Secondary Modal Container (higher z-index) -->
+<div id="secondary-modal-container" class="modal-container"></div>
+
+<!-- CSS for modal transitions -->
+<style>
+    .modal-overlay {
+        opacity: 0;
+        transform: translateY(-20px);
+        animation: modal-fade-in 200ms ease-out forwards;
+    }
+
+    @keyframes modal-fade-in {
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    .modal-content {
+        transition: transform 300ms ease-out, opacity 300ms ease-out;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .modal-overlay {
+            animation: none;
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+</style>

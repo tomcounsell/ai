@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}Password Reset Email Sent{% endblock %}
+
+{% block content %}
+<div class="container mx-auto max-w-md px-4 py-12">
+  <div class="text-center mb-8">
+    <h1 class="text-2xl font-bold mb-2">Check Your Email</h1>
+    <p class="text-gray-600">
+      We've emailed you instructions for setting your password.
+    </p>
+  </div>
+
+  <div class="bg-white rounded-xs shadow-xs p-6">
+    <div class="p-4 bg-blue-50 text-blue-700 rounded-xs">
+      <p class="mb-4">
+        We've sent you an email with a link to reset your password. You should receive it shortly.
+      </p>
+      <p>
+        If you don't receive an email, please make sure you've entered the address you registered with,
+        and check your spam folder.
+      </p>
+    </div>
+
+    <div class="mt-6 text-center">
+      <a href="{% url 'public:account-login' %}" class="text-blue-500 hover:text-blue-700">
+        Return to login
+      </a>
+    </div>
+  </div>
+</div>
+{% endblock %}

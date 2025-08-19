@@ -1,0 +1,91 @@
+{% extends "components/_component_base.html" %}
+{% comment %}
+Error Message Component
+======================
+
+Purpose:
+Displays error messages in a standardized format across the application.
+This component can be used for both inline errors and full page errors.
+
+Context Variables:
+- error_message: The error message to display (required)
+- error_code: Machine-readable error code (optional)
+- status_code: HTTP status code associated with the error (optional)
+- is_htmx: Whether the component is being rendered for an HTMX request (optional)
+- show_stack_trace: Whether to show a stack trace (only in DEBUG mode, optional)
+- stack_trace: The exception stack trace (only shown if DEBUG and show_stack_trace are true)
+
+Usage:
+{% include "components/common/error_message.html" with error_message="The requested resource was not found." %}
+{% endcomment %}
+
+{% block content %}
+<div class="error-message-container {% if is_htmx %}htmx-error{% endif %}"
+     id="error-message-{{ error_code|default:'unknown' }}"
+     role="alert"
+     data-status-code="{{ status_code|default:'500' }}"
+     data-error-code="{{ error_code|default:'unknown_error' }}">
+
+  <div class="error-header">
+    <div class="error-icon">
+      {% if status_code == 404 %}
+        <i class="fas fa-search"></i>
+      {% elif status_code == 403 %}
+        <i class="fas fa-lock"></i>
+      {% elif status_code == 401 %}
+        <i class="fas fa-user-lock"></i>
+      {% elif status_code == 400 %}
+        <i class="fas fa-exclamation-circle"></i>
+      {% else %}
+        <i class="fas fa-exclamation-triangle"></i>
+      {% endif %}
+    </div>
+
+    <div class="error-title">
+      {% if status_code == 404 %}
+        Not Found
+      {% elif status_code == 403 %}
+        Permission Denied
+      {% elif status_code == 401 %}
+        Authentication Required
+      {% elif status_code == 400 %}
+        Invalid Request
+      {% else %}
+        Error
+      {% endif %}
+
+      {% if status_code %}
+        <span class="error-status-code">({{ status_code }})</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <div class="error-body">
+    <p class="error-message">{{ error_message }}</p>
+
+    {% if error_code %}
+    <p class="error-code">Error code: {{ error_code }}</p>
+    {% endif %}
+  </div>
+
+  {% if is_htmx %}
+  <div class="error-actions">
+    <button class="btn-primary" onclick="window.location.reload()">
+      Refresh Page
+    </button>
+    <button class="btn-secondary" onclick="history.back()">
+      Go Back
+    </button>
+  </div>
+  {% endif %}
+
+  {% if debug and show_stack_trace and stack_trace %}
+  <div class="error-debug">
+    <details>
+      <summary>Stack Trace (Debug Only)</summary>
+      <pre class="error-stack-trace">{{ stack_trace }}</pre>
+    </details>
+  </div>
+  {% endif %}
+</div>
+{% endblock content %}

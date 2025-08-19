@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}Change Password{% endblock %}
+
+{% block content %}
+<div class="container mx-auto max-w-md px-4 py-12">
+  <div class="mb-8">
+    <h1 class="text-2xl font-bold mb-2">Change Your Password</h1>
+    <p class="text-gray-600">
+      Please enter your old password for security, then enter a new password twice.
+    </p>
+  </div>
+
+  <div class="bg-white rounded-xs shadow-xs p-6">
+    <form method="post">
+      {% csrf_token %}
+
+      {% if form.non_field_errors %}
+        <div class="mb-4 p-3 bg-red-100 text-red-700 rounded-xs">
+          {{ form.non_field_errors }}
+        </div>
+      {% endif %}
+
+      <div class="mb-4">
+        <label for="{{ form.old_password.id_for_label }}" class="block text-gray-700 font-semibold mb-2">
+          Current Password
+        </label>
+        {{ form.old_password }}
+        {% if form.old_password.errors %}
+          <p class="text-red-500 text-sm mt-1">{{ form.old_password.errors.0 }}</p>
+        {% endif %}
+      </div>
+
+      <div class="mb-4">
+        <label for="{{ form.new_password1.id_for_label }}" class="block text-gray-700 font-semibold mb-2">
+          New Password
+        </label>
+        {{ form.new_password1 }}
+        {% if form.new_password1.errors %}
+          <p class="text-red-500 text-sm mt-1">{{ form.new_password1.errors.0 }}</p>
+        {% endif %}
+        {% if form.new_password1.help_text %}
+          <div class="text-gray-500 text-sm mt-1">
+            <ul class="list-disc pl-5">
+              {% for help_text in form.new_password1.help_text|split:'<li>' %}
+                {% if not forloop.first %}
+                  <li>{{ help_text|split:'</li>'|first }}</li>
+                {% endif %}
+              {% endfor %}
+            </ul>
+          </div>
+        {% endif %}
+      </div>
+
+      <div class="mb-4">
+        <label for="{{ form.new_password2.id_for_label }}" class="block text-gray-700 font-semibold mb-2">
+          Confirm New Password
+        </label>
+        {{ form.new_password2 }}
+        {% if form.new_password2.errors %}
+          <p class="text-red-500 text-sm mt-1">{{ form.new_password2.errors.0 }}</p>
+        {% endif %}
+      </div>
+
+      <div class="flex justify-between">
+        <a href="{% url 'public:account-settings' %}" class="bg-gray-300 hover:bg-gray-400 text-gray-800 py-2 px-4 rounded-xs">
+          Cancel
+        </a>
+        <button type="submit" class="bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded-xs">
+          Change Password
+        </button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

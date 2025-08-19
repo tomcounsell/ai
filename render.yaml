@@ -1,0 +1,30 @@
+databases:
+  - name: django_template_db
+    plan: free
+    databaseName: django_template
+    user: django_template_user
+
+services:
+  - type: web
+    plan: free
+    name: django-project-template
+    runtime: python
+    buildCommand: "./build.sh"
+    startCommand: "python -m gunicorn settings.asgi:application -k uvicorn.workers.UvicornWorker"
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: django_template_db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DJANGO_SETTINGS_MODULE
+        value: settings.production
+      - key: WEB_CONCURRENCY
+        value: 4
+      - key: DEBUG
+        value: False
+      - key: ENVIRONMENT
+        value: production
+      - key: ALLOWED_HOSTS
+        value: ".onrender.com,localhost,127.0.0.1"

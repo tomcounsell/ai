@@ -1,0 +1,72 @@
+{% load i18n %}
+
+<div class="p-4 bg-white rounded-xs shadow-xs dark:bg-gray-800">
+  <div class="flex items-center justify-between">
+    <h3 class="text-xl font-bold text-gray-900 dark:text-white">{% trans "Teams" %}</h3>
+    <a href="{% url 'admin:common_team_changelist' %}" class="text-sm font-medium text-blue-600 hover:text-blue-800 dark:text-blue-400 dark:hover:text-blue-600">
+      {% trans "View all" %}
+    </a>
+  </div>
+
+  <div class="mt-4 grid grid-cols-1 gap-6 sm:grid-cols-2">
+    <!-- Total Teams -->
+    <div class="flex flex-col p-3 bg-gray-50 rounded-xs dark:bg-gray-700">
+      <span class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Total Teams" %}</span>
+      <span class="mt-1 text-2xl font-bold text-gray-900 dark:text-white">{{ total_teams }}</span>
+      <span class="text-xs text-gray-500 dark:text-gray-400">{% trans "Across all projects" %}</span>
+    </div>
+
+    <!-- Active Teams -->
+    <div class="flex flex-col p-3 bg-green-50 rounded-xs dark:bg-green-900">
+      <span class="text-sm font-medium text-green-600 dark:text-green-300">{% trans "Active Teams" %}</span>
+      <span class="mt-1 text-2xl font-bold text-green-600 dark:text-green-300">{{ active_teams }}</span>
+      <span class="text-xs text-green-600 dark:text-green-300">{% trans "Ready for collaboration" %}</span>
+    </div>
+  </div>
+
+  <!-- Team Activity Chart -->
+  <div class="mt-6">
+    <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">{% trans "Team Size Distribution" %}</h4>
+    <div class="bg-gray-50 dark:bg-gray-700 rounded-xs p-3">
+      <div class="flex items-end space-x-2 h-24">
+        {% for size, count in team_sizes.items %}
+          <div class="flex flex-col items-center flex-grow">
+            <div class="w-full bg-blue-500 dark:bg-blue-600 rounded-t" style="height: {% widthratio count max_team_size 100 %}%"></div>
+            <span class="text-xs mt-1 text-gray-600 dark:text-gray-400">{{ size }}</span>
+          </div>
+        {% empty %}
+          <div class="w-full flex items-center justify-center h-full">
+            <span class="text-gray-500 dark:text-gray-400">{% trans "No team data available" %}</span>
+          </div>
+        {% endfor %}
+      </div>
+      <div class="flex justify-between mt-2 text-xs text-gray-500 dark:text-gray-400">
+        <span>{% trans "Team Size" %}</span>
+        <span>{% trans "Number of Teams" %}</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Top Teams -->
+  <div class="mt-4">
+    <h4 class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">{% trans "Top Teams by Size" %}</h4>
+    <div class="space-y-2">
+      {% for team in top_teams %}
+        <div class="bg-gray-50 dark:bg-gray-700 p-2 rounded-xs flex items-center justify-between">
+          <div class="flex items-center">
+            <div class="w-8 h-8 flex items-center justify-center bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 rounded-full mr-2 text-xs font-semibold">{{ forloop.counter }}</div>
+            <span class="font-medium">{{ team.name }}</span>
+          </div>
+          <div class="flex items-center">
+            <span class="material-symbols-outlined text-gray-500 mr-1">group</span>
+            <span class="text-gray-700 dark:text-gray-300 font-medium">{{ team.member_count }}</span>
+          </div>
+        </div>
+      {% empty %}
+        <div class="bg-gray-50 dark:bg-gray-700 p-3 rounded-xs text-center text-gray-500 dark:text-gray-400">
+          {% trans "No teams found" %}
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>

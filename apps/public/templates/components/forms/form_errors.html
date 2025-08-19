@@ -1,0 +1,24 @@
+{% comment %}
+Form Errors Component
+
+Display non-field errors from a form.
+
+Parameters:
+- form: The form object (required)
+- title: Title for the error section (optional, defaults to "Form Errors")
+
+Usage:
+{% include "components/forms/form_errors.html" with form=form %}
+{% include "components/forms/form_errors.html" with form=form title="Please fix the following errors:" %}
+{% endcomment %}
+
+{% if form.non_field_errors %}
+  <div class="mb-6 p-4 bg-red-50 border border-red-200 rounded-xs">
+    <h3 class="text-red-700 font-semibold mb-2">{{ title|default:"Form Errors" }}</h3>
+    <ul class="list-disc ml-5 text-red-600">
+      {% for error in form.non_field_errors %}
+        <li>{{ error }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+{% endif %}

@@ -1,0 +1,88 @@
+{% comment %}
+  Toast Messages Component
+  =======================
+
+  Purpose:
+  Notification system that displays feedback messages to users after actions
+  or system events. This component uses Django's messages framework to show
+  temporary notifications.
+
+  Message Types:
+  - Success: Confirmation of successful actions (green)
+  - Info: General information messages (blue)
+  - Warning: Non-critical warnings (yellow)
+  - Error: Critical errors or failed actions (red)
+
+  Features:
+  - Auto-dismiss after timeout using CSS animations
+  - Manual dismiss option with inline handlers
+  - Stacked message support
+  - Color-coded by message type
+  - Accessible design with ARIA attributes
+{% endcomment %}
+
+<div id="toast-container"
+     class="fixed top-4 right-4 z-50 flex flex-col gap-2 w-full max-w-xs"
+     {% if not messages %}hidden{% endif %}
+     hx-swap-oob="true">
+
+  {% for message in messages %}
+    {% with message_type=message.tags|default:'info' %}
+      <div class="toast-message bg-white border-l-4 rounded-xs shadow-xs animate-toast
+                  {% if message_type == 'success' %}border-green-500
+                  {% elif message_type == 'error' %}border-red-500
+                  {% elif message_type == 'warning' %}border-yellow-500
+                  {% else %}border-blue-500{% endif %}"
+           role="alert"
+           aria-live="polite">
+        <div class="flex justify-between items-center p-4">
+          <div class="flex items-center">
+            {% if message_type == 'success' %}
+              <svg class="w-5 h-5 text-green-500 mr-2" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"></path>
+              </svg>
+            {% elif message_type == 'error' %}
+              <svg class="w-5 h-5 text-red-500 mr-2" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"></path>
+              </svg>
+            {% elif message_type == 'warning' %}
+              <svg class="w-5 h-5 text-yellow-500 mr-2" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
+              </svg>
+            {% else %}
+              <svg class="w-5 h-5 text-blue-500 mr-2" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg">
+                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-11a1 1 0 10-2 0v2H7a1 1 0 100 2h2v2a1 1 0 102 0v-2h2a1 1 0 100-2h-2V7z" clip-rule="evenodd"></path>
+              </svg>
+            {% endif %}
+            <div class="ml-1 text-sm font-medium text-gray-700">
+              {{ message|safe }}
+            </div>
+          </div>
+          <button type="button"
+                  onclick="this.closest('.toast-message').remove(); if(document.querySelectorAll('#toast-container .toast-message').length === 0) document.getElementById('toast-container').hidden = true;"
+                  class="ml-4 inline-flex text-gray-400 hover:text-gray-500 focus:outline-hidden">
+            <span class="sr-only">Close</span>
+            <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+      </div>
+    {% endwith %}
+  {% endfor %}
+</div>
+
+<style>
+  @keyframes toast-fade {
+    0%, 80% { opacity: 1; transform: translateY(0); }
+    100% { opacity: 0; transform: translateY(-10px); }
+  }
+
+  .animate-toast {
+    animation: toast-fade 5s ease-in-out forwards;
+  }
+
+  .toast-message {
+    transition: opacity 300ms ease-out, transform 300ms ease-out;
+  }
+</style>

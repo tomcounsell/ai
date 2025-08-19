@@ -1,0 +1,92 @@
+{% load i18n %}
+
+<div class="p-4">
+    <div class="mb-4">
+        <h3 class="text-lg font-semibold">{% trans "Team Information" %}</h3>
+        <p class="text-sm text-gray-600 dark:text-gray-400">{% trans "Team details and configuration" %}</p>
+    </div>
+
+    <div class="mb-6 grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="border rounded-xs p-4 bg-white dark:bg-gray-800">
+            <h4 class="text-base font-semibold mb-3">{% trans "Team Details" %}</h4>
+
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Name" %}</p>
+                    <p class="mt-1">{{ original.name }}</p>
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Slug" %}</p>
+                    <p class="mt-1">{{ original.slug }}</p>
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Status" %}</p>
+                    <p class="mt-1">
+                        {% if original.is_active %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">
+                                {% trans "Active" %}
+                            </span>
+                        {% else %}
+                            <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">
+                                {% trans "Inactive" %}
+                            </span>
+                        {% endif %}
+                    </p>
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Created" %}</p>
+                    <p class="mt-1">{{ original.created_at|date:"M d, Y" }}</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="border rounded-xs p-4 bg-white dark:bg-gray-800">
+            <h4 class="text-base font-semibold mb-3">{% trans "Team Stats" %}</h4>
+
+            <div class="grid grid-cols-2 gap-4">
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Total Members" %}</p>
+                    <p class="mt-1 text-2xl font-semibold">{{ original.members.count }}</p>
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Owners & Admins" %}</p>
+                    <p class="mt-1 text-2xl font-semibold">{{ original.teammember_set.all|length }}</p>
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "Last Activity" %}</p>
+                    <p class="mt-1">{{ original.modified_at|date:"M d, Y H:i" }}</p>
+                </div>
+                <div>
+                    <p class="text-sm font-medium text-gray-500 dark:text-gray-400">{% trans "API Keys" %}</p>
+                    <p class="mt-1">{{ original.teamapikey_set.count }}</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="mb-6 border rounded-xs p-4 bg-white dark:bg-gray-800">
+        <h4 class="text-base font-semibold mb-3">{% trans "Description" %}</h4>
+        <div class="prose dark:prose-dark">
+            {% if original.description %}
+                <p>{{ original.description|linebreaks }}</p>
+            {% else %}
+                <p class="text-gray-500 dark:text-gray-400">{% trans "No description provided." %}</p>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if original.meta_data %}
+    <div class="mb-6 border rounded-xs p-4 bg-white dark:bg-gray-800">
+        <h4 class="text-base font-semibold mb-3">{% trans "Metadata" %}</h4>
+        <div class="bg-gray-100 dark:bg-gray-700 rounded p-3 overflow-x-auto">
+            <pre class="text-xs">{{ original.meta_data }}</pre>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="text-right">
+        <a href="{% url 'admin:common_team_change' original.pk %}" class="inline-flex items-center px-4 py-2 border border-gray-300 rounded-xs shadow-xs text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+            {% trans "Edit Team" %}
+        </a>
+    </div>
+</div>

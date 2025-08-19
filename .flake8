@@ -1,0 +1,9 @@
+[flake8]
+max-line-length = 88
+extend-ignore = E203, W503
+exclude = .git,__pycache__,docs/,venv/,build/,dist/
+per-file-ignores =
+    # Allow missing docstrings in __init__ files
+    */__init__.py:D104
+    # Allow missing docstrings in tests
+    */tests/*:D100,D101,D102,D103,D104

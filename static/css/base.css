@@ -1,0 +1,74 @@
+
+/* Primary color utilities for modals and components */
+.bg-primary-600 {
+    background-color: #2563eb; /* Tailwind blue-600 */
+}
+
+.bg-primary-700 {
+    background-color: #1d4ed8; /* Tailwind blue-700 */
+}
+
+.hover\:bg-primary-700:hover {
+    background-color: #1d4ed8;
+}
+
+.focus\:ring-primary-500:focus {
+    --tw-ring-color: rgba(59, 130, 246, 0.5); /* Tailwind blue-500 */
+}
+
+/* Smooth transitions */
+button, a {
+    transition-property: background-color, border-color, color, fill, stroke, transform, box-shadow;
+    transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+    transition-duration: 150ms;
+}
+
+/* HTMX animations */
+tr {
+    transition-property: opacity, max-height, background-color;
+    transition-duration: 500ms;
+    transition-timing-function: ease-in-out;
+}
+
+.htmx-removing {
+    opacity: 0;
+    max-height: 0;
+    overflow: hidden;
+}
+
+/* Modal Size Variants */
+.max-w-sm {
+    max-width: 24rem;
+}
+
+/* 384px */
+.max-w-md {
+    max-width: 28rem;
+}
+
+/* 448px */
+.max-w-lg {
+    max-width: 32rem;
+}
+
+/* 512px */
+.max-w-xl {
+    max-width: 36rem;
+}
+
+/* 576px */
+.max-w-2xl {
+    max-width: 42rem;
+}
+
+/* 672px */
+.max-w-3xl {
+    max-width: 48rem;
+}
+
+/* 768px */
+.max-w-4xl {
+    max-width: 56rem;
+}
+
+/* 896px */

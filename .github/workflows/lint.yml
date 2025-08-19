@@ -1,0 +1,42 @@
+name: Lint
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history for all branches and tags
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install uv
+          # Install project and dependencies with uv (includes dev dependencies)
+          uv sync --all-extras
+
+      - name: Format code with Black
+        run: uv run black . --check
+
+      - name: Format imports with isort
+        run: uv run isort --profile black . --check
+
+      - name: Lint with flake8
+        run: uv run flake8 . || true  # Continue even if flake8 finds issues
+
+      - name: Type check with mypy
+        run: uv run mypy . || true  # Continue even if mypy finds issues

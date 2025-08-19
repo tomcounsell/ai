@@ -1,0 +1,20 @@
+[bandit]
+# Skip asserts in test files
+exclude_dirs = venv,docs/_build,staticfiles,static/temp
+skips = B101  # Skip assert warnings for tests
+
+[tool.bandit]
+# This is a minimal configuration file for Bandit
+# It filters out common test-related false positives
+
+# Exclude directories
+exclude_dirs = ['venv', 'docs/_build', 'staticfiles', 'static/temp']
+
+# Exclude specific tests
+# B101: Use of assert (common in pytest)
+# B106: Hardcoded password arguments (in test files)
+skips = ['B101', 'B106']
+
+# Only show high severity issues
+# levels = HIGH
+# confidence = HIGH

@@ -1,0 +1,81 @@
+{% extends "components/_component_base.html" %}
+
+{#
+  Toast Notification Component
+  =========================
+
+  Purpose:
+  Displays temporary notification messages to provide feedback to users.
+  This component can be loaded dynamically via HTMX for out-of-band updates.
+
+  Context Variables:
+  - messages: List of message objects from Django's message framework
+
+  HTMX Integration:
+  - Auto-dismisses after a timeout using Hyperscript
+  - Can be triggered via hx-trigger from other components
+
+  Usage:
+  <!-- Direct inclusion -->
+  {% include "components/common/notification_toast.html" %}
+
+  <!-- Out-of-band update -->
+  <div
+    id="toast-container"
+    hx-get="{% url 'messages' %}"
+    hx-trigger="showMessage from:body"
+  ></div>
+#}
+
+{% block content %}
+<div
+  id="toast-container"
+  class="fixed top-4 right-4 z-50 w-72 space-y-4"
+  hx-swap-oob="true"
+>
+  {% if messages %}
+    {% for message in messages %}
+    <div
+      class="rounded-xs shadow-xs overflow-hidden bg-white border-l-4 {% if message.level == DEFAULT_MESSAGE_LEVELS.SUCCESS %}border-green-500{% elif message.level == DEFAULT_MESSAGE_LEVELS.ERROR %}border-red-500{% elif message.level == DEFAULT_MESSAGE_LEVELS.WARNING %}border-accent{% else %}border-slate-700{% endif %}"
+      _="on load wait 5s then add .opacity-0 then wait 500ms then remove me"
+      style="transition: opacity 0.5s ease-in-out"
+    >
+      <div class="p-4 flex items-start">
+        <div class="shrink-0 mr-3">
+          {% if message.level == DEFAULT_MESSAGE_LEVELS.SUCCESS %}
+            <svg class="h-5 w-5 text-green-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+            </svg>
+          {% elif message.level == DEFAULT_MESSAGE_LEVELS.ERROR %}
+            <svg class="h-5 w-5 text-red-500" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd" />
+            </svg>
+          {% elif message.level == DEFAULT_MESSAGE_LEVELS.WARNING %}
+            <svg class="h-5 w-5 text-accent" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+            </svg>
+          {% else %}
+            <svg class="h-5 w-5 text-slate-700" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd" />
+            </svg>
+          {% endif %}
+        </div>
+
+        <div class="grow">
+          <p class="text-sm text-gray-800">{{ message }}</p>
+        </div>
+
+        <button
+          class="ml-4 text-gray-400 hover:text-gray-500 focus:outline-hidden"
+          _="on click add .opacity-0 to closest div.rounded-lg then wait 500ms then remove closest div.rounded-lg"
+        >
+          <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+          </svg>
+        </button>
+      </div>
+    </div>
+    {% endfor %}
+  {% endif %}
+</div>
+{% endblock content %}

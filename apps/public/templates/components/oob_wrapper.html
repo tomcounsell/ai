@@ -1,0 +1,29 @@
+{% comment %}
+  OOB (Out-of-Band) Wrapper Component
+  ==================================
+
+  Purpose:
+  A utility template that wraps any content to be used as an out-of-band swap target with HTMX.
+  This wrapper uses the hx-swap-oob attribute to mark content for OOB swapping.
+
+  Context Variables:
+  - target_id: The ID of the target element to replace (required)
+  - swap_method: The swap method to use (default: "innerHTML")
+                 Options: innerHTML, outerHTML, beforebegin, afterbegin, beforeend, afterend
+
+  Usage:
+  {% include "components/oob_wrapper.html" with target_id="toast-container" %}
+    Content to replace the element with id="toast-container"
+  {% endinclude %}
+
+  HTMX Reference:
+  https://htmx.org/attributes/hx-swap-oob/
+
+  Note:
+  This is a utility template that should be used for components that need to be
+  updated out-of-band during an HTMX response.
+{% endcomment %}
+
+<div id="{{ target_id }}" hx-swap-oob="{{ swap_method|default:'innerHTML' }}">
+  {{ content|safe }}
+</div>

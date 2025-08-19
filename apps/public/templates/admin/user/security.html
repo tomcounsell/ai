@@ -1,0 +1,116 @@
+{% load i18n %}
+
+<div class="p-4">
+    <div class="mb-4">
+        <h3 class="text-lg font-semibold">{% trans "User Security" %}</h3>
+        <p class="text-sm text-gray-600 dark:text-gray-400">{% trans "Security settings and API key management" %}</p>
+    </div>
+
+    <div class="mb-6 grid grid-cols-1 gap-6">
+        <div class="border rounded-xs p-4 bg-white dark:bg-gray-800">
+            <h4 class="text-base font-semibold mb-3">{% trans "Password Management" %}</h4>
+
+            <div class="mb-4">
+                <p class="text-sm text-gray-600 dark:text-gray-400">{% trans "The password is stored securely using a one-way hashing method." %}</p>
+            </div>
+
+            <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                    <p class="text-sm font-medium">{% trans "Last password change" %}</p>
+                    <p class="text-sm text-gray-500 dark:text-gray-400">{% trans "Not tracked" %}</p>
+                </div>
+                <div class="mt-2 sm:mt-0">
+                    <a href="{% url 'admin:auth_user_password_change' original.pk %}" class="inline-flex items-center px-3 py-1.5 border border-gray-300 shadow-xs text-xs font-medium rounded-xs text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                        <span class="material-symbols-outlined mr-1 text-base">lock_reset</span>
+                        {% trans "Change Password" %}
+                    </a>
+                </div>
+            </div>
+        </div>
+
+        <div class="border rounded-xs p-4 bg-white dark:bg-gray-800">
+            <h4 class="text-base font-semibold mb-3">{% trans "User API Keys" %}</h4>
+
+            <div class="overflow-hidden bg-white shadow-xs dark:bg-gray-800 sm:rounded-xs mb-4">
+                <ul role="list" class="divide-y divide-gray-200 dark:divide-gray-700">
+                    {% for key in original.userapikey_set.all %}
+                        <li>
+                            <div class="flex items-center px-4 py-4 sm:px-6">
+                                <div class="flex min-w-0 flex-1 items-center">
+                                    <div class="min-w-0 flex-1 px-4">
+                                        <div>
+                                            <p class="truncate text-sm font-medium text-indigo-600 dark:text-indigo-400">{{ key.name }}</p>
+                                            <p class="mt-1 truncate text-sm text-gray-600 dark:text-gray-400">Prefix: {{ key.prefix }}</p>
+                                        </div>
+                                        <div class="mt-2 flex">
+                                            <div class="flex items-center text-sm text-gray-500 dark:text-gray-400">
+                                                <span class="material-symbols-outlined mr-1.5 text-base">calendar_today</span>
+                                                <p>{% trans "Created" %}: {{ key.created_at|date:"M d, Y" }}</p>
+                                            </div>
+                                            <div class="ml-4 flex items-center text-sm text-gray-500 dark:text-gray-400">
+                                                {% if key.revoked %}
+                                                    <span class="material-symbols-outlined mr-1.5 text-base text-red-500">cancel</span>
+                                                    <p class="text-red-500">{% trans "Revoked" %}</p>
+                                                {% else %}
+                                                    <span class="material-symbols-outlined mr-1.5 text-base text-green-500">check_circle</span>
+                                                    <p class="text-green-500">{% trans "Active" %}</p>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div>
+                                    <a href="{% url 'admin:common_userapikey_change' key.pk %}" class="inline-flex items-center rounded-xs bg-white px-2.5 py-1.5 text-sm font-semibold text-gray-900 shadow-xs ring-1 ring-inset ring-gray-300 hover:bg-gray-50 dark:bg-gray-700 dark:text-white dark:ring-gray-600 dark:hover:bg-gray-600">
+                                        {% trans "View" %}
+                                    </a>
+                                </div>
+                            </div>
+                        </li>
+                    {% empty %}
+                        <li>
+                            <div class="px-4 py-5 sm:px-6">
+                                <p class="text-sm text-gray-500 dark:text-gray-400">{% trans "No API keys found." %}</p>
+                            </div>
+                        </li>
+                    {% endfor %}
+                </ul>
+            </div>
+
+            <div class="text-right">
+                <a href="{% url 'admin:common_userapikey_add' %}?user={{ original.pk }}" class="inline-flex items-center px-3 py-1.5 border border-transparent text-xs font-medium rounded-xs shadow-xs text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                    <span class="material-symbols-outlined mr-1 text-base">add</span>
+                    {% trans "Create API Key" %}
+                </a>
+            </div>
+        </div>
+
+        <div class="border rounded-xs p-4 bg-white dark:bg-gray-800">
+            <h4 class="text-base font-semibold mb-3">{% trans "Account Actions" %}</h4>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                    <button type="button" class="inline-flex w-full justify-center items-center px-3 py-2 border border-gray-300 shadow-xs text-sm font-medium rounded-xs text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                        <span class="material-symbols-outlined mr-1 text-base">send</span>
+                        {% trans "Send Password Reset Email" %}
+                    </button>
+                </div>
+
+                <div>
+                    <form method="post" action="{% url 'admin:common_user_change' original.pk %}">
+                        {% csrf_token %}
+                        <input type="hidden" name="is_active" value="{% if original.is_active %}false{% else %}true{% endif %}">
+                        <button type="submit" class="inline-flex w-full justify-center items-center px-3 py-2 border border-gray-300 shadow-xs text-sm font-medium rounded-xs text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                            {% if original.is_active %}
+                                <span class="material-symbols-outlined mr-1 text-base">block</span>
+                                {% trans "Deactivate Account" %}
+                            {% else %}
+                                <span class="material-symbols-outlined mr-1 text-base">check_circle</span>
+                                {% trans "Activate Account" %}
+                            {% endif %}
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>

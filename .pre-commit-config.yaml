@@ -1,0 +1,156 @@
+# Pre-commit hooks for code quality and consistency
+# Install: uv run pre-commit install
+# Run manually: uv run pre-commit run --all-files
+# Update hooks: uv run pre-commit autoupdate
+
+repos:
+  # General file checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '^.*\.(md|rst)$'
+      - id: end-of-file-fixer
+        exclude: '^.*\.(jpg|png|gif|ico|svg)$'
+      - id: check-yaml
+        args: ['--unsafe']
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: debug-statements
+      - id: detect-private-key
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+      - id: check-docstring-first
+      - id: check-executables-have-shebangs
+      - id: check-shebang-scripts-are-executable
+
+  # Python code formatting
+  - repo: https://github.com/psf/black
+    rev: 24.8.0
+    hooks:
+      - id: black
+        language_version: python3.12
+        args: ['--line-length=88']
+
+  # Import sorting
+  - repo: https://github.com/pycqa/isort
+    rev: 5.13.2
+    hooks:
+      - id: isort
+        args: ['--profile', 'black', '--line-length', '88']
+
+  # Python linting
+  - repo: https://github.com/pycqa/flake8
+    rev: 7.1.1
+    hooks:
+      - id: flake8
+        args: ['--max-line-length=88', '--extend-ignore=E203,W503,E501']
+        additional_dependencies:
+          - flake8-django
+          - flake8-bugbear
+          - flake8-comprehensions
+          - flake8-simplify
+        exclude: '^(migrations|.*_cache|build|dist)/.*\.py$'
+
+  # Security checks
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.10
+    hooks:
+      - id: bandit
+        args: ['-ll', '--skip', 'B101,B601,B602,B607']
+        exclude: '^(tests?/|test_.*\.py$|migrations/)'
+
+  # Django specific checks
+  - repo: https://github.com/adamchainz/django-upgrade
+    rev: 1.22.1
+    hooks:
+      - id: django-upgrade
+        args: ['--target-version', '5.1']
+
+  # Python upgrade syntax
+  - repo: https://github.com/asottile/pyupgrade
+    rev: v3.17.0
+    hooks:
+      - id: pyupgrade
+        args: ['--py312-plus']
+        exclude: '^(migrations)/.*\.py$'
+
+  # Type checking (optional - uncomment to enable)
+  # Note: This can be slow, so it's disabled by default
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.11.2
+  #   hooks:
+  #     - id: mypy
+  #       args: ['--config-file=pyproject.toml', '--ignore-missing-imports']
+  #       additional_dependencies:
+  #         - django-stubs
+  #         - types-python-dateutil
+  #         - types-requests
+  #         - types-PyYAML
+  #       exclude: '^(migrations|tests?|conftest\.py)/.*\.py$'
+
+  # Local Django checks
+  - repo: local
+    hooks:
+      - id: django-check
+        name: Django check
+        entry: uv run python manage.py check --fail-level WARNING
+        language: system
+        types: [python]
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit]
+
+      - id: django-makemigrations-check
+        name: Check for missing migrations
+        entry: uv run python manage.py makemigrations --check --dry-run
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: 'models\.py$'
+        stages: [pre-commit]
+
+      - id: django-test-critical
+        name: Run critical tests
+        entry: bash -c 'DJANGO_SETTINGS_MODULE=settings uv run pytest apps/common/tests/test_behaviors.py -q --tb=no'
+        language: system
+        types: [python]
+        pass_filenames: false
+        stages: [pre-push]
+
+# Configuration
+default_language_version:
+  python: python3.12
+
+exclude: |
+  (?x)^(
+    .*\.egg-info/.*|
+    \.git/.*|
+    \.venv/.*|
+    venv/.*|
+    build/.*|
+    dist/.*|
+    staticfiles/.*|
+    media/.*|
+    node_modules/.*|
+    htmlcov/.*|
+    \.coverage|
+    \.pytest_cache/.*|
+    __pycache__/.*|
+    .*\.pyc|
+    .*\.pyo|
+    .*\.mo|
+    .*\.pot|
+    .*\.log|
+    .*\.sqlite3|
+    .*\.db|
+    \.env.*|
+    \.DS_Store
+  )$
+
+fail_fast: false
+default_stages: [pre-commit, pre-push]

@@ -1,0 +1,529 @@
+{% extends "base.html" %}
+
+{% comment %}
+Component Examples Page
+======================
+
+Purpose:
+Demonstrates all available UI components in the project with examples and usage notes.
+This page serves as both documentation and a visual reference.
+
+Sections:
+1. Form Components
+2. Card Components
+3. Modal Components
+4. List Components
+5. Common Components
+6. Layout Elements
+{% endcomment %}
+
+{% block title %}UI Component Examples{% endblock %}
+
+{% block main_header %}
+<div class="mb-6">
+    <h1 class="text-2xl font-bold text-gray-900">UI Component Examples</h1>
+    <p class="text-gray-600 mt-2">
+        This page demonstrates all available UI components with usage examples.
+        Use these components to maintain consistent design across the application.
+    </p>
+</div>
+{% endblock %}
+
+{% block content %}
+<div class="container mx-auto px-4 py-8">
+    <!-- CSS-only Tab Menu -->
+    <div class="bg-white shadow-xs rounded-xs overflow-hidden mb-8">
+        <div class="p-4 border-b border-gray-200">
+            <h2 class="text-lg font-semibold text-gray-900">Component Library</h2>
+        </div>
+
+        <!-- Tab System with CSS only -->
+        <style>
+            /* Hide all tab content by default */
+            .tab-content {
+                display: none;
+            }
+
+            /* Show active tab content based on :target pseudo-class */
+            #tab-common:target ~ .tab-container #common-content,
+            #tab-forms:target ~ .tab-container #forms-content,
+            #tab-cards:target ~ .tab-container #cards-content,
+            #tab-modals:target ~ .tab-container #modals-content,
+            #tab-lists:target ~ .tab-container #lists-content,
+            #tab-layout:target ~ .tab-container #layout-content {
+                display: block;
+            }
+
+            /* Default tab (Common) if no target is present */
+            .tab-container #common-content {
+                display: block;
+            }
+
+            /* When any tab is targeted, hide the default */
+            #tab-forms:target ~ .tab-container #common-content,
+            #tab-cards:target ~ .tab-container #common-content,
+            #tab-modals:target ~ .tab-container #common-content,
+            #tab-lists:target ~ .tab-container #common-content,
+            #tab-layout:target ~ .tab-container #common-content {
+                display: none;
+            }
+
+            /* Tab navigation active styles */
+            .tab-navigation [href="#tab-common"] {
+                border-color: #334155; /* slate-700 */
+                color: #334155; /* slate-700 */
+            }
+
+            #tab-common:target ~ .tab-navigation [href="#tab-common"],
+            #tab-forms:target ~ .tab-navigation [href="#tab-forms"],
+            #tab-cards:target ~ .tab-navigation [href="#tab-cards"],
+            #tab-modals:target ~ .tab-navigation [href="#tab-modals"],
+            #tab-lists:target ~ .tab-navigation [href="#tab-lists"],
+            #tab-layout:target ~ .tab-navigation [href="#tab-layout"] {
+                border-color: #334155; /* slate-700 */
+                color: #334155; /* slate-700 */
+            }
+
+            /* Reset color for all tabs when any tab is selected */
+            #tab-forms:target ~ .tab-navigation [href="#tab-common"],
+            #tab-cards:target ~ .tab-navigation [href="#tab-common"],
+            #tab-modals:target ~ .tab-navigation [href="#tab-common"],
+            #tab-lists:target ~ .tab-navigation [href="#tab-common"],
+            #tab-layout:target ~ .tab-navigation [href="#tab-common"] {
+                border-color: transparent;
+                color: #6b7280; /* gray-500 */
+            }
+        </style>
+
+        <!-- Empty ids for targeting tabs -->
+        <div id="tab-common" class="sr-only"></div>
+        <div id="tab-forms" class="sr-only"></div>
+        <div id="tab-cards" class="sr-only"></div>
+        <div id="tab-modals" class="sr-only"></div>
+        <div id="tab-lists" class="sr-only"></div>
+        <div id="tab-layout" class="sr-only"></div>
+
+        <!-- Tab Navigation -->
+        <div class="tab-navigation overflow-x-auto">
+            <nav class="flex border-b border-gray-200">
+                <a href="#tab-common"
+                   class="px-6 py-4 text-center border-b-2 border-transparent text-gray-500 font-medium hover:text-gray-700 hover:border-gray-300 whitespace-nowrap">
+                    Common
+                </a>
+                <a href="#tab-forms"
+                   class="px-6 py-4 text-center border-b-2 border-transparent text-gray-500 font-medium hover:text-gray-700 hover:border-gray-300 whitespace-nowrap">
+                    Forms
+                </a>
+                <a href="#tab-cards"
+                   class="px-6 py-4 text-center border-b-2 border-transparent text-gray-500 font-medium hover:text-gray-700 hover:border-gray-300 whitespace-nowrap">
+                    Cards
+                </a>
+                <a href="#tab-modals"
+                   class="px-6 py-4 text-center border-b-2 border-transparent text-gray-500 font-medium hover:text-gray-700 hover:border-gray-300 whitespace-nowrap">
+                    Modals
+                </a>
+                <a href="#tab-lists"
+                   class="px-6 py-4 text-center border-b-2 border-transparent text-gray-500 font-medium hover:text-gray-700 hover:border-gray-300 whitespace-nowrap">
+                    Lists
+                </a>
+                <a href="#tab-layout"
+                   class="px-6 py-4 text-center border-b-2 border-transparent text-gray-500 font-medium hover:text-gray-700 hover:border-gray-300 whitespace-nowrap">
+                    Layout
+                </a>
+            </nav>
+        </div>
+
+        <!-- Tab Content Container -->
+        <div class="tab-container p-6">
+            <!-- Common Components Tab Content -->
+            <div id="common-content" class="tab-content">
+                <h2 class="text-xl font-semibold text-gray-900 mb-4">Common Components</h2>
+                <p class="text-gray-600 mb-6">Utility components used throughout the application</p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <!-- Notification Toast -->
+                    <div class="bg-white rounded-xs shadow-xs p-6">
+                        <h3 class="text-lg font-semibold text-gray-800 mb-4">Notification Toast</h3>
+                        <div class="mb-4">
+                            <!-- Success Toast -->
+                            <div class="rounded-lg shadow-md overflow-hidden bg-white border-l-4 border-green-500 mb-4">
+                                <div class="p-4 flex items-start">
+                                    <!-- Icon -->
+                                    <div class="shrink-0 mr-3">
+                                        <svg class="h-5 w-5 text-green-500" xmlns="http://www.w3.org/2000/svg"
+                                             viewBox="0 0 20 20" fill="currentColor">
+                                            <path fill-rule="evenodd"
+                                                  d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z"
+                                                  clip-rule="evenodd"/>
+                                        </svg>
+                                    </div>
+                                    <!-- Content -->
+                                    <div class="flex-1">
+                                        <p class="text-sm text-gray-800">Operation successful!</p>
+                                    </div>
+                                    <!-- Close Button -->
+                                    <button class="ml-4 text-gray-400 hover:text-gray-500 focus:outline-hidden">
+                                        <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
+                                             fill="currentColor">
+                                            <path fill-rule="evenodd"
+                                                  d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                                                  clip-rule="evenodd"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- Error Toast -->
+                            <div class="rounded-lg shadow-md overflow-hidden bg-white border-l-4 border-red-500">
+                                <div class="p-4 flex items-start">
+                                    <!-- Icon -->
+                                    <div class="shrink-0 mr-3">
+                                        <svg class="h-5 w-5 text-red-500" xmlns="http://www.w3.org/2000/svg"
+                                             viewBox="0 0 20 20" fill="currentColor">
+                                            <path fill-rule="evenodd"
+                                                  d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
+                                                  clip-rule="evenodd"/>
+                                        </svg>
+                                    </div>
+                                    <!-- Content -->
+                                    <div class="flex-1">
+                                        <p class="text-sm text-gray-800">An error occurred. Please try again.</p>
+                                    </div>
+                                    <!-- Close Button -->
+                                    <button class="ml-4 text-gray-400 hover:text-gray-500 focus:outline-hidden">
+                                        <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"
+                                             fill="currentColor">
+                                            <path fill-rule="evenodd"
+                                                  d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                                                  clip-rule="evenodd"/>
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="mt-2 text-sm text-gray-500">
+                            Include with: <code>{&#37; include "components/common/notification_toast.html" with
+                            message="Your message" type="success" &#37;}</code>
+                        </div>
+                    </div>
+
+                    <!-- Error Message -->
+                    <div class="bg-white rounded-xs shadow-xs p-6">
+                        <h3 class="text-lg font-semibold text-gray-800 mb-4">Error Message</h3>
+                        <div class="mb-4">
+                            <div class="bg-red-50 border-l-4 border-red-500 p-4">
+                                <div class="flex">
+                                    <div class="shrink-0">
+                                        <svg class="h-5 w-5 text-red-400" xmlns="http://www.w3.org/2000/svg"
+                                             viewBox="0 0 20 20" fill="currentColor">
+                                            <path fill-rule="evenodd"
+                                                  d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
+                                                  clip-rule="evenodd"/>
+                                        </svg>
+                                    </div>
+                                    <div class="ml-3">
+                                        <h3 class="text-sm font-medium text-red-800">Error 404</h3>
+                                        <div class="mt-2 text-sm text-red-700">
+                                            <p>The page you requested could not be found.</p>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="mt-2 text-sm text-gray-500">
+                            Include with: <code>{&#37; include "components/common/error_message.html" with title="Error
+                            404" message="The page you requested could not be found." &#37;}</code>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Forms Tab Content -->
+            <div id="forms-content" class="tab-content">
+                <h2 class="text-xl font-semibold text-gray-900 mb-4">Form Components</h2>
+                <p class="text-gray-600 mb-6">Reusable form elements for consistent user input experiences</p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div class="bg-white rounded-xs shadow-xs p-6">
+                        <h3 class="text-lg font-semibold text-gray-800 mb-4">Text Input</h3>
+                        <div class="mb-4">
+                            <label for="example-text-input" class="block text-gray-700 font-semibold mb-2">
+                                Username <span class="text-red-500">*</span>
+                            </label>
+                            <input
+                                    type="text"
+                                    id="example-text-input"
+                                    value=""
+                                    placeholder="johndoe"
+                                    required
+                                    class="w-full px-3 py-2 border border-gray-300 rounded-xs focus:outline-hidden focus:ring-2 focus:ring-blue-500"
+                            >
+                            <p class="text-gray-500 text-sm mt-1">Choose a unique username</p>
+                        </div>
+                        <div class="mt-2 text-sm text-gray-500">
+                            Include with: <code>{&#37; include "components/forms/text_input.html" with
+                            field=form.username &#37;}</code>
+                        </div>
+                    </div>
+
+                    <div class="bg-white rounded-xs shadow-xs p-6">
+                        <h3 class="text-lg font-semibold text-gray-800 mb-4">Form Buttons</h3>
+                        <div class="mb-4">
+                            <div class="mt-6 flex justify-end items-center space-x-4">
+                                <a href="#"
+                                   class="inline-flex items-center justify-center py-2 px-4 border border-gray-300 shadow-xs text-sm font-medium rounded-xs text-gray-700 bg-white hover:bg-gray-50 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-gray-500">
+                                    <svg class="h-4 w-4 mr-1.5" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd"
+                                              d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                                              clip-rule="evenodd"></path>
+                                    </svg>
+                                    Cancel
+                                </a>
+                                <button type="button"
+                                        class="inline-flex items-center justify-center py-2 px-4 border border-transparent shadow-xs text-sm font-medium rounded-xs text-white bg-slate-700 hover:bg-slate-600 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-2 focus:ring-slate-700">
+                                    <svg class="h-4 w-4 mr-1.5" fill="currentColor" viewBox="0 0 20 20">
+                                        <path fill-rule="evenodd"
+                                              d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                              clip-rule="evenodd"></path>
+                                    </svg>
+                                    Save
+                                </button>
+                            </div>
+                        </div>
+                        <div class="mt-2 text-sm text-gray-500">
+                            Include with: <code>{&#37; include "components/forms/form_buttons.html" with
+                            submit_text="Save" cancel_url=back_url &#37;}</code>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Cards Tab Content -->
+            <div id="cards-content" class="tab-content">
+                <h2 class="text-xl font-semibold text-gray-900 mb-4">Card Components</h2>
+                <p class="text-gray-600 mb-6">Containers for related content with consistent styling</p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div class="bg-white rounded-xs shadow-xs p-6">
+                        <h3 class="text-lg font-semibold text-gray-800 mb-4">Team Card</h3>
+                        <div class="mb-4 border border-gray-200 rounded-lg overflow-hidden">
+                            <div class="team-card">
+                                <div class="card-header bg-gray-50 p-4 border-b border-gray-200">
+                                    <h3 class="text-lg font-semibold">Engineering Team</h3>
+                                    <span class="card-meta text-sm text-gray-500">Created Jan 15, 2025</span>
+                                </div>
+
+                                <div class="card-body p-4">
+                                    <p class="team-description mb-4">Backend and infrastructure engineering team
+                                        responsible for core services.</p>
+
+                                    <div class="team-stats flex space-x-6 text-sm">
+                                        <div class="stat-item">
+                                            <span class="stat-label text-gray-500">Members</span>
+                                            <span class="stat-value block font-semibold">12</span>
+                                        </div>
+                                        <div class="stat-item">
+                                            <span class="stat-label text-gray-500">Projects</span>
+                                            <span class="stat-value block font-semibold">5</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="card-footer bg-gray-50 p-4 border-t border-gray-200 flex justify-between items-center">
+                                    <a
+                                            href="#"
+                                            class="text-slate-700 hover:text-slate-900 hover:underline"
+                                    >
+                                        View Details
+                                    </a>
+
+                                    <button
+                                            class="px-3 py-1 bg-slate-700 hover:bg-slate-600 text-white text-sm rounded-xs"
+                                    >
+                                        Join Team
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="mt-2 text-sm text-gray-500">
+                            Include with: <code>{&#37; include "components/cards/card_team.html" with team=team
+                            &#37;}</code>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Modals Tab Content -->
+            <div id="modals-content" class="tab-content">
+                <h2 class="text-xl font-semibold text-gray-900 mb-4">Modal Components</h2>
+                <p class="text-gray-600 mb-6">Dialog components for user interactions and confirmations</p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div class="bg-white rounded-xs shadow-xs p-6">
+                        <h3 class="text-lg font-semibold text-gray-800 mb-4">Modal Trigger Examples</h3>
+                        <p class="text-gray-600 mb-4">Click the buttons below to open different modal types:</p>
+
+                        <div class="flex flex-wrap gap-4">
+                            <button
+                                    class="px-4 py-2 rounded-xs text-white bg-slate-700 hover:bg-slate-600 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-slate-700"
+                                    hx-get="/modals/content-example/"
+                                    hx-target="#primary-modal-container"
+                                    hx-swap="innerHTML"
+                            >
+                                Content Modal
+                            </button>
+
+                            <button
+                                    class="px-4 py-2 rounded-xs text-white bg-slate-700 hover:bg-slate-600 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-slate-700"
+                                    hx-get="/modals/confirm-example/"
+                                    hx-target="#primary-modal-container"
+                                    hx-swap="innerHTML"
+                            >
+                                Confirm Modal
+                            </button>
+
+                            <button
+                                    class="px-4 py-2 rounded-xs text-white bg-slate-700 hover:bg-slate-600 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-slate-700"
+                                    hx-get="/modals/form-example/"
+                                    hx-target="#primary-modal-container"
+                                    hx-swap="innerHTML"
+                            >
+                                Form Modal
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Lists Tab Content -->
+            <div id="lists-content" class="tab-content">
+                <h2 class="text-xl font-semibold text-gray-900 mb-4">List Components</h2>
+                <p class="text-gray-600 mb-6">Components for displaying collections of items</p>
+
+                <div class="grid grid-cols-1 gap-8">
+                    <div class="bg-white rounded-xs shadow-xs p-6">
+                        <h3 class="text-lg font-semibold text-gray-800 mb-4">Team Members List</h3>
+                        <div class="mb-4 border border-gray-200 rounded-lg overflow-hidden">
+                            <div class="bg-gray-50 px-4 py-3 border-b border-gray-200">
+                                <h3 class="text-lg font-medium text-gray-900">Team Members (3)</h3>
+                            </div>
+                            <ul class="divide-y divide-gray-200">
+                                <li class="p-4 flex items-center justify-between">
+                                    <div class="flex items-center">
+                                        <div class="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center text-slate-800 font-semibold">
+                                            JS
+                                        </div>
+                                        <div class="ml-3">
+                                            <p class="text-sm font-medium text-gray-900">John Smith</p>
+                                            <p class="text-sm text-gray-500">john@example.com</p>
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center space-x-2">
+                                        <span class="px-2 py-1 text-xs font-medium bg-green-100 text-green-800 rounded-full">Admin</span>
+                                    </div>
+                                </li>
+                                <li class="p-4 flex items-center justify-between">
+                                    <div class="flex items-center">
+                                        <div class="w-10 h-10 bg-slate-100 rounded-full flex items-center justify-center text-slate-800 font-semibold">
+                                            SD
+                                        </div>
+                                        <div class="ml-3">
+                                            <p class="text-sm font-medium text-gray-900">Sara Davis</p>
+                                            <p class="text-sm text-gray-500">sara@example.com</p>
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center space-x-2">
+                                        <span class="px-2 py-1 text-xs font-medium bg-blue-100 text-blue-800 rounded-full">Member</span>
+                                    </div>
+                                </li>
+                            </ul>
+                        </div>
+                        <div class="mt-2 text-sm text-gray-500">
+                            Include with: <code>{&#37; include "components/lists/list_team_members.html" with
+                            members=team.members.all team=team can_remove=True &#37;}</code>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Layout Tab Content -->
+            <div id="layout-content" class="tab-content">
+                <h2 class="text-xl font-semibold text-gray-900 mb-4">Layout Elements</h2>
+                <p class="text-gray-600 mb-6">Components that make up the page structure</p>
+
+                <div class="grid grid-cols-1 gap-8">
+                    <div class="bg-white rounded-xs shadow-xs p-6">
+                        <h3 class="text-lg font-semibold text-gray-800 mb-4">Layout Structure</h3>
+                        <div class="bg-gray-100 p-4 rounded-md overflow-x-auto">
+              <pre class="text-xs">
+&lt;!-- Base Structure --&gt;
+{&#37; extends "base.html" &#37;}
+
+{&#37; block title &#37;}Page Title{&#37; endblock &#37;}
+
+{&#37; block content &#37;}
+  &lt;!-- Main content --&gt;
+{&#37; endblock &#37;}
+
+&lt;!-- With Sidebar --&gt;
+{&#37; extends "base.html" &#37;}
+
+{&#37; block title &#37;}Page with Sidebar{&#37; endblock &#37;}
+
+{&#37; block content_width &#37;}8{&#37; endblock &#37;}
+{&#37; block sidebar_enabled &#37;}True{&#37; endblock &#37;}
+
+{&#37; block content &#37;}
+  &lt;!-- Main content --&gt;
+{&#37; endblock &#37;}
+
+{&#37; block aside &#37;}
+  &lt;!-- Sidebar content --&gt;
+{&#37; endblock &#37;}
+              </pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Documentation Resources -->
+    <div class="bg-gray-50 rounded-lg shadow-xs p-6 mt-8">
+        <h2 class="text-xl font-semibold text-gray-800 mb-4">Component Documentation Resources</h2>
+        <p class="text-gray-700 mb-4">For more information about using these components, refer to the following
+            resources:</p>
+
+        <ul class="list-disc pl-5 space-y-2 text-gray-700">
+            <li><a href="/docs/TEMPLATE_CONVENTIONS.md"
+                   class="text-slate-700 hover:text-slate-900 hover:underline hover:decoration-accent hover:decoration-2">Template
+                Conventions</a> - Learn about template structure and best practices
+            </li>
+            <li><a href="/docs/VIEW_CONVENTIONS.md"
+                   class="text-slate-700 hover:text-slate-900 hover:underline hover:decoration-accent hover:decoration-2">View
+                Conventions</a> - Understand how views interact with templates
+            </li>
+            <li><a href="/docs/MODAL_PATTERNS.md"
+                   class="text-slate-700 hover:text-slate-900 hover:underline hover:decoration-accent hover:decoration-2">Modal
+                Patterns</a> - Advanced usage of the modal system
+            </li>
+            <li><a href="/docs/HTMX_INTEGRATION.md"
+                   class="text-slate-700 hover:text-slate-900 hover:underline hover:decoration-accent hover:decoration-2">HTMX
+                Integration</a> - Using components with HTMX
+            </li>
+            <li><a href="/docs/TAILWIND_V4.md"
+                   class="text-slate-700 hover:text-slate-900 hover:underline hover:decoration-accent hover:decoration-2">Tailwind
+                v4 Guide</a> - Tips for using Tailwind CSS v4 features
+            </li>
+            <li><a href="/docs/ERROR_HANDLING.md"
+                   class="text-slate-700 hover:text-slate-900 hover:underline hover:decoration-accent hover:decoration-2">Error
+                Handling</a> - Patterns for consistent error handling
+            </li>
+            <li><a href="/docs/BEHAVIOR_MIXINS.md"
+                   class="text-slate-700 hover:text-slate-900 hover:underline hover:decoration-accent hover:decoration-2">Behavior
+                Mixins</a> - Using model behavior mixins
+            </li>
+        </ul>
+    </div>
+</div>
+{% endblock content %}

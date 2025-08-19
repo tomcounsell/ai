@@ -1,0 +1,271 @@
+{% extends "base.html" %}
+
+{% comment %}
+  Pricing Page
+  =============
+
+  Purpose:
+  Showcases subscription plans and pricing options to encourage users
+  to choose a plan that fits their needs and convert to paying customers.
+
+  Content:
+  - Price comparison table/cards for all plans
+  - Feature comparison
+  - FAQ section
+  - Call to action for sales inquiries
+
+  User Experience:
+  - Clear breakdown of plan features and limitations
+  - Visual emphasis on recommended plan
+  - Easy-to-understand pricing structure
+  - Clear next steps for users to take action
+
+  Integration:
+  Displays in the main content area of the base template.
+  Does not require authentication to view.
+{% endcomment %}
+
+{% block title %}Pricing Plans{% endblock %}
+
+{% block meta_description %}Choose the right plan for your needs. View our competitive pricing options with transparent features and benefits comparison.{% endblock %}
+
+{% block content_width %}12{% endblock %}
+
+{% block main_header %}
+  <div class="text-center">
+    <h1 class="text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">
+      Pricing Plans
+    </h1>
+    <p class="mt-4 text-lg text-gray-500 max-w-3xl mx-auto">
+      Choose the perfect plan for your needs. All plans include core features, unlimited updates, and customer support.
+    </p>
+  </div>
+{% endblock %}
+
+{% block content %}
+  <!-- Pricing Section -->
+  <div class="bg-white py-12">
+    <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+      <!-- Pricing toggle (monthly/annual) could go here in the future -->
+
+      <!-- Pricing cards -->
+      <div class="mt-12 space-y-12 lg:grid lg:grid-cols-3 lg:gap-x-8 lg:space-y-0">
+        {% for plan in plans %}
+          <div class="relative flex flex-col rounded-xs border {% if plan.highlighted %}border-2 border-slate-600 shadow-xs{% else %}border-gray-200{% endif %} p-8 transform hover:scale-105 transition-all">
+            {% if plan.highlighted %}
+              <div class="absolute -top-5 left-1/2 transform -translate-x-1/2 inline-flex rounded-full bg-slate-600 px-4 py-1 text-sm font-semibold text-white">
+                Popular
+              </div>
+            {% endif %}
+
+            <div class="flex-1">
+              <h3 class="text-xl font-semibold text-gray-900">{{ plan.name }}</h3>
+              <p class="mt-4 flex items-baseline text-gray-900">
+                <span class="text-5xl font-extrabold tracking-tight">{{ plan.price }}</span>
+                <span class="ml-1 text-xl font-semibold">{{ plan.period }}</span>
+              </p>
+              <p class="mt-6 text-gray-500">{{ plan.description }}</p>
+
+              <!-- Feature list -->
+              <ul role="list" class="mt-6 space-y-4">
+                {% for feature in plan.features %}
+                  <li class="flex items-start">
+                    <div class="shrink-0">
+                      <i class="fas fa-check h-6 w-6 text-green-500"></i>
+                    </div>
+                    <p class="ml-3 text-base text-gray-500">{{ feature }}</p>
+                  </li>
+                {% endfor %}
+              </ul>
+            </div>
+
+            <a href="{% url 'public:account-login' %}" class="mt-8 block w-full rounded-xs py-3 px-6 text-center text-base font-medium text-white {{ plan.cta_class }} focus:outline-hidden focus:ring-2 focus:ring-slate-600 focus:ring-offset-2">
+              {{ plan.cta_text }}
+            </a>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Feature Comparison -->
+  <div class="bg-gray-50 py-16">
+    <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+      <div class="text-center">
+        <h2 class="text-3xl font-extrabold text-gray-900">Complete Feature Comparison</h2>
+        <p class="mt-4 text-lg text-gray-500">
+          Compare all features across our different plans to find the perfect fit for your needs.
+        </p>
+      </div>
+
+      <div class="mt-12 overflow-x-auto rounded-xs shadow-xs">
+        <table class="min-w-full divide-y divide-gray-200 bg-white">
+          <thead class="bg-gray-50">
+            <tr>
+              <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Feature
+              </th>
+              <th scope="col" class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Free
+              </th>
+              <th scope="col" class="px-6 py-3 text-center text-xs font-medium text-slate-600 uppercase tracking-wider">
+                Premium
+              </th>
+              <th scope="col" class="px-6 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Enterprise
+              </th>
+            </tr>
+          </thead>
+          <tbody class="bg-white divide-y divide-gray-200">
+            <tr>
+              <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                Number of Projects
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                Up to 3
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium text-slate-600">
+                Unlimited
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                Unlimited
+              </td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                Team Members
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                Up to 2
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium text-slate-600">
+                Up to 10
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                Unlimited
+              </td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                Storage
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                1 GB
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium text-slate-600">
+                10 GB
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                100 GB
+              </td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                Analytics
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                <i class="fas fa-times text-red-500"></i>
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium text-slate-600">
+                <i class="fas fa-check text-green-500"></i>
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                <i class="fas fa-check text-green-500"></i>
+              </td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                Custom Integrations
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                <i class="fas fa-times text-red-500"></i>
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium text-slate-600">
+                <i class="fas fa-times text-red-500"></i>
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                <i class="fas fa-check text-green-500"></i>
+              </td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                Priority Support
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                <i class="fas fa-times text-red-500"></i>
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium text-slate-600">
+                <i class="fas fa-check text-green-500"></i>
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                <i class="fas fa-check text-green-500"></i>
+              </td>
+            </tr>
+            <tr>
+              <td class="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                SLA Guarantee
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                <i class="fas fa-times text-red-500"></i>
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm font-medium text-slate-600">
+                <i class="fas fa-times text-red-500"></i>
+              </td>
+              <td class="px-6 py-4 whitespace-nowrap text-center text-sm text-gray-500">
+                <i class="fas fa-check text-green-500"></i>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- FAQs -->
+  <div class="bg-white py-16">
+    <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+      <div class="text-center">
+        <h2 class="text-3xl font-extrabold text-gray-900">Frequently Asked Questions</h2>
+        <p class="mt-4 text-lg text-gray-500">
+          Have questions? We've got answers. If you can't find what you're looking for, please contact our support team.
+        </p>
+      </div>
+
+      <div class="mt-12 max-w-4xl mx-auto">
+        <dl class="space-y-8">
+          {% for faq in faqs %}
+            <div class="bg-gray-50 p-6 rounded-xs">
+              <dt class="text-lg leading-6 font-medium text-gray-900">
+                {{ faq.question }}
+              </dt>
+              <dd class="mt-2 text-base text-gray-500">
+                {{ faq.answer }}
+              </dd>
+            </div>
+          {% endfor %}
+        </dl>
+      </div>
+    </div>
+  </div>
+
+  <!-- CTA -->
+  <div class="bg-slate-700 py-12">
+    <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 text-center">
+      <h2 class="text-3xl font-extrabold text-white">
+        Need something custom?
+      </h2>
+      <p class="mt-4 text-lg text-slate-100">
+        Our team will work with you to create a custom solution tailored to your organization's unique needs.
+      </p>
+      <div class="mt-8 flex justify-center">
+        <div class="inline-flex rounded-xs shadow-xs">
+          <a href="{% url 'public:account-login' %}" class="inline-flex items-center justify-center px-5 py-3 border border-transparent text-base font-medium rounded-xs text-slate-700 bg-white hover:bg-gray-50">
+            Contact sales
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock content %}
+
+{% block main_footer %}{% endblock %}

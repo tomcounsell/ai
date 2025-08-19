@@ -1,0 +1,22 @@
+[run]
+source = apps
+omit =
+    */migrations/*
+    */tests/*
+    */venv/*
+    */settings/*
+    manage.py
+
+[report]
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    if self.debug:
+    raise NotImplementedError
+    if __name__ == "__main__":
+    class .*\bAbstractUser\b.*
+    pass
+    raise ImportError
+
+[html]
+directory = apps/common/tests/coverage_html_report

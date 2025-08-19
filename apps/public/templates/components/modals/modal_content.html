@@ -1,0 +1,55 @@
+{% extends "components/modals/modal_base.html" %}
+
+{% comment %}
+  Content Modal
+  ============
+
+  Purpose:
+  A modal for displaying content or information to the user.
+  This template can be loaded dynamically via HTMX.
+
+  Context Variables:
+  - modal_id: Unique ID for the modal (default: "content-modal")
+  - modal_title: Title of the dialog (required)
+  - content: HTML content to display in the modal (required if not using content block)
+  - close_text: Text for close button (default: "Close")
+  - modal_size: Size variant (options: 'sm', 'md', 'lg', 'xl', default: 'md')
+  - actions: Additional buttons/actions to show in footer (optional HTML)
+
+  Blocks:
+  - content_block: Alternative to passing content in context
+
+  HTMX Integration:
+  Load this modal dynamically:
+
+  <button
+    hx-get="{% url 'load_content_modal' %}"
+    hx-target="#modal-container"
+    hx-swap="innerHTML"
+  >
+    Show Content
+  </button>
+{% endcomment %}
+
+{% block modal_body %}
+<div class="prose prose-sm sm:prose max-w-none">
+    {% block content_block %}
+    {% comment %}Content for the modal - can be provided via context variable or by overriding this block{% endcomment %}
+    {{ content|safe }}
+{% endblock %}
+</div>
+{% endblock modal_body %}
+
+{% block modal_footer %}
+{% if actions %}
+{{ actions|safe }}
+{% endif %}
+
+<button
+        type="button"
+        class="px-4 py-2 rounded-xs text-gray-700 bg-gray-100 hover:bg-gray-200 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 transition-colors"
+        onclick="this.closest('.modal-container').innerHTML = ''"
+>
+    {{ close_text|default:"Close" }}
+</button>
+{% endblock modal_footer %}

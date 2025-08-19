@@ -1,0 +1,41 @@
+{# Component template for displaying a list of items #}
+{# This would be placed in templates/components/lists/list_items.html #}
+
+{% if items %}
+  <ul class="items-list">
+    {% for item in items %}
+      <li class="item-row">
+        <div class="item-details">
+          <h3>{{ item.name }}</h3>
+          <p>{{ item.description }}</p>
+        </div>
+
+        <div class="item-actions">
+          {# Edit button - opens form modal #}
+          <button
+            class="btn-outline"
+            hx-get="{% url 'load_item_form_modal' item_id=item.id %}"
+            hx-target="#primary-modal-container"
+            hx-swap="innerHTML"
+          >
+            Edit
+          </button>
+
+          {# Delete button - opens confirmation modal #}
+          <button
+            class="btn-danger"
+            hx-get="{% url 'load_confirm_delete_modal' item_id=item.id %}"
+            hx-target="#primary-modal-container"
+            hx-swap="innerHTML"
+          >
+            Delete
+          </button>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <div class="empty-state">
+    <p>No items found. Click "Add New Item" to create one.</p>
+  </div>
+{% endif %}

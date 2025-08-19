@@ -1,0 +1,225 @@
+{% load static %}
+
+{% comment %}
+Footer Component
+===============
+
+Purpose:
+Site-wide footer that appears at the bottom of all pages.
+Provides links to important pages, legal information, and site metadata.
+{% endcomment %}
+
+<footer class="bg-gray-900">
+  <div class="mx-auto max-w-7xl px-6 pb-8 pt-16 sm:pt-24 lg:px-8 lg:pt-32">
+    <div class="xl:grid xl:grid-cols-3 xl:gap-8">
+      <!-- Company/Project Info -->
+      <div class="space-y-8">
+        <div class="flex items-center">
+          <img class="h-9 w-auto mr-2" src="{% static 'assets/favicon.png' %}" alt="Logo">
+          <span class="text-white font-medium">
+            <a href="https://tomcounsell.com" target="_blank" title="Tom Counsell"
+               class="text-gray-300 hover:text-white transition">
+                Tom Counsell</a>'s Template
+          </span>
+        </div>
+        <p class="text-balance text-sm/6 text-gray-300">
+          A modern, feature-rich, template Django repository with HTMX integration, comprehensive test coverage, and following strict best practices.
+        </p>
+
+        <!-- Social Links -->
+        <div class="flex gap-x-6">
+          <a href="https://github.com/tomcounsell/django-project-template" target="_blank" class="text-gray-400 hover:text-gray-300">
+            <span class="sr-only">GitHub</span>
+            <i class="fab fa-github fa-lg"></i>
+          </a>
+          <a href="http://x.com/tomcounsell" target="_blank" class="text-gray-400 hover:text-gray-300">
+            <span class="sr-only">X</span>
+            <i class="fab fa-x-twitter fa-lg"></i>
+          </a>
+          <a href="https://www.linkedin.com/in/tomcounsell/" target="_blank" class="text-gray-400 hover:text-gray-300">
+            <span class="sr-only">LinkedIn</span>
+            <i class="fab fa-linkedin fa-lg"></i>
+          </a>
+        </div>
+      </div>
+
+      <!-- Footer Links -->
+      <div class="mt-16 grid grid-cols-2 gap-8 xl:col-span-2 xl:mt-0">
+        <div class="md:grid md:grid-cols-2 md:gap-8">
+          <!-- Project Resources -->
+          <div>
+            <h3 class="text-sm/6 font-semibold text-white">Project Resources</h3>
+            <ul role="list" class="mt-6 space-y-4">
+              <li>
+                <a href="{% url 'public:ui-examples' %}" class="text-sm/6 text-gray-400 hover:text-white">
+                  <i class="fas fa-puzzle-piece fa-fw mr-1"></i> UI Examples
+                </a>
+              </li>
+              {% if user.is_staff %}
+              <li>
+                <a href="{% url 'admin:index' %}" class="text-sm/6 text-gray-400 hover:text-white">
+                  <i class="fas fa-lock fa-fw mr-1"></i> Admin Dashboard
+                </a>
+              </li>
+              {% endif %}
+              {% if user.teams.exists %}
+              <li>
+                <a href="{% url 'public:team-list' %}" class="text-sm/6 text-gray-400 hover:text-white">
+                  <i class="fas fa-users fa-fw mr-1"></i> Team
+                </a>
+              </li>
+              {% endif %}
+            </ul>
+          </div>
+
+          <!-- Documentation -->
+          <div class="mt-10 md:mt-0">
+            <h3 class="text-sm/6 font-semibold text-white">Documentation</h3>
+            <ul role="list" class="mt-6 space-y-4">
+              <!-- Project Documentation Dropdown -->
+              <li class="relative">
+                <button
+                  type="button"
+                  class="text-sm/6 text-gray-400 hover:text-white flex items-center"
+                  id="docs_menu_button"
+                  aria-controls="docs_menu"
+                  onclick="toggleDropdown(this); event.stopPropagation();"
+                  aria-expanded="false"
+                  aria-haspopup="true"
+                >
+                  <i class="fas fa-file-alt fa-fw mr-1"></i> Project Docs
+                  <i class="fas fa-chevron-down text-xs ml-1.5"></i>
+                </button>
+
+                <!-- Docs Popover -->
+                <div
+                  id="docs_menu"
+                  role="menu"
+                  aria-orientation="vertical"
+                  aria-labelledby="docs_menu_button"
+                  class="absolute left-0 z-10 mt-2 origin-top-left rounded-md bg-gray-800 border border-gray-700 shadow-lg p-4 w-72 max-h-80 overflow-y-auto hidden"
+                >
+                  <!-- Docs Navigation -->
+                  <div class="mb-3">
+                    <h4 class="text-sm font-medium text-white mb-2">Documentation</h4>
+                    <div class="flex flex-col gap-y-2">
+                      <!-- Main Docs -->
+                      <div>
+                        <h5 class="text-xs font-medium text-gray-300 mb-1.5">Main Docs</h5>
+                        <ul class="space-y-1.5">
+                          <li><a href="/docs/ARCHITECTURE" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">Architecture <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/TEMPLATE_CONVENTIONS" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">Template Conventions <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/VIEW_CONVENTIONS" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">View Conventions <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/MODEL_CONVENTIONS" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">Model Conventions <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/BEHAVIOR_MIXINS" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">Behavior Mixins <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/ERROR_HANDLING" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">Error Handling <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/HTMX_INTEGRATION" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">HTMX Integration <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/MODAL_PATTERNS" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">Modal Patterns <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/TAILWIND_V4" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">Tailwind v4 <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/TODO" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">TODO List <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                        </ul>
+                      </div>
+
+                      <!-- Advanced Docs -->
+                      <div>
+                        <h5 class="text-xs font-medium text-gray-300 mb-1.5">Advanced Topics</h5>
+                        <ul class="space-y-1.5">
+                          <li><a href="/docs/advanced/BROWSER_TESTING" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">Browser Testing <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/advanced/E2E_TESTING" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">E2E Testing <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/advanced/TEST_CONVENTIONS" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">Test Conventions <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/advanced/TEST_TROUBLESHOOTING" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">Test Troubleshooting <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/advanced/AI_BROWSER_TESTING" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">AI Browser Testing <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/advanced/CICD" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">CI/CD <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/advanced/SCREENSHOT_SERVICE" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">Screenshot Service <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                          <li><a href="/docs/advanced/HTMX_AND_RESPONSIVE_TESTING" target="_blank" rel="noopener" class="text-xs text-gray-400 hover:text-white block">HTMX Testing <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i></a></li>
+                        </ul>
+                      </div>
+
+                      <!-- View All -->
+                      <div class="mt-1 pt-2 border-t border-gray-700">
+                        <a href="/docs/" target="_blank" rel="noopener" class="text-xs text-accent hover:text-accent-light flex items-center">
+                          <i class="fas fa-list-ul mr-1"></i> View all docs <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i>
+                        </a>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </li>
+
+              <!-- External Docs -->
+              <li>
+                <a href="https://docs.djangoproject.com/" target="_blank" rel="noopener" class="text-sm/6 text-gray-400 hover:text-white">
+                  <i class="fas fa-book fa-fw mr-1"></i> Django Docs <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i>
+                </a>
+              </li>
+              <li>
+                <a href="https://htmx.org/docs/" target="_blank" rel="noopener" class="text-sm/6 text-gray-400 hover:text-white">
+                  <i class="fas fa-code fa-fw mr-1"></i> HTMX Docs <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i>
+                </a>
+              </li>
+              <li>
+                <a href="https://tailwindcss.com/docs" target="_blank" rel="noopener" class="text-sm/6 text-gray-400 hover:text-white">
+                  <i class="fas fa-paint-brush fa-fw mr-1"></i> Tailwind CSS <i class="fas fa-external-link-alt text-xs ml-1 opacity-70"></i>
+                </a>
+              </li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="md:grid md:grid-cols-2 md:gap-8">
+          <!-- Company Links -->
+          <div>
+            <h3 class="text-sm/6 font-semibold text-white">About</h3>
+            <ul role="list" class="mt-6 space-y-4">
+              <li>
+                <a href="{% url 'public:blog' %}" class="text-sm/6 text-gray-400 hover:text-white">
+                  <i class="fas fa-newspaper fa-fw mr-1"></i> Blog
+                </a>
+              </li>
+              <li>
+                <a href="{% url 'public:pricing' %}" class="text-sm/6 text-gray-400 hover:text-white">
+                  <i class="fas fa-tags fa-fw mr-1"></i> Pricing
+                </a>
+              </li>
+            </ul>
+          </div>
+
+          <!-- Legal Links -->
+          <div class="mt-10 md:mt-0">
+            <h3 class="text-sm/6 font-semibold text-white">Legal</h3>
+            <ul role="list" class="mt-6 space-y-4">
+              <li>
+                <a href="#" class="text-sm/6 text-gray-400 hover:text-white">
+                  <i class="fas fa-shield-alt fa-fw mr-1"></i> Privacy Policy
+                </a>
+              </li>
+              <li>
+                <a href="#" class="text-sm/6 text-gray-400 hover:text-white">
+                  <i class="fas fa-file-contract fa-fw mr-1"></i> Terms of Service
+                </a>
+              </li>
+              <li>
+                <a href="#" class="text-sm/6 text-gray-400 hover:text-white">
+                  <i class="fas fa-cookie fa-fw mr-1"></i> Cookie Policy
+                </a>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Copyright Section -->
+    <div class="mt-16 border-t border-white/10 pt-8 sm:mt-20 lg:mt-24 flex flex-col md:flex-row justify-between items-center">
+      <p class="text-sm/6 text-gray-400">&copy; {% now "Y" %} Django Project Template. All rights reserved.</p>
+      <p class="text-sm/6 text-gray-400 mt-4 md:mt-0">
+        Made with <i class="fas fa-heart text-accent"></i>
+        by <a href="https://tomcounsell.com" target="_blank" title="Tom Counsell"
+              class="text-gray-300 hover:text-white hover:decoration-accent transition">Tom Counsell</a>
+      </p>
+    </div>
+  </div>
+</footer>
+
+{% comment %}Extension point for adding custom content to the footer{% endcomment %}
+{% block footer_content %}{% endblock %}

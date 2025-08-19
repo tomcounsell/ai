@@ -1,0 +1,98 @@
+{% extends "components/modals/modal_base.html" %}
+
+{% comment %}
+  Confirmation Modal
+  =================
+
+  Purpose:
+  Provides a reusable confirmation dialog for actions that need user verification.
+  This template can be loaded dynamically via HTMX.
+
+  Context Variables:
+  - modal_id: Unique ID for the modal (default: "confirm-modal")
+  - modal_title: Dialog title (default: "Confirm Action")
+  - message: Confirmation message to display (required)
+  - confirm_url: URL to submit confirmation to (required)
+  - confirm_method: HTTP method for confirmation (default: 'post')
+  - confirm_text: Text for confirm button (default: 'Confirm')
+  - cancel_text: Text for cancel button (default: 'Cancel')
+  - confirm_class: CSS class for confirm button (default: 'btn-primary')
+  - cancel_class: CSS class for cancel button (default: 'btn-secondary')
+  - target: HTMX target for the confirmation action (default: '#content')
+  - swap: HTMX swap method (optional)
+  - icon: Type of icon to show (options: 'warning', 'danger', 'info', 'success')
+
+  HTMX Integration:
+  Load this modal dynamically:
+
+  <button
+    hx-get="{% url 'confirm_delete' item.id %}"
+    hx-target="#primary-modal-container"
+    hx-swap="innerHTML"
+  >
+    Delete Item
+  </button>
+{% endcomment %}
+
+{% block modal_body %}
+  <div class="sm:flex sm:items-start">
+    {% if icon == 'warning' %}
+      <div class="mx-auto flex size-12 shrink-0 items-center justify-center rounded-full bg-yellow-100 sm:mx-0 sm:size-10">
+        <svg class="size-6 text-yellow-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+        </svg>
+      </div>
+    {% elif icon == 'danger' %}
+      <div class="mx-auto flex size-12 shrink-0 items-center justify-center rounded-full bg-red-100 sm:mx-0 sm:size-10">
+        <svg class="size-6 text-red-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+        </svg>
+      </div>
+    {% elif icon == 'success' %}
+      <div class="mx-auto flex size-12 shrink-0 items-center justify-center rounded-full bg-green-100 sm:mx-0 sm:size-10">
+        <svg class="size-6 text-green-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+      </div>
+    {% elif icon == 'info' %}
+      <div class="mx-auto flex size-12 shrink-0 items-center justify-center rounded-full bg-blue-100 sm:mx-0 sm:size-10">
+        <svg class="size-6 text-blue-600" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9 9.75v3m3-3v3m3-3v3M15 12h.008v.008H15V12z" />
+        </svg>
+      </div>
+    {% endif %}
+    <div class="mt-3 text-center sm:mt-0 sm:ml-4 sm:text-left">
+      <div class="mt-2">
+        <p class="text-sm text-gray-500">{{ message|safe }}</p>
+      </div>
+    </div>
+  </div>
+{% endblock modal_body %}
+
+{% block modal_footer %}
+  <div class="flex flex-col-reverse sm:flex-row-reverse sm:gap-x-3 gap-y-3">
+    <button
+      type="button"
+      class="inline-flex w-full justify-center rounded-xs {% if icon == 'danger' %}bg-red-600 hover:bg-red-500{% else %}bg-slate-700 hover:bg-slate-600{% endif %} px-3 py-2 text-sm font-semibold text-white shadow-xs focus-visible:outline-2 focus-visible:outline-offset-2 {% if icon == 'danger' %}focus-visible:outline-red-600{% else %}focus-visible:outline-slate-600{% endif %} sm:w-auto {{ confirm_class|default:'' }}"
+      hx-{{ confirm_method|default:"post" }}="{{ confirm_url }}"
+      {% if target %}hx-target="{{ target }}"{% endif %}
+      {% if swap %}hx-swap="{{ swap }}"{% endif %}
+      {% if trigger %}hx-trigger="{{ trigger }}"{% endif %}
+      hx-vals='{% if redirect_after %}{"redirect_after": "{{ redirect_after }}"}{% endif %}'
+      hx-headers='{"X-CSRFToken": "{{ csrf_token }}"}'
+      {% if is_list_view and row_id %}hx-on:click="document.addEventListener('todoDeleted-{{ row_id|cut:'todo-row-' }}', function() { htmx.remove('#{{ row_id }}') });"{% endif %}
+      onclick="const container = this.closest('.modal-container'); setTimeout(() => { if (container) container.innerHTML = '' }, 100)"
+    >
+      {{ confirm_text|default:"Confirm" }}
+    </button>
+
+    <button
+      type="button"
+      class="inline-flex w-full justify-center rounded-xs bg-white px-3 py-2 text-sm font-semibold text-gray-900 ring-1 shadow-xs ring-gray-300 ring-inset hover:bg-gray-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gray-600 sm:w-auto {{ cancel_class|default:'' }}"
+      onclick="const container = this.closest('.modal-container'); if (container) container.innerHTML = ''"
+    >
+      {{ cancel_text|default:"Cancel" }}
+    </button>
+  </div>
+{% endblock modal_footer %}

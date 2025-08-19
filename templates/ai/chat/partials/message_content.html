@@ -1,0 +1,21 @@
+{% if not message.is_processed %}
+<!-- Still processing -->
+<div
+    hx-get="{% url 'ai:chat-poll' message.id %}"
+    hx-trigger="poll"
+    hx-swap="innerHTML"
+    data-message-processing="true"
+>
+    <div class="flex items-center gap-2">
+        <div class="animate-pulse flex space-x-1">
+            <div class="w-2 h-2 bg-gray-500 rounded-full"></div>
+            <div class="w-2 h-2 bg-gray-500 rounded-full"></div>
+            <div class="w-2 h-2 bg-gray-500 rounded-full"></div>
+        </div>
+        <span class="text-sm italic">Thinking...</span>
+    </div>
+</div>
+{% else %}
+<!-- Message processed -->
+<div class="whitespace-pre-wrap" data-message-processing="false">{{ message.content }}</div>
+{% endif %}

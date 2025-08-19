@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}Set New Password{% endblock %}
+
+{% block content %}
+<div class="container mx-auto max-w-md px-4 py-12">
+  <div class="text-center mb-8">
+    <h1 class="text-2xl font-bold mb-2">Set New Password</h1>
+    <p class="text-gray-600">
+      Please enter your new password twice to verify.
+    </p>
+  </div>
+
+  <div class="bg-white rounded-xs shadow-xs p-6">
+    {% if validlink %}
+      <form method="post">
+        {% csrf_token %}
+
+        {% if form.non_field_errors %}
+          <div class="mb-4 p-3 bg-red-100 text-red-700 rounded-xs">
+            {{ form.non_field_errors }}
+          </div>
+        {% endif %}
+
+        <div class="mb-4">
+          <label for="{{ form.new_password1.id_for_label }}" class="block text-gray-700 font-semibold mb-2">
+            New Password
+          </label>
+          {{ form.new_password1 }}
+          {% if form.new_password1.errors %}
+            <p class="text-red-500 text-sm mt-1">{{ form.new_password1.errors.0 }}</p>
+          {% endif %}
+          {% if form.new_password1.help_text %}
+            <div class="text-gray-500 text-sm mt-1">
+              <ul class="list-disc pl-5">
+                {% for help_text in form.new_password1.help_text|split:'<li>' %}
+                  {% if not forloop.first %}
+                    <li>{{ help_text|split:'</li>'|first }}</li>
+                  {% endif %}
+                {% endfor %}
+              </ul>
+            </div>
+          {% endif %}
+        </div>
+
+        <div class="mb-4">
+          <label for="{{ form.new_password2.id_for_label }}" class="block text-gray-700 font-semibold mb-2">
+            Confirm New Password
+          </label>
+          {{ form.new_password2 }}
+          {% if form.new_password2.errors %}
+            <p class="text-red-500 text-sm mt-1">{{ form.new_password2.errors.0 }}</p>
+          {% endif %}
+        </div>
+
+        <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded-xs">
+          Change My Password
+        </button>
+      </form>
+    {% else %}
+      <div class="p-4 bg-yellow-50 text-yellow-700 rounded-xs">
+        <h2 class="font-semibold mb-2">Invalid Password Reset Link</h2>
+        <p>
+          This password reset link is invalid, possibly because it has already been used
+          or has expired. Please request a new password reset.
+        </p>
+      </div>
+
+      <div class="mt-6 text-center">
+        <a href="{% url 'public:account-login' %}" class="bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded-xs">
+          Return to Login
+        </a>
+      </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

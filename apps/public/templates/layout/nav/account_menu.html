@@ -1,0 +1,84 @@
+{% comment %}
+  Account Menu Component
+  =====================
+
+  Purpose:
+  User account management dropdown menu that provides access to account-related
+  functions and administrative tools based on user permissions.
+
+  Authenticated User View:
+  - Account menu toggle: User avatar that expands the dropdown
+  - Settings link: Access to user profile and account settings
+  - Admin link: Access to Django admin (staff users only)
+  - Logout link: Option to end the user session
+
+  Non-Authenticated User View:
+  - Login link: Direct link to the login page
+
+  States:
+  - Collapsed: Only shows the menu toggle (avatar)
+  - Expanded: Shows all available options in a dropdown
+
+  Integration:
+  This component is included in the navbar and handles all user account
+  management navigation. It adapts its display based on authentication state
+  and user permissions.
+{% endcomment %}
+
+{% if user.is_authenticated %}
+  <!-- Profile dropdown -->
+  <div class="relative ml-3">
+    <!-- Avatar/Button that toggles the dropdown -->
+    <button type="button"
+            class="relative flex rounded-full bg-white text-sm focus:outline-hidden focus:ring-2 focus:ring-slate-500 focus:ring-offset-2 focus:ring-offset-white"
+            id="nav_user_menu_button"
+            aria-controls="nav_user_menu"
+            onclick="toggleDropdown(this); event.stopPropagation();"
+            aria-expanded="false"
+            aria-haspopup="true">
+      <span class="absolute -inset-1.5"></span>
+      <span class="sr-only">Open user menu</span>
+      <span class="inline-flex size-8 items-center justify-center rounded-full bg-slate-700">
+        <span class="text-sm font-medium text-white">{{ user.initials|default:"U" }}</span>
+      </span>
+    </button>
+
+    <!-- Dropdown menu -->
+    <!--
+      Show/hide this element based on the dropdown state
+
+      Entering: "transition ease-out duration-100 transform"
+        From: "opacity-0 scale-95"
+        To: "opacity-100 scale-100"
+      Closing: "transition ease-in duration-75 transform"
+        From: "opacity-100 scale-100"
+        To: "opacity-0 scale-95"
+    -->
+    <div id="nav_user_menu" role="menu"
+         class="absolute right-0 z-10 mt-2 w-48 origin-top-right rounded-xs bg-white py-1 shadow-lg ring-1 ring-black/5 focus:outline-hidden hidden"
+         aria-orientation="vertical"
+         aria-labelledby="nav_user_menu_button"
+         tabindex="-1">
+      <!-- Menu items -->
+      <a href="{% url 'public:account-settings' %}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" role="menuitem" tabindex="-1" id="user-menu-item-0">
+        Account Settings
+      </a>
+      {% if user.is_staff %}
+        <a href="/admin/" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" role="menuitem" tabindex="-1" id="user-menu-item-1">
+          Admin Dashboard
+        </a>
+      {% endif %}
+      <form method="post" action="{% url 'public:account-logout' %}" class="block px-0 py-0 logout-form">
+        {% csrf_token %}
+        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 hover:text-red-600" role="menuitem" tabindex="-1" id="user-menu-item-2">
+          Logout
+        </button>
+      </form>
+    </div>
+  </div>
+{% else %}
+  <!-- Login link for non-authenticated users -->
+  <a href="{% url 'public:account-login' %}" class="rounded-xs px-3 py-2 text-sm font-medium text-slate-700 hover:text-slate-900">
+    Login
+  </a>
+{% endif %}

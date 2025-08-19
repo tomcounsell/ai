@@ -1,0 +1,83 @@
+{% extends "partials/_partial_base.html" %}
+
+{% comment %}
+  User Form Partial
+  ================
+
+  Purpose:
+  Reusable form for creating or editing user profiles. This partial can be
+  loaded dynamically via HTMX or included directly in full pages.
+
+  Context Variables:
+  - form: The UserForm instance (required)
+  - submit_url: URL to submit the form to (required)
+  - is_edit: Boolean indicating whether this is an edit form (optional)
+
+  HTMX Attributes:
+  - hx-post: Form submission endpoint
+  - hx-target: Where to display the response
+  - hx-swap: How to swap the response
+
+  Usage:
+  {% include "partials/forms/form_user.html" with form=user_form submit_url=user_create_url %}
+{% endcomment %}
+
+{% block content %}
+<form
+  hx-post="{{ submit_url }}"
+  hx-target="#form-response"
+  hx-swap="outerHTML"
+  class="user-form"
+>
+  {% csrf_token %}
+
+  <div id="form-response">
+    {% if form.non_field_errors %}
+    <div class="error-messages">
+      {{ form.non_field_errors }}
+    </div>
+    {% endif %}
+
+    <div class="form-fields">
+      {% comment %}First Name{% endcomment %}
+      <div class="field">
+        <label for="{{ form.first_name.id_for_label }}">First Name</label>
+        <div class="control">
+          {{ form.first_name }}
+        </div>
+        {% if form.first_name.errors %}
+        <p class="error">{{ form.first_name.errors.0 }}</p>
+        {% endif %}
+      </div>
+
+      {% comment %}Last Name{% endcomment %}
+      <div class="field">
+        <label for="{{ form.last_name.id_for_label }}">Last Name</label>
+        <div class="control">
+          {{ form.last_name }}
+        </div>
+        {% if form.last_name.errors %}
+        <p class="error">{{ form.last_name.errors.0 }}</p>
+        {% endif %}
+      </div>
+
+      {% comment %}Email{% endcomment %}
+      <div class="field">
+        <label for="{{ form.email.id_for_label }}">Email</label>
+        <div class="control">
+          {{ form.email }}
+        </div>
+        {% if form.email.errors %}
+        <p class="error">{{ form.email.errors.0 }}</p>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit" class="btn-primary">
+        {% if is_edit %}Update{% else %}Create{% endif %} User
+      </button>
+    </div>
+  </div>
+</form>
+{% endblock content %}

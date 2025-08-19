@@ -1,0 +1,86 @@
+{% comment %}
+  Modal Examples
+  =============
+
+  Purpose:
+  Example implementations of the modal templates.
+  Include this in any page for easy access to example modals.
+
+  Usage:
+  {% include "components/modals/examples.html" %}
+{% endcomment %}
+
+<div class="modal-examples hidden">
+  <!-- Content Modal Example -->
+  <template id="example-content-modal">
+    {% extends "components/modals/modal_content.html" %}
+
+    {% block content_block %}
+      <h2>Welcome to the Modal System</h2>
+      <p>This is an example of a content modal that can display formatted content.</p>
+      <ul>
+        <li>Easy to use</li>
+        <li>HTMX compatible</li>
+        <li>Fully accessible</li>
+      </ul>
+      <p>Use this for displaying information, help text, or any other content to the user.</p>
+    {% endblock %}
+  </template>
+
+  <!-- Confirmation Modal Example -->
+  <template id="example-confirm-modal">
+    {% extends "components/modals/modal_confirm.html" %}
+    {% with
+      modal_id="confirm-example"
+      modal_title="Confirm Action"
+      message="Are you sure you want to proceed with this action? This cannot be undone."
+      confirm_url="/api/confirm"
+      icon="warning"
+    %}
+    {% endblock %}
+    {% endwith %}
+  </template>
+
+  <!-- Form Modal Example - Note this would normally be rendered server-side -->
+  <template id="example-form-modal">
+    {% extends "components/modals/modal_form.html" %}
+    {% with
+      modal_id="form-example"
+      modal_title="Edit Profile"
+      submit_url="/api/profile"
+      submit_text="Save Changes"
+    %}
+    {% endblock %}
+    {% endwith %}
+  </template>
+</div>
+
+<!-- Example Buttons -->
+<div class="modal-examples-buttons flex space-x-4">
+  <button
+    class="px-4 py-2 rounded-xs text-white bg-blue-600 hover:bg-blue-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+    hx-get="/modals/content-example/"
+    hx-target="#primary-modal-container"
+    hx-swap="innerHTML"
+  >
+    Open Content Modal
+  </button>
+
+  <button
+    class="px-4 py-2 rounded-xs text-white bg-yellow-600 hover:bg-yellow-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
+    hx-get="/modals/confirm-example/"
+    hx-target="#primary-modal-container"
+    hx-swap="innerHTML"
+  >
+    Open Confirm Modal
+  </button>
+
+  <button
+    class="px-4 py-2 rounded-xs text-white bg-green-600 hover:bg-green-700 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-green-500"
+    hx-get="/modals/form-example/"
+    hx-target="#primary-modal-container"
+    hx-swap="innerHTML"
+  >
+    Open Form Modal
+  </button>
+</div>

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+
+{# Example of a list page that uses modal dialogs #}
+
+{% block content %}
+<div class="items-container">
+  <div class="header-actions">
+    <h1>Items</h1>
+
+    {# Create button that opens a form modal #}
+    <button
+      class="btn-primary"
+      hx-get="{% url 'load_item_form_modal' %}"
+      hx-target="#primary-modal-container"
+      hx-swap="innerHTML"
+    >
+      Add New Item
+    </button>
+  </div>
+
+  {# Item list that will be refreshed after actions #}
+  <div id="item-list">
+    {% include "components/lists/list_items.html" with items=items %}
+  </div>
+</div>
+{% endblock content %}

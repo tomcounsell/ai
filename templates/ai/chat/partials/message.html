@@ -1,0 +1,52 @@
+{% for message in messages %}
+<div class="flex {% if message.role == 'user' %}justify-end{% else %}justify-start{% endif %} message-wrapper">
+    <div class="max-w-[70%] {% if message.role == 'user' %}order-2{% endif %}">
+        <div class="flex items-start gap-3">
+            <!-- Avatar -->
+            <div class="flex-shrink-0">
+                {% if message.role == 'user' %}
+                <div class="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-sm font-medium">
+                    U
+                </div>
+                {% else %}
+                <div class="w-8 h-8 rounded-full bg-gray-600 flex items-center justify-center text-white text-sm font-medium">
+                    AI
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- Message Content -->
+            <div class="flex-1">
+                <div class="{% if message.role == 'user' %}bg-blue-600 text-white{% else %}bg-gray-100 text-gray-900{% endif %} rounded-lg px-4 py-2">
+                    {% if not message.is_processed %}
+                    <!-- Loading state for assistant messages -->
+                    <div
+                        hx-get="{% url 'ai:chat-poll' message.id %}"
+                        hx-trigger="load, poll"
+                        hx-swap="innerHTML"
+                        data-message-processing="true"
+                    >
+                        <div class="flex items-center gap-2">
+                            <div class="animate-pulse flex space-x-1">
+                                <div class="w-2 h-2 bg-gray-500 rounded-full"></div>
+                                <div class="w-2 h-2 bg-gray-500 rounded-full"></div>
+                                <div class="w-2 h-2 bg-gray-500 rounded-full"></div>
+                            </div>
+                            <span class="text-sm italic">Thinking...</span>
+                        </div>
+                    </div>
+                    {% else %}
+                    <!-- Processed message content -->
+                    <div class="whitespace-pre-wrap">{{ message.content }}</div>
+                    {% endif %}
+                </div>
+
+                <!-- Timestamp -->
+                <div class="text-xs text-gray-500 mt-1">
+                    {{ message.created_at|date:"g:i A" }}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endfor %}

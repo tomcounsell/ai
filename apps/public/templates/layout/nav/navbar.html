@@ -1,0 +1,164 @@
+{% load static %}
+
+{% comment %}
+  Navbar Component
+  ===============
+
+  Purpose:
+  Primary navigation component that appears at the top of all pages.
+  Provides access to main site sections and user account functions.
+
+  Elements:
+  - Logo: Site branding that links to the homepage
+  - Mobile menu toggle: Hamburger icon that expands navigation on small screens
+  - Main navigation area: Contains links to primary site sections
+  - Account menu: User-specific options (login/logout, settings, etc.)
+
+  Responsive Behavior:
+  - On desktop: Horizontal navigation with full menu visible
+  - On mobile: Collapsed menu with hamburger toggle for expansion
+
+  States:
+  - Default: Standard navigation with branding and links
+  - Authenticated: Shows user-specific navigation options
+  - Mobile expanded: Shows full navigation menu on small screens
+
+  Integration:
+  This component is included in the base template and appears on every page.
+  It works with JavaScript functions for menu toggling functionality.
+{% endcomment %}
+
+<nav class="bg-white shadow-xs">
+  <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
+    <div class="flex h-16 justify-between">
+      <!-- Left section with logo and nav links -->
+      <div class="flex items-center">
+        <!-- Logo -->
+        <div class="flex shrink-0 items-center">
+          <a href="/">
+            <img class="h-8 w-auto" src="{% static 'assets/img/logo-yudame.png' %}" alt="Django Project Template">
+          </a>
+        </div>
+
+        <!-- Desktop navigation - visible on sm and up -->
+        <div class="hidden sm:ml-6 sm:flex sm:space-x-8">
+          <!-- Current: "border-slate-500 text-gray-900", Default: "border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700" -->
+          <a href="/" class="inline-flex items-center border-b-2 {% if active_section == 'home' %}border-slate-500 text-gray-900{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700{% endif %} px-1 pt-1 text-sm font-medium">
+            Home
+          </a>
+
+          <a href="{% url 'public:pricing' %}" class="inline-flex items-center border-b-2 {% if active_section == 'pricing' %}border-slate-500 text-gray-900{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700{% endif %} px-1 pt-1 text-sm font-medium">
+            Pricing
+          </a>
+
+          <a href="{% url 'public:blog' %}" class="inline-flex items-center border-b-2 {% if active_section == 'blog' %}border-slate-500 text-gray-900{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700{% endif %} px-1 pt-1 text-sm font-medium">
+            Blog
+          </a>
+
+          {% if user.is_authenticated %}
+            {% if user.teams.exists %}
+            <a href="{% url 'public:team-list' %}" class="inline-flex items-center border-b-2 {% if active_section == 'teams' %}border-slate-500 text-gray-900{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700{% endif %} px-1 pt-1 text-sm font-medium">
+              Team
+            </a>
+            {% endif %}
+          {% endif %}
+        </div>
+      </div>
+
+      <!-- Right section with mobile menu button and account menu -->
+      <div class="flex items-center">
+        <!-- Mobile menu button - only visible on xs screens -->
+        <div class="sm:hidden">
+          <button type="button"
+                  id="mobile-menu-button"
+                  class="relative inline-flex items-center justify-center rounded-xs p-2 text-gray-400 hover:bg-gray-100 hover:text-gray-500 focus:outline-hidden focus:ring-2 focus:ring-inset focus:ring-slate-500"
+                  aria-controls="mobile-menu"
+                  aria-expanded="false"
+                  onclick="toggleMobileMenu()">
+            <span class="sr-only">Open main menu</span>
+            <!-- Icon when menu is closed -->
+            <svg class="block size-6" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true" data-slot="icon">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+            </svg>
+            <!-- Icon when menu is open - will be toggled with JavaScript -->
+            <svg class="hidden size-6" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true" data-slot="icon">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <!-- Account menu -->
+        <div class="ml-2 sm:ml-6">
+          {% include "layout/nav/account_menu.html" %}
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mobile menu, show/hide based on menu state -->
+  <div class="hidden sm:hidden" id="mobile-menu">
+    <div class="space-y-1 px-2 pt-2 pb-3">
+      <!-- Current: "bg-slate-50 text-slate-700", Default: "text-gray-500 hover:bg-gray-50 hover:text-gray-700" -->
+      <a href="/" class="block rounded-xs {% if active_section == 'home' %}bg-slate-50 text-slate-700{% else %}text-gray-500 hover:bg-gray-50 hover:text-gray-700{% endif %} px-3 py-2 text-base font-medium">
+        Home
+      </a>
+
+      <a href="{% url 'public:pricing' %}" class="block rounded-xs {% if active_section == 'pricing' %}bg-slate-50 text-slate-700{% else %}text-gray-500 hover:bg-gray-50 hover:text-gray-700{% endif %} px-3 py-2 text-base font-medium">
+        Pricing
+      </a>
+
+      <a href="{% url 'public:blog' %}" class="block rounded-xs {% if active_section == 'blog' %}bg-slate-50 text-slate-700{% else %}text-gray-500 hover:bg-gray-50 hover:text-gray-700{% endif %} px-3 py-2 text-base font-medium">
+        Blog
+      </a>
+
+      {% if user.is_authenticated %}
+        {% if user.teams.exists %}
+        <a href="{% url 'public:team-list' %}" class="block rounded-xs {% if active_section == 'teams' %}bg-slate-50 text-slate-700{% else %}text-gray-500 hover:bg-gray-50 hover:text-gray-700{% endif %} px-3 py-2 text-base font-medium">
+          Team
+        </a>
+        {% endif %}
+      {% endif %}
+    </div>
+
+    {% if user.is_authenticated %}
+      <div class="border-t border-gray-200 pb-3 pt-4">
+        <div class="flex items-center px-4">
+          <div class="shrink-0">
+            <div class="inline-flex size-8 items-center justify-center rounded-full bg-gray-500">
+              <span class="text-sm font-medium text-white">{{ user.initials|default:"U" }}</span>
+            </div>
+          </div>
+          <div class="ml-3">
+            <div class="text-base font-medium text-gray-800">{{ user.get_full_name|default:user.username }}</div>
+            <div class="text-sm font-medium text-gray-500">{{ user.email }}</div>
+          </div>
+        </div>
+        <div class="mt-3 space-y-1 px-2">
+          <a href="{% url 'public:account-settings' %}" class="block rounded-xs px-3 py-2 text-base font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-800">
+            Account Settings
+          </a>
+          {% if user.is_staff %}
+            <a href="/admin/" class="block rounded-xs px-3 py-2 text-base font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-800">
+              Admin Dashboard
+            </a>
+          {% endif %}
+          <form method="post" action="{% url 'public:account-logout' %}" class="block px-0 py-0 logout-form">
+            {% csrf_token %}
+            <button type="submit" class="block w-full text-left rounded-xs px-3 py-2 text-base font-medium text-gray-500 hover:bg-gray-50 hover:text-red-600">
+              Logout
+            </button>
+          </form>
+        </div>
+      </div>
+    {% endif %}
+  </div>
+</nav>
+
+<!-- HTMX trigger for refreshing nav on state change -->
+<div class="hidden"
+     hx-get="."
+     hx-swap="outerHTML"
+     hx-trigger="something-change from:body"
+     hx-select="nav"
+     hx-target="nav">
+</div>

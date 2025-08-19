@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+
+{% comment %}
+  Blog Post Detail Page
+  ====================
+
+  Purpose:
+  Displays a single blog post with its full content, metadata,
+  and related navigation elements. This page focuses on readability
+  and engagement with the content.
+
+  Content:
+  - Blog post title, metadata, and full content
+  - Author information
+  - Related posts
+  - Social sharing options
+  - Content navigation/table of contents
+
+  User Experience:
+  - Clean, distraction-free reading experience
+  - Clear typography with appropriate spacing
+  - Related content suggestions
+  - Easy navigation back to blog index
+
+  Integration:
+  Displays in the main content area of the base template.
+  Sidebar is enabled for table of contents and related content.
+  Does not require authentication to view.
+{% endcomment %}
+
+{% block title %}{{ post.title }}{% endblock %}
+
+{% block meta_description %}{{ post.excerpt }}{% endblock %}
+
+{% block og_type %}article{% endblock %}
+
+{% block content_width %}8{% endblock %}
+
+{% block main_header %}
+  <div>
+    <div class="flex items-center">
+      <a href="{% url 'public:blog' %}" class="text-slate-600 hover:text-slate-800 inline-flex items-center mr-4">
+        <i class="fas fa-arrow-left mr-1"></i> Back to Blog
+      </a>
+      <span class="inline-flex items-center px-3 py-1 rounded-full text-xs font-medium bg-slate-100 text-slate-800">
+        {{ post.category }}
+      </span>
+    </div>
+    <h1 class="text-3xl font-bold tracking-tight text-slate-900 mt-4 sm:text-4xl">
+      {{ post.title }}
+    </h1>
+    <div class="mt-4 flex items-center text-gray-500 text-sm">
+      <time datetime="{{ post.published_at|date:'c' }}">
+        Published {{ post.published_at|date:"F j, Y" }}
+      </time>
+      <span class="mx-2">•</span>
+      <span>By {{ post.author.name }}</span>
+    </div>
+  </div>
+{% endblock %}
+
+{% block content %}
+  <!-- Featured Image -->
+  <div class="mb-8 rounded-xs overflow-hidden shadow-xs">
+    <img src="{{ post.image }}" alt="{{ post.title }}" class="w-full h-auto">
+  </div>
+
+  <!-- Post Content -->
+  <article class="prose max-w-none bg-white shadow-xs rounded-xs p-8">
+    {{ post.content|safe }}
+  </article>
+
+  <!-- Author Bio -->
+  <div class="mt-8 flex bg-gray-50 p-6 rounded-xs shadow-xs">
+    <div class="shrink-0 mr-4">
+      <img class="h-16 w-16 rounded-full" src="{{ post.author.avatar }}" alt="{{ post.author.name }}">
+    </div>
+    <div>
+      <h3 class="text-lg font-medium text-gray-900">{{ post.author.name }}</h3>
+      <div class="mt-1 text-sm text-gray-500">
+        {{ post.author.bio }}
+      </div>
+    </div>
+  </div>
+
+  <!-- Tags -->
+  <div class="mt-8">
+    <h3 class="text-lg font-medium text-gray-900 mb-3">Tags</h3>
+    <div class="flex flex-wrap gap-2">
+      {% for tag in post.tags %}
+        <a href="{% url 'public:blog' %}?tag={{ tag|urlencode }}" class="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-gray-100 text-gray-800 hover:bg-slate-100 hover:text-slate-800">
+          #{{ tag }}
+        </a>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Share Buttons -->
+  <div class="mt-8 flex items-center space-x-4">
+    <span class="text-gray-700 font-medium">Share:</span>
+    <a href="#" class="text-blue-600 hover:text-blue-700">
+      <i class="fab fa-facebook-f fa-fw text-lg"></i>
+      <span class="sr-only">Share on Facebook</span>
+    </a>
+    <a href="#" class="text-blue-400 hover:text-blue-500">
+      <i class="fab fa-twitter fa-fw text-lg"></i>
+      <span class="sr-only">Share on Twitter</span>
+    </a>
+    <a href="#" class="text-blue-600 hover:text-blue-700">
+      <i class="fab fa-linkedin-in fa-fw text-lg"></i>
+      <span class="sr-only">Share on LinkedIn</span>
+    </a>
+    <a href="#" class="text-red-600 hover:text-red-700">
+      <i class="far fa-envelope fa-fw text-lg"></i>
+      <span class="sr-only">Share via Email</span>
+    </a>
+  </div>
+
+  <!-- Related Posts -->
+  <div class="mt-12">
+    <h2 class="text-2xl font-bold text-gray-900 mb-6">Related Articles</h2>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      {% for related in post.related_posts %}
+        <div class="flex flex-col bg-white shadow-xs rounded-xs overflow-hidden hover:shadow-xs transition-shadow">
+          <div class="shrink-0">
+            <img class="h-32 w-full object-cover" src="{{ related.image }}" alt="{{ related.title }}">
+          </div>
+          <div class="flex-1 p-4">
+            <a href="{% url 'public:blog-post' related.slug %}" class="block">
+              <h3 class="text-lg font-medium text-gray-900 hover:text-slate-600 line-clamp-2">
+                {{ related.title }}
+              </h3>
+            </a>
+          </div>
+        </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Comments Section -->
+  <div class="mt-12 bg-white shadow-xs rounded-xs p-6">
+    <h2 class="text-2xl font-bold text-gray-900 mb-6">Comments</h2>
+    <div class="space-y-6">
+      <!-- This would usually be a loop over actual comments -->
+      <div class="p-4 bg-gray-50 rounded-xs">
+        <p class="text-gray-500 italic">Comments are disabled for this article.</p>
+      </div>
+    </div>
+  </div>
+{% endblock content %}
+
+{% block sidebar_enabled %}true{% endblock %}
+
+{% block aside %}
+  <!-- Table of Contents -->
+  <div class="bg-white shadow-xs overflow-hidden rounded-xs mb-6 sticky top-4">
+    <div class="px-4 py-5 sm:p-6">
+      <h3 class="text-lg font-medium text-gray-900">Table of Contents</h3>
+      <nav class="mt-4">
+        <ul class="space-y-2 text-sm">
+          <li>
+            <a href="#" class="text-slate-600 hover:text-slate-800 font-medium">Introduction</a>
+          </li>
+          <li>
+            <a href="#" class="text-gray-600 hover:text-slate-600">Section Heading</a>
+          </li>
+          <li>
+            <a href="#" class="text-gray-600 hover:text-slate-600">Another Section</a>
+            <ul class="pl-4 mt-2 space-y-2">
+              <li>
+                <a href="#" class="text-gray-600 hover:text-slate-600">Code Example</a>
+              </li>
+              <li>
+                <a href="#" class="text-gray-600 hover:text-slate-600">Key Points</a>
+              </li>
+            </ul>
+          </li>
+          <li>
+            <a href="#" class="text-gray-600 hover:text-slate-600">Conclusion</a>
+          </li>
+        </ul>
+      </nav>
+    </div>
+  </div>
+
+  <!-- Newsletter Signup -->
+  <div class="bg-slate-700 shadow-xs overflow-hidden rounded-xs mb-6 text-white">
+    <div class="px-4 py-5 sm:p-6">
+      <h3 class="text-lg font-medium">Subscribe to our Newsletter</h3>
+      <p class="mt-2 text-sm text-slate-200">Get notified about new articles and platform updates.</p>
+      <form class="mt-4">
+        <div class="rounded-xs shadow-xs">
+          <input type="email" name="email" class="form-input py-3 px-4 block w-full rounded-xs text-gray-900 transition ease-in-out duration-150 sm:text-sm sm:leading-5" placeholder="Your email address">
+        </div>
+        <button type="submit" class="mt-3 w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-xs text-slate-700 bg-white hover:bg-gray-100 focus:outline-hidden focus:border-white focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-700 focus:ring-white">
+          Subscribe
+        </button>
+      </form>
+    </div>
+  </div>
+{% endblock aside %}
+
+{% block main_footer %}{% endblock %}

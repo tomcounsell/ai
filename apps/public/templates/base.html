@@ -1,0 +1,197 @@
+{% load django_htmx %}
+{% load tailwind_cli %}
+{% load static %}
+{% load component_tags %}
+
+{% comment %}
+base.html - Primary Layout Template
+==================================
+
+Purpose:
+This is the main layout template that provides the common structure for all pages.
+It defines the HTML skeleton, imports necessary CSS/JS dependencies, and sets up
+the standard blocks for content organization.
+
+Block Structure:
+- title: Page title
+- meta: Meta tags for SEO and social sharing
+- extra_css: Page-specific CSS
+- main_header: Header area with page title
+- content: Main page content area
+- main_footer: Additional footer area
+- aside: Sidebar content (optional)
+- footer_content: Custom footer content (optional)
+- scripts: Page-specific JavaScript
+{% endcomment %}
+
+<!DOCTYPE html>
+<html lang="en" data-csrf-token="{{ csrf_token }}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <!-- Favicon -->
+    <link rel="icon" href="{% static 'assets/favicon.png' %}"/>
+
+    <!-- Base CSS -->
+    <link rel="stylesheet" href="{% static 'css/base.css' %}?v=0"/>
+
+    <!-- Title -->
+    <title>{% block title %}Django Project Template{% endblock %}{% if debug %} (DEBUG){% endif %}</title>
+
+    <!-- Meta Tags -->
+    <meta name="description" content="{% block meta_description %}A modern Django project template{% endblock %}">
+
+    {% block meta %}
+    <!-- Open Graph / Social Meta Tags -->
+    <meta property="og:title" content="{{ self.title }}">
+    <meta property="og:description" content="{{ self.meta_description }}">
+    <meta property="og:type" content="{% block og_type %}website{% endblock %}">
+    <meta property="og:url" content="{{ request.build_absolute_uri }}">
+    {% endblock %}
+
+    <!-- Core CSS -->
+
+    <!--TAILWIND CSS-->
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    {% tailwind_css %}
+
+    <!--FOR TEMPLATES TO LOAD MORE CSS-->
+    {% block css %}
+    {% comment %}Additional page-specific CSS can be included here{% endcomment %}
+    {% endblock css %}
+    <!-- DJANGO COMPONENT'S CSS -->
+    {% component_css_dependencies %}
+
+    <!-- JQUERY -->
+    <script src="https://code.jquery.com/jquery-3.7.1.slim.min.js"
+            integrity="sha256-kmHvs0B+OpCW5GVHUNjv9rOmY0IvSIRcf7zGUDTDQM8=" crossorigin="anonymous"></script>
+
+    <!--HTMX-->
+    <script src="https://unpkg.com/htmx.org@2.0.4"
+            integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+"
+            crossorigin="anonymous"></script>
+    {% django_htmx_script %}
+    {% if debug %}
+    <script>
+        htmx.defineExtension('debug', {
+            onEvent: function (name, evt) {
+                if (console.debug) {
+                    console.debug(name, evt);
+                } else if (console) {
+                    console.log("DEBUG:", name, evt);
+                } else {
+                    throw "NO CONSOLE SUPPORTED"
+                }
+            }
+        });
+    </script>
+    {% endif %}
+    <!-- Google Fonts -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+
+    <!-- Font Awesome -->
+    <script src="https://kit.fontawesome.com/c83e8fd695.js" crossorigin="anonymous"></script>
+
+    <!-- Base JavaScript -->
+    <script src="{% static 'js/base.js' %}?v=3" defer></script>
+
+    <!-- Page-specific CSS -->
+    {% block extra_css %}{% endblock extra_css %}
+    {% block extra_head %}{% endblock extra_head %}
+</head>
+
+<body class="min-h-screen flex flex-col bg-gray-50 text-gray-900 font-sans antialiased"
+      {% if debug %}hx-ext="debug" {% endif %}
+      onkeydown="if(event.key==='Escape'){const m=document.querySelector('#primary-modal-container .modal-overlay, #secondary-modal-container .modal-overlay');if(m)m.closest('.modal-container').innerHTML='';}"
+>
+
+<!-- Header/Navbar -->
+{% block header %}
+{% include "layout/nav/navbar.html" %}
+{% endblock %}
+
+<!-- Flash Messages -->
+{% block messages %}
+{% include "layout/messages/toast.html" %}
+{% endblock %}
+
+<!-- Main Content Container -->
+<main class="flex-grow" id="main" hx-history-elt>
+    <!-- Main Header Area -->
+    <div id="main_header" class="bg-white shadow-xs">
+        <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+            {% block main_header %}
+            <h1 class="text-3xl font-bold tracking-tight text-gray-900">&nbsp;</h1>
+            {% endblock %}
+        </div>
+    </div>
+
+    <!-- Content Area -->
+    <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
+        <div class="grid grid-cols-1 md:grid-cols-12 gap-6">
+            <!-- Main Content Area -->
+            <div class="md:col-span-8 md:col-span-9 md:col-span-10 md:col-span-12">
+                {% block content %}
+                <!-- Main content goes here -->
+                {% endblock %}
+            </div>
+
+            <script>
+                // Apply the correct column span based on the content type
+                document.addEventListener('DOMContentLoaded', function () {
+                    const contentDiv = document.querySelector('main .md\\:col-span-8');
+                    const sidebarEnabled = { % block
+                    content_width %
+                }
+                    12
+                    {%
+                        endblock %
+                    }
+                    ;
+
+                    if (contentDiv) {
+                        contentDiv.className = contentDiv.className.replace(/md:col-span-\d+/g, `md:col-span-${sidebarEnabled}`);
+                    }
+                });
+            </script>
+
+            <!-- Sidebar (if enabled) -->
+            {% block sidebar_enabled %}{% endblock %}
+            {% if sidebar_enabled|default:False or block.super %}
+            <aside class="md:col-span-4">
+                {% block aside %}
+                <!-- Sidebar content goes here -->
+                {% endblock %}
+            </aside>
+            {% endif %}
+        </div>
+
+        <!-- Main Footer Area -->
+        <div id="main_footer" class="mt-6">
+            {% block main_footer %}
+            <!-- Extra main area footer block -->
+            {% endblock %}
+        </div>
+    </div>
+</main>
+
+<!-- Footer -->
+<footer class="bg-slate-900 text-white mt-auto">
+    {% block footer %}
+    {% include "layout/footer.html" %}
+    {% endblock %}
+</footer>
+
+<!-- Modals System -->
+{% include "layout/modals.html" %}
+
+{% block extra_body %}{% endblock extra_body %}
+
+<!-- HyperScript (for declarative JavaScript) -->
+<script src="https://unpkg.com/hyperscript.org@0.9.12"></script>
+
+<!-- Page-specific JavaScript -->
+{% block scripts %}{% endblock %}
+</body>
+</html>

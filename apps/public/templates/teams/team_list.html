@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+
+{# Team List Page - Shows the user's team or shows empty state if they have no team #}
+
+{% block title %}My Team{% endblock %}
+
+{% block main_header %}
+  <h1 class="text-3xl font-bold tracking-tight text-slate-600">My Team</h1>
+{% endblock %}
+
+{% block content %}
+  <div class="flex justify-between items-center mb-6">
+    <div class="grow"></div>
+    {% if user.is_staff %}
+    <a href="/admin/common/team/add/" class="inline-flex justify-center py-2 px-4 border border-transparent shadow-xs text-sm font-medium rounded-xs text-white bg-slate-700 hover:bg-slate-600 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-2 focus:ring-slate-700">
+      Manage Teams (Admin)
+    </a>
+    {% endif %}
+  </div>
+
+  {% if not teams %}
+    <div class="bg-white shadow-xs rounded-xs p-8 text-center">
+      <p class="text-gray-600 mb-4">You are not a member of any team.</p>
+      <p class="text-gray-500 mb-4">Teams are created and managed in the admin site.</p>
+      {% if user.is_staff %}
+      <a href="/admin/common/team/" class="inline-flex justify-center py-2 px-4 border border-transparent shadow-xs text-sm font-medium rounded-xs text-white bg-slate-700 hover:bg-slate-600 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-2 focus:ring-slate-700">
+        Go to Team Admin
+      </a>
+      {% endif %}
+    </div>
+  {% else %}
+    {% if owned_teams %}
+      <div class="mb-8">
+        <h2 class="text-xl font-semibold text-gray-900 mb-4">Team You Own</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {% for team in owned_teams %}
+            <div class="bg-white shadow-xs rounded-xs overflow-hidden">
+              <div class="border-l-4 border-slate-700 p-6">
+                <div class="flex justify-between items-start">
+                  <h3 class="font-medium text-lg text-gray-900">{{ team.name }}</h3>
+                  <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-slate-100 text-slate-800">Owner</span>
+                </div>
+                <p class="text-gray-600 mt-2 mb-4 text-sm">
+                  {{ team.description|truncatechars:100 }}
+                </p>
+                <div class="flex justify-between items-center mt-4">
+                  <a href="{% url 'public:team-detail' team_slug=team.slug %}"
+                    class="text-slate-700 hover:text-slate-900">
+                    View Team
+                  </a>
+                  <span class="text-xs text-gray-500">{{ team.members.count }} members</span>
+                </div>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+
+    {% if admin_teams %}
+      <div class="mb-8">
+        <h2 class="text-xl font-semibold mb-4">Team You Manage</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {% for team in admin_teams %}
+            <div class="bg-white shadow-xs rounded-xs p-6 border-l-4 border-purple-500">
+              <div class="flex justify-between items-start">
+                <h3 class="font-bold text-lg">{{ team.name }}</h3>
+                <span class="text-xs bg-purple-100 text-purple-800 px-2 py-1 rounded">Admin</span>
+              </div>
+              <p class="text-gray-600 mt-2 mb-4 text-sm">
+                {{ team.description|truncatechars:100 }}
+              </p>
+              <div class="flex justify-between items-center mt-4">
+                <a href="{% url 'public:team-detail' team_slug=team.slug %}"
+                  class="text-blue-500 hover:text-blue-700">
+                  View Team
+                </a>
+                <span class="text-xs text-gray-500">{{ team.members.count }} members</span>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+
+    {% if member_teams %}
+      <div class="mb-8">
+        <h2 class="text-xl font-semibold mb-4">Team You're A Member Of</h2>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {% for team in member_teams %}
+            <div class="bg-white shadow-xs rounded-xs p-6 border-l-4 border-gray-500">
+              <div class="flex justify-between items-start">
+                <h3 class="font-bold text-lg">{{ team.name }}</h3>
+                <span class="text-xs bg-gray-100 text-gray-800 px-2 py-1 rounded">Member</span>
+              </div>
+              <p class="text-gray-600 mt-2 mb-4 text-sm">
+                {{ team.description|truncatechars:100 }}
+              </p>
+              <div class="flex justify-between items-center mt-4">
+                <a href="{% url 'public:team-detail' team_slug=team.slug %}"
+                  class="text-blue-500 hover:text-blue-700">
+                  View Team
+                </a>
+                <span class="text-xs text-gray-500">{{ team.members.count }} members</span>
+              </div>
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+  {% endif %}
+{% endblock %}

@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}AI Chat Assistant{% endblock %}
+
+{% block content %}
+<div class="min-h-screen bg-gray-50">
+    <div class="container mx-auto px-4 py-8">
+        <div class="max-w-6xl mx-auto">
+            <div class="grid grid-cols-1 lg:grid-cols-4 gap-6">
+                <!-- Sidebar -->
+                <div class="lg:col-span-1">
+                    <div class="bg-white rounded-lg shadow-sm p-4">
+                        <h2 class="text-lg font-semibold mb-4">Chat Sessions</h2>
+
+                        <!-- New Chat Button -->
+                        <button
+                            hx-post="{% url 'ai:chat-new-session' %}"
+                            hx-trigger="click"
+                            class="w-full mb-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                        >
+                            New Chat
+                        </button>
+
+                        <!-- Recent Sessions -->
+                        {% if recent_sessions %}
+                        <div class="space-y-2">
+                            <h3 class="text-sm font-medium text-gray-600 mb-2">Recent</h3>
+                            {% for session in recent_sessions %}
+                            <a
+                                href="#"
+                                hx-get="{% url 'ai:chat-load-session' session.id %}"
+                                hx-trigger="click"
+                                class="block p-2 rounded hover:bg-gray-100 transition-colors {% if session.id == chat_session.id %}bg-gray-100{% endif %}"
+                            >
+                                <div class="text-sm font-medium truncate">
+                                    {{ session.title|default:"New Chat" }}
+                                </div>
+                                <div class="text-xs text-gray-500">
+                                    {{ session.modified_at|timesince }} ago
+                                </div>
+                            </a>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <!-- Main Chat Area -->
+                <div class="lg:col-span-3">
+                    <div class="bg-white rounded-lg shadow-sm flex flex-col h-[calc(100vh-12rem)]">
+                        <!-- Chat Header -->
+                        <div class="border-b px-6 py-4">
+                            <div class="flex items-center justify-between">
+                                <h1 class="text-xl font-semibold">
+                                    {{ chat_session.title|default:"AI Chat Assistant" }}
+                                </h1>
+                                <button
+                                    hx-post="{% url 'ai:chat-clear' %}"
+                                    hx-confirm="Are you sure you want to clear this chat?"
+                                    class="text-sm text-gray-500 hover:text-gray-700"
+                                >
+                                    Clear Chat
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Messages Container -->
+                        <div
+                            id="messages-container"
+                            class="flex-1 overflow-y-auto px-6 py-4 space-y-4"
+                        >
+                            {% for message in messages %}
+                                {% include "ai/chat/partials/message.html" with message=message %}
+                            {% endfor %}
+
+                            {% if not messages %}
+                            <div class="text-center py-12 text-gray-500">
+                                <svg class="mx-auto h-12 w-12 text-gray-400 mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                                </svg>
+                                <p>Start a conversation with the AI assistant</p>
+                            </div>
+                            {% endif %}
+                        </div>
+
+                        <!-- Input Form -->
+                        <div class="border-t px-6 py-4">
+                            <form
+                                hx-post="{% url 'ai:chat-send' %}"
+                                hx-target="#messages-container"
+                                hx-swap="beforeend"
+                                hx-on::after-request="this.reset(); document.getElementById('message-input').focus();"
+                                class="flex gap-2"
+                            >
+                                {% csrf_token %}
+                                <input
+                                    type="text"
+                                    name="message"
+                                    id="message-input"
+                                    placeholder="Type your message..."
+                                    required
+                                    autofocus
+                                    class="flex-1 px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                />
+                                <button
+                                    type="submit"
+                                    class="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50"
+                                >
+                                    Send
+                                </button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Auto-scroll to bottom when new messages are added
+    document.body.addEventListener('htmx:afterSwap', function(evt) {
+        if (evt.detail.target.id === 'messages-container') {
+            const container = document.getElementById('messages-container');
+            container.scrollTop = container.scrollHeight;
+        }
+    });
+
+    // Set up polling for unprocessed messages
+    document.body.addEventListener('poll-message', function(evt) {
+        setTimeout(function() {
+            const unprocessedMessages = document.querySelectorAll('[data-message-processing="true"]');
+            unprocessedMessages.forEach(function(element) {
+                htmx.trigger(element, 'poll');
+            });
+        }, 1000);
+    });
+</script>
+{% endblock %}

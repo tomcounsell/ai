@@ -1,0 +1,1 @@
+# Initialize staff.views package

@@ -1,0 +1,22 @@
+{% comment %}
+  Active Navigation Component
+  =========================
+
+  Purpose:
+  This is a server-side implementation for marking active navigation items.
+  All logic is handled through context processors and template conditionals.
+
+  Context Variables:
+  - active_section: The current active section (e.g., 'home', 'teams', 'todos')
+
+  Usage:
+  The active_section is set automatically by the context processor based on the URL.
+
+  HTMX OOB Support:
+  This component is no longer needed for HTMX OOB updates, as the navigation state
+  is rendered server-side. This file is kept as a placeholder for backward compatibility.
+{% endcomment %}
+
+<div id="nav-active-marker" hx-swap-oob="true">
+  <!-- No JavaScript needed - active state is rendered server-side -->
+</div>

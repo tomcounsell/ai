@@ -1,0 +1,25 @@
+{% comment %}
+  Modal Container
+  ==============
+
+  Purpose:
+  Container for loading modal content via HTMX.
+  Acts as a target for hx-target when loading modals.
+
+  Usage:
+  Include this in your base template, and target it with HTMX:
+  <a href="/modals/example" hx-get hx-target="#modal-container">Show Modal</a>
+
+  Multiple containers can be used for nested modals:
+  - #modal-container: Primary modal container
+  - #secondary-modal-container: For modals triggered from within a modal
+
+  HTMX OOB Support:
+  This component can receive content via OOB swaps.
+{% endcomment %}
+
+<!-- Primary Modal Container -->
+<div id="modal-container" class="modal-container" hx-swap-oob="true"></div>
+
+<!-- Secondary Modal Container (for nested modals) -->
+<div id="secondary-modal-container" class="modal-container"></div>
