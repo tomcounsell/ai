@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Django Project Template - Local Environment Setup Script
+# QuickBooks MCP Server - Local Environment Setup Script
 # This script sets up the local development environment and checks if all required settings are in place
 # It is designed to be idempotent - running it multiple times should be safe
 
@@ -41,28 +41,20 @@ url_encode_db_name() {
 }
 
 # Start script
-print_header "Django Project Template - Setup Script"
+print_header "QuickBooks MCP Server - Setup Script"
 echo "This script will set up your local development environment."
 
 # Step 1: Check Python version
-# Option for adding the upstream remote for template updates
-print_header "1. Setting up Git remotes"
+# Check git repository setup
+print_header "1. Checking Git repository"
 if [ -d ".git" ]; then
-    if git remote | grep -q "upstream"; then
-        print_success "Upstream remote already exists."
+    if git remote | grep -q "origin"; then
+        print_success "Git repository configured."
     else
-        echo "Would you like to add the original template repository as an upstream remote? (y/n)"
-        read add_upstream
-        if [[ $add_upstream == "y" || $add_upstream == "Y" ]]; then
-            git remote add upstream https://github.com/tomcounsell/django-project-template.git
-            print_success "Added upstream remote for future template updates."
-            echo "You can fetch updates with 'git fetch upstream' and cherry-pick specific improvements."
-        else
-            print_warning "Skipping upstream remote setup."
-        fi
+        print_warning "Git origin not configured. Run: git remote add origin https://github.com/yudame/quickbooks.git"
     fi
 else
-    print_warning "Not a git repository. Skipping remote setup."
+    print_warning "Not a git repository. Run: git init"
 fi
 
 print_header "2. Checking Python version"

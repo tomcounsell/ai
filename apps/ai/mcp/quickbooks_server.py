@@ -7,7 +7,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from mcp import Resource, Server, Tool
+from mcp import Resource, Tool
+from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from .quickbooks_tools import QUICKBOOKS_TOOLS

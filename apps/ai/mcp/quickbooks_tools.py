@@ -39,17 +39,17 @@ QUICKBOOKS_TOOLS = [
     Tool(
         name="quickbooks_create_invoice",
         description="Create a new invoice in QuickBooks",
-        input_schema=InvoiceCreateParams.model_json_schema(),
+        inputSchema=InvoiceCreateParams.model_json_schema(),
     ),
     Tool(
         name="quickbooks_search_customers",
         description="Search for customers in QuickBooks",
-        input_schema=CustomerSearchParams.model_json_schema(),
+        inputSchema=CustomerSearchParams.model_json_schema(),
     ),
     Tool(
         name="quickbooks_get_customer",
         description="Get customer details by ID",
-        input_schema={
+        inputSchema={
             "type": "object",
             "properties": {
                 "customer_id": {"type": "string", "description": "QuickBooks customer ID"},
@@ -60,7 +60,7 @@ QUICKBOOKS_TOOLS = [
     Tool(
         name="quickbooks_list_invoices",
         description="List invoices with optional filters",
-        input_schema={
+        inputSchema={
             "type": "object",
             "properties": {
                 "customer_id": {"type": "string", "description": "Filter by customer ID"},
@@ -72,12 +72,12 @@ QUICKBOOKS_TOOLS = [
     Tool(
         name="quickbooks_generate_report",
         description="Generate financial reports from QuickBooks",
-        input_schema=ReportParams.model_json_schema(),
+        inputSchema=ReportParams.model_json_schema(),
     ),
     Tool(
         name="quickbooks_sync_data",
         description="Sync QuickBooks data to local cache",
-        input_schema={
+        inputSchema={
             "type": "object",
             "properties": {
                 "entity_types": {

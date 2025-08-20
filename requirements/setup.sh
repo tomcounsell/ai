@@ -5,7 +5,7 @@
 
 set -e  # Exit on error
 
-echo "🚀 Django Project Template - Development Setup"
+echo "🚀 QuickBooks MCP Server - Development Setup"
 echo "=============================================="
 echo ""
 
