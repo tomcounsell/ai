@@ -1,7 +1,20 @@
-# Django Project Template - Application Primer
+# QuickBooks MCP Integration - Codebase Primer
+
+## 🛑 IMPORTANT: Context Loading Protocol
+
+**This command loads essential codebase context. After running this primer:**
+1. The assistant will have deep understanding of the codebase structure
+2. The assistant will know where to find specific components
+3. The assistant will understand the project's patterns and conventions
+4. **The assistant will WAIT for your instructions before making any edits**
+
+**What happens next:**
+- The assistant has loaded comprehensive context about your codebase
+- You can now provide specific instructions for what you want to accomplish
+- The assistant will use this context to navigate efficiently and make appropriate changes
 
 ## Project Overview
-This is a modern Django application template designed as a production-ready foundation for building web applications. It emphasizes clean architecture, maintainability, and developer experience through modern Python tooling and best practices.
+This is a Django application that provides a Model Context Protocol (MCP) server for QuickBooks integration. It enables AI assistants to interact with QuickBooks data through a standardized interface, featuring OAuth authentication, async API operations, and comprehensive Django admin tools.
 
 ## Core Technology Stack
 - **Framework**: Django 5.0+
@@ -14,16 +27,41 @@ This is a modern Django application template designed as a production-ready foun
 
 ## Application Architecture
 
-### Modular App Structure
-The application is organized into focused, single-responsibility Django apps:
+### Core Components & Where to Find Them
 
 ```
 apps/
-├── common/      # Foundation layer - shared models, behaviors, utilities
-├── public/      # Web UI layer - HTMX views, templates, user-facing features
-├── api/         # REST API layer - JSON endpoints for programmatic access
-├── integration/ # External services layer - third-party API integrations
-└── ai/          # AI capabilities layer - LLM and ML model integrations
+├── common/           # Foundation layer - NO dependencies on other apps
+│   ├── behaviors/    # Reusable model mixins (Timestampable, Authorable, etc.)
+│   ├── models/       # Base models (User, Address, Organization, Image)
+│   ├── tests/        # Shared test utilities and factories
+│   └── utils/        # Helper functions and utilities
+│
+├── integration/      # External service integrations
+│   └── quickbooks/   # QuickBooks API integration (depends on common)
+│       ├── client.py         # Async API client with OAuth handling
+│       ├── models.py         # QuickBooksConnection model
+│       ├── oauth_views.py    # OAuth flow implementation
+│       ├── api.py           # Synchronous API wrapper
+│       └── tests/           # Integration tests
+│
+├── ai/              # MCP server implementation (depends on integration)
+│   ├── mcp/         # Model Context Protocol server
+│   │   ├── quickbooks_server.py  # Main MCP server entry point
+│   │   └── quickbooks_tools.py   # Tool definitions and schemas
+│   ├── models/      # MCP session and API key models
+│   └── tests/       # MCP server tests
+│
+├── api/             # REST API endpoints (depends on all above)
+│   └── quickbooks/  # QuickBooks-specific API views
+│
+├── public/          # Web UI with HTMX (depends on all above)
+│   ├── templates/   # All templates centralized here
+│   ├── views/       # HTMX-powered web views
+│   └── static/      # CSS, JS, images
+│
+└── staff/           # Admin tools and internal interfaces
+    └── admin.py     # Django admin customizations
 ```
 
 ### Layered Settings Configuration
@@ -88,44 +126,97 @@ Reusable model behaviors in `apps/common/behaviors/`:
   - Boolean fields start with `is_` or `has_`
   - Clear, descriptive variable names
 
-## Application Purpose
+## QuickBooks Integration Deep Dive
 
-This template serves as a foundation for:
-- **SaaS Applications**: Multi-tenant web services
-- **Content Platforms**: Publishing and content management
-- **API Services**: RESTful backends with web interfaces
-- **Data-Driven Apps**: Applications requiring complex data models
-- **AI-Enhanced Products**: Integration points for LLM and ML features
+### MCP Server Entry Points
+The MCP server enables AI assistants to interact with QuickBooks data:
 
-## Key Features Out-of-the-Box
+1. **Main Server**: `apps/ai/mcp/quickbooks_server.py`
+   - Handles MCP protocol communication
+   - Routes tool calls to appropriate handlers
+   - Manages authentication and sessions
 
-### User Management
-- Custom User model in `apps/common/`
-- Authentication and authorization setup
-- Profile and account management scaffolding
+2. **Tool Definitions**: `apps/ai/mcp/quickbooks_tools.py`
+   - Defines available QuickBooks operations
+   - JSON schemas for tool parameters
+   - Tool documentation for AI assistants
 
-### Admin Interface
-- Django admin customizations
-- Model admin classes with filters and search
-- Inline editing for related models
+3. **QuickBooks Client**: `apps/integration/quickbooks/client.py`
+   - Async HTTP client for QuickBooks API
+   - OAuth token management
+   - Request/response handling
 
-### API Foundation
-- Django REST Framework integration
-- Versioned API structure
-- Authentication and permissions setup
-- Serializer patterns for common operations
+### OAuth Authentication Flow
+Located in `apps/integration/quickbooks/oauth_views.py`:
+1. User initiates connection at `/api/quickbooks/connect/`
+2. Redirected to QuickBooks for authorization
+3. Callback processes tokens at `/api/quickbooks/callback/`
+4. Tokens stored in `QuickBooksConnection` model
+5. MCP server uses tokens for API access
 
-### Frontend Components
-- Base templates with responsive layouts
-- HTMX view classes for partial rendering
-- Tailwind component library
-- Form handling with Django forms
+### Key Models and Their Locations
 
-### Development Tools
-- Comprehensive test suite structure
-- Factory classes for test data
-- Browser testing framework
-- Visual regression testing setup
+**QuickBooks Models** (`apps/integration/quickbooks/models.py`):
+- `QuickBooksConnection`: OAuth tokens and company info
+- Stores access/refresh tokens, realm ID, company name
+- Handles token refresh automatically
+
+**MCP Models** (`apps/ai/models/`):
+- `MCPSession`: Active MCP session tracking
+- `APIKey`: Authentication for MCP clients
+- Session management and security
+
+**Common Models** (`apps/common/models/`):
+- `User`: Custom user model
+- `Organization`: Multi-tenant support
+- `Address`: Shared address functionality
+
+## Finding What You Need - Quick Reference
+
+### Adding New QuickBooks Operations
+1. **Define the tool**: `apps/ai/mcp/quickbooks_tools.py`
+   - Add to `QUICKBOOKS_TOOLS` list
+   - Define parameter schema
+
+2. **Implement handler**: `apps/ai/mcp/quickbooks_server.py`
+   - Add case in `handle_tool_call()`
+   - Call appropriate client method
+
+3. **Add API method**: `apps/integration/quickbooks/client.py`
+   - Implement async method
+   - Handle QuickBooks API specifics
+
+4. **Write tests**: 
+   - MCP tests: `apps/ai/tests/test_mcp_quickbooks.py`
+   - Integration tests: `apps/integration/quickbooks/tests/`
+
+### Common File Locations
+
+**Configuration**:
+- Environment variables: `.env.local` (copy from `.env.example`)
+- Django settings: `settings/` directory
+- QuickBooks config: `settings/third_party.py`
+
+**URLs and Routing**:
+- Main URLs: `urls.py`
+- API URLs: `apps/api/urls.py`
+- QuickBooks OAuth: `apps/integration/quickbooks/urls.py`
+
+**Templates** (all in `apps/public/templates/`):
+- Base layout: `base.html`
+- HTMX partials: `partials/`
+- QuickBooks UI: `quickbooks/`
+
+**Static Files**:
+- CSS: `apps/public/static/css/`
+- JavaScript: `apps/public/static/js/`
+- Tailwind config: `tailwind.config.js`
+
+**Tests**:
+- Test factories: `apps/common/tests/factories.py`
+- MCP tests: `apps/ai/tests/`
+- Integration tests: `apps/integration/quickbooks/tests/`
+- E2E tests: `apps/*/tests/test_e2e_*.py`
 
 ## Working Principles
 
@@ -153,27 +244,101 @@ This template serves as a foundation for:
 - Keep third-party dependencies minimal
 - Optimize for developer understanding
 
+## Critical Code Paths to Understand
+
+### MCP Request Flow
+1. **MCP Client** → connects to server via stdio
+2. **quickbooks_server.py** → receives tool call request
+3. **Authentication** → validates API key from request
+4. **Tool Router** → matches tool name to handler
+5. **QuickBooks Client** → makes async API request
+6. **Token Refresh** → automatic if token expired
+7. **Response** → formatted and returned to MCP client
+
+### OAuth Connection Flow
+1. **User clicks "Connect"** → `/api/quickbooks/connect/`
+2. **OAuth URL built** → `apps/integration/quickbooks/oauth_views.py:26`
+3. **QuickBooks auth** → User authorizes in QuickBooks
+4. **Callback received** → `/api/quickbooks/callback/`
+5. **Tokens exchanged** → `apps/integration/quickbooks/oauth_views.py:45`
+6. **Connection saved** → `QuickBooksConnection` model
+7. **MCP enabled** → Server can now access QuickBooks data
+
+### Data Flow Architecture
+```
+MCP Client Request
+    ↓
+quickbooks_server.py (MCP protocol handling)
+    ↓
+quickbooks_tools.py (parameter validation)
+    ↓
+client.py (async QuickBooks API calls)
+    ↓
+QuickBooks API
+    ↓
+Response formatting & return
+```
+
 ## Common Tasks Quick Reference
 
 ### Daily Development
 ```bash
-uv run python manage.py runserver  # Start dev server
-uv run python manage.py shell      # Django shell
-DJANGO_SETTINGS_MODULE=settings pytest  # Run tests
+# Start Django dev server
+uv run python manage.py runserver
+
+# Start MCP server for testing
+uv run python -m apps.ai.mcp.quickbooks_server
+
+# Django shell with all models loaded
+uv run python manage.py shell
+
+# Run tests with proper settings
+DJANGO_SETTINGS_MODULE=settings pytest
+
+# Run specific test file
+DJANGO_SETTINGS_MODULE=settings pytest apps/ai/tests/test_mcp_quickbooks.py -v
 ```
 
 ### Code Quality
 ```bash
-black . && isort .     # Format code
-uv run ruff check .    # Lint code
-uv run pyright         # Type check
+# Format code (MUST run before committing)
+black . && isort . --profile black
+
+# Lint code
+uv run ruff check .
+
+# Type checking
+uv run pyright
+
+# Run all pre-commit hooks
+uv run pre-commit run --all-files
 ```
 
 ### Database Operations
 ```bash
-uv run python manage.py makemigrations  # Create migrations
-uv run python manage.py migrate         # Apply migrations
-uv run python manage.py dbshell        # Database shell
+# Create migrations (requires approval)
+uv run python manage.py makemigrations
+
+# Apply migrations
+uv run python manage.py migrate
+
+# Database shell
+uv run python manage.py dbshell
+
+# Create superuser for admin
+uv run python manage.py createsuperuser
+```
+
+### QuickBooks MCP Testing
+```bash
+# Test MCP server locally
+uv run python -m apps.ai.mcp.quickbooks_server
+
+# Test specific QuickBooks tool
+DJANGO_SETTINGS_MODULE=settings pytest apps/ai/tests/test_mcp_quickbooks.py::test_get_company_info -v
+
+# Test OAuth flow
+DJANGO_SETTINGS_MODULE=settings pytest apps/integration/quickbooks/tests/test_oauth.py -v
 ```
 
 ## Architecture Decisions
@@ -308,4 +473,75 @@ The documentation follows a layered approach:
 
 Always start with the high-level docs to understand context, then drill down into specific guides as needed. The examples provide practical implementations of the patterns described in the documentation.
 
-This primer provides the essential context for understanding and contributing to this Django application. The architecture emphasizes simplicity, maintainability, and developer productivity while providing a solid foundation for building modern web applications.
+## Debugging Guide
+
+### Common Issues and Solutions
+
+**MCP Server Won't Start**:
+- Check: `QUICKBOOKS_CLIENT_ID` and `QUICKBOOKS_CLIENT_SECRET` in `.env.local`
+- Verify: PostgreSQL is running (`psql -l`)
+- Ensure: Virtual environment activated (`source .venv/bin/activate`)
+
+**OAuth Flow Fails**:
+- Check: Redirect URI matches QuickBooks app settings
+- Verify: `QUICKBOOKS_SANDBOX_MODE` matches QuickBooks environment
+- Debug: Check logs in `apps/integration/quickbooks/oauth_views.py`
+
+**Token Refresh Issues**:
+- Location: `apps/integration/quickbooks/client.py:refresh_token()`
+- Check: Token expiry in `QuickBooksConnection` model
+- Debug: Enable logging in client.py
+
+**MCP Tool Not Found**:
+- Verify: Tool added to `QUICKBOOKS_TOOLS` list
+- Check: Handler implemented in `quickbooks_server.py`
+- Test: Run MCP server with debug logging
+
+### Key Debug Points
+
+**Enable Debug Logging**:
+```python
+# In apps/ai/mcp/quickbooks_server.py
+import logging
+logging.basicConfig(level=logging.DEBUG)
+```
+
+**Test QuickBooks Connection**:
+```python
+# Django shell
+from apps.integration.quickbooks.client import QuickBooksClient
+from apps.integration.quickbooks.models import QuickBooksConnection
+
+conn = QuickBooksConnection.objects.first()
+client = QuickBooksClient(conn)
+await client.test_connection()
+```
+
+**Inspect MCP Requests**:
+```python
+# In quickbooks_server.py handle_tool_call()
+logger.debug(f"Tool: {tool_name}, Args: {arguments}")
+```
+
+## Context Loaded - Ready for Instructions
+
+✅ **Context successfully loaded.** The assistant now has comprehensive understanding of:
+- The QuickBooks MCP integration architecture
+- Where to find all major components
+- How data flows through the system
+- Common patterns and conventions
+- Testing and debugging approaches
+
+**The assistant is now waiting for your specific instructions.**
+
+You can ask the assistant to:
+- Add new QuickBooks MCP tools
+- Fix bugs in the integration
+- Improve the OAuth flow
+- Add new API endpoints
+- Enhance the MCP server
+- Write tests for new features
+- Debug existing issues
+- Or any other development task
+
+This primer provides the essential context for understanding and contributing to this QuickBooks MCP integration. The architecture emphasizes clean separation of concerns, async operations, and comprehensive testing while providing a solid foundation for AI-assisted QuickBooks interactions.
