@@ -80,7 +80,7 @@ flake8==7.2.0
     # via -r requirements/base.txt
 gunicorn==23.0.0
     # via -r requirements/base.txt
-h11==0.14.0
+h11==0.16.0
     # via uvicorn
 idna==3.10
     # via requests
