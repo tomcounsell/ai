@@ -273,7 +273,7 @@ class TelegramBot:
                 
                 # Check if compression needed
                 if self.context_manager.needs_compression(context):
-                    logger.warning(f"⚠️ Context for {chat_id} approaching limit - {stats.get('token_usage', {}).get('total', 0)} tokens used")
+                    logger.warning(f"⚠️ Context for {chat_id} approaching limit - {stats.get('total_tokens', 0)} tokens used")
                     logger.debug(f"Compression threshold reached for context: {chat_id}")
                     
             except Exception as e:
@@ -310,10 +310,10 @@ class TelegramBot:
         
     def _generate_demo_response(self, message: str, stats: dict) -> str:
         """Generate a demo response without API keys"""
-        # Get token usage safely
-        token_total = stats.get('token_usage', {}).get('total', 0)
-        token_max = stats.get('token_usage', {}).get('max_tokens', 100000)
-        message_count = stats.get('message_count', {}).get('total', 0)
+        # Get stats safely - handle both old and new format
+        token_total = stats.get('total_tokens', 0)  # Changed from token_usage.total
+        token_max = stats.get('max_tokens', 100000)  # Changed from token_usage.max_tokens
+        message_count = stats.get('message_count', 0)  # Changed from message_count.total
         
         return f"""🤖 AI Rebuild Bot (Demo Mode)
 
