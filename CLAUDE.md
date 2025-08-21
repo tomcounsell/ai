@@ -269,3 +269,4 @@ python scripts/telegram_auth.py
 - Comprehensive error handling with categorized errors
 - Performance metrics tracked for all operations
 - Documentation required for all public interfaces
+- after every fix, restart the server
