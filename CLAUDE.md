@@ -112,8 +112,9 @@ The QuickBooks MCP implementation spans multiple apps:
   - `quickbooks_tools.py`: Tool definitions and schemas
 - **apps/integration/quickbooks/**: QuickBooks API integration
   - `client.py`: Async QuickBooks API client with OAuth
-  - `models.py`: QuickBooks connection models
-- **apps/ai/models/**: MCP session and API key management
+- **apps/integration/models/**: Integration models
+  - `quickbooks.py`: Organization, QuickBooksConnection, MCPSession models
+- **apps/ai/models/**: AI-specific models (chat sessions, feedback)
 
 ### Template and Frontend Architecture
 - **Single template location**: `apps/public/templates/`

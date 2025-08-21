@@ -1,5 +1,5 @@
 """
-QuickBooks integration models for MCP server.
+QuickBooks integration models for OAuth and MCP server.
 """
 
 from django.contrib.auth import get_user_model
@@ -36,6 +36,7 @@ class Organization(Timestampable, models.Model):
     
     class Meta:
         ordering = ["name"]
+        db_table = "integration_organization"
         
     def __str__(self):
         return self.name
@@ -49,21 +50,26 @@ class QuickBooksConnection(Timestampable, models.Model):
         on_delete=models.CASCADE,
         related_name="quickbooks_connections",
     )
-    company_id = models.CharField(max_length=255)
+    company_id = models.CharField(max_length=255)  # QuickBooks realmId
     company_name = models.CharField(max_length=255)
     
-    # OAuth tokens
+    # OAuth tokens (should be encrypted at rest in production)
     access_token = models.TextField()
     refresh_token = models.TextField()
     token_expires_at = models.DateTimeField()
     
     # Connection status
     is_active = models.BooleanField(default=True)
+    is_sandbox = models.BooleanField(default=True)  # Default to sandbox for safety
     last_sync_at = models.DateTimeField(null=True, blank=True)
+    
+    # Webhook verification
+    webhook_token = models.CharField(max_length=255, blank=True)
     
     class Meta:
         ordering = ["-created_at"]
         unique_together = [["organization", "company_id"]]
+        db_table = "integration_quickbooksconnection"
         
     def __str__(self):
         return f"{self.organization.name} - {self.company_name}"
@@ -91,6 +97,7 @@ class MCPSession(Timestampable, models.Model):
     
     class Meta:
         ordering = ["-connected_at"]
+        db_table = "integration_mcpsession"
         
     def __str__(self):
         return f"Session {self.session_id} - {self.organization.name}"

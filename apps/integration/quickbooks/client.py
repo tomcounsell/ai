@@ -32,7 +32,7 @@ class QuickBooksClient:
         
     async def _get_credentials(self) -> tuple[str, str]:
         """Get QuickBooks credentials from database."""
-        from apps.ai.models import QuickBooksConnection
+        from apps.integration.models import QuickBooksConnection
         
         try:
             connection = await QuickBooksConnection.objects.aget(

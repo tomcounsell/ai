@@ -156,20 +156,22 @@ Located in `apps/integration/quickbooks/oauth_views.py`:
 
 ### Key Models and Their Locations
 
-**QuickBooks Models** (`apps/integration/quickbooks/models.py`):
+**QuickBooks Models** (`apps/integration/models/quickbooks.py`):
+- `Organization`: B2B organization management
 - `QuickBooksConnection`: OAuth tokens and company info
+- `MCPSession`: Active MCP session tracking
 - Stores access/refresh tokens, realm ID, company name
 - Handles token refresh automatically
 
-**MCP Models** (`apps/ai/models/`):
-- `MCPSession`: Active MCP session tracking
-- `APIKey`: Authentication for MCP clients
-- Session management and security
+**AI Models** (`apps/ai/models/`):
+- `ChatSession`: Chat conversation tracking
+- `ChatMessage`: Individual chat messages
+- `ChatFeedback`: User feedback on responses
 
 **Common Models** (`apps/common/models/`):
 - `User`: Custom user model
-- `Organization`: Multi-tenant support
 - `Address`: Shared address functionality
+- `Team`: Team/group management
 
 ## Finding What You Need - Quick Reference
 
