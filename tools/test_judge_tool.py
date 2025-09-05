@@ -92,7 +92,7 @@ class TestSuite:
 @dataclass
 class TestJudgment:
     """AI test judgment result."""
-    overall_score: float = Field(ge=0.0, le=10.0)
+    overall_score: float
     severity: TestResultSeverity
     summary: str
     detailed_analysis: str
@@ -101,7 +101,7 @@ class TestJudgment:
     performance_assessment: Dict[str, Any] = field(default_factory=dict)
     risk_factors: List[str] = field(default_factory=list)
     improvement_priorities: List[Tuple[str, int]] = field(default_factory=list)  # (item, priority 1-10)
-    confidence_score: float = Field(ge=0.0, le=1.0, default=0.8)
+    confidence_score: float = 0.8
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
