@@ -77,9 +77,12 @@ class TelegramBot:
         self.phone = os.getenv('TELEGRAM_PHONE')
         self.password = os.getenv('TELEGRAM_PASSWORD')
         
-        # Get chat filtering settings
+        # Load group configuration
+        self.group_config = self._load_group_config()
+        
+        # Get chat filtering settings (backwards compatibility)
         self.allowed_groups = os.getenv('TELEGRAM_ALLOWED_GROUPS', '').strip('"').split(',') if os.getenv('TELEGRAM_ALLOWED_GROUPS') else []
-        self.allow_dms = os.getenv('TELEGRAM_ALLOW_DMS', 'false').lower() == 'true'
+        self.allow_dms = os.getenv('TELEGRAM_ALLOW_DMS', 'true').lower() == 'true'
         
         # Initialize AI components
         self.db_manager: Optional[DatabaseManager] = None
@@ -88,7 +91,91 @@ class TelegramBot:
         self.message_count = 0  # Track total messages
         self.error_count = 0  # Track errors
         logger.debug(f"Initialized with groups: {self.allowed_groups}, DMs: {self.allow_dms}")
+        logger.debug(f"Group config loaded: {len(self.group_config.get('groups', {}))} groups configured")
         
+    def _load_group_config(self):
+        """Load group configuration from JSON file"""
+        config_path = Path(__file__).parent / 'config' / 'telegram_groups.json'
+        try:
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    return json.load(f)
+            else:
+                logger.warning(f"Group config not found at {config_path}, using defaults")
+                return {
+                    "default_behavior": {
+                        "respond_to_mentions": True,
+                        "respond_to_all": False,
+                        "respond_to_replies": True
+                    },
+                    "groups": {},
+                    "direct_messages": {"enabled": True},
+                    "mention_triggers": ["@valor", "valor"]
+                }
+        except Exception as e:
+            logger.error(f"Error loading group config: {e}")
+            return {}
+    
+    def _should_respond(self, event, chat_title=None):
+        """Determine if we should respond to this message"""
+        # Direct messages
+        if event.is_private:
+            dm_config = self.group_config.get('direct_messages', {})
+            if not dm_config.get('enabled', True):
+                return False
+            
+            # Check whitelist/blacklist
+            sender_id = str(event.sender_id) if hasattr(event, 'sender_id') else None
+            if sender_id:
+                whitelist = dm_config.get('whitelist_users', [])
+                blacklist = dm_config.get('blacklist_users', [])
+                
+                if whitelist and sender_id not in whitelist:
+                    return False
+                if blacklist and sender_id in blacklist:
+                    return False
+            
+            return True
+        
+        # Group messages
+        if event.is_group or event.is_channel:
+            # Check if group is in config
+            group_config = self.group_config.get('groups', {}).get(chat_title, 
+                                                    self.group_config.get('default_behavior', {}))
+            
+            if not group_config.get('enabled', True):
+                return False
+            
+            # Check if it's a reply to our message
+            if event.is_reply and group_config.get('respond_to_replies', True):
+                # TODO: Check if the replied message was from us
+                return True
+            
+            # Check for mentions
+            if group_config.get('respond_to_mentions', True):
+                text_lower = event.text.lower() if event.text else ""
+                mention_triggers = self.group_config.get('mention_triggers', ["@valor", "valor"])
+                
+                for trigger in mention_triggers:
+                    if trigger.lower() in text_lower:
+                        logger.debug(f"Mention detected: '{trigger}' in message")
+                        return True
+            
+            # Check if we should respond to all messages
+            if group_config.get('respond_to_all', False):
+                return True
+            
+            # Check for keywords
+            keywords = group_config.get('keywords', [])
+            if keywords and event.text:
+                text_lower = event.text.lower()
+                for keyword in keywords:
+                    if keyword.lower() in text_lower:
+                        logger.debug(f"Keyword detected: '{keyword}' in message")
+                        return True
+        
+        return False
+    
     async def initialize_components(self):
         """Initialize AI system components"""
         logger.info("📦 Initializing AI components...")
@@ -181,19 +268,23 @@ class TelegramBot:
                 logger.debug(f"Message metadata: {json.dumps(message_metadata, indent=2)}")
                 
                 # Check if we should handle this message
-                if event.is_private:
-                    # Direct message
-                    if not self.allow_dms:
-                        logger.info(f"Ignoring DM from {sender.first_name} (@{sender.username}) - DMs disabled")
-                        logger.debug(f"Ignored message content: {event.text[:100] if event.text else 'None'}")
-                        return
-                elif event.is_group or event.is_channel:
-                    # Group/channel message
-                    chat_title = getattr(chat, 'title', str(chat.id))
-                    if self.allowed_groups and chat_title not in self.allowed_groups:
-                        logger.info(f"Ignoring message from '{chat_title}' (not in allowed groups: {self.allowed_groups})")
-                        logger.debug(f"Ignored message from {sender.first_name}: {event.text[:100] if event.text else 'None'}")
-                        return
+                chat_title = getattr(chat, 'title', None) if (event.is_group or event.is_channel) else None
+                
+                # Use new config-based logic
+                should_respond = self._should_respond(event, chat_title)
+                
+                # Log decision
+                if not should_respond:
+                    if event.is_private:
+                        logger.info(f"Ignoring DM from {sender.first_name} (@{sender.username}) based on config")
+                    else:
+                        logger.info(f"Ignoring message in '{chat_title}' - no trigger detected (mention/keyword)")
+                    logger.debug(f"Message text: {event.text[:100] if event.text else 'None'}")
+                    return
+                
+                # Special log for mentions
+                if event.text and any(trigger in event.text.lower() for trigger in self.group_config.get('mention_triggers', [])):
+                    logger.info(f"🔔 Mention detected in message from {sender.first_name} in {chat_title or 'DM'}")
                 
                 # Log the message with full context
                 logger.info(f"📨 New message from {sender.first_name} (@{sender.username}) in {message_metadata['chat_type']}: {event.text[:100] if event.text else 'None'}...")
