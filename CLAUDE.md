@@ -13,7 +13,7 @@ source setup_local_env.sh
 uv venv && source .venv/bin/activate
 uv sync --all-extras
 cp .env.example .env.local
-createdb quickbooks
+createdb cuttlefish
 uv run python manage.py migrate
 uv run python manage.py createsuperuser
 ```
@@ -24,7 +24,7 @@ uv run python manage.py createsuperuser
 uv run python manage.py runserver
 
 # MCP server
-uv run python -m apps.ai.mcp.quickbooks_server
+uv run python -m apps.ai.mcp.cuttlefish_server
 
 # Django shell
 uv run python manage.py shell
@@ -171,7 +171,7 @@ Common model functionality via mixins in `apps/common/behaviors/`:
 ### Environment Variables
 Required in `.env.local`:
 ```
-DATABASE_URL=postgres://$(whoami)@localhost:5432/quickbooks
+DATABASE_URL=postgres://$(whoami)@localhost:5432/cuttlefish
 DEPLOYMENT_TYPE=LOCAL
 SECRET_KEY=your-secret-key
 DEBUG=True

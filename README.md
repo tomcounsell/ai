@@ -1,10 +1,10 @@
 
-# QuickBooks MCP Server
+# Cuttlefish - Multi-Tool MCP Platform
 
-[![Tests](https://github.com/yudame/quickbooks/actions/workflows/test.yml/badge.svg)](https://github.com/yudame/quickbooks/actions/workflows/test.yml)
-[![Documentation](https://github.com/yudame/quickbooks/actions/workflows/docs.yml/badge.svg)](https://yudame.github.io/quickbooks/)
+[![Tests](https://github.com/yudame/cuttlefish/actions/workflows/test.yml/badge.svg)](https://github.com/yudame/cuttlefish/actions/workflows/test.yml)
+[![Documentation](https://github.com/yudame/cuttlefish/actions/workflows/docs.yml/badge.svg)](https://yudame.github.io/cuttlefish/)
 
-A B2B SaaS platform providing QuickBooks integration via Model Context Protocol (MCP), enabling AI assistants to interact with QuickBooks Online data.
+A B2B SaaS platform providing multiple integrations via Model Context Protocol (MCP), enabling AI assistants to interact with various business tools and services. Currently supports QuickBooks Online with more integrations coming soon.
 
 ## Key Features
 
@@ -36,7 +36,7 @@ A B2B SaaS platform providing QuickBooks integration via Model Context Protocol 
 - For development practices, see [Development Guide](CLAUDE.md)
 
 ### Documentation
-- **API and Code Documentation**: [API and Code Documentation](https://yudame.github.io/quickbooks/) (generated with Sphinx and hosted on GitHub Pages)
+- **API and Code Documentation**: [API and Code Documentation](https://yudame.github.io/cuttlefish/) (generated with Sphinx and hosted on GitHub Pages)
 - Documentation is automatically built and published from the main branch
 
 ### Coding Standards & Quality

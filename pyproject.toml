@@ -6,12 +6,12 @@ build-backend = "setuptools.build_meta"
 packages = ["apps"]
 
 [project]
-name = "quickbooks"
+name = "cuttlefish"
 version = "0.1.0"
-description = "QuickBooks MCP Server - B2B SaaS for QuickBooks integration via Model Context Protocol"
+description = "Multi-tool MCP Server Platform - B2B SaaS for various integrations via Model Context Protocol"
 readme = "README.md"
 authors = [
-    {name = "Tom Counsell", email = "tom@quickbooks.com"}
+    {name = "Tom Counsell", email = "tom@yuda.me"}
 ]
 license = "MIT"
 classifiers = [
@@ -78,8 +78,8 @@ e2e = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/tomcounsell/quickbooks"
-Issues = "https://github.com/tomcounsell/quickbooks/issues"
+Homepage = "https://github.com/tomcounsell/cuttlefish"
+Issues = "https://github.com/tomcounsell/cuttlefish/issues"
 
 [tool.black]
 line-length = 88

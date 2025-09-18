@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# QuickBooks MCP Server - Local Environment Setup Script
+# Cuttlefish - Local Environment Setup Script
 # This script sets up the local development environment and checks if all required settings are in place
 # It is designed to be idempotent - running it multiple times should be safe
 
@@ -41,7 +41,7 @@ url_encode_db_name() {
 }
 
 # Start script
-print_header "QuickBooks MCP Server - Setup Script"
+print_header "Cuttlefish - Setup Script"
 echo "This script will set up your local development environment."
 
 # Step 1: Check Python version
@@ -51,7 +51,7 @@ if [ -d ".git" ]; then
     if git remote | grep -q "origin"; then
         print_success "Git repository configured."
     else
-        print_warning "Git origin not configured. Run: git remote add origin https://github.com/yudame/quickbooks.git"
+        print_warning "Git origin not configured. Run: git remote add origin https://github.com/yudame/cuttlefish.git"
     fi
 else
     print_warning "Not a git repository. Run: git init"
