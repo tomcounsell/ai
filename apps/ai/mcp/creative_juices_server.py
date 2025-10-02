@@ -64,30 +64,24 @@ ALL_MUSK_QUESTIONS = [q for category in MUSK_QUESTIONS.values() for q in categor
 
 
 @mcp.tool()
-async def ignite(count: int = 3) -> dict:
+async def ignite() -> dict:
     """
     Generate random conceptual sparks for starting fresh problem-solving.
 
     Use this at the beginning of any creative or problem-solving task where
-    out-of-the-box thinking would be valuable. Returns random verb-noun
-    combinations to frame the challenge in unexpected ways.
-
-    Args:
-        count: Number of random sparks (1-5, default: 3)
+    out-of-the-box thinking would be valuable. Returns 3 random verb-noun
+    combinations at "wild" intensity to frame the challenge in unexpected ways.
 
     Returns:
-        Random verb-noun pairs with intensity-based framing
+        Three random verb-noun pairs for initial creative framing
     """
     from .creative_juices_words import VERBS, NOUNS
 
-    count = max(1, min(5, count))
-
-    # Use "wild" intensity for initial sparks
     verb_list = VERBS["wild"]
     noun_list = NOUNS["wild"]
 
     pairs = []
-    for _ in range(count):
+    for _ in range(3):
         verb = random.choice(verb_list)
         noun = random.choice(noun_list)
         pairs.append(f"{verb}-{noun}")
@@ -99,76 +93,62 @@ async def ignite(count: int = 3) -> dict:
 
 
 @mcp.tool()
-async def scatter(count: int = 3, intensity: str = "chaos") -> dict:
+async def scatter() -> dict:
     """
     Generate random divergent sparks when exploration has stalled.
 
     Use this mid-conversation when you've been working on something and need
-    to break out of linear/convergent thinking. Returns random verb-noun pairs
-    at higher intensity to force radical divergence.
-
-    Args:
-        count: Number of random sparks (1-5, default: 3)
-        intensity: "wild" or "chaos" (default: "chaos")
+    to break out of linear/convergent thinking. Returns 3 random verb-noun pairs
+    at "chaos" intensity to force radical divergence from current thinking.
 
     Returns:
-        Random verb-noun pairs with high-intensity framing
+        Three random verb-noun pairs at maximum intensity for radical divergence
     """
     from .creative_juices_words import VERBS, NOUNS
 
-    count = max(1, min(5, count))
-    intensity = "chaos" if intensity not in ["wild", "chaos"] else intensity
-
-    verb_list = VERBS[intensity]
-    noun_list = NOUNS[intensity]
+    verb_list = VERBS["chaos"]
+    noun_list = NOUNS["chaos"]
 
     pairs = []
-    for _ in range(count):
+    for _ in range(3):
         verb = random.choice(verb_list)
         noun = random.choice(noun_list)
         pairs.append(f"{verb}-{noun}")
 
-    instructions = {
-        "wild": "Break out of your current path with these:",
-        "chaos": "Shatter your assumptions with these:"
-    }
-
     return {
         "sparks": pairs,
-        "instruction": instructions[intensity]
+        "instruction": "Shatter your assumptions with these:"
     }
 
 
 @mcp.tool()
-async def focus(count: int = 2, framework: str = "random") -> dict:
+async def focus() -> dict:
     """
-    Generate random questions from Elon Musk's thinking frameworks.
+    Generate random questions from Elon Musk's four thinking frameworks.
 
     Use this to ground creative thinking in reality while maintaining openness.
-    Based on Musk's actual methods: first principles thinking, limit case analysis,
-    platonic ideal visualization, and five-step optimization (question → delete → optimize).
-
-    Args:
-        count: Number of random questions (1-5, default: 2)
-        framework: "random", "first_principles", "limit_thinking", "platonic_ideal", or "optimization"
+    Returns one random question from each of Musk's four frameworks:
+    1. First Principles - strip to fundamental truths
+    2. Limit Thinking - scale to extremes
+    3. Platonic Ideal - visualize perfection first
+    4. Optimization - question → delete → optimize
 
     Returns:
-        Random reality-grounding questions from Musk's frameworks
+        Four questions (one per framework) for reality-grounded thinking
     """
-    count = max(1, min(5, count))
+    # Get one random question from each framework
+    questions = []
+    frameworks = []
 
-    if framework == "random" or framework not in MUSK_QUESTIONS:
-        # Random questions from all frameworks
-        questions = random.sample(ALL_MUSK_QUESTIONS, count)
-    else:
-        # Questions from specific framework
-        framework_questions = MUSK_QUESTIONS[framework]
-        questions = random.sample(framework_questions, min(count, len(framework_questions)))
+    for framework_name, framework_questions in MUSK_QUESTIONS.items():
+        question = random.choice(framework_questions)
+        questions.append(question)
+        frameworks.append(framework_name)
 
     return {
         "questions": questions,
-        "instruction": "Ground your thinking with Musk-style reality checks:",
-        "framework": framework
+        "frameworks": frameworks,
+        "instruction": "Ground your thinking with one question from each Musk framework:"
     }
 
 
