@@ -1,5 +1,7 @@
 """
 Creative Juices MCP Server implementation using FastMCP.
+
+Provides randomness tools to encourage out-of-the-box thinking.
 """
 
 import logging
@@ -12,78 +14,132 @@ from mcp.server.fastmcp import FastMCP
 logger = logging.getLogger(__name__)
 
 # Initialize MCP server
-mcp = FastMCP("Creative Juices MCP")
+mcp = FastMCP("Creative Juices")
 
-# Creative prompt for the prompt feature
-CREATIVE_PROMPT = """You have access to the Creative Juices tool. Use it to generate unexpected verb-noun combinations that can help reframe problems and spark creative thinking.
-
-The tool offers three intensity levels:
-- "mild": Gentle, accessible combinations
-- "wild": Unexpected, thought-provoking pairs (default)
-- "chaos": Surreal, assumption-shattering combinations
-
-When you receive a creative challenge or problem to solve:
-1. Use get_creative_spark with the appropriate intensity
-2. Present the combinations as reframing lenses
-3. Help explore how each pairing might reveal new perspectives
-4. Encourage the user to build on the most promising angles
-
-Remember: These aren't solutions - they're catalysts for breaking mental patterns."""
+# Elon-style reality check questions
+REALITY_QUESTIONS = [
+    "What are the first principles here?",
+    "What's the physics limit?",
+    "What would 10x scale require?",
+    "What if you removed this constraint entirely?",
+    "What's the simplest version that could possibly work?",
+    "What's actually impossible vs just hard?",
+    "How would you test this core assumption?",
+    "What's the limiting factor?",
+    "What would a child's solution be?",
+    "If you had unlimited resources, what changes?",
+    "What can't change? (physics, human nature, etc.)",
+    "What's the 80/20 here?",
+    "What breaks first at scale?",
+    "What would make this 10x cheaper?",
+    "What would make this 10x faster?",
+    "What's the obvious solution you're avoiding?",
+    "What if the constraint is the solution?",
+    "What happens at the limit case?",
+    "What would Feynman say is actually happening here?",
+    "What's the dumbest way to solve this that might work?",
+]
 
 
 @mcp.tool()
-async def get_creative_spark(count: int = 2, intensity: str = "wild") -> dict:
+async def ignite(count: int = 3) -> dict:
     """
-    Generate random verb-noun combinations for creative thinking.
+    Generate random conceptual sparks for starting fresh problem-solving.
+
+    Use this at the beginning of any creative or problem-solving task where
+    out-of-the-box thinking would be valuable. Returns random verb-noun
+    combinations to frame the challenge in unexpected ways.
 
     Args:
-        count: Number of combinations to generate (1-5, default: 2)
-        intensity: Intensity level - "mild", "wild", or "chaos" (default: "wild")
+        count: Number of random sparks (1-5, default: 3)
 
     Returns:
-        Dictionary with pairs, instruction, and a prompt suggestion
+        Random verb-noun pairs with intensity-based framing
     """
     from .creative_juices_words import VERBS, NOUNS
 
-    # Validate parameters
     count = max(1, min(5, count))
 
-    if intensity not in ["mild", "wild", "chaos"]:
-        intensity = "wild"
+    # Use "wild" intensity for initial sparks
+    verb_list = VERBS["wild"]
+    noun_list = NOUNS["wild"]
 
-    # Select words based on intensity
-    verb_list = VERBS[intensity]
-    noun_list = NOUNS[intensity]
-
-    # Generate pairs
     pairs = []
     for _ in range(count):
         verb = random.choice(verb_list)
         noun = random.choice(noun_list)
         pairs.append(f"{verb}-{noun}")
 
-    # Generate instruction based on intensity
-    instructions = {
-        "mild": "Consider how these concepts might relate to your problem:",
-        "wild": "Use these unexpected combinations as lenses to radically reframe:",
-        "chaos": "Let these surreal pairings shatter your assumptions:"
+    return {
+        "sparks": pairs,
+        "instruction": "Use these unexpected combinations as initial lenses:"
     }
 
-    # Generate prompt suggestion
-    first_pair = pairs[0].replace('-', ' the ')
-    prompt = f"What if your solution could {first_pair}?"
+
+@mcp.tool()
+async def scatter(count: int = 3, intensity: str = "chaos") -> dict:
+    """
+    Generate random divergent sparks when exploration has stalled.
+
+    Use this mid-conversation when you've been working on something and need
+    to break out of linear/convergent thinking. Returns random verb-noun pairs
+    at higher intensity to force radical divergence.
+
+    Args:
+        count: Number of random sparks (1-5, default: 3)
+        intensity: "wild" or "chaos" (default: "chaos")
+
+    Returns:
+        Random verb-noun pairs with high-intensity framing
+    """
+    from .creative_juices_words import VERBS, NOUNS
+
+    count = max(1, min(5, count))
+    intensity = "chaos" if intensity not in ["wild", "chaos"] else intensity
+
+    verb_list = VERBS[intensity]
+    noun_list = NOUNS[intensity]
+
+    pairs = []
+    for _ in range(count):
+        verb = random.choice(verb_list)
+        noun = random.choice(noun_list)
+        pairs.append(f"{verb}-{noun}")
+
+    instructions = {
+        "wild": "Break out of your current path with these:",
+        "chaos": "Shatter your assumptions with these:"
+    }
 
     return {
-        "pairs": pairs,
-        "instruction": instructions[intensity],
-        "prompt": prompt
+        "sparks": pairs,
+        "instruction": instructions[intensity]
     }
 
 
-@mcp.prompt()
-async def creative_reframe() -> str:
-    """Prompt for applying creative thinking techniques."""
-    return CREATIVE_PROMPT
+@mcp.tool()
+async def focus(count: int = 2) -> dict:
+    """
+    Generate random first-principles and limit-case questions.
+
+    Use this to ground creative thinking in reality while maintaining openness.
+    Returns random questions inspired by Elon Musk's approach: first principles,
+    physics limits, constraint removal, scaling, and simplification.
+
+    Args:
+        count: Number of random questions (1-5, default: 2)
+
+    Returns:
+        Random reality-checking questions
+    """
+    count = max(1, min(5, count))
+
+    questions = random.sample(REALITY_QUESTIONS, count)
+
+    return {
+        "questions": questions,
+        "instruction": "Ground your thinking with these first-principles questions:"
+    }
 
 
 def main():

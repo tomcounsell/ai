@@ -144,9 +144,10 @@ Shows:
 **File:** `apps/ai/mcp/creative_juices_server.py`
 
 Shows:
-- Simple tool without external dependencies
-- Prompt definitions
-- Minimal Django integration
+- Three distinct tools with clear use cases
+- Pure randomness for creativity (no intelligence)
+- Tool descriptions that instruct LLMs when to use each
+- Minimal external dependencies
 
 ---
 
