@@ -136,15 +136,7 @@ async def process_chat_message(
         result = await chat_agent.run(message, deps=deps, message_history=messages)
 
     # Add assistant response to session
-    # Get the response text from the result
-    if hasattr(result, "output"):
-        response = result.output
-    elif hasattr(result, "text"):
-        response = result.text
-    elif hasattr(result, "data"):
-        response = result.data
-    else:
-        response = str(result)
+    response = result.output
     session.add_message("assistant", response)
 
     return response

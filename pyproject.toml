@@ -48,17 +48,15 @@ dependencies = [
     "selenium",
     "django-tailwind-cli>=4.3.0",
     "drf-yasg>=1.21.10",
-    "pydantic-ai>=0.7.0",
-    "openai>=1.99.1",
-    "mcp>=1.13.0",
-    "mcp-python>=0.1.4",
+    "openai>=1.107.2",
+    "pydantic-ai>=1.0.0,<2.0.0",
+    "mcp>=1.15.0,<2.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "django-browser-reload",
     "Werkzeug",
-    "aider-chat",
     "black",
     "flake8",
     "mypy",

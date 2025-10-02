@@ -48,8 +48,9 @@ DJANGO_SETTINGS_MODULE=settings pytest --cov=apps --cov-report=html
 # Run E2E tests
 python tools/testing/browser_test_runner.py apps/**/tests/test_e2e_*.py
 
-# Test MCP components
-uv run python -m pytest apps/ai/tests/test_mcp_quickbooks.py
+# Test MCP servers locally
+uv run python -m apps.ai.mcp.quickbooks_server
+uv run python -m apps.ai.mcp.creative_juices_server
 ```
 
 ### Code Quality
@@ -107,9 +108,9 @@ Settings are modular and loaded in sequence via `settings/__init__.py`:
 
 ### MCP Server Architecture
 The QuickBooks MCP implementation spans multiple apps:
-- **apps/ai/mcp/**: MCP protocol server and tools
-  - `quickbooks_server.py`: Main MCP server implementation
-  - `quickbooks_tools.py`: Tool definitions and schemas
+- **apps/ai/mcp/**: MCP protocol servers using FastMCP
+  - `quickbooks_server.py`: QuickBooks MCP server with @mcp.tool() decorators
+  - `creative_juices_server.py`: Creative Juices MCP server
 - **apps/integration/quickbooks/**: QuickBooks API integration
   - `client.py`: Async QuickBooks API client with OAuth
 - **apps/integration/models/**: Integration models
@@ -153,6 +154,20 @@ Common model functionality via mixins in `apps/common/behaviors/`:
 - Import order: stdlib, third-party, Django, local
 - Pre-commit hooks must pass before committing
 
+### Documentation
+- **Document only current implementation** - No migration guides, no "old vs new" comparisons
+- **Never reference removed/deprecated patterns** - If it's gone, it's forgotten
+- **Link to official docs** - Don't duplicate what's readily available elsewhere
+- **Focus on what IS, not what WAS** - This codebase is rebuilt from specs; only the current state matters
+
+### AI Integration
+- **PydanticAI models MUST use `Agent` prefix** (e.g., `AgentChatSession` not `ChatSession`)
+- Use adapter pattern for Django ↔ PydanticAI conversion
+- Never mutate `os.environ` for API keys - pass as parameters
+- Use Django's `async_to_sync` / `sync_to_async` utilities, not custom event loop code
+- See [PydanticAI Integration Guide](docs/PYDANTIC_AI_INTEGRATION.md) for full details
+- See [AI Conventions](docs/AI_CONVENTIONS.md) for general AI patterns
+
 ## QuickBooks MCP Integration
 
 ### OAuth Flow
@@ -162,11 +177,11 @@ Common model functionality via mixins in `apps/common/behaviors/`:
 4. MCP server accesses organization's data
 
 ### Adding MCP Tools
-1. Define schema in `apps/ai/mcp/quickbooks_tools.py`
-2. Add to `QUICKBOOKS_TOOLS` list
-3. Implement handler in `quickbooks_server.py`
-4. Add method in `apps/integration/quickbooks/client.py`
-5. Write tests in both `apps/ai/tests/` and `apps/integration/quickbooks/tests/`
+1. Add `@mcp.tool()` decorated function in `apps/ai/mcp/quickbooks_server.py`
+2. Use type hints for automatic schema generation
+3. Implement client method in `apps/integration/quickbooks/client.py`
+4. Write tests in both `apps/ai/tests/` and `apps/integration/quickbooks/tests/`
+5. See [MCP Development Guide](docs/MCP_DEVELOPMENT_GUIDE.md) for patterns
 
 ### Environment Variables
 Required in `.env.local`:

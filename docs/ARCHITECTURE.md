@@ -107,10 +107,12 @@ graph TD
   - Loops: Transactional email
 - Abstracts external API details behind a clean interface
 
-### AI App (Planned)
-- Will integrate with AI service providers
-- Will provide abstractions for prompts and completions
-- Will include agent frameworks for advanced AI workflows
+### AI App
+- Integrates with AI service providers (OpenAI, Anthropic)
+- Provides chat agent functionality using PydanticAI framework
+- Includes MCP (Model Context Protocol) servers for external integrations
+- Follows strict separation between Django models (database) and PydanticAI models (in-memory)
+- See [PydanticAI Integration Guide](PYDANTIC_AI_INTEGRATION.md) for implementation details
 
 ## Data Flow
 
@@ -136,5 +138,23 @@ graph TD
 - **Backend**: Django, DRF, PostgreSQL
 - **Frontend**: HTMX, Tailwind CSS v4 with django-tailwind-cli
 - **External Services**: AWS, Twilio, Loops
-- **AI Integration**: OpenAI, Anthropic (planned)
+- **AI Integration**: PydanticAI framework with OpenAI/Anthropic, MCP protocol
 - **Deployment**: Docker, Render
+
+## AI Integration Architecture
+
+The AI app uses a layered architecture to separate concerns:
+
+```
+Django Views (HTTP) → Adapters → PydanticAI Agents → LLM Providers
+       ↓                 ↓              ↓
+Django Models    AgentModels    Tool Execution
+  (database)     (in-memory)
+```
+
+**Key principles:**
+- Clear naming: Django `ChatSession` vs PydanticAI `AgentChatSession`
+- Adapter pattern for model conversion
+- Async-first with Django's async views
+- Tool sandboxing for security
+- See [PydanticAI Integration Guide](PYDANTIC_AI_INTEGRATION.md) for full details
