@@ -16,29 +16,51 @@ logger = logging.getLogger(__name__)
 # Initialize MCP server
 mcp = FastMCP("Creative Juices")
 
-# Elon-style reality check questions
-REALITY_QUESTIONS = [
-    "What are the first principles here?",
-    "What's the physics limit?",
-    "What would 10x scale require?",
-    "What if you removed this constraint entirely?",
-    "What's the simplest version that could possibly work?",
-    "What's actually impossible vs just hard?",
-    "How would you test this core assumption?",
-    "What's the limiting factor?",
-    "What would a child's solution be?",
-    "If you had unlimited resources, what changes?",
-    "What can't change? (physics, human nature, etc.)",
-    "What's the 80/20 here?",
-    "What breaks first at scale?",
-    "What would make this 10x cheaper?",
-    "What would make this 10x faster?",
-    "What's the obvious solution you're avoiding?",
-    "What if the constraint is the solution?",
-    "What happens at the limit case?",
-    "What would Feynman say is actually happening here?",
-    "What's the dumbest way to solve this that might work?",
-]
+# Elon Musk's thinking frameworks as questions
+MUSK_QUESTIONS = {
+    # First Principles Thinking - strip to fundamental truths
+    "first_principles": [
+        "What are the absolute truths here, known by physics?",
+        "What assumptions can you remove completely?",
+        "What's expensive: the materials or the manufacturing?",
+        "If everyone agrees, what are they all wrong about?",
+        "What's the foundational truth underneath this problem?",
+        "Strip away all bias and conjecture - what remains?",
+    ],
+
+    # Think in the Limit - scale to extremes
+    "limit_thinking": [
+        "What happens at 1 unit vs 1 million units?",
+        "If this scaled to billions, what breaks first?",
+        "What if it was 1000x smaller? 1000x larger?",
+        "At minimum viable scale, does the problem still exist?",
+        "At infinite scale, what's the limiting factor?",
+        "If you had just one customer vs a billion, what changes?",
+    ],
+
+    # Platonic Ideal - perfect solution first
+    "platonic_ideal": [
+        "What does the perfect version of this look like?",
+        "Ignoring your current skills, what's the ideal solution?",
+        "If you designed this from scratch today, what would it be?",
+        "What would the perfect [product/service/process] do?",
+        "Work backwards from perfection - what do you need?",
+        "What's the ideal outcome, unconstrained by reality?",
+    ],
+
+    # Five-Step Optimization - question, delete, optimize, accelerate, automate
+    "optimization": [
+        "Question: Are your requirements dumb? Does this even matter?",
+        "Delete: What can you remove? Are you adding things 'just in case'?",
+        "If you're not adding back 10% of deletions, did you delete enough?",
+        "What shouldn't exist at all that you're trying to optimize?",
+        "What steps can be eliminated entirely?",
+        "What are you optimizing that doesn't need to exist?",
+    ]
+}
+
+# Flatten all questions for random selection
+ALL_MUSK_QUESTIONS = [q for category in MUSK_QUESTIONS.values() for q in category]
 
 
 @mcp.tool()
@@ -118,27 +140,35 @@ async def scatter(count: int = 3, intensity: str = "chaos") -> dict:
 
 
 @mcp.tool()
-async def focus(count: int = 2) -> dict:
+async def focus(count: int = 2, framework: str = "random") -> dict:
     """
-    Generate random first-principles and limit-case questions.
+    Generate random questions from Elon Musk's thinking frameworks.
 
     Use this to ground creative thinking in reality while maintaining openness.
-    Returns random questions inspired by Elon Musk's approach: first principles,
-    physics limits, constraint removal, scaling, and simplification.
+    Based on Musk's actual methods: first principles thinking, limit case analysis,
+    platonic ideal visualization, and five-step optimization (question → delete → optimize).
 
     Args:
         count: Number of random questions (1-5, default: 2)
+        framework: "random", "first_principles", "limit_thinking", "platonic_ideal", or "optimization"
 
     Returns:
-        Random reality-checking questions
+        Random reality-grounding questions from Musk's frameworks
     """
     count = max(1, min(5, count))
 
-    questions = random.sample(REALITY_QUESTIONS, count)
+    if framework == "random" or framework not in MUSK_QUESTIONS:
+        # Random questions from all frameworks
+        questions = random.sample(ALL_MUSK_QUESTIONS, count)
+    else:
+        # Questions from specific framework
+        framework_questions = MUSK_QUESTIONS[framework]
+        questions = random.sample(framework_questions, min(count, len(framework_questions)))
 
     return {
         "questions": questions,
-        "instruction": "Ground your thinking with these first-principles questions:"
+        "instruction": "Ground your thinking with Musk-style reality checks:",
+        "framework": framework
     }
 
 
