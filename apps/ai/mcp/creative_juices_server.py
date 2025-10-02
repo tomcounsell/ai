@@ -66,14 +66,9 @@ ALL_MUSK_QUESTIONS = [q for category in MUSK_QUESTIONS.values() for q in categor
 @mcp.tool()
 async def ignite() -> dict:
     """
-    Generate random conceptual sparks for starting fresh problem-solving.
-
-    Use this at the beginning of any creative or problem-solving task where
-    out-of-the-box thinking would be valuable. Returns 3 random verb-noun
-    combinations at "wild" intensity to frame the challenge in unexpected ways.
-
-    Returns:
-        Three random verb-noun pairs for initial creative framing
+    Use at the start of creative or problem-solving tasks to frame challenges
+    in unexpected ways. Helpful when you need to think outside the box from
+    the beginning and want unconventional starting points.
     """
     from .creative_juices_words import VERBS, NOUNS
 
@@ -95,14 +90,9 @@ async def ignite() -> dict:
 @mcp.tool()
 async def scatter() -> dict:
     """
-    Generate random divergent sparks when exploration has stalled.
-
-    Use this mid-conversation when you've been working on something and need
-    to break out of linear/convergent thinking. Returns 3 random verb-noun pairs
-    at "chaos" intensity to force radical divergence from current thinking.
-
-    Returns:
-        Three random verb-noun pairs at maximum intensity for radical divergence
+    Use mid-conversation when exploration has stalled or thinking has become
+    too linear. Helpful when you need to break out of convergent patterns and
+    force radical divergence from your current approach.
     """
     from .creative_juices_words import VERBS, NOUNS
 
@@ -124,17 +114,9 @@ async def scatter() -> dict:
 @mcp.tool()
 async def focus() -> dict:
     """
-    Generate random questions from Elon Musk's four thinking frameworks.
-
-    Use this to ground creative thinking in reality while maintaining openness.
-    Returns one random question from each of Musk's four frameworks:
-    1. First Principles - strip to fundamental truths
-    2. Limit Thinking - scale to extremes
-    3. Platonic Ideal - visualize perfection first
-    4. Optimization - question → delete → optimize
-
-    Returns:
-        Four questions (one per framework) for reality-grounded thinking
+    Use to ground creative thinking in reality while maintaining openness.
+    Helpful when wild ideas need pressure-testing against constraints, or when
+    you need to validate assumptions and identify what actually matters.
     """
     # Get one random question from each framework
     questions = []
