@@ -2,7 +2,6 @@
 Creative Juices MCP Server implementation using FastMCP.
 """
 
-import asyncio
 import logging
 import os
 import random
@@ -87,7 +86,7 @@ async def creative_reframe() -> str:
     return CREATIVE_PROMPT
 
 
-async def main():
+def main():
     """Main entry point for the MCP server."""
     # Add project root to path for Django setup
     project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -101,9 +100,9 @@ async def main():
     except Exception as e:
         logger.warning(f"Django setup skipped: {e}")
 
-    # Run the MCP server
-    await mcp.run()
+    # Run the MCP server (starts event loop internally)
+    mcp.run()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

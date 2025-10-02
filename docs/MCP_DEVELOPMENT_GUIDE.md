@@ -32,7 +32,6 @@ apps/ai/mcp/
 ```python
 """Service Name MCP Server using FastMCP."""
 
-import asyncio
 import logging
 import os
 from mcp.server.fastmcp import FastMCP
@@ -59,17 +58,17 @@ async def my_tool(param: str) -> dict:
     """Tool description."""
     return {}
 
-async def main():
+def main():
     api_key = os.environ.get("SERVICE_API_KEY")
     if not api_key:
         logger.error("Missing SERVICE_API_KEY")
         return
 
     initialize_client(api_key)
-    await mcp.run()
+    mcp.run()  # Starts event loop internally
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
 ```
 
 ### Django Integration Pattern
@@ -77,7 +76,7 @@ if __name__ == "__main__":
 When MCP server needs Django models:
 
 ```python
-async def main():
+def main():
     import os, sys
 
     # Add project root to path
@@ -92,7 +91,7 @@ async def main():
     except Exception as e:
         logger.warning(f"Django setup skipped: {e}")
 
-    await mcp.run()
+    mcp.run()  # Starts event loop internally
 ```
 
 ---

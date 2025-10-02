@@ -2,7 +2,6 @@
 QuickBooks MCP Server implementation using FastMCP.
 """
 
-import asyncio
 import logging
 import os
 from typing import Any, Dict, List
@@ -183,7 +182,7 @@ async def sync_data(entity_types: List[str]) -> dict:
     }
 
 
-async def main():
+def main():
     """Main entry point for the MCP server."""
     organization_id = os.environ.get("QUICKBOOKS_ORG_ID")
     api_key = os.environ.get("QUICKBOOKS_API_KEY")
@@ -199,9 +198,9 @@ async def main():
     # Initialize QuickBooks client
     initialize_client(organization_id)
 
-    # Run the MCP server
-    await mcp.run()
+    # Run the MCP server (starts event loop internally)
+    mcp.run()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
