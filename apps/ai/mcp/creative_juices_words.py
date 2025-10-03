@@ -48,7 +48,20 @@ VERBS = {
         "building", "reinforcing", "strengthening", "supporting", "stabilizing",
         # Calming
         "soothing", "calming", "quieting", "settling", "resting",
-        "sleeping", "dreaming", "meditating", "breathing", "relaxing"
+        "sleeping", "dreaming", "meditating", "breathing", "relaxing",
+        # Digital/cyber actions
+        "uploading", "downloading", "hacking", "encrypting", "streaming",
+        "syncing", "interfacing", "booting", "compiling", "rendering",
+        "scanning", "digitizing", "projecting", "transmitting",
+        # Mechanical/robotic
+        "powering", "charging", "rebooting", "overclocking", "modulating",
+        "amplifying", "augmenting", "droning",
+        # Space/advanced tech
+        "teleporting", "warping", "cloaking", "phasing", "beaming",
+        "pressurizing", "terraforming", "mining", "docking", "launching",
+        # Energy manipulation
+        "ionizing", "magnetizing", "polarizing", "channeling",
+        "focusing", "dispersing", "absorbing", "converting"
     ],
     "chaos": [
         # Destructive human actions
@@ -61,7 +74,20 @@ VERBS = {
         "stampeding", "attacking", "overwhelming", "infesting", "consuming",
         # Animal actions (survival/defense - DEFENSE)
         "escaping", "fortifying", "armoring", "burrowing", "camouflaging",
-        "fleeing", "adapting", "regenerating", "healing", "surviving"
+        "fleeing", "adapting", "regenerating", "healing", "surviving",
+        # Biological/organic sci-fi
+        "mutating", "evolving", "spawning", "metamorphosing", "replicating",
+        "assimilating", "infecting", "colonizing", "spreading", "morphing",
+        "splitting", "merging", "budding", "gestating",
+        # Psychic/mental
+        "telepathizing", "mind-melding", "probing", "sensing", "communing",
+        "dream-walking", "imprinting",
+        # Otherworldly movement
+        "dimension-hopping", "time-sliding", "probability-shifting", "quantum-tunneling",
+        "gravitating", "levitating", "undulating", "pulsating", "resonating",
+        # Exotic biology
+        "secreting", "crystallizing", "bioluminescing", "photosynthesizing",
+        "liquefying", "solidifying", "sporing", "cocooning"
     ]
 }
 
@@ -107,7 +133,20 @@ NOUNS = {
         "haven", "meadow", "pasture", "grove", "glade",
         # Gentle elements
         "breeze", "dew", "mist", "moonlight", "sunrise",
-        "stream", "pond", "shade", "grass", "petal"
+        "stream", "pond", "shade", "grass", "petal",
+        # Common devices
+        "datapad", "neural-jack", "bio-scanner", "plasma-cutter", "nano-injector",
+        "quantum-drive", "fusion-core", "gravity-plate", "stasis-pod", "cyberdeck",
+        "memory-chip", "holo-projector", "force-field", "laser-grid",
+        # Ship/station parts
+        "airlock", "bulkhead", "thruster", "reactor", "conduit",
+        "hull", "viewport", "cargo-bay", "med-bay", "cryo-chamber",
+        # Weapons/tools
+        "stunner", "disruptor", "multi-tool", "fabricator", "recycler",
+        "beacon", "drone", "servo", "actuator", "sensor",
+        # Infrastructure
+        "terminal", "console", "relay", "node", "hub",
+        "port", "socket", "cable", "circuit", "processor"
     ],
     "chaos": [
         # Violent natural phenomena (OFFENSE)
@@ -122,6 +161,19 @@ NOUNS = {
         "smoke", "shadow", "rust", "thorn", "ice",
         # Defense structures (DEFENSE)
         "fortress", "armor", "shield", "bunker", "moat",
-        "rampart", "barrier", "sanctuary", "refuge", "vault"
+        "rampart", "barrier", "sanctuary", "refuge", "vault",
+        # Biological structures
+        "spore", "pod", "sac", "membrane", "tendril",
+        "chitin", "ichor", "pheromone", "enzyme", "symbiont",
+        "hive-node", "neural-cluster", "bio-mass", "egg-sac", "chrysalis",
+        # Alien materials
+        "xenocrystal", "bio-gel", "star-dust", "void-stone", "plasma-silk",
+        "quantum-foam", "dark-matter", "exotic-particle", "time-crystal", "null-space",
+        # Alien anatomy
+        "tentacle", "mandible", "proboscis", "gill-slit", "compound-eye",
+        "exoskeleton", "bio-luminescent-organ", "psionic-lobe", "venom-gland", "spinneret",
+        # Alien environments
+        "spawning-pool", "growth-chamber", "mind-web", "fungal-network", "coral-structure",
+        "bio-dome", "flesh-wall", "living-ship"
     ]
 }
