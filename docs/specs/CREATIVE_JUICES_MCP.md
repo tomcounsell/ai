@@ -1,207 +1,159 @@
 # Creative Juices MCP Specification
 
-## Implementation Status
-
-### Phase 1 (✅ COMPLETED - Basic Functionality)
-- ✅ MCP server implementation using FastMCP
-- ✅ Three creative thinking tools: `get_inspiration`, `think_outside_the_box`, `reality_check`
-- ✅ Concrete word lists for tangible metaphors (inspiring and out-of-the-box categories)
-- ✅ Elon Musk thinking frameworks integration
-- ✅ Django integration (apps/ai/mcp/)
-- ✅ Basic tests for server functionality
-
-### Phase 2 (🔄 TODO - Enhancements)
-- ⬜ Add parameter support (count, intensity)
-- ⬜ Add Pydantic validation
-- ⬜ Add prompts via @mcp.prompt()
-- ⬜ Standardize error handling patterns
-- ⬜ Add comprehensive logging
-
-### Phase 3 (⬜ TODO - Advanced Features)
-- ⬜ Extended word categories (sci-fi, primitive, nurturing)
-- ⬜ User-configurable word lists
-- ⬜ Session history tracking
-- ⬜ Analytics on tool usage
-- ⬜ Claude Desktop DXT package
-- ⬜ PydanticAI example integration
-
 ## Overview
 
 **Name**: Creative Juices MCP
 **Purpose**: Provides randomness tools to encourage out-of-the-box thinking through concrete verb-noun combinations and strategic frameworks
-**Key Value Proposition**: Break out of predictable AI responses by injecting unexpected tangible metaphors and Elon Musk's proven thinking frameworks
+**Key Value**: Break out of predictable AI responses by injecting unexpected tangible metaphors and proven strategic thinking frameworks
 
 ## Core Functionality
 
-### Tools
+The server provides three tools designed for different stages of the creative process:
 
 1. **`get_inspiration()`** - Early-stage creative framing with gentle, concrete metaphors
 2. **`think_outside_the_box()`** - Mid-stage divergent thinking with intense, dramatic concepts
-3. **`reality_check()`** - Grounding tool using Elon Musk's thinking frameworks
-
-### Prompts
-- None currently implemented (Phase 2 enhancement)
+3. **`reality_check()`** - Grounding tool using Elon Musk's strategic thinking frameworks
 
 ## Tool Definitions
 
 ### get_inspiration
 
-```
-Description: Use at the start of creative or problem-solving tasks to frame challenges
-             in unexpected ways. Provides gentle, concrete verb-noun combinations.
-Parameters: None
-Returns:
-  - sparks: list of 3 verb-noun combinations (e.g., "painting-shoe", "baking-door")
-  - instruction: "Use these unexpected combinations as initial lenses:"
-Example Use Case: Beginning creative work, need unconventional starting points
-Word Lists: "inspiring" category - everyday human actions, animal behaviors, natural phenomena
-```
+**Purpose**: Frame challenges in unexpected ways at the start of creative or problem-solving tasks
+
+**Parameters**: None
+
+**Returns**:
+- `sparks`: Array of 3 verb-noun combinations (e.g., "painting-shoe", "baking-door", "knitting-spoon")
+- `instruction`: Context-specific guidance for applying the metaphors
+
+**When to Use**: Beginning creative work when you need unconventional starting points
+
+**Word Strategy**: Uses "inspiring" category words - gentle, constructive actions paired with everyday concrete objects. Draws from human actions, animal behaviors, natural phenomena, and spans human history from primitive tools through ancient civilizations to modern industry.
 
 ### think_outside_the_box
 
-```
-Description: Use mid-conversation when exploration has stalled or thinking has become
-             too linear. Forces radical divergence with intense verb-noun combinations.
-Parameters: None
-Returns:
-  - sparks: list of 3 verb-noun combinations (e.g., "crushing-fire", "burning-storm")
-  - instruction: "Shatter your assumptions with these:"
-Example Use Case: Breaking out of convergent patterns, need dramatic perspective shift
-Word Lists: "out_of_the_box" category - destructive actions, violent phenomena, sci-fi tech
-```
+**Purpose**: Force radical divergence when exploration has stalled or thinking has become too linear
+
+**Parameters**: None
+
+**Returns**:
+- `sparks`: Array of 3 verb-noun combinations (e.g., "crushing-fire", "exploding-storm", "swarming-venom")
+- `instruction`: Context-specific guidance for breaking assumptions
+
+**When to Use**: Mid-conversation when convergent thinking needs disruption
+
+**Word Strategy**: Uses "out_of_the_box" category words - intense, dramatic actions paired with extreme concepts. Includes destructive actions, predatory behaviors, sci-fi technology, and alien/futuristic elements.
 
 ### reality_check
 
-```
-Description: Ground creative thinking in reality while maintaining openness.
-             Pressure-test wild ideas against Elon Musk's strategic frameworks.
-Parameters: None
-Returns:
-  - questions: list of 4 questions (one from each framework)
-  - frameworks: list of framework names ["first_principles", "limit_thinking", "platonic_ideal", "optimization"]
-  - instruction: "Ground your thinking with one question from each Musk framework:"
-Example Use Case: Validating assumptions, identifying what actually matters
-Frameworks:
-  - First Principles Thinking: Strip to fundamental truths
-  - Think in the Limit: Scale to extremes
-  - Platonic Ideal: Perfect solution first
-  - Five-Step Optimization: Question, delete, optimize, accelerate, automate
-```
+**Purpose**: Ground creative thinking against strategic frameworks while maintaining openness
 
-## Implementation Details
+**Parameters**: None
 
-### Architecture
+**Returns**:
+- `questions`: Array of 4 questions (one from each framework)
+- `frameworks`: Array of framework names in same order as questions
+- `instruction`: Context-specific guidance for strategic validation
+
+**When to Use**: Validating assumptions, pressure-testing wild ideas, identifying what actually matters
+
+**Framework Strategy**: Uses four Elon Musk thinking frameworks:
+1. **First Principles** - Challenge assumptions, find fundamental truths (6 questions)
+2. **Limit Thinking** - Scale to extremes to find breaking points (6 questions)
+3. **Platonic Ideal** - Start with perfect solution, work backwards (6 questions)
+4. **Five-Step Optimization** - Question→Delete→Optimize→Accelerate→Automate (6 questions)
+
+Each call randomly selects one question from each framework to provide diverse strategic perspectives.
+
+## Design Philosophy
+
+### Concrete Over Abstract
+
+The word lists use tangible, everyday words rather than abstract concepts. This is intentional:
+
+- **Abstract words** (e.g., "crystallize-entropy") sound sophisticated but provide weak creative friction
+- **Concrete words** (e.g., "baking-shoe") force genuine metaphorical thinking because the conceptual gap is larger
+
+The larger the gap between the metaphor and the problem space, the stronger the creative reframing effect.
+
+### Three-Stage Creative Process
+
+Different creative stages require different intensities:
+
+1. **Early stage**: Gentle nudges with familiar, constructive concepts (inspiring)
+2. **Stuck stage**: Dramatic shocks with intense, disruptive concepts (out-of-the-box)
+3. **Validation stage**: Strategic frameworks for reality-testing (Musk frameworks)
+
+This mirrors natural creative problem-solving: diverge gently → diverge dramatically → converge strategically.
+
+### Historical Dimension
+
+Word lists intentionally span human development to maximize metaphorical range:
+- Primitive era: knapping, flint, hammerstone, hide
+- Ancient civilizations: forging, plow, anvil, wheel
+- Modern industrial: organizing, filing, calculator, circuit
+- Futuristic/sci-fi: teleporting, quantum-drive, plasma-cutter, bio-mass
+
+This temporal diversity ensures metaphors can connect to any domain.
+
+### Proven Strategic Frameworks
+
+The Musk frameworks represent battle-tested patterns from solving hard real-world problems (reusable rockets, electric vehicles, brain-computer interfaces). They're not academic theory—they're practical strategic tools extracted from demonstrated success.
+
+## Implementation Location
 
 ```
 apps/ai/mcp/
-├── creative_juices_server.py  # FastMCP server with @mcp.tool() decorators
-└── creative_juices_words.py   # Curated word lists by category
+├── creative_juices_server.py  # FastMCP server with three @mcp.tool() decorated functions
+└── creative_juices_words.py   # Word lists organized by category (VERBS, NOUNS dictionaries)
 ```
 
-### Word List Philosophy
+**Implementation Note**: Refer to the latest MCP and FastMCP documentation for current patterns and best practices when implementing or modifying this server.
 
-**Concrete over Abstract**: Uses tangible, everyday words to force metaphorical thinking rather than abstract concepts. This creates more creative distance and stronger metaphors.
+## Word List Categories
 
-**Categories**:
-- **inspiring** (300+ words): Gentle, constructive actions + concrete objects
-  - Human actions: painting, baking, melting, climbing, swimming
-  - Animal behaviors: flying, burrowing, nesting, flocking, migrating
-  - Everyday objects: shoe, door, window, chair, spoon
-  - Natural elements: rain, river, tree, seed, leaf
-  - Spans human history: primitive tools → ancient civilizations → modern industrial
+### Inspiring Category (300+ words)
 
-- **out_of_the_box** (250+ words): Intense, dramatic actions + extreme concepts
-  - Destructive: crushing, burning, drowning, exploding, rotting
-  - Predatory: hunting, prowling, stalking, swarming
-  - Sci-fi tech: hacking, encrypting, teleporting, cloaking, terraforming
-  - Extreme objects: fire, storm, flood, venom, plasma-cutter, quantum-drive
+**Verbs**: Human actions (painting, baking, melting, climbing, swimming, knitting), animal behaviors (flying, burrowing, nesting, flocking, migrating, herding), mechanical/systematic actions (organizing, filing, sorting, measuring, calculating), healing/restoration (mending, repairing, cleaning, bandaging), nurturing actions (cradling, rocking, feeding, nursing), primitive crafts (knapping, chipping, thatching, foraging), ancient skills (forging, plowing, sowing, quarrying)
 
-### Elon Musk Frameworks
+**Nouns**: Everyday objects (shoe, door, window, chair, spoon, rope, mirror), animal structures (nest, hive, web, shell, wing, feather), natural elements (rain, river, tree, seed, leaf, rock), comfort items (bed, quilt, cushion, tea, lamp), primitive tools (hammerstone, pestle, hide, gourd, ember), ancient items (ingot, anvil, plow, sickle, wheel, loom)
 
-Four strategic thinking frameworks extracted from Musk's problem-solving approach:
+### Out-of-the-Box Category (250+ words)
 
-1. **First Principles** (6 questions) - Challenge assumptions, find fundamental truths
-2. **Limit Thinking** (6 questions) - Scale to extremes to find breaking points
-3. **Platonic Ideal** (6 questions) - Start with perfect solution, work backwards
-4. **Five-Step Optimization** (6 questions) - Question→Delete→Optimize→Accelerate→Automate
+**Verbs**: Destructive actions (crushing, burning, drowning, exploding, rotting, shattering), predatory behaviors (hunting, prowling, stalking, swarming, devouring, ambushing), defense/evasion (shielding, hiding, retreating, fortifying, armoring), advanced technology (hacking, encrypting, compiling, rendering, overclocking), sci-fi actions (teleporting, warping, cloaking, phasing, terraforming, ionizing), biological sci-fi (mutating, evolving, metamorphosing, replicating, assimilating), psychic/mental (telepathizing, mind-melding, probing, dream-walking)
 
-### Data Flow
-
-**get_inspiration / think_outside_the_box**:
-1. Tool called (no parameters)
-2. Select 3 random verbs from category list
-3. Select 3 random nouns from category list
-4. Combine into verb-noun pairs
-5. Return with contextual instruction
-
-**reality_check**:
-1. Tool called (no parameters)
-2. Select 1 random question from each of 4 frameworks
-3. Return questions with framework names and instruction
-
-### Dependencies
-
-- **FastMCP**: MCP server protocol implementation
-- **Python stdlib random**: Random selection from word lists
-- **No external APIs**: Fully local operation
-- **No Django requirement**: Word lists are static Python dictionaries
-
-### Error Handling
-
-Current: None (Phase 2 enhancement)
-- No try-except blocks
-- No parameter validation
-- No logging
-
-## Configuration
-
-- **Environment Variables**: None required
-- **Optional Settings**: None
-- **Default Behavior**: Works immediately with built-in word lists
-
-## Installation & Running
-
-```bash
-# Run the MCP server
-uv run python -m apps.ai.mcp.creative_juices_server
-
-# Test locally with MCP Inspector
-mcp-inspector uv run python -m apps.ai.mcp.creative_juices_server
-
-# Run tests
-DJANGO_SETTINGS_MODULE=settings pytest apps/ai/tests/test_mcp_creative_juices.py -v
-```
+**Nouns**: Violent natural phenomena (fire, storm, flood, avalanche, earthquake, lightning), predatory elements (venom, prey, predator, fang, claw, jaws, swarm), wounds/damage (blood, bone, wound, scar, ash, smoke), sci-fi technology (datapad, neural-jack, plasma-cutter, quantum-drive, fusion-core), spacecraft elements (stasis-pod, airlock, thruster, reactor, cryo-chamber), primitive weapons (flint, handaxe, spearpoint, arrowhead, blade), alien biology (spore, tentacle, chitin, pheromone, exoskeleton, bio-mass), exotic materials (xenocrystal, plasma-silk, quantum-foam, dark-matter)
 
 ## Usage Examples
 
 ### Scenario 1: Product Design Kickoff
 
 **Tool**: `get_inspiration()`
-**Response**:
+**Sample Output**:
 ```json
 {
   "sparks": ["painting-shoe", "baking-door", "knitting-spoon"],
   "instruction": "Use these unexpected combinations as initial lenses:"
 }
 ```
-**Outcome**: "What if our app could 'paint' on a user's journey like painting a shoe?" → Leads to customization features
+**Impact**: "What if our app could 'paint' on a user's journey like painting a shoe?" leads to thinking about customization, personalization, and user-driven aesthetic choices.
 
 ### Scenario 2: Breaking Through Analysis Paralysis
 
 **Tool**: `think_outside_the_box()`
-**Response**:
+**Sample Output**:
 ```json
 {
   "sparks": ["crushing-fire", "exploding-storm", "swarming-venom"],
   "instruction": "Shatter your assumptions with these:"
 }
 ```
-**Outcome**: Dramatic metaphors force abandonment of incremental thinking
+**Impact**: Dramatic, violent metaphors force abandonment of incremental thinking. "What if our approach could swarm like venom?" shifts from linear optimization to distributed, adaptive strategies.
 
 ### Scenario 3: Validating Wild Ideas
 
 **Tool**: `reality_check()`
-**Response**:
+**Sample Output**:
 ```json
 {
   "questions": [
@@ -214,103 +166,73 @@ DJANGO_SETTINGS_MODULE=settings pytest apps/ai/tests/test_mcp_creative_juices.py
   "instruction": "Ground your thinking with one question from each Musk framework:"
 }
 ```
-**Outcome**: Strategic pressure-testing reveals fundamental constraints and opportunities
+**Impact**: Strategic pressure-testing reveals fundamental constraints and opportunities. First principles strip away bias, limit thinking exposes scaling issues, platonic ideal provides target state, optimization eliminates unnecessary work.
 
-### Scenario 4: Three-Tool Creative Process
+### Scenario 4: Complete Creative Process
 
-1. **Start**: `get_inspiration()` → Gentle concrete metaphors frame the problem
-2. **Diverge**: `think_outside_the_box()` → Intense metaphors break linear thinking
-3. **Converge**: `reality_check()` → Musk frameworks validate and refine ideas
+A three-tool workflow demonstrates the full creative arc:
 
-## Word List Details
+1. **Diverge (gentle)**: `get_inspiration()` → Concrete everyday metaphors frame the problem space
+2. **Diverge (extreme)**: `think_outside_the_box()` → Intense dramatic metaphors break linear thinking patterns
+3. **Converge (strategic)**: `reality_check()` → Musk frameworks validate and refine ideas against reality
 
-### Inspiring Category (VERBS)
-- Human actions: painting, baking, melting, climbing, swimming, knitting...
-- Animal (individual): flying, burrowing, nesting, molting, grazing...
-- Animal (collective): flocking, herding, schooling, migrating, clustering...
-- Mechanical/systematic: organizing, filing, sorting, measuring, calculating...
-- Healing/restoration: healing, mending, repairing, cleaning, bandaging...
-- Nurturing: cradling, rocking, feeding, nursing, wrapping...
-- Primitive: knapping, chipping, flaking, thatching, foraging...
-- Ancient civilization: casting, forging, plowing, sowing, quarrying...
+This pattern supports natural creative problem-solving rhythms.
 
-### Inspiring Category (NOUNS)
-- Everyday objects: shoe, door, window, chair, spoon, rope, mirror...
-- Animal structures: nest, hive, web, shell, wing, feather...
-- Natural elements: rain, river, tree, seed, leaf, rock...
-- Comfort items: bed, quilt, cushion, tea, lamp...
-- Primitive tools: hammerstone, pestle, hide, gourd, ember...
-- Ancient items: ingot, anvil, plow, sickle, wheel, loom...
+## Running the Server
 
-### Out-of-the-Box Category (VERBS)
-- Destructive: crushing, burning, drowning, exploding, rotting, shattering...
-- Predatory: hunting, prowling, stalking, swarming, devouring, ambushing...
-- Defense: shielding, hiding, retreating, fortifying, armoring...
-- Advanced tech: hacking, encrypting, compiling, rendering, overclocking...
-- Sci-fi: teleporting, warping, cloaking, phasing, terraforming, ionizing...
-- Biological sci-fi: mutating, evolving, metamorphosing, replicating, assimilating...
-- Psychic: telepathizing, mind-melding, probing, dream-walking...
+```bash
+# Start the MCP server
+uv run python -m apps.ai.mcp.creative_juices_server
 
-### Out-of-the-Box Category (NOUNS)
-- Violent natural: fire, storm, flood, avalanche, earthquake, lightning...
-- Predatory: venom, prey, predator, fang, claw, jaws, swarm...
-- Wounds: blood, bone, wound, scar, ash, smoke...
-- Sci-fi tech: datapad, neural-jack, plasma-cutter, quantum-drive, fusion-core...
-- Spacecraft: stasis-pod, airlock, thruster, reactor, cryo-chamber...
-- Primitive weapons: flint, handaxe, spearpoint, arrowhead, blade...
-- Alien biology: spore, tentacle, chitin, pheromone, exoskeleton, bio-mass...
-- Exotic materials: xenocrystal, plasma-silk, quantum-foam, dark-matter...
+# Test locally with MCP Inspector
+mcp-inspector uv run python -m apps.ai.mcp.creative_juices_server
 
-## Security Considerations
+# Run tests
+uv run pytest apps/ai/tests/test_mcp_creative_juices.py -v
+```
 
-- **Data Handling**: No user data stored or transmitted
-- **Permissions**: Read-only access to internal word lists
-- **No External APIs**: Completely offline operation
-- **No Authentication**: Stateless tools require no credentials
-- **No Django Required**: Word lists are static Python code
+## Technical Characteristics
 
-## Design Decisions
+- **No external dependencies**: Uses Python stdlib `random` only
+- **No authentication required**: Stateless tools with no credentials
+- **No user data**: Nothing stored or transmitted
+- **Fully local operation**: No external API calls
+- **No configuration needed**: Works immediately with built-in word lists
+- **No Django dependency**: Word lists are static Python dictionaries
 
-### Why Concrete Words?
+## Design Rationale
 
-Abstract words like "crystallize-entropy" sound sophisticated but provide less creative friction. Concrete words like "baking-shoe" force genuine metaphorical thinking because the gap between concept and problem is larger.
+### Why Not Parameters?
 
-### Why Three Separate Tools?
+Current implementation has no parameters (count, intensity, categories) to keep the initial version simple and maximize adoption. Tools generate fixed outputs to reduce decision fatigue. Future versions may add parameters if usage patterns demonstrate clear value.
 
-Different creative stages require different intensities:
-- **Early stage**: Gentle nudges (inspiring)
-- **Stuck stage**: Dramatic shocks (out-of-the-box)
-- **Validation stage**: Strategic frameworks (reality_check)
+### Why Separate Tools Instead of One Tool with Parameters?
+
+Three tools with clear names (`get_inspiration`, `think_outside_the_box`, `reality_check`) are more discoverable and self-explanatory than one tool with intensity/mode parameters. Tool names communicate intent and appropriate usage context.
 
 ### Why Musk Frameworks?
 
-Proven strategic thinking patterns from a successful entrepreneur who's solved hard problems (reusable rockets, electric vehicles, brain-computer interfaces). These frameworks work.
+Other strategic frameworks exist (TRIZ, Six Thinking Hats, Design Thinking), but Musk's frameworks have demonstrated success on extremely hard engineering problems. They're practical and actionable rather than academic. The questions are direct and confrontational, which pairs well with the divergent thinking tools.
 
-### Why No Parameters?
+### Why Random Selection?
 
-Current implementation prioritizes simplicity. Phase 2 will add `count` and `intensity` parameters with Pydantic validation.
+Randomness is the core value proposition. Predictable outputs would defeat the purpose of breaking habitual thinking patterns. Each tool call should feel fresh and unexpected.
 
-## Future Enhancements
+## Security & Privacy
 
-### Phase 2 (Near-term)
-- Parameter support: `get_inspiration(count=3, category="primitive")`
-- Pydantic validation for type safety
-- MCP prompts via `@mcp.prompt()` decorator
-- Error handling and logging
-- Return type consistency
+- **Read-only**: Tools only read from internal word lists
+- **No data collection**: No logging, tracking, or analytics of tool usage
+- **No external communication**: Completely offline operation
+- **No authentication**: Appropriate for the risk level (generating random word pairs)
+- **No injection risks**: Outputs are pre-curated word combinations only
 
-### Phase 3 (Long-term)
-- Expand word categories: nurturing, digital, biological
-- Database-backed user word lists
-- Session tracking and history
-- Analytics: which combinations led to breakthroughs
-- Integration with PydanticAI agents
-- Claude Desktop package distribution
+## Success Metrics
 
-## Notes
+Effectiveness of Creative Juices MCP can be evaluated through:
 
-- **Intentionally simple**: No config files, no database, no external APIs
-- **Zero setup**: Works immediately with curated word lists
-- **Historically grounded**: Word lists span human development (primitive → ancient → modern → sci-fi)
-- **Battle-tested frameworks**: Musk's strategic patterns from real problem-solving
-- **Concrete trumps abstract**: Tangible metaphors create stronger creative distance
+1. **Usage frequency**: Are users calling the tools regularly?
+2. **Tool sequencing**: Are users following the three-stage pattern?
+3. **Qualitative feedback**: Do users report creative breakthroughs?
+4. **Integration patterns**: Are the tools being integrated into workflows/agents?
+
+These metrics would require instrumentation not currently present in the implementation.
