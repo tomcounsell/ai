@@ -5,9 +5,7 @@ Provides randomness tools to encourage out-of-the-box thinking.
 """
 
 import logging
-import os
 import random
-import sys
 
 from mcp.server.fastmcp import FastMCP
 
@@ -27,7 +25,6 @@ MUSK_QUESTIONS = {
         "What's the foundational truth underneath this problem?",
         "Strip away all bias and conjecture - what remains?",
     ],
-
     # Think in the Limit - scale to extremes
     "limit_thinking": [
         "What happens at 1 unit vs 1 million units?",
@@ -37,7 +34,6 @@ MUSK_QUESTIONS = {
         "At infinite scale, what's the limiting factor?",
         "If you had just one customer vs a billion, what changes?",
     ],
-
     # Platonic Ideal - perfect solution first
     "platonic_ideal": [
         "What does the perfect version of this look like?",
@@ -47,7 +43,6 @@ MUSK_QUESTIONS = {
         "Work backwards from perfection - what do you need?",
         "What's the ideal outcome, unconstrained by reality?",
     ],
-
     # Five-Step Optimization - question, delete, optimize, accelerate, automate
     "optimization": [
         "Question: Are your requirements dumb? Does this even matter?",
@@ -56,7 +51,7 @@ MUSK_QUESTIONS = {
         "What shouldn't exist at all that you're trying to optimize?",
         "What steps can be eliminated entirely?",
         "What are you optimizing that doesn't need to exist?",
-    ]
+    ],
 }
 
 # Flatten all questions for random selection
@@ -83,7 +78,7 @@ async def get_inspiration() -> dict:
 
     return {
         "sparks": pairs,
-        "instruction": "Use these unexpected combinations as initial lenses:"
+        "instruction": "Use these unexpected combinations as initial lenses:",
     }
 
 
@@ -105,10 +100,7 @@ async def think_outside_the_box() -> dict:
         noun = random.choice(noun_list)
         pairs.append(f"{verb}-{noun}")
 
-    return {
-        "sparks": pairs,
-        "instruction": "Shatter your assumptions with these:"
-    }
+    return {"sparks": pairs, "instruction": "Shatter your assumptions with these:"}
 
 
 @mcp.tool()
@@ -130,24 +122,12 @@ async def reality_check() -> dict:
     return {
         "questions": questions,
         "frameworks": frameworks,
-        "instruction": "Ground your thinking with one question from each Musk framework:"
+        "instruction": "Ground your thinking with one question from each Musk framework:",
     }
 
 
 def main():
     """Main entry point for the MCP server."""
-    # Add project root to path for Django setup
-    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-    sys.path.insert(0, project_root)
-
-    # Setup Django (if needed for word lists from database)
-    try:
-        os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'settings')
-        import django
-        django.setup()
-    except Exception as e:
-        logger.warning(f"Django setup skipped: {e}")
-
     # Run the MCP server (starts event loop internally)
     mcp.run()
 

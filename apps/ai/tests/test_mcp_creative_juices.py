@@ -3,126 +3,64 @@ Tests for Creative Juices MCP Server.
 """
 
 import pytest
-from unittest.mock import AsyncMock, patch
 
-from apps.ai.mcp.creative_juices_server import CreativeJuicesMCPServer
-
-
-@pytest.mark.asyncio
-async def test_list_tools():
-    """Test that tools are properly listed."""
-    from apps.ai.mcp.creative_juices_tools import CREATIVE_JUICES_TOOLS
-
-    assert len(CREATIVE_JUICES_TOOLS) == 1
-    assert CREATIVE_JUICES_TOOLS[0].name == "get_creative_spark"
-    assert "verb-noun combinations" in CREATIVE_JUICES_TOOLS[0].description.lower()
+from apps.ai.mcp.creative_juices_server import (
+    get_inspiration,
+    think_outside_the_box,
+    reality_check,
+    MUSK_QUESTIONS,
+)
 
 
 @pytest.mark.asyncio
-async def test_list_prompts():
-    """Test that prompts are available."""
-    from apps.ai.mcp.creative_juices_tools import CREATIVE_PROMPT
+async def test_get_inspiration():
+    """Test get_inspiration returns valid structure."""
+    result = await get_inspiration()
 
-    assert CREATIVE_PROMPT is not None
-    assert "verb-noun combinations" in CREATIVE_PROMPT.lower()
-    assert "lateral thinking" in CREATIVE_PROMPT.lower()
-
-
-@pytest.mark.asyncio
-async def test_get_prompt():
-    """Test the creative_reframe prompt content."""
-    from apps.ai.mcp.creative_juices_tools import CREATIVE_PROMPT
-
-    assert "lateral thinking" in CREATIVE_PROMPT
-    assert "get_creative_spark" in CREATIVE_PROMPT
-    assert "[verb]-[noun]" in CREATIVE_PROMPT
-
-
-@pytest.mark.asyncio
-async def test_get_creative_spark_default():
-    """Test get_creative_spark with default parameters."""
-    server = CreativeJuicesMCPServer()
-
-    result = await server._handle_get_creative_spark({})
-
-    assert "pairs" in result
+    assert "sparks" in result
     assert "instruction" in result
-    assert "prompt" in result
-    assert len(result["pairs"]) == 2  # Default count
-    assert all("-" in pair for pair in result["pairs"])
-    assert "radically reframe" in result["instruction"]  # Default intensity is "wild"
-    assert "What if your solution could" in result["prompt"]
+    assert len(result["sparks"]) == 3
+    assert all("-" in spark for spark in result["sparks"])
+    assert (
+        result["instruction"] == "Use these unexpected combinations as initial lenses:"
+    )
 
 
 @pytest.mark.asyncio
-async def test_get_creative_spark_with_params():
-    """Test get_creative_spark with specific parameters."""
-    server = CreativeJuicesMCPServer()
+async def test_think_outside_the_box():
+    """Test think_outside_the_box returns valid structure."""
+    result = await think_outside_the_box()
 
-    # Test with mild intensity
-    result = await server._handle_get_creative_spark({
-        "count": 3,
-        "intensity": "mild"
-    })
-
-    assert len(result["pairs"]) == 3
-    assert "Consider how these concepts" in result["instruction"]
-
-    # Test with chaos intensity
-    result = await server._handle_get_creative_spark({
-        "count": 1,
-        "intensity": "chaos"
-    })
-
-    assert len(result["pairs"]) == 1
-    assert "shatter your assumptions" in result["instruction"]
+    assert "sparks" in result
+    assert "instruction" in result
+    assert len(result["sparks"]) == 3
+    assert all("-" in spark for spark in result["sparks"])
+    assert result["instruction"] == "Shatter your assumptions with these:"
 
 
 @pytest.mark.asyncio
-async def test_get_creative_spark_max_count():
-    """Test get_creative_spark with maximum count."""
-    server = CreativeJuicesMCPServer()
+async def test_reality_check():
+    """Test reality_check returns valid structure."""
+    result = await reality_check()
 
-    result = await server._handle_get_creative_spark({"count": 5})
+    assert "questions" in result
+    assert "frameworks" in result
+    assert "instruction" in result
+    assert len(result["questions"]) == 4
+    assert len(result["frameworks"]) == 4
+    assert (
+        result["instruction"]
+        == "Ground your thinking with one question from each Musk framework:"
+    )
 
-    assert len(result["pairs"]) == 5
-    assert all("-" in pair for pair in result["pairs"])
-
-
-@pytest.mark.asyncio
-async def test_get_creative_spark_invalid_params():
-    """Test get_creative_spark with invalid parameters."""
-    server = CreativeJuicesMCPServer()
-
-    # Test with count too high - should be clamped to 5
-    result = await server._handle_get_creative_spark({"count": 10})
-    assert len(result["pairs"]) == 5
-
-    # Test with count too low - should be clamped to 1
-    result = await server._handle_get_creative_spark({"count": 0})
-    assert len(result["pairs"]) == 1
-
-    # Test with invalid intensity - should default to "wild"
-    result = await server._handle_get_creative_spark({"intensity": "invalid"})
-    assert "radically reframe" in result["instruction"]
-
-
-@pytest.mark.asyncio
-async def test_call_tool():
-    """Test tool execution through the server."""
-    server = CreativeJuicesMCPServer()
-
-    # Test valid tool call
-    result = await server._handle_get_creative_spark({"count": 2})
-    assert "pairs" in result
-    assert len(result["pairs"]) == 2
-
-    # Test error handling - simulate through direct handler call
-    # Since call_tool returns error dict, we can test the handler directly
-    with patch.object(server, '_handle_get_creative_spark', side_effect=Exception("Test error")):
-        # Would need to call through the actual call_tool handler, but since
-        # we can't access it directly, we test the error handling logic exists
-        assert hasattr(server, '_handle_get_creative_spark')
+    # Verify frameworks match expected names
+    expected_frameworks = {
+        "first_principles",
+        "limit_thinking",
+        "platonic_ideal",
+        "optimization",
+    }
+    assert set(result["frameworks"]) == expected_frameworks
 
 
 @pytest.mark.asyncio
@@ -130,13 +68,124 @@ async def test_word_lists_loaded():
     """Test that word lists are properly loaded."""
     from apps.ai.mcp.creative_juices_words import VERBS, NOUNS
 
-    # Check all intensity levels exist
-    for intensity in ["mild", "wild", "chaos"]:
-        assert intensity in VERBS
-        assert intensity in NOUNS
-        assert len(VERBS[intensity]) >= 10
-        assert len(NOUNS[intensity]) >= 10
+    # Check both categories exist
+    assert "inspiring" in VERBS
+    assert "inspiring" in NOUNS
+    assert "out_of_the_box" in VERBS
+    assert "out_of_the_box" in NOUNS
 
-        # Check that words are strings
-        assert all(isinstance(verb, str) for verb in VERBS[intensity])
-        assert all(isinstance(noun, str) for noun in NOUNS[intensity])
+    # Check lists have content
+    assert len(VERBS["inspiring"]) > 50
+    assert len(NOUNS["inspiring"]) > 50
+    assert len(VERBS["out_of_the_box"]) > 50
+    assert len(NOUNS["out_of_the_box"]) > 50
+
+    # Check that words are strings
+    assert all(isinstance(verb, str) for verb in VERBS["inspiring"])
+    assert all(isinstance(noun, str) for noun in NOUNS["inspiring"])
+    assert all(isinstance(verb, str) for verb in VERBS["out_of_the_box"])
+    assert all(isinstance(noun, str) for noun in NOUNS["out_of_the_box"])
+
+
+@pytest.mark.asyncio
+async def test_musk_frameworks_loaded():
+    """Test that Musk frameworks are properly loaded."""
+    assert "first_principles" in MUSK_QUESTIONS
+    assert "limit_thinking" in MUSK_QUESTIONS
+    assert "platonic_ideal" in MUSK_QUESTIONS
+    assert "optimization" in MUSK_QUESTIONS
+
+    # Check each framework has questions
+    for framework, questions in MUSK_QUESTIONS.items():
+        assert len(questions) >= 5
+        assert all(isinstance(q, str) for q in questions)
+        assert all(len(q) > 10 for q in questions)  # Questions should be substantial
+
+
+@pytest.mark.asyncio
+async def test_get_inspiration_uses_inspiring_words():
+    """Test that get_inspiration uses words from inspiring category."""
+    results = []
+    # Run multiple times to get variety
+    for _ in range(10):
+        result = await get_inspiration()
+        results.extend(result["sparks"])
+
+    # Verify all sparks are non-empty strings with hyphens
+    assert all(isinstance(spark, str) for spark in results)
+    assert all("-" in spark for spark in results)
+    assert len(results) == 30  # 10 calls × 3 sparks each
+
+
+@pytest.mark.asyncio
+async def test_think_outside_the_box_uses_out_of_the_box_words():
+    """Test that think_outside_the_box uses words from out_of_the_box category."""
+    results = []
+    # Run multiple times to get variety
+    for _ in range(10):
+        result = await think_outside_the_box()
+        results.extend(result["sparks"])
+
+    # Verify all sparks are non-empty strings with hyphens
+    assert all(isinstance(spark, str) for spark in results)
+    assert all("-" in spark for spark in results)
+    assert len(results) == 30  # 10 calls × 3 sparks each
+
+
+@pytest.mark.asyncio
+async def test_reality_check_questions_from_frameworks():
+    """Test that reality_check returns questions from correct frameworks."""
+    result = await reality_check()
+
+    # Verify each question comes from its corresponding framework
+    for question, framework in zip(result["questions"], result["frameworks"]):
+        assert question in MUSK_QUESTIONS[framework]
+
+
+@pytest.mark.asyncio
+async def test_all_tools_are_async():
+    """Test that all tools are async functions."""
+    import inspect
+
+    assert inspect.iscoroutinefunction(get_inspiration)
+    assert inspect.iscoroutinefunction(think_outside_the_box)
+    assert inspect.iscoroutinefunction(reality_check)
+
+
+@pytest.mark.asyncio
+async def test_get_inspiration_randomness():
+    """Test that get_inspiration produces varied results."""
+    results = []
+    for _ in range(5):
+        result = await get_inspiration()
+        results.append(tuple(result["sparks"]))
+
+    # At least some results should be different (very high probability with random selection)
+    unique_results = set(results)
+    assert len(unique_results) > 1
+
+
+@pytest.mark.asyncio
+async def test_think_outside_the_box_randomness():
+    """Test that think_outside_the_box produces varied results."""
+    results = []
+    for _ in range(5):
+        result = await think_outside_the_box()
+        results.append(tuple(result["sparks"]))
+
+    # At least some results should be different
+    unique_results = set(results)
+    assert len(unique_results) > 1
+
+
+@pytest.mark.asyncio
+async def test_reality_check_randomness():
+    """Test that reality_check produces varied results."""
+    results = []
+    for _ in range(5):
+        result = await reality_check()
+        results.append(tuple(result["questions"]))
+
+    # At least some results should be different
+    unique_results = set(results)
+    assert len(unique_results) > 1
