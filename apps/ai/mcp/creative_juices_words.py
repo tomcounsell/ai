@@ -61,7 +61,35 @@ VERBS = {
         "pressurizing", "terraforming", "mining", "docking", "launching",
         # Energy manipulation
         "ionizing", "magnetizing", "polarizing", "channeling",
-        "focusing", "dispersing", "absorbing", "converting"
+        "focusing", "dispersing", "absorbing", "converting",
+        # Tool-making (primitive)
+        "knapping", "chipping", "flaking", "hafting",
+        "sharpening", "pecking", "abrading", "notching", "scraping",
+        # Primitive crafts
+        "thatching", "daubing", "smoking", "tanning",
+        "salting", "roasting",
+        # Hunting/gathering
+        "trapping", "snaring", "spearing",
+        "foraging", "gathering", "picking", "collecting",
+        # Fire/shelter
+        "kindling", "stoking", "banking", "smoldering", "charring",
+        "lashing", "binding", "plastering", "mudding",
+        # Daily survival
+        "butchering", "skinning", "filleting", "pounding",
+        "stripping", "husking", "winnowing", "threshing",
+        # Metalworking
+        "smelting", "casting", "forging", "annealing",
+        "quenching", "tempering", "alloying", "molding",
+        "riveting", "soldering", "engraving", "embossing", "gilding",
+        # Early agriculture
+        "plowing", "sowing", "reaping", "irrigating",
+        "terracing", "harvesting", "yoking", "harrowing", "tilling",
+        # Crafts/trade
+        "potting", "glazing", "kilning", "dyeing",
+        "bartering", "trading", "minting", "weighing",
+        # Construction
+        "quarrying", "hauling", "lifting", "mortaring", "fitting",
+        "chiseling", "sawing", "joining", "bracing", "leveling"
     ],
     "chaos": [
         # Destructive human actions
@@ -146,7 +174,39 @@ NOUNS = {
         "beacon", "drone", "servo", "actuator", "sensor",
         # Infrastructure
         "terminal", "console", "relay", "node", "hub",
-        "port", "socket", "cable", "circuit", "processor"
+        "port", "socket", "cable", "circuit", "processor",
+        # Primitive tools
+        "flint", "handaxe", "scraper", "burin", "awl",
+        "hammerstone", "grindstone", "pestle", "mortar", "chopper",
+        "spearpoint", "arrowhead", "blade", "core", "flake",
+        # Shelter/primitive items
+        "hide", "pelt", "sinew", "antler",
+        "thatch", "daub", "wattle", "lean-to", "windbreak",
+        # Primitive containers/everyday
+        "gourd", "bladder", "pouch", "mat",
+        "bundle", "staff", "club", "sling", "bolas",
+        # Fire/cooking
+        "ember", "tinder", "hearth", "pit",
+        "spit", "smoke-rack", "drying-frame", "stone-boiler", "coal",
+        # Primitive materials
+        "ochre", "clay", "pitch", "resin", "gut",
+        "marrow", "tallow", "rawhide", "fiber", "reed",
+        # Metal objects
+        "ingot", "anvil", "tongs", "bellows", "crucible",
+        "mold", "adze", "rivet",
+        "sword", "dagger", "spearhead", "helmet", "greave",
+        # Agricultural
+        "plow", "sickle", "scythe", "yoke", "harness",
+        "millstone", "quern", "granary", "cistern", "aqueduct",
+        # Pottery/vessels
+        "amphora", "urn", "pitcher", "beaker", "cauldron",
+        "brazier", "seal", "tablet", "stylus",
+        # Building materials
+        "brick", "tile", "beam", "lintel", "column",
+        "plaster", "stone-block", "dowel", "wedge",
+        # Trade/civilization
+        "wheel", "axle", "cart", "boat", "oar",
+        "loom", "spindle", "weight", "coin"
     ],
     "chaos": [
         # Violent natural phenomena (OFFENSE)
