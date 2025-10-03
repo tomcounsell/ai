@@ -72,8 +72,8 @@ async def get_inspiration() -> dict:
     """
     from .creative_juices_words import VERBS, NOUNS
 
-    verb_list = VERBS["wild"]
-    noun_list = NOUNS["wild"]
+    verb_list = VERBS["inspiring"]
+    noun_list = NOUNS["inspiring"]
 
     pairs = []
     for _ in range(3):
@@ -96,8 +96,8 @@ async def think_outside_the_box() -> dict:
     """
     from .creative_juices_words import VERBS, NOUNS
 
-    verb_list = VERBS["chaos"]
-    noun_list = NOUNS["chaos"]
+    verb_list = VERBS["out_of_the_box"]
+    noun_list = NOUNS["out_of_the_box"]
 
     pairs = []
     for _ in range(3):

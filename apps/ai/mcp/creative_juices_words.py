@@ -6,7 +6,7 @@ Includes animal behaviors (individual and collective) and natural phenomena.
 """
 
 VERBS = {
-    "wild": [
+    "inspiring": [
         # Human actions
         "painting", "baking", "melting", "climbing", "swimming",
         "knitting", "planting", "folding", "pouring", "carving",
@@ -91,7 +91,7 @@ VERBS = {
         "quarrying", "hauling", "lifting", "mortaring", "fitting",
         "chiseling", "sawing", "joining", "bracing", "leveling"
     ],
-    "chaos": [
+    "out_of_the_box": [
         # Destructive human actions
         "crushing", "burning", "drowning", "exploding", "rotting",
         "bleeding", "screaming", "choking", "rusting", "cracking",
@@ -120,7 +120,7 @@ VERBS = {
 }
 
 NOUNS = {
-    "wild": [
+    "inspiring": [
         # Everyday objects
         "shoe", "door", "window", "chair", "spoon",
         "rope", "mirror", "ladder", "bucket", "pencil",
@@ -208,7 +208,7 @@ NOUNS = {
         "wheel", "axle", "cart", "boat", "oar",
         "loom", "spindle", "weight", "coin"
     ],
-    "chaos": [
+    "out_of_the_box": [
         # Violent natural phenomena (OFFENSE)
         "fire", "storm", "flood", "avalanche", "earthquake",
         "wildfire", "lightning", "thunder", "erosion", "mud",
