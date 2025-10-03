@@ -64,7 +64,7 @@ ALL_MUSK_QUESTIONS = [q for category in MUSK_QUESTIONS.values() for q in categor
 
 
 @mcp.tool()
-async def ignite() -> dict:
+async def get_inspiration() -> dict:
     """
     Use at the start of creative or problem-solving tasks to frame challenges
     in unexpected ways. Helpful when you need to think outside the box from
@@ -88,7 +88,7 @@ async def ignite() -> dict:
 
 
 @mcp.tool()
-async def scatter() -> dict:
+async def think_outside_the_box() -> dict:
     """
     Use mid-conversation when exploration has stalled or thinking has become
     too linear. Helpful when you need to break out of convergent patterns and
@@ -112,7 +112,7 @@ async def scatter() -> dict:
 
 
 @mcp.tool()
-async def focus() -> dict:
+async def reality_check() -> dict:
     """
     Use to ground creative thinking in reality while maintaining openness.
     Helpful when wild ideas need pressure-testing against constraints, or when
