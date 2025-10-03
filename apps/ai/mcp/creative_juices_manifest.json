@@ -1,0 +1,96 @@
+{
+  "name": "creative-juices",
+  "version": "1.0.0",
+  "description": "MCP server that generates random creative prompts and strategic questions to help LLMs think outside the box",
+  "author": "Tom Counsell",
+  "homepage": "https://mcp.yuda.me/creative-juices",
+  "repository": "https://github.com/tomcounsell/cuttlefish",
+  "documentation": "https://github.com/tomcounsell/cuttlefish/blob/main/apps/ai/mcp/CREATIVE_JUICES_README.md",
+
+  "tools": [
+    {
+      "name": "get_inspiration",
+      "description": "Generate 3 gentle verb-noun combinations for early-stage creative framing",
+      "parameters": {},
+      "returns": {
+        "sparks": "array of 3 verb-noun combinations",
+        "instruction": "guidance for applying the metaphors"
+      }
+    },
+    {
+      "name": "think_outside_the_box",
+      "description": "Generate 3 intense verb-noun combinations for breaking linear thinking",
+      "parameters": {},
+      "returns": {
+        "sparks": "array of 3 verb-noun combinations",
+        "instruction": "guidance for shattering assumptions"
+      }
+    },
+    {
+      "name": "reality_check",
+      "description": "Get strategic questions from Elon Musk's thinking frameworks for validation",
+      "parameters": {},
+      "returns": {
+        "questions": "array of 4 strategic questions",
+        "frameworks": "array of framework names",
+        "instruction": "guidance for strategic validation"
+      }
+    }
+  ],
+
+  "prompts": [],
+
+  "installation": {
+    "type": "python",
+    "requirements": ["python>=3.11", "fastmcp"],
+    "command": "uv run python -m apps.ai.mcp.creative_juices_server",
+    "config": {
+      "claude_desktop": {
+        "command": "uv",
+        "args": [
+          "--directory",
+          "/ABSOLUTE/PATH/TO/cuttlefish",
+          "run",
+          "python",
+          "-m",
+          "apps.ai.mcp.creative_juices_server"
+        ]
+      }
+    }
+  },
+
+  "features": [
+    "600+ curated words spanning human history",
+    "Zero external dependencies (uses stdlib random)",
+    "Completely private - no data collection",
+    "No authentication required",
+    "Four proven strategic thinking frameworks",
+    "Concrete words for stronger creative friction"
+  ],
+
+  "keywords": [
+    "mcp",
+    "creative-thinking",
+    "divergent-thinking",
+    "brainstorming",
+    "strategic-frameworks",
+    "metaphors",
+    "randomness",
+    "elon-musk",
+    "first-principles"
+  ],
+
+  "license": "Part of Cuttlefish project",
+
+  "privacy": {
+    "data_collection": false,
+    "external_apis": false,
+    "authentication_required": false
+  },
+
+  "categories": [
+    "creativity",
+    "productivity",
+    "thinking-tools"
+  ]
+}
