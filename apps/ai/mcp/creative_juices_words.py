@@ -18,18 +18,23 @@ VERBS = {
         "stalking", "hibernating", "camouflaging", "gliding", "perching",
         # Animal actions (collective)
         "swarming", "flocking", "herding", "schooling", "migrating",
-        "clustering", "scattering", "regrouping", "signaling", "coordinating"
+        "clustering", "scattering", "regrouping", "signaling", "coordinating",
+        # Defense/protection
+        "shielding", "hiding", "sheltering", "guarding", "protecting",
+        "retreating", "evading", "dodging", "defending", "blocking"
     ],
     "chaos": [
         # Destructive human actions
         "crushing", "burning", "drowning", "exploding", "rotting",
         "bleeding", "screaming", "choking", "rusting", "cracking",
         "tearing", "dragging", "stomping", "freezing", "shattering",
-        # Animal actions (survival/predation)
+        # Animal actions (survival/predation - OFFENSE)
         "devouring", "clawing", "biting", "stinging", "mauling",
         "ambushing", "pouncing", "strangling", "trampling", "pecking",
-        # Collective animal chaos
-        "stampeding", "attacking", "overwhelming", "infesting", "consuming"
+        "stampeding", "attacking", "overwhelming", "infesting", "consuming",
+        # Animal actions (survival/defense - DEFENSE)
+        "escaping", "fortifying", "armoring", "burrowing", "camouflaging",
+        "fleeing", "adapting", "regenerating", "healing", "surviving"
     ]
 }
 
@@ -46,18 +51,24 @@ NOUNS = {
         "feather", "scale", "fin", "antenna", "horn",
         # Natural elements
         "rain", "river", "tree", "seed", "leaf",
-        "rock", "cave", "hill", "path", "root"
+        "rock", "cave", "hill", "path", "root",
+        # Protection structures
+        "wall", "fence", "shelter", "roof", "gate",
+        "hedge", "burrow", "den", "hideout", "safe"
     ],
     "chaos": [
-        # Violent natural phenomena
-        "fire", "dirt", "blood", "tooth", "bone",
-        "storm", "mud", "smoke", "shadow", "rust",
-        "ash", "thorn", "ice", "thunder", "wound",
-        "flood", "fang", "claw", "scar", "sting",
-        # Animal predation
+        # Violent natural phenomena (OFFENSE)
+        "fire", "storm", "flood", "avalanche", "earthquake",
+        "wildfire", "lightning", "thunder", "erosion", "mud",
+        # Animal predation (OFFENSE)
         "venom", "prey", "predator", "trap", "jaws",
-        "swarm", "horde", "pack", "colony", "brood",
-        # Destruction
-        "avalanche", "earthquake", "wildfire", "lightning", "erosion"
+        "fang", "claw", "sting", "tooth", "swarm",
+        "horde", "pack", "colony", "brood",
+        # Wounds/damage (OFFENSE)
+        "blood", "bone", "wound", "scar", "ash",
+        "smoke", "shadow", "rust", "thorn", "ice",
+        # Defense structures (DEFENSE)
+        "fortress", "armor", "shield", "bunker", "moat",
+        "rampart", "barrier", "sanctuary", "refuge", "vault"
     ]
 }
