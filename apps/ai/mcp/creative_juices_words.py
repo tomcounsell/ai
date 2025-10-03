@@ -13,15 +13,13 @@ VERBS = {
         "juggling", "mixing", "stacking", "rowing", "hammering",
         "sweeping", "digging", "sewing", "polishing", "watering",
         # Animal actions (individual)
-        "flying", "burrowing", "hunting", "nesting", "molting",
-        "shedding", "prowling", "grazing", "soaring", "diving",
-        "stalking", "hibernating", "camouflaging", "gliding", "perching",
+        "flying", "burrowing", "nesting", "molting",
+        "shedding", "grazing", "gliding", "perching",
         # Animal actions (collective)
-        "swarming", "flocking", "herding", "schooling", "migrating",
-        "clustering", "scattering", "regrouping", "signaling", "coordinating",
+        "flocking", "herding", "schooling", "migrating",
+        "clustering", "regrouping", "signaling", "coordinating",
         # Defense/protection
-        "shielding", "hiding", "sheltering", "guarding", "protecting",
-        "retreating", "evading", "dodging", "defending", "blocking",
+        "sheltering", "guarding", "protecting",
         # Mechanical/systematic actions
         "organizing", "filing", "sorting", "labeling", "measuring",
         "calculating", "scheduling", "documenting", "recording", "indexing",
@@ -33,7 +31,7 @@ VERBS = {
         "queueing", "marching", "synchronizing", "timing", "pacing",
         "rationing", "distributing", "allocating", "designating", "assigning",
         # Maintenance
-        "inspecting", "monitoring", "testing", "verifying", "auditing",
+        "inspecting", "monitoring", "testing", "verifying",
         "updating", "backing", "copying", "duplicating", "archiving",
         # Healing/restoration
         "healing", "mending", "repairing", "restoring", "smoothing",
@@ -50,18 +48,8 @@ VERBS = {
         "soothing", "calming", "quieting", "settling", "resting",
         "sleeping", "dreaming", "meditating", "breathing", "relaxing",
         # Digital/cyber actions
-        "uploading", "downloading", "hacking", "encrypting", "streaming",
-        "syncing", "interfacing", "booting", "compiling", "rendering",
-        "scanning", "digitizing", "projecting", "transmitting",
-        # Mechanical/robotic
-        "powering", "charging", "rebooting", "overclocking", "modulating",
-        "amplifying", "augmenting", "droning",
-        # Space/advanced tech
-        "teleporting", "warping", "cloaking", "phasing", "beaming",
-        "pressurizing", "terraforming", "mining", "docking", "launching",
-        # Energy manipulation
-        "ionizing", "magnetizing", "polarizing", "channeling",
-        "focusing", "dispersing", "absorbing", "converting",
+        "uploading", "downloading", "syncing", "interfacing", "booting",
+        "scanning", "digitizing", "projecting",
         # Tool-making (primitive)
         "knapping", "chipping", "flaking", "hafting",
         "sharpening", "pecking", "abrading", "notching", "scraping",
@@ -69,17 +57,14 @@ VERBS = {
         "thatching", "daubing", "smoking", "tanning",
         "salting", "roasting",
         # Hunting/gathering
-        "trapping", "snaring", "spearing",
         "foraging", "gathering", "picking", "collecting",
         # Fire/shelter
         "kindling", "stoking", "banking", "smoldering", "charring",
         "lashing", "binding", "plastering", "mudding",
         # Daily survival
-        "butchering", "skinning", "filleting", "pounding",
-        "stripping", "husking", "winnowing", "threshing",
+        "husking", "winnowing", "threshing",
         # Metalworking
-        "smelting", "casting", "forging", "annealing",
-        "quenching", "tempering", "alloying", "molding",
+        "casting", "forging",
         "riveting", "soldering", "engraving", "embossing", "gilding",
         # Early agriculture
         "plowing", "sowing", "reaping", "irrigating",
@@ -92,15 +77,29 @@ VERBS = {
         "chiseling", "sawing", "joining", "bracing", "leveling"
     ],
     "out_of_the_box": [
-        # Destructive human actions
+        # Destructive actions
         "crushing", "burning", "drowning", "exploding", "rotting",
         "bleeding", "screaming", "choking", "rusting", "cracking",
         "tearing", "dragging", "stomping", "freezing", "shattering",
-        # Animal actions (survival/predation - OFFENSE)
-        "devouring", "clawing", "biting", "stinging", "mauling",
+        # Intense animal actions
+        "hunting", "prowling", "soaring", "diving", "stalking",
+        "swarming", "scattering",
+        # Defense/evasion
+        "shielding", "hiding", "retreating", "evading", "dodging", "defending", "blocking",
+        # Advanced tech
+        "hacking", "encrypting", "streaming", "compiling", "rendering", "transmitting",
+        "powering", "charging", "rebooting", "overclocking", "modulating", "amplifying", "augmenting", "droning",
+        "teleporting", "warping", "cloaking", "phasing", "beaming",
+        "pressurizing", "terraforming", "mining", "docking", "launching",
+        "ionizing", "magnetizing", "polarizing", "channeling", "focusing", "dispersing", "absorbing", "converting",
+        # Primitive hunting/survival
+        "trapping", "snaring", "spearing", "butchering", "skinning", "filleting", "pounding", "stripping",
+        # Metalworking
+        "smelting", "annealing", "quenching", "tempering", "alloying", "molding",
+        # Advanced operations
+        "auditing", "devouring", "clawing", "biting", "stinging", "mauling",
         "ambushing", "pouncing", "strangling", "trampling", "pecking",
         "stampeding", "attacking", "overwhelming", "infesting", "consuming",
-        # Animal actions (survival/defense - DEFENSE)
         "escaping", "fortifying", "armoring", "burrowing", "camouflaging",
         "fleeing", "adapting", "regenerating", "healing", "surviving",
         # Biological/organic sci-fi
@@ -132,20 +131,20 @@ NOUNS = {
         "feather", "scale", "fin", "antenna", "horn",
         # Natural elements
         "rain", "river", "tree", "seed", "leaf",
-        "rock", "cave", "hill", "path", "root",
+        "rock", "path", "root",
         # Protection structures
         "wall", "fence", "shelter", "roof", "gate",
         "hedge", "burrow", "den", "hideout", "safe",
         # Office/institutional items
-        "clipboard", "folder", "binder", "stapler", "calculator",
+        "clipboard", "folder", "binder", "stapler",
         "label", "barcode", "badge", "uniform", "schedule",
-        "cubicle", "filing cabinet", "printer", "scanner", "spreadsheet",
+        "cubicle", "filing cabinet",
         # Manufactured/processed
         "plastic", "metal", "concrete", "glass", "wire",
-        "pipe", "circuit", "battery", "screen", "keyboard",
+        "pipe", "battery",
         # Measurement tools
-        "ruler", "scale", "timer", "thermometer", "gauge",
-        "meter", "counter", "sensor", "monitor", "detector",
+        "ruler", "scale", "timer", "thermometer",
+        "meter", "counter",
         # Containers/organization
         "compartment", "drawer", "slot", "rack", "grid",
         "container", "box", "tray", "bin", "shelf",
@@ -162,23 +161,10 @@ NOUNS = {
         # Gentle elements
         "breeze", "dew", "mist", "moonlight", "sunrise",
         "stream", "pond", "shade", "grass", "petal",
-        # Common devices
-        "datapad", "neural-jack", "bio-scanner", "plasma-cutter", "nano-injector",
-        "quantum-drive", "fusion-core", "gravity-plate", "stasis-pod", "cyberdeck",
-        "memory-chip", "holo-projector", "force-field", "laser-grid",
-        # Ship/station parts
-        "airlock", "bulkhead", "thruster", "reactor", "conduit",
-        "hull", "viewport", "cargo-bay", "med-bay", "cryo-chamber",
-        # Weapons/tools
-        "stunner", "disruptor", "multi-tool", "fabricator", "recycler",
-        "beacon", "drone", "servo", "actuator", "sensor",
         # Infrastructure
-        "terminal", "console", "relay", "node", "hub",
-        "port", "socket", "cable", "circuit", "processor",
+        "terminal", "console", "port", "socket", "cable", "circuit",
         # Primitive tools
-        "flint", "handaxe", "scraper", "burin", "awl",
-        "hammerstone", "grindstone", "pestle", "mortar", "chopper",
-        "spearpoint", "arrowhead", "blade", "core", "flake",
+        "hammerstone", "grindstone", "pestle", "mortar",
         # Shelter/primitive items
         "hide", "pelt", "sinew", "antler",
         "thatch", "daub", "wattle", "lean-to", "windbreak",
@@ -194,7 +180,6 @@ NOUNS = {
         # Metal objects
         "ingot", "anvil", "tongs", "bellows", "crucible",
         "mold", "adze", "rivet",
-        "sword", "dagger", "spearhead", "helmet", "greave",
         # Agricultural
         "plow", "sickle", "scythe", "yoke", "harness",
         "millstone", "quern", "granary", "cistern", "aqueduct",
@@ -209,19 +194,39 @@ NOUNS = {
         "loom", "spindle", "weight", "coin"
     ],
     "out_of_the_box": [
-        # Violent natural phenomena (OFFENSE)
+        # Violent natural phenomena
         "fire", "storm", "flood", "avalanche", "earthquake",
         "wildfire", "lightning", "thunder", "erosion", "mud",
-        # Animal predation (OFFENSE)
+        # Animal predation
         "venom", "prey", "predator", "trap", "jaws",
         "fang", "claw", "sting", "tooth", "swarm",
         "horde", "pack", "colony", "brood",
-        # Wounds/damage (OFFENSE)
+        # Wounds/damage
         "blood", "bone", "wound", "scar", "ash",
         "smoke", "shadow", "rust", "thorn", "ice",
-        # Defense structures (DEFENSE)
+        # Defense structures
         "fortress", "armor", "shield", "bunker", "moat",
         "rampart", "barrier", "sanctuary", "refuge", "vault",
+        # Sci-fi tech
+        "datapad", "neural-jack", "bio-scanner", "plasma-cutter", "nano-injector",
+        "quantum-drive", "fusion-core", "gravity-plate", "stasis-pod", "cyberdeck",
+        "memory-chip", "holo-projector", "force-field", "laser-grid",
+        "airlock", "bulkhead", "thruster", "reactor", "conduit",
+        "hull", "viewport", "cargo-bay", "med-bay", "cryo-chamber",
+        "stunner", "disruptor", "multi-tool", "fabricator", "recycler",
+        "beacon", "drone", "servo", "actuator", "sensor",
+        "relay", "node", "hub", "processor",
+        # Primitive weapons/tools
+        "flint", "handaxe", "scraper", "burin", "awl",
+        "spearpoint", "arrowhead", "blade", "core", "flake", "chopper",
+        # Metal weapons
+        "sword", "dagger", "spearhead", "helmet", "greave",
+        # Natural dramatic elements
+        "cave", "hill",
+        # Tech devices
+        "calculator", "printer", "scanner", "spreadsheet",
+        "circuit", "screen", "keyboard",
+        "gauge", "sensor", "monitor", "detector",
         # Biological structures
         "spore", "pod", "sac", "membrane", "tendril",
         "chitin", "ichor", "pheromone", "enzyme", "symbiont",
