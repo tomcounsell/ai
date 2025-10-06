@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CTO Tools - MCP Server</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 3rem 2rem;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+            font-weight: 700;
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            opacity: 0.95;
+        }
+
+        .content {
+            padding: 2rem;
+        }
+
+        .section {
+            margin-bottom: 2rem;
+        }
+
+        h2 {
+            color: #667eea;
+            margin-bottom: 1rem;
+            font-size: 1.8rem;
+        }
+
+        h3 {
+            color: #764ba2;
+            margin-top: 1.5rem;
+            margin-bottom: 0.75rem;
+            font-size: 1.3rem;
+        }
+
+        .tool-card {
+            background: #f8f9fa;
+            border-left: 4px solid #667eea;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            border-radius: 8px;
+        }
+
+        .tool-card h4 {
+            color: #667eea;
+            margin-bottom: 0.5rem;
+            font-size: 1.2rem;
+        }
+
+        .tool-card code {
+            background: #e9ecef;
+            padding: 0.2rem 0.5rem;
+            border-radius: 4px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.9rem;
+        }
+
+        .installation {
+            background: #f1f3f5;
+            padding: 1.5rem;
+            border-radius: 8px;
+            margin: 1.5rem 0;
+        }
+
+        .installation h3 {
+            margin-top: 0;
+        }
+
+        pre {
+            background: #2d3748;
+            color: #e2e8f0;
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 1rem 0;
+        }
+
+        code {
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.9rem;
+        }
+
+        .features {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+            margin: 1.5rem 0;
+        }
+
+        .feature {
+            background: #f8f9fa;
+            padding: 1.25rem;
+            border-radius: 8px;
+            border-top: 3px solid #764ba2;
+        }
+
+        .feature h4 {
+            color: #764ba2;
+            margin-bottom: 0.5rem;
+        }
+
+        .cta {
+            text-align: center;
+            padding: 2rem;
+            background: #f8f9fa;
+            margin-top: 2rem;
+            border-radius: 8px;
+        }
+
+        .cta a {
+            display: inline-block;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1rem 2rem;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .cta a:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+        }
+
+        .footer {
+            text-align: center;
+            padding: 2rem;
+            color: #6c757d;
+            font-size: 0.9rem;
+        }
+
+        ul {
+            margin-left: 1.5rem;
+            margin-top: 0.5rem;
+        }
+
+        li {
+            margin-bottom: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎯 CTO Tools</h1>
+            <p>Engineering leadership frameworks for AI assistants</p>
+        </div>
+
+        <div class="content">
+            <div class="section">
+                <h2>What is CTO Tools?</h2>
+                <p>
+                    CTO Tools is a Model Context Protocol (MCP) server that provides structured frameworks
+                    and best practices for common CTO activities. It helps AI assistants guide engineering
+                    leaders through weekly reviews, team analysis, and strategic decision-making.
+                </p>
+            </div>
+
+            <div class="section">
+                <h2>Available Tools</h2>
+
+                <div class="tool-card">
+                    <h4>📊 weekly_review()</h4>
+                    <p>
+                        Comprehensive framework for conducting weekly engineering team reviews. Provides
+                        step-by-step instructions for analyzing commit history, categorizing work, extracting
+                        metrics, and generating executive summaries.
+                    </p>
+                    <p style="margin-top: 1rem;">
+                        <strong>Use when:</strong> You need to review your team's weekly progress and prepare
+                        summaries for stakeholders.
+                    </p>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2>Features</h2>
+                <div class="features">
+                    <div class="feature">
+                        <h4>📈 Structured Reviews</h4>
+                        <p>Systematic frameworks for analyzing team work and progress</p>
+                    </div>
+                    <div class="feature">
+                        <h4>🔍 Git Analysis</h4>
+                        <p>Commands and techniques for extracting insights from commit history</p>
+                    </div>
+                    <div class="feature">
+                        <h4>📝 Executive Summaries</h4>
+                        <p>Templates for communicating progress to stakeholders</p>
+                    </div>
+                    <div class="feature">
+                        <h4>🎯 Action-Oriented</h4>
+                        <p>Clear next steps and decision points for engineering leaders</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="installation">
+                <h3>Installation</h3>
+                <p>Install in Claude Desktop by adding to your configuration:</p>
+                <pre><code>{
+  "mcpServers": {
+    "cto-tools": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/path/to/cuttlefish",
+        "run",
+        "python",
+        "-m",
+        "apps.ai.mcp.cto_tools_server"
+      ]
+    }
+  }
+}</code></pre>
+                <p style="margin-top: 1rem;">
+                    <strong>Web Manifest:</strong> <code>https://ai.yuda.me/mcp/cto-tools/manifest.json</code>
+                </p>
+            </div>
+
+            <div class="section">
+                <h2>How It Works</h2>
+                <ol>
+                    <li><strong>Request a Tool:</strong> Ask Claude to use CTO Tools for team review</li>
+                    <li><strong>Get Framework:</strong> Receive structured instructions and best practices</li>
+                    <li><strong>Follow Steps:</strong> Use the provided git commands and analysis frameworks</li>
+                    <li><strong>Generate Insights:</strong> Create executive summaries and action items</li>
+                </ol>
+            </div>
+
+            <div class="section">
+                <h2>Privacy & Security</h2>
+                <ul>
+                    <li>✅ No external API calls or data transmission</li>
+                    <li>✅ No authentication or credentials required</li>
+                    <li>✅ No user data storage or logging</li>
+                    <li>✅ Fully local execution via MCP protocol</li>
+                    <li>✅ Git commands run in your local environment only</li>
+                </ul>
+            </div>
+
+            <div class="cta">
+                <h3>Ready to Get Started?</h3>
+                <p style="margin-bottom: 1rem;">Add CTO Tools to your MCP configuration and start using engineering leadership frameworks in Claude.</p>
+                <a href="https://github.com/tomcounsell/cuttlefish">View Documentation</a>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>Part of the Cuttlefish AI Integration Platform</p>
+            <p>Powered by <a href="https://modelcontextprotocol.io" style="color: #667eea;">Model Context Protocol</a></p>
+        </div>
+    </div>
+</body>
+</html>

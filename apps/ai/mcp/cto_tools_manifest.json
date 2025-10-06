@@ -1,0 +1,57 @@
+{
+  "name": "CTO Tools",
+  "version": "1.0.0",
+  "description": "Engineering leadership frameworks for AI assistants including weekly reviews, team analysis, and strategic decision-making",
+  "homepage": "https://ai.yuda.me/mcp/cto-tools",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tomcounsell/cuttlefish"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "Yuda",
+    "url": "https://yuda.me"
+  },
+  "mcp": {
+    "protocol": "stdio",
+    "command": "uv",
+    "args": [
+      "--directory",
+      "/path/to/cuttlefish",
+      "run",
+      "python",
+      "-m",
+      "apps.ai.mcp.cto_tools_server"
+    ]
+  },
+  "tools": [
+    {
+      "name": "weekly_review",
+      "description": "Provides a structured framework for conducting weekly engineering team reviews based on commit history and team metrics",
+      "category": "engineering-leadership"
+    }
+  ],
+  "categories": [
+    "engineering-leadership",
+    "team-management",
+    "git-analysis",
+    "productivity"
+  ],
+  "keywords": [
+    "cto",
+    "engineering",
+    "team-review",
+    "git-analysis",
+    "leadership",
+    "weekly-review",
+    "metrics",
+    "productivity"
+  ],
+  "privacy": {
+    "dataCollection": false,
+    "authentication": false,
+    "externalAPIs": false,
+    "localStorage": false
+  },
+  "documentation": "https://ai.yuda.me/mcp/cto-tools/README.md"
+}

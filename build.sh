@@ -2,18 +2,21 @@
 # Exit on error
 set -o errexit
 
-# Install dependencies using uv (as required by project standards)
-echo "Installing dependencies..."
+# Install uv package manager
+echo "Installing uv..."
 pip install uv
-uv pip install -r requirements/prod.lock.txt
+
+# Install dependencies using uv  (project standard)
+echo "Installing dependencies..."
+uv pip install . --system
 
 # Convert static asset files
 echo "Collecting static files..."
-python manage.py collectstatic --no-input
+uv run python manage.py collectstatic --no-input
 
 # Apply any outstanding database migrations
 echo "Applying database migrations..."
-python manage.py migrate
+uv run python manage.py migrate
 
 # Any additional production setup steps can be added here
 echo "Build completed successfully!"
