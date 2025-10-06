@@ -107,6 +107,8 @@ urlpatterns = [
     path("", include("apps.public.urls", namespace="public")),
     path("staff/", include("apps.staff.urls", namespace="staff")),
     path("ai/", include("apps.ai.urls", namespace="ai")),
+    # Health check endpoint for monitoring
+    path("health/", lambda r: HttpResponse("OK"), name="health"),
     # Serve documentation index
     path("docs/", serve_docs_index, name="docs_index"),
     # Serve Markdown documentation directly - supports docs/FILENAME and nested paths
