@@ -9,6 +9,9 @@ from apps.ai.views import (
     ChatNewSessionView,
     ChatPollMessageView,
     ChatSendMessageView,
+    CreativeJuicesLandingView,
+    CreativeJuicesManifestView,
+    CreativeJuicesReadmeView,
 )
 from apps.ai.views.test_chat import TestChatView
 from apps.ai.views.test_page import TestChatPageView
@@ -19,6 +22,22 @@ urlpatterns: list[URLPattern] = [
     # Test endpoints (no database required)
     path("test/", TestChatPageView.as_view(), name="test-page"),
     path("test-chat/", TestChatView.as_view(), name="test-chat"),
+    # MCP server endpoints
+    path(
+        "mcp/creative-juices/",
+        CreativeJuicesLandingView.as_view(),
+        name="mcp-creative-juices",
+    ),
+    path(
+        "mcp/creative-juices/manifest.json",
+        CreativeJuicesManifestView.as_view(),
+        name="mcp-creative-juices-manifest",
+    ),
+    path(
+        "mcp/creative-juices/README.md",
+        CreativeJuicesReadmeView.as_view(),
+        name="mcp-creative-juices-readme",
+    ),
     # Chat interface (requires migrations)
     # path('chat/', ChatIndexView.as_view(), name='chat-index'),
     # path('chat/send/', ChatSendMessageView.as_view(), name='chat-send'),

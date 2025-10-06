@@ -180,8 +180,10 @@ This pattern supports natural creative problem-solving rhythms.
 
 ## Running the Server
 
+### Local Development
+
 ```bash
-# Start the MCP server
+# Start the MCP server locally
 uv run python -m apps.ai.mcp.creative_juices_server
 
 # Test locally with MCP Inspector
@@ -190,6 +192,17 @@ mcp-inspector uv run python -m apps.ai.mcp.creative_juices_server
 # Run tests
 uv run pytest apps/ai/tests/test_mcp_creative_juices.py -v
 ```
+
+### Web Deployment
+
+The Creative Juices MCP is deployed via Django at **https://ai.yuda.me/mcp/creative-juices**
+
+**Available URLs**:
+- Landing page: https://ai.yuda.me/mcp/creative-juices
+- Manifest: https://ai.yuda.me/mcp/creative-juices/manifest.json
+- README: https://ai.yuda.me/mcp/creative-juices/README.md
+
+See [DEPLOYMENT.md](../../apps/ai/mcp/DEPLOYMENT.md) for full deployment details.
 
 ## Technical Characteristics
 

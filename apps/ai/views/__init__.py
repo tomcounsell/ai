@@ -8,6 +8,11 @@ from .chat import (
     ChatPollMessageView,
     ChatSendMessageView,
 )
+from .mcp_views import (
+    CreativeJuicesLandingView,
+    CreativeJuicesManifestView,
+    CreativeJuicesReadmeView,
+)
 
 __all__ = [
     "ChatIndexView",
@@ -16,4 +21,7 @@ __all__ = [
     "ChatNewSessionView",
     "ChatLoadSessionView",
     "ChatClearView",
+    "CreativeJuicesLandingView",
+    "CreativeJuicesManifestView",
+    "CreativeJuicesReadmeView",
 ]

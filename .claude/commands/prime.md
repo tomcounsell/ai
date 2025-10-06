@@ -1,4 +1,4 @@
-# QuickBooks MCP Integration - Codebase Primer
+# Cuttlefish - AI Integration Platform
 
 ## 🛑 IMPORTANT: Context Loading Protocol
 
@@ -14,13 +14,32 @@
 - The assistant will use this context to navigate efficiently and make appropriate changes
 
 ## Project Overview
-This is a Django application that provides a Model Context Protocol (MCP) server for QuickBooks integration. It enables AI assistants to interact with QuickBooks data through a standardized interface, featuring OAuth authentication, async API operations, and comprehensive Django admin tools.
+
+Cuttlefish is a Django-based AI integration platform that provides multiple services:
+
+1. **Model Context Protocol (MCP) Servers**
+   - QuickBooks integration for AI assistants
+   - Creative Juices for creative thinking prompts
+   - Hosted and accessible via web endpoints
+
+2. **Django Web Application**
+   - Serves MCP server landing pages and manifests
+   - OAuth integration flows
+   - REST API endpoints
+   - Web-based interfaces with HTMX
+
+3. **Future: Voice-Driven Desktop Agent**
+   - Tauri-based desktop application
+   - Voice-controlled AI agent for creating mini-applications
+   - Real-time code generation and execution
 
 ## Core Technology Stack
+
 - **Framework**: Django 5.0+
 - **Database**: PostgreSQL (required for JSON field support)
 - **Package Management**: uv (modern Python package manager)
 - **Frontend**: HTMX + Tailwind CSS v4
+- **MCP Framework**: FastMCP for MCP server implementation
 - **Testing**: pytest with factory_boy
 - **Code Quality**: Black, isort, Ruff, pyright
 - **Python**: 3.11+
@@ -45,11 +64,18 @@ apps/
 │       ├── api.py           # Synchronous API wrapper
 │       └── tests/           # Integration tests
 │
-├── ai/              # MCP server implementation (depends on integration)
-│   ├── mcp/         # Model Context Protocol server
-│   │   ├── quickbooks_server.py  # Main MCP server entry point
-│   │   └── quickbooks_tools.py   # Tool definitions and schemas
-│   ├── models/      # MCP session and API key models
+├── ai/              # MCP servers and AI functionality (depends on integration)
+│   ├── mcp/         # Model Context Protocol servers
+│   │   ├── quickbooks_server.py      # QuickBooks MCP server
+│   │   ├── creative_juices_server.py # Creative Juices MCP server
+│   │   ├── creative_juices_words.py  # Word lists for Creative Juices
+│   │   ├── CREATIVE_JUICES_README.md # Creative Juices installation guide
+│   │   ├── creative_juices_manifest.json # MCP manifest
+│   │   ├── creative_juices_web.html  # Landing page HTML
+│   │   └── DEPLOYMENT.md             # Django deployment guide
+│   ├── views/       # Web views for MCP landing pages
+│   │   └── mcp_views.py   # Django views serving MCP assets
+│   ├── models/      # MCP session and AI-related models
 │   └── tests/       # MCP server tests
 │
 ├── api/             # REST API endpoints (depends on all above)
@@ -65,6 +91,7 @@ apps/
 ```
 
 ### Layered Settings Configuration
+
 Settings are modularized and loaded in a specific order:
 
 ```
@@ -77,9 +104,71 @@ settings/
 └── local.py       # Local development overrides
 ```
 
+## MCP Server Implementations
+
+### 1. QuickBooks MCP Server
+
+**Purpose**: Enables AI assistants to interact with QuickBooks data through standardized MCP protocol.
+
+**Key Components**:
+- **Server**: `apps/ai/mcp/quickbooks_server.py` - Main MCP server with tool handlers
+- **Client**: `apps/integration/quickbooks/client.py` - Async QuickBooks API client
+- **OAuth**: `apps/integration/quickbooks/oauth_views.py` - OAuth authentication flow
+- **Models**: `apps/integration/models/quickbooks.py` - QuickBooksConnection, Organization
+
+**Running**:
+```bash
+uv run python -m apps.ai.mcp.quickbooks_server
+```
+
+**Authentication**: OAuth 2.0 flow with token refresh
+**Data Access**: Customers, invoices, vendors, payments, company info
+
+### 2. Creative Juices MCP Server
+
+**Purpose**: Provides randomness tools to encourage creative thinking through concrete metaphors and strategic frameworks.
+
+**Key Components**:
+- **Server**: `apps/ai/mcp/creative_juices_server.py` - FastMCP server with three tools
+- **Word Lists**: `apps/ai/mcp/creative_juices_words.py` - Curated verb-noun combinations
+- **Web Assets**: Landing page, manifest, README served via Django
+
+**Tools**:
+1. `get_inspiration()` - Gentle creative nudges with everyday metaphors
+2. `think_outside_the_box()` - Intense creative shocks with dramatic metaphors
+3. `reality_check()` - Strategic validation using Elon Musk's frameworks
+
+**Running**:
+```bash
+uv run python -m apps.ai.mcp.creative_juices_server
+```
+
+**Deployment**: https://ai.yuda.me/mcp/creative-juices (Django-hosted)
+**Authentication**: None required (stateless, public tools)
+**Privacy**: No data collection, fully local operation
+
+### MCP Web Hosting Architecture
+
+Both MCP servers are deployed via Django web views:
+
+**Django Views** (`apps/ai/views/mcp_views.py`):
+- `CreativeJuicesLandingView` - Serves HTML landing page
+- `CreativeJuicesManifestView` - Serves manifest.json with CORS headers
+- `CreativeJuicesReadmeView` - Serves README.md as markdown
+
+**URL Routes** (`apps/ai/urls.py`):
+```python
+path("mcp/creative-juices/", CreativeJuicesLandingView.as_view())
+path("mcp/creative-juices/manifest.json", CreativeJuicesManifestView.as_view())
+path("mcp/creative-juices/README.md", CreativeJuicesReadmeView.as_view())
+```
+
+**Deployment**: See `apps/ai/mcp/DEPLOYMENT.md` for full Django deployment guide
+
 ## Key Design Patterns
 
 ### Behavior Mixins
+
 Reusable model behaviors in `apps/common/behaviors/`:
 - **Timestampable**: Automatic created/modified tracking
 - **Authorable**: Content authorship tracking
@@ -90,12 +179,14 @@ Reusable model behaviors in `apps/common/behaviors/`:
 - **Annotatable**: Flexible notes system
 
 ### Template Organization
+
 - All templates centralized in `/templates/` (not in individual apps)
 - Template inheritance hierarchy for consistent UI
 - Partial templates for HTMX components
 - No JavaScript-heavy SPA approach - server-side rendering with HTMX enhancements
 
 ### Frontend Philosophy
+
 - **HTMX-first**: Dynamic interactions without complex JavaScript
 - **Tailwind CSS v4**: Utility-first styling with django-tailwind-cli
 - **Progressive Enhancement**: Works without JavaScript, enhanced with it
@@ -104,12 +195,14 @@ Reusable model behaviors in `apps/common/behaviors/`:
 ## Development Workflow
 
 ### Environment Setup
+
 1. Python virtual environment with venv
 2. Dependency management exclusively through uv
 3. PostgreSQL database (SQLite not supported due to JSON fields)
 4. Environment variables in `.env.local` (from `.env.example`)
 
 ### Testing Strategy
+
 - **Test-Driven Development**: Write tests before implementation
 - **Test Organization**: Separate directories for models, views, serializers, etc.
 - **Factory Pattern**: Use factory_boy for test data generation
@@ -117,11 +210,12 @@ Reusable model behaviors in `apps/common/behaviors/`:
 - **E2E Testing**: Browser automation tests for critical user paths
 
 ### Code Quality Standards
+
 - **Type Hints**: Required for all new code
 - **Formatting**: Black (88 char lines) + isort for imports
 - **Linting**: Ruff for fast, comprehensive checks
 - **Type Checking**: pyright for static type analysis
-- **Naming Conventions**: 
+- **Naming Conventions**:
   - Datetime fields end with `_at`
   - Boolean fields start with `is_` or `has_`
   - Clear, descriptive variable names
@@ -129,6 +223,7 @@ Reusable model behaviors in `apps/common/behaviors/`:
 ## QuickBooks Integration Deep Dive
 
 ### MCP Server Entry Points
+
 The MCP server enables AI assistants to interact with QuickBooks data:
 
 1. **Main Server**: `apps/ai/mcp/quickbooks_server.py`
@@ -136,17 +231,13 @@ The MCP server enables AI assistants to interact with QuickBooks data:
    - Routes tool calls to appropriate handlers
    - Manages authentication and sessions
 
-2. **Tool Definitions**: `apps/ai/mcp/quickbooks_tools.py`
-   - Defines available QuickBooks operations
-   - JSON schemas for tool parameters
-   - Tool documentation for AI assistants
-
-3. **QuickBooks Client**: `apps/integration/quickbooks/client.py`
+2. **QuickBooks Client**: `apps/integration/quickbooks/client.py`
    - Async HTTP client for QuickBooks API
    - OAuth token management
    - Request/response handling
 
 ### OAuth Authentication Flow
+
 Located in `apps/integration/quickbooks/oauth_views.py`:
 1. User initiates connection at `/api/quickbooks/connect/`
 2. Redirected to QuickBooks for authorization
@@ -173,22 +264,93 @@ Located in `apps/integration/quickbooks/oauth_views.py`:
 - `Address`: Shared address functionality
 - `Team`: Team/group management
 
+## Creative Juices MCP Deep Dive
+
+### Design Philosophy
+
+**Concrete Over Abstract**:
+- Uses tangible, everyday words rather than abstract concepts
+- Larger conceptual gap = stronger creative reframing effect
+- Examples: "baking-shoe" vs "crystallize-entropy"
+
+**Three-Stage Creative Process**:
+1. **Early stage**: Gentle nudges with familiar concepts (inspiring)
+2. **Stuck stage**: Dramatic shocks with intense concepts (out-of-the-box)
+3. **Validation stage**: Strategic frameworks for reality-testing (Musk frameworks)
+
+**Historical Dimension**:
+- Spans human development: primitive → ancient → modern → futuristic
+- Maximizes metaphorical range across all domains
+
+### Word Lists
+
+**Inspiring Category** (300+ words):
+- Human actions: painting, baking, melting, climbing
+- Animal behaviors: flying, burrowing, nesting
+- Natural elements: rain, tree, seed, rock
+- Primitive tools: hammerstone, hide, gourd
+
+**Out-of-the-Box Category** (250+ words):
+- Destructive actions: crushing, burning, exploding
+- Predatory behaviors: hunting, stalking, swarming
+- Sci-fi technology: teleporting, warping, cloaking
+- Alien biology: spore, tentacle, exoskeleton
+
+**Strategic Frameworks**:
+- First Principles: Challenge assumptions
+- Limit Thinking: Scale to extremes
+- Platonic Ideal: Start with perfection
+- Five-Step Optimization: Question→Delete→Optimize→Accelerate→Automate
+
+### Technical Characteristics
+
+- **No external dependencies**: Uses Python stdlib `random` only
+- **No authentication**: Stateless tools with no credentials
+- **No user data**: Nothing stored or transmitted
+- **Fully local operation**: No external API calls
+- **No configuration needed**: Works immediately with built-in word lists
+
 ## Finding What You Need - Quick Reference
 
+### Adding New MCP Servers
+
+1. **Create server file**: `apps/ai/mcp/{name}_server.py`
+   - Use FastMCP framework with `@mcp.tool()` decorators
+   - Define tools with type hints for automatic schema generation
+
+2. **Create Django views**: `apps/ai/views/mcp_views.py`
+   - Add views for landing page, manifest, README
+   - Include CORS headers for manifest.json
+
+3. **Add URL routes**: `apps/ai/urls.py`
+   - Map `/mcp/{name}/` to landing page
+   - Map `/mcp/{name}/manifest.json` to manifest
+   - Map `/mcp/{name}/README.md` to documentation
+
+4. **Create web assets**:
+   - `{name}_web.html` - Landing page
+   - `{name}_manifest.json` - MCP manifest
+   - `{NAME}_README.md` - Installation guide
+
+5. **Write tests**:
+   - MCP tests: `apps/ai/tests/test_mcp_{name}.py`
+   - Test all tools and edge cases
+
+6. **Document deployment**:
+   - Add deployment guide to `apps/ai/mcp/DEPLOYMENT.md`
+   - Update spec in `docs/specs/`
+
 ### Adding New QuickBooks Operations
-1. **Define the tool**: `apps/ai/mcp/quickbooks_tools.py`
-   - Add to `QUICKBOOKS_TOOLS` list
-   - Define parameter schema
 
-2. **Implement handler**: `apps/ai/mcp/quickbooks_server.py`
-   - Add case in `handle_tool_call()`
-   - Call appropriate client method
+1. **Define the tool**: `apps/ai/mcp/quickbooks_server.py`
+   - Add `@mcp.tool()` decorated function
+   - Use type hints for parameter validation
 
-3. **Add API method**: `apps/integration/quickbooks/client.py`
+2. **Add API method**: `apps/integration/quickbooks/client.py`
    - Implement async method
    - Handle QuickBooks API specifics
 
-4. **Write tests**: 
+3. **Write tests**:
    - MCP tests: `apps/ai/tests/test_mcp_quickbooks.py`
    - Integration tests: `apps/integration/quickbooks/tests/`
 
@@ -200,8 +362,8 @@ Located in `apps/integration/quickbooks/oauth_views.py`:
 - QuickBooks config: `settings/third_party.py`
 
 **URLs and Routing**:
-- Main URLs: `urls.py`
-- API URLs: `apps/api/urls.py`
+- Main URLs: `settings/urls.py`
+- AI/MCP URLs: `apps/ai/urls.py`
 - QuickBooks OAuth: `apps/integration/quickbooks/urls.py`
 
 **Templates** (all in `apps/public/templates/`):
@@ -220,27 +382,37 @@ Located in `apps/integration/quickbooks/oauth_views.py`:
 - Integration tests: `apps/integration/quickbooks/tests/`
 - E2E tests: `apps/*/tests/test_e2e_*.py`
 
+**Documentation**:
+- Specs: `docs/specs/` - Feature specifications
+- Guides: `docs/guides/` - How-to guides
+- Advanced: `docs/advanced/` - Deep dives
+- Examples: `docs/examples/` - Code examples
+
 ## Working Principles
 
 ### Separation of Concerns
+
 - Models handle business logic
 - Views coordinate between models and templates
 - Templates focus on presentation
 - Behaviors encapsulate reusable model patterns
 
 ### Don't Repeat Yourself (DRY)
+
 - Behavior mixins for common model patterns
 - Template inheritance for UI consistency
 - Centralized configuration in settings
 - Shared utilities in `apps/common/`
 
 ### Convention Over Configuration
+
 - Standard Django project structure
 - Predictable file locations
 - Consistent naming patterns
 - Clear import organization
 
 ### Progressive Complexity
+
 - Start simple with Django defaults
 - Add complexity only when needed
 - Keep third-party dependencies minimal
@@ -248,7 +420,8 @@ Located in `apps/integration/quickbooks/oauth_views.py`:
 
 ## Critical Code Paths to Understand
 
-### MCP Request Flow
+### MCP Request Flow (QuickBooks)
+
 1. **MCP Client** → connects to server via stdio
 2. **quickbooks_server.py** → receives tool call request
 3. **Authentication** → validates API key from request
@@ -257,7 +430,16 @@ Located in `apps/integration/quickbooks/oauth_views.py`:
 6. **Token Refresh** → automatic if token expired
 7. **Response** → formatted and returned to MCP client
 
+### MCP Request Flow (Creative Juices)
+
+1. **MCP Client** → connects to server via stdio
+2. **creative_juices_server.py** → receives tool call request
+3. **Tool Router** → matches tool name (get_inspiration, think_outside_the_box, reality_check)
+4. **Word Selection** → random selection from appropriate category
+5. **Response** → formatted sparks/questions with instructions
+
 ### OAuth Connection Flow
+
 1. **User clicks "Connect"** → `/api/quickbooks/connect/`
 2. **OAuth URL built** → `apps/integration/quickbooks/oauth_views.py:26`
 3. **QuickBooks auth** → User authorizes in QuickBooks
@@ -266,30 +448,27 @@ Located in `apps/integration/quickbooks/oauth_views.py`:
 6. **Connection saved** → `QuickBooksConnection` model
 7. **MCP enabled** → Server can now access QuickBooks data
 
-### Data Flow Architecture
-```
-MCP Client Request
-    ↓
-quickbooks_server.py (MCP protocol handling)
-    ↓
-quickbooks_tools.py (parameter validation)
-    ↓
-client.py (async QuickBooks API calls)
-    ↓
-QuickBooks API
-    ↓
-Response formatting & return
-```
+### Django Web Deployment Flow
+
+1. **User requests URL** → https://ai.yuda.me/mcp/creative-juices
+2. **Django routing** → `settings/urls.py` → `apps/ai/urls.py`
+3. **View executed** → `CreativeJuicesLandingView.get()`
+4. **File loaded** → `apps/ai/mcp/creative_juices_web.html`
+5. **Response sent** → HTML content with proper content-type
 
 ## Common Tasks Quick Reference
 
 ### Daily Development
+
 ```bash
 # Start Django dev server
 uv run python manage.py runserver
 
-# Start MCP server for testing
+# Start QuickBooks MCP server
 uv run python -m apps.ai.mcp.quickbooks_server
+
+# Start Creative Juices MCP server
+uv run python -m apps.ai.mcp.creative_juices_server
 
 # Django shell with all models loaded
 uv run python manage.py shell
@@ -298,13 +477,14 @@ uv run python manage.py shell
 DJANGO_SETTINGS_MODULE=settings pytest
 
 # Run specific test file
-DJANGO_SETTINGS_MODULE=settings pytest apps/ai/tests/test_mcp_quickbooks.py -v
+DJANGO_SETTINGS_MODULE=settings pytest apps/ai/tests/test_mcp_creative_juices.py -v
 ```
 
 ### Code Quality
+
 ```bash
 # Format code (MUST run before committing)
-black . && isort . --profile black
+uv run black . && uv run isort . --profile black
 
 # Lint code
 uv run ruff check .
@@ -317,6 +497,7 @@ uv run pre-commit run --all-files
 ```
 
 ### Database Operations
+
 ```bash
 # Create migrations (requires approval)
 uv run python manage.py makemigrations
@@ -331,27 +512,48 @@ uv run python manage.py dbshell
 uv run python manage.py createsuperuser
 ```
 
-### QuickBooks MCP Testing
+### MCP Testing
+
 ```bash
-# Test MCP server locally
+# Test QuickBooks MCP server locally
 uv run python -m apps.ai.mcp.quickbooks_server
 
-# Test specific QuickBooks tool
-DJANGO_SETTINGS_MODULE=settings pytest apps/ai/tests/test_mcp_quickbooks.py::test_get_company_info -v
+# Test Creative Juices MCP server
+uv run python -m apps.ai.mcp.creative_juices_server
 
-# Test OAuth flow
-DJANGO_SETTINGS_MODULE=settings pytest apps/integration/quickbooks/tests/test_oauth.py -v
+# Test with MCP Inspector
+mcp-inspector uv run python -m apps.ai.mcp.creative_juices_server
+
+# Run MCP tests
+DJANGO_SETTINGS_MODULE=settings pytest apps/ai/tests/test_mcp_quickbooks.py -v
+DJANGO_SETTINGS_MODULE=settings pytest apps/ai/tests/test_mcp_creative_juices.py -v
+```
+
+### Deployment
+
+```bash
+# Collect static files
+uv run python manage.py collectstatic
+
+# Run production server
+uv run gunicorn settings.wsgi:application --bind 0.0.0.0:8000
+
+# Test MCP endpoints
+curl https://ai.yuda.me/mcp/creative-juices
+curl https://ai.yuda.me/mcp/creative-juices/manifest.json
 ```
 
 ## Architecture Decisions
 
 ### Why PostgreSQL Only?
+
 - JSON field support for flexible data storage
 - Advanced querying capabilities
 - Production-proven reliability
 - Better performance for complex queries
 
 ### Why HTMX Over React/Vue?
+
 - Simpler mental model
 - Leverages Django's template system
 - Reduces JavaScript complexity
@@ -359,24 +561,57 @@ DJANGO_SETTINGS_MODULE=settings pytest apps/integration/quickbooks/tests/test_oa
 - Faster initial page loads
 
 ### Why uv for Package Management?
+
 - 10-100x faster than pip
 - Built-in virtual environment management
 - Reproducible builds with lock files
 - Modern dependency resolution
 
 ### Why Modular Settings?
+
 - Environment-specific configurations
 - Easier debugging and testing
 - Clear configuration hierarchy
 - Secrets isolation
+
+### Why Django for MCP Hosting?
+
+- Serves dynamic content and static assets
+- OAuth integration for QuickBooks
+- Centralized deployment and monitoring
+- CORS handling for manifest.json
+- Future extensibility (analytics, user management)
+
+## Future: Desktop Agent Application
+
+### Overview
+
+Voice-driven desktop application for creating mini-applications through AI interaction.
+
+**Spec Location**: `docs/specs/DESKTOP_AGENT_SPEC.md`
+
+**Technology Stack**:
+- **Desktop**: Tauri (Rust + TypeScript)
+- **Backend**: Django REST API
+- **Voice**: Whisper (transcription) + OpenAI TTS
+- **AI**: Claude API with MCP tools
+
+**Key Features**:
+1. Voice input for natural interaction
+2. Real-time visual feedback during app generation
+3. Voice summaries of agent activity
+4. File system access via Tauri
+5. Local and remote tool execution
+
+**Status**: Specification complete, implementation pending
 
 ## Next Steps for New Features
 
 1. **Identify the appropriate app** for your feature
 2. **Create models** with appropriate behavior mixins
 3. **Write tests first** following TDD principles
-4. **Implement views** (HTMX for web, ViewSets for API)
-5. **Create templates** in the centralized directory
+4. **Implement views** (HTMX for web, ViewSets for API, MCP for tools)
+5. **Create templates** in the centralized directory (if web UI)
 6. **Add URL patterns** to the app's urls.py
 7. **Run tests** and ensure coverage
 8. **Format code** with Black and isort
@@ -390,120 +625,82 @@ DJANGO_SETTINGS_MODULE=settings pytest apps/integration/quickbooks/tests/test_oa
 - **No app-specific static files**: All static files in /static/
 - **No migration creation**: Wait for approval before migrations
 - **No JavaScript frameworks**: Use HTMX for interactivity
+- **MCP servers use FastMCP**: Follow FastMCP patterns for tool definitions
 
 ## Documentation Deep Dives
 
-The `docs/` directory contains comprehensive guides for specific topics. Here's when to consult each:
+The `docs/` directory contains comprehensive guides for specific topics:
 
 ### Essential Reading Before Starting
-- **docs/ARCHITECTURE.md** - Understand the system's overall design
-- **docs/REPO_MAP.md** - Navigate the codebase structure
-- **CLAUDE.md** - Primary reference for commands and guidelines
+
+- **docs/ARCHITECTURE.md** - System design overview
+- **docs/REPO_MAP.md** - Codebase navigation
+- **CLAUDE.md** - Commands and guidelines
+- **docs/specs/** - Feature specifications (QuickBooks, Creative Juices, Desktop Agent)
 
 ### Feature Development Guides
 
-#### Building Models
+**Building Models**:
 - **docs/MODEL_CONVENTIONS.md** - Naming, structure, relationships
 - **docs/BEHAVIOR_MIXINS.md** - Reusable model behaviors
-- Review existing models in `apps/common/models/` for patterns
 
-#### Frontend Implementation
-- **docs/HTMX_INTEGRATION.md** - HTMX patterns and best practices
-- **docs/TEMPLATE_CONVENTIONS.md** - Template organization and naming
-- **docs/VIEW_CONVENTIONS.md** - View class patterns (MainContentView, HTMXView)
-- **docs/MODAL_PATTERNS.md** - Modal dialogs with HTMX
-- **docs/TAILWIND_V4.md** - Styling with Tailwind CSS v4
+**Frontend Implementation**:
+- **docs/HTMX_INTEGRATION.md** - HTMX patterns
+- **docs/TEMPLATE_CONVENTIONS.md** - Template organization
+- **docs/VIEW_CONVENTIONS.md** - View class patterns
+- **docs/MODAL_PATTERNS.md** - Modal dialogs
+- **docs/TAILWIND_V4.md** - Styling with Tailwind
 
-#### Testing Strategy
-- **docs/advanced/TEST_CONVENTIONS.md** - Test organization and patterns
-- **docs/advanced/E2E_TESTING.md** - End-to-end browser tests
-- **docs/advanced/BROWSER_TESTING.md** - Browser automation framework
-- **docs/advanced/TEST_TROUBLESHOOTING.md** - Common issues and solutions
-- **docs/advanced/AI_BROWSER_TESTING.md** - AI-assisted test generation
+**Testing Strategy**:
+- **docs/advanced/TEST_CONVENTIONS.md** - Test organization
+- **docs/advanced/E2E_TESTING.md** - Browser tests
+- **docs/advanced/BROWSER_TESTING.md** - Automation framework
 
-#### Error Management
-- **docs/ERROR_HANDLING.md** - Error handling patterns and strategies
+**MCP Development**:
+- **apps/ai/mcp/DEPLOYMENT.md** - Django deployment guide
+- **docs/specs/CREATIVE_JUICES_MCP.md** - Creative Juices spec
+- Review existing servers for patterns
 
 ### Setup and Configuration
-- **docs/guides/SETUP_GUIDE.md** - Detailed environment setup
-- **docs/guides/CONTRIBUTING.md** - Contribution workflow
-- **docs/guides/PYCHARM_CONFIG.MD** - PyCharm IDE configuration
 
-### Migration and Upgrade Guides
-- **docs/guides/TAILWIND_V4_UPGRADE.md** - Upgrading from Tailwind v3
-- **docs/guides/TAILWIND_V4_MIGRATION_CHECKLIST.md** - Migration checklist
+- **docs/guides/SETUP_GUIDE.md** - Environment setup
+- **docs/guides/CONTRIBUTING.md** - Contribution workflow
 
 ### Code Examples
-- **docs/examples/modal_example_view.py** - Complete modal implementation
+
+- **docs/examples/modal_example_view.py** - Modal implementation
 - **docs/examples/item_list_example.html** - List view with pagination
-- **docs/examples/list_items_partial.html** - HTMX partial rendering
-- **docs/guides/example_unfold_admin.py** - Admin customization
-
-### Advanced Topics
-- **docs/advanced/CICD.md** - CI/CD pipeline configuration
-- **docs/advanced/SCREENSHOT_SERVICE.md** - Visual testing service
-- **docs/advanced/HTMX_AND_RESPONSIVE_TESTING.md** - Responsive design testing
-
-### Quick Reference Workflow
-
-1. **Starting a new feature?**
-   - Read: ARCHITECTURE.md → relevant convention docs → examples
-
-2. **Implementing models?**
-   - Read: MODEL_CONVENTIONS.md → BEHAVIOR_MIXINS.md
-
-3. **Building UI components?**
-   - Read: HTMX_INTEGRATION.md → TEMPLATE_CONVENTIONS.md → VIEW_CONVENTIONS.md
-
-4. **Writing tests?**
-   - Read: TEST_CONVENTIONS.md → relevant test type docs
-
-5. **Debugging issues?**
-   - Read: ERROR_HANDLING.md → TEST_TROUBLESHOOTING.md
-
-6. **Setting up environment?**
-   - Read: SETUP_GUIDE.md → CLAUDE.md setup section
-
-### Documentation Philosophy
-
-The documentation follows a layered approach:
-- **CLAUDE.md**: Commands and quick reference
-- **prime.md**: High-level architecture and concepts
-- **docs/**: Deep dives into specific topics
-- **examples/**: Working code examples
-- **sphinx_docs/**: Auto-generated API documentation
-
-Always start with the high-level docs to understand context, then drill down into specific guides as needed. The examples provide practical implementations of the patterns described in the documentation.
+- **apps/ai/mcp/creative_juices_server.py** - Complete MCP server example
 
 ## Debugging Guide
 
 ### Common Issues and Solutions
 
 **MCP Server Won't Start**:
-- Check: `QUICKBOOKS_CLIENT_ID` and `QUICKBOOKS_CLIENT_SECRET` in `.env.local`
+- Check: Environment variables in `.env.local`
 - Verify: PostgreSQL is running (`psql -l`)
-- Ensure: Virtual environment activated (`source .venv/bin/activate`)
+- Ensure: Virtual environment activated
 
 **OAuth Flow Fails**:
 - Check: Redirect URI matches QuickBooks app settings
-- Verify: `QUICKBOOKS_SANDBOX_MODE` matches QuickBooks environment
+- Verify: `QUICKBOOKS_SANDBOX_MODE` matches environment
 - Debug: Check logs in `apps/integration/quickbooks/oauth_views.py`
 
-**Token Refresh Issues**:
-- Location: `apps/integration/quickbooks/client.py:refresh_token()`
-- Check: Token expiry in `QuickBooksConnection` model
-- Debug: Enable logging in client.py
+**Django 404 on MCP URLs**:
+- Check: Django routing in `settings/urls.py` includes `apps/ai/urls.py`
+- Verify: Views imported in `apps/ai/views/__init__.py`
+- Test: `uv run python manage.py runserver` and visit URL
 
-**MCP Tool Not Found**:
-- Verify: Tool added to `QUICKBOOKS_TOOLS` list
-- Check: Handler implemented in `quickbooks_server.py`
-- Test: Run MCP server with debug logging
+**Creative Juices Not Working**:
+- Check: Word lists loaded correctly in `creative_juices_words.py`
+- Verify: FastMCP installed (`uv add fastmcp`)
+- Test: Run with debug logging enabled
 
 ### Key Debug Points
 
 **Enable Debug Logging**:
 ```python
-# In apps/ai/mcp/quickbooks_server.py
+# In MCP server files
 import logging
 logging.basicConfig(level=logging.DEBUG)
 ```
@@ -519,31 +716,41 @@ client = QuickBooksClient(conn)
 await client.test_connection()
 ```
 
-**Inspect MCP Requests**:
+**Test Django Views**:
 ```python
-# In quickbooks_server.py handle_tool_call()
-logger.debug(f"Tool: {tool_name}, Args: {arguments}")
+# Django shell
+from django.test import Client
+c = Client()
+response = c.get('/ai/mcp/creative-juices/')
+print(response.status_code, response.content[:100])
 ```
 
 ## Context Loaded - Ready for Instructions
 
 ✅ **Context successfully loaded.** The assistant now has comprehensive understanding of:
-- The QuickBooks MCP integration architecture
+- The full scope of Cuttlefish: MCP servers, Django web app, future desktop agent
+- QuickBooks MCP integration with OAuth and async API
+- Creative Juices MCP with randomness tools and web hosting
+- Django architecture with behavior mixins and HTMX
 - Where to find all major components
 - How data flows through the system
 - Common patterns and conventions
 - Testing and debugging approaches
+- Deployment strategies for MCP servers via Django
 
 **The assistant is now waiting for your specific instructions.**
 
 You can ask the assistant to:
-- Add new QuickBooks MCP tools
-- Fix bugs in the integration
+- Add new MCP servers or tools
+- Enhance existing MCP functionality
+- Fix bugs in QuickBooks or Creative Juices
 - Improve the OAuth flow
-- Add new API endpoints
-- Enhance the MCP server
+- Add new Django views or API endpoints
+- Create web interfaces with HTMX
 - Write tests for new features
 - Debug existing issues
+- Prepare for Desktop Agent implementation
+- Deploy MCP servers via Django
 - Or any other development task
 
-This primer provides the essential context for understanding and contributing to this QuickBooks MCP integration. The architecture emphasizes clean separation of concerns, async operations, and comprehensive testing while providing a solid foundation for AI-assisted QuickBooks interactions.
+This primer provides the essential context for understanding and contributing to the Cuttlefish AI integration platform. The architecture emphasizes clean separation of concerns, MCP protocol standards, Django web hosting, and comprehensive testing while providing a solid foundation for AI-assisted integrations and creative tools.
