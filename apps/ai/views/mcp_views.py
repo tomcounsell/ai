@@ -60,3 +60,58 @@ class CreativeJuicesReadmeView(View):
             content = f.read()
 
         return HttpResponse(content, content_type="text/markdown; charset=utf-8")
+
+
+class CTOToolsLandingView(View):
+    """Serve the CTO Tools MCP landing page."""
+
+    def get(self, request):
+        """Return the HTML landing page."""
+        html_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "mcp",
+            "cto_tools_web.html",
+        )
+
+        with open(html_path) as f:
+            content = f.read()
+
+        return HttpResponse(content, content_type="text/html; charset=utf-8")
+
+
+class CTOToolsManifestView(View):
+    """Serve the CTO Tools MCP manifest.json."""
+
+    def get(self, request):
+        """Return the manifest.json with CORS headers."""
+        manifest_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "mcp",
+            "cto_tools_manifest.json",
+        )
+
+        with open(manifest_path) as f:
+            manifest_data = json.load(f)
+
+        response = JsonResponse(manifest_data)
+        response["Access-Control-Allow-Origin"] = "*"
+        response["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response["Access-Control-Allow-Headers"] = "Content-Type"
+        return response
+
+
+class CTOToolsReadmeView(View):
+    """Serve the CTO Tools MCP README."""
+
+    def get(self, request):
+        """Return the README.md as markdown."""
+        readme_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "mcp",
+            "CTO_TOOLS_README.md",
+        )
+
+        with open(readme_path) as f:
+            content = f.read()
+
+        return HttpResponse(content, content_type="text/markdown; charset=utf-8")

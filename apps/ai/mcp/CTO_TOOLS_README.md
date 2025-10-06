@@ -48,29 +48,50 @@ Access the web manifest at: `https://ai.yuda.me/mcp/cto-tools/manifest.json`
 
 ### weekly_review()
 
-Provides a comprehensive framework for conducting weekly engineering team reviews.
+Provides a streamlined 3-phase framework for conducting weekly engineering team reviews.
 
-**Purpose**: Systematically review your development team's work to understand accomplishments, identify blockers, recognize contributions, and plan priorities.
+**Purpose**: Systematically review your development team's work to understand accomplishments and recognize contributions. Analysis-focused, not prescriptive. Works with ANY codebase and tech stack.
 
-**Returns**: Step-by-step instructions including:
-- Git commands for extracting commit history
-- Framework for categorizing and analyzing work
-- Templates for generating executive summaries
-- Team recognition guidelines
-- Action item checklist
+**Returns**: Detailed phase-by-phase instructions including:
+
+**Phase 1 - Data Gathering**:
+- Git commands to run in parallel for efficient data collection
+- Commit history, author statistics, and file changes
+
+**Phase 2 - Analysis & Categorization** (LLM-aligned workflow):
+- Draft all updates first (build context)
+- Identify natural groupings (pattern recognition)
+- Choose 5 category names (decision making)
+- 13 suggested categories including DevOps, API, Billing, Reporting
+- Always include Team Activity and Repository Metrics
+- Optional: Development patterns (extra credit when verbose)
+
+**Phase 3 - Multi-Level Summaries (with Team Recognition)**:
+- Technical summary for engineering team
+- Executive summary for leadership with team recognition (200-300 words)
+- Quick summary for Slack/chat (50-100 words)
 
 **Example Usage**:
 
 ```
-Claude, use CTO Tools to help me run a weekly review of my team's work.
+Claude, use CTO Tools to run a weekly review of my team's work.
 ```
 
-The tool will provide detailed instructions for:
-1. Gathering commit history data
-2. Analyzing patterns and metrics
-3. Generating executive summaries
-4. Recognizing team contributions
-5. Defining action items
+Or for a quick review:
+
+```
+Claude, use CTO Tools for a fast 15-minute weekly review focusing on highlights and blockers.
+```
+
+**Features**:
+- ⚡ Speed mode (15-20 min) for quick insights
+- 🔍 Deep mode (45-60 min) for comprehensive analysis
+- 📝 Auto-generates documentation for critical issues found
+- 👥 Recognizes individual and collaborative contributions
+- 🎯 Creates multi-format summaries for different stakeholders
+
+The framework guides you through systematic analysis that tells the story of your team's week,
+identifies both achievements and problems, and produces actionable insights for decision-making.
 
 ## How It Works
 

@@ -23,12 +23,10 @@ async def test_weekly_review_contains_framework_sections():
     """Test weekly_review contains expected framework sections."""
     result = weekly_review()
 
-    # Check for main framework sections
-    assert "Step 1: Gather Commit History" in result
-    assert "Step 2: Analyze the Data" in result
-    assert "Step 3: Generate Executive Summary" in result
-    assert "Step 4: Team Recognition" in result
-    assert "Step 5: Action Items" in result
+    # Check for main framework phases (3 phases - data, analysis, summaries with team recognition)
+    assert "PHASE 1: GATHER DATA" in result
+    assert "PHASE 2: ANALYZE & CATEGORIZE" in result
+    assert "PHASE 3: CREATE SUMMARIES" in result
 
 
 @pytest.mark.asyncio
@@ -38,22 +36,23 @@ async def test_weekly_review_contains_git_commands():
 
     # Should contain git commands
     assert "git log" in result
-    assert "git shortlog" in result
-    assert "--since='1 week ago'" in result
+    assert '--since="7 days ago"' in result
+    assert "--no-merges" in result
 
 
 @pytest.mark.asyncio
 async def test_weekly_review_contains_categorization_guidance():
-    """Test weekly_review includes work categorization."""
+    """Test weekly_review includes work categorization guidance with proper LLM workflow."""
     result = weekly_review()
 
-    # Check for work categories
-    assert "Features" in result
-    assert "Bugs" in result
-    assert "Refactoring" in result
-    assert "Infrastructure" in result
-    assert "Documentation" in result
-    assert "Tests" in result
+    # Check for proper LLM workflow: draft first, then categorize
+    assert "Draft All Updates" in result or "working draft" in result.lower()
+    assert "Identify Natural Groupings" in result or "natural" in result.lower()
+    assert "Choose Category Names" in result or "choose" in result.lower()
+    assert "Category suggestions" in result or "suggestions" in result.lower()
+
+    # Should have expanded category list
+    assert "DevOps" in result or "API" in result or "Billing" in result
 
 
 @pytest.mark.asyncio
@@ -62,9 +61,9 @@ async def test_weekly_review_contains_metrics_guidance():
     result = weekly_review()
 
     # Check for metrics mentions
-    assert "Key Metrics" in result or "metrics" in result.lower()
-    assert "Commits per day" in result
-    assert "Pull requests" in result
+    assert "metrics" in result.lower()
+    assert "commits" in result.lower()
+    assert "contributors" in result.lower()
 
 
 @pytest.mark.asyncio
@@ -72,12 +71,12 @@ async def test_weekly_review_contains_summary_template():
     """Test weekly_review includes executive summary template."""
     result = weekly_review()
 
-    # Check for summary sections
-    assert "Highlights" in result
-    assert "Team Velocity" in result
-    assert "Areas of Focus" in result
-    assert "Blockers" in result or "Risks" in result
-    assert "Next Week Priorities" in result
+    # Check for summary sections (3-phase framework with integrated team recognition)
+    assert "Technical Summary" in result
+    assert "Executive Summary" in result
+    assert "Quick Summary" in result
+    assert "Team Recognition" in result
+    assert "Overview" in result
 
 
 @pytest.mark.asyncio
@@ -86,20 +85,9 @@ async def test_weekly_review_contains_tips():
     result = weekly_review()
 
     # Check for tips section
-    assert "Pro Tips" in result or "Tips" in result
-    assert "Fast Reviews" in result or "15 min" in result
-    assert "Deep Reviews" in result or "60 min" in result
-
-
-@pytest.mark.asyncio
-async def test_weekly_review_contains_sample_questions():
-    """Test weekly_review includes sample questions."""
-    result = weekly_review()
-
-    # Check for sample questions section
-    assert "Sample Questions" in result or "Questions to Answer" in result
-    # Should have questions about achievements, goals, etc.
-    assert "?" in result  # Should contain question marks
+    assert "EXECUTION TIPS" in result or "Pro Tips" in result
+    assert "Speed" in result or "15-20 min" in result
+    assert "Depth" in result or "45-60 min" in result
 
 
 @pytest.mark.asyncio
@@ -132,29 +120,18 @@ async def test_weekly_review_formatted_as_markdown():
 
 
 @pytest.mark.asyncio
-async def test_weekly_review_includes_action_checklist():
-    """Test that weekly_review includes action items."""
-    result = weekly_review()
-
-    # Check for checklist items
-    assert "- [ ]" in result or "[ ]" in result
-    assert "Action Items" in result
-
-
-@pytest.mark.asyncio
 async def test_weekly_review_comprehensive_coverage():
     """Test that weekly_review covers all key aspects of team review."""
     result = weekly_review()
 
-    # Verify comprehensive coverage
+    # Verify comprehensive coverage (3-phase: data, analysis, summaries+team)
     coverage_aspects = [
         "commit",  # Git analysis
         "team",  # Team focus
-        "velocity",  # Metrics
-        "blockers" or "impediments",  # Challenges
-        "recognition" or "contributions",  # Team recognition
-        "priorities" or "next week",  # Planning
-        "executive" or "stakeholder",  # Communication
+        "metrics",  # Metrics
+        "recognition",  # Team recognition
+        "categor",  # Categorization (matches "categorize" or "categories")
+        "summary",  # Multi-level summaries
     ]
 
     result_lower = result.lower()

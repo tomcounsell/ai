@@ -9,6 +9,9 @@ from .chat import (
     ChatSendMessageView,
 )
 from .mcp_views import (
+    CTOToolsLandingView,
+    CTOToolsManifestView,
+    CTOToolsReadmeView,
     CreativeJuicesLandingView,
     CreativeJuicesManifestView,
     CreativeJuicesReadmeView,
@@ -21,6 +24,9 @@ __all__ = [
     "ChatNewSessionView",
     "ChatLoadSessionView",
     "ChatClearView",
+    "CTOToolsLandingView",
+    "CTOToolsManifestView",
+    "CTOToolsReadmeView",
     "CreativeJuicesLandingView",
     "CreativeJuicesManifestView",
     "CreativeJuicesReadmeView",

@@ -3,6 +3,9 @@ from typing import List
 from django.urls import URLPattern, path
 
 from apps.ai.views import (
+    CTOToolsLandingView,
+    CTOToolsManifestView,
+    CTOToolsReadmeView,
     ChatClearView,
     ChatIndexView,
     ChatLoadSessionView,
@@ -37,6 +40,22 @@ urlpatterns: list[URLPattern] = [
         "mcp/creative-juices/README.md",
         CreativeJuicesReadmeView.as_view(),
         name="mcp-creative-juices-readme",
+    ),
+    # CTO Tools MCP server endpoints
+    path(
+        "mcp/cto-tools/",
+        CTOToolsLandingView.as_view(),
+        name="mcp-cto-tools",
+    ),
+    path(
+        "mcp/cto-tools/manifest.json",
+        CTOToolsManifestView.as_view(),
+        name="mcp-cto-tools-manifest",
+    ),
+    path(
+        "mcp/cto-tools/README.md",
+        CTOToolsReadmeView.as_view(),
+        name="mcp-cto-tools-readme",
     ),
     # Chat interface (requires migrations)
     # path('chat/', ChatIndexView.as_view(), name='chat-index'),
