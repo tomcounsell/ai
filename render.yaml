@@ -19,20 +19,18 @@ services:
         value: 8000
       - key: DEPLOYMENT_TYPE
         value: PRODUCTION
-      # Optional: Redis for future use (currently commented out)
-      # - key: REDIS_URL
-      #   fromService:
-      #     type: keyvalue
-      #     name: redis-production
-      #     property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: redis-production
+          property: connectionString
       - fromGroup: cuttlefish
 
-  # Redis for future use (currently commented out)
-  # - type: keyvalue
-  #   name: redis-production
-  #   region: oregon
-  #   ipAllowList:
-  #     - source: 0.0.0.0/0
-  #       description: allow-all
-  #   plan: starter
-  #   maxmemoryPolicy: allkeys-lru
+  - type: keyvalue
+    name: redis-production
+    region: oregon
+    ipAllowList:
+      - source: 0.0.0.0/0
+        description: allow-all
+    plan: starter
+    maxmemoryPolicy: allkeys-lru
