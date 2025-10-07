@@ -2,7 +2,7 @@
 
 ## Summary
 
-The `weekly_review()` tool in the CTO Tools MCP server has been completely enhanced with a comprehensive 6-phase framework based on real-world usage patterns. This update transforms it from a simple instructional tool into a powerful, step-by-step guide that any LLM can follow in any codebase.
+The `weekly_review()` tool in the CTO Tools MCP server has been completely enhanced with a comprehensive 5-phase framework based on real-world usage patterns. This update transforms it from a simple instructional tool into a powerful, analysis-focused guide that any LLM can follow in any codebase.
 
 ## What Changed
 
@@ -14,15 +14,16 @@ The `weekly_review()` tool in the CTO Tools MCP server has been completely enhan
 - No issue identification guidance
 
 ### After (Enhanced Version)
-- **6 comprehensive phases** with detailed instructions
+- **5 comprehensive phases** with detailed instructions
 - **Specific git commands** to run in parallel
-- **7 modern categories** (AI/ML, Auth, UX, Performance, etc.)
+- **Adaptive categorization** (LLM chooses 5 categories + team/repo stats)
 - **3 summary formats** (Technical, Executive, Quick)
 - **Issue detection framework** with red flags and patterns
 - **Multi-level outputs** for different stakeholders
 - **Speed & Deep modes** for different time constraints
+- **Analysis-focused** (not prescriptive planning)
 
-## The 6-Phase Framework
+## The 5-Phase Framework
 
 ### Phase 1: GATHER DATA (Run in Parallel)
 - Get commits from last 7 days

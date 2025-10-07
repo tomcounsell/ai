@@ -41,8 +41,8 @@ if not SECRET_KEY and (LOCAL or DEBUG):
 
 # Hosts configuration
 ALLOWED_HOSTS = [
-    # '.mycompany.com',
-    # '.herokuapp.com',
+    'ai.yuda.me',
+    'cuttlefish-ea1h.onrender.com',
     # '.amazonaws.com',
     "localhost",
     "127.0.0.1",
@@ -52,8 +52,8 @@ if LOCAL:
     CORS_ORIGIN_ALLOW_ALL = True
 else:
     CORS_ORIGIN_WHITELIST = [
-        # 'https://myproject-api*.herokuapp.com',
-        # 'https://*.mycompany.com',
+        'cuttlefish-ea1h.onrender.com',
+        'https://*.yuda.me',
         # 'https://s3.amazonaws.com',
         # 'https://vendor_api.com',
         "https://localhost",
@@ -62,9 +62,9 @@ else:
 
 # Hostname configuration
 if PRODUCTION:
-    HOSTNAME = "app.mycompany.com"
+    HOSTNAME = "ai.yuda.me"
 elif STAGE:
-    HOSTNAME = "stage.mycompany.com"
+    HOSTNAME = "stage.yuda.me"
 else:
     try:
         HOSTNAME = socket.gethostname()

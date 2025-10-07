@@ -20,5 +20,5 @@ CSRF_COOKIE_SECURE = True
 # Production logging handled in settings/logging.py
 
 # Override hostname if needed
-HOSTNAME = os.environ.get("HOSTNAME", "app.mycompany.com")
+HOSTNAME = os.environ.get("HOSTNAME", "ai.yuda.me")
 ALLOWED_HOSTS = ALLOWED_HOSTS + [HOSTNAME]

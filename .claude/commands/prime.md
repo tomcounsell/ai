@@ -543,6 +543,78 @@ curl https://ai.yuda.me/mcp/creative-juices
 curl https://ai.yuda.me/mcp/creative-juices/manifest.json
 ```
 
+### Render MCP Deployment
+
+The Render MCP provides tools to manage Render.com deployments directly from Claude:
+
+```bash
+# List workspaces
+mcp__render__list_workspaces
+
+# Select workspace (required before other operations)
+mcp__render__select_workspace(ownerID="tea-...")
+
+# List existing services
+mcp__render__list_services
+
+# Create PostgreSQL database
+mcp__render__create_postgres(
+    name="cuttlefish-db",
+    plan="free",  # or basic_256mb, pro_4gb, etc.
+    region="oregon",
+    version=16
+)
+
+# Create web service
+mcp__render__create_web_service(
+    name="cuttlefish",
+    repo="https://github.com/yudame/cuttlefish",
+    branch="main",
+    runtime="python",
+    buildCommand="./build.sh",
+    startCommand="gunicorn settings.wsgi:application",
+    plan="starter",
+    region="oregon",
+    envVars=[
+        {"key": "DEBUG", "value": "False"},
+        {"key": "DATABASE_URL", "value": "postgres://..."},
+        # Add more env vars as needed
+    ]
+)
+
+# Update environment variables (merges with existing by default)
+mcp__render__update_environment_variables(
+    serviceId="srv-...",
+    envVars=[{"key": "SECRET_KEY", "value": "new-value"}],
+    replace=False  # Set to True to replace all env vars
+)
+
+# Get deployment status
+mcp__render__get_deploy(serviceId="srv-...", deployId="dep-...")
+
+# View logs
+mcp__render__list_logs(
+    resource=["srv-..."],
+    limit=50,
+    type=["build", "app"]  # Filter by log type
+)
+
+# Get service metrics
+mcp__render__get_metrics(
+    resourceId="srv-...",
+    metricTypes=["cpu_usage", "memory_usage", "http_request_count"],
+    startTime="2024-01-01T00:00:00Z",
+    endTime="2024-01-01T23:59:59Z"
+)
+```
+
+**Important Notes**:
+- Always select a workspace before performing operations
+- Environment variables are merged by default (use `replace=True` to replace all)
+- Database URLs are automatically provided by Render when linking services
+- Health checks should be defined at `/health/` endpoint
+- The build.sh script must use `uv pip install . --system` for Render compatibility
+
 ## Architecture Decisions
 
 ### Why PostgreSQL Only?
