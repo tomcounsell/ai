@@ -11,7 +11,7 @@ services:
     startCommand: gunicorn settings.wsgi:application --bind 0.0.0.0:$PORT --timeout 180 --keep-alive 5 --worker-connections 1000 --preload
     repo: https://github.com/tomcounsell/cuttlefish.git
     branch: main
-    region: oregon
+    region: virginia
     plan: starter
     healthCheckPath: /health/
     envVars:
@@ -28,7 +28,7 @@ services:
 
   - type: keyvalue
     name: redis-production
-    region: oregon
+    region: virginia
     ipAllowList:
       - source: 0.0.0.0/0
         description: allow-all
