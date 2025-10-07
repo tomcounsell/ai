@@ -2,13 +2,6 @@
 previews:
   generation: manual
 
-databases:
-  - name: cuttlefish-db
-    plan: free
-    databaseName: cuttlefish
-    user: cuttlefish_user
-    region: oregon
-
 services:
   # Production web service
   - type: web
@@ -24,10 +17,6 @@ services:
     envVars:
       - key: PORT
         value: 8000
-      - key: DATABASE_URL
-        fromDatabase:
-          name: cuttlefish-db
-          property: connectionString
       - key: DEPLOYMENT_TYPE
         value: PRODUCTION
       # Optional: Redis for future use (currently commented out)
