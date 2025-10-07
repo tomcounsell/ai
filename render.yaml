@@ -28,9 +28,8 @@ services:
 
   - type: keyvalue
     name: redis-production
-    region: virginia
     ipAllowList:
       - source: 0.0.0.0/0
         description: allow-all
-    plan: starter
+    plan: free
     maxmemoryPolicy: allkeys-lru
