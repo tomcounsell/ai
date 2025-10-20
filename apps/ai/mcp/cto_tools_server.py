@@ -212,6 +212,20 @@ summary accessible to ALL stakeholders - technical and non-technical alike.
 
 ---
 
+## FINAL STEP: SAVE TO FILE
+
+After completing the summary, save it to a markdown file:
+
+**Filename format**: `/tmp/eng_review_<dates>.md`
+- Example: `/tmp/eng_review_oct6-13.md` (for weekly review)
+- Example: `/tmp/eng_review_sep7-oct7.md` (for monthly review)
+
+**Only save if file write access is available** - if not, just output the summary.
+
+Use the Write tool to save the complete markdown summary to this file.
+
+---
+
 **Start by running the PHASE 1 git commands in parallel, then proceed.**
 """
 
