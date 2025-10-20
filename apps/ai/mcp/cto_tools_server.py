@@ -62,9 +62,9 @@ def weekly_review() -> str:
 # Weekly Engineering Team Review Framework
 
 ## GOAL
-Produce a structured weekly engineering review organized by 5 categories with 2-5 technical
-bullets each, plus detailed team statistics. Format uses numbered list, bold bullet titles,
-file references, and emojis. Suitable for sharing with engineering teams and leadership.
+Produce a structured weekly engineering review organized by 5 categories with 2-5 bullets each,
+plus team statistics. Format uses numbered list, bold titles, and emojis. Written in plain
+language accessible to non-technical stakeholders while still meaningful to engineers.
 
 ---
 
@@ -128,34 +128,34 @@ Examples: "Credential & Authentication Infrastructure" not just "Auth"
 # Weekly Engineering Review - [Date Range]
 
 1. 🔐 Category Name
-- **Feature/component name** - Technical description with key details (path/to/file.py)
-- **Another feature** - What changed and how, include file references when relevant
-- **Third feature** - More technical details with specifics
+- **Feature/improvement name** - What it does and why it matters for users or the business
+- **Another improvement** - The benefit or problem it solves, in plain language
+- **Third item** - Focus on impact, not implementation details
 - [Continue with 2-5 bullets per category]
 
 2. 🔌 Category Name
-- **Feature name** - Description (apps/specific/path.py)
-- **Another feature** - Technical details
+- **Feature name** - Business value and user impact
+- **Another feature** - What changed and why
 - [2-5 bullets]
 
 3. 💬 Category Name
-- **Feature name** - Description
+- **Feature name** - Clear description of what users will experience
 - [2-5 bullets]
 
 4. 📧 Category Name
-- **Feature name** - Description
+- **Feature name** - Benefits and outcomes
 - [2-5 bullets]
 
 5. 🧪 Category Name
-- **Feature name** - Description
+- **Feature name** - What was improved and why it matters
 - [2-5 bullets]
 
 📊 Team Statistics & Recognition
-- [X] total commits across [Y] files ([Z] commits/day average)
-- [Additional metrics like test cases added, files changed, etc.]
-- **[Name]**: [X] commits ([%]%) - [Their focus areas and achievements]
-- **[Name]**: [X] commits ([%]%) - [Their focus areas and achievements]
-- **[Name]**: [X] commits ([%]%) - [Their focus areas and achievements]
+- [X] total commits over [N] days ([Z] commits/day average)
+- [Additional high-level metrics: features completed, improvements made]
+- **[Name]**: [X] commits ([%]%) - [Their focus areas in plain language]
+- **[Name]**: [X] commits ([%]%) - [Their focus areas in plain language]
+- **[Name]**: [X] commits ([%]%) - [Their focus areas in plain language]
 ```
 
 ---
@@ -168,10 +168,10 @@ Examples: "Credential & Authentication Infrastructure" not just "Auth"
 
 **Each bullet format**:
 - Start with **bold title** - then description
-- Include technical details (what AND how when relevant)
-- Add file references in parentheses: `(apps/module/file.py)` or `(apps/module/file.py:123)`
+- Focus on WHAT was done and WHY it matters (business impact, user benefit, problem solved)
+- Write in plain language - avoid jargon, code paths, method names, technical implementation details
 - Can be 1-2 sentences if needed for clarity
-- Be specific about technologies, patterns, and technical decisions
+- Think: "Would a product manager, designer, or executive understand this?"
 
 **Category selection**:
 - Choose the 5 most relevant to this week's work
@@ -191,14 +191,15 @@ Examples: "Credential & Authentication Infrastructure" not just "Auth"
 
 Your final response should be:
 - ✅ One structured summary with 5 numbered categories
-- ✅ 2-5 technical bullets per category with file references
+- ✅ 2-5 bullets per category in plain language (no code paths, no method names, no file references)
 - ✅ Team Statistics section with contributor breakdown
+- ✅ Focus on business impact and user benefits, not technical implementation
 - ❌ NOT multiple pages of verbose analysis
 - ❌ NOT separate technical/executive/quick summaries
-- ❌ NOT long explanations of methodology
+- ❌ NOT technical jargon or code references (apps/path/file.py, function names, etc.)
 
 The analysis happens internally using sequential thinking. The output is a well-structured
-technical summary suitable for sharing with engineering teams and leadership.
+summary accessible to ALL stakeholders - technical and non-technical alike.
 
 ---
 
