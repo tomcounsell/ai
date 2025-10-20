@@ -203,12 +203,12 @@
                     </p>
                     <ul style="margin-top: 0.5rem;">
                         <li><strong>Phase 1:</strong> Data gathering with parallel git commands</li>
-                        <li><strong>Phase 2:</strong> LLM-aligned analysis (draft → identify → categorize)</li>
-                        <li><strong>Phase 3:</strong> Multi-level summaries with integrated team recognition</li>
+                        <li><strong>Phase 2:</strong> Internal analysis (review → categorize → stats)</li>
+                        <li><strong>Phase 3:</strong> Concise output (~200 words) with 5 categories and contributor stats</li>
                     </ul>
                     <p style="margin-top: 1rem;">
-                        <strong>Features:</strong> ⚡ Speed mode (15-20 min) | 🔍 Deep mode (45-60 min) |
-                        🎯 Multi-format outputs | 🌟 Extra credit patterns (when verbose)
+                        <strong>Features:</strong> ⚡ Fast reviews (15-20 min) | 📊 Concise output |
+                        👥 Automatic contributor recognition | 🎯 Communication-ready format
                     </p>
                 </div>
             </div>
@@ -218,41 +218,43 @@
                 <div class="features">
                     <div class="feature">
                         <h4>📈 3-Phase Framework</h4>
-                        <p>Streamlined process: gather data, analyze & categorize, create summaries</p>
+                        <p>Streamlined process: gather data, analyze internally, output concise summary</p>
                     </div>
                     <div class="feature">
-                        <h4>🔍 Adaptive Analysis</h4>
-                        <p>LLM chooses 5 relevant categories based on actual work, not templates</p>
+                        <h4>🔍 Adaptive Categorization</h4>
+                        <p>AI chooses 5 relevant categories based on actual work, not templates</p>
                     </div>
                     <div class="feature">
-                        <h4>📝 Multi-Level Summaries</h4>
-                        <p>Technical, executive, and quick formats with integrated team recognition</p>
+                        <h4>📝 Concise Output</h4>
+                        <p>Single ~200 word summary with bullets, suitable for any communication channel</p>
                     </div>
                     <div class="feature">
-                        <h4>🎯 Analysis-Focused</h4>
-                        <p>Understand what happened, not prescribe what to do next</p>
+                        <h4>🎯 Focus on What Changed</h4>
+                        <p>Clear deliverables without verbose analysis - thinking happens internally</p>
                     </div>
                 </div>
             </div>
 
             <div class="installation">
-                <h3>Installation</h3>
-                <p>Install in Claude Desktop by adding to your configuration:</p>
+                <h3>Installation - Single Executable File</h3>
+                <p><strong>No dependencies required!</strong> Run directly from URL with uv:</p>
                 <pre><code>{
   "mcpServers": {
     "cto-tools": {
       "command": "uv",
       "args": [
-        "--directory",
-        "/path/to/cuttlefish",
         "run",
-        "python",
-        "-m",
-        "apps.ai.mcp.cto_tools_server"
+        "https://raw.githubusercontent.com/tomcounsell/cuttlefish/main/apps/ai/mcp/cto_tools_server.py"
       ]
     }
   }
 }</code></pre>
+                <p style="margin-top: 1rem;">
+                    <strong>Or download and run locally:</strong>
+                </p>
+                <pre><code>curl -O https://raw.githubusercontent.com/tomcounsell/cuttlefish/main/apps/ai/mcp/cto_tools_server.py
+chmod +x cto_tools_server.py
+./cto_tools_server.py</code></pre>
                 <p style="margin-top: 1rem;">
                     <strong>Web Manifest:</strong> <code>https://ai.yuda.me/mcp/cto-tools/manifest.json</code>
                 </p>

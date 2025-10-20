@@ -23,10 +23,10 @@ async def test_weekly_review_contains_framework_sections():
     """Test weekly_review contains expected framework sections."""
     result = weekly_review()
 
-    # Check for main framework phases (3 phases - data, analysis, summaries with team recognition)
+    # Check for main framework phases (3 phases - data, analysis, output)
     assert "PHASE 1: GATHER DATA" in result
-    assert "PHASE 2: ANALYZE & CATEGORIZE" in result
-    assert "PHASE 3: CREATE SUMMARIES" in result
+    assert "PHASE 2: ANALYZE INTERNALLY" in result
+    assert "PHASE 3: WRITE THE FINAL SUMMARY" in result
 
 
 @pytest.mark.asyncio
@@ -42,52 +42,48 @@ async def test_weekly_review_contains_git_commands():
 
 @pytest.mark.asyncio
 async def test_weekly_review_contains_categorization_guidance():
-    """Test weekly_review includes work categorization guidance with proper LLM workflow."""
+    """Test weekly_review includes work categorization guidance."""
     result = weekly_review()
 
-    # Check for proper LLM workflow: draft first, then categorize
-    assert "Draft All Updates" in result or "working draft" in result.lower()
-    assert "Identify Natural Groupings" in result or "natural" in result.lower()
-    assert "Choose Category Names" in result or "choose" in result.lower()
-    assert "Category suggestions" in result or "suggestions" in result.lower()
+    # Check for category guidance
+    assert "Choose 5 categories" in result or "5 categories" in result
+    assert "Category ideas" in result or "category" in result.lower()
 
-    # Should have expanded category list
-    assert "DevOps" in result or "API" in result or "Billing" in result
+    # Should have category suggestions
+    assert "DevOps" in result or "API" in result or "Testing" in result
 
 
 @pytest.mark.asyncio
-async def test_weekly_review_contains_metrics_guidance():
-    """Test weekly_review includes metrics extraction."""
+async def test_weekly_review_contains_stats_guidance():
+    """Test weekly_review includes stats extraction."""
     result = weekly_review()
 
-    # Check for metrics mentions
-    assert "metrics" in result.lower()
+    # Check for stats mentions
+    assert "stats" in result.lower()
     assert "commits" in result.lower()
     assert "contributors" in result.lower()
 
 
 @pytest.mark.asyncio
-async def test_weekly_review_contains_summary_template():
-    """Test weekly_review includes executive summary template."""
+async def test_weekly_review_contains_output_template():
+    """Test weekly_review includes structured output template."""
     result = weekly_review()
 
-    # Check for summary sections (3-phase framework with integrated team recognition)
-    assert "Technical Summary" in result
-    assert "Executive Summary" in result
-    assert "Quick Summary" in result
-    assert "Team Recognition" in result
-    assert "Overview" in result
+    # Check for numbered list format and team statistics
+    assert "1. " in result and "2. " in result  # Numbered categories
+    assert "Team Statistics" in result or "contributors" in result.lower()
+    assert "commits" in result.lower()
 
 
 @pytest.mark.asyncio
-async def test_weekly_review_contains_tips():
-    """Test weekly_review includes pro tips."""
+async def test_weekly_review_emphasizes_structured_output():
+    """Test weekly_review emphasizes structured technical output."""
     result = weekly_review()
 
-    # Check for tips section
-    assert "EXECUTION TIPS" in result or "Pro Tips" in result
-    assert "Speed" in result or "15-20 min" in result
-    assert "Depth" in result or "45-60 min" in result
+    # Check for output expectations
+    assert "OUTPUT EXPECTATIONS" in result or "structured" in result.lower()
+    assert "numbered categories" in result.lower() or "5 categories" in result
+    assert "NOT multiple pages" in result or "not multiple" in result.lower()
 
 
 @pytest.mark.asyncio
@@ -124,14 +120,13 @@ async def test_weekly_review_comprehensive_coverage():
     """Test that weekly_review covers all key aspects of team review."""
     result = weekly_review()
 
-    # Verify comprehensive coverage (3-phase: data, analysis, summaries+team)
+    # Verify comprehensive coverage (data, analysis, output)
     coverage_aspects = [
         "commit",  # Git analysis
-        "team",  # Team focus
-        "metrics",  # Metrics
-        "recognition",  # Team recognition
+        "contributors",  # Team focus
         "categor",  # Categorization (matches "categorize" or "categories")
-        "summary",  # Multi-level summaries
+        "bullet",  # Bullet point format
+        "structured",  # Emphasis on structured output
     ]
 
     result_lower = result.lower()

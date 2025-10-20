@@ -16,12 +16,8 @@
     "protocol": "stdio",
     "command": "uv",
     "args": [
-      "--directory",
-      "/path/to/cuttlefish",
       "run",
-      "python",
-      "-m",
-      "apps.ai.mcp.cto_tools_server"
+      "https://raw.githubusercontent.com/tomcounsell/cuttlefish/main/apps/ai/mcp/cto_tools_server.py"
     ]
   },
   "tools": [

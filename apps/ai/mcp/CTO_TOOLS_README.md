@@ -15,12 +15,12 @@ CTO Tools is a Model Context Protocol (MCP) server that provides structured fram
 
 ## Installation
 
-### Claude Desktop
+### Standalone Single-File Server
 
-Add to your Claude Desktop configuration file:
+The CTO Tools MCP server is a **single executable file** with inline dependencies.
+You can run it directly with `uv` without needing the full cuttlefish project.
 
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+#### Option 1: Run from URL (Recommended)
 
 ```json
 {
@@ -28,13 +28,54 @@ Add to your Claude Desktop configuration file:
     "cto-tools": {
       "command": "uv",
       "args": [
-        "--directory",
-        "/path/to/cuttlefish",
         "run",
-        "python",
-        "-m",
-        "apps.ai.mcp.cto_tools_server"
+        "https://raw.githubusercontent.com/tomcounsell/cuttlefish/main/apps/ai/mcp/cto_tools_server.py"
       ]
+    }
+  }
+}
+```
+
+#### Option 2: Run Local File
+
+Download the file and run it directly:
+
+```bash
+# Download the file
+curl -O https://raw.githubusercontent.com/tomcounsell/cuttlefish/main/apps/ai/mcp/cto_tools_server.py
+
+# Make it executable (optional)
+chmod +x cto_tools_server.py
+
+# Run it
+uv run cto_tools_server.py
+# or
+./cto_tools_server.py
+```
+
+**Claude Desktop config** (macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "cto-tools": {
+      "command": "uv",
+      "args": ["run", "/absolute/path/to/cto_tools_server.py"]
+    }
+  }
+}
+```
+
+#### Option 3: Run from Cuttlefish Project
+
+If you have the cuttlefish repository:
+
+```json
+{
+  "mcpServers": {
+    "cto-tools": {
+      "command": "uv",
+      "args": ["run", "/path/to/cuttlefish/apps/ai/mcp/cto_tools_server.py"]
     }
   }
 }
@@ -50,26 +91,24 @@ Access the web manifest at: `https://ai.yuda.me/mcp/cto-tools/manifest.json`
 
 Provides a streamlined 3-phase framework for conducting weekly engineering team reviews.
 
-**Purpose**: Systematically review your development team's work to understand accomplishments and recognize contributions. Analysis-focused, not prescriptive. Works with ANY codebase and tech stack.
+**Purpose**: Systematically review your development team's work to produce a concise summary. Analysis-focused, not prescriptive. Works with ANY codebase and tech stack.
 
-**Returns**: Detailed phase-by-phase instructions including:
+**Returns**: Phase-by-phase instructions for creating a ~200 word summary including:
 
 **Phase 1 - Data Gathering**:
 - Git commands to run in parallel for efficient data collection
 - Commit history, author statistics, and file changes
 
-**Phase 2 - Analysis & Categorization** (LLM-aligned workflow):
-- Draft all updates first (build context)
-- Identify natural groupings (pattern recognition)
-- Choose 5 category names (decision making)
-- 13 suggested categories including DevOps, API, Billing, Reporting
-- Always include Team Activity and Repository Metrics
-- Optional: Development patterns (extra credit when verbose)
+**Phase 2 - Internal Analysis**:
+- Review commits and identify patterns
+- Choose 5 relevant categories that emerge from the work
+- Note key stats (commits, files, contributors)
+- Suggested categories: AI & ML, Auth & Security, Frontend/UX, Performance, Code Quality, Bug Fixes, Data & Analytics, DevOps, API, Billing, Reporting, Database, Testing
 
-**Phase 3 - Multi-Level Summaries (with Team Recognition)**:
-- Technical summary for engineering team
-- Executive summary for leadership with team recognition (200-300 words)
-- Quick summary for Slack/chat (50-100 words)
+**Phase 3 - Concise Output**:
+- Single summary organized by 5 categories (2-5 bullets each)
+- Stats section with commit counts and contributor recognition
+- Suitable for any communication channel (chat, email, reports)
 
 **Example Usage**:
 
@@ -77,21 +116,15 @@ Provides a streamlined 3-phase framework for conducting weekly engineering team 
 Claude, use CTO Tools to run a weekly review of my team's work.
 ```
 
-Or for a quick review:
-
-```
-Claude, use CTO Tools for a fast 15-minute weekly review focusing on highlights and blockers.
-```
-
 **Features**:
-- ⚡ Speed mode (15-20 min) for quick insights
-- 🔍 Deep mode (45-60 min) for comprehensive analysis
-- 📝 Auto-generates documentation for critical issues found
-- 👥 Recognizes individual and collaborative contributions
-- 🎯 Creates multi-format summaries for different stakeholders
+- 📊 Concise output (~200 words) suitable for any channel
+- 🎯 Focus on what changed, not lengthy analysis
+- 👥 Automatic contributor recognition with commit counts
+- 🔍 Internal analysis (using sequential thinking) with brief output
+- ⚡ Fast reviews (15-20 min) with clear deliverables
 
-The framework guides you through systematic analysis that tells the story of your team's week,
-identifies both achievements and problems, and produces actionable insights for decision-making.
+The framework guides you through systematic analysis that produces a concise, scannable summary
+of your team's week with category-based organization and contributor recognition.
 
 ## How It Works
 
@@ -111,20 +144,17 @@ identifies both achievements and problems, and produces actionable insights for 
 
 ### Weekly Team Reviews
 Review your team's progress every Friday:
-- Extract commit history from the past week
-- Categorize work (features, bugs, refactoring, etc.)
-- Generate executive summary for stakeholders
-- Identify blockers and risks
-- Plan next week's priorities
+- Extract commit history from the past 7 days
+- Analyze internally to identify 5 key categories
+- Generate concise summary (~200 words) with bullets
+- Include contributor stats and recognition
 
-### Fast Reviews (15 minutes)
-Focus on highlights, key metrics, and blockers only.
-
-### Deep Reviews (60 minutes)
-Include full categorization, pattern analysis, and individual deep-dives.
-
-### Board/Executive Updates
-Lead with business value delivered, risks identified, and resource needs.
+### Communication-Ready Output
+The summary format is designed for immediate sharing:
+- Chat channels (Slack, Teams, Discord)
+- Email updates to stakeholders
+- Status reports for leadership
+- Team retrospectives
 
 ## Technical Details
 
