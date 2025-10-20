@@ -127,6 +127,10 @@ Examples: "Credential & Authentication Infrastructure" not just "Auth"
 ```markdown
 # Weekly Engineering Review - [Date Range]
 
+**IMPORTANT**: The title date range should ALWAYS show the full period requested (e.g., "Oct 6-13, 2025"
+for a 7-day review), regardless of when commits actually occurred. Even if there are only 2 days of
+commits, the title reflects the full search period.
+
 1. 🔐 Category Name
 - **Feature/improvement name** - What it does and why it matters for users or the business
 - **Another improvement** - The benefit or problem it solves, in plain language
@@ -161,6 +165,11 @@ Examples: "Credential & Authentication Infrastructure" not just "Auth"
 ---
 
 ## WRITING GUIDELINES
+
+**Title date range**:
+- ALWAYS use the full period searched (e.g., "Oct 6-13" for 7 days, "Sept 7 - Oct 7" for 30 days)
+- Don't adjust dates based on when commits actually happened
+- The title shows the review period, not the activity period
 
 **Emoji format**:
 - Use real Unicode emojis (🔐 🔌 💬 📧 🧪 etc.)
