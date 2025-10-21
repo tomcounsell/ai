@@ -58,13 +58,14 @@ def weekly_review() -> str:
     Returns:
         str: Step-by-step instructions for conducting a weekly review with concise output
     """
-    instructions = """
+    instructions = r"""
 # Weekly Engineering Team Review Framework
 
 ## GOAL
 Produce a structured weekly engineering review organized by 5 categories with 2-5 bullets each,
-plus team statistics. Format uses numbered list, bold titles, and emojis. Written in plain
-language accessible to non-technical stakeholders while still meaningful to engineers.
+plus team statistics. Output in RTF (Rich Text Format) for easy copy-paste into email, Slack,
+Google Docs, etc. Uses emojis, bold titles (no numbers), and plain language accessible to
+non-technical stakeholders while still meaningful to engineers.
 
 ---
 
@@ -122,45 +123,57 @@ Examples: "Credential & Authentication Infrastructure" not just "Auth"
 
 ## PHASE 3: WRITE THE FINAL SUMMARY
 
-**Output ONLY this format**:
+**Output in RTF format (no numbers, just emoji + bold titles)**:
 
-```markdown
-# Weekly Engineering Review - [Date Range]
+```
+{\rtf1\ansi\deff0
+{\fonttbl{\f0\fnil\fcharset0 Helvetica;}}
+{\colortbl;\red0\green0\blue0;\red51\green51\blue51;}
+
+\f0\fs24
+
+{\b\fs32 Weekly Engineering Review - [Date Range]}\par
+\par
+
+{\b\fs28 🔐 Category Name}\par
+{\b Feature/improvement name} - What it does and why it matters for users or the business\par
+{\b Another improvement} - The benefit or problem it solves, in plain language\par
+{\b Third item} - Focus on impact, not implementation details\par
+[Continue with 2-5 bullets per category]\par
+\par
+
+{\b\fs28 🔌 Category Name}\par
+{\b Feature name} - Business value and user impact\par
+{\b Another feature} - What changed and why\par
+[2-5 bullets]\par
+\par
+
+{\b\fs28 💬 Category Name}\par
+{\b Feature name} - Clear description of what users will experience\par
+[2-5 bullets]\par
+\par
+
+{\b\fs28 📧 Category Name}\par
+{\b Feature name} - Benefits and outcomes\par
+[2-5 bullets]\par
+\par
+
+{\b\fs28 🧪 Category Name}\par
+{\b Feature name} - What was improved and why it matters\par
+[2-5 bullets]\par
+\par
+
+{\b\fs28 📊 Team Statistics & Recognition}\par
+[X] total commits over [N] days ([Z] commits/day average)\par
+[Additional high-level metrics: features completed, improvements made]\par
+{\b [Name]}: [X] commits ([%]%) - [Their focus areas in plain language]\par
+{\b [Name]}: [X] commits ([%]%) - [Their focus areas in plain language]\par
+{\b [Name]}: [X] commits ([%]%) - [Their focus areas in plain language]\par
+}
+```
 
 **IMPORTANT**: The title date range should ALWAYS show the full period requested (e.g., "Oct 6-13, 2025"
-for a 7-day review), regardless of when commits actually occurred. Even if there are only 2 days of
-commits, the title reflects the full search period.
-
-1. 🔐 Category Name
-- **Feature/improvement name** - What it does and why it matters for users or the business
-- **Another improvement** - The benefit or problem it solves, in plain language
-- **Third item** - Focus on impact, not implementation details
-- [Continue with 2-5 bullets per category]
-
-2. 🔌 Category Name
-- **Feature name** - Business value and user impact
-- **Another feature** - What changed and why
-- [2-5 bullets]
-
-3. 💬 Category Name
-- **Feature name** - Clear description of what users will experience
-- [2-5 bullets]
-
-4. 📧 Category Name
-- **Feature name** - Benefits and outcomes
-- [2-5 bullets]
-
-5. 🧪 Category Name
-- **Feature name** - What was improved and why it matters
-- [2-5 bullets]
-
-📊 Team Statistics & Recognition
-- [X] total commits over [N] days ([Z] commits/day average)
-- [Additional high-level metrics: features completed, improvements made]
-- **[Name]**: [X] commits ([%]%) - [Their focus areas in plain language]
-- **[Name]**: [X] commits ([%]%) - [Their focus areas in plain language]
-- **[Name]**: [X] commits ([%]%) - [Their focus areas in plain language]
-```
+for a 7-day review), regardless of when commits actually occurred.
 
 ---
 
@@ -186,7 +199,7 @@ commits, the title reflects the full search period.
 - Choose the 5 most relevant to this week's work
 - Use descriptive names like "Credential & Authentication Infrastructure" not just "Auth"
 - Order by importance/impact
-- Use professional slack emoji codes
+- NO NUMBERS - just emoji and title (e.g., "🔐 Authentication" not "1. 🔐 Authentication")
 
 **Team Statistics section**:
 - Calculate commit percentages for each contributor
@@ -199,30 +212,42 @@ commits, the title reflects the full search period.
 ## IMPORTANT: OUTPUT EXPECTATIONS
 
 Your final response should be:
-- ✅ One structured summary with 5 numbered categories
+- ✅ RTF format for rich text copy-paste
+- ✅ 5 categories with emoji + bold title (NO NUMBERS)
 - ✅ 2-5 bullets per category in plain language (no code paths, no method names, no file references)
 - ✅ Team Statistics section with contributor breakdown
 - ✅ Focus on business impact and user benefits, not technical implementation
 - ❌ NOT multiple pages of verbose analysis
-- ❌ NOT separate technical/executive/quick summaries
+- ❌ NOT numbered sections (just emoji + title)
 - ❌ NOT technical jargon or code references (apps/path/file.py, function names, etc.)
 
-The analysis happens internally using sequential thinking. The output is a well-structured
-summary accessible to ALL stakeholders - technical and non-technical alike.
+The analysis happens internally using sequential thinking. The output is RTF-formatted and
+accessible to ALL stakeholders - technical and non-technical alike.
 
 ---
 
-## FINAL STEP: SAVE TO FILE
+## FINAL STEP: CREATE DOCUMENT
 
-After completing the summary, save it to a markdown file:
+Choose the best document option based on your environment:
 
-**Filename format**: `/tmp/eng_review_<dates>.md`
-- Example: `/tmp/eng_review_oct6-13.md` (for weekly review)
-- Example: `/tmp/eng_review_sep7-oct7.md` (for monthly review)
+**Option 1: Claude Code / Desktop Commander MCP**
+Save to RTF file: `/tmp/eng_review_<dates>.rtf`
+- Example: `/tmp/eng_review_oct6-13.rtf` (for weekly review)
+- Example: `/tmp/eng_review_sep7-oct7.rtf` (for monthly review)
+- After saving, offer to open in TextEdit: `open -a TextEdit /tmp/eng_review_<dates>.rtf`
 
-**Only save if file write access is available** - if not, just output the summary.
+**Option 2: Claude Artifact** (if available)
+Create a new artifact with the RTF content for easy viewing and editing.
 
-Use the Write tool to save the complete markdown summary to this file.
+**Option 3: ChatGPT Canvas** (if in ChatGPT)
+Use canvas mode to create an editable document.
+
+**Option 4: Google Drive** (if Drive integration available)
+Create a new Google Doc with the formatted content.
+
+**If none available**: Just output the RTF content for manual copy-paste.
+
+**After creating file**, offer to open it in the local TextEdit app for easy copy-paste.
 
 ---
 
