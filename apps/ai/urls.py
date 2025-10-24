@@ -27,33 +27,33 @@ urlpatterns: list[URLPattern] = [
     path("test-chat/", TestChatView.as_view(), name="test-chat"),
     # MCP server endpoints
     path(
-        "mcp/creative-juices/",
+        "creative-juices/",
         CreativeJuicesLandingView.as_view(),
         name="mcp-creative-juices",
     ),
     path(
-        "mcp/creative-juices/manifest.json",
+        "creative-juices/manifest.json",
         CreativeJuicesManifestView.as_view(),
         name="mcp-creative-juices-manifest",
     ),
     path(
-        "mcp/creative-juices/README.md",
+        "creative-juices/README.md",
         CreativeJuicesReadmeView.as_view(),
         name="mcp-creative-juices-readme",
     ),
     # CTO Tools MCP server endpoints
     path(
-        "mcp/cto-tools/",
+        "cto-tools/",
         CTOToolsLandingView.as_view(),
         name="mcp-cto-tools",
     ),
     path(
-        "mcp/cto-tools/manifest.json",
+        "cto-tools/manifest.json",
         CTOToolsManifestView.as_view(),
         name="mcp-cto-tools-manifest",
     ),
     path(
-        "mcp/cto-tools/README.md",
+        "cto-tools/README.md",
         CTOToolsReadmeView.as_view(),
         name="mcp-cto-tools-readme",
     ),

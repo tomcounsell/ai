@@ -21,14 +21,14 @@ ENDPOINTS_TO_CHECK = [
     ("/", 200, False, "Homepage"),
     ("/health/", 200, False, "Basic health check"),
     ("/health/deep/", 200, False, "Deep health check"),
-    ("/ai/mcp/creative-juices/", 200, False, "Creative Juices landing"),
+    ("/mcp/creative-juices/", 200, False, "Creative Juices landing"),
     (
-        "/ai/mcp/creative-juices/manifest.json",
+        "/mcp/creative-juices/manifest.json",
         200,
         True,
         "Creative Juices manifest",
     ),
-    ("/ai/mcp/creative-juices/README.md", 200, True, "Creative Juices README"),
+    ("/mcp/creative-juices/README.md", 200, True, "Creative Juices README"),
 ]
 
 

@@ -3,7 +3,7 @@ import os
 from django.contrib import admin
 from django.http import Http404, HttpResponse, JsonResponse
 from django.urls import include, path
-from django.views.generic import TemplateView
+from django.views.generic import RedirectView, TemplateView
 
 from apps.api.views.health_views import health_check, deep_health_check
 from settings.env import DEBUG, LOCAL
@@ -107,7 +107,13 @@ urlpatterns = [
     path("", TemplateView.as_view(template_name="pages/home.html"), name="home"),
     path("", include("apps.public.urls", namespace="public")),
     path("staff/", include("apps.staff.urls", namespace="staff")),
-    path("ai/", include("apps.ai.urls", namespace="ai")),
+    # Legacy redirect for old /ai/mcp/ URLs
+    path(
+        "ai/mcp/<path:subpath>",
+        RedirectView.as_view(url="/mcp/%(subpath)s", permanent=True),
+        name="legacy_mcp_redirect",
+    ),
+    path("mcp/", include("apps.ai.urls", namespace="ai")),
     # Health check endpoints for monitoring
     path("health/", health_check, name="health_check"),
     path("health/deep/", deep_health_check, name="deep_health_check"),

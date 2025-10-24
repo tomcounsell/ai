@@ -50,7 +50,7 @@ def test_deep_health_check(page: Page):
 
 def test_creative_juices_landing(page: Page):
     """Test Creative Juices landing page."""
-    page.goto(f"{PRODUCTION_URL}/ai/mcp/creative-juices/")
+    page.goto(f"{PRODUCTION_URL}/mcp/creative-juices/")
 
     # Check page title
     expect(page).to_have_title("Creative Juices MCP - Break Free from Predictable AI")
@@ -61,7 +61,7 @@ def test_creative_juices_landing(page: Page):
 
 def test_creative_juices_manifest_accessible(page: Page):
     """Test manifest.json is accessible."""
-    response = page.goto(f"{PRODUCTION_URL}/ai/mcp/creative-juices/manifest.json")
+    response = page.goto(f"{PRODUCTION_URL}/mcp/creative-juices/manifest.json")
     assert response.status == 200
 
     # Check CORS headers
@@ -71,7 +71,7 @@ def test_creative_juices_manifest_accessible(page: Page):
 
 def test_creative_juices_readme_accessible(page: Page):
     """Test README.md is accessible."""
-    response = page.goto(f"{PRODUCTION_URL}/ai/mcp/creative-juices/README.md")
+    response = page.goto(f"{PRODUCTION_URL}/mcp/creative-juices/README.md")
     assert response.status == 200
 
     # Check CORS headers
@@ -81,7 +81,7 @@ def test_creative_juices_readme_accessible(page: Page):
 
 def test_all_critical_links_work(page: Page):
     """Test that all critical navigation links work."""
-    page.goto(f"{PRODUCTION_URL}/ai/mcp/creative-juices/")
+    page.goto(f"{PRODUCTION_URL}/mcp/creative-juices/")
 
     # Wait for page to load
     page.wait_for_load_state("networkidle")

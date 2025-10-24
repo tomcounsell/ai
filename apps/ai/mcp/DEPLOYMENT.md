@@ -60,7 +60,7 @@ uv run python manage.py migrate
 
 # Test locally
 uv run python manage.py runserver
-# Visit http://localhost:8000/ai/mcp/creative-juices
+# Visit http://localhost:8000/mcp/creative-juices
 ```
 
 ### Production Deployment
