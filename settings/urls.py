@@ -5,6 +5,7 @@ from django.http import Http404, HttpResponse, JsonResponse
 from django.urls import include, path
 from django.views.generic import TemplateView
 
+from apps.api.views.health_views import health_check, deep_health_check
 from settings.env import DEBUG, LOCAL
 from settings.unfold import (
     ADMIN_INDEX_TITLE,
@@ -107,8 +108,9 @@ urlpatterns = [
     path("", include("apps.public.urls", namespace="public")),
     path("staff/", include("apps.staff.urls", namespace="staff")),
     path("ai/", include("apps.ai.urls", namespace="ai")),
-    # Health check endpoint for monitoring
-    path("health/", lambda r: HttpResponse("OK"), name="health"),
+    # Health check endpoints for monitoring
+    path("health/", health_check, name="health_check"),
+    path("health/deep/", deep_health_check, name="deep_health_check"),
     # Serve documentation index
     path("docs/", serve_docs_index, name="docs_index"),
     # Serve Markdown documentation directly - supports docs/FILENAME and nested paths
