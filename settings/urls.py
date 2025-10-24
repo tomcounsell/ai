@@ -6,6 +6,7 @@ from django.urls import include, path
 from django.views.generic import RedirectView, TemplateView
 
 from apps.api.views.health_views import health_check, deep_health_check
+from apps.public.views.landing_views import AIPlatformLandingView
 from settings.env import DEBUG, LOCAL
 from settings.unfold import (
     ADMIN_INDEX_TITLE,
@@ -104,7 +105,7 @@ def serve_markdown_file(request, filename):
 
 
 urlpatterns = [
-    path("", TemplateView.as_view(template_name="pages/home.html"), name="home"),
+    path("", AIPlatformLandingView.as_view(), name="home"),
     path("", include("apps.public.urls", namespace="public")),
     path("staff/", include("apps.staff.urls", namespace="staff")),
     # Legacy redirect for old /ai/mcp/ URLs
