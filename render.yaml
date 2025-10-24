@@ -5,7 +5,7 @@ previews:
 services:
   # Production web service
   - type: web
-    name: cuttlefish-production
+    name: cuttlefish
     runtime: python
     buildCommand: ./build.sh
     startCommand: gunicorn settings.wsgi:application --bind 0.0.0.0:$PORT --timeout 180 --keep-alive 5 --worker-connections 1000 --preload
@@ -22,12 +22,12 @@ services:
       - key: REDIS_URL
         fromService:
           type: keyvalue
-          name: redis-production
+          name: cuttlefish-keyvalue
           property: connectionString
       - fromGroup: cuttlefish
 
   - type: keyvalue
-    name: redis-production
+    name: cuttlefish-keyvalue
     ipAllowList:
       - source: 0.0.0.0/0
         description: allow-all
