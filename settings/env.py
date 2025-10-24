@@ -52,7 +52,8 @@ if LOCAL:
     CORS_ORIGIN_ALLOW_ALL = True
 else:
     CORS_ORIGIN_WHITELIST = [
-        'cuttlefish-ea1h.onrender.com',
+        'https://cuttlefish-ea1h.onrender.com',
+        'https://ai.yuda.me',
         'https://*.yuda.me',
         # 'https://s3.amazonaws.com',
         # 'https://vendor_api.com',
