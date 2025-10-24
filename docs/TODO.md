@@ -4,6 +4,99 @@
 
 This document tracks pending infrastructure components and improvements for the codebase. Check here before implementing features that need these components.
 
+## 🎯 Immediate Priorities (Next Up)
+
+### 1. Production Health Check Tests
+**Status**: Not Started
+**Priority**: High
+**Estimated Time**: 3-4 hours
+**Owner**: TBD
+
+Create end-to-end production tests to verify services are online and functioning.
+
+**Tasks**:
+- [ ] Create health check endpoints (`/health/`, `/health/deep/`)
+- [ ] Write production health check script (`tools/testing/production_health_check.py`)
+- [ ] Test critical endpoints (homepage, MCP pages, manifests)
+- [ ] Verify CORS headers on MCP endpoints
+- [ ] Add browser-based E2E tests with Playwright
+- [ ] Set up GitHub Actions workflow for automated checks (every 15 min)
+- [ ] Configure failure notifications
+
+**Success Criteria**:
+- All production endpoints return 200
+- CORS headers present on MCP manifest/README
+- Automated checks run on schedule
+- Team notified on failures
+
+**See detailed plan in this document below**
+
+---
+
+### 2. Remove /ai/ URL Prefix
+**Status**: Not Started
+**Priority**: Medium
+**Estimated Time**: 1-2 hours
+**Owner**: TBD
+
+Simplify URLs by removing the `/ai/` prefix from MCP endpoints.
+
+**Current**: `https://ai.yuda.me/ai/mcp/creative-juices/`
+**Target**: `https://ai.yuda.me/mcp/creative-juices/`
+
+**Tasks**:
+- [ ] Update `settings/urls.py` to route `/mcp/` directly
+- [ ] Update `apps/ai/urls.py` to remove `mcp/` prefix
+- [ ] Search and replace hardcoded URLs in codebase
+- [ ] Add redirects for old URLs (optional but recommended)
+- [ ] Update external documentation
+- [ ] Update production health check script with new URLs
+- [ ] Deploy and verify
+
+**Success Criteria**:
+- MCP endpoints work at `/mcp/` prefix
+- Old URLs redirect (if implemented) or return 404
+- All documentation updated
+- No broken links
+
+**See detailed plan in this document below**
+
+---
+
+### 3. New Landing Page for ai.yuda.me
+**Status**: Not Started
+**Priority**: High
+**Estimated Time**: 2-3 hours
+**Owner**: TBD
+
+Create a compelling single-page landing that showcases MCP servers.
+
+**Sections**:
+- Hero with value proposition and CTAs
+- Featured MCP servers (Creative Juices, QuickBooks, Coming Soon)
+- "What is MCP?" explainer
+- Quick Start with installation instructions
+- Footer with links
+
+**Tasks**:
+- [ ] Create template (`apps/public/templates/landing/ai_platform.html`)
+- [ ] Create view (`apps/public/views/landing_views.py`)
+- [ ] Update URLs to use new landing as homepage
+- [ ] Test responsive design (mobile, tablet, desktop)
+- [ ] Verify all links work
+- [ ] Deploy and monitor
+
+**Success Criteria**:
+- Page loads in <2 seconds
+- Responsive on all devices
+- Clear value proposition
+- Easy to find MCP servers
+- Professional appearance
+
+**See detailed plan in this document below**
+
+---
+
 ## Completed Features ✅
 
 - **Architecture**: Behavior mixins, consolidated templates, HTMX integration, Tailwind CSS v4
@@ -243,6 +336,352 @@ Central registry for discovering and managing MCP servers.
 - Distributed MCP servers with message queuing
 - MCP server versioning and backwards compatibility
 - Multi-language MCP SDK generation
+
+---
+
+## 📋 Detailed Implementation Plans
+
+### Plan 1: Production Health Check Tests (Detailed)
+
+#### Phase 1: Create Health Check Endpoints (30 min)
+
+```python
+# apps/api/views/health_views.py
+from django.http import JsonResponse
+from django.db import connection
+from django.core.cache import cache
+from django.conf import settings
+
+def health_check(request):
+    """Basic health check endpoint"""
+    return JsonResponse({
+        "status": "healthy",
+        "service": "cuttlefish",
+        "environment": settings.DEPLOYMENT_TYPE
+    })
+
+def deep_health_check(request):
+    """Detailed health check with dependencies"""
+    checks = {
+        "database": _check_database(),
+        "cache": _check_cache(),
+        "static_files": True,  # Assume OK if server is running
+    }
+
+    all_healthy = all(checks.values())
+    status_code = 200 if all_healthy else 503
+
+    return JsonResponse({
+        "status": "healthy" if all_healthy else "unhealthy",
+        "checks": checks,
+        "environment": settings.DEPLOYMENT_TYPE
+    }, status=status_code)
+
+def _check_database():
+    """Check database connectivity"""
+    try:
+        connection.ensure_connection()
+        return True
+    except Exception:
+        return False
+
+def _check_cache():
+    """Check cache connectivity"""
+    try:
+        cache.set('health_check', 'ok', 10)
+        return cache.get('health_check') == 'ok'
+    except Exception:
+        return False
+```
+
+Add URLs:
+```python
+# settings/urls.py
+from apps.api.views.health_views import health_check, deep_health_check
+
+urlpatterns = [
+    path('health/', health_check, name='health_check'),
+    path('health/deep/', deep_health_check, name='deep_health_check'),
+    # ... existing patterns
+]
+```
+
+#### Phase 2: Create Production Test Script (45 min)
+
+```python
+# tools/testing/production_health_check.py
+"""
+Production health check script.
+Run with: python tools/testing/production_health_check.py
+"""
+
+import requests
+import sys
+from typing import Dict, List, Tuple
+
+PRODUCTION_BASE_URL = "https://ai.yuda.me"
+
+ENDPOINTS_TO_CHECK = [
+    # (url, expected_status, check_cors, description)
+    ("/", 200, False, "Homepage"),
+    ("/health/", 200, False, "Basic health check"),
+    ("/health/deep/", 200, False, "Deep health check"),
+    ("/mcp/creative-juices/", 200, False, "Creative Juices landing"),
+    ("/mcp/creative-juices/manifest.json", 200, True, "Creative Juices manifest"),
+    ("/mcp/creative-juices/README.md", 200, True, "Creative Juices README"),
+]
+
+def check_endpoint(url: str, expected_status: int, check_cors: bool, description: str) -> Tuple[bool, str]:
+    """Check a single endpoint"""
+    full_url = f"{PRODUCTION_BASE_URL}{url}"
+
+    try:
+        response = requests.get(full_url, timeout=10)
+
+        # Check status code
+        if response.status_code != expected_status:
+            return False, f"Expected {expected_status}, got {response.status_code}"
+
+        # Check CORS headers if required
+        if check_cors:
+            cors_header = response.headers.get('Access-Control-Allow-Origin')
+            if not cors_header:
+                return False, "Missing CORS header"
+
+        return True, "OK"
+
+    except requests.exceptions.RequestException as e:
+        return False, f"Request failed: {str(e)}"
+
+def run_health_checks() -> bool:
+    """Run all health checks and report results"""
+    print(f"Running production health checks for {PRODUCTION_BASE_URL}...")
+    print("=" * 80)
+
+    results: List[Dict] = []
+    all_passed = True
+
+    for url, expected_status, check_cors, description in ENDPOINTS_TO_CHECK:
+        print(f"\nChecking: {description}")
+        print(f"  URL: {url}")
+
+        passed, message = check_endpoint(url, expected_status, check_cors, description)
+
+        results.append({
+            "description": description,
+            "url": url,
+            "passed": passed,
+            "message": message
+        })
+
+        if passed:
+            print(f"  ✅ {message}")
+        else:
+            print(f"  ❌ {message}")
+            all_passed = False
+
+    # Summary
+    print("\n" + "=" * 80)
+    print("SUMMARY")
+    print("=" * 80)
+
+    passed_count = sum(1 for r in results if r["passed"])
+    total_count = len(results)
+
+    print(f"\nPassed: {passed_count}/{total_count}")
+
+    if all_passed:
+        print("\n✅ All health checks passed!")
+        return True
+    else:
+        print("\n❌ Some health checks failed!")
+        return False
+
+if __name__ == "__main__":
+    success = run_health_checks()
+    sys.exit(0 if success else 1)
+```
+
+#### Phase 3: Browser E2E Tests (1-2 hours)
+
+```python
+# apps/public/tests/test_e2e_production_pages.py
+"""
+E2E tests for production pages.
+Run with: python tools/testing/browser_test_runner.py apps/public/tests/test_e2e_production_pages.py
+"""
+
+import pytest
+from playwright.sync_api import Page, expect
+
+PRODUCTION_URL = "https://ai.yuda.me"
+
+@pytest.fixture
+def page(browser):
+    """Create a new page for each test"""
+    page = browser.new_page()
+    yield page
+    page.close()
+
+def test_homepage_loads(page: Page):
+    """Test that homepage loads"""
+    page.goto(PRODUCTION_URL)
+    expect(page).to_have_title("Home")
+
+def test_creative_juices_landing(page: Page):
+    """Test Creative Juices landing page"""
+    page.goto(f"{PRODUCTION_URL}/mcp/creative-juices/")
+    expect(page).to_have_title("Creative Juices MCP - Break Free from Predictable AI")
+
+def test_manifest_accessible(page: Page):
+    """Test manifest.json is accessible"""
+    response = page.goto(f"{PRODUCTION_URL}/mcp/creative-juices/manifest.json")
+    assert response.status == 200
+```
+
+#### Phase 4: GitHub Actions (15 min)
+
+```yaml
+# .github/workflows/production-health-check.yml
+name: Production Health Check
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'  # Every 15 minutes
+  workflow_dispatch:
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install requests
+      - name: Run health checks
+        run: python tools/testing/production_health_check.py
+```
+
+---
+
+### Plan 2: Remove /ai/ URL Prefix (Detailed)
+
+#### Step 1: Update settings/urls.py
+
+```python
+# BEFORE
+urlpatterns = [
+    path("admin/", admin.site.urls),
+    path("api/", include("apps.api.urls")),
+    path("ai/", include("apps.ai.urls")),  # ← Remove this
+    path("", include("apps.public.urls")),
+]
+
+# AFTER
+urlpatterns = [
+    path("admin/", admin.site.urls),
+    path("api/", include("apps.api.urls")),
+    path("mcp/", include("apps.ai.urls")),  # ← Direct to MCP
+    path("", include("apps.public.urls")),
+]
+```
+
+#### Step 2: Update apps/ai/urls.py
+
+Remove `mcp/` prefix from all paths since it's now in settings/urls.py:
+
+```python
+# BEFORE
+urlpatterns = [
+    path("mcp/creative-juices/", CreativeJuicesLandingView.as_view(), ...),
+]
+
+# AFTER
+urlpatterns = [
+    path("creative-juices/", CreativeJuicesLandingView.as_view(), ...),
+]
+```
+
+#### Step 3: Find and Replace Hardcoded URLs
+
+```bash
+# Find all references
+rg "/ai/mcp/" --type py --type md --type html --type json
+
+# Review and replace carefully
+```
+
+#### Step 4: Add Redirects (Optional)
+
+```python
+# apps/public/urls.py or settings/urls.py
+from django.views.generic import RedirectView
+
+urlpatterns = [
+    # Legacy redirects
+    path("ai/mcp/<path:subpath>",
+         RedirectView.as_view(url="/mcp/%(subpath)s", permanent=True)),
+]
+```
+
+#### Step 5: Test
+
+```bash
+# Local
+python manage.py runserver
+curl http://localhost:8000/mcp/creative-juices/
+
+# Production (after deploy)
+curl https://ai.yuda.me/mcp/creative-juices/
+curl -I https://ai.yuda.me/ai/mcp/creative-juices/  # Should redirect
+```
+
+---
+
+### Plan 3: New Landing Page (Detailed)
+
+#### Template Structure
+
+Create `apps/public/templates/landing/ai_platform.html` with sections:
+
+1. **Hero Section** - Gradient background, bold headline, CTAs
+2. **MCP Servers Cards** - Grid of available servers with icons
+3. **What is MCP** - Educational section with benefits
+4. **Quick Start** - Code snippet for installation
+5. **Footer** - Links and copyright
+
+#### Key Features
+
+- Responsive design (mobile-first)
+- Tailwind CSS v4 styling
+- Purple/blue gradient theme (consistent with Creative Juices)
+- Fast loading (no heavy images)
+- SEO-friendly meta tags
+
+#### View and URLs
+
+```python
+# apps/public/views/landing_views.py
+from django.views.generic import TemplateView
+
+class AIPlatformLandingView(TemplateView):
+    template_name = "landing/ai_platform.html"
+
+# apps/public/urls.py
+urlpatterns = [
+    path("", AIPlatformLandingView.as_view(), name="home"),
+]
+```
+
+#### Content Guidelines
+
+- **Hero**: "AI Integration Platform" + "MCP servers for extending AI assistants"
+- **Server Cards**: Focus on benefits, not features. Keep descriptions <100 words.
+- **Quick Start**: 3-5 steps max, copy-pasteable code
+- **Professional tone**: Technical but accessible
 
 ---
 
