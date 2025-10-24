@@ -51,6 +51,7 @@ dependencies = [
     "openai>=1.107.2",
     "pydantic-ai>=1.0.0,<2.0.0",
     "mcp>=1.15.0,<2.0.0",
+    "django-redis>=6.0.0",
 ]
 
 [project.optional-dependencies]
