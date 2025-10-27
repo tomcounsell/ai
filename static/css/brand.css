@@ -1,0 +1,404 @@
+/* ============================================
+   CUTTLEFISH BRAND STYLES
+   Technical Elegance • Minimalist Design
+   ============================================ */
+
+/* === TYPOGRAPHY === */
+
+/* Import Fonts */
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&display=swap');
+
+:root {
+    /* Typography */
+    --font-mono: 'IBM Plex Mono', 'Courier New', monospace;
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+
+    /* Color Palette - Monochromatic with warm neutrals */
+    --color-bg-cream: #FAF9F6;
+    --color-bg-white: #FFFFFF;
+    --color-bg-warm-gray: #F5F4F1;
+
+    --color-text-black: #1A1A1A;
+    --color-text-charcoal: #2D2D2D;
+    --color-text-gray: #5A5A5A;
+    --color-text-light-gray: #8A8A8A;
+
+    --color-border-dark: #3A3A3A;
+    --color-border-medium: #C4C4C4;
+    --color-border-light: #E5E5E5;
+
+    /* Optional accent */
+    --color-accent: #D4A574;
+    --color-accent-dark: #B8935F;
+
+    /* Technical grid */
+    --grid-size: 8px;
+
+    /* Spacing scale */
+    --space-xs: calc(var(--grid-size) * 1);
+    --space-sm: calc(var(--grid-size) * 2);
+    --space-md: calc(var(--grid-size) * 3);
+    --space-lg: calc(var(--grid-size) * 4);
+    --space-xl: calc(var(--grid-size) * 6);
+    --space-2xl: calc(var(--grid-size) * 8);
+    --space-3xl: calc(var(--grid-size) * 12);
+}
+
+/* Base Typography */
+body {
+    font-family: var(--font-sans);
+    font-weight: 400;
+    color: var(--color-text-charcoal);
+    background-color: var(--color-bg-cream);
+    line-height: 1.6;
+}
+
+/* Monospace elements */
+code, kbd, samp, pre {
+    font-family: var(--font-mono);
+}
+
+/* === HEADINGS === */
+
+/* Small-caps treatment for headers */
+h1, h2, h3 {
+    font-family: var(--font-sans);
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    font-size: 0.85em;
+    color: var(--color-text-black);
+}
+
+/* Label styling - typewriter aesthetic */
+label, .label {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-gray);
+}
+
+/* Receipt/dot-matrix aesthetic for data displays */
+.spec-sheet, .data-display {
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    line-height: 1.8;
+    letter-spacing: 0.02em;
+    background: var(--color-bg-white);
+    border: 1px solid var(--color-border-light);
+    padding: var(--space-lg);
+}
+
+/* === TECHNICAL DRAWING ELEMENTS === */
+
+/* Subtle grid background */
+.technical-bg {
+    background-image:
+        linear-gradient(var(--color-border-light) 1px, transparent 1px),
+        linear-gradient(90deg, var(--color-border-light) 1px, transparent 1px);
+    background-size: var(--grid-size) var(--grid-size);
+}
+
+/* Connection lines and nodes */
+.connection-line {
+    border-top: 1px solid var(--color-border-medium);
+    position: relative;
+}
+
+.connection-line::before,
+.connection-line::after {
+    content: '';
+    position: absolute;
+    width: 6px;
+    height: 6px;
+    border: 1px solid var(--color-border-dark);
+    background: var(--color-bg-cream);
+    border-radius: 50%;
+    top: -3px;
+}
+
+.connection-line::before {
+    left: 0;
+}
+
+.connection-line::after {
+    right: 0;
+}
+
+/* Technical border styling */
+.technical-border {
+    border: 1px solid var(--color-border-dark);
+    box-shadow:
+        inset 0 0 0 3px var(--color-bg-cream),
+        inset 0 0 0 4px var(--color-border-medium);
+}
+
+/* Blueprint-style containers */
+.blueprint-box {
+    position: relative;
+    padding: var(--space-lg);
+    border: 2px solid var(--color-border-dark);
+    background: var(--color-bg-white);
+}
+
+.blueprint-box::before {
+    content: '';
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    border: 1px solid var(--color-border-light);
+    pointer-events: none;
+}
+
+/* === LAYOUT === */
+
+/* Generous negative space */
+.section {
+    padding: var(--space-3xl) 0;
+}
+
+.container-brand {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 var(--space-lg);
+}
+
+/* === BUTTONS === */
+
+.btn-brand {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: var(--space-sm) var(--space-lg);
+    border: 1px solid var(--color-border-dark);
+    background: var(--color-bg-white);
+    color: var(--color-text-black);
+    transition: all 0.2s ease;
+    cursor: pointer;
+}
+
+.btn-brand:hover {
+    background: var(--color-text-black);
+    color: var(--color-bg-white);
+    border-color: var(--color-text-black);
+}
+
+.btn-brand-accent {
+    background: var(--color-accent);
+    border-color: var(--color-accent-dark);
+    color: var(--color-text-black);
+}
+
+.btn-brand-accent:hover {
+    background: var(--color-accent-dark);
+    border-color: var(--color-accent-dark);
+    color: var(--color-bg-white);
+}
+
+/* === CARDS === */
+
+.card-technical {
+    background: var(--color-bg-white);
+    border: 1px solid var(--color-border-medium);
+    padding: var(--space-lg);
+    position: relative;
+    transition: all 0.3s ease;
+}
+
+.card-technical:hover {
+    border-color: var(--color-border-dark);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+/* Card with corner marks (technical drawing style) */
+.card-corner-marks {
+    position: relative;
+    background: var(--color-bg-white);
+    padding: var(--space-lg);
+}
+
+.card-corner-marks::before,
+.card-corner-marks::after {
+    content: '';
+    position: absolute;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--color-border-dark);
+}
+
+.card-corner-marks::before {
+    top: 0;
+    left: 0;
+    border-right: none;
+    border-bottom: none;
+}
+
+.card-corner-marks::after {
+    bottom: 0;
+    right: 0;
+    border-left: none;
+    border-top: none;
+}
+
+/* === NAVIGATION === */
+
+.nav-brand {
+    background: var(--color-bg-white);
+    border-bottom: 1px solid var(--color-border-light);
+}
+
+.nav-brand a {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-gray);
+    text-decoration: none;
+    transition: color 0.2s ease;
+}
+
+.nav-brand a:hover,
+.nav-brand a.active {
+    color: var(--color-text-black);
+}
+
+/* === TABLES === */
+
+/* Spec sheet table styling */
+.table-spec {
+    width: 100%;
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    border-collapse: collapse;
+}
+
+.table-spec th {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    text-align: left;
+    padding: var(--space-sm);
+    border-bottom: 2px solid var(--color-border-dark);
+    background: var(--color-bg-warm-gray);
+}
+
+.table-spec td {
+    padding: var(--space-sm);
+    border-bottom: 1px solid var(--color-border-light);
+}
+
+.table-spec tr:hover {
+    background: var(--color-bg-warm-gray);
+}
+
+/* === FORMS === */
+
+.input-brand {
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    padding: var(--space-sm);
+    border: 1px solid var(--color-border-medium);
+    background: var(--color-bg-white);
+    color: var(--color-text-charcoal);
+    transition: border-color 0.2s ease;
+}
+
+.input-brand:focus {
+    outline: none;
+    border-color: var(--color-border-dark);
+    box-shadow: 0 0 0 3px rgba(58, 58, 58, 0.1);
+}
+
+/* === CODE BLOCKS === */
+
+pre.brand-code {
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    line-height: 1.6;
+    background: var(--color-text-black);
+    color: var(--color-bg-cream);
+    padding: var(--space-lg);
+    border: 1px solid var(--color-border-dark);
+    overflow-x: auto;
+}
+
+/* === UTILITY CLASSES === */
+
+.text-mono {
+    font-family: var(--font-mono);
+}
+
+.text-sans {
+    font-family: var(--font-sans);
+}
+
+.text-small-caps {
+    font-variant: small-caps;
+    letter-spacing: 0.05em;
+}
+
+.bg-cream {
+    background-color: var(--color-bg-cream);
+}
+
+.bg-warm-gray {
+    background-color: var(--color-bg-warm-gray);
+}
+
+.border-technical {
+    border: 1px solid var(--color-border-dark);
+}
+
+.divider-technical {
+    height: 1px;
+    background: var(--color-border-medium);
+    margin: var(--space-lg) 0;
+    position: relative;
+}
+
+.divider-technical::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: -3px;
+    transform: translateX(-50%);
+    width: 6px;
+    height: 6px;
+    border: 1px solid var(--color-border-dark);
+    background: var(--color-bg-cream);
+    border-radius: 50%;
+}
+
+/* === RESPONSIVE === */
+
+@media (max-width: 768px) {
+    :root {
+        --space-3xl: calc(var(--grid-size) * 8);
+        --space-2xl: calc(var(--grid-size) * 6);
+    }
+}
+
+/* === ACCESSIBILITY === */
+
+/* Focus visible for keyboard navigation */
+*:focus-visible {
+    outline: 2px solid var(--color-border-dark);
+    outline-offset: 2px;
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+    :root {
+        --color-border-medium: #000000;
+        --color-text-gray: #000000;
+    }
+}

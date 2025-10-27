@@ -35,6 +35,7 @@ Block Structure:
 
     <!-- Base CSS -->
     <link rel="stylesheet" href="{% static 'css/base.css' %}?v=0"/>
+    <link rel="stylesheet" href="{% static 'css/brand.css' %}?v=1"/>
 
     <!-- Title -->
     <title>{% block title %}Django Project Template{% endblock %}{% if debug %} (DEBUG){% endif %}</title>
@@ -87,8 +88,7 @@ Block Structure:
         });
     </script>
     {% endif %}
-    <!-- Google Fonts -->
-    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
+    <!-- Google Fonts - handled in brand.css -->
 
     <!-- Font Awesome -->
     <script src="https://kit.fontawesome.com/c83e8fd695.js" crossorigin="anonymous"></script>
@@ -101,7 +101,7 @@ Block Structure:
     {% block extra_head %}{% endblock extra_head %}
 </head>
 
-<body class="min-h-screen flex flex-col bg-gray-50 text-gray-900 font-sans antialiased"
+<body class="min-h-screen flex flex-col bg-cream text-gray-900 antialiased"
       {% if debug %}hx-ext="debug" {% endif %}
       onkeydown="if(event.key==='Escape'){const m=document.querySelector('#primary-modal-container .modal-overlay, #secondary-modal-container .modal-overlay');if(m)m.closest('.modal-container').innerHTML='';}"
 >
@@ -177,7 +177,7 @@ Block Structure:
 </main>
 
 <!-- Footer -->
-<footer class="bg-slate-900 text-white mt-auto">
+<footer class="nav-brand mt-auto border-t"
     {% block footer %}
     {% include "layout/footer.html" %}
     {% endblock %}

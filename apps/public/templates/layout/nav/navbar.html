@@ -28,32 +28,31 @@
   It works with JavaScript functions for menu toggling functionality.
 {% endcomment %}
 
-<nav class="bg-white shadow-xs">
+<nav class="nav-brand">
   <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
-    <div class="flex h-16 justify-between">
+    <div class="flex h-16 justify-between items-center">
       <!-- Left section with logo and nav links -->
       <div class="flex items-center">
         <!-- Logo -->
         <div class="flex shrink-0 items-center">
-          <a href="/">
-            <img class="h-8 w-auto" src="{% static 'assets/img/logo-yudame.png' %}" alt="Django Project Template">
+          <a href="/" class="text-mono" style="font-size: 0.875rem; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase; color: var(--color-text-black); text-decoration: none;">
+            CUTTLEFISH
           </a>
         </div>
 
         <!-- Desktop navigation - visible on sm and up -->
-        <div class="hidden sm:ml-6 sm:flex sm:space-x-8">
-          <!-- Current: "border-slate-500 text-gray-900", Default: "border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700" -->
-          <a href="/" class="inline-flex items-center border-b-2 {% if active_section == 'home' %}border-slate-500 text-gray-900{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700{% endif %} px-1 pt-1 text-sm font-medium">
+        <div class="hidden sm:ml-8 sm:flex sm:space-x-6">
+          <a href="/" class="{% if active_section == 'home' %}active{% endif %}">
             Home
           </a>
 
-          <a href="{% url 'public:pricing' %}" class="inline-flex items-center border-b-2 {% if active_section == 'pricing' %}border-slate-500 text-gray-900{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700{% endif %} px-1 pt-1 text-sm font-medium">
+          <a href="{% url 'public:pricing' %}" class="{% if active_section == 'pricing' %}active{% endif %}">
             Pricing
           </a>
 
           {% if user.is_authenticated %}
             {% if user.teams.exists %}
-            <a href="{% url 'public:team-list' %}" class="inline-flex items-center border-b-2 {% if active_section == 'teams' %}border-slate-500 text-gray-900{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700{% endif %} px-1 pt-1 text-sm font-medium">
+            <a href="{% url 'public:team-list' %}" class="{% if active_section == 'teams' %}active{% endif %}">
               Team
             </a>
             {% endif %}
@@ -94,18 +93,17 @@
   <!-- Mobile menu, show/hide based on menu state -->
   <div class="hidden sm:hidden" id="mobile-menu">
     <div class="space-y-1 px-2 pt-2 pb-3">
-      <!-- Current: "bg-slate-50 text-slate-700", Default: "text-gray-500 hover:bg-gray-50 hover:text-gray-700" -->
-      <a href="/" class="block rounded-xs {% if active_section == 'home' %}bg-slate-50 text-slate-700{% else %}text-gray-500 hover:bg-gray-50 hover:text-gray-700{% endif %} px-3 py-2 text-base font-medium">
+      <a href="/" class="block px-3 py-2 text-mono {% if active_section == 'home' %}active{% endif %}" style="font-size: 0.75rem;">
         Home
       </a>
 
-      <a href="{% url 'public:pricing' %}" class="block rounded-xs {% if active_section == 'pricing' %}bg-slate-50 text-slate-700{% else %}text-gray-500 hover:bg-gray-50 hover:text-gray-700{% endif %} px-3 py-2 text-base font-medium">
+      <a href="{% url 'public:pricing' %}" class="block px-3 py-2 text-mono {% if active_section == 'pricing' %}active{% endif %}" style="font-size: 0.75rem;">
         Pricing
       </a>
 
       {% if user.is_authenticated %}
         {% if user.teams.exists %}
-        <a href="{% url 'public:team-list' %}" class="block rounded-xs {% if active_section == 'teams' %}bg-slate-50 text-slate-700{% else %}text-gray-500 hover:bg-gray-50 hover:text-gray-700{% endif %} px-3 py-2 text-base font-medium">
+        <a href="{% url 'public:team-list' %}" class="block px-3 py-2 text-mono {% if active_section == 'teams' %}active{% endif %}" style="font-size: 0.75rem;">
           Team
         </a>
         {% endif %}

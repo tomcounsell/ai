@@ -3,7 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CTO Tools - MCP Server</title>
+    <title>CTO Tools MCP - Engineering Leadership Frameworks</title>
+    <meta name="description" content="MCP server providing structured frameworks for CTO activities: weekly reviews, team analysis, and strategic decision-making">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * {
             margin: 0;
@@ -11,233 +15,459 @@
             box-sizing: border-box;
         }
 
+        :root {
+            --font-mono: 'IBM Plex Mono', 'Courier New', monospace;
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            --color-bg-cream: #FAF9F6;
+            --color-bg-white: #FFFFFF;
+            --color-bg-warm-gray: #F5F4F1;
+            --color-text-black: #1A1A1A;
+            --color-text-charcoal: #2D2D2D;
+            --color-text-gray: #5A5A5A;
+            --color-text-light-gray: #8A8A8A;
+            --color-border-dark: #3A3A3A;
+            --color-border-medium: #C4C4C4;
+            --color-border-light: #E5E5E5;
+            --color-accent: #D4A574;
+            --color-accent-dark: #B8935F;
+            --grid-size: 8px;
+            --space-sm: calc(var(--grid-size) * 2);
+            --space-md: calc(var(--grid-size) * 3);
+            --space-lg: calc(var(--grid-size) * 4);
+            --space-xl: calc(var(--grid-size) * 6);
+            --space-2xl: calc(var(--grid-size) * 8);
+            --space-3xl: calc(var(--grid-size) * 12);
+        }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            font-family: var(--font-sans);
             line-height: 1.6;
-            color: #333;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 2rem;
+            color: var(--color-text-charcoal);
+            background-color: var(--color-bg-cream);
+            padding: var(--space-2xl) var(--space-lg);
         }
 
         .container {
-            max-width: 900px;
+            max-width: 1000px;
             margin: 0 auto;
-            background: white;
-            border-radius: 16px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            overflow: hidden;
         }
 
         .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 3rem 2rem;
-            text-align: center;
+            border: 2px solid var(--color-border-dark);
+            background: var(--color-bg-white);
+            padding: var(--space-2xl);
+            margin-bottom: var(--space-3xl);
+            position: relative;
         }
 
-        .header h1 {
-            font-size: 2.5rem;
-            margin-bottom: 0.5rem;
-            font-weight: 700;
+        .header::before {
+            content: '';
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            right: 8px;
+            bottom: 8px;
+            border: 1px solid var(--color-border-light);
+            pointer-events: none;
         }
 
-        .header p {
-            font-size: 1.1rem;
-            opacity: 0.95;
+        .label {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            font-weight: 500;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--color-text-gray);
+            margin-bottom: var(--space-sm);
         }
 
-        .content {
-            padding: 2rem;
+        h1 {
+            font-family: var(--font-mono);
+            font-size: 2rem;
+            font-weight: 300;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            color: var(--color-text-black);
+            margin-bottom: var(--space-md);
+        }
+
+        .tagline {
+            font-family: var(--font-mono);
+            font-size: 0.875rem;
+            letter-spacing: 0.05em;
+            color: var(--color-text-gray);
+            margin-bottom: var(--space-lg);
+        }
+
+        .intro {
+            font-size: 0.95rem;
+            color: var(--color-text-charcoal);
+            line-height: 1.8;
+        }
+
+        .divider {
+            height: 1px;
+            background: var(--color-border-medium);
+            margin: var(--space-2xl) 0;
+            position: relative;
+        }
+
+        .divider::before {
+            content: '';
+            position: absolute;
+            left: 50%;
+            top: -3px;
+            transform: translateX(-50%);
+            width: 6px;
+            height: 6px;
+            border: 1px solid var(--color-border-dark);
+            background: var(--color-bg-cream);
+            border-radius: 50%;
         }
 
         .section {
-            margin-bottom: 2rem;
+            margin-bottom: var(--space-3xl);
         }
 
         h2 {
-            color: #667eea;
-            margin-bottom: 1rem;
-            font-size: 1.8rem;
+            font-family: var(--font-sans);
+            font-size: 1.25rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: var(--color-text-black);
+            margin-bottom: var(--space-lg);
         }
 
-        h3 {
-            color: #764ba2;
-            margin-top: 1.5rem;
-            margin-bottom: 0.75rem;
-            font-size: 1.3rem;
+        .tool-spec {
+            background: var(--color-bg-white);
+            border: 2px solid var(--color-border-dark);
+            padding: var(--space-2xl);
+            margin-bottom: var(--space-2xl);
         }
 
-        .tool-card {
-            background: #f8f9fa;
-            border-left: 4px solid #667eea;
-            padding: 1.5rem;
-            margin-bottom: 1rem;
-            border-radius: 8px;
+        .tool-spec h3 {
+            font-family: var(--font-mono);
+            font-size: 1.25rem;
+            font-weight: 400;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--color-text-black);
+            margin-bottom: var(--space-md);
         }
 
-        .tool-card h4 {
-            color: #667eea;
-            margin-bottom: 0.5rem;
-            font-size: 1.2rem;
+        .tool-spec h4 {
+            font-family: var(--font-mono);
+            font-size: 0.875rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--color-text-black);
+            margin-top: var(--space-lg);
+            margin-bottom: var(--space-sm);
         }
 
-        .tool-card code {
-            background: #e9ecef;
-            padding: 0.2rem 0.5rem;
-            border-radius: 4px;
-            font-family: 'Monaco', 'Menlo', monospace;
-            font-size: 0.9rem;
-        }
-
-        .installation {
-            background: #f1f3f5;
-            padding: 1.5rem;
-            border-radius: 8px;
-            margin: 1.5rem 0;
-        }
-
-        .installation h3 {
+        .tool-spec h4:first-of-type {
             margin-top: 0;
         }
 
+        .tool-spec ul {
+            list-style: none;
+            margin: var(--space-md) 0;
+        }
+
+        .tool-spec ul li {
+            font-size: 0.9rem;
+            padding: var(--space-sm) 0;
+            padding-left: var(--space-xl);
+            position: relative;
+            line-height: 1.6;
+        }
+
+        .tool-spec ul li:before {
+            content: "→";
+            position: absolute;
+            left: 0;
+            color: var(--color-border-dark);
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: var(--space-lg);
+            margin-bottom: var(--space-2xl);
+        }
+
+        .feature-card {
+            background: var(--color-bg-white);
+            border: 1px solid var(--color-border-medium);
+            padding: var(--space-lg);
+            position: relative;
+        }
+
+        .feature-card h4 {
+            font-family: var(--font-sans);
+            font-size: 0.875rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: var(--color-text-black);
+            margin-bottom: var(--space-sm);
+        }
+
+        .feature-card p {
+            font-size: 0.875rem;
+            color: var(--color-text-gray);
+            line-height: 1.6;
+        }
+
+        .installation {
+            background: var(--color-bg-white);
+            border: 2px solid var(--color-border-dark);
+            padding: var(--space-2xl);
+            margin-bottom: var(--space-2xl);
+        }
+
+        .installation h3 {
+            font-family: var(--font-mono);
+            font-size: 0.875rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--color-text-black);
+            margin-bottom: var(--space-md);
+        }
+
         pre {
-            background: #2d3748;
-            color: #e2e8f0;
-            padding: 1rem;
-            border-radius: 8px;
+            font-family: var(--font-mono);
+            font-size: 0.875rem;
+            line-height: 1.6;
+            background: var(--color-text-black);
+            color: var(--color-bg-cream);
+            padding: var(--space-lg);
+            border: 1px solid var(--color-border-dark);
             overflow-x: auto;
-            margin: 1rem 0;
+            margin: var(--space-md) 0;
         }
 
         code {
-            font-family: 'Monaco', 'Menlo', monospace;
-            font-size: 0.9rem;
+            font-family: var(--font-mono);
         }
 
-        .features {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 1rem;
-            margin: 1.5rem 0;
+        .spec-table {
+            width: 100%;
+            font-family: var(--font-mono);
+            font-size: 0.875rem;
+            border-collapse: collapse;
+            margin: var(--space-lg) 0;
         }
 
-        .feature {
-            background: #f8f9fa;
-            padding: 1.25rem;
-            border-radius: 8px;
-            border-top: 3px solid #764ba2;
-        }
-
-        .feature h4 {
-            color: #764ba2;
-            margin-bottom: 0.5rem;
-        }
-
-        .cta {
-            text-align: center;
-            padding: 2rem;
-            background: #f8f9fa;
-            margin-top: 2rem;
-            border-radius: 8px;
-        }
-
-        .cta a {
-            display: inline-block;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 1rem 2rem;
-            text-decoration: none;
-            border-radius: 8px;
+        .spec-table th {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
             font-weight: 600;
-            transition: transform 0.2s, box-shadow 0.2s;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            text-align: left;
+            padding: var(--space-sm);
+            border-bottom: 2px solid var(--color-border-dark);
+            background: var(--color-bg-warm-gray);
         }
 
-        .cta a:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 10px 30px rgba(102, 126, 234, 0.4);
+        .spec-table td {
+            padding: var(--space-sm);
+            border-bottom: 1px solid var(--color-border-light);
+        }
+
+        .feature-list {
+            list-style: none;
+            margin: var(--space-lg) 0;
+        }
+
+        .feature-list li {
+            font-size: 0.9rem;
+            padding: var(--space-sm) 0;
+            padding-left: var(--space-xl);
+            position: relative;
+            line-height: 1.6;
+            color: var(--color-text-charcoal);
+        }
+
+        .feature-list li:before {
+            content: "■";
+            position: absolute;
+            left: 0;
+            color: var(--color-border-dark);
+            font-size: 0.75rem;
+        }
+
+        .btn-brand {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            font-weight: 500;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            padding: var(--space-sm) var(--space-lg);
+            border: 1px solid var(--color-border-dark);
+            background: var(--color-accent);
+            color: var(--color-text-black);
+            text-decoration: none;
+            display: inline-block;
+            transition: all 0.2s ease;
+        }
+
+        .btn-brand:hover {
+            background: var(--color-accent-dark);
+            border-color: var(--color-accent-dark);
+            color: var(--color-bg-white);
         }
 
         .footer {
+            margin-top: var(--space-3xl);
+            padding-top: var(--space-2xl);
+            border-top: 1px solid var(--color-border-light);
             text-align: center;
-            padding: 2rem;
-            color: #6c757d;
-            font-size: 0.9rem;
+            color: var(--color-text-light-gray);
+            font-size: 0.875rem;
         }
 
-        ul {
-            margin-left: 1.5rem;
-            margin-top: 0.5rem;
+        .footer a {
+            color: var(--color-text-gray);
+            text-decoration: none;
+            border-bottom: 1px solid var(--color-border-medium);
         }
 
-        li {
-            margin-bottom: 0.5rem;
+        .footer a:hover {
+            color: var(--color-text-black);
+            border-bottom-color: var(--color-text-black);
+        }
+
+        @media (max-width: 768px) {
+            body {
+                padding: var(--space-lg) var(--space-sm);
+            }
+            h1 {
+                font-size: 1.5rem;
+            }
+            .features-grid {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>🎯 CTO Tools</h1>
-            <p>Engineering leadership frameworks for AI assistants</p>
+            <div class="label">MCP_SERVER_02</div>
+            <h1>CTO TOOLS</h1>
+            <p class="tagline">ENGINEERING LEADERSHIP FRAMEWORKS</p>
+            <div class="divider" style="margin: var(--space-lg) 0;"></div>
+            <p class="intro">
+                CTO Tools provides structured frameworks and best practices for common engineering leadership activities.
+                Helps AI assistants guide technical leaders through weekly reviews, team analysis, and strategic decision-making
+                with analysis-focused, non-prescriptive approaches.
+            </p>
         </div>
 
-        <div class="content">
-            <div class="section">
-                <h2>What is CTO Tools?</h2>
-                <p>
-                    CTO Tools is a Model Context Protocol (MCP) server that provides structured frameworks
-                    and best practices for common CTO activities. It helps AI assistants guide engineering
-                    leaders through weekly reviews, team analysis, and strategic decision-making.
-                </p>
-            </div>
+        <h2>AVAILABLE TOOLS</h2>
 
-            <div class="section">
-                <h2>Available Tools</h2>
+        <div class="tool-spec">
+            <div class="label">TOOL_01</div>
+            <h3>weekly_review()</h3>
+            <p style="font-size: 0.95rem; margin-bottom: var(--space-lg); line-height: 1.8;">
+                Streamlined 3-phase framework for weekly engineering team reviews. Analysis-focused, not prescriptive. Works with ANY codebase.
+            </p>
 
-                <div class="tool-card">
-                    <h4>📊 weekly_review()</h4>
-                    <p>
-                        Streamlined 3-phase framework for weekly engineering team reviews.
-                        Analysis-focused, not prescriptive. Works with ANY codebase.
-                    </p>
-                    <ul style="margin-top: 0.5rem;">
-                        <li><strong>Phase 1:</strong> Data gathering with parallel git commands</li>
-                        <li><strong>Phase 2:</strong> Internal analysis (review → categorize → stats)</li>
-                        <li><strong>Phase 3:</strong> Concise output (~200 words) with 5 categories and contributor stats</li>
-                    </ul>
-                    <p style="margin-top: 1rem;">
-                        <strong>Features:</strong> ⚡ Fast reviews (15-20 min) | 📊 Concise output |
-                        👥 Automatic contributor recognition | 🎯 Communication-ready format
-                    </p>
+            <h4>Phase 1: Data Gathering</h4>
+            <ul>
+                <li>Parallel git commands for efficient data collection</li>
+                <li>Commit analysis across the reporting period</li>
+                <li>Contributor activity tracking</li>
+            </ul>
+
+            <h4>Phase 2: Internal Analysis</h4>
+            <ul>
+                <li>Review commits and categorize work</li>
+                <li>Identify patterns and themes</li>
+                <li>Generate contributor statistics</li>
+            </ul>
+
+            <h4>Phase 3: Concise Output</h4>
+            <ul>
+                <li>~200 word summary with 5 adaptive categories</li>
+                <li>Contributor recognition and stats</li>
+                <li>Communication-ready format for any channel</li>
+            </ul>
+
+            <table class="spec-table" style="margin-top: var(--space-xl);">
+                <thead>
+                    <tr>
+                        <th>Characteristic</th>
+                        <th>Implementation</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Review Time</td>
+                        <td>15-20 minutes</td>
+                    </tr>
+                    <tr>
+                        <td>Output Length</td>
+                        <td>~200 words</td>
+                    </tr>
+                    <tr>
+                        <td>Categories</td>
+                        <td>5 adaptive, based on actual work</td>
+                    </tr>
+                    <tr>
+                        <td>Codebase</td>
+                        <td>Universal, no configuration needed</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="section">
+            <h2>KEY FEATURES</h2>
+            <div class="features-grid">
+                <div class="feature-card">
+                    <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_01</div>
+                    <h4>3-Phase Framework</h4>
+                    <p>Streamlined process: gather data, analyze internally, output concise summary</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_02</div>
+                    <h4>Adaptive Categorization</h4>
+                    <p>AI chooses 5 relevant categories based on actual work, not templates</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_03</div>
+                    <h4>Concise Output</h4>
+                    <p>Single ~200 word summary suitable for any communication channel</p>
+                </div>
+
+                <div class="feature-card">
+                    <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_04</div>
+                    <h4>Focus on Deliverables</h4>
+                    <p>Clear what-changed summary without verbose analysis</p>
                 </div>
             </div>
+        </div>
 
-            <div class="section">
-                <h2>Features</h2>
-                <div class="features">
-                    <div class="feature">
-                        <h4>📈 3-Phase Framework</h4>
-                        <p>Streamlined process: gather data, analyze internally, output concise summary</p>
-                    </div>
-                    <div class="feature">
-                        <h4>🔍 Adaptive Categorization</h4>
-                        <p>AI chooses 5 relevant categories based on actual work, not templates</p>
-                    </div>
-                    <div class="feature">
-                        <h4>📝 Concise Output</h4>
-                        <p>Single ~200 word summary with bullets, suitable for any communication channel</p>
-                    </div>
-                    <div class="feature">
-                        <h4>🎯 Focus on What Changed</h4>
-                        <p>Clear deliverables without verbose analysis - thinking happens internally</p>
-                    </div>
-                </div>
-            </div>
+        <div class="divider"></div>
+
+        <div class="section">
+            <h2>INSTALLATION</h2>
 
             <div class="installation">
-                <h3>Installation - Single Executable File</h3>
-                <p><strong>No dependencies required!</strong> Run directly from URL with uv:</p>
+                <h3>Single Executable File - No Dependencies</h3>
+                <p style="margin-bottom: var(--space-md); font-size: 0.875rem;">
+                    Run directly from URL with uv:
+                </p>
                 <pre><code>{
   "mcpServers": {
     "cto-tools": {
@@ -249,48 +479,69 @@
     }
   }
 }</code></pre>
-                <p style="margin-top: 1rem;">
-                    <strong>Or download and run locally:</strong>
+
+                <p style="margin-top: var(--space-lg); margin-bottom: var(--space-sm); font-family: var(--font-mono); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em;">
+                    Or download and run locally:
                 </p>
                 <pre><code>curl -O https://raw.githubusercontent.com/tomcounsell/cuttlefish/main/apps/ai/mcp/cto_tools_server.py
 chmod +x cto_tools_server.py
 ./cto_tools_server.py</code></pre>
-                <p style="margin-top: 1rem;">
+
+                <p style="margin-top: var(--space-lg); font-size: 0.875rem;">
                     <strong>Web Manifest:</strong> <code>https://ai.yuda.me/mcp/cto-tools/manifest.json</code>
                 </p>
             </div>
+        </div>
 
-            <div class="section">
-                <h2>How It Works</h2>
-                <ol>
-                    <li><strong>Request a Tool:</strong> Ask Claude to use CTO Tools for team review</li>
-                    <li><strong>Get Framework:</strong> Receive structured instructions and best practices</li>
-                    <li><strong>Follow Steps:</strong> Use the provided git commands and analysis frameworks</li>
-                    <li><strong>Generate Insights:</strong> Create executive summaries and action items</li>
-                </ol>
-            </div>
+        <div class="divider"></div>
 
-            <div class="section">
-                <h2>Privacy & Security</h2>
-                <ul>
-                    <li>✅ No external API calls or data transmission</li>
-                    <li>✅ No authentication or credentials required</li>
-                    <li>✅ No user data storage or logging</li>
-                    <li>✅ Fully local execution via MCP protocol</li>
-                    <li>✅ Git commands run in your local environment only</li>
-                </ul>
-            </div>
+        <div class="section">
+            <h2>USAGE WORKFLOW</h2>
+            <ul class="feature-list">
+                <li><strong>Request Tool</strong> — Ask Claude to use CTO Tools for team review</li>
+                <li><strong>Receive Framework</strong> — Get structured instructions and best practices</li>
+                <li><strong>Follow Steps</strong> — Use provided git commands and analysis frameworks</li>
+                <li><strong>Generate Insights</strong> — Create executive summaries and action items</li>
+            </ul>
+        </div>
 
-            <div class="cta">
-                <h3>Ready to Get Started?</h3>
-                <p style="margin-bottom: 1rem;">Add CTO Tools to your MCP configuration and start using engineering leadership frameworks in Claude.</p>
-                <a href="https://github.com/tomcounsell/cuttlefish">View Documentation</a>
-            </div>
+        <div class="section">
+            <h2>PRIVACY & SECURITY</h2>
+            <table class="spec-table">
+                <tbody>
+                    <tr>
+                        <td>External API Calls</td>
+                        <td>None</td>
+                    </tr>
+                    <tr>
+                        <td>Authentication Required</td>
+                        <td>No</td>
+                    </tr>
+                    <tr>
+                        <td>User Data Storage</td>
+                        <td>None</td>
+                    </tr>
+                    <tr>
+                        <td>Execution Environment</td>
+                        <td>Fully local via MCP protocol</td>
+                    </tr>
+                    <tr>
+                        <td>Git Commands</td>
+                        <td>Run in your local environment only</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div style="text-align: center; margin: var(--space-3xl) 0;">
+            <a href="https://github.com/tomcounsell/cuttlefish" class="btn-brand">
+                VIEW DOCUMENTATION
+            </a>
         </div>
 
         <div class="footer">
-            <p>Part of the Cuttlefish AI Integration Platform</p>
-            <p>Powered by <a href="https://modelcontextprotocol.io" style="color: #667eea;">Model Context Protocol</a></p>
+            <p>Part of the <a href="https://github.com/tomcounsell/cuttlefish">Cuttlefish</a> AI Integration Platform</p>
+            <p style="margin-top: var(--space-sm);">Powered by <a href="https://modelcontextprotocol.io">Model Context Protocol</a></p>
         </div>
     </div>
 </body>

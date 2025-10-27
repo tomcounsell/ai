@@ -3,8 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Creative Juices MCP - Break Free from Predictable AI</title>
-    <meta name="description" content="MCP server that generates random creative prompts and strategic questions to help LLMs think outside the box">
+    <title>Creative Juices MCP - Randomness Tools for Divergent Thinking</title>
+    <meta name="description" content="MCP server that generates random creative prompts and strategic questions to help LLMs break free from predictable patterns">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <style>
         * {
             margin: 0;
@@ -12,211 +15,386 @@
             box-sizing: border-box;
         }
 
+        :root {
+            --font-mono: 'IBM Plex Mono', 'Courier New', monospace;
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            --color-bg-cream: #FAF9F6;
+            --color-bg-white: #FFFFFF;
+            --color-bg-warm-gray: #F5F4F1;
+            --color-text-black: #1A1A1A;
+            --color-text-charcoal: #2D2D2D;
+            --color-text-gray: #5A5A5A;
+            --color-text-light-gray: #8A8A8A;
+            --color-border-dark: #3A3A3A;
+            --color-border-medium: #C4C4C4;
+            --color-border-light: #E5E5E5;
+            --color-accent: #D4A574;
+            --color-accent-dark: #B8935F;
+            --grid-size: 8px;
+            --space-sm: calc(var(--grid-size) * 2);
+            --space-md: calc(var(--grid-size) * 3);
+            --space-lg: calc(var(--grid-size) * 4);
+            --space-xl: calc(var(--grid-size) * 6);
+            --space-2xl: calc(var(--grid-size) * 8);
+            --space-3xl: calc(var(--grid-size) * 12);
+        }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            font-family: var(--font-sans);
             line-height: 1.6;
-            color: #333;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            padding: 2rem;
+            color: var(--color-text-charcoal);
+            background-color: var(--color-bg-cream);
+            padding: var(--space-2xl) var(--space-lg);
         }
 
         .container {
-            max-width: 900px;
+            max-width: 1000px;
             margin: 0 auto;
-            background: white;
-            border-radius: 12px;
-            padding: 3rem;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+        }
+
+        .header {
+            border: 2px solid var(--color-border-dark);
+            background: var(--color-bg-white);
+            padding: var(--space-2xl);
+            margin-bottom: var(--space-3xl);
+            position: relative;
+        }
+
+        .header::before {
+            content: '';
+            position: absolute;
+            top: 8px;
+            left: 8px;
+            right: 8px;
+            bottom: 8px;
+            border: 1px solid var(--color-border-light);
+            pointer-events: none;
+        }
+
+        .label {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            font-weight: 500;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--color-text-gray);
+            margin-bottom: var(--space-sm);
         }
 
         h1 {
-            font-size: 2.5rem;
-            margin-bottom: 0.5rem;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
+            font-family: var(--font-mono);
+            font-size: 2rem;
+            font-weight: 300;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            color: var(--color-text-black);
+            margin-bottom: var(--space-md);
         }
 
         .tagline {
-            font-size: 1.25rem;
-            color: #666;
-            margin-bottom: 2rem;
-            font-weight: 300;
+            font-family: var(--font-mono);
+            font-size: 0.875rem;
+            letter-spacing: 0.05em;
+            color: var(--color-text-gray);
+            margin-bottom: var(--space-lg);
+        }
+
+        .intro {
+            font-size: 0.95rem;
+            color: var(--color-text-charcoal);
+            line-height: 1.8;
+        }
+
+        .divider {
+            height: 1px;
+            background: var(--color-border-medium);
+            margin: var(--space-2xl) 0;
+            position: relative;
+        }
+
+        .divider::before {
+            content: '';
+            position: absolute;
+            left: 50%;
+            top: -3px;
+            transform: translateX(-50%);
+            width: 6px;
+            height: 6px;
+            border: 1px solid var(--color-border-dark);
+            background: var(--color-bg-cream);
+            border-radius: 50%;
         }
 
         .tools-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 1.5rem;
-            margin: 2rem 0;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: var(--space-lg);
+            margin-bottom: var(--space-3xl);
         }
 
         .tool-card {
-            padding: 1.5rem;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            transition: all 0.3s ease;
+            background: var(--color-bg-white);
+            border: 1px solid var(--color-border-medium);
+            padding: var(--space-lg);
+            position: relative;
+            transition: border-color 0.3s ease;
         }
 
         .tool-card:hover {
-            border-color: #667eea;
-            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.15);
+            border-color: var(--color-border-dark);
         }
 
         .tool-card h3 {
-            color: #667eea;
-            margin-bottom: 0.5rem;
-            font-size: 1.1rem;
+            font-family: var(--font-sans);
+            font-size: 1rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: var(--color-text-black);
+            margin-bottom: var(--space-sm);
         }
 
         .tool-card p {
-            color: #666;
-            font-size: 0.9rem;
+            font-size: 0.875rem;
+            color: var(--color-text-gray);
+            margin-bottom: var(--space-md);
+            line-height: 1.6;
         }
 
         .tool-card .example {
-            background: #f5f5f5;
-            padding: 0.5rem;
-            border-radius: 4px;
-            margin-top: 0.5rem;
-            font-family: 'Courier New', monospace;
-            font-size: 0.85rem;
-            color: #764ba2;
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            background: var(--color-bg-warm-gray);
+            padding: var(--space-sm);
+            border: 1px solid var(--color-border-light);
+            line-height: 1.8;
+        }
+
+        .section {
+            margin-bottom: var(--space-3xl);
+        }
+
+        h2 {
+            font-family: var(--font-sans);
+            font-size: 1.25rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            color: var(--color-text-black);
+            margin-bottom: var(--space-lg);
         }
 
         .installation {
-            background: #f9f9f9;
-            padding: 2rem;
-            border-radius: 8px;
-            margin: 2rem 0;
-            border-left: 4px solid #667eea;
+            background: var(--color-bg-white);
+            border: 2px solid var(--color-border-dark);
+            padding: var(--space-2xl);
+            margin-bottom: var(--space-2xl);
         }
 
-        .installation h2 {
-            color: #333;
-            margin-bottom: 1rem;
+        .installation h3 {
+            font-family: var(--font-mono);
+            font-size: 0.875rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--color-text-black);
+            margin-bottom: var(--space-md);
+            margin-top: var(--space-lg);
+        }
+
+        .installation h3:first-of-type {
+            margin-top: 0;
         }
 
         pre {
-            background: #1e1e1e;
-            color: #d4d4d4;
-            padding: 1rem;
-            border-radius: 6px;
+            font-family: var(--font-mono);
+            font-size: 0.875rem;
+            line-height: 1.6;
+            background: var(--color-text-black);
+            color: var(--color-bg-cream);
+            padding: var(--space-lg);
+            border: 1px solid var(--color-border-dark);
             overflow-x: auto;
-            margin: 1rem 0;
-            font-size: 0.9rem;
+            margin: var(--space-md) 0;
         }
 
         code {
-            font-family: 'Courier New', monospace;
+            font-family: var(--font-mono);
         }
 
         .highlight {
-            background: #fff3cd;
+            background: var(--color-accent);
+            color: var(--color-text-black);
             padding: 0.2rem 0.4rem;
-            border-radius: 3px;
         }
 
         .feature-list {
             list-style: none;
-            margin: 1rem 0;
+            margin: var(--space-lg) 0;
         }
 
         .feature-list li {
-            padding: 0.5rem 0;
-            padding-left: 2rem;
+            font-size: 0.9rem;
+            padding: var(--space-sm) 0;
+            padding-left: var(--space-xl);
             position: relative;
+            line-height: 1.6;
+            color: var(--color-text-charcoal);
         }
 
         .feature-list li:before {
-            content: "✓";
+            content: "■";
             position: absolute;
             left: 0;
-            color: #667eea;
-            font-weight: bold;
-            font-size: 1.2rem;
+            color: var(--color-border-dark);
+            font-size: 0.75rem;
         }
 
-        .cta {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 1rem 2rem;
-            border-radius: 6px;
+        .spec-table {
+            width: 100%;
+            font-family: var(--font-mono);
+            font-size: 0.875rem;
+            border-collapse: collapse;
+            margin: var(--space-lg) 0;
+        }
+
+        .spec-table th {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            text-align: left;
+            padding: var(--space-sm);
+            border-bottom: 2px solid var(--color-border-dark);
+            background: var(--color-bg-warm-gray);
+        }
+
+        .spec-table td {
+            padding: var(--space-sm);
+            border-bottom: 1px solid var(--color-border-light);
+        }
+
+        .btn-brand {
+            font-family: var(--font-mono);
+            font-size: 0.75rem;
+            font-weight: 500;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            padding: var(--space-sm) var(--space-lg);
+            border: 1px solid var(--color-border-dark);
+            background: var(--color-accent);
+            color: var(--color-text-black);
             text-decoration: none;
             display: inline-block;
-            margin-top: 1rem;
-            font-weight: 500;
-            transition: transform 0.2s ease;
+            transition: all 0.2s ease;
         }
 
-        .cta:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        .btn-brand:hover {
+            background: var(--color-accent-dark);
+            border-color: var(--color-accent-dark);
+            color: var(--color-bg-white);
         }
 
         .footer {
-            margin-top: 3rem;
-            padding-top: 2rem;
-            border-top: 1px solid #e0e0e0;
+            margin-top: var(--space-3xl);
+            padding-top: var(--space-2xl);
+            border-top: 1px solid var(--color-border-light);
             text-align: center;
-            color: #999;
-            font-size: 0.9rem;
+            color: var(--color-text-light-gray);
+            font-size: 0.875rem;
         }
 
         .footer a {
-            color: #667eea;
+            color: var(--color-text-gray);
             text-decoration: none;
+            border-bottom: 1px solid var(--color-border-medium);
         }
 
         .footer a:hover {
-            text-decoration: underline;
+            color: var(--color-text-black);
+            border-bottom-color: var(--color-text-black);
+        }
+
+        @media (max-width: 768px) {
+            body {
+                padding: var(--space-lg) var(--space-sm);
+            }
+            h1 {
+                font-size: 1.5rem;
+            }
+            .tools-grid {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🎨 Creative Juices MCP</h1>
-        <p class="tagline">Break free from predictable AI responses with randomized creative prompts</p>
+        <div class="header">
+            <div class="label">MCP_SERVER_01</div>
+            <h1>CREATIVE JUICES</h1>
+            <p class="tagline">RANDOMNESS TOOLS FOR DIVERGENT THINKING</p>
+            <div class="divider" style="margin: var(--space-lg) 0;"></div>
+            <p class="intro">
+                Creative Juices is a Model Context Protocol server that pushes LLMs into divergent thinking patterns using random verb-noun combinations and strategic frameworks. No setup, no API keys, completely private.
+            </p>
+        </div>
 
-        <p>Creative Juices is an MCP server that pushes LLMs into divergent thinking patterns using random verb-noun combinations and strategic frameworks. No setup, no API keys, completely private.</p>
-
+        <h2>AVAILABLE TOOLS</h2>
         <div class="tools-grid">
             <div class="tool-card">
+                <div class="label">TOOL_01</div>
                 <h3>get_inspiration</h3>
-                <p>Gentle creative nudges with everyday metaphors</p>
-                <div class="example">painting-shoe<br>baking-door<br>knitting-spoon</div>
+                <p>Gentle creative nudges with everyday metaphors for early-stage ideation.</p>
+                <div class="example">
+painting-shoe<br>
+baking-door<br>
+knitting-spoon
+                </div>
             </div>
 
             <div class="tool-card">
+                <div class="label">TOOL_02</div>
                 <h3>think_outside_the_box</h3>
-                <p>Intense creative shocks with dramatic metaphors</p>
-                <div class="example">crushing-fire<br>swarming-venom<br>teleporting-plasma</div>
+                <p>Intense creative shocks with dramatic metaphors when you're stuck in patterns.</p>
+                <div class="example">
+crushing-fire<br>
+swarming-venom<br>
+teleporting-plasma
+                </div>
             </div>
 
             <div class="tool-card">
+                <div class="label">TOOL_03</div>
                 <h3>reality_check</h3>
-                <p>Strategic validation using Elon Musk's frameworks</p>
-                <div class="example">First Principles<br>Limit Thinking<br>Platonic Ideal</div>
+                <p>Strategic validation using proven frameworks for convergent thinking.</p>
+                <div class="example">
+First Principles<br>
+Limit Thinking<br>
+Platonic Ideal
+                </div>
             </div>
         </div>
 
-        <div class="installation">
-            <h2>Installation</h2>
+        <div class="divider"></div>
 
-            <h3>1. Clone the Repository</h3>
-            <pre><code>git clone https://github.com/tomcounsell/cuttlefish.git
+        <div class="section">
+            <h2>INSTALLATION</h2>
+
+            <div class="installation">
+                <h3>1. Clone Repository</h3>
+                <pre><code>git clone https://github.com/tomcounsell/cuttlefish.git
 cd cuttlefish
 uv sync --all-extras</code></pre>
 
-            <h3>2. Test the Server</h3>
-            <pre><code># Run with MCP Inspector
+                <h3>2. Test Server</h3>
+                <pre><code># Run with MCP Inspector
 npx @modelcontextprotocol/inspector uv run python -m apps.ai.mcp.creative_juices_server</code></pre>
 
-            <h3>3. Configure Claude Desktop</h3>
-            <p>Add to your <code>claude_desktop_config.json</code>:</p>
-            <pre><code>{
+                <h3>3. Configure Claude Desktop</h3>
+                <p style="margin-bottom: var(--space-md); font-size: 0.875rem;">Add to your <code>claude_desktop_config.json</code>:</p>
+                <pre><code>{
   "mcpServers": {
     "creative-juices": {
       "command": "uv",
@@ -232,37 +410,75 @@ npx @modelcontextprotocol/inspector uv run python -m apps.ai.mcp.creative_juices
   }
 }</code></pre>
 
-            <p><strong>Config file location:</strong></p>
-            <ul style="margin-left: 2rem; margin-top: 0.5rem;">
-                <li><strong>macOS:</strong> <code>~/Library/Application Support/Claude/claude_desktop_config.json</code></li>
-                <li><strong>Windows:</strong> <code>%APPDATA%\Claude\claude_desktop_config.json</code></li>
-            </ul>
+                <p style="margin-top: var(--space-lg); margin-bottom: var(--space-sm); font-family: var(--font-mono); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em;">
+                    Config File Location:
+                </p>
+                <table class="spec-table">
+                    <tr>
+                        <td><strong>macOS</strong></td>
+                        <td><code>~/Library/Application Support/Claude/claude_desktop_config.json</code></td>
+                    </tr>
+                    <tr>
+                        <td><strong>Windows</strong></td>
+                        <td><code>%APPDATA%\Claude\claude_desktop_config.json</code></td>
+                    </tr>
+                </table>
 
-            <p style="margin-top: 1rem;">Replace <code class="highlight">/ABSOLUTE/PATH/TO/cuttlefish</code> with your actual repository path, then restart Claude Desktop.</p>
+                <p style="margin-top: var(--space-md); font-size: 0.875rem; color: var(--color-text-gray);">
+                    Replace <code class="highlight">/ABSOLUTE/PATH/TO/cuttlefish</code> with your actual repository path, then restart Claude Desktop.
+                </p>
+            </div>
         </div>
 
-        <h2>Why Use Creative Juices?</h2>
-        <ul class="feature-list">
-            <li><strong>Break habitual thinking</strong> - Random concrete metaphors force new mental pathways</li>
-            <li><strong>Zero setup</strong> - No API keys, no configuration, works immediately</li>
-            <li><strong>Completely private</strong> - Runs locally, no external calls, no data collection</li>
-            <li><strong>Battle-tested frameworks</strong> - Strategic questions from proven problem-solving patterns</li>
-            <li><strong>600+ curated words</strong> - Spanning human history from primitive tools to sci-fi futures</li>
-        </ul>
+        <div class="divider"></div>
 
-        <h2>Design Philosophy</h2>
-        <p><strong>Concrete over Abstract:</strong> Words like "baking-shoe" create stronger creative friction than "crystallize-entropy" because the conceptual gap is larger.</p>
+        <div class="section">
+            <h2>KEY FEATURES</h2>
+            <ul class="feature-list">
+                <li><strong>Break habitual thinking</strong> — Random concrete metaphors force new mental pathways</li>
+                <li><strong>Zero setup</strong> — No API keys, no configuration, works immediately</li>
+                <li><strong>Completely private</strong> — Runs locally, no external calls, no data collection</li>
+                <li><strong>Battle-tested frameworks</strong> — Strategic questions from proven problem-solving patterns</li>
+                <li><strong>600+ curated words</strong> — Spanning human history from primitive tools to sci-fi futures</li>
+            </ul>
+        </div>
 
-        <p><strong>Three-stage process:</strong> Diverge gently (inspiring) → Diverge dramatically (out-of-the-box) → Converge strategically (reality check)</p>
+        <div class="section">
+            <h2>DESIGN PHILOSOPHY</h2>
+            <table class="spec-table">
+                <thead>
+                    <tr>
+                        <th>Principle</th>
+                        <th>Implementation</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Concrete over Abstract</td>
+                        <td>Words like "baking-shoe" create stronger creative friction than "crystallize-entropy"</td>
+                    </tr>
+                    <tr>
+                        <td>Three-stage Process</td>
+                        <td>Diverge gently (inspiring) → Diverge dramatically (out-of-the-box) → Converge strategically (reality check)</td>
+                    </tr>
+                    <tr>
+                        <td>Historical Dimension</td>
+                        <td>Spans primitive era (knapping, flint) through sci-fi future (teleporting, quantum-drive)</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
 
-        <p><strong>Historical dimension:</strong> Words span from primitive era (knapping, flint) through ancient civilizations (forging, wheel) to futuristic sci-fi (teleporting, quantum-drive) for maximum metaphorical range.</p>
-
-        <a href="https://github.com/tomcounsell/cuttlefish" class="cta">View on GitHub</a>
+        <div style="text-align: center; margin: var(--space-3xl) 0;">
+            <a href="https://github.com/tomcounsell/cuttlefish" class="btn-brand">
+                VIEW ON GITHUB
+            </a>
+        </div>
 
         <div class="footer">
-            <p>Part of the <a href="https://github.com/tomcounsell/cuttlefish">Cuttlefish</a> project</p>
-            <p>Built with <a href="https://github.com/jlowin/fastmcp">FastMCP</a> • Powered by randomness • Fueled by metaphors</p>
-            <p style="margin-top: 1rem;">Questions? <a href="https://github.com/tomcounsell/cuttlefish/issues">Open an issue</a></p>
+            <p>Part of the <a href="https://github.com/tomcounsell/cuttlefish">Cuttlefish</a> AI Integration Platform</p>
+            <p style="margin-top: var(--space-sm);">Built with <a href="https://github.com/jlowin/fastmcp">FastMCP</a> • Powered by randomness • Fueled by metaphors</p>
+            <p style="margin-top: var(--space-lg);">Questions? <a href="https://github.com/tomcounsell/cuttlefish/issues">Open an issue</a></p>
         </div>
     </div>
 </body>
