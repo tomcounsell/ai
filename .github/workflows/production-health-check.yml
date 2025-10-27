@@ -1,0 +1,30 @@
+name: Production Health Check
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'  # Every 15 minutes
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run health checks
+        run: python tools/testing/production_health_check.py
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "❌ Production health checks failed!"
+          echo "Check the logs for details."
