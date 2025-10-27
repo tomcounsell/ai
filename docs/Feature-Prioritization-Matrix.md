@@ -28,6 +28,7 @@ Using the **RICE** scoring method adapted for our context:
 
 | Feature | Reach | Impact | Confidence | Effort | RICE Score | Priority |
 |---------|-------|--------|------------|--------|------------|----------|
+| MCP Library & Auth Management | 9 | 9 | 1.0 | 2.0 | **40.5** | P1 |
 | MCP/Claude Code Integration | 8 | 10 | 0.8 | 3.0 | **21.3** | P1 |
 | GitHub Integration | 7 | 8 | 1.0 | 2.0 | **28.0** | P1 |
 | Web Search (Perplexity) | 9 | 7 | 1.0 | 1.0 | **63.0** | P1 |
