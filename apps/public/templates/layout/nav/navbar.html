@@ -51,9 +51,10 @@
             Pricing
           </a>
 
-          <a href="{% url 'public:blog' %}" class="inline-flex items-center border-b-2 {% if active_section == 'blog' %}border-slate-500 text-gray-900{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700{% endif %} px-1 pt-1 text-sm font-medium">
+          {# Blog link - DISABLED #}
+          {# <a href="{% url 'public:blog' %}" class="inline-flex items-center border-b-2 {% if active_section == 'blog' %}border-slate-500 text-gray-900{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700{% endif %} px-1 pt-1 text-sm font-medium">
             Blog
-          </a>
+          </a> #}
 
           {% if user.is_authenticated %}
             {% if user.teams.exists %}
@@ -107,9 +108,10 @@
         Pricing
       </a>
 
-      <a href="{% url 'public:blog' %}" class="block rounded-xs {% if active_section == 'blog' %}bg-slate-50 text-slate-700{% else %}text-gray-500 hover:bg-gray-50 hover:text-gray-700{% endif %} px-3 py-2 text-base font-medium">
+      {# Blog link - DISABLED #}
+      {# <a href="{% url 'public:blog' %}" class="block rounded-xs {% if active_section == 'blog' %}bg-slate-50 text-slate-700{% else %}text-gray-500 hover:bg-gray-50 hover:text-gray-700{% endif %} px-3 py-2 text-base font-medium">
         Blog
-      </a>
+      </a> #}
 
       {% if user.is_authenticated %}
         {% if user.teams.exists %}

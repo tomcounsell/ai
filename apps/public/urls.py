@@ -44,17 +44,17 @@ urlpatterns += [
         pages.PricingView.as_view(),
         name="pricing",
     ),
-    # Blog pages
-    path(
-        "blog/",
-        pages.BlogView.as_view(),
-        name="blog",
-    ),
-    path(
-        "blog/<slug:slug>/",
-        pages.BlogPostView.as_view(),
-        name="blog-post",
-    ),
+    # Blog pages - DISABLED
+    # path(
+    #     "blog/",
+    #     pages.BlogView.as_view(),
+    #     name="blog",
+    # ),
+    # path(
+    #     "blog/<slug:slug>/",
+    #     pages.BlogPostView.as_view(),
+    #     name="blog-post",
+    # ),
 ]
 
 # Auth and Accounts
