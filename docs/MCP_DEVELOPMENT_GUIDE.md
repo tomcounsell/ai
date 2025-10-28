@@ -98,27 +98,50 @@ def main():
 
 ## Running MCP Servers
 
-### Local Development
+### Hosting & Installation Philosophy
 
-```bash
-# Set environment variables
-export QUICKBOOKS_ORG_ID=your_org_id
-export QUICKBOOKS_API_KEY=your_api_key
+**Yudame AI MCP servers follow a hosted-first approach:**
 
-# Run server
-uv run python -m apps.ai.mcp.quickbooks_server
-```
+1. **Hosted Service (Preferred)**
+   - All MCP servers are hosted at `https://ai.yuda.me/mcp/{server-name}/serve`
+   - Users configure via simple URL (no local installation required)
+   - Examples: Creative Juices, CTO Tools
+   - Benefits: Zero setup, always latest version, no local dependencies
 
-### Claude Desktop Configuration
+2. **Local Execution (When Required)**
+   - Only for servers requiring local file system access or sensitive credentials
+   - Examples: QuickBooks (requires OAuth), local development tools
+   - Uses `uvx run` for zero-install execution from GitHub
+
+**Configuration Examples:**
+
+### Hosted MCP Server (Recommended)
 
 Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
 
 ```json
 {
   "mcpServers": {
+    "creative-juices": {
+      "url": "https://ai.yuda.me/mcp/creative-juices/serve"
+    }
+  }
+}
+```
+
+### Local Execution (When Needed)
+
+For servers requiring local access or credentials:
+
+```json
+{
+  "mcpServers": {
     "quickbooks": {
-      "command": "uv",
-      "args": ["run", "python", "-m", "apps.ai.mcp.quickbooks_server"],
+      "command": "uvx",
+      "args": [
+        "run",
+        "https://raw.githubusercontent.com/yudame/cuttlefish/main/apps/ai/mcp/quickbooks_server.py"
+      ],
       "env": {
         "QUICKBOOKS_ORG_ID": "your_org_id",
         "QUICKBOOKS_API_KEY": "your_api_key"
@@ -128,26 +151,111 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
 }
 ```
 
+### Local Development Testing
+
+```bash
+# Set environment variables
+export QUICKBOOKS_ORG_ID=your_org_id
+export QUICKBOOKS_API_KEY=your_api_key
+
+# Run server locally
+uv run python -m apps.ai.mcp.quickbooks_server
+```
+
+---
+
+## Creating New MCP Servers
+
+### Decision: Hosted vs Local
+
+**Choose Hosted (default):**
+- Server provides information, data transformation, or stateless operations
+- No local file system access needed
+- No sensitive credentials required
+- Examples: Creative tools, data formatters, reference data
+
+**Choose Local only when:**
+- Requires reading/writing local files
+- Needs access to user's file system
+- Handles sensitive OAuth tokens or API keys
+- Needs to interact with local development environment
+
+### Hosted Server Checklist
+
+1. **Create server file:** `apps/ai/mcp/{name}_server.py`
+2. **Add Django view:** Serve at `/mcp/{name}/serve`
+3. **Create documentation page:** `apps/ai/mcp/{name}_web.html`
+4. **Update URLs:** Add routes for serve endpoint and docs page
+5. **Add to homepage:** Include in MCP servers section
+6. **Test hosted endpoint:** Verify at `https://ai.yuda.me/mcp/{name}/serve`
+
+### Installation Guide Format
+
+**For hosted servers, always use this format in docs:**
+
+```json
+{
+  "mcpServers": {
+    "server-name": {
+      "url": "https://ai.yuda.me/mcp/server-name/serve"
+    }
+  }
+}
+```
+
+**For local-only servers, use uvx format:**
+
+```json
+{
+  "mcpServers": {
+    "server-name": {
+      "command": "uvx",
+      "args": [
+        "run",
+        "https://raw.githubusercontent.com/yudame/cuttlefish/main/apps/ai/mcp/server_name.py"
+      ]
+    }
+  }
+}
+```
+
 ---
 
 ## Examples in This Project
 
-### QuickBooks Server
-**File:** `apps/ai/mcp/quickbooks_server.py`
-
-Shows:
-- Resource definitions for QuickBooks data access
-- Tools for creating invoices, searching customers
-- Client initialization with organization ID
-
-### Creative Juices Server
+### Creative Juices Server (Hosted)
 **File:** `apps/ai/mcp/creative_juices_server.py`
+**URL:** `https://ai.yuda.me/mcp/creative-juices/serve`
+**Docs:** `https://ai.yuda.me/mcp/creative-juices`
 
 Shows:
+- Hosted MCP server pattern (no local installation)
 - Three distinct tools with clear use cases
 - Pure randomness for creativity (no intelligence)
 - Tool descriptions that instruct LLMs when to use each
 - Minimal external dependencies
+- Complete documentation page with installation guide
+
+### CTO Tools Server (Hosted)
+**File:** `apps/ai/mcp/cto_tools_server.py`
+**URL:** `https://ai.yuda.me/mcp/cto-tools/serve`
+**Docs:** `https://ai.yuda.me/mcp/cto-tools`
+
+Shows:
+- Hosted MCP server for engineering leadership
+- Weekly review framework tool
+- Structured prompts for CTO workflows
+- Documentation with brand-compliant styling
+
+### QuickBooks Server (Local - OAuth Required)
+**File:** `apps/ai/mcp/quickbooks_server.py`
+
+Shows:
+- Local execution pattern for OAuth credentials
+- Resource definitions for QuickBooks data access
+- Tools for creating invoices, searching customers
+- Client initialization with organization ID
+- Environment variable configuration
 
 ---
 
