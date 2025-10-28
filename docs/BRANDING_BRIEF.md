@@ -233,70 +233,45 @@ This section documents the specific design choices made during the Cuttlefish br
 - Generous spacing (up to 96px) reinforces "breathing room" principle
 - Aligns with technical/grid aesthetic
 
-#### Design Pattern Library
+#### Component Library
 
-**1. Blueprint Box**
-```
-Purpose: Primary container for hero sections
-Structure:
-  - 2px solid border (dark)
-  - Inner border 8px inset (light)
-  - Creates "technical drawing" layered effect
-Usage: Homepage hero, MCP landing headers
-```
+**1. Technical Spec Box** (`.technical-spec-box`)
+- Hero sections with double-border technical aesthetic
+- 2px outer border + 6px inset inner border (pseudo-element)
+- Square corners, generous padding (--space-2xl)
+- Usage: Homepage hero, ai_platform.html
 
-**2. Card with Corner Marks**
-```
-Purpose: Technical spec cards, product showcases
-Structure:
-  - 16×16px corner decorations (top-left, bottom-right)
-  - Borders only on outer edges (incomplete square)
-  - Suggests "in-progress blueprint"
-Usage: MCP server cards, feature cards
-```
+**2. Server Card** (`.server-card`)
+- MCP server display with specs and status
+- Square corners, 1px border (medium → dark on hover)
+- Status dot (6px circle, green/orange)
+- Spec sheet with 2px left-border accent
+- Usage: Homepage, ai_platform.html server grids
 
-**3. Technical Divider**
-```
-Purpose: Section separation with visual interest
-Structure:
-  - 1px horizontal line (medium border color)
-  - 6×6px circular node at center
-  - Circle: border + background creates depth
-Usage: Between major sections on all pages
-```
+**3. Card with Corner Marks** (`.card-corner-marks`)
+- 16×16px corner decorations (top-left, bottom-right)
+- Incomplete borders suggest "blueprint in progress"
+- Usage: Feature cards, alternative to full-border cards
 
-**4. Connection Line**
-```
-Purpose: Visual connector showing relationships
-Structure:
-  - Horizontal line with nodes at endpoints
-  - 6×6px circles (border + fill)
-  - Suggests data flow or linkage
-Usage: Currently in CSS library, ready for diagrams
-```
+**4. Technical Divider** (`.divider-technical`)
+- 1px horizontal line with centered 6px circular node
+- Section separator with visual interest
+- Usage: Between major page sections
 
-**5. Spec Sheet / Data Table**
-```
-Purpose: Technical information display
-Structure:
-  - Monospace font throughout
-  - 2px bottom border on headers (dark)
-  - 1px borders on rows (light)
-  - Warm gray header background
-  - Hover state with subtle background shift
-Usage: Tool characteristics, privacy specs, design philosophy
-```
+**5. Spec Table** (`.table-spec`)
+- Monospace throughout, 2px bottom border on headers
+- Warm gray header background, subtle row hover
+- Usage: Feature specs, technical comparisons
 
-**6. Label System**
-```
-Purpose: Categorization and organization
-Structure:
-  - Monospace, 0.75rem
-  - Uppercase, 0.08em letter-spacing
-  - Gray color for subtlety
-  - Examples: "MCP_SERVER_01", "TOOL_01", "FEATURE_01"
-Rationale: Mimics technical documentation labeling
-```
+**6. Inline Spec Table** (`.spec-table-inline`)
+- Minimal embedded specifications
+- Grid layout: label column (gray) + value column
+- Usage: Hero sections, embedded data displays
+
+**7. Label System** (`.label`)
+- Monospace, 0.75rem, uppercase, 0.08em letter-spacing
+- Gray color, follows pattern: MCP_SERVER_01, TOOL_01, BENEFIT_01
+- Mimics technical documentation numbering
 
 #### Component-Specific Decisions
 
@@ -333,104 +308,52 @@ Rationale: Mimics technical documentation labeling
   - Hover: Darker bronze with white text
   - Used for primary CTAs only
 
-**Cards (MCP Servers on Homepage):**
-- **Layout Decision:** Grid with min 320px columns
-  - Auto-fits based on viewport
-  - Maintains readable width even on wide screens
-
-- **Information Hierarchy:**
-  1. Label (MCP_SERVER_##)
-  2. Title (uppercase, larger)
-  3. Description (sans-serif, body size)
-  4. Spec sheet (monospace, small)
-  5. CTA button
-
-- **Status Indication:** Opacity for "coming soon" items
-  - QuickBooks at 60% opacity
-  - Disabled button with "COMING SOON" text
-  - Maintains visual presence without false promise
+**Server Cards (Homepage & AI Platform):**
+- Grid: auto-fit, minmax(300px, 1fr) for responsive columns
+- Information hierarchy: Label → Title → Description → Spec sheet → CTA
+- Status indication: Opacity (0.5) for in-development items
+- Disabled buttons clearly labeled "IN DEVELOPMENT"
 
 #### Layout Decisions
 
-**Container Width:**
-- Max-width: 1000px for MCP landing pages
-- Max-width: 1200px (7xl) for main app pages
-- Rationale: Prevents excessive line length, maintains readability
+**Page Widths:**
+- MCP landing pages: 1000px max-width
+- Main app pages: 1200px (7xl) max-width
+- Prevents excessive line length, maintains readability
 
-**Responsive Breakpoints:**
-- Mobile: Base styles
-- Tablet: 768px (sm:)
-- Desktop: Inherits from Tailwind defaults
-- Focus on mobile-first, progressive enhancement
-
-**Grid Usage:**
-- Homepage: Auto-fit grid for MCP cards
-- Footer: 3-column on desktop (xl:), stacks on mobile
-- Flexible layouts that adapt without media query complexity
+**Responsive Approach:**
+- Mobile-first base styles
+- Progressive enhancement at 768px (sm:)
+- Auto-fit grids eliminate need for complex media queries
 
 #### Technical Drawing Elements
 
-**Subtle Grid Background:**
-```css
-.technical-bg {
-  background-image:
-    linear-gradient(lines),
-    linear-gradient(90deg, lines);
-  background-size: 8px 8px;
-}
-```
-- Available but not overused
-- Can be applied to specific sections for emphasis
-- Maintains "blueprint" metaphor without overwhelming
+**Grid Background** (`.technical-bg`)
+- 8×8px grid pattern available in CSS
+- Use sparingly for specific sections
+- Maintains blueprint metaphor without overwhelming
 
-**Node/Circle Pattern:**
-- Consistent 6×6px circles throughout
-- Border + background (creates ring effect)
-- Used in dividers, connection lines
-- Suggests "connection points" in technical diagrams
+**Node Pattern:**
+- Consistent 6×6px circles with border + fill
+- Used in dividers and connection lines
+- Suggests connection points in technical diagrams
 
-#### Accessibility Considerations
+#### Accessibility
 
-**Focus States:**
-```css
-*:focus-visible {
-  outline: 2px solid var(--color-border-dark);
-  outline-offset: 2px;
-}
-```
-- Visible, high-contrast outline
-- Offset prevents overlap with content
-- Respects user's focus-visible preference
+- **Focus states:** 2px outline with 2px offset (respects :focus-visible)
+- **High contrast mode:** Auto-adjusts borders and text to black
+- **Color ratios:** All text meets WCAG AA (labels ~4.5:1, body ~12:1)
 
-**High Contrast Mode:**
-```css
-@media (prefers-contrast: high) {
-  --color-border-medium: #000000;
-  --color-text-gray: #000000;
-}
-```
-- Automatically adjusts for users who need higher contrast
-- Maintains design intent while improving readability
+#### Content Voice
 
-**Color Contrast Ratios:**
-- Text on cream background: All text colors meet WCAG AA
-- Labels (gray on cream): ~4.5:1 ratio
-- Body text (charcoal on cream): ~12:1 ratio
-- Accent buttons tested for both normal and hover states
-
-#### Content Voice Implementation
-
-**Labels Follow Technical Spec Pattern:**
-- "MCP_SERVER_01" not "Server 1"
-- "TOOL_01" not "Tool One"
-- "FEATURE_04" not "Fourth Feature"
-- Rationale: Suggests versioning, systematic organization
+**Technical Labeling:**
+- MCP_SERVER_01, TOOL_01, BENEFIT_01 (not "Server 1" or "First Tool")
+- Suggests systematic versioning and organization
 
 **Descriptions:**
-- Short, declarative sentences
+- Short, declarative, fact-based
 - Technical accuracy without jargon
-- "What it does" not "how amazing it is"
-- Example: "Analysis-focused, not prescriptive" vs "Revolutionary framework"
+- Focus on capability, not hype
 
 **Call-to-Action Text:**
 - Uppercase, imperative
@@ -453,39 +376,13 @@ Rationale: Mimics technical documentation labeling
    - Implementation documentation
 
 **Updated Files:**
-1. `apps/public/templates/base.html`
-   - Added brand.css import
-   - Changed body background to cream
-   - Updated footer element class
-
-2. `apps/public/templates/pages/home.html`
-   - Complete redesign using new components
-   - Blueprint-box hero
-   - Corner-mark cards for MCP servers
-   - Technical dividers
-
-3. `apps/ai/mcp/creative_juices_web.html`
-   - Self-contained redesign
-   - All brand CSS inline for portability
-   - Technical aesthetic throughout
-   - Spec tables for features
-
-4. `apps/ai/mcp/cto_tools_web.html`
-   - Self-contained redesign
-   - Consistent with Creative Juices
-   - Tool specification layout
-   - Feature grid with labels
-
-5. `apps/public/templates/layout/nav/navbar.html`
-   - Wordmark instead of logo image
-   - Simplified link styling
-   - Monospace navigation
-
-6. `apps/public/templates/layout/footer.html`
-   - Removed complex dropdowns
-   - Simplified four-column layout
-   - Consistent link hover states
-   - Monospace copyright section
+1. `apps/public/templates/base.html` - Brand CSS, cream background, removed main_header white box
+2. `apps/public/templates/pages/home.html` - Complete redesign with technical-spec-box hero, server cards, dividers
+3. `apps/public/templates/landing/ai_platform.html` - Technical elegance aesthetic, installation guide with numbered steps
+4. `apps/ai/mcp/creative_juices_web.html` - Self-contained redesign with inline brand CSS
+5. `apps/ai/mcp/cto_tools_web.html` - Consistent technical aesthetic with Creative Juices
+6. `apps/public/templates/layout/nav/navbar.html` - Wordmark, simplified link styling
+7. `apps/public/templates/layout/footer.html` - Four-column layout, monospace copyright
 
 #### Design Rationale Summary
 
@@ -518,6 +415,13 @@ Rationale: Mimics technical documentation labeling
 - Suggests "work in progress" or "blueprint"
 - Reduces visual weight compared to full borders
 - Allows content to breathe
+
+**Why Square Corners Everywhere (Except Buttons)?**
+- Reinforces technical drawing aesthetic
+- Creates architectural, precise feeling
+- Avoids "consumer app" softness
+- Buttons retain subtle rounding for affordance (clickability)
+- Status dots use circles (50% border-radius) for visual differentiation
 
 **Why Generous Spacing?**
 - Prevents cramped, overwhelming feeling
@@ -601,11 +505,20 @@ Rationale: Mimics technical documentation labeling
    - Borders: Use defined border colors (dark, medium, light)
    - Accent: Use bronze sparingly (CTAs, highlights only)
 
+5. **Border Radius Policy:**
+   - Containers/Cards: NO border-radius (square corners)
+   - Sections/Divs: NO border-radius (square corners)
+   - Code blocks: NO border-radius (square corners)
+   - Buttons: Default browser rounding (subtle, acceptable)
+   - Status indicators: 50% border-radius (circles only)
+   - Exception: Only use rounded corners for interactive elements (buttons, badges)
+
 **When In Doubt:**
 - Refer to existing MCP landing pages as reference
 - Prioritize clarity over decoration
 - Choose the simpler option
 - Less is more in this brand
+- Square corners unless it's a button or status dot
 
 ---
 

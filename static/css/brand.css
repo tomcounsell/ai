@@ -216,6 +216,37 @@ label, .label {
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
 }
 
+/* Technical specification box - for hero sections */
+.technical-spec-box {
+    background: var(--color-bg-white);
+    border: 2px solid var(--color-border-dark);
+    padding: var(--space-2xl);
+    position: relative;
+}
+
+.technical-spec-box::before {
+    content: '';
+    position: absolute;
+    top: 6px;
+    left: 6px;
+    right: 6px;
+    bottom: 6px;
+    border: 1px solid var(--color-border-light);
+    pointer-events: none;
+}
+
+/* Server card - clean, minimal card for MCP servers */
+.server-card {
+    background: var(--color-bg-white);
+    border: 1px solid var(--color-border-medium);
+    padding: var(--space-lg);
+    transition: border-color 0.2s ease;
+}
+
+.server-card:hover {
+    border-color: var(--color-border-dark);
+}
+
 /* Card with corner marks (technical drawing style) */
 .card-corner-marks {
     position: relative;
@@ -300,6 +331,22 @@ label, .label {
     background: var(--color-bg-warm-gray);
 }
 
+/* Inline spec table - minimal, for embedded specs */
+.spec-table-inline {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+}
+
+.spec-table-inline td {
+    padding: var(--space-xs) 0;
+    vertical-align: top;
+}
+
+.spec-table-inline td:first-child {
+    color: var(--color-text-gray);
+    padding-right: var(--space-md);
+}
+
 /* === FORMS === */
 
 .input-brand {
@@ -329,6 +376,28 @@ pre.brand-code {
     padding: var(--space-lg);
     border: 1px solid var(--color-border-dark);
     overflow-x: auto;
+}
+
+/* === STATUS INDICATORS === */
+
+.status-indicator {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    margin-right: 6px;
+}
+
+.status-operational {
+    background: #4CAF50;
+}
+
+.status-development {
+    background: #FFA726;
+}
+
+.status-offline {
+    background: #E53935;
 }
 
 /* === UTILITY CLASSES === */
