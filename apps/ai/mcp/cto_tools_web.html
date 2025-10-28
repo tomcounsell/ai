@@ -373,15 +373,21 @@
 
         <div class="tool-spec">
             <div class="label">TOOL_01</div>
-            <h3>weekly_review()</h3>
+            <h3>weekly_review(days=7, categories=5)</h3>
             <p style="font-size: 0.95rem; margin-bottom: var(--space-lg); line-height: 1.8;">
-                Streamlined 3-phase framework for weekly engineering team reviews. Analysis-focused, not prescriptive. Works with ANY codebase.
+                Streamlined 3-phase framework for engineering team reviews with flexible time periods. Analysis-focused, not prescriptive. Works with ANY codebase.
             </p>
+
+            <h4>Parameters</h4>
+            <ul>
+                <li><strong>days</strong> (int, default: 7): Number of days to review (e.g., 7 for weekly, 14 for bi-weekly, 30 for monthly)</li>
+                <li><strong>categories</strong> (int, default: 5): Number of work categories to organize the output into</li>
+            </ul>
 
             <h4>Phase 1: Data Gathering</h4>
             <ul>
                 <li>Parallel git commands for efficient data collection</li>
-                <li>Commit analysis across the reporting period</li>
+                <li>Commit analysis across the reporting period (automatically adjusted based on days parameter)</li>
                 <li>Contributor activity tracking</li>
             </ul>
 
@@ -394,9 +400,10 @@
 
             <h4>Phase 3: Concise Output</h4>
             <ul>
-                <li>~200 word summary with 5 adaptive categories</li>
+                <li>Plain text (.txt) format with full Unicode emoji support</li>
+                <li>Concise summary with N adaptive categories (based on categories parameter)</li>
                 <li>Contributor recognition and stats</li>
-                <li>Communication-ready format for any channel</li>
+                <li>Communication-ready format for any channel - copy-paste anywhere</li>
             </ul>
 
             <table class="spec-table" style="margin-top: var(--space-xl);">
@@ -412,12 +419,16 @@
                         <td>15-20 minutes</td>
                     </tr>
                     <tr>
-                        <td>Output Length</td>
-                        <td>~200 words</td>
+                        <td>Time Period</td>
+                        <td>Flexible (default: 7 days)</td>
                     </tr>
                     <tr>
                         <td>Categories</td>
-                        <td>5 adaptive, based on actual work</td>
+                        <td>Flexible (default: 5), based on actual work</td>
+                    </tr>
+                    <tr>
+                        <td>Output Format</td>
+                        <td>Plain text (.txt) with Unicode emoji support</td>
                     </tr>
                     <tr>
                         <td>Codebase</td>
@@ -440,14 +451,14 @@
 
                 <div class="feature-card">
                     <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_02</div>
-                    <h4>Adaptive Categorization</h4>
-                    <p>AI chooses 5 relevant categories based on actual work, not templates</p>
+                    <h4>Flexible Parameters</h4>
+                    <p>Customize time periods (days) and category count for your needs</p>
                 </div>
 
                 <div class="feature-card">
                     <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_03</div>
-                    <h4>Concise Output</h4>
-                    <p>Single ~200 word summary suitable for any communication channel</p>
+                    <h4>Plain Text with Emojis</h4>
+                    <p>Full Unicode emoji support in plain text format - copy-paste anywhere</p>
                 </div>
 
                 <div class="feature-card">

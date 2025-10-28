@@ -87,44 +87,59 @@ Access the web manifest at: `https://ai.yuda.me/mcp/cto-tools/manifest.json`
 
 ## Available Tools
 
-### weekly_review()
+### weekly_review(days=7, categories=5)
 
-Provides a streamlined 3-phase framework for conducting weekly engineering team reviews.
+Provides a streamlined 3-phase framework for conducting engineering team reviews.
 
 **Purpose**: Systematically review your development team's work to produce a concise summary. Analysis-focused, not prescriptive. Works with ANY codebase and tech stack.
 
-**Returns**: Phase-by-phase instructions for creating a ~200 word summary including:
+**Parameters**:
+- `days` (int, default: 7): Number of days to review (e.g., 7 for weekly, 14 for bi-weekly, 30 for monthly)
+- `categories` (int, default: 5): Number of work categories to organize the output into
+
+**Returns**: Phase-by-phase instructions for creating a concise summary including:
 
 **Phase 1 - Data Gathering**:
 - Git commands to run in parallel for efficient data collection
 - Commit history, author statistics, and file changes
+- Commands automatically adjusted based on `days` parameter
 
 **Phase 2 - Internal Analysis**:
 - Review commits and identify patterns
-- Choose 5 relevant categories that emerge from the work
+- Choose N categories (based on `categories` parameter) that emerge from the work
 - Note key stats (commits, files, contributors)
 - Suggested categories: AI & ML, Auth & Security, Frontend/UX, Performance, Code Quality, Bug Fixes, Data & Analytics, DevOps, API, Billing, Reporting, Database, Testing
 
 **Phase 3 - Concise Output**:
-- Single summary organized by 5 categories (2-5 bullets each)
+- Plain text (.txt) format with full Unicode emoji support
+- Single summary organized by N categories (2-5 bullets each)
 - Stats section with commit counts and contributor recognition
 - Suitable for any communication channel (chat, email, reports)
 
 **Example Usage**:
 
 ```
+# Default 7-day weekly review
 Claude, use CTO Tools to run a weekly review of my team's work.
+
+# Custom 14-day review with 3 categories
+Claude, use CTO Tools weekly_review with days=14 and categories=3.
+
+# Monthly review with 7 categories
+Claude, use CTO Tools weekly_review with days=30 and categories=7.
 ```
 
 **Features**:
-- 📊 Concise output (~200 words) suitable for any channel
+- 📊 Concise output suitable for any channel
 - 🎯 Focus on what changed, not lengthy analysis
 - 👥 Automatic contributor recognition with commit counts
 - 🔍 Internal analysis (using sequential thinking) with brief output
 - ⚡ Fast reviews (15-20 min) with clear deliverables
+- 🎨 Full Unicode emoji support in plain text format
+- ⚙️ Flexible time periods and category counts
 
 The framework guides you through systematic analysis that produces a concise, scannable summary
-of your team's week with category-based organization and contributor recognition.
+of your team's work with category-based organization and contributor recognition.
 
 ## How It Works
 
@@ -142,19 +157,21 @@ of your team's week with category-based organization and contributor recognition
 
 ## Use Cases
 
-### Weekly Team Reviews
-Review your team's progress every Friday:
-- Extract commit history from the past 7 days
-- Analyze internally to identify 5 key categories
-- Generate concise summary (~200 words) with bullets
+### Weekly/Monthly Team Reviews
+Review your team's progress with flexible time periods:
+- Extract commit history from any number of days (default: 7)
+- Analyze internally to identify N key categories (default: 5)
+- Generate concise summary with bullets
 - Include contributor stats and recognition
+- Plain text format with full Unicode emoji support
 
 ### Communication-Ready Output
-The summary format is designed for immediate sharing:
-- Chat channels (Slack, Teams, Discord)
+The plain text format is designed for immediate sharing:
+- Chat channels (Slack, Teams, Discord) - full emoji support
 - Email updates to stakeholders
 - Status reports for leadership
 - Team retrospectives
+- Copy-paste into any application without formatting issues
 
 ## Technical Details
 

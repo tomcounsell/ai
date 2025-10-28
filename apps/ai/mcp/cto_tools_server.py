@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 @mcp.tool()
-def weekly_review() -> str:
+def weekly_review(days: int = 7, categories: int = 5) -> str:
     """
     Provides a structured framework for conducting weekly engineering team reviews.
 
@@ -55,36 +55,40 @@ def weekly_review() -> str:
 
     This framework works for ANY codebase and tech stack.
 
+    Args:
+        days: Number of days to review (default: 7)
+        categories: Number of work categories to organize output into (default: 5)
+
     Returns:
         str: Step-by-step instructions for conducting a weekly review with concise output
     """
-    instructions = r"""
-# Weekly Engineering Team Review Framework
+    instructions = f"""
+# Engineering Team Review Framework
 
 ## GOAL
-Produce a structured weekly engineering review organized by 5 categories with 2-5 bullets each,
-plus team statistics. Output in RTF (Rich Text Format) for easy copy-paste into email, Slack,
-Google Docs, etc. Uses emojis, bold titles (no numbers), and plain language accessible to
-non-technical stakeholders while still meaningful to engineers.
+Produce a structured engineering review organized by {categories} categories with 2-5 bullets each,
+plus team statistics. Output in plain text (.txt) format with Unicode emojis for easy copy-paste
+into email, Slack, Google Docs, etc. Uses emojis, bold titles (no numbers), and plain language
+accessible to non-technical stakeholders while still meaningful to engineers.
 
 ---
 
 ## PHASE 1: GATHER DATA
 
-Run these git commands in parallel to collect commit history from the past 7 days:
+Run these git commands in parallel to collect commit history from the past {days} days:
 
 ```bash
 # Verify you're on the correct branch
 git pull && git branch --show-current
 
 # Get all commits
-git log --since="7 days ago" --oneline --no-merges
+git log --since="{days} days ago" --oneline --no-merges
 
 # Count commits by author
-git log --since="7 days ago" --format="%an" --no-merges | sort | uniq -c | sort -rn
+git log --since="{days} days ago" --format="%an" --no-merges | sort | uniq -c | sort -rn
 
 # Get detailed stats (first 500 lines)
-git log --since="7 days ago" --stat --no-merges | head -500
+git log --since="{days} days ago" --stat --no-merges | head -500
 ```
 
 ---
@@ -95,7 +99,7 @@ Use the sequential thinking tool to organize your analysis:
 
 1. **Review the commits** - Read through and understand what changed
 2. **Identify patterns** - Group related commits together
-3. **Choose 5 categories** - Pick categories that naturally emerge from the work
+3. **Choose {categories} categories** - Pick categories that naturally emerge from the work
 
 **Category examples** (choose what fits this week's actual work):
 - 🔐 Credential & Authentication Infrastructure
@@ -123,57 +127,44 @@ Examples: "Credential & Authentication Infrastructure" not just "Auth"
 
 ## PHASE 3: WRITE THE FINAL SUMMARY
 
-**Output in RTF format (no numbers, just emoji + bold titles)**:
+**Output in plain text format with Unicode emojis (no numbers, just emoji + bold titles)**:
 
 ```
-{\rtf1\ansi\deff0
-{\fonttbl{\f0\fnil\fcharset0 Helvetica;}}
-{\colortbl;\red0\green0\blue0;\red51\green51\blue51;}
+# Engineering Review - [Date Range]
 
-\f0\fs24
+🔐 **Category Name**
+• **Feature/improvement name** - What it does and why it matters for users or the business
+• **Another improvement** - The benefit or problem it solves, in plain language
+• **Third item** - Focus on impact, not implementation details
+[Continue with 2-5 bullets per category]
 
-{\b\fs32 Weekly Engineering Review - [Date Range]}\par
-\par
+🔌 **Category Name**
+• **Feature name** - Business value and user impact
+• **Another feature** - What changed and why
+[2-5 bullets]
 
-{\b\fs28 🔐 Category Name}\par
-{\b Feature/improvement name} - What it does and why it matters for users or the business\par
-{\b Another improvement} - The benefit or problem it solves, in plain language\par
-{\b Third item} - Focus on impact, not implementation details\par
-[Continue with 2-5 bullets per category]\par
-\par
+💬 **Category Name**
+• **Feature name** - Clear description of what users will experience
+[2-5 bullets]
 
-{\b\fs28 🔌 Category Name}\par
-{\b Feature name} - Business value and user impact\par
-{\b Another feature} - What changed and why\par
-[2-5 bullets]\par
-\par
+📧 **Category Name**
+• **Feature name** - Benefits and outcomes
+[2-5 bullets]
 
-{\b\fs28 💬 Category Name}\par
-{\b Feature name} - Clear description of what users will experience\par
-[2-5 bullets]\par
-\par
+🧪 **Category Name**
+• **Feature name** - What was improved and why it matters
+[2-5 bullets]
 
-{\b\fs28 📧 Category Name}\par
-{\b Feature name} - Benefits and outcomes\par
-[2-5 bullets]\par
-\par
-
-{\b\fs28 🧪 Category Name}\par
-{\b Feature name} - What was improved and why it matters\par
-[2-5 bullets]\par
-\par
-
-{\b\fs28 📊 Team Statistics & Recognition}\par
-[X] total commits over [N] days ([Z] commits/day average)\par
-[Additional high-level metrics: features completed, improvements made]\par
-{\b [Name]}: [X] commits ([%]%) - [Their focus areas in plain language]\par
-{\b [Name]}: [X] commits ([%]%) - [Their focus areas in plain language]\par
-{\b [Name]}: [X] commits ([%]%) - [Their focus areas in plain language]\par
-}
+📊 **Team Statistics & Recognition**
+• [X] total commits over [N] days ([Z] commits/day average)
+• [Additional high-level metrics: features completed, improvements made]
+• **[Name]**: [X] commits ([%]%) - [Their focus areas in plain language]
+• **[Name]**: [X] commits ([%]%) - [Their focus areas in plain language]
+• **[Name]**: [X] commits ([%]%) - [Their focus areas in plain language]
 ```
 
 **IMPORTANT**: The title date range should ALWAYS show the full period requested (e.g., "Oct 6-13, 2025"
-for a 7-day review), regardless of when commits actually occurred.
+for a {days}-day review), regardless of when commits actually occurred.
 
 ---
 
@@ -196,7 +187,7 @@ for a 7-day review), regardless of when commits actually occurred.
 - Think: "Would a product manager, designer, or executive understand this?"
 
 **Category selection**:
-- Choose the 5 most relevant to this week's work
+- Choose the {categories} most relevant to this week's work
 - Use descriptive names like "Credential & Authentication Infrastructure" not just "Auth"
 - Order by importance/impact
 - NO NUMBERS - just emoji and title (e.g., "🔐 Authentication" not "1. 🔐 Authentication")
@@ -212,8 +203,8 @@ for a 7-day review), regardless of when commits actually occurred.
 ## IMPORTANT: OUTPUT EXPECTATIONS
 
 Your final response should be:
-- ✅ RTF format for rich text copy-paste
-- ✅ 5 categories with emoji + bold title (NO NUMBERS)
+- ✅ Plain text (.txt) format with full Unicode emoji support
+- ✅ {categories} categories with emoji + bold title (NO NUMBERS)
 - ✅ 2-5 bullets per category in plain language (no code paths, no method names, no file references)
 - ✅ Team Statistics section with contributor breakdown
 - ✅ Focus on business impact and user benefits, not technical implementation
@@ -221,7 +212,7 @@ Your final response should be:
 - ❌ NOT numbered sections (just emoji + title)
 - ❌ NOT technical jargon or code references (apps/path/file.py, function names, etc.)
 
-The analysis happens internally using sequential thinking. The output is RTF-formatted and
+The analysis happens internally using sequential thinking. The output is plain text formatted and
 accessible to ALL stakeholders - technical and non-technical alike.
 
 ---
@@ -231,13 +222,13 @@ accessible to ALL stakeholders - technical and non-technical alike.
 Choose the best document option based on your environment:
 
 **Option 1: Claude Code / Desktop Commander MCP**
-Save to RTF file: `/tmp/eng_review_<dates>.rtf`
-- Example: `/tmp/eng_review_oct6-13.rtf` (for weekly review)
-- Example: `/tmp/eng_review_sep7-oct7.rtf` (for monthly review)
-- After saving, offer to open in TextEdit: `open -a TextEdit /tmp/eng_review_<dates>.rtf`
+Save to plain text file: `/tmp/eng_review_<dates>.txt`
+- Example: `/tmp/eng_review_oct6-13.txt` (for weekly review)
+- Example: `/tmp/eng_review_sep7-oct7.txt` (for monthly review)
+- After saving, offer to open in TextEdit: `open -a TextEdit /tmp/eng_review_<dates>.txt`
 
 **Option 2: Claude Artifact** (if available)
-Create a new artifact with the RTF content for easy viewing and editing.
+Create a new artifact with the plain text content for easy viewing and editing.
 
 **Option 3: ChatGPT Canvas** (if in ChatGPT)
 Use canvas mode to create an editable document.
@@ -245,7 +236,7 @@ Use canvas mode to create an editable document.
 **Option 4: Google Drive** (if Drive integration available)
 Create a new Google Doc with the formatted content.
 
-**If none available**: Just output the RTF content for manual copy-paste.
+**If none available**: Just output the plain text content for manual copy-paste.
 
 **After creating file**, offer to open it in the local TextEdit app for easy copy-paste.
 
