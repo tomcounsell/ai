@@ -484,11 +484,7 @@ Platonic Ideal
                         <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-md); font-family: var(--font-mono); font-size: 0.688rem; overflow-x: auto; margin: var(--space-md) 0;"><code>{
   "mcpServers": {
     "creative-juices": {
-      "command": "uvx",
-      "args": [
-        "run",
-        "https://raw.githubusercontent.com/tomcounsell/cuttlefish/main/apps/ai/mcp/creative_juices_server.py"
-      ]
+      "url": "https://ai.yuda.me/mcp/creative-juices/serve"
     }
   }
 }</code></pre>
@@ -507,7 +503,7 @@ Platonic Ideal
                         <p style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-md);">
                             Run this command in your terminal:
                         </p>
-                        <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-md); font-family: var(--font-mono); font-size: 0.75rem; overflow-x: auto; margin: 0;"><code>claude mcp add creative-juices uvx run https://raw.githubusercontent.com/tomcounsell/cuttlefish/main/apps/ai/mcp/creative_juices_server.py</code></pre>
+                        <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-md); font-family: var(--font-mono); font-size: 0.75rem; overflow-x: auto; margin: 0;"><code>claude mcp add creative-juices --url https://ai.yuda.me/mcp/creative-juices/serve</code></pre>
                     </div>
                 </details>
 
@@ -523,11 +519,7 @@ Platonic Ideal
                         <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-md); font-family: var(--font-mono); font-size: 0.688rem; overflow-x: auto; margin: var(--space-md) 0;"><code>{
   "mcpServers": {
     "creative-juices": {
-      "command": "uvx",
-      "args": [
-        "run",
-        "https://raw.githubusercontent.com/tomcounsell/cuttlefish/main/apps/ai/mcp/creative_juices_server.py"
-      ]
+      "url": "https://ai.yuda.me/mcp/creative-juices/serve"
     }
   }
 }</code></pre>
@@ -549,11 +541,7 @@ Platonic Ideal
                         <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-md); font-family: var(--font-mono); font-size: 0.688rem; overflow-x: auto; margin: var(--space-md) 0;"><code>{
   "mcpServers": {
     "creative-juices": {
-      "command": "uvx",
-      "args": [
-        "run",
-        "https://raw.githubusercontent.com/tomcounsell/cuttlefish/main/apps/ai/mcp/creative_juices_server.py"
-      ]
+      "url": "https://ai.yuda.me/mcp/creative-juices/serve"
     }
   }
 }</code></pre>
@@ -606,16 +594,56 @@ Platonic Ideal
         </div>
 
         <div style="text-align: center; margin: var(--space-3xl) 0;">
-            <a href="https://github.com/tomcounsell/cuttlefish" class="btn-brand">
+            <a href="https://github.com/yudame/cuttlefish" class="btn-brand">
                 VIEW ON GITHUB
             </a>
         </div>
 
         <div class="footer">
-            <p>Part of the <a href="https://github.com/tomcounsell/cuttlefish">Cuttlefish</a> AI Integration Platform</p>
+            <p>Part of the <a href="https://github.com/yudame/cuttlefish">Cuttlefish</a> AI Integration Platform</p>
             <p style="margin-top: var(--space-sm);">Built with <a href="https://github.com/jlowin/fastmcp">FastMCP</a> • Powered by randomness • Fueled by metaphors</p>
-            <p style="margin-top: var(--space-lg);">Questions? <a href="https://github.com/tomcounsell/cuttlefish/issues">Open an issue</a></p>
+            <p style="margin-top: var(--space-lg);">Questions? <a href="https://github.com/yudame/cuttlefish/issues">Open an issue</a></p>
         </div>
     </div>
+
+    <script>
+    // Auto-add copy buttons to all terminal-style code blocks
+    document.addEventListener('DOMContentLoaded', function() {
+        document.querySelectorAll('pre').forEach(pre => {
+            // Only add to dark terminal-style code blocks
+            if (pre.style.background && pre.style.background.includes('var(--color-text-black)')) {
+                const wrapper = document.createElement('div');
+                wrapper.style.position = 'relative';
+
+                const button = document.createElement('button');
+                button.textContent = 'COPY';
+                button.style.cssText = 'position: absolute; top: 8px; right: 8px; background: var(--color-border-medium); color: var(--color-text-black); border: none; padding: 4px 8px; font-family: var(--font-mono); font-size: 0.688rem; cursor: pointer; opacity: 0.7; transition: opacity 0.2s;';
+                button.onmouseover = () => button.style.opacity = '1';
+                button.onmouseout = () => button.style.opacity = '0.7';
+
+                button.onclick = function() {
+                    const code = pre.querySelector('code');
+                    const text = code ? code.textContent : pre.textContent;
+
+                    navigator.clipboard.writeText(text).then(() => {
+                        button.textContent = 'COPIED!';
+                        button.style.background = 'var(--color-text-black)';
+                        button.style.color = 'var(--color-bg-cream)';
+
+                        setTimeout(() => {
+                            button.textContent = 'COPY';
+                            button.style.background = 'var(--color-border-medium)';
+                            button.style.color = 'var(--color-text-black)';
+                        }, 2000);
+                    });
+                };
+
+                pre.parentNode.insertBefore(wrapper, pre);
+                wrapper.appendChild(button);
+                wrapper.appendChild(pre);
+            }
+        });
+    });
+    </script>
 </body>
 </html>

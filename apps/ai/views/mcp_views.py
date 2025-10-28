@@ -6,7 +6,9 @@ import os
 import zipfile
 
 from django.http import HttpResponse, JsonResponse
+from django.utils.decorators import method_decorator
 from django.views import View
+from django.views.decorators.csrf import csrf_exempt
 
 
 class CreativeJuicesLandingView(View):
@@ -152,7 +154,7 @@ class CreativeJuicesBundleView(View):
             "homepage": "https://ai.yuda.me/mcp/creative-juices",
             "repository": {
                 "type": "git",
-                "url": "https://github.com/tomcounsell/cuttlefish"
+                "url": "https://github.com/yudame/cuttlefish"
             },
             "documentation": "https://ai.yuda.me/mcp/creative-juices/README.md",
             "license": "MIT",
@@ -165,19 +167,13 @@ class CreativeJuicesBundleView(View):
                 "first-principles"
             ],
             "server": {
-                "type": "python",
-                "entry_point": "creative_juices_server.py",
-                "mcp_config": {
-                    "command": "uvx",
-                    "args": [
-                        "run",
-                        "https://raw.githubusercontent.com/tomcounsell/cuttlefish/main/apps/ai/mcp/creative_juices_server.py"
-                    ],
-                    "env": {
-                        # Future: Add API key here if needed
-                        # "CREATIVE_JUICES_API_KEY": "${user_config.api_key}"
-                    }
-                }
+                "type": "http",
+                "url": "https://ai.yuda.me/mcp/creative-juices/serve",
+                "transport": "streamable-http",
+                # Future: Add authentication headers if needed
+                # "headers": {
+                #     "Authorization": "Bearer ${user_config.api_key}"
+                # }
             },
             "compatibility": {
                 "claude_desktop": ">=1.0.0",
@@ -237,3 +233,33 @@ class CreativeJuicesBundleView(View):
         response['Content-Disposition'] = 'attachment; filename="creative-juices.mcpb"'
 
         return response
+
+
+# ASGI endpoint for Creative Juices MCP Server over HTTP
+from django.views.decorators.csrf import csrf_exempt
+
+
+@csrf_exempt
+async def creative_juices_mcp_http(scope, receive, send):
+    """ASGI endpoint that serves the Creative Juices MCP server via streamable HTTP.
+
+    This allows remote clients to connect to the MCP server over HTTP instead of stdio.
+    Mounted at: /mcp/creative-juices/serve
+
+    Usage in client config:
+    {
+      "mcpServers": {
+        "creative-juices": {
+          "url": "https://ai.yuda.me/mcp/creative-juices/serve"
+        }
+      }
+    }
+    """
+    # Import here to avoid loading FastMCP unless needed
+    from apps.ai.mcp.creative_juices_server import mcp
+
+    # Get the ASGI app from FastMCP
+    asgi_app = mcp.streamable_http_app()
+
+    # Forward the request to the FastMCP ASGI app
+    await asgi_app(scope, receive, send)

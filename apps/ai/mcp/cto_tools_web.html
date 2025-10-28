@@ -569,5 +569,45 @@
             <p style="margin-top: var(--space-sm);">Powered by <a href="https://modelcontextprotocol.io">Model Context Protocol</a></p>
         </div>
     </div>
+
+    <script>
+    // Auto-add copy buttons to all terminal-style code blocks
+    document.addEventListener('DOMContentLoaded', function() {
+        document.querySelectorAll('pre').forEach(pre => {
+            // Only add to dark terminal-style code blocks
+            if (pre.style.background && pre.style.background.includes('var(--color-text-black)')) {
+                const wrapper = document.createElement('div');
+                wrapper.style.position = 'relative';
+
+                const button = document.createElement('button');
+                button.textContent = 'COPY';
+                button.style.cssText = 'position: absolute; top: 8px; right: 8px; background: var(--color-border-medium); color: var(--color-text-black); border: none; padding: 4px 8px; font-family: var(--font-mono); font-size: 0.688rem; cursor: pointer; opacity: 0.7; transition: opacity 0.2s;';
+                button.onmouseover = () => button.style.opacity = '1';
+                button.onmouseout = () => button.style.opacity = '0.7';
+
+                button.onclick = function() {
+                    const code = pre.querySelector('code');
+                    const text = code ? code.textContent : pre.textContent;
+
+                    navigator.clipboard.writeText(text).then(() => {
+                        button.textContent = 'COPIED!';
+                        button.style.background = 'var(--color-text-black)';
+                        button.style.color = 'var(--color-bg-cream)';
+
+                        setTimeout(() => {
+                            button.textContent = 'COPY';
+                            button.style.background = 'var(--color-border-medium)';
+                            button.style.color = 'var(--color-text-black)';
+                        }, 2000);
+                    });
+                };
+
+                pre.parentNode.insertBefore(wrapper, pre);
+                wrapper.appendChild(button);
+                wrapper.appendChild(pre);
+            }
+        });
+    });
+    </script>
 </body>
 </html>

@@ -127,8 +127,12 @@ async def reality_check() -> dict:
 
 
 def main():
-    """Main entry point for the MCP server."""
-    # Run the MCP server (starts event loop internally)
+    """Main entry point for the MCP server (stdio mode only).
+
+    For HTTP hosting, use the Django view at /mcp/creative-juices/serve
+    which wraps this server and exposes it via HTTP transport.
+    """
+    logger.info("Starting Creative Juices MCP server in stdio mode")
     mcp.run()
 
 

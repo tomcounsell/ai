@@ -179,7 +179,12 @@
             </div>
             <div>
               <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-sm);">Install uv (if needed)</h3>
-              <pre class="brand-code" style="font-size: 0.75rem; padding: var(--space-sm);"><code>curl -LsSf https://astral.sh/uv/install.sh | sh</code></pre>
+              <div style="position: relative;">
+                <button class="copy-btn" style="position: absolute; top: var(--space-xs); right: var(--space-xs); background: var(--color-border-medium); color: var(--color-text-black); border: none; padding: 4px 8px; font-family: var(--font-mono); font-size: 0.688rem; cursor: pointer; opacity: 0.7; transition: opacity 0.2s;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'">
+                  COPY
+                </button>
+                <pre class="brand-code" style="font-size: 0.75rem; padding: var(--space-sm);"><code>curl -LsSf https://astral.sh/uv/install.sh | sh</code></pre>
+              </div>
             </div>
           </div>
 
@@ -193,7 +198,11 @@
               <p class="text-sans" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-sm);">
                 Edit: <code class="text-mono" style="background: var(--color-bg-warm-gray); padding: 2px 6px;">~/Library/Application Support/Claude/claude_desktop_config.json</code>
               </p>
-              <pre class="brand-code" style="font-size: 0.688rem; padding: var(--space-sm);"><code>{
+              <div style="position: relative;">
+                <button class="copy-btn" style="position: absolute; top: var(--space-xs); right: var(--space-xs); background: var(--color-border-medium); color: var(--color-text-black); border: none; padding: 4px 8px; font-family: var(--font-mono); font-size: 0.688rem; cursor: pointer; opacity: 0.7; transition: opacity 0.2s;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'">
+                  COPY
+                </button>
+                <pre class="brand-code" style="font-size: 0.688rem; padding: var(--space-sm);"><code>{
   "mcpServers": {
     "creative-juices": {
       "command": "uvx",
@@ -204,6 +213,7 @@
     }
   }
 }</code></pre>
+              </div>
             </div>
           </div>
 
@@ -226,3 +236,29 @@
 
   </div>
 {% endblock content %}
+
+{% block scripts %}
+<script>
+// Copy button functionality for code blocks
+document.querySelectorAll('.copy-btn').forEach(button => {
+  button.addEventListener('click', function() {
+    const pre = this.nextElementSibling;
+    const code = pre.querySelector('code');
+    const text = code.textContent;
+
+    navigator.clipboard.writeText(text).then(() => {
+      const originalText = this.textContent;
+      this.textContent = 'COPIED!';
+      this.style.background = 'var(--color-text-black)';
+      this.style.color = 'var(--color-bg-cream)';
+
+      setTimeout(() => {
+        this.textContent = originalText;
+        this.style.background = 'var(--color-border-medium)';
+        this.style.color = 'var(--color-text-black)';
+      }, 2000);
+    });
+  });
+});
+</script>
+{% endblock %}

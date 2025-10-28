@@ -17,6 +17,7 @@ from apps.ai.views import (
     CreativeJuicesManifestView,
     CreativeJuicesReadmeView,
 )
+from apps.ai.views.mcp_views import creative_juices_mcp_http
 from apps.ai.views.test_chat import TestChatView
 from apps.ai.views.test_page import TestChatPageView
 
@@ -46,6 +47,12 @@ urlpatterns: list[URLPattern] = [
         "creative-juices/download.mcpb",
         CreativeJuicesBundleView.as_view(),
         name="mcp-creative-juices-bundle",
+    ),
+    # ASGI endpoint for HTTP-based MCP connection
+    path(
+        "creative-juices/serve",
+        creative_juices_mcp_http,
+        name="mcp-creative-juices-http",
     ),
     # CTO Tools MCP server endpoints
     path(

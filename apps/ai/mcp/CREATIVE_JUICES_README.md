@@ -32,7 +32,7 @@ Creative Juices provides three tools for different stages of creative problem-so
 
 ```bash
 # Clone the repository
-git clone https://github.com/tomcounsell/cuttlefish.git
+git clone https://github.com/yudame/cuttlefish.git
 cd cuttlefish
 
 # Install dependencies
@@ -260,7 +260,7 @@ Contributions welcome! Areas for improvement:
 
 ## License
 
-Part of the [Cuttlefish](https://github.com/tomcounsell/cuttlefish) project.
+Part of the [Cuttlefish](https://github.com/yudame/cuttlefish) project.
 
 ## Credits
 
@@ -272,7 +272,7 @@ Part of the [Cuttlefish](https://github.com/tomcounsell/cuttlefish) project.
 
 - **Full specification**: See `docs/specs/CREATIVE_JUICES_MCP.md` for design philosophy
 - **Web interface**: https://mcp.yuda.me/creative-juices (coming soon)
-- **Issues/feedback**: [GitHub Issues](https://github.com/tomcounsell/cuttlefish/issues)
+- **Issues/feedback**: [GitHub Issues](https://github.com/yudame/cuttlefish/issues)
 
 ---
 

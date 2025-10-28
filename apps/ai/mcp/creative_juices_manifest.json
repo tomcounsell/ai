@@ -4,7 +4,7 @@
   "description": "MCP server that generates random creative prompts and strategic questions to help LLMs think outside the box",
   "author": "Tom Counsell",
   "homepage": "https://ai.yuda.me/mcp/creative-juices",
-  "repository": "https://github.com/tomcounsell/cuttlefish",
+  "repository": "https://github.com/yudame/cuttlefish",
   "documentation": "https://ai.yuda.me/mcp/creative-juices/README.md",
 
   "tools": [
