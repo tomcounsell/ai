@@ -127,13 +127,27 @@ async def reality_check() -> dict:
 
 
 def main():
-    """Main entry point for the MCP server (stdio mode only).
+    """Main entry point for the MCP server.
 
-    For HTTP hosting, use the Django view at /mcp/creative-juices/serve
-    which wraps this server and exposes it via HTTP transport.
+    Supports two modes:
+    - stdio (default): For local development and testing
+    - streamable-http: For production hosting at ai.yuda.me
+
+    Set MCP_TRANSPORT environment variable to switch modes.
     """
-    logger.info("Starting Creative Juices MCP server in stdio mode")
-    mcp.run()
+    import os
+
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+
+    if transport == "streamable-http":
+        # Production mode - HTTP transport for hosting at ai.yuda.me
+        # This will be run as a separate service on Render
+        logger.info("Starting Creative Juices MCP server in HTTP mode")
+        mcp.run(transport="streamable-http")
+    else:
+        # Development mode - stdio transport
+        logger.info("Starting Creative Juices MCP server in stdio mode")
+        mcp.run()
 
 
 if __name__ == "__main__":

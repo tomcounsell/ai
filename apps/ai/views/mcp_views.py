@@ -233,33 +233,3 @@ class CreativeJuicesBundleView(View):
         response['Content-Disposition'] = 'attachment; filename="creative-juices.mcpb"'
 
         return response
-
-
-# ASGI endpoint for Creative Juices MCP Server over HTTP
-from django.views.decorators.csrf import csrf_exempt
-
-
-@csrf_exempt
-async def creative_juices_mcp_http(scope, receive, send):
-    """ASGI endpoint that serves the Creative Juices MCP server via streamable HTTP.
-
-    This allows remote clients to connect to the MCP server over HTTP instead of stdio.
-    Mounted at: /mcp/creative-juices/serve
-
-    Usage in client config:
-    {
-      "mcpServers": {
-        "creative-juices": {
-          "url": "https://ai.yuda.me/mcp/creative-juices/serve"
-        }
-      }
-    }
-    """
-    # Import here to avoid loading FastMCP unless needed
-    from apps.ai.mcp.creative_juices_server import mcp
-
-    # Get the ASGI app from FastMCP
-    asgi_app = mcp.streamable_http_app()
-
-    # Forward the request to the FastMCP ASGI app
-    await asgi_app(scope, receive, send)
