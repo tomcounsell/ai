@@ -1,0 +1,586 @@
+{% extends "base.html" %}
+
+{% block title %}Design Elements Reference - Cuttlefish{% endblock %}
+
+{% block main_header %}
+  <div style="max-width: 1000px; margin: 0 auto; padding-top: var(--space-2xl);">
+    <div class="technical-spec-box">
+      <div class="label" style="margin-bottom: var(--space-md);">DESIGN_SYSTEM_REFERENCE</div>
+      <h1 class="text-mono" style="font-size: 2rem; font-weight: 300; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: var(--space-lg);">
+        Component Library
+      </h1>
+      <p class="text-sans" style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal); max-width: 700px;">
+        Reference guide for all design components, typography rules, and brand patterns used throughout the Cuttlefish platform.
+      </p>
+    </div>
+  </div>
+{% endblock %}
+
+{% block content %}
+<div style="max-width: 1000px; margin: 0 auto;">
+
+  <!-- TYPOGRAPHY SECTION -->
+  <section style="margin-bottom: var(--space-3xl);">
+    <div class="label" style="margin-bottom: var(--space-lg);">01_TYPOGRAPHY</div>
+
+    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg); margin-bottom: var(--space-lg);">
+      <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: var(--space-md);">
+        Font Families
+      </h2>
+
+      <div style="display: grid; gap: var(--space-md);">
+        <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
+          <div class="text-mono" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: 4px;">PRIMARY_MONOSPACE</div>
+          <div class="text-mono" style="font-size: 1rem; margin-bottom: 4px;">IBM Plex Mono (300, 400, 500, 600)</div>
+          <div class="text-sans" style="font-size: 0.75rem; color: var(--color-text-gray);">Usage: Headers, labels, navigation, code blocks, technical specs</div>
+        </div>
+
+        <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
+          <div class="text-mono" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: 4px;">PRIMARY_SANS_SERIF</div>
+          <div class="text-sans" style="font-size: 1rem; margin-bottom: 4px;">Inter (300, 400, 500, 600, 700)</div>
+          <div class="text-sans" style="font-size: 0.75rem; color: var(--color-text-gray);">Usage: Body copy, descriptions, paragraphs</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Typography Scale -->
+    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg); margin-bottom: var(--space-lg);">
+      <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: var(--space-md);">
+        Type Scale & Hierarchy
+      </h2>
+
+      <div style="display: grid; gap: var(--space-sm);">
+        <!-- Hero Title -->
+        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
+          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">HERO_TITLE (2.5rem / 40px)</div>
+          <h1 class="text-mono" style="font-size: 2.5rem; font-weight: 300; letter-spacing: 0.15em; text-transform: uppercase; line-height: 1;">
+            CUTTLEFISH
+          </h1>
+          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 2.5rem; font-weight: 300; letter-spacing: 0.15em;</code>
+        </div>
+
+        <!-- Page Title -->
+        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
+          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">PAGE_TITLE (2rem / 32px)</div>
+          <h1 class="text-mono" style="font-size: 2rem; font-weight: 300; letter-spacing: 0.1em; text-transform: uppercase; line-height: 1.2;">
+            MCP Server Hub
+          </h1>
+          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 2rem; font-weight: 300; letter-spacing: 0.1em;</code>
+        </div>
+
+        <!-- Section Header -->
+        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
+          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">SECTION_HEADER (0.875rem / 14px)</div>
+          <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;">
+            What is Model Context Protocol?
+          </h2>
+          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 0.875rem; font-weight: 600; letter-spacing: 0.08em;</code>
+        </div>
+
+        <!-- Component Title -->
+        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
+          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">COMPONENT_TITLE (1rem / 16px)</div>
+          <h3 class="text-mono" style="font-size: 1rem; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase;">
+            Creative Juices
+          </h3>
+          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 1rem; font-weight: 500; letter-spacing: 0.05em;</code>
+        </div>
+
+        <!-- Label -->
+        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
+          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">LABEL (0.75rem / 12px)</div>
+          <div class="label">MCP_SERVER_01</div>
+          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 0.75rem; font-weight: 500; letter-spacing: 0.08em; color: var(--color-text-gray);</code>
+        </div>
+
+        <!-- Body Text -->
+        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
+          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">BODY_TEXT (0.875rem / 14px)</div>
+          <p class="text-sans" style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal);">
+            MCP is an open protocol that standardizes how applications provide context to Large Language Models.
+          </p>
+          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal);</code>
+        </div>
+
+        <!-- Small Body -->
+        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
+          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">SMALL_BODY (0.813rem / 13px)</div>
+          <p class="text-sans" style="font-size: 0.813rem; line-height: 1.6; color: var(--color-text-gray);">
+            Randomness tools for divergent thinking. Breaks predictable AI patterns.
+          </p>
+          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 0.813rem; line-height: 1.6; color: var(--color-text-gray);</code>
+        </div>
+
+        <!-- Button Text -->
+        <div style="padding: var(--space-sm);">
+          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">BUTTON_TEXT (0.688rem / 11px)</div>
+          <div style="font-size: 0.688rem;">VIEW DOCUMENTATION →</div>
+          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 0.688rem; text-transform: uppercase; letter-spacing: 0.1em;</code>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DIVIDER -->
+  <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+
+  <!-- COLOR PALETTE SECTION -->
+  <section style="margin-bottom: var(--space-3xl);">
+    <div class="label" style="margin-bottom: var(--space-lg);">02_COLOR_PALETTE</div>
+
+    <div style="display: grid; gap: var(--space-lg);">
+
+      <!-- Background Colors -->
+      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
+        <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-md);">Background Colors</h3>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-md);">
+          <div>
+            <div style="height: 60px; background: #FAF9F6; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">--color-bg-cream</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#FAF9F6</div>
+          </div>
+          <div>
+            <div style="height: 60px; background: #FFFFFF; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">--color-bg-white</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#FFFFFF</div>
+          </div>
+          <div>
+            <div style="height: 60px; background: #F5F4F1; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">--color-bg-warm-gray</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#F5F4F1</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Text Colors -->
+      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
+        <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-md);">Text Colors</h3>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-md);">
+          <div>
+            <div style="height: 60px; background: #1A1A1A; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">--color-text-black</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#1A1A1A</div>
+          </div>
+          <div>
+            <div style="height: 60px; background: #2D2D2D; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">--color-text-charcoal</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#2D2D2D</div>
+          </div>
+          <div>
+            <div style="height: 60px; background: #5A5A5A; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">--color-text-gray</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#5A5A5A</div>
+          </div>
+          <div>
+            <div style="height: 60px; background: #8A8A8A; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">--color-text-light-gray</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#8A8A8A</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Border Colors -->
+      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
+        <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-md);">Border Colors</h3>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-md);">
+          <div>
+            <div style="height: 60px; background: #3A3A3A; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">--color-border-dark</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#3A3A3A</div>
+          </div>
+          <div>
+            <div style="height: 60px; background: #C4C4C4; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">--color-border-medium</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#C4C4C4</div>
+          </div>
+          <div>
+            <div style="height: 60px; background: #E5E5E5; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">--color-border-light</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#E5E5E5</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Accent Colors -->
+      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
+        <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-md);">Accent Colors</h3>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-md);">
+          <div>
+            <div style="height: 60px; background: #D4A574; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">--color-accent</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#D4A574</div>
+          </div>
+          <div>
+            <div style="height: 60px; background: #B8935F; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">--color-accent-dark</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#B8935F</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Status Colors -->
+      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
+        <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-md);">Status Indicators</h3>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-md);">
+          <div>
+            <div style="height: 60px; background: #4CAF50; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">Operational</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#4CAF50</div>
+          </div>
+          <div>
+            <div style="height: 60px; background: #FFA726; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">Development</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#FFA726</div>
+          </div>
+          <div>
+            <div style="height: 60px; background: #E53935; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
+            <div class="text-mono" style="font-size: 0.688rem;">Offline</div>
+            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#E53935</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- DIVIDER -->
+  <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+
+  <!-- SPACING SYSTEM SECTION -->
+  <section style="margin-bottom: var(--space-3xl);">
+    <div class="label" style="margin-bottom: var(--space-lg);">03_SPACING_SYSTEM</div>
+
+    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
+      <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-md);">8px Base Grid</h3>
+      <p class="text-sans" style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal); margin-bottom: var(--space-lg);">
+        All spacing values are multiples of 8px for mathematical harmony and consistent rhythm.
+      </p>
+
+      <table class="spec-table-inline" style="width: 100%;">
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-xs</td>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">8px</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Micro-spacing, tight gaps</td>
+          <td><div style="height: 8px; width: 8px; background: var(--color-border-dark);"></div></td>
+        </tr>
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-sm</td>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">16px</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Within components</td>
+          <td><div style="height: 16px; width: 16px; background: var(--color-border-dark);"></div></td>
+        </tr>
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-md</td>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">24px</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Component spacing</td>
+          <td><div style="height: 24px; width: 24px; background: var(--color-border-dark);"></div></td>
+        </tr>
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-lg</td>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">32px</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Between components</td>
+          <td><div style="height: 32px; width: 32px; background: var(--color-border-dark);"></div></td>
+        </tr>
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-xl</td>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">48px</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Large gaps</td>
+          <td><div style="height: 48px; width: 48px; background: var(--color-border-dark);"></div></td>
+        </tr>
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-2xl</td>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">64px</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Section padding</td>
+          <td><div style="height: 64px; width: 64px; background: var(--color-border-dark);"></div></td>
+        </tr>
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-3xl</td>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">96px</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Between sections</td>
+          <td><div style="height: 96px; width: 96px; background: var(--color-border-dark);"></div></td>
+        </tr>
+      </table>
+    </div>
+  </section>
+
+  <!-- DIVIDER -->
+  <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+
+  <!-- COMPONENTS SECTION -->
+  <section style="margin-bottom: var(--space-3xl);">
+    <div class="label" style="margin-bottom: var(--space-lg);">04_COMPONENTS</div>
+
+    <!-- Technical Spec Box -->
+    <div style="margin-bottom: var(--space-lg);">
+      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_01: TECHNICAL_SPEC_BOX</div>
+      <div class="technical-spec-box">
+        <div class="label" style="margin-bottom: var(--space-sm);">EXAMPLE_LABEL</div>
+        <h2 class="text-mono" style="font-size: 1.5rem; font-weight: 300; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: var(--space-md);">
+          Hero Section Component
+        </h2>
+        <p class="text-sans" style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal);">
+          Double-border container for hero sections. 2px outer border with 6px inset inner border (pseudo-element). Square corners, generous padding.
+        </p>
+      </div>
+      <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-sm);">
+        &lt;div class="technical-spec-box"&gt;...&lt;/div&gt;
+      </code>
+    </div>
+
+    <!-- Server Card -->
+    <div style="margin-bottom: var(--space-lg);">
+      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_02: SERVER_CARD</div>
+      <div class="server-card">
+        <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: var(--space-md);">
+          <div>
+            <div class="label" style="margin-bottom: var(--space-xs);">MCP_SERVER_01</div>
+            <h3 class="text-mono" style="font-size: 1rem; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase;">
+              Example Server
+            </h3>
+          </div>
+          <div style="width: 6px; height: 6px; background: #4CAF50; border-radius: 50%; margin-top: 8px;"></div>
+        </div>
+
+        <p class="text-sans" style="font-size: 0.813rem; line-height: 1.6; color: var(--color-text-gray); margin-bottom: var(--space-md);">
+          Server card component with status indicator, spec sheet, and CTA button. Square corners with 1px border.
+        </p>
+
+        <div style="background: var(--color-bg-warm-gray); padding: var(--space-sm); margin-bottom: var(--space-md); font-family: var(--font-mono); font-size: 0.75rem; border-left: 2px solid var(--color-border-dark);">
+          <div style="display: grid; grid-template-columns: 80px 1fr; gap: var(--space-xs);">
+            <span style="color: var(--color-text-gray);">TOOLS:</span><span>3</span>
+            <span style="color: var(--color-text-gray);">AUTH:</span><span>None</span>
+            <span style="color: var(--color-text-gray);">PRIVACY:</span><span>Local Only</span>
+          </div>
+        </div>
+
+        <a href="#" class="btn-brand" style="text-decoration: none; display: inline-block; font-size: 0.688rem;">
+          VIEW DOCUMENTATION →
+        </a>
+      </div>
+      <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-sm);">
+        &lt;div class="server-card"&gt;...&lt;/div&gt;
+      </code>
+    </div>
+
+    <!-- Buttons -->
+    <div style="margin-bottom: var(--space-lg);">
+      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_03: BUTTONS</div>
+      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
+        <div style="display: flex; gap: var(--space-md); align-items: center; flex-wrap: wrap;">
+          <button class="btn-brand">PRIMARY BUTTON</button>
+          <button class="btn-brand-accent">ACCENT BUTTON</button>
+          <button class="btn-brand" disabled style="opacity: 0.5; cursor: not-allowed;">DISABLED BUTTON</button>
+        </div>
+        <div style="margin-top: var(--space-md);">
+          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block;">
+            &lt;button class="btn-brand"&gt;PRIMARY BUTTON&lt;/button&gt;<br>
+            &lt;button class="btn-brand-accent"&gt;ACCENT BUTTON&lt;/button&gt;
+          </code>
+        </div>
+      </div>
+    </div>
+
+    <!-- Technical Divider -->
+    <div style="margin-bottom: var(--space-lg);">
+      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_04: TECHNICAL_DIVIDER</div>
+      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
+        <div class="divider-technical"></div>
+        <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-md);">
+          &lt;div class="divider-technical"&gt;&lt;/div&gt;
+        </code>
+      </div>
+    </div>
+
+    <!-- Spec Tables -->
+    <div style="margin-bottom: var(--space-lg);">
+      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_05: SPEC_TABLES</div>
+
+      <!-- Inline Spec Table -->
+      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg); margin-bottom: var(--space-md);">
+        <h4 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-sm);">Inline Spec Table</h4>
+        <table class="spec-table-inline" style="width: 100%;">
+          <tr>
+            <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">TYPE</td>
+            <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">AI Integration Platform</td>
+          </tr>
+          <tr>
+            <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">PROTOCOL</td>
+            <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Model Context Protocol</td>
+          </tr>
+          <tr>
+            <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">STATUS</td>
+            <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Operational</td>
+          </tr>
+        </table>
+        <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-md);">
+          &lt;table class="spec-table-inline"&gt;...&lt;/table&gt;
+        </code>
+      </div>
+
+      <!-- Full Spec Table -->
+      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
+        <h4 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-sm);">Full Spec Table</h4>
+        <table class="table-spec">
+          <thead>
+            <tr>
+              <th>COMPONENT</th>
+              <th>TYPE</th>
+              <th>STATUS</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Creative Juices</td>
+              <td>MCP Server</td>
+              <td>Active</td>
+            </tr>
+            <tr>
+              <td>CTO Tools</td>
+              <td>MCP Server</td>
+              <td>Active</td>
+            </tr>
+            <tr>
+              <td>QuickBooks</td>
+              <td>MCP Server</td>
+              <td>Development</td>
+            </tr>
+          </tbody>
+        </table>
+        <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-md);">
+          &lt;table class="table-spec"&gt;...&lt;/table&gt;
+        </code>
+      </div>
+    </div>
+
+    <!-- Status Indicators -->
+    <div style="margin-bottom: var(--space-lg);">
+      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_06: STATUS_INDICATORS</div>
+      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
+        <div style="display: flex; gap: var(--space-lg); align-items: center; flex-wrap: wrap;">
+          <div style="display: flex; align-items: center; gap: var(--space-xs);">
+            <span style="display: inline-block; width: 6px; height: 6px; background: #4CAF50; border-radius: 50%;"></span>
+            <span class="text-mono" style="font-size: 0.75rem;">Operational</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: var(--space-xs);">
+            <span style="display: inline-block; width: 6px; height: 6px; background: #FFA726; border-radius: 50%;"></span>
+            <span class="text-mono" style="font-size: 0.75rem;">Development</span>
+          </div>
+          <div style="display: flex; align-items: center; gap: var(--space-xs);">
+            <span style="display: inline-block; width: 6px; height: 6px; background: #E53935; border-radius: 50%;"></span>
+            <span class="text-mono" style="font-size: 0.75rem;">Offline</span>
+          </div>
+        </div>
+        <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-md);">
+          &lt;span style="width: 6px; height: 6px; background: #4CAF50; border-radius: 50%;"&gt;&lt;/span&gt;
+        </code>
+      </div>
+    </div>
+
+    <!-- Code Block -->
+    <div style="margin-bottom: var(--space-lg);">
+      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_07: CODE_BLOCK</div>
+      <pre class="brand-code"><code>curl -LsSf https://astral.sh/uv/install.sh | sh
+
+uv add package-name
+
+git commit -m "Update implementation"</code></pre>
+      <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-sm);">
+        &lt;pre class="brand-code"&gt;&lt;code&gt;...&lt;/code&gt;&lt;/pre&gt;
+      </code>
+    </div>
+
+  </section>
+
+  <!-- DIVIDER -->
+  <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+
+  <!-- USAGE RULES SECTION -->
+  <section style="margin-bottom: var(--space-3xl);">
+    <div class="label" style="margin-bottom: var(--space-lg);">05_USAGE_RULES</div>
+
+    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
+      <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: var(--space-md);">
+        Border Radius Policy
+      </h2>
+      <div style="display: grid; gap: var(--space-md);">
+        <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
+          <div class="text-mono" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: 4px;">NO_BORDER_RADIUS</div>
+          <div class="text-sans" style="font-size: 0.75rem;">Containers, cards, sections, divs, code blocks</div>
+        </div>
+        <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
+          <div class="text-mono" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: 4px;">ALLOWED_BORDER_RADIUS</div>
+          <div class="text-sans" style="font-size: 0.75rem;">Buttons (subtle default rounding), status indicators (50% for circles)</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg); margin-top: var(--space-lg);">
+      <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: var(--space-md);">
+        Typography Rules
+      </h2>
+      <table class="spec-table-inline" style="width: 100%;">
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray); width: 150px;">LABELS</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Monospace, uppercase, 0.75rem, 0.08em letter-spacing</td>
+        </tr>
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">HEADERS</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Sans-serif or monospace, uppercase, increased letter-spacing</td>
+        </tr>
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">BODY_TEXT</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Sans-serif, normal case, 0.875-0.95rem</td>
+        </tr>
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">CODE_DATA</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Monospace, normal case, 0.75-0.875rem</td>
+        </tr>
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">BUTTONS</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Monospace, uppercase, 0.688rem, 0.1em letter-spacing</td>
+        </tr>
+      </table>
+    </div>
+
+    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg); margin-top: var(--space-lg);">
+      <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: var(--space-md);">
+        Spacing Guidelines
+      </h2>
+      <table class="spec-table-inline" style="width: 100%;">
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray); width: 150px;">BETWEEN_SECTIONS</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">--space-2xl (64px) or --space-3xl (96px)</td>
+        </tr>
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">BETWEEN_COMPONENTS</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">--space-lg (32px) or --space-xl (48px)</td>
+        </tr>
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">WITHIN_COMPONENTS</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">--space-sm (16px) or --space-md (24px)</td>
+        </tr>
+        <tr>
+          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">MICRO_SPACING</td>
+          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">--space-xs (8px)</td>
+        </tr>
+      </table>
+    </div>
+
+    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg); margin-top: var(--space-lg);">
+      <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: var(--space-md);">
+        Label Naming Convention
+      </h2>
+      <p class="text-sans" style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal); margin-bottom: var(--space-md);">
+        Follow technical documentation pattern with underscores and zero-padded numbers:
+      </p>
+      <div style="display: grid; gap: var(--space-sm);">
+        <div class="label">MCP_SERVER_01</div>
+        <div class="label">TOOL_03</div>
+        <div class="label">BENEFIT_02</div>
+        <div class="label">INSTALLATION_GUIDE</div>
+        <div class="label">PROTOCOL_OVERVIEW</div>
+      </div>
+    </div>
+  </section>
+
+</div>
+{% endblock content %}

@@ -21,12 +21,12 @@ app_name = "public"
 
 urlpatterns = []
 
-# Home page
+# Dashboard (authenticated users)
 urlpatterns += [
     path(
-        "",
-        account.HomeView.as_view(),
-        name="home",
+        "dashboard/",
+        account.DashboardView.as_view(),
+        name="dashboard",
     ),
 ]
 
@@ -43,6 +43,12 @@ urlpatterns += [
         "pricing/",
         pages.PricingView.as_view(),
         name="pricing",
+    ),
+    # Design elements reference
+    path(
+        "design-elements/",
+        pages.DesignElementsView.as_view(),
+        name="design-elements",
     ),
 ]
 
