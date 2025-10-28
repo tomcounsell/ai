@@ -3,10 +3,10 @@ from django.views.generic import TemplateView
 
 class ComponentExamplesView(TemplateView):
     """
-    View to render the component examples page.
+    Design system reference page.
 
-    This view demonstrates all available UI components with examples and usage notes.
-    It serves as both documentation and a visual reference for developers.
+    This view renders the complete design system documentation including typography,
+    colors, spacing, and all UI components with brand-compliant examples.
     """
 
     template_name = "examples.html"

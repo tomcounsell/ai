@@ -56,12 +56,6 @@ urlpatterns += [
         pages.TermsOfServiceView.as_view(),
         name="terms",
     ),
-    # Design elements reference
-    path(
-        "design-elements/",
-        pages.DesignElementsView.as_view(),
-        name="design-elements",
-    ),
 ]
 
 # Auth and Accounts

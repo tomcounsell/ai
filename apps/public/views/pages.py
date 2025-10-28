@@ -253,17 +253,6 @@ class BlogView(MainContentView):
         return context
 
 
-class DesignElementsView(MainContentView):
-    """Design elements reference page."""
-
-    template_name = "pages/example_design_elements.html"
-    active_nav = None
-
-    def get(self, request, *args, **kwargs):
-        """Get method to load design elements page."""
-        return self.render(request)
-
-
 class PrivacyPolicyView(MainContentView):
     """Privacy policy page."""
 

@@ -12,6 +12,7 @@ from apps.ai.views import (
     ChatNewSessionView,
     ChatPollMessageView,
     ChatSendMessageView,
+    CreativeJuicesBundleView,
     CreativeJuicesLandingView,
     CreativeJuicesManifestView,
     CreativeJuicesReadmeView,
@@ -40,6 +41,11 @@ urlpatterns: list[URLPattern] = [
         "creative-juices/README.md",
         CreativeJuicesReadmeView.as_view(),
         name="mcp-creative-juices-readme",
+    ),
+    path(
+        "creative-juices/download.mcpb",
+        CreativeJuicesBundleView.as_view(),
+        name="mcp-creative-juices-bundle",
     ),
     # CTO Tools MCP server endpoints
     path(
