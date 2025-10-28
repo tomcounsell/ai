@@ -123,6 +123,23 @@ The QuickBooks MCP implementation spans multiple apps:
 - **View pattern**: `MainContentView` for pages, `HTMXView` for partials
 - **CSS**: Tailwind v4 via django-tailwind-cli
 
+### Design System
+- **Brand CSS**: `static/css/brand.css` - Complete design system with all components
+- **Living Style Guide**: `/design-elements/` - Comprehensive reference page
+- **When to reference**:
+  - Before creating new pages or components
+  - When choosing typography (8 levels documented)
+  - When selecting colors (monochromatic warm palette)
+  - When applying spacing (8px base grid system)
+  - When styling buttons, cards, tables, or dividers
+- **Key principles**:
+  - Square corners everywhere (except buttons and status dots)
+  - Monospace (IBM Plex Mono) for labels, headers, code
+  - Sans-serif (Inter) for body text
+  - Technical labeling: MCP_SERVER_01, TOOL_03, BENEFIT_01
+  - Warm minimalism with bronze accent (#D4A574)
+- **Documentation**: See `docs/BRANDING_BRIEF.md` for rationale and guidelines
+
 ### Behavior Mixin Pattern
 Common model functionality via mixins in `apps/common/behaviors/`:
 - Timestampable, Authorable, Publishable, Expirable
