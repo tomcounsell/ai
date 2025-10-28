@@ -494,18 +494,18 @@ git commit -m "Update implementation"</code></pre>
       <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
         <div style="display: grid; gap: var(--space-lg);">
 
-          <!-- Step 1 -->
+          <!-- Step 1: Simple code example -->
           <div style="display: grid; grid-template-columns: auto 1fr; gap: var(--space-md);">
             <div style="border-right: 1px solid var(--color-border-light); padding-right: var(--space-md);">
               <div class="text-mono" style="font-size: 1.5rem; color: var(--color-text-gray);">01</div>
             </div>
             <div>
               <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-top: 0; margin-bottom: var(--space-sm);">Install uv (if needed)</h3>
-              <pre class="brand-code" style="font-size: 0.75rem; padding: var(--space-sm);"><code>curl -LsSf https://astral.sh/uv/install.sh | sh</code></pre>
+              <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-sm); font-family: var(--font-mono); font-size: 0.75rem; overflow-x: auto; white-space: pre; margin: 0;"><code>curl -LsSf https://astral.sh/uv/install.sh | sh</code></pre>
             </div>
           </div>
 
-          <!-- Step 2 -->
+          <!-- Step 2: Multi-line JSON example with smaller font -->
           <div style="display: grid; grid-template-columns: auto 1fr; gap: var(--space-md);">
             <div style="border-right: 1px solid var(--color-border-light); padding-right: var(--space-md);">
               <div class="text-mono" style="font-size: 1.5rem; color: var(--color-text-gray);">02</div>
@@ -515,7 +515,7 @@ git commit -m "Update implementation"</code></pre>
               <p class="text-sans" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-sm);">
                 Edit: <code class="text-mono" style="background: var(--color-bg-warm-gray); padding: 2px 6px;">~/Library/Application Support/Claude/claude_desktop_config.json</code>
               </p>
-              <pre class="brand-code" style="font-size: 0.688rem; padding: var(--space-sm);"><code>{
+              <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-sm); font-family: var(--font-mono); font-size: 0.688rem; overflow-x: auto; white-space: pre; margin: 0;"><code>{
   "mcpServers": {
     "server-name": {
       "command": "uvx",
@@ -526,7 +526,7 @@ git commit -m "Update implementation"</code></pre>
             </div>
           </div>
 
-          <!-- Step 3 -->
+          <!-- Step 3: Text-only example -->
           <div style="display: grid; grid-template-columns: auto 1fr; gap: var(--space-md);">
             <div style="border-right: 1px solid var(--color-border-light); padding-right: var(--space-md);">
               <div class="text-mono" style="font-size: 1.5rem; color: var(--color-text-gray);">03</div>
@@ -541,9 +541,18 @@ git commit -m "Update implementation"</code></pre>
 
         </div>
       </div>
-      <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-sm);">
-        Numbered steps (1.5rem) with --space-md gap and padding
-      </code>
+      <div style="background: var(--color-bg-warm-gray); padding: var(--space-sm); margin-top: var(--space-sm); border-left: 2px solid var(--color-border-dark);">
+        <div class="text-mono" style="font-size: 0.688rem; font-weight: 600; margin-bottom: var(--space-xs);">CRITICAL SPECIFICATIONS:</div>
+        <div class="text-mono" style="font-size: 0.688rem; line-height: 1.6;">
+          • Step numbers: font-size: 1.5rem (NOT 1.75rem)<br>
+          • Grid gap: gap: var(--space-md) (NOT --space-lg)<br>
+          • Border padding: padding-right: var(--space-md) (NOT --space-lg)<br>
+          • Step 1 code: font-size: 0.75rem<br>
+          • Step 2 code: font-size: 0.688rem<br>
+          • Pre tag overflow: overflow-x: auto; white-space: pre; margin: 0;<br>
+          • Pre tag styling: background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-sm);
+        </div>
+      </div>
     </div>
 
   </section>
