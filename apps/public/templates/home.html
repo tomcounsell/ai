@@ -1,28 +1,42 @@
 {% extends "base.html" %}
 
 {% comment %}
-  AI Platform Landing Page
-  ========================
+  Homepage - Yudame AI Integration Platform
+  ==========================================
 
-  Purpose:
-  Showcase MCP servers and AI integration platform capabilities.
-  This is the main landing page for ai.yuda.me.
+  STRUCTURE:
+  1. Hero Section (lines 32-44)
+     - Platform title and description
+     - Technical elegance brand styling
 
-  Content:
-  - Hero section with value proposition
-  - Featured MCP servers with links
-  - "What is MCP?" explainer section
-  - Quick start installation guide
-  - Footer with additional links
+  2. Featured MCP Servers Section (lines 50-114)
+     - Grid of server cards
+     - Each card includes: name, description, specs, documentation link
+     - Status indicator (green = live, orange = development)
 
-  User Experience:
-  - Clear, professional design
-  - Easy navigation to MCP servers
-  - Quick setup instructions for developers
-  - Mobile-responsive layout
+  3. What is MCP? Section (lines 120-149)
+     - Protocol overview and benefits
+     - Three-column feature grid
+
+  4. Quick Start Installation Guide (lines 155-211)
+     - Step-by-step installation instructions
+     - Code snippets for setup
+     - Restart instructions
+
+  DESIGN SYSTEM:
+  - Uses custom CSS variables from static/css/brand.css
+  - Technical spec box styling for hero
+  - Server card component for MCP listings
+  - Monospace font for technical elements
+  - Sans-serif font for descriptions
+
+  MAINTENANCE:
+  - To add new MCP server: duplicate server-card div (lines 56-82)
+  - Update server count in hero section when adding servers
+  - Links point to /mcp/{server-name}/ for documentation pages
 {% endcomment %}
 
-{% block title %}AI Integration Platform - MCP Servers{% endblock %}
+{% block title %}Yudame AI{% endblock %}
 
 {% block meta_description %}Extend AI assistants with powerful MCP servers. Creative thinking tools, QuickBooks integration, and more for Claude and other AI platforms.{% endblock %}
 

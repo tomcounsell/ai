@@ -67,6 +67,12 @@ class SettingsView(LoginRequiredMixin, MainContentView):
         return self.get(request, *args, **kwargs)
 
 
-class HomeView(LoginRequiredMixin, MainContentView):
+class DashboardView(LoginRequiredMixin, MainContentView):
+    """
+    Authenticated user dashboard.
+
+    This is shown to logged-in users when they access their account area.
+    Different from the public homepage (HomeView in landing_views.py).
+    """
     template_name = "pages/home.html"
     # url = "/"  #  root of host

@@ -1,0 +1,337 @@
+{% extends "base.html" %}
+
+{% comment %}
+  Privacy Policy Page
+  ===================
+
+  Purpose:
+  Provides users with comprehensive information about how their personal data
+  is collected, used, and protected by the platform.
+
+  Content:
+  - Company information and data collection policies
+  - User rights regarding their data
+  - Data security measures
+  - Contact information for privacy concerns
+
+  User Experience:
+  - Clear and readable legal language
+  - Organized sections for easy navigation
+  - Last updated date for transparency
+
+  Integration:
+  Displays in the main content area of the base template.
+  Does not require authentication to view.
+{% endcomment %}
+
+{% block title %}Privacy Policy{% endblock %}
+
+{% block meta_description %}Learn how YUDAME AI collects, uses, and protects your personal information. View our comprehensive privacy policy and data protection practices.{% endblock %}
+
+{% block content_width %}12{% endblock %}
+
+{% block main_header %}
+  <div class="text-center">
+    <h1 class="text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">
+      Privacy Policy
+    </h1>
+    <p class="mt-4 text-lg text-gray-500 max-w-3xl mx-auto">
+      Last updated: {% now "F j, Y" %}
+    </p>
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div class="bg-white py-12">
+    <div class="mx-auto max-w-4xl px-4 sm:px-6 lg:px-8">
+      <div class="prose prose-slate max-w-none">
+
+        <section class="mb-12">
+          <p class="text-lg text-gray-700 leading-relaxed">
+            Your privacy is important to us. It is YUDAME AI's policy to respect your privacy and comply with any applicable law and regulation regarding any personal information we may collect about you, including across our website, <a href="https://ai.yuda.me" class="text-slate-600 hover:text-slate-800">https://ai.yuda.me</a>, and other sites we own and operate.
+          </p>
+
+          <p class="text-lg text-gray-700 leading-relaxed mt-4">
+            Personal information is any information about you which can be used to identify you. This includes information about you as a person (such as name, address, and date of birth), your devices, payment details, and even information about how you use a website or online service.
+          </p>
+
+          <p class="text-lg text-gray-700 leading-relaxed mt-4">
+            In the event our site contains links to third-party sites and services, please be aware that those sites and services have their own privacy policies. After following a link to any third-party content, you should read their posted privacy policy information about how they collect and use personal information. This Privacy Policy does not apply to any of your activities after you leave our site.
+          </p>
+
+          <p class="text-lg text-gray-700 leading-relaxed mt-4">
+            This policy is effective as of {% now "F j, Y" %}.
+          </p>
+        </section>
+
+        <section class="mb-12">
+          <h2 class="text-2xl font-bold text-slate-900 mb-4">Information We Collect</h2>
+
+          <p class="text-gray-700 leading-relaxed">
+            Information we collect falls into one of two categories: "voluntarily provided" information and "automatically collected" information.
+          </p>
+
+          <p class="text-gray-700 leading-relaxed mt-4">
+            "Voluntarily provided" information refers to any information you knowingly and actively provide us when using or participating in any of our services and promotions.
+          </p>
+
+          <p class="text-gray-700 leading-relaxed mt-4">
+            "Automatically collected" information refers to any information automatically sent by your devices in the course of accessing our products and services.
+          </p>
+        </section>
+
+        <section class="mb-12">
+          <h3 class="text-xl font-semibold text-slate-900 mb-3">Log Data</h3>
+
+          <p class="text-gray-700 leading-relaxed">
+            When you visit our website, our servers may automatically log the standard data provided by your web browser. It may include your device's Internet Protocol (IP) address, your browser type and version, the pages you visit, the time and date of your visit, the time spent on each page, and other details about your visit.
+          </p>
+
+          <p class="text-gray-700 leading-relaxed mt-4">
+            Additionally, if you encounter certain errors while using the site, we may automatically collect data about the error and the circumstances surrounding its occurrence. This data may include technical details about your device, what you were trying to do when the error happened, and other technical information relating to the problem. You may or may not receive notice of such errors, even in the moment they occur, that they have occurred, or what the nature of the error is.
+          </p>
+
+          <p class="text-gray-700 leading-relaxed mt-4">
+            Please be aware that while this information may not be personally identifying by itself, it may be possible to combine it with other data to personally identify individual persons.
+          </p>
+        </section>
+
+        <section class="mb-12">
+          <h3 class="text-xl font-semibold text-slate-900 mb-3">Device Data</h3>
+
+          <p class="text-gray-700 leading-relaxed">
+            When you visit our website or interact with our services, we may automatically collect data about your device, such as:
+          </p>
+
+          <ul class="list-disc pl-6 mt-4 text-gray-700 space-y-2">
+            <li>Device type and operating system</li>
+            <li>Unique device identifiers</li>
+            <li>Browser type and version</li>
+            <li>Screen resolution and other display settings</li>
+            <li>Geographic location (approximate)</li>
+          </ul>
+
+          <p class="text-gray-700 leading-relaxed mt-4">
+            Data we collect can depend on the individual settings of your device and software. We recommend checking the policies of your device manufacturer or software provider to learn what information they make available to us.
+          </p>
+        </section>
+
+        <section class="mb-12">
+          <h3 class="text-xl font-semibold text-slate-900 mb-3">Personal Information</h3>
+
+          <p class="text-gray-700 leading-relaxed">
+            We may ask for personal information when you contact us, which may include one or more of the following:
+          </p>
+
+          <ul class="list-disc pl-6 mt-4 text-gray-700 space-y-2">
+            <li>Name</li>
+            <li>Email address</li>
+            <li>Company or organization name</li>
+            <li>Phone number</li>
+            <li>Business information related to QuickBooks integration</li>
+            <li>Usage data from Model Context Protocol (MCP) servers</li>
+          </ul>
+        </section>
+
+        <section class="mb-12">
+          <h3 class="text-xl font-semibold text-slate-900 mb-3">Transaction Data</h3>
+
+          <p class="text-gray-700 leading-relaxed">
+            Transaction data refers to data that accumulates over the normal course of operation on our platform. This may include transaction records, stored files, user profiles, analytics data and other metrics, as well as other types of information, created or generated, as users interact with our services.
+          </p>
+
+          <ul class="list-disc pl-6 mt-4 text-gray-700 space-y-2">
+            <li>QuickBooks data accessed through our MCP servers</li>
+            <li>MCP session information and usage logs</li>
+            <li>Team collaboration data</li>
+            <li>API usage metrics</li>
+          </ul>
+        </section>
+
+        <section class="mb-12">
+          <h2 class="text-2xl font-bold text-slate-900 mb-4">Legitimate Reasons for Processing Your Personal Information</h2>
+
+          <p class="text-gray-700 leading-relaxed">
+            We only collect and use your personal information when we have a legitimate reason for doing so. In which instance, we only collect personal information that is reasonably necessary to provide our services to you.
+          </p>
+        </section>
+
+        <section class="mb-12">
+          <h2 class="text-2xl font-bold text-slate-900 mb-4">Collection and Use of Information</h2>
+
+          <p class="text-gray-700 leading-relaxed">
+            We may collect personal information from you when you do any of the following on our website:
+          </p>
+
+          <ul class="list-disc pl-6 mt-4 text-gray-700 space-y-2">
+            <li>Register for an account</li>
+            <li>Connect your QuickBooks account</li>
+            <li>Use our Model Context Protocol (MCP) servers</li>
+            <li>Sign up to receive updates from us via email or social media channels</li>
+            <li>Use a mobile device or web browser to access our content</li>
+            <li>Contact us via email, social media, or similar technologies</li>
+            <li>Mention us on social media</li>
+          </ul>
+
+          <p class="text-gray-700 leading-relaxed mt-4">
+            We may combine voluntarily provided and automatically collected personal information with general information or research data we receive from other trusted sources. For example, if you provide us with your location, we may combine this with general information about currency and language to provide you with an enhanced experience of our site and service.
+          </p>
+        </section>
+
+        <section class="mb-12">
+          <h2 class="text-2xl font-bold text-slate-900 mb-4">Security of Your Personal Information</h2>
+
+          <p class="text-gray-700 leading-relaxed">
+            When we collect and process personal information, and while we retain this information, we will protect it within commercially acceptable means to prevent loss and theft, as well as unauthorized access, disclosure, copying, use or modification.
+          </p>
+
+          <p class="text-gray-700 leading-relaxed mt-4">
+            Although we will do our best to protect the personal information you provide to us, we advise that no method of electronic transmission or storage is 100% secure and no one can guarantee absolute data security.
+          </p>
+
+          <p class="text-gray-700 leading-relaxed mt-4">
+            You are responsible for selecting any password and its overall security strength, ensuring the security of your own information within the bounds of our services. For example, ensuring you do not make your personal information publicly available via our platform.
+          </p>
+        </section>
+
+        <section class="mb-12">
+          <h2 class="text-2xl font-bold text-slate-900 mb-4">How Long We Keep Your Personal Information</h2>
+
+          <p class="text-gray-700 leading-relaxed">
+            We keep your personal information only for as long as we need to. This time period may depend on what we are using your information for, in accordance with this privacy policy. For example, if you have provided us with personal information such as an email address when contacting us about a specific enquiry, we may retain this information for the duration of your enquiry remaining open as well as for our own records so we may effectively address similar enquiries in future. If your personal information is no longer required for this purpose, we will delete it or make it anonymous by removing all details that identify you.
+          </p>
+
+          <p class="text-gray-700 leading-relaxed mt-4">
+            However, if necessary, we may retain your personal information for our compliance with a legal, accounting, or reporting obligation or for archiving purposes in the public interest, scientific, or historical research purposes or statistical purposes.
+          </p>
+        </section>
+
+        <section class="mb-12">
+          <h2 class="text-2xl font-bold text-slate-900 mb-4">Disclosure of Personal Information to Third Parties</h2>
+
+          <p class="text-gray-700 leading-relaxed">
+            We may disclose personal information to third parties for analytics and service improvement purposes. We do not sell your personal information to third parties.
+          </p>
+        </section>
+
+        <section class="mb-12">
+          <h2 class="text-2xl font-bold text-slate-900 mb-4">Your Rights and Controlling Your Personal Information</h2>
+
+          <div class="space-y-4">
+            <div>
+              <h4 class="font-semibold text-gray-900">Your choice:</h4>
+              <p class="text-gray-700 leading-relaxed">
+                By providing personal information to us, you understand we will collect, hold, use, and disclose your personal information in accordance with this privacy policy. You do not have to provide personal information to us, however, if you do not, it may affect your use of our website or the products and/or services offered on or through it.
+              </p>
+            </div>
+
+            <div>
+              <h4 class="font-semibold text-gray-900">Information from third parties:</h4>
+              <p class="text-gray-700 leading-relaxed">
+                If we receive personal information about you from a third party, we will protect it as set out in this privacy policy. If you are a third party providing personal information about somebody else, you represent and warrant that you have such person's consent to provide the personal information to us.
+              </p>
+            </div>
+
+            <div>
+              <h4 class="font-semibold text-gray-900">Marketing permission:</h4>
+              <p class="text-gray-700 leading-relaxed">
+                If you have previously agreed to us using your personal information for direct marketing purposes, you may change your mind at any time by contacting us using the details below.
+              </p>
+            </div>
+
+            <div>
+              <h4 class="font-semibold text-gray-900">Access:</h4>
+              <p class="text-gray-700 leading-relaxed">
+                You may request details of the personal information that we hold about you.
+              </p>
+            </div>
+
+            <div>
+              <h4 class="font-semibold text-gray-900">Correction:</h4>
+              <p class="text-gray-700 leading-relaxed">
+                If you believe that any information we hold about you is inaccurate, out of date, incomplete, irrelevant, or misleading, please contact us using the details provided in this privacy policy. We will take reasonable steps to correct any information found to be inaccurate, incomplete, misleading, or out of date.
+              </p>
+            </div>
+
+            <div>
+              <h4 class="font-semibold text-gray-900">Non-discrimination:</h4>
+              <p class="text-gray-700 leading-relaxed">
+                We will not discriminate against you for exercising any of your rights over your personal information. Unless your personal information is required to provide you with a particular service or offer, we will not deny you goods or services and/or charge you different prices or rates for goods or services, including through granting discounts or other benefits, or imposing penalties, or provide you with a different level or quality of goods or services.
+              </p>
+            </div>
+
+            <div>
+              <h4 class="font-semibold text-gray-900">Notification of data breaches:</h4>
+              <p class="text-gray-700 leading-relaxed">
+                We will comply with laws applicable to us in respect of any data breach.
+              </p>
+            </div>
+
+            <div>
+              <h4 class="font-semibold text-gray-900">Complaints:</h4>
+              <p class="text-gray-700 leading-relaxed">
+                If you believe that we have breached a relevant data protection law and wish to make a complaint, please contact us using the details below and provide us with full details of the alleged breach. We will promptly investigate your complaint and respond to you, in writing, setting out the outcome of our investigation and the steps we will take to deal with your complaint. You also have the right to contact a regulatory body or data protection authority in relation to your complaint.
+              </p>
+            </div>
+
+            <div>
+              <h4 class="font-semibold text-gray-900">Unsubscribe:</h4>
+              <p class="text-gray-700 leading-relaxed">
+                To unsubscribe from our email database or opt-out of communications (including marketing communications), please contact us using the details provided in this privacy policy, or opt-out using the opt-out facilities provided in the communication. We may need to request specific information from you to help us confirm your identity.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section class="mb-12">
+          <h2 class="text-2xl font-bold text-slate-900 mb-4">Business Transfers</h2>
+
+          <p class="text-gray-700 leading-relaxed">
+            If we or our assets are acquired, or in the unlikely event that we go out of business or enter bankruptcy, we would include data, including your personal information, among the assets transferred to any parties who acquire us. You acknowledge that such transfers may occur, and that any parties who acquire us may, to the extent permitted by applicable law, continue to use your personal information according to this policy, which they will be required to assume as it is the basis for any ownership or use rights we have over such information.
+          </p>
+        </section>
+
+        <section class="mb-12">
+          <h2 class="text-2xl font-bold text-slate-900 mb-4">Limits of Our Policy</h2>
+
+          <p class="text-gray-700 leading-relaxed">
+            Our website may link to external sites that are not operated by us. Please be aware that we have no control over the content and policies of those sites, and cannot accept responsibility or liability for their respective privacy practices.
+          </p>
+        </section>
+
+        <section class="mb-12">
+          <h2 class="text-2xl font-bold text-slate-900 mb-4">Changes to This Policy</h2>
+
+          <p class="text-gray-700 leading-relaxed">
+            At our discretion, we may change our privacy policy to reflect updates to our business processes, current acceptable practices, or legislative or regulatory changes. If we decide to change this privacy policy, we will post the changes here at the same link by which you are accessing this privacy policy.
+          </p>
+
+          <p class="text-gray-700 leading-relaxed mt-4">
+            If required by law, we will get your permission or give you the opportunity to opt in to or opt out of, as applicable, any new uses of your personal information.
+          </p>
+        </section>
+
+        <section class="mb-12">
+          <h2 class="text-2xl font-bold text-slate-900 mb-4">Contact Us</h2>
+
+          <p class="text-gray-700 leading-relaxed">
+            For any questions or concerns regarding your privacy, you may contact us using the following details:
+          </p>
+
+          <div class="mt-4 bg-gray-50 p-6 rounded-xs">
+            <p class="text-gray-900 font-semibold">Tom Counsell</p>
+            <p class="text-gray-700 mt-2">
+              <a href="https://tomcounsell.com" class="text-slate-600 hover:text-slate-800" target="_blank">https://tomcounsell.com</a>
+            </p>
+            <p class="text-gray-700 mt-2">
+              <a href="https://github.com/yudame/ai-skills" class="text-slate-600 hover:text-slate-800" target="_blank">GitHub: yudame/ai-skills</a>
+            </p>
+          </div>
+        </section>
+
+      </div>
+    </div>
+  </div>
+{% endblock content %}
+
+{% block main_footer %}{% endblock %}

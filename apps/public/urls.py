@@ -44,6 +44,18 @@ urlpatterns += [
         pages.PricingView.as_view(),
         name="pricing",
     ),
+    # Privacy policy page
+    path(
+        "privacy/",
+        pages.PrivacyPolicyView.as_view(),
+        name="privacy",
+    ),
+    # Terms of service page
+    path(
+        "terms/",
+        pages.TermsOfServiceView.as_view(),
+        name="terms",
+    ),
     # Design elements reference
     path(
         "design-elements/",

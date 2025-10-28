@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% comment %}
+  Terms of Service Page
+  =====================
+
+  Purpose:
+  Provides users with the terms and conditions for using the platform.
+
+  Content:
+  - Terms and conditions of service
+  - User obligations and responsibilities
+  - Service limitations and disclaimers
+  - Agreement acceptance terms
+
+  User Experience:
+  - Clear and readable legal language
+  - Organized sections for easy navigation
+  - Last updated date for transparency
+
+  Integration:
+  Displays in the main content area of the base template.
+  Does not require authentication to view.
+{% endcomment %}
+
+{% block title %}Terms of Service{% endblock %}
+
+{% block meta_description %}Review the terms and conditions for using YUDAME AI's platform and services.{% endblock %}
+
+{% block content_width %}12{% endblock %}
+
+{% block main_header %}
+  <div class="text-center">
+    <h1 class="text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">
+      Terms of Service
+    </h1>
+    <p class="mt-4 text-lg text-gray-500 max-w-3xl mx-auto">
+      Last updated: {% now "F j, Y" %}
+    </p>
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div class="bg-white py-12">
+    <div class="mx-auto max-w-4xl px-4 sm:px-6 lg:px-8">
+      <div class="prose prose-slate max-w-none">
+
+        <section class="mb-12">
+          <p class="text-lg text-gray-700 leading-relaxed">
+            Terms of service content will be added here.
+          </p>
+        </section>
+
+      </div>
+    </div>
+  </div>
+{% endblock content %}
+
+{% block main_footer %}{% endblock %}

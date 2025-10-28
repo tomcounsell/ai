@@ -264,6 +264,28 @@ class DesignElementsView(MainContentView):
         return self.render(request)
 
 
+class PrivacyPolicyView(MainContentView):
+    """Privacy policy page."""
+
+    template_name = "pages/privacy_policy.html"
+    active_nav = None
+
+    def get(self, request, *args, **kwargs):
+        """Get method to load privacy policy page."""
+        return self.render(request)
+
+
+class TermsOfServiceView(MainContentView):
+    """Terms of service page."""
+
+    template_name = "pages/terms_of_service.html"
+    active_nav = None
+
+    def get(self, request, *args, **kwargs):
+        """Get method to load terms of service page."""
+        return self.render(request)
+
+
 class BlogPostView(MainContentView):
     """Individual blog post page."""
 
