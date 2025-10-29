@@ -3,6 +3,8 @@ from typing import List
 from django.urls import URLPattern, path
 
 from apps.ai.views import (
+    CTOToolsBundleView,
+    CTOToolsClientView,
     CTOToolsLandingView,
     CTOToolsManifestView,
     CTOToolsReadmeView,
@@ -13,6 +15,7 @@ from apps.ai.views import (
     ChatPollMessageView,
     ChatSendMessageView,
     CreativeJuicesBundleView,
+    CreativeJuicesClientView,
     CreativeJuicesLandingView,
     CreativeJuicesManifestView,
     CreativeJuicesReadmeView,
@@ -43,6 +46,11 @@ urlpatterns: list[URLPattern] = [
         name="mcp-creative-juices-readme",
     ),
     path(
+        "creative-juices/client.py",
+        CreativeJuicesClientView.as_view(),
+        name="mcp-creative-juices-client",
+    ),
+    path(
         "creative-juices/download.mcpb",
         CreativeJuicesBundleView.as_view(),
         name="mcp-creative-juices-bundle",
@@ -62,6 +70,16 @@ urlpatterns: list[URLPattern] = [
         "cto-tools/README.md",
         CTOToolsReadmeView.as_view(),
         name="mcp-cto-tools-readme",
+    ),
+    path(
+        "cto-tools/client.py",
+        CTOToolsClientView.as_view(),
+        name="mcp-cto-tools-client",
+    ),
+    path(
+        "cto-tools/download.mcpb",
+        CTOToolsBundleView.as_view(),
+        name="mcp-cto-tools-bundle",
     ),
     # Chat interface (requires migrations)
     # path('chat/', ChatIndexView.as_view(), name='chat-index'),
