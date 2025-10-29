@@ -129,8 +129,22 @@
 
     .divider {
         height: 1px;
-        background: var(--color-border-light);
+        background: var(--color-border-medium);
         margin: var(--space-2xl) 0;
+        position: relative;
+    }
+
+    .divider::before {
+        content: '';
+        position: absolute;
+        left: 50%;
+        top: -3px;
+        transform: translateX(-50%);
+        width: 6px;
+        height: 6px;
+        border: 1px solid var(--color-border-dark);
+        background: var(--color-bg-cream);
+        border-radius: 50%;
     }
 
     .section {
