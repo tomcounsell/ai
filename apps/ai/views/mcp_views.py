@@ -9,23 +9,13 @@ from django.http import HttpResponse, JsonResponse
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
+from django.views.generic import TemplateView
 
 
-class CreativeJuicesLandingView(View):
+class CreativeJuicesLandingView(TemplateView):
     """Serve the Creative Juices MCP landing page."""
 
-    def get(self, request):
-        """Return the HTML landing page."""
-        html_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "mcp",
-            "creative_juices_web.html",
-        )
-
-        with open(html_path) as f:
-            content = f.read()
-
-        return HttpResponse(content, content_type="text/html; charset=utf-8")
+    template_name = "mcp/creative_juices.html"
 
 
 class CreativeJuicesManifestView(View):
@@ -83,21 +73,10 @@ class CreativeJuicesClientView(View):
         return HttpResponse(content, content_type="text/x-python; charset=utf-8")
 
 
-class CTOToolsLandingView(View):
+class CTOToolsLandingView(TemplateView):
     """Serve the CTO Tools MCP landing page."""
 
-    def get(self, request):
-        """Return the HTML landing page."""
-        html_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "mcp",
-            "cto_tools_web.html",
-        )
-
-        with open(html_path) as f:
-            content = f.read()
-
-        return HttpResponse(content, content_type="text/html; charset=utf-8")
+    template_name = "mcp/cto_tools.html"
 
 
 class CTOToolsManifestView(View):
