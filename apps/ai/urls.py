@@ -6,6 +6,7 @@ from apps.ai.views import (
     CTOToolsBundleView,
     CTOToolsClientView,
     CTOToolsLandingView,
+    CTOToolsMCPServerView,
     CTOToolsManifestView,
     CTOToolsReadmeView,
     ChatClearView,
@@ -17,6 +18,7 @@ from apps.ai.views import (
     CreativeJuicesBundleView,
     CreativeJuicesClientView,
     CreativeJuicesLandingView,
+    CreativeJuicesMCPServerView,
     CreativeJuicesManifestView,
     CreativeJuicesReadmeView,
 )
@@ -55,6 +57,11 @@ urlpatterns: list[URLPattern] = [
         CreativeJuicesBundleView.as_view(),
         name="mcp-creative-juices-bundle",
     ),
+    path(
+        "creative-juices/serve",
+        CreativeJuicesMCPServerView.as_view(),
+        name="mcp-creative-juices-serve",
+    ),
     # CTO Tools MCP server endpoints
     path(
         "cto-tools/",
@@ -80,6 +87,11 @@ urlpatterns: list[URLPattern] = [
         "cto-tools/download.mcpb",
         CTOToolsBundleView.as_view(),
         name="mcp-cto-tools-bundle",
+    ),
+    path(
+        "cto-tools/serve",
+        CTOToolsMCPServerView.as_view(),
+        name="mcp-cto-tools-serve",
     ),
     # Chat interface (requires migrations)
     # path('chat/', ChatIndexView.as_view(), name='chat-index'),

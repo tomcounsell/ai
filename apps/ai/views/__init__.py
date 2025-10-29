@@ -20,6 +20,10 @@ from .mcp_views import (
     CreativeJuicesManifestView,
     CreativeJuicesReadmeView,
 )
+from .mcp_server_views import (
+    CreativeJuicesMCPServerView,
+    CTOToolsMCPServerView,
+)
 
 __all__ = [
     "ChatIndexView",
@@ -33,9 +37,11 @@ __all__ = [
     "CTOToolsLandingView",
     "CTOToolsManifestView",
     "CTOToolsReadmeView",
+    "CTOToolsMCPServerView",
     "CreativeJuicesBundleView",
     "CreativeJuicesClientView",
     "CreativeJuicesLandingView",
     "CreativeJuicesManifestView",
+    "CreativeJuicesMCPServerView",
     "CreativeJuicesReadmeView",
 ]

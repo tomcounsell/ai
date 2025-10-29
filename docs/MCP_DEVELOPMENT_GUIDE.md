@@ -221,6 +221,114 @@ uv run python -m apps.ai.mcp.quickbooks_server
 
 ---
 
+## Django Integration Implementation
+
+### Architecture
+
+MCP server endpoints are **integrated directly into Django** via views that handle MCP JSON-RPC protocol requests. No separate service needed!
+
+**Key files:**
+- **Views:** `apps/ai/views/mcp_server_views.py` - Handle MCP protocol
+- **URLs:** `apps/ai/urls.py` - Routes like `/mcp/{name}/serve`
+- **Server logic:** `apps/ai/mcp/{name}_server.py` - Tool implementations
+
+### How It Works
+
+The Django view receives JSON-RPC requests and calls the MCP tool functions directly:
+
+```python
+# apps/ai/views/mcp_server_views.py
+from apps.ai.mcp.creative_juices_server import get_inspiration
+
+async def _handle_tool_call(self, tool_name, arguments):
+    if tool_name == "get_inspiration":
+        result = await get_inspiration()
+
+    return {
+        "content": [{"type": "text", "text": json.dumps(result)}]
+    }
+```
+
+The view implements the MCP JSON-RPC 2.0 protocol:
+- `initialize` - Server handshake
+- `tools/list` - List available tools
+- `tools/call` - Execute a tool
+
+### Creating a New Hosted Server
+
+**1. Create the server file** (`apps/ai/mcp/your_server.py`):
+```python
+from mcp.server.fastmcp import FastMCP
+
+mcp = FastMCP("Your Server")
+
+@mcp.tool()
+async def your_tool() -> dict:
+    """Tool description."""
+    return {"result": "data"}
+```
+
+**2. Add a Django view** (`apps/ai/views/mcp_server_views.py`):
+```python
+@method_decorator(csrf_exempt, name="dispatch")
+class YourServerMCPView(View):
+    def post(self, request):
+        # Parse MCP request
+        mcp_request = json.loads(request.body)
+        method = mcp_request.get("method")
+
+        # Handle initialize, tools/list, tools/call
+        # ...
+
+        return JsonResponse({"jsonrpc": "2.0", "id": request_id, "result": result})
+```
+
+**3. Add URL route** (`apps/ai/urls.py`):
+```python
+path("your-server/serve", YourServerMCPView.as_view(), name="mcp-your-server-serve")
+```
+
+**4. Export the view** (`apps/ai/views/__init__.py`):
+```python
+from .mcp_server_views import YourServerMCPView
+
+__all__ = [..., "YourServerMCPView"]
+```
+
+### Local Testing
+
+```bash
+# Start Django server
+uv run python manage.py runserver
+
+# Test initialize
+curl -X POST http://localhost:8000/mcp/your-server/serve \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"initialize","params":{},"id":1}'
+
+# Test tools/list
+curl -X POST http://localhost:8000/mcp/your-server/serve \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","params":{},"id":2}'
+
+# Test tool call
+curl -X POST http://localhost:8000/mcp/your-server/serve \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","method":"tools/call","params":{"name":"your_tool","arguments":{}},"id":3}'
+```
+
+### Production Deployment
+
+The endpoint is deployed automatically with the main Django app on Render:
+- No separate service needed
+- No ASGI/async server needed (uses `asyncio.run()` in view)
+- CSRF exempt for MCP client compatibility
+- Available at: `https://ai.yuda.me/mcp/{name}/serve`
+
+**That's it!** Just commit and push - the endpoint will be live when Django deploys.
+
+---
+
 ## Examples in This Project
 
 ### Creative Juices Server (Hosted)
