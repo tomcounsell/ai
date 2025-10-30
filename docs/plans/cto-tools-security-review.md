@@ -253,3 +253,34 @@ class SecurityReviewResponse(BaseModel):
     correlation_confidence: float
     timestamp: str
 ```
+
+## 17. Backlog / Future Enhancements
+
+### Linear Integration (Multi-tenant Support)
+
+**Status**: Not yet implemented - requires user authentication and secure credential storage
+
+**Requirements**:
+1. **User Authentication**: Integrate with Django auth system
+2. **Secure Storage**: Store Linear API keys per-organization in encrypted fields
+3. **OAuth Flow**: Consider Linear OAuth instead of API keys for better security
+4. **Models Needed**:
+   ```python
+   class LinearConnection(Timestampable, models.Model):
+       organization = models.ForeignKey(Organization, on_delete=models.CASCADE)
+       api_key = models.TextField()  # Should be encrypted at rest
+       workspace_id = models.CharField(max_length=255)
+       team_id = models.CharField(max_length=255, blank=True)
+       is_active = models.BooleanField(default=True)
+   ```
+5. **MCP Session Auth**: Link MCP sessions to organizations for API key retrieval
+6. **Security Considerations**:
+   - Encrypt API keys at rest (use Django's `cryptography` package)
+   - Implement key rotation mechanism
+   - Audit log all ticket creation actions
+   - Rate limiting per organization
+
+**Implementation Effort**: 3-5 days
+**Priority**: Low (tool is fully functional without it)
+
+**Alternative**: Users can copy-paste risk summaries into Linear manually until multi-tenant support is built.
