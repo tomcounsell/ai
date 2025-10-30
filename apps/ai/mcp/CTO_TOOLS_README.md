@@ -15,12 +15,43 @@ CTO Tools is a Model Context Protocol (MCP) server that provides structured fram
 
 ## Installation
 
-### Standalone Single-File Server
+### Option 1: One-Click Install (Recommended)
+
+Download and install the `.mcpb` bundle in Claude Desktop:
+
+**https://ai.yuda.me/mcp/cto-tools/download.mcpb**
+
+1. Click the download link above
+2. Open Claude Desktop → Settings → Extensions
+3. Click "Install from file"
+4. Select the downloaded `cto-tools.mcpb` file
+5. Done! No configuration needed.
+
+**Architecture:**
+- Bundle contains a Node.js proxy client (no Python/uvx needed)
+- Connects to hosted server at `https://ai.yuda.me/mcp/cto-tools/serve`
+- Zero dependencies (Node.js ships with Claude Desktop)
+
+### Option 2: Direct Hosted Connection
+
+For clients that support HTTP/SSE MCP servers directly:
+
+```json
+{
+  "mcpServers": {
+    "cto-tools": {
+      "url": "https://ai.yuda.me/mcp/cto-tools/serve"
+    }
+  }
+}
+```
+
+### Option 3: Standalone Single-File Server (Local)
 
 The CTO Tools MCP server is a **single executable file** with inline dependencies.
 You can run it directly with `uv` without needing the full cuttlefish project.
 
-#### Option 1: Run from URL (Recommended)
+**Run from URL:**
 
 ```json
 {
@@ -36,9 +67,7 @@ You can run it directly with `uv` without needing the full cuttlefish project.
 }
 ```
 
-#### Option 2: Run Local File
-
-Download the file and run it directly:
+**Run Local File:**
 
 ```bash
 # Download the file
@@ -66,7 +95,7 @@ uv run cto_tools_server.py
 }
 ```
 
-#### Option 3: Run from Cuttlefish Project
+**From Cuttlefish Project:**
 
 If you have the cuttlefish repository:
 
@@ -80,10 +109,6 @@ If you have the cuttlefish repository:
   }
 }
 ```
-
-### Web Manifest
-
-Access the web manifest at: `https://ai.yuda.me/mcp/cto-tools/manifest.json`
 
 ## Available Tools
 

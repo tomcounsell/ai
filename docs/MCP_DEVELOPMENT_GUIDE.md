@@ -100,24 +100,43 @@ def main():
 
 ### Hosting & Installation Philosophy
 
-**Yudame AI MCP servers follow a hosted-first approach:**
+**Yudame AI MCP servers use a hybrid approach:**
 
-1. **Hosted Service (Preferred)**
-   - All MCP servers are hosted at `https://ai.yuda.me/mcp/{server-name}/serve`
-   - Users configure via simple URL (no local installation required)
+1. **MCPB Bundle Distribution (Preferred)**
+   - One-click `.mcpb` bundles for Claude Desktop installation
+   - Bundle contains Node.js proxy client (no dependencies - Node.js ships with Claude)
+   - Proxy forwards to hosted server at `https://ai.yuda.me/mcp/{server-name}/serve`
    - Examples: Creative Juices, CTO Tools
-   - Benefits: Zero setup, always latest version, no local dependencies
+   - Benefits: Zero config, always latest version, works out-of-the-box
 
-2. **Local Execution (When Required)**
+2. **Direct Hosted Connection**
+   - For MCP clients that support HTTP/SSE transport directly
+   - Not supported by Claude Desktop (requires stdio transport)
+   - Use MCPB bundles for Claude Desktop instead
+
+3. **Local Execution (When Required)**
    - Only for servers requiring local file system access or sensitive credentials
    - Examples: QuickBooks (requires OAuth), local development tools
    - Uses `uvx run` for zero-install execution from GitHub
 
 **Configuration Examples:**
 
-### Hosted MCP Server (Recommended)
+### MCPB Bundle Installation (Recommended for Claude Desktop)
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
+The easiest way to install our MCP servers:
+
+1. Download: `https://ai.yuda.me/mcp/{server-name}/download.mcpb`
+2. Open Claude Desktop → Settings → Extensions
+3. Click "Install from file"
+4. Select downloaded `.mcpb` file
+
+**Available bundles:**
+- Creative Juices: https://ai.yuda.me/mcp/creative-juices/download.mcpb
+- CTO Tools: https://ai.yuda.me/mcp/cto-tools/download.mcpb
+
+### Direct Hosted Connection (For Non-Claude Clients)
+
+For MCP clients that support HTTP/SSE transport:
 
 ```json
 {
@@ -128,6 +147,8 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
   }
 }
 ```
+
+**Note:** Claude Desktop doesn't support direct HTTP URLs - use MCPB bundles instead.
 
 ### Local Execution (When Needed)
 

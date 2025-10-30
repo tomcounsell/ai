@@ -38,6 +38,24 @@ Creative Juices is deployed as an HTTP-based MCP server at:
 
 See `CREATIVE_JUICES_DEPLOYMENT.md` for full deployment guide.
 
+### MCPB Bundle Distribution
+
+The server is also available as a one-click installable `.mcpb` bundle for Claude Desktop:
+**https://ai.yuda.me/mcp/creative-juices/download.mcpb**
+
+**Architecture:**
+- Bundle contains a Node.js proxy client that forwards MCP protocol to the hosted server
+- No Python/uvx dependencies required (Node.js ships with Claude Desktop)
+- Zero-configuration installation for end users
+
+**Building the bundle:**
+```bash
+cd apps/ai/mcp/bundles/creative-juices
+zip -r ../../creative-juices.mcpb manifest.json client.js
+```
+
+See `bundles/README.md` for complete build instructions and architecture details.
+
 ## Tool Reference
 
 See public documentation at https://github.com/yudame/ai-skills/creative-juices for usage examples and detailed tool descriptions.
@@ -48,16 +66,24 @@ See public documentation at https://github.com/yudame/ai-skills/creative-juices 
 apps/ai/mcp/
 ├── creative_juices_server.py       # Main MCP server (FastMCP)
 ├── creative_juices_words.py        # Curated word lists (600+ words)
+├── creative_juices_client.py       # Python proxy client (legacy)
 ├── creative_juices_web.html        # Landing page
 ├── creative_juices_manifest.json   # MCP manifest
+├── creative-juices.mcpb            # Pre-built MCPB bundle
+├── bundles/creative-juices/
+│   ├── client.js                   # Node.js proxy client
+│   └── manifest.json               # MCPB manifest
 ├── CREATIVE_JUICES_README.md       # This file (internal docs)
 └── CREATIVE_JUICES_DEPLOYMENT.md   # Deployment guide
 
-apps/ai/views/mcp_views.py
-├── CreativeJuicesLandingView       # Serves web page
-├── CreativeJuicesManifestView      # Serves manifest.json
-├── CreativeJuicesBundleView        # Generates .mcpb bundle
-└── creative_juices_mcp_http()      # ASGI endpoint for HTTP transport
+apps/ai/views/
+├── mcp_views.py
+│   ├── CreativeJuicesLandingView       # Serves web page
+│   ├── CreativeJuicesManifestView      # Serves manifest.json
+│   ├── CreativeJuicesBundleView        # Serves .mcpb bundle
+│   └── CreativeJuicesClientView        # Serves client.py
+└── mcp_server_views.py
+    └── CreativeJuicesMCPServerView     # HTTP endpoint for MCP protocol
 ```
 
 ## Running Tests
