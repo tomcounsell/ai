@@ -1,0 +1,606 @@
+{% extends "base.html" %}
+
+{% block title %}CTO Tools MCP - Engineering Leadership Frameworks{% endblock %}
+
+{% block meta_description %}MCP server providing structured frameworks for CTO activities: weekly reviews, team analysis, and strategic decision-making{% endblock %}
+
+{% block content_width %}12{% endblock %}
+
+{% block extra_css %}
+<style>
+    /* MCP Page Specific Styles */
+    body {
+        padding: 0 !important;
+    }
+
+    main {
+        padding: 0 !important;
+    }
+
+    #main_header {
+        display: none;
+    }
+
+    main > div {
+        max-width: 100% !important;
+        padding: 0 !important;
+    }
+
+    .mcp-container {
+        max-width: 1000px;
+        margin: 0 auto;
+        padding: var(--space-2xl) var(--space-lg);
+    }
+
+    .header {
+        border: 2px solid var(--color-border-dark);
+        background: var(--color-bg-white);
+        padding: var(--space-2xl);
+        margin-bottom: var(--space-2xl);
+        position: relative;
+    }
+
+    .header::before {
+        content: '';
+        position: absolute;
+        top: 8px;
+        left: 8px;
+        right: 8px;
+        bottom: 8px;
+        border: 1px solid var(--color-border-light);
+        pointer-events: none;
+    }
+
+    h1 {
+        font-family: var(--font-mono);
+        font-size: 2rem;
+        font-weight: 300;
+        letter-spacing: 0.15em;
+        text-transform: uppercase;
+        color: var(--color-text-black);
+        margin-bottom: var(--space-md);
+    }
+
+    h2 {
+        font-family: var(--font-mono);
+        font-size: 0.875rem;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--color-text-black);
+        margin-bottom: var(--space-lg);
+    }
+
+    h3 {
+        font-family: var(--font-mono);
+        font-size: 0.875rem;
+        font-weight: 500;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--color-text-charcoal);
+    }
+
+    .tagline {
+        font-family: var(--font-mono);
+        font-size: 0.875rem;
+        letter-spacing: 0.05em;
+        color: var(--color-text-gray);
+        margin-bottom: var(--space-lg);
+    }
+
+    .intro {
+        font-size: 0.875rem;
+        line-height: 1.8;
+        color: var(--color-text-charcoal);
+    }
+
+    .tool-spec {
+        padding: 0;
+        margin-bottom: var(--space-2xl);
+    }
+
+    .tool-spec h3 {
+        font-family: var(--font-mono);
+        font-size: 1.25rem;
+        font-weight: 400;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--color-text-black);
+        margin-bottom: var(--space-md);
+    }
+
+    .tool-spec h4 {
+        font-family: var(--font-mono);
+        font-size: 0.875rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--color-text-black);
+        margin-top: var(--space-lg);
+        margin-bottom: var(--space-sm);
+    }
+
+    .tool-spec h4:first-of-type {
+        margin-top: 0;
+    }
+
+    .tool-spec ul {
+        list-style: none;
+        margin: var(--space-md) 0;
+    }
+
+    .tool-spec ul li {
+        font-size: 0.9rem;
+        padding: var(--space-xs) 0;
+        padding-left: var(--space-xl);
+        position: relative;
+        line-height: 1.4;
+    }
+
+    .tool-spec ul li:before {
+        content: "→";
+        position: absolute;
+        left: 0;
+        color: var(--color-border-dark);
+    }
+
+    .spec-table {
+        width: 100%;
+        font-family: var(--font-mono);
+        font-size: 0.875rem;
+        border-collapse: collapse;
+        margin: var(--space-lg) 0;
+    }
+
+    .spec-table th {
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        font-weight: 600;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        text-align: left;
+        padding: var(--space-sm);
+        border-bottom: 2px solid var(--color-border-dark);
+        background: var(--color-bg-warm-gray);
+    }
+
+    .spec-table td {
+        padding: var(--space-sm);
+        border-bottom: 1px solid var(--color-border-light);
+    }
+
+    .features-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+        gap: var(--space-xl);
+        margin-bottom: var(--space-2xl);
+    }
+
+    .feature-card {
+        background: var(--color-bg-white);
+        border: 1px solid var(--color-border-medium);
+        padding: var(--space-lg);
+        position: relative;
+    }
+
+    .feature-card h4 {
+        font-family: var(--font-sans);
+        font-size: 0.875rem;
+        font-weight: 600;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--color-text-black);
+        margin-bottom: var(--space-sm);
+    }
+
+    .feature-card p {
+        font-size: 0.875rem;
+        color: var(--color-text-gray);
+        line-height: 1.6;
+    }
+
+    .divider {
+        height: 1px;
+        background: var(--color-border-medium);
+        margin: var(--space-2xl) 0;
+        position: relative;
+    }
+
+    .divider::before {
+        content: '';
+        position: absolute;
+        left: 50%;
+        top: -3px;
+        transform: translateX(-50%);
+        width: 6px;
+        height: 6px;
+        border: 1px solid var(--color-border-dark);
+        background: var(--color-bg-cream);
+        border-radius: 50%;
+    }
+
+    .section {
+        margin-bottom: var(--space-2xl);
+    }
+
+    .installation {
+        background: var(--color-bg-white);
+        border: 1px solid var(--color-border-medium);
+        padding: var(--space-lg);
+    }
+
+    .install-note {
+        font-size: 0.75rem;
+        color: var(--color-text-gray);
+        background: var(--color-bg-warm-gray);
+        padding: var(--space-sm);
+        border-left: 2px solid var(--color-accent);
+        line-height: 1.6;
+    }
+
+    .feature-list {
+        list-style: none;
+        padding: 0;
+    }
+
+    .feature-list li {
+        padding: var(--space-sm) 0;
+        border-bottom: 1px solid var(--color-border-light);
+        font-size: 0.875rem;
+        line-height: 1.6;
+        color: var(--color-text-charcoal);
+    }
+
+    .feature-list li:last-child {
+        border-bottom: none;
+    }
+
+    .feature-list li:before {
+        content: "■";
+        position: absolute;
+        left: 0;
+        color: var(--color-border-dark);
+        font-size: 0.75rem;
+    }
+
+    .footer {
+        margin-top: var(--space-3xl);
+        padding-top: var(--space-2xl);
+        border-top: 1px solid var(--color-border-light);
+        text-align: center;
+        color: var(--color-text-light-gray);
+        font-size: 0.875rem;
+    }
+
+    .footer a {
+        color: var(--color-text-gray);
+        text-decoration: none;
+        border-bottom: 1px solid var(--color-border-medium);
+    }
+
+    .footer a:hover {
+        color: var(--color-text-black);
+        border-bottom-color: var(--color-text-black);
+    }
+
+    @media (max-width: 768px) {
+        h1 {
+            font-size: 1.5rem;
+        }
+        .features-grid {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="mcp-container">
+    <div class="header">
+        <div class="label">MCP_SERVER_02</div>
+        <h1>CTO TOOLS</h1>
+        <p class="tagline">ENGINEERING LEADERSHIP FRAMEWORKS</p>
+        <div class="divider" style="margin: var(--space-lg) 0;"></div>
+        <p class="intro">
+            CTO Tools provides structured frameworks and best practices for common engineering leadership activities.
+            Helps AI assistants guide technical leaders through weekly reviews, team analysis, and strategic decision-making
+            with analysis-focused, non-prescriptive approaches.
+        </p>
+    </div>
+
+    <div class="section">
+        <h2>INSTALLATION</h2>
+
+        <!-- Recommended: One-Click Installation -->
+        <div class="installation" style="background: var(--color-bg-white); border: 2px solid var(--color-accent); margin-bottom: var(--space-lg);">
+            <div class="label">RECOMMENDED</div>
+            <h3 style="font-family: var(--font-mono); font-size: 0.875rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--color-text-black); margin-bottom: var(--space-md);">One-Click Installation</h3>
+            <p style="font-size: 0.875rem; color: var(--color-text-charcoal); margin-bottom: var(--space-lg); line-height: 1.6;">
+                Download the MCP Bundle for instant installation. Works with Claude Desktop, Cursor, Windsurf, and other MCP-compatible clients.
+            </p>
+            <div style="text-align: center;">
+                <a href="/mcp/cto-tools/download.mcpb" class="btn-brand" style="font-size: 0.875rem; padding: var(--space-md) var(--space-xl);">
+                    📦 DOWNLOAD CTO-TOOLS.MCPB
+                </a>
+            </div>
+            <div class="install-note" style="margin-top: var(--space-lg);">
+                <strong>After downloading:</strong> Double-click the file to install. Your MCP client will handle the rest. No configuration needed.
+            </div>
+        </div>
+
+        <!-- Advanced: Manual Installation -->
+        <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
+            <h3 style="font-family: var(--font-sans); font-size: 0.875rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--color-text-gray); margin-bottom: var(--space-md);">
+                ⚙️ Advanced: Manual Installation
+            </h3>
+            <p style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-lg); line-height: 1.6;">
+                Prefer to configure manually? Expand your client below for detailed instructions.
+            </p>
+
+            <!-- Claude Desktop -->
+            <details style="margin-bottom: var(--space-sm); border: 1px solid var(--color-border-light); background: var(--color-bg-cream);">
+                <summary style="padding: var(--space-md); cursor: pointer; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">
+                    Claude Desktop
+                </summary>
+                <div style="padding: var(--space-lg); border-top: 1px solid var(--color-border-light); background: var(--color-bg-white);">
+                    <p style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-md);">
+                        Edit: <code style="background: var(--color-bg-warm-gray); padding: 2px 6px; font-family: var(--font-mono);">~/Library/Application Support/Claude/claude_desktop_config.json</code>
+                    </p>
+                    <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-md); font-family: var(--font-mono); font-size: 0.688rem; overflow-x: auto; margin: var(--space-md) 0;"><code>{
+  "mcpServers": {
+    "cto-tools": {
+      "url": "https://ai.yuda.me/mcp/cto-tools/serve"
+    }
+  }
+}</code></pre>
+                    <p style="font-size: 0.75rem; color: var(--color-text-charcoal); line-height: 1.6;">
+                        After saving, restart Claude Desktop (Cmd+Q then reopen). Look for the 🔌 icon.
+                    </p>
+                </div>
+            </details>
+
+            <!-- Claude Code CLI -->
+            <details style="margin-bottom: var(--space-sm); border: 1px solid var(--color-border-light); background: var(--color-bg-cream);">
+                <summary style="padding: var(--space-md); cursor: pointer; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">
+                    Claude Code (CLI)
+                </summary>
+                <div style="padding: var(--space-lg); border-top: 1px solid var(--color-border-light); background: var(--color-bg-white);">
+                    <p style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-md);">
+                        Run this command in your terminal:
+                    </p>
+                    <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-md); font-family: var(--font-mono); font-size: 0.75rem; overflow-x: auto; margin: 0;"><code>claude mcp add cto-tools --url https://ai.yuda.me/mcp/cto-tools/serve</code></pre>
+                </div>
+            </details>
+
+            <!-- Cursor -->
+            <details style="margin-bottom: var(--space-sm); border: 1px solid var(--color-border-light); background: var(--color-bg-cream);">
+                <summary style="padding: var(--space-md); cursor: pointer; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">
+                    Cursor
+                </summary>
+                <div style="padding: var(--space-lg); border-top: 1px solid var(--color-border-light); background: var(--color-bg-white);">
+                    <p style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-md);">
+                        Edit: <code style="background: var(--color-bg-warm-gray); padding: 2px 6px; font-family: var(--font-mono);">~/.cursor/mcp.json</code>
+                    </p>
+                    <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-md); font-family: var(--font-mono); font-size: 0.688rem; overflow-x: auto; margin: var(--space-md) 0;"><code>{
+  "mcpServers": {
+    "cto-tools": {
+      "url": "https://ai.yuda.me/mcp/cto-tools/serve"
+    }
+  }
+}</code></pre>
+                    <p style="font-size: 0.75rem; color: var(--color-text-charcoal); line-height: 1.6;">
+                        Restart Cursor after saving the configuration.
+                    </p>
+                </div>
+            </details>
+
+            <!-- Windsurf -->
+            <details style="margin-bottom: var(--space-sm); border: 1px solid var(--color-border-light); background: var(--color-bg-cream);">
+                <summary style="padding: var(--space-md); cursor: pointer; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">
+                    Windsurf
+                </summary>
+                <div style="padding: var(--space-lg); border-top: 1px solid var(--color-border-light); background: var(--color-bg-white);">
+                    <p style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-md);">
+                        Edit: <code style="background: var(--color-bg-warm-gray); padding: 2px 6px; font-family: var(--font-mono);">~/.codeium/windsurf/mcp_config.json</code>
+                    </p>
+                    <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-md); font-family: var(--font-mono); font-size: 0.688rem; overflow-x: auto; margin: var(--space-md) 0;"><code>{
+  "mcpServers": {
+    "cto-tools": {
+      "url": "https://ai.yuda.me/mcp/cto-tools/serve"
+    }
+  }
+}</code></pre>
+                    <p style="font-size: 0.75rem; color: var(--color-text-charcoal); line-height: 1.6;">
+                        Restart Windsurf after saving the configuration.
+                    </p>
+                </div>
+            </details>
+
+        </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <h2>AVAILABLE TOOLS</h2>
+
+    <div class="tool-spec">
+        <div class="label">TOOL_01</div>
+        <h3>weekly_review()</h3>
+        <p style="font-size: 0.95rem; margin-bottom: var(--space-lg); line-height: 1.8;">
+            Streamlined 3-phase framework for weekly engineering team reviews. Analysis-focused, not prescriptive. Works with ANY codebase.
+        </p>
+
+        <h4>Phase 1: Data Gathering</h4>
+        <ul>
+            <li>Parallel git commands for efficient data collection</li>
+            <li>Commit analysis across the reporting period</li>
+            <li>Contributor activity tracking</li>
+        </ul>
+
+        <h4>Phase 2: Internal Analysis</h4>
+        <ul>
+            <li>Review commits and categorize work</li>
+            <li>Identify patterns and themes</li>
+            <li>Generate contributor statistics</li>
+        </ul>
+
+        <h4>Phase 3: Concise Output</h4>
+        <ul>
+            <li>~200 word summary with 5 adaptive categories</li>
+            <li>Contributor recognition and stats</li>
+            <li>Communication-ready format for any channel</li>
+        </ul>
+
+        <table class="spec-table" style="margin-top: var(--space-xl);">
+            <thead>
+                <tr>
+                    <th>Characteristic</th>
+                    <th>Implementation</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td>Review Time</td>
+                    <td>15-20 minutes</td>
+                </tr>
+                <tr>
+                    <td>Output Length</td>
+                    <td>~200 words</td>
+                </tr>
+                <tr>
+                    <td>Categories</td>
+                    <td>5 adaptive, based on actual work</td>
+                </tr>
+                <tr>
+                    <td>Codebase</td>
+                    <td>Universal, no configuration needed</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="section">
+        <h2>KEY FEATURES</h2>
+        <div class="features-grid">
+            <div class="feature-card">
+                <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_01</div>
+                <h4>3-Phase Framework</h4>
+                <p>Streamlined process: gather data, analyze internally, output concise summary</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_02</div>
+                <h4>Adaptive Categorization</h4>
+                <p>AI chooses 5 relevant categories based on actual work, not templates</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_03</div>
+                <h4>Concise Output</h4>
+                <p>Single ~200 word summary suitable for any communication channel</p>
+            </div>
+
+            <div class="feature-card">
+                <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_04</div>
+                <h4>Focus on Deliverables</h4>
+                <p>Clear what-changed summary without verbose analysis</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="section">
+        <h2>USAGE WORKFLOW</h2>
+        <ul class="feature-list">
+            <li><strong>Request Tool</strong> — Ask Claude to use CTO Tools for team review</li>
+            <li><strong>Receive Framework</strong> — Get structured instructions and best practices</li>
+            <li><strong>Follow Steps</strong> — Use provided git commands and analysis frameworks</li>
+            <li><strong>Generate Insights</strong> — Create executive summaries and action items</li>
+        </ul>
+    </div>
+
+    <div class="section">
+        <h2>PRIVACY & SECURITY</h2>
+        <table class="spec-table">
+            <tbody>
+                <tr>
+                    <td>External API Calls</td>
+                    <td>None</td>
+                </tr>
+                <tr>
+                    <td>Authentication Required</td>
+                    <td>No</td>
+                </tr>
+                <tr>
+                    <td>User Data Storage</td>
+                    <td>None</td>
+                </tr>
+                <tr>
+                    <td>Execution Environment</td>
+                    <td>Fully local via MCP protocol</td>
+                </tr>
+                <tr>
+                    <td>Git Commands</td>
+                    <td>Run in your local environment only</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div style="text-align: center; margin: var(--space-3xl) 0;">
+        <a href="https://github.com/tomcounsell/cuttlefish" class="btn-brand">
+            VIEW DOCUMENTATION
+        </a>
+    </div>
+
+    <div class="footer">
+        <p>Part of the <a href="https://github.com/tomcounsell/cuttlefish">Cuttlefish</a> AI Integration Platform</p>
+        <p style="margin-top: var(--space-sm);">Powered by <a href="https://modelcontextprotocol.io">Model Context Protocol</a></p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Auto-add copy buttons to all terminal-style code blocks
+    document.addEventListener('DOMContentLoaded', function() {
+        document.querySelectorAll('pre').forEach(pre => {
+            // Only add to dark terminal-style code blocks
+            if (pre.style.background && pre.style.background.includes('var(--color-text-black)')) {
+                const wrapper = document.createElement('div');
+                wrapper.style.position = 'relative';
+
+                const button = document.createElement('button');
+                button.textContent = 'COPY';
+                button.style.cssText = 'position: absolute; top: 8px; right: 8px; background: var(--color-border-medium); color: var(--color-text-black); border: none; padding: 4px 8px; font-family: var(--font-mono); font-size: 0.688rem; cursor: pointer; opacity: 0.7; transition: opacity 0.2s;';
+                button.onmouseover = () => button.style.opacity = '1';
+                button.onmouseout = () => button.style.opacity = '0.7';
+
+                button.onclick = function() {
+                    const code = pre.querySelector('code');
+                    const text = code ? code.textContent : pre.textContent;
+
+                    navigator.clipboard.writeText(text).then(() => {
+                        button.textContent = 'COPIED!';
+                        button.style.background = 'var(--color-text-black)';
+                        button.style.color = 'var(--color-bg-cream)';
+
+                        setTimeout(() => {
+                            button.textContent = 'COPY';
+                            button.style.background = 'var(--color-border-medium)';
+                            button.style.color = 'var(--color-text-black)';
+                        }, 2000);
+                    });
+                };
+
+                pre.parentNode.insertBefore(wrapper, pre);
+                wrapper.appendChild(button);
+                wrapper.appendChild(pre);
+            }
+        });
+    });
+</script>
+{% endblock %}

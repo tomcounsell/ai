@@ -9,23 +9,13 @@ from django.http import HttpResponse, JsonResponse
 from django.utils.decorators import method_decorator
 from django.views import View
 from django.views.decorators.csrf import csrf_exempt
+from django.views.generic import TemplateView
 
 
-class CreativeJuicesLandingView(View):
+class CreativeJuicesLandingView(TemplateView):
     """Serve the Creative Juices MCP landing page."""
 
-    def get(self, request):
-        """Return the HTML landing page."""
-        html_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "mcp",
-            "creative_juices_web.html",
-        )
-
-        with open(html_path) as f:
-            content = f.read()
-
-        return HttpResponse(content, content_type="text/html; charset=utf-8")
+    template_name = "mcp/creative_juices.html"
 
 
 class CreativeJuicesManifestView(View):
@@ -66,21 +56,27 @@ class CreativeJuicesReadmeView(View):
         return HttpResponse(content, content_type="text/markdown; charset=utf-8")
 
 
-class CTOToolsLandingView(View):
-    """Serve the CTO Tools MCP landing page."""
+class CreativeJuicesClientView(View):
+    """Serve the Creative Juices MCP client proxy script."""
 
     def get(self, request):
-        """Return the HTML landing page."""
-        html_path = os.path.join(
+        """Return the client.py file."""
+        client_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
             "mcp",
-            "cto_tools_web.html",
+            "creative_juices_client.py",
         )
 
-        with open(html_path) as f:
+        with open(client_path) as f:
             content = f.read()
 
-        return HttpResponse(content, content_type="text/html; charset=utf-8")
+        return HttpResponse(content, content_type="text/x-python; charset=utf-8")
+
+
+class CTOToolsLandingView(TemplateView):
+    """Serve the CTO Tools MCP landing page."""
+
+    template_name = "mcp/cto_tools.html"
 
 
 class CTOToolsManifestView(View):
@@ -119,6 +115,23 @@ class CTOToolsReadmeView(View):
             content = f.read()
 
         return HttpResponse(content, content_type="text/markdown; charset=utf-8")
+
+
+class CTOToolsClientView(View):
+    """Serve the CTO Tools MCP client proxy script."""
+
+    def get(self, request):
+        """Return the client.py file."""
+        client_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "mcp",
+            "cto_tools_client.py",
+        )
+
+        with open(client_path) as f:
+            content = f.read()
+
+        return HttpResponse(content, content_type="text/x-python; charset=utf-8")
 
 
 class CreativeJuicesBundleView(View):
@@ -167,13 +180,14 @@ class CreativeJuicesBundleView(View):
                 "first-principles"
             ],
             "server": {
-                "type": "http",
-                "url": "https://ai.yuda.me/mcp/creative-juices/serve",
-                "transport": "streamable-http",
-                # Future: Add authentication headers if needed
-                # "headers": {
-                #     "Authorization": "Bearer ${user_config.api_key}"
-                # }
+                "type": "python",
+                "command": "uvx",
+                "args": [
+                    "run",
+                    "--with", "mcp",
+                    "--with", "httpx",
+                    "https://ai.yuda.me/mcp/creative-juices/client.py"
+                ]
             },
             "compatibility": {
                 "claude_desktop": ">=1.0.0",
@@ -231,5 +245,89 @@ class CreativeJuicesBundleView(View):
             content_type='application/zip'
         )
         response['Content-Disposition'] = 'attachment; filename="creative-juices.mcpb"'
+
+        return response
+
+
+class CTOToolsBundleView(View):
+    """Serve a dynamically generated .mcpb bundle for CTO Tools MCP server.
+
+    Currently generates the same bundle for all users, but can be customized
+    in the future to include user-specific API keys or configuration.
+    """
+
+    def get(self, request):
+        """Generate and return the .mcpb bundle as a ZIP file."""
+        # Create manifest for the bundle
+        manifest = {
+            "manifest_version": "0.3",
+            "name": "cto-tools",
+            "version": "1.0.0",
+            "display_name": "CTO Tools",
+            "description": "MCP server providing engineering leadership frameworks for weekly reviews, team analysis, and strategic decision-making",
+            "long_description": "CTO Tools provides structured frameworks for engineering leadership:\n\n"
+                              "1. **Weekly review templates** - Consistent format for tracking progress\n"
+                              "2. **Team analysis frameworks** - Structured approach to people challenges\n"
+                              "3. **Strategic decision guides** - First principles thinking for technical choices\n\n"
+                              "Designed for CTOs and engineering leaders who need consistent, proven approaches to leadership tasks.",
+            "author": {
+                "name": "Tom Counsell",
+                "url": "https://github.com/tomcounsell"
+            },
+            "homepage": "https://ai.yuda.me/mcp/cto-tools",
+            "repository": {
+                "type": "git",
+                "url": "https://github.com/yudame/cuttlefish"
+            },
+            "documentation": "https://ai.yuda.me/mcp/cto-tools/README.md",
+            "license": "MIT",
+            "keywords": [
+                "leadership",
+                "cto",
+                "engineering-management",
+                "frameworks",
+                "weekly-reviews",
+                "strategic-thinking"
+            ],
+            "server": {
+                "type": "python",
+                "command": "uvx",
+                "args": [
+                    "run",
+                    "--with", "mcp",
+                    "--with", "httpx",
+                    "https://ai.yuda.me/mcp/cto-tools/client.py"
+                ]
+            },
+            "compatibility": {
+                "claude_desktop": ">=1.0.0",
+                "platforms": ["darwin", "win32", "linux"],
+                "runtimes": {
+                    "python": ">=3.11"
+                }
+            },
+            "tools": [
+                {
+                    "name": "get_weekly_review_template",
+                    "description": "Get structured weekly review template for engineering leaders"
+                }
+            ],
+            "user_config": {}
+        }
+
+        # Create ZIP file in memory
+        zip_buffer = io.BytesIO()
+
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+            # Add manifest.json to the bundle
+            zip_file.writestr('manifest.json', json.dumps(manifest, indent=2))
+
+        # Prepare response
+        zip_buffer.seek(0)
+        response = HttpResponse(
+            zip_buffer.getvalue(),
+            content_type='application/zip'
+        )
+        response['Content-Disposition'] = 'attachment; filename="cto-tools.mcpb"'
 
         return response

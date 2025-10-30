@@ -3,7 +3,10 @@ from typing import List
 from django.urls import URLPattern, path
 
 from apps.ai.views import (
+    CTOToolsBundleView,
+    CTOToolsClientView,
     CTOToolsLandingView,
+    CTOToolsMCPServerView,
     CTOToolsManifestView,
     CTOToolsReadmeView,
     ChatClearView,
@@ -13,7 +16,9 @@ from apps.ai.views import (
     ChatPollMessageView,
     ChatSendMessageView,
     CreativeJuicesBundleView,
+    CreativeJuicesClientView,
     CreativeJuicesLandingView,
+    CreativeJuicesMCPServerView,
     CreativeJuicesManifestView,
     CreativeJuicesReadmeView,
 )
@@ -43,9 +48,19 @@ urlpatterns: list[URLPattern] = [
         name="mcp-creative-juices-readme",
     ),
     path(
+        "creative-juices/client.py",
+        CreativeJuicesClientView.as_view(),
+        name="mcp-creative-juices-client",
+    ),
+    path(
         "creative-juices/download.mcpb",
         CreativeJuicesBundleView.as_view(),
         name="mcp-creative-juices-bundle",
+    ),
+    path(
+        "creative-juices/serve",
+        CreativeJuicesMCPServerView.as_view(),
+        name="mcp-creative-juices-serve",
     ),
     # CTO Tools MCP server endpoints
     path(
@@ -62,6 +77,21 @@ urlpatterns: list[URLPattern] = [
         "cto-tools/README.md",
         CTOToolsReadmeView.as_view(),
         name="mcp-cto-tools-readme",
+    ),
+    path(
+        "cto-tools/client.py",
+        CTOToolsClientView.as_view(),
+        name="mcp-cto-tools-client",
+    ),
+    path(
+        "cto-tools/download.mcpb",
+        CTOToolsBundleView.as_view(),
+        name="mcp-cto-tools-bundle",
+    ),
+    path(
+        "cto-tools/serve",
+        CTOToolsMCPServerView.as_view(),
+        name="mcp-cto-tools-serve",
     ),
     # Chat interface (requires migrations)
     # path('chat/', ChatIndexView.as_view(), name='chat-index'),
