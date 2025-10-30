@@ -1,0 +1,64 @@
+{
+  "manifest_version": "0.3",
+  "name": "creative-juices",
+  "version": "1.0.0",
+  "display_name": "Creative Juices",
+  "description": "MCP server that generates random creative prompts and strategic questions to help LLMs think outside the box",
+  "long_description": "Creative Juices provides three tools for divergent and convergent thinking:\n\n1. **get_inspiration** - Gentle creative nudges with everyday metaphors\n2. **think_outside_the_box** - Intense creative shocks to break linear thinking\n3. **reality_check** - Strategic validation using proven frameworks\n\nFeatures 600+ curated words spanning human history, runs completely locally with no external dependencies.",
+  "author": {
+    "name": "Tom Counsell",
+    "url": "https://github.com/tomcounsell"
+  },
+  "homepage": "https://ai.yuda.me/mcp/creative-juices",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yudame/cuttlefish"
+  },
+  "documentation": "https://ai.yuda.me/mcp/creative-juices/README.md",
+  "license": "MIT",
+  "keywords": [
+    "creativity",
+    "brainstorming",
+    "divergent-thinking",
+    "strategic-frameworks",
+    "metaphors",
+    "first-principles"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "client.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/client.js"
+      ],
+      "env": {}
+    }
+  },
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=16.0.0"
+    }
+  },
+  "tools": [
+    {
+      "name": "get_inspiration",
+      "description": "Generate 3 gentle verb-noun combinations for early-stage creative framing. Use at the start of creative or problem-solving tasks to frame challenges in unexpected ways."
+    },
+    {
+      "name": "think_outside_the_box",
+      "description": "Generate 3 intense verb-noun combinations for breaking linear thinking. Use mid-conversation when exploration has stalled or thinking has become too linear."
+    },
+    {
+      "name": "reality_check",
+      "description": "Get strategic questions from proven thinking frameworks for validation. Use to ground creative thinking in reality while maintaining openness."
+    }
+  ],
+  "user_config": {}
+}
