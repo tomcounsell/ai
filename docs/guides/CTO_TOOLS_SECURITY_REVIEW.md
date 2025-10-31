@@ -2,7 +2,9 @@
 
 ## Overview
 
-The CTO Tools MCP server's `security_review` tool provides automated correlation of security alerts from multiple sources (SAST/DAST, CSPM, threat intelligence) with policy violations to identify, score, and prioritize security risks. It can optionally create Linear tickets for critical findings.
+The CTO Tools MCP server's `security_review` tool provides automated correlation of security alerts from multiple sources (SAST/DAST, CSPM, threat intelligence) with policy violations to identify, score, and prioritize security risks.
+
+**Status**: Fully functional with demo connectors. Linear integration deferred to backlog (requires multi-tenant authentication).
 
 ## Architecture
 
@@ -29,8 +31,7 @@ User Query → Parse Filters → Fetch Alerts (SAST/DAST/CSPM)
                            → Fetch Policies
                            → Correlate (alerts + assets + policies)
                            → Score Risks (0-100)
-                           → (Optional) Create Linear Tickets
-                           → Generate Summary + JSON
+                           → Generate Summary + JSON (with ticket details for manual creation)
 ```
 
 ## Installation
@@ -63,14 +64,13 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
     "cto-tools": {
       "command": "uv",
       "args": ["run", "python", "-m", "apps.ai.mcp.cto_tools_server"],
-      "cwd": "/path/to/cuttlefish",
-      "env": {
-        "LINEAR_API_KEY": "lin_api_your_key_here"
-      }
+      "cwd": "/path/to/cuttlefish"
     }
   }
 }
 ```
+
+No environment variables needed - works immediately with demo connectors!
 
 ## Configuration
 
