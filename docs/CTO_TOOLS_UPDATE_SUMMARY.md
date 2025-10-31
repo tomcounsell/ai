@@ -115,7 +115,7 @@ This real usage pattern informed the comprehensive framework now built into the 
 ### Core MCP Server
 - `apps/ai/mcp/cto_tools_server.py` - Enhanced `weekly_review()` with 6-phase framework
 - `apps/ai/mcp/CTO_TOOLS_README.md` - Updated documentation with phase descriptions
-- `apps/ai/mcp/cto_tools_web.html` - Updated landing page with framework details
+- `apps/ai/templates/mcp/cto_tools.html` - Django template for landing page with framework details
 
 ### Tests
 - `apps/ai/tests/test_mcp_cto_tools.py` - Updated all 13 tests to match new framework:

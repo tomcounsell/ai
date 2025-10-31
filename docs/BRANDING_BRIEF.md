@@ -380,7 +380,7 @@ This section documents the specific design choices made during the Cuttlefish br
 2. `apps/public/templates/pages/home.html` - Complete redesign with technical-spec-box hero, server cards, dividers
 3. `apps/public/templates/landing/ai_platform.html` - Technical elegance aesthetic, installation guide with numbered steps
 4. `apps/ai/mcp/creative_juices_web.html` - Self-contained redesign with inline brand CSS
-5. `apps/ai/mcp/cto_tools_web.html` - Consistent technical aesthetic with Creative Juices
+5. `apps/ai/templates/mcp/cto_tools.html` - Django template with consistent technical aesthetic
 6. `apps/public/templates/layout/nav/navbar.html` - Wordmark, simplified link styling
 7. `apps/public/templates/layout/footer.html` - Four-column layout, monospace copyright
 
