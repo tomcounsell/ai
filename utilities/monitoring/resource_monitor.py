@@ -1,864 +1,452 @@
-#!/usr/bin/env python3
 """
-Memory and Resource Monitoring System
-
-Comprehensive resource monitoring for the unified Valor-Claude system,
-tracking memory usage, CPU consumption, session management, and system health
-to ensure production-ready performance and reliability.
-
-Key Features:
-- Real-time memory usage tracking and alerts
-- Session lifecycle management and cleanup
-- Resource limit enforcement and optimization
-- Performance bottleneck detection
-- Production health monitoring
+Comprehensive resource monitoring for production systems.
+Monitors CPU, memory, disk, network, and database resources.
 """
 
-import gc
-import os
 import psutil
-import threading
 import time
-import weakref
-from collections import defaultdict, deque
-from dataclasses import dataclass, field
+import threading
+import sqlite3
+import logging
+from typing import Dict, List, Optional, Callable, Any
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any, Callable
+import asyncio
 import json
-
+import os
 
 @dataclass
-class ResourceSnapshot:
-    """Snapshot of system resources at a point in time."""
+class ResourceMetrics:
+    """Container for system resource metrics"""
     timestamp: datetime
-    memory_mb: float
     cpu_percent: float
-    active_sessions: int
-    total_processes: int
-    disk_usage_percent: float
-    network_io_bytes: Tuple[int, int]  # (bytes_sent, bytes_received)
-
-
-@dataclass
-class SessionInfo:
-    """Information about an active session."""
-    session_id: str
-    chat_id: str
-    username: str
-    created_at: datetime
-    last_activity: datetime
-    memory_usage_mb: float
-    message_count: int
-    status: str = "active"
-    context_size_kb: float = 0.0
-
+    memory_percent: float
+    disk_percent: float
+    disk_io_read: int
+    disk_io_write: int
+    network_bytes_sent: int
+    network_bytes_recv: int
+    process_count: int
+    load_average: Optional[List[float]]
+    database_connections: Optional[int] = None
+    database_query_time: Optional[float] = None
 
 @dataclass
-class ResourceLimits:
-    """Configurable resource limits for monitoring."""
-    max_memory_mb: float = 500.0
-    max_memory_per_session_mb: float = 50.0
-    max_cpu_percent: float = 80.0
-    max_sessions: int = 100
-    session_timeout_hours: float = 24.0
-    cleanup_interval_minutes: float = 15.0
-    
-    # System protection thresholds
-    emergency_memory_mb: float = 800.0  # Trigger emergency cleanup
-    emergency_cpu_percent: float = 95.0  # Trigger emergency throttling
-    critical_memory_mb: float = 1000.0  # Consider process restart
-    
-    # Auto-restart configuration
-    enable_auto_restart: bool = True
-    restart_memory_threshold_mb: float = 1200.0
-    restart_after_hours: float = 48.0  # Restart after long uptime
-
-
-@dataclass
-class PerformanceAlert:
-    """Alert for performance issues."""
-    alert_type: str
-    severity: str  # low, medium, high, critical
-    message: str
-    timestamp: datetime
-    resource_snapshot: ResourceSnapshot
-    recommended_action: str
-
+class AlertThreshold:
+    """Alert threshold configuration"""
+    metric: str
+    warning_threshold: float
+    critical_threshold: float
+    duration_seconds: int = 300  # 5 minutes
 
 class ResourceMonitor:
     """
-    Comprehensive resource monitoring and management system.
+    Production-grade resource monitoring system.
     
-    Monitors system resources, tracks active sessions, manages cleanup,
-    and provides alerts for production deployment monitoring.
+    Features:
+    - Real-time system metrics collection
+    - Database performance monitoring
+    - Configurable alert thresholds
+    - Historical data storage
+    - Performance trend analysis
     """
     
-    def __init__(self, limits: Optional[ResourceLimits] = None):
-        """
-        Initialize resource monitor.
+    def __init__(self, 
+                 db_path: str = "data/monitoring.db",
+                 collection_interval: int = 30,
+                 retention_days: int = 30):
+        self.db_path = db_path
+        self.collection_interval = collection_interval
+        self.retention_days = retention_days
+        self.logger = logging.getLogger(__name__)
         
-        Args:
-            limits: Resource limits configuration
-        """
-        self.limits = limits or ResourceLimits()
+        # Monitoring state
+        self.running = False
+        self.monitor_thread = None
+        self._callbacks: List[Callable[[ResourceMetrics], None]] = []
         
-        # Monitoring data
-        self.resource_history: deque = deque(maxlen=1000)
-        self.active_sessions: Dict[str, SessionInfo] = {}
-        self.performance_alerts: List[PerformanceAlert] = []
+        # Alert thresholds
+        self.thresholds = {
+            'cpu_percent': AlertThreshold('cpu_percent', 70.0, 90.0),
+            'memory_percent': AlertThreshold('memory_percent', 80.0, 95.0),
+            'disk_percent': AlertThreshold('disk_percent', 85.0, 95.0),
+            'database_query_time': AlertThreshold('database_query_time', 1.0, 5.0)
+        }
         
-        # Monitoring thread control
-        self.monitoring_active = False
-        self.monitoring_thread: Optional[threading.Thread] = None
-        self.cleanup_thread: Optional[threading.Thread] = None
+        # Alert state tracking
+        self._alert_states = {}
         
-        # Performance tracking
-        self.start_time = datetime.now()
-        self.total_sessions_created = 0
-        self.total_sessions_cleaned = 0
-        self.memory_warnings_issued = 0
-        
-        # Alert callbacks
-        self.alert_callbacks: List[Callable] = []
-        
-        # Session cleanup registry
-        self.session_cleanup_callbacks: Dict[str, List[Callable]] = defaultdict(list)
-        
-        # Resource usage patterns
-        self.peak_memory_usage = 0.0
-        self.peak_session_count = 0
-        self.performance_baselines = self._establish_baselines()
-        
-        # Emergency protection state
-        self.emergency_cleanups_performed = 0
-        self.last_emergency_cleanup = None
-        self.cpu_throttling_active = False
-        self.restart_recommended = False
-        self.restart_callbacks: List[Callable] = []
+        # Initialize database
+        self._init_database()
     
-    def _establish_baselines(self) -> Dict[str, float]:
-        """Establish performance baselines for comparison."""
+    def _init_database(self):
+        """Initialize monitoring database"""
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS resource_metrics (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME NOT NULL,
+                    cpu_percent REAL NOT NULL,
+                    memory_percent REAL NOT NULL,
+                    disk_percent REAL NOT NULL,
+                    disk_io_read INTEGER NOT NULL,
+                    disk_io_write INTEGER NOT NULL,
+                    network_bytes_sent INTEGER NOT NULL,
+                    network_bytes_recv INTEGER NOT NULL,
+                    process_count INTEGER NOT NULL,
+                    load_average TEXT,
+                    database_connections INTEGER,
+                    database_query_time REAL
+                )
+            ''')
+            
+            conn.execute('''
+                CREATE INDEX IF NOT EXISTS idx_timestamp 
+                ON resource_metrics(timestamp)
+            ''')
+            
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS alerts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME NOT NULL,
+                    metric TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    value REAL NOT NULL,
+                    threshold REAL NOT NULL,
+                    message TEXT NOT NULL
+                )
+            ''')
+    
+    def add_callback(self, callback: Callable[[ResourceMetrics], None]):
+        """Add callback for metric updates"""
+        self._callbacks.append(callback)
+    
+    def remove_callback(self, callback: Callable[[ResourceMetrics], None]):
+        """Remove metric update callback"""
+        if callback in self._callbacks:
+            self._callbacks.remove(callback)
+    
+    def set_threshold(self, metric: str, warning: float, critical: float, duration: int = 300):
+        """Set alert threshold for a metric"""
+        self.thresholds[metric] = AlertThreshold(metric, warning, critical, duration)
+    
+    def collect_metrics(self, include_db: bool = True) -> ResourceMetrics:
+        """Collect current system metrics"""
         try:
-            # Take initial measurements
-            initial_memory = self._get_memory_usage()
-            initial_cpu = psutil.cpu_percent(interval=1)
+            # CPU metrics
+            cpu_percent = psutil.cpu_percent(interval=1)
             
-            return {
-                "baseline_memory_mb": initial_memory,
-                "baseline_cpu_percent": initial_cpu,
-                "baseline_timestamp": time.time()
-            }
-        except Exception:
-            return {
-                "baseline_memory_mb": 100.0,
-                "baseline_cpu_percent": 10.0,
-                "baseline_timestamp": time.time()
-            }
-    
-    def start_monitoring(self, monitoring_interval: float = 30.0):
-        """
-        Start continuous resource monitoring.
-        
-        Args:
-            monitoring_interval: Seconds between monitoring cycles
-        """
-        if self.monitoring_active:
-            return
-        
-        self.monitoring_active = True
-        
-        # Start monitoring thread
-        self.monitoring_thread = threading.Thread(
-            target=self._monitoring_loop,
-            args=(monitoring_interval,),
-            daemon=True
-        )
-        self.monitoring_thread.start()
-        
-        # Start cleanup thread
-        cleanup_interval = self.limits.cleanup_interval_minutes * 60
-        self.cleanup_thread = threading.Thread(
-            target=self._cleanup_loop,
-            args=(cleanup_interval,),
-            daemon=True
-        )
-        self.cleanup_thread.start()
-        
-        print(f"✅ Resource monitoring started (interval: {monitoring_interval}s)")
-    
-    def stop_monitoring(self):
-        """Stop resource monitoring."""
-        self.monitoring_active = False
-        
-        if self.monitoring_thread:
-            self.monitoring_thread.join(timeout=5)
-        if self.cleanup_thread:
-            self.cleanup_thread.join(timeout=5)
-        
-        print("🛑 Resource monitoring stopped")
-    
-    def _monitoring_loop(self, interval: float):
-        """Main monitoring loop running in background thread."""
-        while self.monitoring_active:
-            try:
-                # Take resource snapshot
-                snapshot = self._take_resource_snapshot()
-                self.resource_history.append(snapshot)
-                
-                # Check for alerts
-                self._check_resource_alerts(snapshot)
-                
-                # Update peak usage tracking
-                self._update_peak_tracking(snapshot)
-                
-                # Sleep until next interval
-                time.sleep(interval)
-                
-            except Exception as e:
-                print(f"⚠️ Monitoring loop error: {e}")
-                time.sleep(interval)
-    
-    def _cleanup_loop(self, interval: float):
-        """Cleanup loop for managing stale sessions and resources."""
-        while self.monitoring_active:
-            try:
-                # Clean up stale sessions
-                cleaned_count = self.cleanup_stale_sessions()
-                if cleaned_count > 0:
-                    print(f"🧹 Cleaned up {cleaned_count} stale sessions")
-                
-                # Force garbage collection periodically
-                gc.collect()
-                
-                # Sleep until next cleanup
-                time.sleep(interval)
-                
-            except Exception as e:
-                print(f"⚠️ Cleanup loop error: {e}")
-                time.sleep(interval)
-    
-    def _take_resource_snapshot(self) -> ResourceSnapshot:
-        """Take a snapshot of current system resources."""
-        try:
-            # Memory usage
-            memory_mb = self._get_memory_usage()
+            # Memory metrics
+            memory = psutil.virtual_memory()
+            memory_percent = memory.percent
             
-            # CPU usage
-            cpu_percent = psutil.cpu_percent()
+            # Disk metrics
+            disk = psutil.disk_usage('/')
+            disk_percent = disk.percent
             
-            # Disk usage
-            disk_usage = psutil.disk_usage('/')
-            disk_percent = (disk_usage.used / disk_usage.total) * 100
+            # Disk I/O
+            disk_io = psutil.disk_io_counters()
+            disk_io_read = disk_io.read_bytes if disk_io else 0
+            disk_io_write = disk_io.write_bytes if disk_io else 0
             
-            # Network IO
+            # Network I/O
             net_io = psutil.net_io_counters()
-            network_io = (net_io.bytes_sent, net_io.bytes_recv)
+            network_bytes_sent = net_io.bytes_sent if net_io else 0
+            network_bytes_recv = net_io.bytes_recv if net_io else 0
             
             # Process count
-            total_processes = len(psutil.pids())
+            process_count = len(psutil.pids())
             
-            return ResourceSnapshot(
+            # Load average (Unix systems)
+            load_average = None
+            try:
+                load_average = list(os.getloadavg())
+            except (OSError, AttributeError):
+                pass  # Windows doesn't have getloadavg
+            
+            # Database metrics
+            database_connections = None
+            database_query_time = None
+            
+            if include_db:
+                database_connections, database_query_time = self._collect_db_metrics()
+            
+            metrics = ResourceMetrics(
                 timestamp=datetime.now(),
-                memory_mb=memory_mb,
                 cpu_percent=cpu_percent,
-                active_sessions=len(self.active_sessions),
-                total_processes=total_processes,
-                disk_usage_percent=disk_percent,
-                network_io_bytes=network_io
+                memory_percent=memory_percent,
+                disk_percent=disk_percent,
+                disk_io_read=disk_io_read,
+                disk_io_write=disk_io_write,
+                network_bytes_sent=network_bytes_sent,
+                network_bytes_recv=network_bytes_recv,
+                process_count=process_count,
+                load_average=load_average,
+                database_connections=database_connections,
+                database_query_time=database_query_time
             )
+            
+            return metrics
+            
         except Exception as e:
-            print(f"⚠️ Error taking resource snapshot: {e}")
-            return ResourceSnapshot(
-                timestamp=datetime.now(),
-                memory_mb=0, cpu_percent=0, active_sessions=0,
-                total_processes=0, disk_usage_percent=0,
-                network_io_bytes=(0, 0)
-            )
+            self.logger.error(f"Error collecting metrics: {e}")
+            raise
     
-    def _get_memory_usage(self) -> float:
-        """Get current memory usage in MB."""
+    def _collect_db_metrics(self) -> tuple[Optional[int], Optional[float]]:
+        """Collect database-specific metrics"""
         try:
-            process = psutil.Process()
-            return process.memory_info().rss / 1024 / 1024
-        except Exception:
-            return 0.0
+            start_time = time.time()
+            
+            with sqlite3.connect(self.db_path) as conn:
+                # Simple query to measure response time
+                conn.execute("SELECT 1").fetchone()
+                query_time = time.time() - start_time
+                
+                # Count active connections (simplified for SQLite)
+                connections = 1  # SQLite doesn't have connection pooling like PostgreSQL
+                
+            return connections, query_time
+            
+        except Exception as e:
+            self.logger.warning(f"Error collecting database metrics: {e}")
+            return None, None
     
-    def _check_resource_alerts(self, snapshot: ResourceSnapshot):
-        """Check for resource-based alerts and issues."""
+    def store_metrics(self, metrics: ResourceMetrics):
+        """Store metrics in database"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    INSERT INTO resource_metrics (
+                        timestamp, cpu_percent, memory_percent, disk_percent,
+                        disk_io_read, disk_io_write, network_bytes_sent, 
+                        network_bytes_recv, process_count, load_average,
+                        database_connections, database_query_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    metrics.timestamp,
+                    metrics.cpu_percent,
+                    metrics.memory_percent,
+                    metrics.disk_percent,
+                    metrics.disk_io_read,
+                    metrics.disk_io_write,
+                    metrics.network_bytes_sent,
+                    metrics.network_bytes_recv,
+                    metrics.process_count,
+                    json.dumps(metrics.load_average) if metrics.load_average else None,
+                    metrics.database_connections,
+                    metrics.database_query_time
+                ))
+                
+        except Exception as e:
+            self.logger.error(f"Error storing metrics: {e}")
+    
+    def check_alerts(self, metrics: ResourceMetrics):
+        """Check metrics against alert thresholds"""
         alerts = []
         
-        # Emergency protection checks (FIRST PRIORITY)
-        if snapshot.memory_mb > self.limits.critical_memory_mb:
-            self._handle_critical_memory_situation(snapshot)
-            alerts.append(PerformanceAlert(
-                alert_type="critical_memory",
-                severity="critical",
-                message=f"CRITICAL: Memory usage {snapshot.memory_mb:.1f}MB exceeds critical threshold {self.limits.critical_memory_mb}MB",
-                timestamp=snapshot.timestamp,
-                resource_snapshot=snapshot,
-                recommended_action="Emergency cleanup initiated, consider immediate restart"
-            ))
-        elif snapshot.memory_mb > self.limits.emergency_memory_mb:
-            self._handle_emergency_memory_situation(snapshot)
-            alerts.append(PerformanceAlert(
-                alert_type="emergency_memory",
-                severity="high",
-                message=f"EMERGENCY: Memory usage {snapshot.memory_mb:.1f}MB requires immediate cleanup",
-                timestamp=snapshot.timestamp,
-                resource_snapshot=snapshot,
-                recommended_action="Emergency session cleanup in progress"
-            ))
+        for metric_name, threshold in self.thresholds.items():
+            value = getattr(metrics, metric_name, None)
+            if value is None:
+                continue
             
-        # Emergency CPU protection
-        if snapshot.cpu_percent > self.limits.emergency_cpu_percent:
-            self._handle_emergency_cpu_situation(snapshot)
-            alerts.append(PerformanceAlert(
-                alert_type="emergency_cpu",
-                severity="high",
-                message=f"EMERGENCY: CPU usage {snapshot.cpu_percent:.1f}% triggering throttling",
-                timestamp=snapshot.timestamp,
-                resource_snapshot=snapshot,
-                recommended_action="CPU throttling enabled, limiting new operations"
-            ))
-        
-        # Check for auto-restart conditions
-        if self.limits.enable_auto_restart:
-            self._check_auto_restart_conditions(snapshot)
-        
-        # Standard alerts (existing logic)
-        if snapshot.memory_mb > self.limits.max_memory_mb:
-            alerts.append(PerformanceAlert(
-                alert_type="memory_limit_exceeded",
-                severity="high",
-                message=f"Memory usage {snapshot.memory_mb:.1f}MB exceeds limit {self.limits.max_memory_mb}MB",
-                timestamp=snapshot.timestamp,
-                resource_snapshot=snapshot,
-                recommended_action="Clean up stale sessions, trigger garbage collection"
-            ))
-        elif snapshot.memory_mb > self.limits.max_memory_mb * 0.8:
-            alerts.append(PerformanceAlert(
-                alert_type="memory_warning",
-                severity="medium",
-                message=f"Memory usage {snapshot.memory_mb:.1f}MB approaching limit",
-                timestamp=snapshot.timestamp,
-                resource_snapshot=snapshot,
-                recommended_action="Monitor closely, prepare for cleanup"
-            ))
-        
-        # CPU alerts
-        if snapshot.cpu_percent > self.limits.max_cpu_percent:
-            alerts.append(PerformanceAlert(
-                alert_type="cpu_limit_exceeded",
-                severity="high",
-                message=f"CPU usage {snapshot.cpu_percent:.1f}% exceeds limit {self.limits.max_cpu_percent}%",
-                timestamp=snapshot.timestamp,
-                resource_snapshot=snapshot,
-                recommended_action="Investigate high CPU processes, optimize workload"
-            ))
-        
-        # Session count alerts
-        if snapshot.active_sessions > self.limits.max_sessions:
-            alerts.append(PerformanceAlert(
-                alert_type="session_limit_exceeded",
-                severity="medium",
-                message=f"Active sessions {snapshot.active_sessions} exceeds limit {self.limits.max_sessions}",
-                timestamp=snapshot.timestamp,
-                resource_snapshot=snapshot,
-                recommended_action="Force cleanup of oldest sessions"
-            ))
-        
-        # Process alerts to callbacks
-        for alert in alerts:
-            self.performance_alerts.append(alert)
-            self._trigger_alert_callbacks(alert)
+            alert_level = None
+            if value >= threshold.critical_threshold:
+                alert_level = 'critical'
+            elif value >= threshold.warning_threshold:
+                alert_level = 'warning'
             
-            # Update warning counters
-            if "memory" in alert.alert_type:
-                self.memory_warnings_issued += 1
-    
-    def _update_peak_tracking(self, snapshot: ResourceSnapshot):
-        """Update peak usage tracking."""
-        self.peak_memory_usage = max(self.peak_memory_usage, snapshot.memory_mb)
-        self.peak_session_count = max(self.peak_session_count, snapshot.active_sessions)
-    
-    def _trigger_alert_callbacks(self, alert: PerformanceAlert):
-        """Trigger registered alert callbacks."""
-        for callback in self.alert_callbacks:
-            try:
-                callback(alert)
-            except Exception as e:
-                print(f"⚠️ Alert callback error: {e}")
-    
-    def register_session(self, 
-                        session_id: str,
-                        chat_id: str, 
-                        username: str,
-                        cleanup_callback: Optional[Callable] = None) -> SessionInfo:
-        """
-        Register a new active session.
-        
-        Args:
-            session_id: Unique session identifier
-            chat_id: Chat/conversation ID
-            username: Username of session owner
-            cleanup_callback: Optional cleanup function
-            
-        Returns:
-            SessionInfo object
-        """
-        session_info = SessionInfo(
-            session_id=session_id,
-            chat_id=chat_id,
-            username=username,
-            created_at=datetime.now(),
-            last_activity=datetime.now(),
-            memory_usage_mb=self._estimate_session_memory(),
-            message_count=0
-        )
-        
-        self.active_sessions[session_id] = session_info
-        self.total_sessions_created += 1
-        
-        # Register cleanup callback
-        if cleanup_callback:
-            self.session_cleanup_callbacks[session_id].append(cleanup_callback)
-        
-        # Check session limits
-        if len(self.active_sessions) > self.limits.max_sessions:
-            self._force_session_cleanup()
-        
-        return session_info
-    
-    def update_session_activity(self, 
-                               session_id: str,
-                               memory_delta: float = 0.0,
-                               message_count_delta: int = 1,
-                               context_size_kb: float = 0.0):
-        """
-        Update session activity and resource usage.
-        
-        Args:
-            session_id: Session to update
-            memory_delta: Change in memory usage (MB)
-            message_count_delta: Change in message count
-            context_size_kb: Current context size in KB
-        """
-        if session_id not in self.active_sessions:
-            return
-        
-        session = self.active_sessions[session_id]
-        session.last_activity = datetime.now()
-        session.memory_usage_mb += memory_delta
-        session.message_count += message_count_delta
-        session.context_size_kb = context_size_kb
-        
-        # Check per-session memory limits
-        if session.memory_usage_mb > self.limits.max_memory_per_session_mb:
-            self._handle_session_memory_limit(session_id, session)
-    
-    def unregister_session(self, session_id: str) -> bool:
-        """
-        Unregister and clean up a session.
-        
-        Args:
-            session_id: Session to remove
-            
-        Returns:
-            True if session was found and removed
-        """
-        if session_id not in self.active_sessions:
-            return False
-        
-        # Run cleanup callbacks
-        for callback in self.session_cleanup_callbacks.get(session_id, []):
-            try:
-                callback()
-            except Exception as e:
-                print(f"⚠️ Session cleanup callback error: {e}")
-        
-        # Remove session
-        del self.active_sessions[session_id]
-        if session_id in self.session_cleanup_callbacks:
-            del self.session_cleanup_callbacks[session_id]
-        
-        self.total_sessions_cleaned += 1
-        return True
-    
-    def cleanup_stale_sessions(self) -> int:
-        """
-        Clean up sessions that have exceeded timeout.
-        
-        Returns:
-            Number of sessions cleaned up
-        """
-        current_time = datetime.now()
-        timeout_delta = timedelta(hours=self.limits.session_timeout_hours)
-        
-        stale_sessions = []
-        for session_id, session in self.active_sessions.items():
-            if current_time - session.last_activity > timeout_delta:
-                stale_sessions.append(session_id)
-        
-        # Clean up stale sessions
-        for session_id in stale_sessions:
-            self.unregister_session(session_id)
-        
-        return len(stale_sessions)
-    
-    def _force_session_cleanup(self):
-        """Force cleanup of oldest sessions when limits exceeded."""
-        if len(self.active_sessions) <= self.limits.max_sessions:
-            return
-        
-        # Sort sessions by last activity (oldest first)
-        sorted_sessions = sorted(
-            self.active_sessions.items(),
-            key=lambda x: x[1].last_activity
-        )
-        
-        # Remove oldest sessions until under limit
-        sessions_to_remove = len(self.active_sessions) - self.limits.max_sessions + 5  # Buffer
-        for i in range(min(sessions_to_remove, len(sorted_sessions))):
-            session_id = sorted_sessions[i][0]
-            self.unregister_session(session_id)
-    
-    def _handle_session_memory_limit(self, session_id: str, session: SessionInfo):
-        """Handle session exceeding memory limits."""
-        alert = PerformanceAlert(
-            alert_type="session_memory_exceeded",
-            severity="medium",
-            message=f"Session {session_id} using {session.memory_usage_mb:.1f}MB (limit: {self.limits.max_memory_per_session_mb}MB)",
-            timestamp=datetime.now(),
-            resource_snapshot=self._take_resource_snapshot(),
-            recommended_action=f"Clean up session {session_id} or optimize context usage"
-        )
-        
-        self.performance_alerts.append(alert)
-        self._trigger_alert_callbacks(alert)
-    
-    def _estimate_session_memory(self) -> float:
-        """Estimate initial memory usage for a new session."""
-        # Base estimate based on current system state
-        current_memory = self._get_memory_usage()
-        session_count = len(self.active_sessions)
-        
-        if session_count == 0:
-            return 5.0  # Base session memory estimate
-        
-        # Calculate average memory per existing session
-        avg_memory_per_session = current_memory / session_count
-        return min(avg_memory_per_session, 10.0)  # Cap at 10MB estimate
-    
-    def get_system_health(self) -> Dict[str, Any]:
-        """Get comprehensive system health report."""
-        current_snapshot = self._take_resource_snapshot()
-        uptime = datetime.now() - self.start_time
-        
-        # Calculate averages from recent history
-        recent_snapshots = list(self.resource_history)[-10:]  # Last 10 snapshots
-        if recent_snapshots:
-            avg_memory = sum(s.memory_mb for s in recent_snapshots) / len(recent_snapshots)
-            avg_cpu = sum(s.cpu_percent for s in recent_snapshots) / len(recent_snapshots)
-        else:
-            avg_memory = current_snapshot.memory_mb
-            avg_cpu = current_snapshot.cpu_percent
-        
-        # Health score calculation
-        health_score = self._calculate_health_score(current_snapshot)
-        
-        return {
-            "timestamp": current_snapshot.timestamp.isoformat(),
-            "uptime_hours": uptime.total_seconds() / 3600,
-            "health_score": health_score,
-            "current_resources": {
-                "memory_mb": current_snapshot.memory_mb,
-                "memory_limit_mb": self.limits.max_memory_mb,
-                "memory_utilization_percent": (current_snapshot.memory_mb / self.limits.max_memory_mb) * 100,
-                "cpu_percent": current_snapshot.cpu_percent,
-                "active_sessions": current_snapshot.active_sessions,
-                "disk_usage_percent": current_snapshot.disk_usage_percent
-            },
-            "averages": {
-                "memory_mb": avg_memory,
-                "cpu_percent": avg_cpu
-            },
-            "peaks": {
-                "memory_mb": self.peak_memory_usage,
-                "session_count": self.peak_session_count
-            },
-            "session_management": {
-                "total_created": self.total_sessions_created,
-                "total_cleaned": self.total_sessions_cleaned,
-                "currently_active": len(self.active_sessions),
-                "cleanup_rate": (self.total_sessions_cleaned / max(self.total_sessions_created, 1)) * 100
-            },
-            "alerts": {
-                "total_alerts": len(self.performance_alerts),
-                "memory_warnings": self.memory_warnings_issued,
-                "recent_alerts": len([a for a in self.performance_alerts 
-                                    if (datetime.now() - a.timestamp).total_seconds() < 3600])
-            }
-        }
-    
-    def _calculate_health_score(self, snapshot: ResourceSnapshot) -> float:
-        """Calculate overall system health score (0-100)."""
-        scores = []
-        
-        # Memory health (30%)
-        memory_utilization = snapshot.memory_mb / self.limits.max_memory_mb
-        memory_score = max(0, 100 - (memory_utilization * 100))
-        scores.append(memory_score * 0.3)
-        
-        # CPU health (25%)
-        cpu_score = max(0, 100 - snapshot.cpu_percent)
-        scores.append(cpu_score * 0.25)
-        
-        # Session health (25%)
-        session_utilization = snapshot.active_sessions / self.limits.max_sessions
-        session_score = max(0, 100 - (session_utilization * 100))
-        scores.append(session_score * 0.25)
-        
-        # Alert health (20%)
-        recent_alerts = len([a for a in self.performance_alerts 
-                           if (datetime.now() - a.timestamp).total_seconds() < 3600])
-        alert_score = max(0, 100 - (recent_alerts * 10))  # -10 points per recent alert
-        scores.append(alert_score * 0.2)
-        
-        return sum(scores)
-    
-    def get_session_report(self) -> Dict[str, Any]:
-        """Get detailed session management report."""
-        sessions_by_age = defaultdict(int)
-        sessions_by_size = defaultdict(int)
-        total_context_size = 0
-        
-        for session in self.active_sessions.values():
-            # Age categorization
-            age_hours = (datetime.now() - session.created_at).total_seconds() / 3600
-            if age_hours < 1:
-                sessions_by_age["<1h"] += 1
-            elif age_hours < 6:
-                sessions_by_age["1-6h"] += 1
-            elif age_hours < 24:
-                sessions_by_age["6-24h"] += 1
+            if alert_level:
+                alert_key = f"{metric_name}_{alert_level}"
+                current_time = datetime.now()
+                
+                # Track alert state
+                if alert_key not in self._alert_states:
+                    self._alert_states[alert_key] = current_time
+                
+                # Only fire alert if threshold duration exceeded
+                if (current_time - self._alert_states[alert_key]).seconds >= threshold.duration_seconds:
+                    alert = {
+                        'timestamp': current_time,
+                        'metric': metric_name,
+                        'level': alert_level,
+                        'value': value,
+                        'threshold': threshold.critical_threshold if alert_level == 'critical' else threshold.warning_threshold,
+                        'message': f"{metric_name.replace('_', ' ').title()} {alert_level}: {value:.2f}% (threshold: {threshold.critical_threshold if alert_level == 'critical' else threshold.warning_threshold}%)"
+                    }
+                    alerts.append(alert)
+                    self._store_alert(alert)
             else:
-                sessions_by_age[">24h"] += 1
-            
-            # Memory categorization
-            if session.memory_usage_mb < 10:
-                sessions_by_size["<10MB"] += 1
-            elif session.memory_usage_mb < 25:
-                sessions_by_size["10-25MB"] += 1
-            elif session.memory_usage_mb < 50:
-                sessions_by_size["25-50MB"] += 1
-            else:
-                sessions_by_size[">50MB"] += 1
-            
-            total_context_size += session.context_size_kb
+                # Clear alert states for this metric
+                for key in list(self._alert_states.keys()):
+                    if key.startswith(f"{metric_name}_"):
+                        del self._alert_states[key]
         
-        return {
-            "total_sessions": len(self.active_sessions),
-            "sessions_by_age": dict(sessions_by_age),
-            "sessions_by_memory": dict(sessions_by_size),
-            "total_context_size_mb": total_context_size / 1024,
-            "average_session_memory_mb": sum(s.memory_usage_mb for s in self.active_sessions.values()) / max(len(self.active_sessions), 1),
-            "most_active_session": max(self.active_sessions.values(), key=lambda s: s.message_count, default=None),
-            "oldest_session": min(self.active_sessions.values(), key=lambda s: s.created_at, default=None)
-        }
+        return alerts
     
-    def _handle_emergency_memory_situation(self, snapshot: ResourceSnapshot):
-        """Handle emergency memory situation with aggressive cleanup."""
-        now = datetime.now()
+    def _store_alert(self, alert: Dict[str, Any]):
+        """Store alert in database"""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute('''
+                    INSERT INTO alerts (timestamp, metric, level, value, threshold, message)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (
+                    alert['timestamp'],
+                    alert['metric'],
+                    alert['level'],
+                    alert['value'],
+                    alert['threshold'],
+                    alert['message']
+                ))
+        except Exception as e:
+            self.logger.error(f"Error storing alert: {e}")
+    
+    def get_historical_metrics(self, 
+                             hours: int = 24, 
+                             metric: Optional[str] = None) -> List[Dict]:
+        """Get historical metrics from database"""
+        start_time = datetime.now() - timedelta(hours=hours)
         
-        # Prevent too frequent emergency cleanups (min 60 seconds apart)
-        if (self.last_emergency_cleanup and 
-            (now - self.last_emergency_cleanup).total_seconds() < 60):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            
+            if metric:
+                query = f'''
+                    SELECT timestamp, {metric}
+                    FROM resource_metrics 
+                    WHERE timestamp >= ?
+                    ORDER BY timestamp
+                '''
+            else:
+                query = '''
+                    SELECT * FROM resource_metrics 
+                    WHERE timestamp >= ?
+                    ORDER BY timestamp
+                '''
+            
+            results = conn.execute(query, (start_time,)).fetchall()
+            return [dict(row) for row in results]
+    
+    def get_recent_alerts(self, hours: int = 24) -> List[Dict]:
+        """Get recent alerts from database"""
+        start_time = datetime.now() - timedelta(hours=hours)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            results = conn.execute('''
+                SELECT * FROM alerts 
+                WHERE timestamp >= ?
+                ORDER BY timestamp DESC
+            ''', (start_time,)).fetchall()
+            
+            return [dict(row) for row in results]
+    
+    def cleanup_old_data(self):
+        """Remove old monitoring data beyond retention period"""
+        cutoff_date = datetime.now() - timedelta(days=self.retention_days)
+        
+        with sqlite3.connect(self.db_path) as conn:
+            # Clean up old metrics
+            conn.execute('''
+                DELETE FROM resource_metrics 
+                WHERE timestamp < ?
+            ''', (cutoff_date,))
+            
+            # Clean up old alerts
+            conn.execute('''
+                DELETE FROM alerts 
+                WHERE timestamp < ?
+            ''', (cutoff_date,))
+            
+            conn.commit()
+    
+    def _monitoring_loop(self):
+        """Main monitoring loop"""
+        self.logger.info("Resource monitoring started")
+        
+        while self.running:
+            try:
+                # Collect metrics
+                metrics = self.collect_metrics()
+                
+                # Store metrics
+                self.store_metrics(metrics)
+                
+                # Check for alerts
+                alerts = self.check_alerts(metrics)
+                
+                # Notify callbacks
+                for callback in self._callbacks:
+                    try:
+                        callback(metrics)
+                    except Exception as e:
+                        self.logger.error(f"Error in callback: {e}")
+                
+                # Log alerts
+                for alert in alerts:
+                    if alert['level'] == 'critical':
+                        self.logger.critical(alert['message'])
+                    else:
+                        self.logger.warning(alert['message'])
+                
+                # Periodic cleanup
+                if int(time.time()) % 3600 == 0:  # Every hour
+                    self.cleanup_old_data()
+                
+                time.sleep(self.collection_interval)
+                
+            except Exception as e:
+                self.logger.error(f"Error in monitoring loop: {e}")
+                time.sleep(self.collection_interval)
+        
+        self.logger.info("Resource monitoring stopped")
+    
+    def start(self):
+        """Start resource monitoring"""
+        if self.running:
             return
         
-        print(f"🚨 EMERGENCY MEMORY CLEANUP: {snapshot.memory_mb:.1f}MB > {self.limits.emergency_memory_mb}MB")
-        
-        # 1. Force garbage collection
-        collected = gc.collect()
-        print(f"   - Garbage collection freed {collected} objects")
-        
-        # 2. Aggressive session cleanup (remove 50% of sessions)
-        sessions_to_remove = max(1, len(self.active_sessions) // 2)
-        sorted_sessions = sorted(
-            self.active_sessions.items(),
-            key=lambda x: x[1].last_activity
-        )
-        
-        cleaned_sessions = 0
-        for i in range(min(sessions_to_remove, len(sorted_sessions))):
-            session_id = sorted_sessions[i][0]
-            if self.unregister_session(session_id):
-                cleaned_sessions += 1
-        
-        print(f"   - Emergency cleanup removed {cleaned_sessions} sessions")
-        
-        # 3. Clear performance history to free memory
-        if len(self.resource_history) > 100:
-            # Keep only last 50 entries
-            recent_history = list(self.resource_history)[-50:]
-            self.resource_history.clear()
-            self.resource_history.extend(recent_history)
-            print(f"   - Trimmed resource history")
-        
-        self.last_emergency_cleanup = now
-        self.emergency_cleanups_performed += 1
+        self.running = True
+        self.monitor_thread = threading.Thread(target=self._monitoring_loop, daemon=True)
+        self.monitor_thread.start()
+        self.logger.info("Resource monitor started")
     
-    def _handle_critical_memory_situation(self, snapshot: ResourceSnapshot):
-        """Handle critical memory situation - prepare for restart."""
-        print(f"💀 CRITICAL MEMORY SITUATION: {snapshot.memory_mb:.1f}MB > {self.limits.critical_memory_mb}MB")
+    def stop(self):
+        """Stop resource monitoring"""
+        if not self.running:
+            return
         
-        # 1. Emergency memory cleanup first
-        self._handle_emergency_memory_situation(snapshot)
+        self.running = False
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            self.monitor_thread.join(timeout=10)
         
-        # 2. Mark restart as recommended
-        self.restart_recommended = True
-        
-        # 3. Clear all non-essential data
-        self.performance_alerts = self.performance_alerts[-10:]  # Keep only last 10 alerts
-        
-        # 4. Trigger restart callbacks if configured
-        for callback in self.restart_callbacks:
-            try:
-                callback("critical_memory", snapshot)
-            except Exception as e:
-                print(f"⚠️ Restart callback error: {e}")
-        
-        print("   - Restart recommended due to critical memory usage")
+        self.logger.info("Resource monitor stopped")
     
-    def _handle_emergency_cpu_situation(self, snapshot: ResourceSnapshot):
-        """Handle emergency CPU situation with throttling."""
-        if not self.cpu_throttling_active:
-            print(f"🐌 CPU THROTTLING ENABLED: {snapshot.cpu_percent:.1f}% > {self.limits.emergency_cpu_percent}%")
-            self.cpu_throttling_active = True
-        
-        # Add delay to reduce CPU pressure
-        time.sleep(0.5)
-    
-    def _check_auto_restart_conditions(self, snapshot: ResourceSnapshot):
-        """Check if automatic restart should be triggered."""
-        uptime = datetime.now() - self.start_time
-        uptime_hours = uptime.total_seconds() / 3600
-        
-        should_restart = False
-        restart_reason = ""
-        
-        # Check memory threshold
-        if snapshot.memory_mb > self.limits.restart_memory_threshold_mb:
-            should_restart = True
-            restart_reason = f"memory_threshold ({snapshot.memory_mb:.1f}MB > {self.limits.restart_memory_threshold_mb}MB)"
-        
-        # Check uptime threshold
-        elif uptime_hours > self.limits.restart_after_hours:
-            should_restart = True
-            restart_reason = f"uptime_threshold ({uptime_hours:.1f}h > {self.limits.restart_after_hours}h)"
-        
-        if should_restart and not self.restart_recommended:
-            self.restart_recommended = True
-            print(f"🔄 AUTO-RESTART RECOMMENDED: {restart_reason}")
+    def get_current_status(self) -> Dict[str, Any]:
+        """Get current system status summary"""
+        try:
+            metrics = self.collect_metrics()
+            recent_alerts = self.get_recent_alerts(hours=1)
             
-            # Trigger restart callbacks
-            for callback in self.restart_callbacks:
-                try:
-                    callback(restart_reason, snapshot)
-                except Exception as e:
-                    print(f"⚠️ Restart callback error: {e}")
-    
-    def add_restart_callback(self, callback: Callable[[str, ResourceSnapshot], None]):
-        """Add callback function for restart recommendations."""
-        self.restart_callbacks.append(callback)
-    
-    def add_alert_callback(self, callback: Callable[[PerformanceAlert], None]):
-        """Add callback function for performance alerts."""
-        self.alert_callbacks.append(callback)
-    
-    def get_emergency_status(self) -> Dict[str, Any]:
-        """Get emergency protection status."""
-        return {
-            "emergency_cleanups_performed": self.emergency_cleanups_performed,
-            "last_emergency_cleanup": self.last_emergency_cleanup.isoformat() if self.last_emergency_cleanup else None,
-            "cpu_throttling_active": self.cpu_throttling_active,
-            "restart_recommended": self.restart_recommended,
-            "protection_thresholds": {
-                "emergency_memory_mb": self.limits.emergency_memory_mb,
-                "emergency_cpu_percent": self.limits.emergency_cpu_percent,
-                "critical_memory_mb": self.limits.critical_memory_mb,
-                "restart_memory_threshold_mb": self.limits.restart_memory_threshold_mb
+            return {
+                'timestamp': metrics.timestamp.isoformat(),
+                'status': 'healthy' if not recent_alerts else 'degraded',
+                'metrics': {
+                    'cpu_percent': metrics.cpu_percent,
+                    'memory_percent': metrics.memory_percent,
+                    'disk_percent': metrics.disk_percent,
+                    'process_count': metrics.process_count,
+                    'database_query_time': metrics.database_query_time
+                },
+                'recent_alerts': len(recent_alerts),
+                'monitoring_enabled': self.running
             }
-        }
-    
-    def export_metrics(self, filepath: str):
-        """Export comprehensive metrics to JSON file."""
-        metrics = {
-            "system_health": self.get_system_health(),
-            "session_report": self.get_session_report(),
-            "resource_history": [
-                {
-                    "timestamp": snapshot.timestamp.isoformat(),
-                    "memory_mb": snapshot.memory_mb,
-                    "cpu_percent": snapshot.cpu_percent,
-                    "active_sessions": snapshot.active_sessions
-                }
-                for snapshot in list(self.resource_history)[-100:]  # Last 100 snapshots
-            ],
-            "recent_alerts": [
-                {
-                    "type": alert.alert_type,
-                    "severity": alert.severity,
-                    "message": alert.message,
-                    "timestamp": alert.timestamp.isoformat(),
-                    "action": alert.recommended_action
-                }
-                for alert in self.performance_alerts[-50:]  # Last 50 alerts
-            ]
-        }
-        
-        with open(filepath, 'w') as f:
-            json.dump(metrics, f, indent=2, default=str)
-        
-        print(f"📊 Metrics exported to {filepath}")
-    
-    def validate_production_readiness(self) -> Dict[str, bool]:
-        """
-        Validate system readiness for production deployment.
-        
-        Returns:
-            Dictionary of production readiness checks
-        """
-        health = self.get_system_health()
-        current_snapshot = self._take_resource_snapshot()
-        
-        return {
-            "memory_usage_acceptable": current_snapshot.memory_mb < self.limits.max_memory_mb * 0.8,
-            "cpu_usage_acceptable": current_snapshot.cpu_percent < self.limits.max_cpu_percent * 0.8,
-            "session_count_manageable": current_snapshot.active_sessions < self.limits.max_sessions * 0.8,
-            "health_score_good": health["health_score"] >= 80,
-            "no_critical_alerts": len([a for a in self.performance_alerts 
-                                     if a.severity == "critical" and 
-                                     (datetime.now() - a.timestamp).total_seconds() < 3600]) == 0,
-            "cleanup_working": self.total_sessions_cleaned > 0 or self.total_sessions_created < 10,
-            "monitoring_active": self.monitoring_active
-        }
-
-
-# Singleton instance for global use
-resource_monitor = ResourceMonitor()
-
-
-# Convenience functions
-def start_resource_monitoring():
-    """Start global resource monitoring."""
-    resource_monitor.start_monitoring()
-
-
-def get_resource_status() -> Dict[str, Any]:
-    """Get current resource status."""
-    return resource_monitor.get_system_status()
-
-
-def register_monitoring_session(session_id: str, chat_id: str, username: str) -> SessionInfo:
-    """Register session for resource monitoring."""
-    return resource_monitor.register_session(session_id, chat_id, username)
+        except Exception as e:
+            self.logger.error(f"Error getting current status: {e}")
+            return {
+                'status': 'error',
+                'error': str(e),
+                'monitoring_enabled': self.running
+            }

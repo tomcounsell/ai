@@ -1,1235 +1,1214 @@
-#!/usr/bin/env python3
 """
 Development Tools MCP Server
 
-Provides comprehensive development tools including test parameter generation,
-test judging, linting, document summarization, and image tagging.
+This module implements MCP server for development and debugging tools:
+- Code execution in various environments
+- Debugging and profiling tools
+- Environment management
+- Process monitoring
+- Test execution
 """
 
+import asyncio
+import logging
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 import json
 import os
+import signal
+import psutil
 
-# Add project root to path for workspace validation
-import sys
-from pathlib import Path
-from typing import Any
+from pydantic import BaseModel, Field, validator
 
-from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from .base import MCPServer, MCPToolCapability, MCPRequest, MCPError
+from .context_manager import MCPContextManager, SecurityLevel
 
-from tools.doc_summary_tool import (
-    SummaryConfig,
-    batch_summarize_docs,
-    quick_doc_summary,
-    summarize_document,
-    summarize_url_document,
-)
-from tools.image_tagging_tool import (
-    TaggingConfig,
-    batch_tag_images,
-    content_moderation_tags,
-    detailed_image_analysis,
-    extract_simple_tags,
-    tag_image,
-)
-from tools.linting_tool import (
-    LintConfig,
-    lint_files,
-    quick_lint_check,
-    run_linting,
-    strict_lint_check,
-)
-from tools.test_judge_tool import (
-    JudgeConfig,
-    batch_judge_tests,
-    judge_code_quality,
-    judge_test_result,
-)
 
-# Import tool functions
-from tools.test_params_tool import (
-    TestParamConfig,
-    generate_code_quality_test_params,
-    generate_test_params,
-    generate_ui_test_params,
-)
-
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
-
-from utilities.workspace_validator import WorkspaceAccessError, get_workspace_validator
-
-# Load environment variables
-load_dotenv()
-
-# Initialize MCP server
-mcp = FastMCP("Development Tools")
-
-
-def get_project_context(chat_id: str = "") -> str:
-    """Get project context including working directory, README, and CLAUDE.md content.
-
-    Args:
-        chat_id: Telegram chat ID for workspace detection
-
-    Returns:
-        str: Formatted project context information
-    """
-    context_parts = []
-
-    try:
-        # Get workspace information
-        if chat_id:
-            validator = get_workspace_validator()
-            workspace = validator.get_workspace_for_chat(chat_id)
-            working_dir = validator.get_working_directory(chat_id)
-
-            if workspace and working_dir:
-                context_parts.append(f"**Current Workspace**: {workspace}")
-                context_parts.append(f"**Working Directory**: {working_dir}")
-
-                # Try to read README file
-                readme_patterns = ["README.md", "readme.md", "README", "readme.txt"]
-                for pattern in readme_patterns:
-                    readme_path = Path(working_dir) / pattern
-                    if readme_path.exists():
-                        try:
-                            readme_content = readme_path.read_text(encoding="utf-8")[
-                                :2000
-                            ]  # Limit size
-                            context_parts.append(f"**Project README**:\n{readme_content}")
-                            break
-                        except Exception:
-                            continue
-
-                # Try to read CLAUDE.md file
-                claude_md_path = Path(working_dir) / "CLAUDE.md"
-                if claude_md_path.exists():
-                    try:
-                        claude_content = claude_md_path.read_text(encoding="utf-8")[
-                            :2000
-                        ]  # Limit size
-                        context_parts.append(
-                            f"**Project Instructions (CLAUDE.md)**:\n{claude_content}"
-                        )
-                    except Exception:
-                        pass
-
-        # If no workspace context, try current directory
-        if not context_parts:
-            current_dir = os.getcwd()
-            context_parts.append(f"**Current Directory**: {current_dir}")
-
-            # Try to read files from current directory
-            for pattern in ["README.md", "CLAUDE.md"]:
-                file_path = Path(current_dir) / pattern
-                if file_path.exists():
-                    try:
-                        content = file_path.read_text(encoding="utf-8")[
-                            :1000
-                        ]  # Smaller limit for fallback
-                        context_parts.append(f"**{pattern}**:\n{content}")
-                    except Exception:
-                        continue
-
-    except Exception as e:
-        context_parts.append(f"**Context Error**: {str(e)}")
-
-    if context_parts:
-        return "\n\n".join(context_parts)
-    else:
-        return (
-            "**Project Context**: Working in current directory with no additional context available"
-        )
-
-
-def enhance_tool_prompt(base_prompt: str, chat_id: str = "") -> str:
-    """Enhance a tool prompt with project context.
-
-    Args:
-        base_prompt: The base prompt text
-        chat_id: Optional chat ID for workspace context
-
-    Returns:
-        str: Enhanced prompt with project context
-    """
-    project_context = get_project_context(chat_id)
-
-    return f"""{base_prompt}
-
-## Current Project Context
-{project_context}
-
-Please consider this context when providing assistance and tailor your responses to the current project and workspace."""
-
-
-def validate_directory_access(chat_id: str, file_path: str) -> str | None:
-    """Validate directory access for a chat ID and file path.
-
-    Args:
-        chat_id: Telegram chat ID making the request
-        file_path: File or directory path to validate
-
-    Returns:
-        Error message if validation fails, None if access is allowed
-    """
-    if not chat_id:
-        # Allow access if no chat_id provided (direct usage)
-        return None
-
-    try:
-        validator = get_workspace_validator()
-        validator.validate_directory_access(chat_id, file_path)
-        return None  # Access allowed
-    except WorkspaceAccessError as e:
-        return f"❌ Directory Access Denied: {str(e)}"
-    except Exception as e:
-        return f"❌ Directory Validation Error: {str(e)}"
-
-
-# ==================== TEST PARAMETER GENERATION TOOLS ====================
-
-
-@mcp.tool()
-def generate_test_parameters(
-    test_type: str,
-    param_categories: list[str],
-    num_variations: int = 5,
-    complexity_level: str = "medium",
-    domain_context: str | None = None,
-) -> str:
-    """Generate diverse test parameters for AI subjective testing.
-
-    Creates structured test scenarios with evaluation criteria for validating
-    AI responses across different contexts and requirements.
-
-    Args:
-        test_type: Type of test (e.g., 'ui_feedback', 'code_quality', 'response_evaluation')
-        param_categories: Categories of parameters to generate (e.g., ['ui_feedback', 'code_quality'])
-        num_variations: Number of parameter variations to generate (default: 5)
-        complexity_level: Complexity level - 'simple', 'medium', or 'complex' (default: 'medium')
-        domain_context: Optional domain-specific context (e.g., 'healthcare', 'finance')
-
-    Returns:
-        JSON string containing generated test parameters with evaluation criteria
-    """
-    try:
-        config = TestParamConfig(
-            test_type=test_type,
-            param_categories=param_categories,
-            num_variations=num_variations,
-            complexity_level=complexity_level,
-            domain_context=domain_context,
-        )
-
-        params = generate_test_params(config)
-        return json.dumps([p.model_dump() for p in params], indent=2)
-
-    except Exception as e:
-        return f"❌ Error generating test parameters: {str(e)}"
-
-
-@mcp.tool()
-def generate_ui_testing_params(num_variations: int = 5, complexity: str = "medium") -> str:
-    """Generate test parameters specifically for UI feedback evaluation.
-
-    Creates parameters for testing AI responses to user interface feedback scenarios,
-    including different user expertise levels, interface styles, and feedback contexts.
-
-    Args:
-        num_variations: Number of parameter variations to generate
-        complexity: Complexity level - 'simple', 'medium', or 'complex'
-
-    Returns:
-        JSON string containing UI-specific test parameters
-    """
-    try:
-        return generate_ui_test_params(num_variations, complexity)
-    except Exception as e:
-        return f"❌ Error generating UI test parameters: {str(e)}"
-
-
-@mcp.tool()
-def generate_code_testing_params(num_variations: int = 5, complexity: str = "medium") -> str:
-    """Generate test parameters for code quality evaluation.
-
-    Creates parameters for testing AI responses to code review and quality assessment
-    scenarios with different coding styles, priorities, and contexts.
-
-    Args:
-        num_variations: Number of parameter variations to generate
-        complexity: Complexity level - 'simple', 'medium', or 'complex'
-
-    Returns:
-        JSON string containing code quality test parameters
-    """
-    try:
-        return generate_code_quality_test_params(num_variations, complexity)
-    except Exception as e:
-        return f"❌ Error generating code test parameters: {str(e)}"
-
-
-# ==================== TEST JUDGING TOOLS ====================
-
-
-@mcp.tool()
-def judge_ai_response(
-    response_text: str,
-    evaluation_criteria: list[str],
-    test_context: dict[str, Any],
-    model: str = "gemma2:3b",
-    strict_mode: bool = True,
-) -> str:
-    """Judge AI response quality using local models for fast, cost-effective evaluation.
-
-    Uses local models (via Ollama) to provide consistent, objective evaluation of
-    AI responses against specified criteria with structured feedback.
-
-    Args:
-        response_text: The AI response to evaluate
-        evaluation_criteria: List of criteria to judge against (e.g., ['accuracy', 'clarity'])
-        test_context: Context information including test_id, test_type, etc.
-        model: Local model to use for judging (default: 'gemma2:3b')
-        strict_mode: Whether to apply strict evaluation standards
-
-    Returns:
-        JSON string containing judgment results with scores and feedback
-    """
-    try:
-        config = JudgeConfig(model=model, strict_mode=strict_mode)
-
-        judgment = judge_test_result(response_text, evaluation_criteria, test_context, config)
-        return json.dumps(judgment.model_dump(), indent=2)
-
-    except Exception as e:
-        return f"❌ Error judging response: {str(e)}"
-
-
-@mcp.tool()
-def judge_code_quality_response(
-    code: str, language: str, quality_criteria: list[str], model: str = "gemma2:3b"
-) -> str:
-    """Judge code quality using local AI models.
-
-    Evaluates code against quality criteria like readability, correctness,
-    maintainability, and best practices using local models.
-
-    Args:
-        code: The code to evaluate
-        language: Programming language (e.g., 'python', 'javascript')
-        quality_criteria: Quality criteria to evaluate (e.g., ['readability', 'correctness'])
-        model: Local model to use for judging
-
-    Returns:
-        JSON string containing code quality judgment
-    """
-    try:
-        config = JudgeConfig(model=model)
-        judgment = judge_code_quality(code, language, quality_criteria, config)
-        return json.dumps(judgment.model_dump(), indent=2)
-
-    except Exception as e:
-        return f"❌ Error judging code quality: {str(e)}"
-
-
-@mcp.tool()
-def batch_judge_responses(test_cases: list[dict[str, Any]], model: str = "gemma2:3b") -> str:
-    """Judge multiple test responses in batch for efficiency.
-
-    Processes multiple test cases simultaneously, useful for evaluating
-    AI performance across different scenarios or parameter sets.
-
-    Args:
-        test_cases: List of test cases, each with 'output', 'criteria', and 'context'
-        model: Local model to use for judging
-
-    Returns:
-        JSON string containing batch judgment results
-    """
-    try:
-        config = JudgeConfig(model=model)
-        judgments = batch_judge_tests(test_cases, config)
-        return json.dumps([j.model_dump() for j in judgments], indent=2)
-
-    except Exception as e:
-        return f"❌ Error in batch judging: {str(e)}"
-
-
-# ==================== CODE LINTING TOOLS ====================
-
-
-@mcp.tool()
-def lint_python_code(
-    project_path: str,
-    run_ruff: bool = True,
-    run_black: bool = True,
-    run_mypy: bool = False,
-    fix_issues: bool = False,
-    chat_id: str = "",
-) -> str:
-    """Run comprehensive Python code linting and formatting checks with directory access controls.
-
-    Executes multiple linting tools (ruff, black, mypy, flake8) and provides
-    aggregated results with issue categorization and fix suggestions.
-
-    Args:
-        project_path: Path to the Python project or file to lint
-        run_ruff: Whether to run ruff linter (recommended)
-        run_black: Whether to run black formatter check
-        run_mypy: Whether to run mypy type checker (can be slow)
-        fix_issues: Whether to automatically fix fixable issues
-        chat_id: Telegram chat ID for directory access validation (optional)
-
-    Returns:
-        JSON string containing linting results with issues and summary
-    """
-    # Validate directory access
-    access_error = validate_directory_access(chat_id, project_path)
-    if access_error:
-        return access_error
-
-    try:
-        config = LintConfig(
-            run_ruff=run_ruff, run_black=run_black, run_mypy=run_mypy, fix_issues=fix_issues
-        )
-
-        result = run_linting(project_path, config)
-        return json.dumps(result.model_dump(), indent=2)
-
-    except Exception as e:
-        return f"❌ Error running linting: {str(e)}"
-
-
-@mcp.tool()
-def lint_specific_files(
-    file_paths: list[str], fix_formatting: bool = False, chat_id: str = ""
-) -> str:
-    """Lint specific Python files rather than entire project with directory access controls.
-
-    Focused linting for specific files, useful for targeted code review
-    or when working with individual modules.
-
-    Args:
-        file_paths: List of specific Python files to lint
-        fix_formatting: Whether to automatically fix formatting issues
-        chat_id: Telegram chat ID for directory access validation (optional)
-
-    Returns:
-        JSON string containing linting results for specified files
-    """
-    # Validate directory access for all file paths
-    for file_path in file_paths:
-        access_error = validate_directory_access(chat_id, file_path)
-        if access_error:
-            return access_error
-
-    try:
-        config = LintConfig(fix_issues=fix_formatting)
-        result = lint_files(file_paths, config)
-        return json.dumps(result.model_dump(), indent=2)
-
-    except Exception as e:
-        return f"❌ Error linting files: {str(e)}"
-
-
-@mcp.tool()
-def quick_code_check(file_path: str, chat_id: str = "") -> str:
-    """Quick pass/fail code quality check for a single file with directory access controls.
-
-    Fast code quality validation, useful for CI/CD or rapid feedback
-    during development.
-
-    Args:
-        file_path: Path to the Python file to check
-        chat_id: Telegram chat ID for directory access validation (optional)
-
-    Returns:
-        Simple pass/fail result with basic summary
-    """
-    # Validate directory access
-    access_error = validate_directory_access(chat_id, file_path)
-    if access_error:
-        return access_error
-
-    try:
-        passed = quick_lint_check(file_path)
-        return f"✅ Code quality check: {'PASSED' if passed else 'FAILED'}"
-
-    except Exception as e:
-        return f"❌ Error in quick check: {str(e)}"
-
-
-@mcp.tool()
-def comprehensive_project_lint(project_path: str, chat_id: str = "") -> str:
-    """Run comprehensive linting with all tools enabled and directory access controls.
-
-    Strict linting analysis using all available tools for thorough
-    code quality assessment.
-
-    Args:
-        project_path: Path to the Python project to analyze
-        chat_id: Telegram chat ID for directory access validation (optional)
-
-    Returns:
-        JSON string containing comprehensive linting results
-    """
-    # Validate directory access
-    access_error = validate_directory_access(chat_id, project_path)
-    if access_error:
-        return access_error
-
-    try:
-        result = strict_lint_check(project_path)
-        return json.dumps(result.model_dump(), indent=2)
-
-    except Exception as e:
-        return f"❌ Error in comprehensive linting: {str(e)}"
-
-
-# ==================== DOCUMENT SUMMARIZATION TOOLS ====================
-
-
-@mcp.tool()
-def summarize_code_documentation(
-    document_path: str,
-    max_section_words: int = 500,
-    summary_style: str = "comprehensive",
-    focus_topics: list[str] | None = None,
-    chat_id: str = "",
-) -> str:
-    """Read and summarize large documents (markdown, code files, text) with directory access controls.
-
-    Automatically detects document type and creates structured summaries
-    with section analysis, key insights, and reading time estimates.
-
-    Args:
-        document_path: Path to the document to summarize
-        max_section_words: Maximum words per section summary
-        summary_style: Style of summary - 'brief', 'comprehensive', or 'technical'
-        focus_topics: Optional list of topics to focus on during analysis
-        chat_id: Telegram chat ID for directory access validation (optional)
-
-    Returns:
-        JSON string containing structured document summary
-    """
-    # Validate directory access
-    access_error = validate_directory_access(chat_id, document_path)
-    if access_error:
-        return access_error
-
-    try:
-        config = SummaryConfig(
-            max_section_words=max_section_words,
-            summary_style=summary_style,
-            focus_topics=focus_topics,
-        )
-
-        summary = summarize_document(document_path, config)
-        return json.dumps(summary.model_dump(), indent=2)
-
-    except Exception as e:
-        return f"❌ Error summarizing document: {str(e)}"
-
-
-@mcp.tool()
-def summarize_url_content(url: str, summary_style: str = "comprehensive") -> str:
-    """Summarize document content from a URL.
-
-    Downloads and analyzes documents from web URLs, useful for
-    processing GitHub READMEs, documentation sites, or online articles.
-
-    Args:
-        url: URL of the document to summarize
-        summary_style: Style of summary - 'brief', 'comprehensive', or 'technical'
-
-    Returns:
-        JSON string containing URL document summary
-    """
-    try:
-        config = SummaryConfig(summary_style=summary_style)
-        summary = summarize_url_document(url, config)
-        return json.dumps(summary.model_dump(), indent=2)
-
-    except Exception as e:
-        return f"❌ Error summarizing URL content: {str(e)}"
-
-
-@mcp.tool()
-def batch_summarize_documents(
-    document_paths: list[str], summary_style: str = "comprehensive", chat_id: str = ""
-) -> str:
-    """Summarize multiple documents in batch for efficiency with directory access controls.
-
-    Process multiple documents simultaneously, useful for analyzing
-    entire documentation sets or code repositories.
-
-    Args:
-        document_paths: List of document paths to summarize
-        summary_style: Style of summary for all documents
-        chat_id: Telegram chat ID for directory access validation (optional)
-
-    Returns:
-        JSON string containing summaries for all documents
-    """
-    # Validate directory access for all document paths
-    for document_path in document_paths:
-        access_error = validate_directory_access(chat_id, document_path)
-        if access_error:
-            return access_error
-
-    try:
-        config = SummaryConfig(summary_style=summary_style)
-        summaries = batch_summarize_docs(document_paths, config)
-
-        # Convert to serializable format
-        result = {}
-        for path, summary in summaries.items():
-            result[path] = summary.model_dump()
-
-        return json.dumps(result, indent=2)
-
-    except Exception as e:
-        return f"❌ Error in batch summarization: {str(e)}"
-
-
-@mcp.tool()
-def quick_document_overview(file_path: str, chat_id: str = "") -> str:
-    """Get a quick text overview of a document with directory access controls.
-
-    Fast document analysis providing a brief summary, useful for
-    quick document assessment or content verification.
-
-    Args:
-        file_path: Path to the document to analyze
-        chat_id: Telegram chat ID for directory access validation (optional)
-
-    Returns:
-        Brief text summary of the document
-    """
-    # Validate directory access
-    access_error = validate_directory_access(chat_id, file_path)
-    if access_error:
-        return access_error
-
-    try:
-        return quick_doc_summary(file_path)
-
-    except Exception as e:
-        return f"❌ Error getting document overview: {str(e)}"
-
-
-# ==================== IMAGE ANALYSIS TOOLS ====================
-
-
-@mcp.tool()
-def analyze_image_content(
-    image_path: str,
-    max_tags: int = 20,
-    min_confidence: float = 0.3,
-    api_provider: str = "openai",
-    use_local_model: bool = False,
-    chat_id: str = "",
-) -> str:
-    """Analyze image and generate comprehensive tags using AI vision models with directory access controls.
-
-    Uses AI vision capabilities to identify objects, scenes, styles, colors,
-    and mood in images with structured tag output and confidence scores.
-
-    Args:
-        image_path: Path to the image file to analyze
-        max_tags: Maximum number of tags to generate
-        min_confidence: Minimum confidence threshold for tags (0.0-1.0)
-        api_provider: API provider - 'openai', 'anthropic', or 'local'
-        use_local_model: Whether to use local vision model (via Ollama)
-        chat_id: Telegram chat ID for directory access validation (optional)
-
-    Returns:
-        JSON string containing comprehensive image analysis
-    """
-    # Validate directory access
-    access_error = validate_directory_access(chat_id, image_path)
-    if access_error:
-        return access_error
-
-    try:
-        config = TaggingConfig(
-            max_tags=max_tags,
-            min_confidence=min_confidence,
-            api_provider=api_provider,
-            local_model=use_local_model,
-        )
-
-        analysis = tag_image(image_path, config)
-        return json.dumps(analysis.model_dump(), indent=2)
-
-    except Exception as e:
-        return f"❌ Error analyzing image: {str(e)}"
-
-
-@mcp.tool()
-def get_simple_image_tags(image_path: str, max_tags: int = 10, chat_id: str = "") -> str:
-    """Extract simple list of tags from an image with directory access controls.
-
-    Quick image tagging without detailed analysis, useful for basic
-    content categorization or search indexing.
-
-    Args:
-        image_path: Path to the image file
-        max_tags: Maximum number of tags to return
-        chat_id: Telegram chat ID for directory access validation (optional)
-
-    Returns:
-        JSON array of tag strings
-    """
-    # Validate directory access
-    access_error = validate_directory_access(chat_id, image_path)
-    if access_error:
-        return access_error
-
-    try:
-        tags = extract_simple_tags(image_path, max_tags)
-        return json.dumps(tags)
-
-    except Exception as e:
-        return f"❌ Error extracting image tags: {str(e)}"
-
-
-@mcp.tool()
-def get_project_context_tool(chat_id: str = "") -> str:
-    """Get comprehensive project context including workspace info, README, and CLAUDE.md.
-
-    This tool provides Claude Code with essential project information to understand
-    the current workspace, project structure, and development context.
-
-    Args:
-        chat_id: Telegram chat ID for workspace detection (optional)
-
-    Returns:
-        str: Formatted project context information
-    """
-    try:
-        context = get_project_context(chat_id)
-        return f"## Project Context Retrieved\n\n{context}"
-    except Exception as e:
-        return f"❌ Error retrieving project context: {str(e)}"
-
-
-@mcp.tool()
-def run_project_prime_command(chat_id: str = "") -> str:
-    """Execute the /prime command equivalent to provide comprehensive project context.
-
-    This tool simulates Claude Code's /prime command functionality to give
-    comprehensive project overview and development context.
-
-    Args:
-        chat_id: Telegram chat ID for workspace detection (optional)
-
-    Returns:
-        str: Comprehensive project primer information
-    """
-    try:
-        # Get basic project context
-        context = get_project_context(chat_id)
-
-        # Try to get workspace-specific information
-        workspace_info = ""
-        if chat_id:
-            try:
-                validator = get_workspace_validator()
-                workspace = validator.get_workspace_for_chat(chat_id)
-                working_dir = validator.get_working_directory(chat_id)
-
-                if workspace and working_dir:
-                    workspace_info = f"""
-## Workspace Configuration
-- **Workspace**: {workspace}
-- **Working Directory**: {working_dir}
-- **Chat ID**: {chat_id}
-"""
-            except Exception:
-                pass
-
-        # Get directory structure overview
-        structure_info = ""
-        try:
-            if chat_id:
-                validator = get_workspace_validator()
-                working_dir = validator.get_working_directory(chat_id)
-            else:
-                working_dir = os.getcwd()
-
-            # Get basic directory listing
-            working_path = Path(working_dir)
-            if working_path.exists():
-                items = list(working_path.iterdir())[:20]  # Limit to first 20 items
-                structure_items = []
-                for item in items:
-                    if item.is_dir():
-                        structure_items.append(f"📁 {item.name}/")
-                    else:
-                        structure_items.append(f"📄 {item.name}")
-
-                if structure_items:
-                    structure_info = f"""
-## Project Structure
-```
-{chr(10).join(structure_items)}
-```
-"""
-        except Exception:
-            pass
-
-        # Combine all information
-        primer_content = f"""# Project Primer
-
-{context}
-{workspace_info}
-{structure_info}
-
-## Development Context
-You are now working in this project's workspace. All development tasks should consider:
-1. The current workspace configuration and restrictions
-2. Project-specific patterns and conventions from CLAUDE.md
-3. Existing project structure and files
-4. Any workspace-specific development workflows
-
-Ready for development tasks in this context!
-"""
-
-        return primer_content
-
-    except Exception as e:
-        return f"❌ Error running project primer: {str(e)}"
-
-
-@mcp.tool()
-def validate_directory_access_tool(chat_id: str, file_path: str) -> str:
-    """Validate if a chat has access to a specific directory or file path.
-
-    Args:
-        chat_id: Telegram chat ID to validate
-        file_path: File or directory path to check access for
-
-    Returns:
-        str: Validation result with access details
-    """
-    try:
-        validator = get_workspace_validator()
-        validator.validate_directory_access(chat_id, file_path)
-
-        # Get workspace details
-        allowed_workspace = validator.get_workspace_for_chat(chat_id)
-        allowed_dirs = validator.get_allowed_directories(chat_id)
-
-        return (
-            f"✅ **Directory Access Granted**\n\n"
-            f"• Chat: {chat_id}\n"
-            f"• File Path: {file_path}\n"
-            f"• Workspace: {allowed_workspace}\n"
-            f"• Allowed Directories: {', '.join(allowed_dirs)}"
-        )
-
-    except WorkspaceAccessError as e:
-        return f"❌ **Directory Access Denied**: {str(e)}"
-    except Exception as e:
-        return f"❌ **Directory Validation Error**: {str(e)}"
-
-
-@mcp.tool()
-def batch_analyze_images(
-    image_paths: list[str], max_tags: int = 15, api_provider: str = "openai"
-) -> str:
-    """Analyze multiple images in batch for efficiency.
-
-    Process multiple images simultaneously, useful for gallery analysis
-    or bulk content processing.
-
-    Args:
-        image_paths: List of image file paths to analyze
-        max_tags: Maximum tags per image
-        api_provider: API provider for analysis
-
-    Returns:
-        JSON string containing analysis results for all images
-    """
-    try:
-        config = TaggingConfig(max_tags=max_tags, api_provider=api_provider)
-        results = batch_tag_images(image_paths, config)
-
-        # Convert to serializable format
-        serialized_results = {}
-        for path, analysis in results.items():
-            serialized_results[path] = analysis.model_dump()
-
-        return json.dumps(serialized_results, indent=2)
-
-    except Exception as e:
-        return f"❌ Error in batch image analysis: {str(e)}"
-
-
-@mcp.tool()
-def analyze_image_for_moderation(image_path: str) -> str:
-    """Analyze image for content moderation purposes.
-
-    Extracts tags relevant for content moderation, safety assessment,
-    and appropriateness evaluation.
-
-    Args:
-        image_path: Path to the image to analyze
-
-    Returns:
-        JSON array of moderation-relevant tags
-    """
-    try:
-        tags = content_moderation_tags(image_path)
-        return json.dumps(tags)
-
-    except Exception as e:
-        return f"❌ Error in content moderation analysis: {str(e)}"
-
-
-@mcp.tool()
-def detailed_image_assessment(image_path: str) -> str:
-    """Comprehensive image analysis with technical details.
-
-    Provides detailed analysis including technical quality assessment,
-    composition analysis, and comprehensive tagging.
-
-    Args:
-        image_path: Path to the image file
-
-    Returns:
-        JSON string containing detailed image assessment
-    """
-    try:
-        analysis = detailed_image_analysis(image_path)
-        return json.dumps(analysis.model_dump(), indent=2)
-
-    except Exception as e:
-        return f"❌ Error in detailed image assessment: {str(e)}"
-
-
-# ==================== DOCUMENTATION TOOLS ====================
-
-
-@mcp.tool()
-def read_documentation(filename: str, chat_id: str = "") -> str:
-    """Read project documentation files to help with development questions.
+class CodeExecutionResult(BaseModel):
+    """Code execution result structure."""
     
-    This tool provides access to project documentation like architecture guides,
-    API documentation, system operations guides, and other project specifications.
-    Use this when you need to reference project documentation to answer questions
-    or understand system design.
+    execution_id: str = Field(..., description="Execution ID")
+    language: str = Field(..., description="Programming language")
+    code: str = Field(..., description="Executed code")
     
-    Args:
-        filename: Name of documentation file (e.g., "agent-architecture.md", "system-operations.md")
-        chat_id: Telegram chat ID for workspace context (optional)
+    # Execution results
+    stdout: str = Field(default="", description="Standard output")
+    stderr: str = Field(default="", description="Standard error")
+    return_code: int = Field(default=0, description="Process return code")
     
-    Returns:
-        str: Documentation content formatted for conversation, or error message if file not found
+    # Execution metadata
+    execution_time_ms: float = Field(..., description="Execution time in milliseconds")
+    memory_usage_mb: Optional[float] = Field(None, description="Peak memory usage in MB")
+    
+    # Status
+    success: bool = Field(default=True, description="Whether execution was successful")
+    timeout: bool = Field(default=False, description="Whether execution timed out")
+    error_message: Optional[str] = Field(None, description="Error message if execution failed")
+    
+    # Files created/modified
+    created_files: List[str] = Field(default_factory=list, description="Files created during execution")
+    
+    # Timestamps
+    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: Optional[datetime] = Field(None, description="Completion timestamp")
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+
+class ProcessInfo(BaseModel):
+    """Process information structure."""
+    
+    pid: int = Field(..., description="Process ID")
+    name: str = Field(..., description="Process name")
+    status: str = Field(..., description="Process status")
+    
+    # Resource usage
+    cpu_percent: float = Field(default=0.0, description="CPU usage percentage")
+    memory_mb: float = Field(default=0.0, description="Memory usage in MB")
+    
+    # Process details
+    cmdline: List[str] = Field(default_factory=list, description="Command line arguments")
+    cwd: Optional[str] = Field(None, description="Current working directory")
+    username: Optional[str] = Field(None, description="Process owner username")
+    
+    # Timestamps
+    create_time: datetime = Field(..., description="Process creation time")
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+
+class DebugSession(BaseModel):
+    """Debug session structure."""
+    
+    session_id: str = Field(..., description="Debug session ID")
+    language: str = Field(..., description="Programming language")
+    target_file: str = Field(..., description="Target file being debugged")
+    
+    # Debug state
+    is_active: bool = Field(default=False, description="Whether session is active")
+    current_line: Optional[int] = Field(None, description="Current line number")
+    breakpoints: List[int] = Field(default_factory=list, description="Set breakpoints")
+    
+    # Variables and stack
+    local_variables: Dict[str, Any] = Field(default_factory=dict, description="Local variables")
+    call_stack: List[str] = Field(default_factory=list, description="Call stack frames")
+    
+    # Session metadata
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    last_activity: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+
+class ProfileResult(BaseModel):
+    """Code profiling result structure."""
+    
+    profile_id: str = Field(..., description="Profile ID")
+    language: str = Field(..., description="Programming language")
+    code: str = Field(..., description="Profiled code")
+    
+    # Profiling data
+    total_time: float = Field(..., description="Total execution time")
+    function_calls: int = Field(default=0, description="Number of function calls")
+    
+    # Performance metrics
+    top_functions: List[Dict[str, Any]] = Field(default_factory=list, description="Top time-consuming functions")
+    memory_profile: Dict[str, Any] = Field(default_factory=dict, description="Memory usage profile")
+    
+    # Timestamps
+    profiled_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+
+class TestResult(BaseModel):
+    """Test execution result structure."""
+    
+    test_id: str = Field(..., description="Test execution ID")
+    test_framework: str = Field(..., description="Test framework used")
+    test_path: str = Field(..., description="Path to test file or directory")
+    
+    # Test results
+    total_tests: int = Field(default=0, description="Total number of tests")
+    passed_tests: int = Field(default=0, description="Number of passed tests")
+    failed_tests: int = Field(default=0, description="Number of failed tests")
+    skipped_tests: int = Field(default=0, description="Number of skipped tests")
+    
+    # Test details
+    test_details: List[Dict[str, Any]] = Field(default_factory=list, description="Individual test results")
+    coverage_report: Optional[Dict[str, Any]] = Field(None, description="Code coverage report")
+    
+    # Execution metadata
+    execution_time: float = Field(default=0.0, description="Total execution time")
+    success: bool = Field(default=True, description="Whether test run was successful")
+    
+    # Timestamps
+    executed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+
+class DevelopmentToolsServer(MCPServer):
     """
-    try:
-        # Import here to avoid circular imports
-        from tools.documentation_tool import read_documentation as read_doc
-        
-        # Add context enhancement if chat_id provided
-        if chat_id:
-            # Could add workspace-specific context here in the future
-            pass
-            
-        return read_doc(filename)
-        
-    except Exception as e:
-        return f"❌ Error reading documentation: {str(e)}"
-
-
-@mcp.tool()  
-def list_documentation_files(chat_id: str = "") -> str:
-    """List all available project documentation files.
+    MCP Server implementation for development and debugging tools.
     
-    This tool helps discover what documentation is available in the project
-    before attempting to read specific files. Use this when you want to see
-    what documentation exists or help users find relevant documentation.
+    Provides stateless development functionality with context injection including:
+    - Code execution in sandboxed environments
+    - Process monitoring and management
+    - Debugging capabilities
+    - Performance profiling
+    - Test execution and reporting
+    """
     
-    Args:
-        chat_id: Telegram chat ID for workspace context (optional)
+    def __init__(
+        self,
+        name: str = "development_tools",
+        version: str = "1.0.0",
+        description: str = "Development and debugging tools MCP server",
+        allowed_languages: List[str] = None,
+        execution_timeout: int = 30,
+        max_memory_mb: int = 512,
+        sandbox_enabled: bool = True,
+        **kwargs
+    ):
+        super().__init__(name, version, description, **kwargs)
         
-    Returns:
-        str: Formatted list of available documentation files, or error message if listing fails
-    """
-    try:
-        # Import here to avoid circular imports  
-        from tools.documentation_tool import list_documentation_files as list_docs
+        # Configuration
+        self.allowed_languages = allowed_languages or ["python", "javascript", "bash", "sql"]
+        self.execution_timeout = execution_timeout
+        self.max_memory_mb = max_memory_mb
+        self.sandbox_enabled = sandbox_enabled
         
-        # Add context enhancement if chat_id provided
-        if chat_id:
-            # Could add workspace-specific filtering here in the future
-            pass
-            
-        return list_docs()
+        # Language configurations
+        self._language_configs = {
+            "python": {
+                "command": [sys.executable, "-c"],
+                "file_extension": ".py",
+                "packages": ["psutil", "memory_profiler", "cProfile"]
+            },
+            "javascript": {
+                "command": ["node", "-e"],
+                "file_extension": ".js",
+                "packages": []
+            },
+            "bash": {
+                "command": ["bash", "-c"],
+                "file_extension": ".sh",
+                "packages": []
+            },
+            "sql": {
+                "command": ["sqlite3", ":memory:"],
+                "file_extension": ".sql",
+                "packages": []
+            }
+        }
         
-    except Exception as e:
-        return f"❌ Error listing documentation: {str(e)}"
-
-
-# ==================== SCREENSHOT HANDOFF TOOLS ====================
-
-
-@mcp.tool()
-def retrieve_workspace_screenshot(
-    task_id: str,
-    chat_id: str = "",
-    max_age_minutes: int = 10
-) -> str:
-    """
-    Retrieve and analyze screenshot from current workspace after Claude Code execution.
-
-    This tool searches for screenshots captured by Claude Code sessions in the current
-    workspace's tmp/ai_screenshots/ directory and returns them using the TELEGRAM_IMAGE_GENERATED
-    marker for automatic Telegram upload.
-
-    Args:
-        task_id: Task identifier for screenshot matching
-        chat_id: Telegram chat ID for workspace detection and upload
-        max_age_minutes: Maximum age of screenshot to accept (default: 10)
-
-    Returns:
-        TELEGRAM_IMAGE_GENERATED marker with screenshot path for automatic upload
-    """
-    import os
-    import glob
-    import time
-    from pathlib import Path
-    
-    try:
-        # Get workspace working directory for this chat
-        if chat_id:
-            validator = get_workspace_validator()
-            workspace_name = validator.get_workspace_for_chat(chat_id)
-            if workspace_name:
-                allowed_dirs = validator.get_allowed_directories(chat_id)
-                working_dir = allowed_dirs[0] if allowed_dirs else os.getcwd()
-            else:
-                working_dir = os.getcwd()
-        else:
-            working_dir = os.getcwd()
-
-        # Look for screenshots in workspace tmp directory
-        screenshot_dir = os.path.join(working_dir, "tmp", "ai_screenshots")
+        # Active sessions and processes
+        self._execution_history: Dict[str, CodeExecutionResult] = {}
+        self._debug_sessions: Dict[str, DebugSession] = {}
+        self._running_processes: Dict[str, subprocess.Popen] = {}
         
-        if not os.path.exists(screenshot_dir):
-            return f"📸 No screenshot directory found in {working_dir}/tmp/ai_screenshots"
-
-        # Find matching screenshot files
-        pattern = os.path.join(screenshot_dir, f"{task_id}_*.png")
-        matching_files = glob.glob(pattern)
-
-        if not matching_files:
-            return f"📸 No screenshots found for task {task_id} in {screenshot_dir}"
-
-        # Get most recent file within age limit
-        cutoff_time = time.time() - (max_age_minutes * 60)
-        recent_files = [
-            f for f in matching_files
-            if os.path.getmtime(f) > cutoff_time
+        # Security settings
+        self._restricted_imports = [
+            "os", "sys", "subprocess", "importlib", "__import__",
+            "eval", "exec", "compile", "open", "file"
         ]
-
-        if not recent_files:
-            return f"📸 No recent screenshots found for task {task_id} (last {max_age_minutes} minutes)"
-
-        # Use most recent file
-        screenshot_path = max(recent_files, key=os.path.getmtime)
         
-        # Validate file access through workspace validator
-        if chat_id:
-            access_error = validate_directory_access(chat_id, screenshot_path)
-            if access_error:
-                return access_error
-
-        # Analyze screenshot using existing image analysis tool
-        from tools.image_analysis_tool import analyze_image
-        analysis = analyze_image(
-            screenshot_path, 
-            question="What does this screenshot show? Focus on any UI issues, errors, or relevant details.",
-            context=f"This is a screenshot captured for task: {task_id}"
+        self.logger.info(f"Development Tools Server initialized with languages: {self.allowed_languages}")
+    
+    async def initialize(self) -> None:
+        """Initialize the development tools server."""
+        try:
+            # Register all tool capabilities
+            await self._register_execution_tools()
+            await self._register_debugging_tools()
+            await self._register_profiling_tools()
+            await self._register_process_tools()
+            await self._register_test_tools()
+            
+            # Verify language availability
+            await self._verify_language_availability()
+            
+            self.logger.info("Development Tools Server initialized successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Development Tools Server: {str(e)}")
+            raise MCPError(
+                f"Development server initialization failed: {str(e)}",
+                error_code="DEV_TOOLS_INIT_ERROR",
+                details={"error": str(e)},
+                recoverable=False
+            )
+    
+    async def shutdown(self) -> None:
+        """Shutdown the development tools server."""
+        try:
+            # Terminate any running processes
+            for proc_id, process in self._running_processes.items():
+                try:
+                    if process.poll() is None:  # Process is still running
+                        process.terminate()
+                        try:
+                            process.wait(timeout=5)
+                        except subprocess.TimeoutExpired:
+                            process.kill()
+                except Exception as e:
+                    self.logger.warning(f"Error terminating process {proc_id}: {str(e)}")
+            
+            self._running_processes.clear()
+            
+            self.logger.info("Development Tools Server shut down successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error during Development Tools Server shutdown: {str(e)}")
+    
+    # Code Execution Tools
+    
+    async def _register_execution_tools(self) -> None:
+        """Register code execution tool capabilities."""
+        
+        # Execute code
+        execute_code_capability = MCPToolCapability(
+            name="execute_code",
+            description="Execute code in a specified language",
+            parameters={
+                "language": {
+                    "type": "string",
+                    "required": True,
+                    "enum": self.allowed_languages,
+                    "description": "Programming language"
+                },
+                "code": {"type": "string", "required": True, "description": "Code to execute"},
+                "timeout": {"type": "integer", "required": False, "description": f"Execution timeout in seconds (max {self.execution_timeout})"},
+                "working_directory": {"type": "string", "required": False, "description": "Working directory for execution"},
+                "environment": {"type": "object", "required": False, "description": "Environment variables"}
+            },
+            returns={"type": "object", "description": "Execution result"},
+            tags=["development", "code", "execution"]
+        )
+        self.register_tool(execute_code_capability, self._handle_execute_code)
+        
+        # Execute code from file
+        execute_file_capability = MCPToolCapability(
+            name="execute_file",
+            description="Execute code from a file",
+            parameters={
+                "file_path": {"type": "string", "required": True, "description": "Path to code file"},
+                "arguments": {"type": "array", "items": "string", "required": False, "description": "Command line arguments"},
+                "timeout": {"type": "integer", "required": False, "description": "Execution timeout in seconds"},
+                "working_directory": {"type": "string", "required": False, "description": "Working directory for execution"}
+            },
+            returns={"type": "object", "description": "Execution result"},
+            tags=["development", "code", "execution", "file"]
+        )
+        self.register_tool(execute_file_capability, self._handle_execute_file)
+        
+        # Get execution history
+        get_execution_history_capability = MCPToolCapability(
+            name="get_execution_history",
+            description="Get history of code executions",
+            parameters={
+                "limit": {"type": "integer", "required": False, "default": 10, "description": "Maximum number of results"},
+                "language": {"type": "string", "required": False, "description": "Filter by language"}
+            },
+            returns={"type": "array", "items": "CodeExecutionResult"},
+            tags=["development", "code", "history"]
+        )
+        self.register_tool(get_execution_history_capability, self._handle_get_execution_history)
+    
+    async def _handle_execute_code(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle code execution requests."""
+        language = request.params.get("language")
+        code = request.params.get("code")
+        timeout = min(request.params.get("timeout", self.execution_timeout), self.execution_timeout)
+        working_directory = request.params.get("working_directory")
+        environment = request.params.get("environment", {})
+        
+        if not language or not code:
+            raise MCPError(
+                "Language and code are required",
+                error_code="MISSING_EXECUTION_PARAMS",
+                request_id=request.id
+            )
+        
+        if language not in self.allowed_languages:
+            raise MCPError(
+                f"Language '{language}' is not allowed",
+                error_code="LANGUAGE_NOT_ALLOWED",
+                details={"allowed_languages": self.allowed_languages},
+                request_id=request.id
+            )
+        
+        # Security check for restricted imports/commands
+        if self.sandbox_enabled:
+            security_issues = self._check_code_security(code, language)
+            if security_issues:
+                raise MCPError(
+                    f"Security violations detected: {', '.join(security_issues)}",
+                    error_code="SECURITY_VIOLATION",
+                    details={"violations": security_issues},
+                    request_id=request.id
+                )
+        
+        try:
+            execution_id = f"exec_{int(time.time())}_{id(request)}"
+            
+            # Prepare execution environment
+            execution_result = CodeExecutionResult(
+                execution_id=execution_id,
+                language=language,
+                code=code,
+                started_at=datetime.now(timezone.utc)
+            )
+            
+            # Execute code
+            start_time = time.time()
+            
+            try:
+                stdout, stderr, return_code = await self._execute_code_safely(
+                    language, code, timeout, working_directory, environment
+                )
+                
+                execution_time_ms = (time.time() - start_time) * 1000
+                
+                execution_result.stdout = stdout
+                execution_result.stderr = stderr
+                execution_result.return_code = return_code
+                execution_result.execution_time_ms = execution_time_ms
+                execution_result.success = (return_code == 0)
+                execution_result.completed_at = datetime.now(timezone.utc)
+                
+            except asyncio.TimeoutError:
+                execution_result.timeout = True
+                execution_result.success = False
+                execution_result.error_message = f"Execution timed out after {timeout} seconds"
+                execution_result.completed_at = datetime.now(timezone.utc)
+            
+            except Exception as e:
+                execution_result.success = False
+                execution_result.error_message = str(e)
+                execution_result.stderr = traceback.format_exc()
+                execution_result.completed_at = datetime.now(timezone.utc)
+            
+            # Store execution result
+            self._execution_history[execution_id] = execution_result
+            
+            # Limit history size
+            if len(self._execution_history) > 100:
+                oldest_keys = sorted(self._execution_history.keys())[:50]
+                for key in oldest_keys:
+                    del self._execution_history[key]
+            
+            self.logger.info(f"Code execution completed: {execution_id} (success={execution_result.success})")
+            
+            return execution_result.dict()
+            
+        except Exception as e:
+            self.logger.error(f"Code execution failed: {str(e)}")
+            raise MCPError(
+                f"Code execution failed: {str(e)}",
+                error_code="CODE_EXECUTION_ERROR",
+                details={"language": language, "error": str(e)},
+                request_id=request.id
+            )
+    
+    async def _handle_execute_file(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle file execution requests."""
+        file_path = request.params.get("file_path")
+        arguments = request.params.get("arguments", [])
+        timeout = min(request.params.get("timeout", self.execution_timeout), self.execution_timeout)
+        working_directory = request.params.get("working_directory")
+        
+        if not file_path:
+            raise MCPError(
+                "File path is required",
+                error_code="MISSING_FILE_PATH",
+                request_id=request.id
+            )
+        
+        # Verify file exists and is readable
+        file_path_obj = Path(file_path)
+        if not file_path_obj.exists():
+            raise MCPError(
+                f"File not found: {file_path}",
+                error_code="FILE_NOT_FOUND",
+                request_id=request.id
+            )
+        
+        if not file_path_obj.is_file():
+            raise MCPError(
+                f"Path is not a file: {file_path}",
+                error_code="NOT_A_FILE",
+                request_id=request.id
+            )
+        
+        try:
+            # Read file content for security check
+            with open(file_path, 'r', encoding='utf-8') as f:
+                code_content = f.read()
+            
+            # Determine language from file extension
+            extension = file_path_obj.suffix.lower()
+            language = None
+            for lang, config in self._language_configs.items():
+                if config["file_extension"] == extension:
+                    language = lang
+                    break
+            
+            if not language:
+                raise MCPError(
+                    f"Unsupported file extension: {extension}",
+                    error_code="UNSUPPORTED_FILE_TYPE",
+                    details={"file_extension": extension},
+                    request_id=request.id
+                )
+            
+            if language not in self.allowed_languages:
+                raise MCPError(
+                    f"Language '{language}' is not allowed",
+                    error_code="LANGUAGE_NOT_ALLOWED",
+                    details={"allowed_languages": self.allowed_languages},
+                    request_id=request.id
+                )
+            
+            # Security check
+            if self.sandbox_enabled:
+                security_issues = self._check_code_security(code_content, language)
+                if security_issues:
+                    raise MCPError(
+                        f"Security violations detected in file: {', '.join(security_issues)}",
+                        error_code="SECURITY_VIOLATION",
+                        details={"violations": security_issues},
+                        request_id=request.id
+                    )
+            
+            execution_id = f"file_exec_{int(time.time())}_{id(request)}"
+            
+            execution_result = CodeExecutionResult(
+                execution_id=execution_id,
+                language=language,
+                code=f"# File: {file_path}\n{code_content}",
+                started_at=datetime.now(timezone.utc)
+            )
+            
+            # Execute file
+            start_time = time.time()
+            
+            try:
+                # Prepare command
+                config = self._language_configs[language]
+                if language == "python":
+                    command = [sys.executable, file_path] + arguments
+                elif language == "javascript":
+                    command = ["node", file_path] + arguments
+                elif language == "bash":
+                    command = ["bash", file_path] + arguments
+                else:
+                    command = config["command"] + [file_path] + arguments
+                
+                stdout, stderr, return_code = await self._run_process(
+                    command, timeout, working_directory
+                )
+                
+                execution_time_ms = (time.time() - start_time) * 1000
+                
+                execution_result.stdout = stdout
+                execution_result.stderr = stderr
+                execution_result.return_code = return_code
+                execution_result.execution_time_ms = execution_time_ms
+                execution_result.success = (return_code == 0)
+                execution_result.completed_at = datetime.now(timezone.utc)
+                
+            except asyncio.TimeoutError:
+                execution_result.timeout = True
+                execution_result.success = False
+                execution_result.error_message = f"Execution timed out after {timeout} seconds"
+                execution_result.completed_at = datetime.now(timezone.utc)
+            
+            except Exception as e:
+                execution_result.success = False
+                execution_result.error_message = str(e)
+                execution_result.stderr = traceback.format_exc()
+                execution_result.completed_at = datetime.now(timezone.utc)
+            
+            # Store execution result
+            self._execution_history[execution_id] = execution_result
+            
+            self.logger.info(f"File execution completed: {execution_id} (success={execution_result.success})")
+            
+            return execution_result.dict()
+            
+        except Exception as e:
+            self.logger.error(f"File execution failed: {str(e)}")
+            raise MCPError(
+                f"File execution failed: {str(e)}",
+                error_code="FILE_EXECUTION_ERROR",
+                details={"file_path": file_path, "error": str(e)},
+                request_id=request.id
+            )
+    
+    async def _handle_get_execution_history(self, request: MCPRequest, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle get execution history requests."""
+        limit = request.params.get("limit", 10)
+        language_filter = request.params.get("language")
+        
+        # Filter and sort executions
+        executions = list(self._execution_history.values())
+        
+        if language_filter:
+            executions = [e for e in executions if e.language == language_filter]
+        
+        # Sort by start time (most recent first)
+        executions.sort(key=lambda e: e.started_at, reverse=True)
+        
+        # Limit results
+        executions = executions[:limit]
+        
+        self.logger.info(f"Retrieved {len(executions)} execution history entries")
+        
+        return [execution.dict() for execution in executions]
+    
+    # Process Tools
+    
+    async def _register_process_tools(self) -> None:
+        """Register process monitoring tool capabilities."""
+        
+        # List processes
+        list_processes_capability = MCPToolCapability(
+            name="list_processes",
+            description="List running processes",
+            parameters={
+                "name_filter": {"type": "string", "required": False, "description": "Filter processes by name"},
+                "user_filter": {"type": "string", "required": False, "description": "Filter processes by user"},
+                "limit": {"type": "integer", "required": False, "default": 50, "description": "Maximum number of processes"}
+            },
+            returns={"type": "array", "items": "ProcessInfo"},
+            tags=["development", "processes", "monitoring"]
+        )
+        self.register_tool(list_processes_capability, self._handle_list_processes)
+        
+        # Get process info
+        get_process_capability = MCPToolCapability(
+            name="get_process_info",
+            description="Get detailed information about a specific process",
+            parameters={
+                "pid": {"type": "integer", "required": True, "description": "Process ID"}
+            },
+            returns={"type": "object", "description": "Process information"},
+            tags=["development", "processes", "monitoring"]
+        )
+        self.register_tool(get_process_capability, self._handle_get_process_info)
+        
+        # Monitor system resources
+        monitor_resources_capability = MCPToolCapability(
+            name="monitor_system_resources",
+            description="Monitor system resource usage",
+            parameters={
+                "duration": {"type": "integer", "required": False, "default": 10, "description": "Monitoring duration in seconds"}
+            },
+            returns={"type": "object", "properties": {"cpu_percent": "number", "memory_percent": "number", "disk_usage": "object"}},
+            tags=["development", "monitoring", "resources"]
+        )
+        self.register_tool(monitor_resources_capability, self._handle_monitor_resources)
+    
+    async def _handle_list_processes(self, request: MCPRequest, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle list processes requests."""
+        name_filter = request.params.get("name_filter")
+        user_filter = request.params.get("user_filter")
+        limit = request.params.get("limit", 50)
+        
+        try:
+            processes = []
+            
+            for proc in psutil.process_iter(['pid', 'name', 'status', 'username', 'cmdline', 'cwd', 'create_time']):
+                try:
+                    proc_info = proc.info
+                    
+                    # Apply filters
+                    if name_filter and name_filter.lower() not in proc_info['name'].lower():
+                        continue
+                    
+                    if user_filter and proc_info['username'] != user_filter:
+                        continue
+                    
+                    # Get resource usage
+                    try:
+                        cpu_percent = proc.cpu_percent()
+                        memory_info = proc.memory_info()
+                        memory_mb = memory_info.rss / 1024 / 1024
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        cpu_percent = 0.0
+                        memory_mb = 0.0
+                    
+                    process_info = ProcessInfo(
+                        pid=proc_info['pid'],
+                        name=proc_info['name'],
+                        status=proc_info['status'],
+                        cpu_percent=cpu_percent,
+                        memory_mb=memory_mb,
+                        cmdline=proc_info['cmdline'] or [],
+                        cwd=proc_info['cwd'],
+                        username=proc_info['username'],
+                        create_time=datetime.fromtimestamp(proc_info['create_time'], timezone.utc)
+                    )
+                    
+                    processes.append(process_info)
+                    
+                    if len(processes) >= limit:
+                        break
+                        
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+            
+            # Sort by CPU usage (descending)
+            processes.sort(key=lambda p: p.cpu_percent, reverse=True)
+            
+            self.logger.info(f"Listed {len(processes)} processes")
+            
+            return [proc.dict() for proc in processes]
+            
+        except Exception as e:
+            self.logger.error(f"Failed to list processes: {str(e)}")
+            raise MCPError(
+                f"Failed to list processes: {str(e)}",
+                error_code="PROCESS_LIST_ERROR",
+                details={"error": str(e)},
+                request_id=request.id
+            )
+    
+    async def _handle_get_process_info(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle get process info requests."""
+        pid = request.params.get("pid")
+        
+        if not pid:
+            raise MCPError(
+                "Process ID is required",
+                error_code="MISSING_PID",
+                request_id=request.id
+            )
+        
+        try:
+            proc = psutil.Process(pid)
+            
+            # Get process information
+            proc_info = proc.as_dict([
+                'pid', 'name', 'status', 'username', 'cmdline', 'cwd', 'create_time'
+            ])
+            
+            # Get resource usage
+            cpu_percent = proc.cpu_percent()
+            memory_info = proc.memory_info()
+            memory_mb = memory_info.rss / 1024 / 1024
+            
+            process_info = ProcessInfo(
+                pid=proc_info['pid'],
+                name=proc_info['name'],
+                status=proc_info['status'],
+                cpu_percent=cpu_percent,
+                memory_mb=memory_mb,
+                cmdline=proc_info['cmdline'] or [],
+                cwd=proc_info['cwd'],
+                username=proc_info['username'],
+                create_time=datetime.fromtimestamp(proc_info['create_time'], timezone.utc)
+            )
+            
+            self.logger.info(f"Retrieved process info for PID {pid}")
+            
+            return process_info.dict()
+            
+        except psutil.NoSuchProcess:
+            raise MCPError(
+                f"Process with PID {pid} not found",
+                error_code="PROCESS_NOT_FOUND",
+                details={"pid": pid},
+                request_id=request.id
+            )
+        except psutil.AccessDenied:
+            raise MCPError(
+                f"Access denied to process {pid}",
+                error_code="PROCESS_ACCESS_DENIED",
+                details={"pid": pid},
+                request_id=request.id
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to get process info: {str(e)}")
+            raise MCPError(
+                f"Failed to get process info: {str(e)}",
+                error_code="PROCESS_INFO_ERROR",
+                details={"pid": pid, "error": str(e)},
+                request_id=request.id
+            )
+    
+    async def _handle_monitor_resources(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle monitor system resources requests."""
+        duration = min(request.params.get("duration", 10), 60)  # Max 60 seconds
+        
+        try:
+            # Initial measurements
+            cpu_percent = psutil.cpu_percent(interval=1)
+            memory = psutil.virtual_memory()
+            disk = psutil.disk_usage('/')
+            
+            # Monitor for specified duration
+            cpu_samples = []
+            memory_samples = []
+            
+            for _ in range(duration):
+                cpu_samples.append(psutil.cpu_percent(interval=1))
+                memory_samples.append(psutil.virtual_memory().percent)
+            
+            # Calculate averages
+            avg_cpu = sum(cpu_samples) / len(cpu_samples)
+            avg_memory = sum(memory_samples) / len(memory_samples)
+            
+            result = {
+                "cpu_percent": avg_cpu,
+                "memory_percent": avg_memory,
+                "disk_usage": {
+                    "total_gb": disk.total / 1024**3,
+                    "used_gb": disk.used / 1024**3,
+                    "free_gb": disk.free / 1024**3,
+                    "percent": (disk.used / disk.total) * 100
+                },
+                "monitoring_duration": duration,
+                "samples_collected": len(cpu_samples)
+            }
+            
+            self.logger.info(f"System resource monitoring completed ({duration}s)")
+            
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Failed to monitor resources: {str(e)}")
+            raise MCPError(
+                f"Failed to monitor resources: {str(e)}",
+                error_code="RESOURCE_MONITOR_ERROR",
+                details={"duration": duration, "error": str(e)},
+                request_id=request.id
+            )
+    
+    # Debugging Tools (simplified implementation)
+    
+    async def _register_debugging_tools(self) -> None:
+        """Register debugging tool capabilities."""
+        
+        # Start debug session (placeholder)
+        debug_session_capability = MCPToolCapability(
+            name="start_debug_session",
+            description="Start a debugging session for code analysis",
+            parameters={
+                "language": {"type": "string", "required": True, "enum": ["python"], "description": "Programming language"},
+                "code": {"type": "string", "required": True, "description": "Code to debug"}
+            },
+            returns={"type": "object", "description": "Debug session information"},
+            tags=["development", "debugging", "analysis"]
+        )
+        self.register_tool(debug_session_capability, self._handle_start_debug_session)
+    
+    async def _handle_start_debug_session(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle start debug session requests (simplified)."""
+        language = request.params.get("language")
+        code = request.params.get("code")
+        
+        if not language or not code:
+            raise MCPError(
+                "Language and code are required",
+                error_code="MISSING_DEBUG_PARAMS",
+                request_id=request.id
+            )
+        
+        # This is a simplified debug session implementation
+        # In a real implementation, this would integrate with actual debuggers
+        session_id = f"debug_{int(time.time())}_{id(request)}"
+        
+        debug_session = DebugSession(
+            session_id=session_id,
+            language=language,
+            target_file="<inline_code>",
+            is_active=True
         )
         
-        # Return using TELEGRAM_IMAGE_GENERATED marker for automatic upload
-        caption = f"📸 **Screenshot Evidence - Task {task_id}**\n\n{analysis}"
+        self._debug_sessions[session_id] = debug_session
         
-        # Clean up file after successful processing
-        try:
-            os.remove(screenshot_path)
-        except Exception:
-            pass  # Don't fail if cleanup fails
-            
-        return f"TELEGRAM_IMAGE_GENERATED|{screenshot_path}|{caption}"
-
-    except Exception as e:
-        return f"📸 Screenshot retrieval error: {str(e)}"
-
-
-@mcp.tool()
-def execute_bug_report_with_screenshot(
-    task_description: str,
-    notion_task_id: str,
-    chat_id: str = ""
-) -> str:
-    """
-    Execute complete bug report workflow with automated screenshot evidence.
-
-    This tool orchestrates:
-    1. Claude Code session to create/run Playwright test
-    2. Screenshot capture during test execution
-    3. Screenshot retrieval and analysis
-    4. Automatic Telegram upload with AI analysis
-
-    Args:
-        task_description: Description of the bug or issue to investigate
-        notion_task_id: Notion task ID for tracking and file naming
-        chat_id: Telegram chat ID for workspace detection and upload
-
-    Returns:
-        TELEGRAM_IMAGE_GENERATED marker with screenshot and analysis, or error message
-    """
-    import os
-    
-    try:
-        # Get workspace directory for this chat
-        if chat_id:
-            validator = get_workspace_validator()
-            workspace_name = validator.get_workspace_for_chat(chat_id)
-            if workspace_name:
-                allowed_dirs = validator.get_allowed_directories(chat_id)
-                target_directory = allowed_dirs[0] if allowed_dirs else os.getcwd()
-            else:
-                return "❌ Unable to determine workspace for this chat"
-        else:
-            target_directory = os.getcwd()
-
-        # Import SDK wrapper
-        from utilities.claude_sdk_wrapper import ClaudeCodeSDK, ClaudeTaskOptions, PermissionMode, AllowedTool, anyio_run_sync
-
-        # Set environment variable for Claude Code session
-        original_task_id = os.environ.get('NOTION_TASK_ID')
-        os.environ['NOTION_TASK_ID'] = notion_task_id
-
-        try:
-            # Execute via SDK with screenshot instructions
-            enhanced_prompt = f"""Create and run a Playwright test to investigate: {task_description}
-            
-            Requirements:
-            1. Navigate to the relevant page/component
-            2. Capture a full-page screenshot showing the issue
-            3. Save screenshot to ./tmp/ai_screenshots/{notion_task_id}_{{timestamp}}.png
-            4. Output the exact text: SCREENSHOT_CAPTURED:{{path}}
-            
-            The screenshot will be automatically retrieved and uploaded to Telegram with AI analysis.
-            """
-
-            options = ClaudeTaskOptions(
-                max_turns=15,
-                working_directory=target_directory,
-                permission_mode=PermissionMode.ACCEPT_EDITS,
-                allowed_tools=[AllowedTool.BASH, AllowedTool.EDITOR, AllowedTool.FILE_READER],
-                chat_id=chat_id  # Enable workspace-aware enhancements
-            )
-
-            delegation_result = anyio_run_sync(
-                ClaudeCodeSDK().execute_task_sync(enhanced_prompt, options)
-            )
-
-            # Check if screenshot was captured
-            if "SCREENSHOT_CAPTURED:" not in delegation_result:
-                return f"⚠️ Task completed but no screenshot captured:\n\n{delegation_result}"
-
-            # Retrieve and process screenshot
-            screenshot_result = retrieve_workspace_screenshot(
-                task_id=notion_task_id,
-                chat_id=chat_id,
-                max_age_minutes=5
-            )
-
-            if screenshot_result.startswith("TELEGRAM_IMAGE_GENERATED|"):
-                return screenshot_result  # Success - will trigger automatic upload
-            else:
-                return f"📋 **Task Completed**\n\n{delegation_result}\n\n⚠️ Screenshot issue: {screenshot_result}"
-
-        finally:
-            # Restore original environment
-            if original_task_id is not None:
-                os.environ['NOTION_TASK_ID'] = original_task_id
-            elif 'NOTION_TASK_ID' in os.environ:
-                del os.environ['NOTION_TASK_ID']
-
-    except Exception as e:
-        return f"❌ Bug report workflow error: {str(e)}"
-
-
-@mcp.tool()
-def trigger_error_recovery_analysis(error_description: str, chat_id: str = "") -> str:
-    """Trigger manual error recovery analysis for system issues.
-    
-    Args:
-        error_description: Description of the error or issue to investigate
-        chat_id: Optional chat ID context
-    
-    Returns:
-        str: Recovery analysis result
-    """
-    try:
-        from utilities.claude_sdk_wrapper import ClaudeCodeSDK, ClaudeTaskOptions, PermissionMode, AllowedTool, anyio_run_sync
+        self.logger.info(f"Started debug session: {session_id}")
         
-        recovery_prompt = f"""Investigate and provide analysis for this reported system issue:
+        return debug_session.dict()
+    
+    # Profiling Tools
+    
+    async def _register_profiling_tools(self) -> None:
+        """Register profiling tool capabilities."""
+        
+        # Profile code performance
+        profile_code_capability = MCPToolCapability(
+            name="profile_code",
+            description="Profile code performance and generate analysis",
+            parameters={
+                "language": {"type": "string", "required": True, "enum": ["python"], "description": "Programming language"},
+                "code": {"type": "string", "required": True, "description": "Code to profile"}
+            },
+            returns={"type": "object", "description": "Profiling results"},
+            tags=["development", "profiling", "performance"]
+        )
+        self.register_tool(profile_code_capability, self._handle_profile_code)
+    
+    async def _handle_profile_code(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle code profiling requests."""
+        language = request.params.get("language")
+        code = request.params.get("code")
+        
+        if not language or not code:
+            raise MCPError(
+                "Language and code are required",
+                error_code="MISSING_PROFILE_PARAMS",
+                request_id=request.id
+            )
+        
+        if language != "python":
+            raise MCPError(
+                "Only Python profiling is currently supported",
+                error_code="UNSUPPORTED_PROFILE_LANGUAGE",
+                request_id=request.id
+            )
+        
+        try:
+            profile_id = f"profile_{int(time.time())}_{id(request)}"
+            
+            # Create profiling code wrapper
+            profiling_code = f"""
+import cProfile
+import pstats
+from io import StringIO
+import time
 
-**Issue Description:**
-{error_description}
+# User code wrapped in profiler
+def user_code():
+{chr(10).join('    ' + line for line in code.split(chr(10)))}
 
-**Chat Context:** {chat_id if chat_id else 'N/A'}
+# Profile the code
+pr = cProfile.Profile()
+start_time = time.time()
+pr.enable()
+user_code()
+pr.disable()
+end_time = time.time()
 
-**Analysis Task:**
-1. Search the codebase for potential causes of this issue
-2. Check recent logs for related errors (logs/system.log, logs/tasks.log)
-3. Look for error patterns in integrations/telegram/handlers.py
-4. Check if utilities/auto_error_recovery.py is functioning correctly
-5. Identify any missing variable definitions or import issues
-6. Test for syntax/indentation problems
-7. Provide specific recommendations for fixing
-8. If appropriate, implement a fix immediately
-9. Test the fix if implemented
+# Get profiling results
+s = StringIO()
+ps = pstats.Stats(pr, stream=s)
+ps.sort_stats('cumulative')
+ps.print_stats(10)  # Top 10 functions
 
-**Focus Areas:**
-- Error patterns in Telegram handlers
-- Auto-recovery system effectiveness  
-- Missing variable definitions (like is_priority issues)
-- Timeout and connectivity issues
-- System stability and reliability
-
-Provide a comprehensive analysis and implement fixes where possible.
-Focus on error recovery, system reliability, and immediate fixes.
+print(f"PROFILE_TOTAL_TIME: {{end_time - start_time}}")
+print(f"PROFILE_STATS_START")
+print(s.getvalue())
+print(f"PROFILE_STATS_END")
 """
+            
+            # Execute profiling code
+            stdout, stderr, return_code = await self._execute_code_safely(
+                "python", profiling_code, self.execution_timeout
+            )
+            
+            if return_code != 0:
+                raise MCPError(
+                    f"Profiling execution failed: {stderr}",
+                    error_code="PROFILING_EXECUTION_ERROR",
+                    request_id=request.id
+                )
+            
+            # Parse profiling results
+            total_time = 0.0
+            stats_lines = []
+            
+            lines = stdout.split('\n')
+            capturing_stats = False
+            
+            for line in lines:
+                if line.startswith("PROFILE_TOTAL_TIME:"):
+                    total_time = float(line.split(":")[1].strip())
+                elif line == "PROFILE_STATS_START":
+                    capturing_stats = True
+                elif line == "PROFILE_STATS_END":
+                    capturing_stats = False
+                elif capturing_stats:
+                    stats_lines.append(line)
+            
+            # Create profiling result
+            profile_result = ProfileResult(
+                profile_id=profile_id,
+                language=language,
+                code=code,
+                total_time=total_time,
+                top_functions=[{"analysis": "\n".join(stats_lines)}]
+            )
+            
+            self.logger.info(f"Code profiling completed: {profile_id}")
+            
+            return profile_result.dict()
+            
+        except Exception as e:
+            self.logger.error(f"Code profiling failed: {str(e)}")
+            raise MCPError(
+                f"Code profiling failed: {str(e)}",
+                error_code="CODE_PROFILING_ERROR",
+                details={"language": language, "error": str(e)},
+                request_id=request.id
+            )
+    
+    # Test Tools
+    
+    async def _register_test_tools(self) -> None:
+        """Register test execution tool capabilities."""
         
-        print(f"🔍 Triggering SDK-powered error recovery analysis...")
-        print(f"   Error description: {error_description[:100]}...")
-        print(f"   Chat context: {chat_id}")
-        
-        options = ClaudeTaskOptions(
-            max_turns=20,
-            working_directory="/Users/valorengels/src/ai",
-            permission_mode=PermissionMode.ACCEPT_EDITS,
-            allowed_tools=[AllowedTool.BASH, AllowedTool.EDITOR, AllowedTool.FILE_READER],
-            chat_id=chat_id  # Enable workspace-aware enhancements
+        # Run tests
+        run_tests_capability = MCPToolCapability(
+            name="run_tests",
+            description="Execute tests using various testing frameworks",
+            parameters={
+                "test_path": {"type": "string", "required": True, "description": "Path to test file or directory"},
+                "framework": {"type": "string", "required": False, "default": "auto", "enum": ["auto", "pytest", "unittest", "jest"], "description": "Test framework to use"},
+                "coverage": {"type": "boolean", "required": False, "default": False, "description": "Enable code coverage reporting"}
+            },
+            returns={"type": "object", "description": "Test execution results"},
+            tags=["development", "testing", "quality"]
         )
+        self.register_tool(run_tests_capability, self._handle_run_tests)
+    
+    async def _handle_run_tests(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle test execution requests."""
+        test_path = request.params.get("test_path")
+        framework = request.params.get("framework", "auto")
+        enable_coverage = request.params.get("coverage", False)
         
-        result = anyio_run_sync(
-            ClaudeCodeSDK().execute_task_sync(recovery_prompt, options)
-        )
+        if not test_path:
+            raise MCPError(
+                "Test path is required",
+                error_code="MISSING_TEST_PATH",
+                request_id=request.id
+            )
         
-        return f"🔍 **Error Recovery Analysis**\n\n{result}"
+        try:
+            test_id = f"test_{int(time.time())}_{id(request)}"
+            
+            # Auto-detect framework if needed
+            if framework == "auto":
+                if test_path.endswith('.py') or any(f.endswith('test.py') for f in os.listdir(os.path.dirname(test_path) or '.')):
+                    framework = "pytest"
+                elif test_path.endswith('.js') or test_path.endswith('.ts'):
+                    framework = "jest"
+                else:
+                    framework = "pytest"  # Default
+            
+            # Prepare test command
+            if framework == "pytest":
+                command = ["python", "-m", "pytest", test_path, "-v"]
+                if enable_coverage:
+                    command.extend(["--cov=.", "--cov-report=json"])
+            elif framework == "unittest":
+                command = ["python", "-m", "unittest", "discover", "-s", test_path, "-v"]
+            elif framework == "jest":
+                command = ["npm", "test", "--", test_path]
+            else:
+                raise MCPError(
+                    f"Unsupported test framework: {framework}",
+                    error_code="UNSUPPORTED_TEST_FRAMEWORK",
+                    request_id=request.id
+                )
+            
+            # Execute tests
+            start_time = time.time()
+            stdout, stderr, return_code = await self._run_process(command, self.execution_timeout)
+            execution_time = time.time() - start_time
+            
+            # Parse test results (simplified)
+            test_result = TestResult(
+                test_id=test_id,
+                test_framework=framework,
+                test_path=test_path,
+                execution_time=execution_time,
+                success=(return_code == 0)
+            )
+            
+            # Simple parsing of pytest output
+            if framework == "pytest" and stdout:
+                lines = stdout.split('\n')
+                for line in lines:
+                    if " passed" in line or " failed" in line or " error" in line:
+                        # Extract test counts (simplified)
+                        parts = line.strip().split()
+                        for i, part in enumerate(parts):
+                            if part == "passed" and i > 0:
+                                try:
+                                    test_result.passed_tests = int(parts[i-1])
+                                except ValueError:
+                                    pass
+                            elif part == "failed" and i > 0:
+                                try:
+                                    test_result.failed_tests = int(parts[i-1])
+                                except ValueError:
+                                    pass
+                        break
+            
+            test_result.total_tests = test_result.passed_tests + test_result.failed_tests
+            
+            self.logger.info(f"Test execution completed: {test_id} (success={test_result.success})")
+            
+            return test_result.dict()
+            
+        except Exception as e:
+            self.logger.error(f"Test execution failed: {str(e)}")
+            raise MCPError(
+                f"Test execution failed: {str(e)}",
+                error_code="TEST_EXECUTION_ERROR",
+                details={"test_path": test_path, "framework": framework, "error": str(e)},
+                request_id=request.id
+            )
+    
+    # Helper methods
+    
+    async def _execute_code_safely(
+        self, 
+        language: str, 
+        code: str, 
+        timeout: int,
+        working_directory: str = None,
+        environment: Dict[str, str] = None
+    ) -> tuple[str, str, int]:
+        """Execute code safely with security restrictions."""
+        config = self._language_configs[language]
         
-    except Exception as e:
-        return f"❌ Error recovery analysis failed: {str(e)}"
+        if language == "python":
+            # For Python, execute directly with the interpreter
+            command = config["command"] + [code]
+        elif language == "javascript":
+            command = config["command"] + [code]
+        elif language == "bash":
+            command = config["command"] + [code]
+        elif language == "sql":
+            # For SQL, create a temporary file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.sql', delete=False) as f:
+                f.write(code)
+                temp_file = f.name
+            try:
+                command = ["sqlite3", ":memory:", f".read {temp_file}"]
+            finally:
+                os.unlink(temp_file)
+        else:
+            raise MCPError(
+                f"Unsupported language: {language}",
+                error_code="UNSUPPORTED_LANGUAGE"
+            )
+        
+        return await self._run_process(command, timeout, working_directory, environment)
+    
+    async def _run_process(
+        self, 
+        command: List[str], 
+        timeout: int,
+        working_directory: str = None,
+        environment: Dict[str, str] = None
+    ) -> tuple[str, str, int]:
+        """Run a process with timeout and resource limits."""
+        try:
+            # Prepare environment
+            env = os.environ.copy()
+            if environment:
+                env.update(environment)
+            
+            # Run process
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=working_directory,
+                env=env
+            )
+            
+            # Wait for completion with timeout
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), 
+                    timeout=timeout
+                )
+                
+                return (
+                    stdout.decode('utf-8', errors='replace'),
+                    stderr.decode('utf-8', errors='replace'),
+                    process.returncode
+                )
+                
+            except asyncio.TimeoutError:
+                # Kill the process if it times out
+                try:
+                    process.kill()
+                    await process.wait()
+                except:
+                    pass
+                raise asyncio.TimeoutError()
+                
+        except Exception as e:
+            raise MCPError(
+                f"Process execution failed: {str(e)}",
+                error_code="PROCESS_EXECUTION_ERROR",
+                details={"command": command, "error": str(e)}
+            )
+    
+    def _check_code_security(self, code: str, language: str) -> List[str]:
+        """Check code for security violations."""
+        violations = []
+        
+        if language == "python":
+            # Check for dangerous imports and functions
+            for restricted in self._restricted_imports:
+                if f"import {restricted}" in code or f"from {restricted}" in code:
+                    violations.append(f"Restricted import: {restricted}")
+                if f"{restricted}(" in code:
+                    violations.append(f"Restricted function call: {restricted}")
+        
+        elif language == "bash":
+            # Check for dangerous bash commands
+            dangerous_commands = ["rm -rf", "chmod", "chown", "sudo", "su"]
+            for cmd in dangerous_commands:
+                if cmd in code:
+                    violations.append(f"Dangerous bash command: {cmd}")
+        
+        return violations
+    
+    async def _verify_language_availability(self) -> None:
+        """Verify that required language interpreters are available."""
+        for language in self.allowed_languages:
+            config = self._language_configs.get(language)
+            if config:
+                try:
+                    # Test if interpreter is available
+                    command = config["command"][0]
+                    await self._run_process([command, "--version"], 5)
+                    self.logger.info(f"Language {language} is available")
+                except Exception as e:
+                    self.logger.warning(f"Language {language} may not be available: {str(e)}")
 
 
-if __name__ == "__main__":
-    mcp.run()
+# Export the server class
+__all__ = ["DevelopmentToolsServer"]

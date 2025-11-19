@@ -1,500 +1,1017 @@
-"""
-AgentOrchestrator: Single point for agent interaction.
+"""Agent Orchestrator Component
 
-Consolidates all agent routing and processing logic into a unified component.
+This module orchestrates agent selection, tool coordination, and execution
+for complex multi-step tasks with intelligent workload distribution and
+performance optimization.
 """
 
 import asyncio
 import logging
 import time
-from typing import Any
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from enum import Enum
 
-from integrations.telegram.models import (
-    AgentResponse,
-    Intent,
-    MediaAttachment,
-    MessageContext,
-    ProcessingPlan,
-)
+from pydantic import BaseModel, Field
+from telethon.tl.types import Message
+
+from .context_builder import MessageContext
+from .type_router import MessageType, ProcessingPriority
+from ...agents.valor.agent import ValorAgent
+from ...tools.base import BaseTool
+from ...agents.tool_registry import ToolRegistry
+
 
 logger = logging.getLogger(__name__)
 
 
+class OrchestrationStrategy(Enum):
+    """Agent orchestration strategies"""
+    SINGLE_AGENT = "single_agent"           # Use one primary agent
+    MULTI_AGENT_PARALLEL = "multi_agent_parallel"   # Multiple agents in parallel
+    MULTI_AGENT_SEQUENTIAL = "multi_agent_sequential" # Multiple agents in sequence
+    AGENT_PIPELINE = "agent_pipeline"       # Structured pipeline of agents
+    ADAPTIVE_ROUTING = "adaptive_routing"   # Dynamic routing based on context
+
+
+class ExecutionMode(Enum):
+    """Execution modes for agent tasks"""
+    SYNCHRONOUS = "synchronous"     # Wait for completion
+    ASYNCHRONOUS = "asynchronous"   # Fire and forget
+    STREAMING = "streaming"         # Stream results as available
+    BATCH = "batch"                # Process in batches
+
+
+class AgentStatus(Enum):
+    """Agent status tracking"""
+    IDLE = "idle"
+    BUSY = "busy"
+    OVERLOADED = "overloaded"
+    ERROR = "error"
+    MAINTENANCE = "maintenance"
+
+
+@dataclass
+class AgentInstance:
+    """Agent instance with performance tracking"""
+    agent_id: str
+    agent: ValorAgent
+    agent_type: str
+    status: AgentStatus = AgentStatus.IDLE
+    current_tasks: int = 0
+    max_concurrent_tasks: int = 3
+    total_tasks_completed: int = 0
+    total_processing_time: float = 0.0
+    error_count: int = 0
+    last_used: float = field(default_factory=time.time)
+    performance_score: float = 1.0
+    specializations: List[str] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ToolAssignment:
+    """Tool assignment for agent execution"""
+    tool_name: str
+    tool_instance: BaseTool
+    priority: int = 1
+    required: bool = True
+    estimated_time: float = 1.0
+    dependencies: List[str] = field(default_factory=list)
+    configuration: Dict[str, Any] = field(default_factory=dict)
+
+
+class AgentResult(BaseModel):
+    """Result from agent orchestration and execution"""
+    
+    success: bool = Field(..., description="Whether orchestration succeeded")
+    agent_name: str = Field(..., description="Primary agent used")
+    agent_instances: List[str] = Field(default_factory=list, description="All agents involved")
+    
+    # Execution results
+    primary_response: str = Field(..., description="Main response content")
+    supplementary_responses: Dict[str, str] = Field(default_factory=dict)
+    tool_outputs: Dict[str, Any] = Field(default_factory=dict)
+    
+    # Tool usage
+    tools_used: List[str] = Field(default_factory=list)
+    tool_execution_times: Dict[str, float] = Field(default_factory=dict)
+    tool_success_rates: Dict[str, bool] = Field(default_factory=dict)
+    
+    # Performance metrics
+    total_execution_time: float = Field(default=0.0)
+    agent_execution_times: Dict[str, float] = Field(default_factory=dict)
+    orchestration_overhead: float = Field(default=0.0)
+    
+    # Quality metrics
+    response_quality_score: float = Field(default=0.8, ge=0.0, le=1.0)
+    coherence_score: float = Field(default=0.8, ge=0.0, le=1.0)
+    completeness_score: float = Field(default=0.8, ge=0.0, le=1.0)
+    
+    # Error handling
+    warnings: List[str] = Field(default_factory=list)
+    errors: List[str] = Field(default_factory=list)
+    fallback_used: bool = Field(default=False)
+    
+    # Metadata
+    orchestration_strategy: OrchestrationStrategy = Field(default=OrchestrationStrategy.SINGLE_AGENT)
+    execution_mode: ExecutionMode = Field(default=ExecutionMode.SYNCHRONOUS)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentOrchestrator:
-    """Single point for agent interaction."""
-
-    def __init__(self, valor_agent=None, intent_classifier=None):
-        """Initialize with optional agent and classifier."""
-        self.valor_agent = valor_agent
-        self.intent_classifier = intent_classifier
-        self.streaming_timeout = 30  # seconds
-        self.sync_timeout = 60  # seconds for sync operations
-
-    async def process_with_agent(
-        self, context: MessageContext, plan: ProcessingPlan
-    ) -> AgentResponse:
+    """
+    Advanced agent orchestrator that manages multiple AI agents,
+    coordinates tool usage, and optimizes task distribution for
+    complex multi-modal processing.
+    """
+    
+    def __init__(
+        self,
+        tool_registry: Optional[ToolRegistry] = None,
+        max_concurrent_orchestrations: int = 5,
+        agent_timeout_seconds: int = 30,
+        enable_performance_optimization: bool = True,
+        enable_adaptive_routing: bool = True,
+        quality_threshold: float = 0.7,
+        default_model: str = "openai:gpt-4"
+    ):
         """
-        Unified agent processing with context.
-
-        Handles:
-        1. Intent classification if needed
-        2. Context preparation
-        3. Agent invocation
-        4. Response streaming
-        5. Error handling
-
+        Initialize the agent orchestrator.
+        
+        Args:
+            tool_registry: Registry of available tools
+            max_concurrent_orchestrations: Maximum concurrent orchestrations
+            agent_timeout_seconds: Timeout for agent operations
+            enable_performance_optimization: Enable performance-based routing
+            enable_adaptive_routing: Enable adaptive routing strategies
+            quality_threshold: Minimum quality threshold for responses
+            default_model: Default model for new agents
+        """
+        self.tool_registry = tool_registry or ToolRegistry()
+        self.max_concurrent_orchestrations = max_concurrent_orchestrations
+        self.agent_timeout_seconds = agent_timeout_seconds
+        self.enable_performance_optimization = enable_performance_optimization
+        self.enable_adaptive_routing = enable_adaptive_routing
+        self.quality_threshold = quality_threshold
+        self.default_model = default_model
+        
+        # Agent management
+        self.agent_instances: Dict[str, AgentInstance] = {}
+        self.agent_specializations: Dict[str, List[str]] = defaultdict(list)
+        self.active_orchestrations: Dict[str, Dict[str, Any]] = {}
+        
+        # Performance tracking
+        self.orchestration_history: List[Dict[str, Any]] = []
+        self.performance_metrics: Dict[str, List[float]] = defaultdict(list)
+        self.tool_usage_stats: Dict[str, Dict[str, Any]] = defaultdict(dict)
+        
+        # Concurrency control
+        self.orchestration_semaphore = asyncio.Semaphore(max_concurrent_orchestrations)
+        self.orchestration_count = 0
+        
+        # Load balancing
+        self.agent_load: Dict[str, int] = defaultdict(int)
+        self.routing_cache: Dict[str, str] = {}  # message_hash -> agent_id
+        
+        # Initialize default agents
+        asyncio.create_task(self._initialize_default_agents())
+        
+        logger.info(
+            f"AgentOrchestrator initialized with {max_concurrent_orchestrations} "
+            f"max concurrent orchestrations, performance_optimization={enable_performance_optimization}"
+        )
+    
+    async def orchestrate(
+        self,
+        message: Message,
+        context: MessageContext,
+        message_type: MessageType,
+        route_metadata: Optional[Dict[str, Any]] = None
+    ) -> AgentResult:
+        """
+        Orchestrate agent selection and execution for a message.
+        
+        Args:
+            message: Telegram message object
+            context: Message context
+            message_type: Detected message type
+            route_metadata: Additional routing metadata
+            
         Returns:
-            AgentResponse with processed content
+            AgentResult with orchestration results
         """
-        start_time = time.time()
-
-        try:
-            # Classify intent if needed
-            if plan.intent is None and self._should_classify_intent(plan):
-                plan.intent = await self._classify_intent_if_needed(context)
-
-            # Prepare agent context
-            agent_context = self._prepare_agent_context(context, plan)
-
-            # Process with agent
-            if plan.requires_agent:
-                response = await self._invoke_agent(context, plan, agent_context)
-            else:
-                # Handle non-agent responses (commands, etc.)
-                response = await self._handle_special_response(context, plan)
-
-            # Add metadata
-            response.processing_time = time.time() - start_time
-            response.model_used = plan.agent_config.model
-
-            return response
-
-        except TimeoutError:
-            logger.error(f"Agent processing timeout for chat {context.chat_id}")
-            return AgentResponse(
-                content="⏱️ Response timeout. Please try again.",
-                metadata={"error": "timeout", "processing_time": time.time() - start_time},
-            )
-        except Exception as e:
-            logger.error(f"Agent processing error: {str(e)}", exc_info=True)
-            return AgentResponse(
-                content=f"❌ Processing error: {str(e)}",
-                metadata={"error": str(e), "processing_time": time.time() - start_time},
-            )
-
-    def _should_classify_intent(self, plan: ProcessingPlan) -> bool:
-        """Check if intent classification is needed."""
-        return (
-            plan.requires_agent
-            and plan.intent is None
-            and "intent_classification" not in (plan.metadata.get("skip_features", []))
-        )
-
-    async def _classify_intent_if_needed(self, context: MessageContext) -> Intent | None:
-        """Lightweight intent classification."""
-        if not self.intent_classifier:
-            return None
-
-        try:
-            # Quick rule-based classification first
-            text_lower = context.cleaned_text.lower()
-
-            # Clear command intent
-            if text_lower.startswith("/"):
-                return Intent.COMMAND
-
-            # Question detection
-            if any(indicator in text_lower for indicator in ["?", "what", "how", "why", "when"]):
-                return Intent.QUESTION
-
-            # Task detection
-            if any(
-                word in text_lower for word in ["create", "make", "build", "fix", "update", "add"]
-            ):
-                return Intent.TASK
-
-            # Feedback detection
-            if any(
-                word in text_lower for word in ["feedback", "suggestion", "issue", "problem", "bug"]
-            ):
-                return Intent.FEEDBACK
-
-            # For ambiguous cases, use LLM classifier if available
-            if self.intent_classifier and len(context.cleaned_text) > 20:
-                return await self.intent_classifier.classify(context.cleaned_text)
-
-            return Intent.CONVERSATION
-
-        except Exception as e:
-            logger.error(f"Intent classification error: {str(e)}")
-            return Intent.UNKNOWN
-
-    def _prepare_agent_context(
-        self, context: MessageContext, plan: ProcessingPlan
-    ) -> dict[str, Any]:
-        """Convert MessageContext to agent-specific context."""
-        # Build Valor context
-        valor_context = {
-            "chat_id": str(context.chat_id),
-            "username": context.username,
-            "chat_history": context.chat_history,
-            "workspace": context.workspace,
-            "working_directory": context.working_directory,
-            "is_priority_question": (plan.priority.value if hasattr(plan.priority, 'value') else str(plan.priority)) in ["high", "critical"],
-            "message_text": context.cleaned_text,
-        }
-
-        # Add intent information
-        if plan.intent:
-            valor_context["detected_intent"] = plan.intent.intent.value if hasattr(plan.intent, 'intent') and plan.intent.intent else str(plan.intent)
-
-        # Add reply context
-        if context.reply_context:
-            valor_context["reply_to"] = {
-                "text": context.reply_context.get("text"),
-                "username": context.reply_context.get("username"),
-                "is_bot": context.reply_context.get("is_bot"),
-            }
-
-        # Add media context
-        if context.media_info:
-            valor_context["media_type"] = context.media_info.media_type.value
-            valor_context["media_file_id"] = context.media_info.file_id
-
-        # Add special handlers context
-        if plan.special_handlers:
-            valor_context["special_handlers"] = plan.special_handlers
-
-        # Add enabled tools
-        if plan.agent_config.tools_enabled:
-            valor_context["enabled_tools"] = plan.agent_config.tools_enabled
-
-        return valor_context
-
-    async def _invoke_agent(
-        self, context: MessageContext, plan: ProcessingPlan, agent_context: dict[str, Any]
-    ) -> AgentResponse:
-        """
-        Optimized Valor agent invocation with direct agent access.
+        orchestration_id = f"orch_{int(time.time() * 1000)}_{context.chat_id}"
+        start_time = time.perf_counter()
         
-        This replaces the previous fragmented handler approach with direct agent execution,
-        providing better performance, cleaner error handling, and unified context management.
-        """
-        if not self.valor_agent:
-            return AgentResponse(
-                content="Agent not available. Please try again later.",
-                metadata={"error": "no_agent"},
-            )
-
-        try:
-            # Import agent and context directly
-            from agents.valor.agent import valor_agent, ValorContext
-            
-            # Convert agent_context dict to proper ValorContext
-            valor_ctx = ValorContext(
-                chat_id=agent_context.get("chat_id"),
-                username=agent_context.get("username"),
-                is_group_chat=not context.is_private_chat,
-                chat_history=agent_context.get("chat_history", []),
-                chat_history_obj=agent_context.get("chat_history_obj"),
-                notion_data=agent_context.get("notion_data"),
-                is_priority_question=agent_context.get("is_priority_question", False),
-                intent_result=plan.intent
-            )
-
-            # Build enhanced message with context for agent
-            enhanced_message = self._build_enhanced_message(context, plan, agent_context)
-
-            # Apply intent-specific system prompt if available
-            original_prompt = None
-            if plan.intent and plan.intent != Intent.UNKNOWN:
-                original_prompt = await self._apply_intent_optimization(valor_agent, plan.intent, context)
-
+        async with self.orchestration_semaphore:
             try:
-                # Execute agent with timeout and proper context
-                logger.debug(f"⚡ Executing valor_agent.run() with message ({len(enhanced_message)} chars)")
+                self.orchestration_count += 1
                 
-                if plan.agent_config.streaming:
-                    # Handle streaming mode with real-time token delivery
-                    response_text = await self._execute_streaming_agent(valor_agent, enhanced_message, valor_ctx)
-                else:
-                    # Handle sync mode with timeout
-                    result = await asyncio.wait_for(
-                        valor_agent.run(enhanced_message, deps=valor_ctx),
-                        timeout=self.sync_timeout
-                    )
-                    response_text = result.output if result.output else "No response generated."
-
-                # Extract tool usage for metadata
-                tool_actions = self._extract_tool_actions(result if 'result' in locals() else None)
+                # Initialize orchestration tracking
+                self.active_orchestrations[orchestration_id] = {
+                    "start_time": start_time,
+                    "context": context,
+                    "message_type": message_type,
+                    "agents_used": [],
+                    "tools_used": []
+                }
                 
-                # Parse response with comprehensive marker detection
-                agent_response = self._parse_agent_response(response_text)
-                agent_response.metadata.update({
-                    "tools_used": tool_actions,
-                    "intent": plan.intent.intent.value if hasattr(plan.intent, 'intent') and plan.intent.intent else str(plan.intent) if plan.intent else None,
-                    "context_size": len(enhanced_message),
-                    "model": "claude-3-5-sonnet-20241022"
-                })
-
-                return agent_response
-
-            finally:
-                # Restore original system prompt if modified
-                if original_prompt is not None:
-                    valor_agent.system_prompt = original_prompt
-
-        except asyncio.TimeoutError:
-            logger.error(f"⏱️ Agent execution timeout ({self.sync_timeout}s) for chat {context.chat_id}")
-            return AgentResponse(
-                content="⏱️ Response timeout. The request is taking longer than expected. Please try again.",
-                metadata={"error": "timeout", "timeout_duration": self.sync_timeout}
-            )
-        except Exception as e:
-            logger.error(f"❌ Agent invocation error: {str(e)}", exc_info=True)
-            return AgentResponse(
-                content=f"❌ I encountered an error processing your message: {str(e)}",
-                metadata={"error": str(e), "error_type": type(e).__name__}
-            )
-
-    def _build_enhanced_message(
-        self, context: MessageContext, plan: ProcessingPlan, agent_context: dict[str, Any]
-    ) -> str:
-        """Build enhanced message with comprehensive context for the agent."""
-        message_parts = []
-        
-        # Add intent context if available
-        if plan.intent and plan.intent != Intent.UNKNOWN:
-            intent_info = f"Detected Intent: {plan.intent.intent.value if hasattr(plan.intent, 'intent') and plan.intent.intent else str(plan.intent)}"
-            if hasattr(plan, 'intent_confidence'):
-                intent_info += f" (confidence: {plan.intent_confidence:.2f})"
-            message_parts.append(intent_info)
-        
-        # Add chat history context
-        if agent_context.get("chat_history"):
-            recent_history = agent_context["chat_history"][-5:]  # Last 5 messages
-            if recent_history:
-                history_text = "Recent conversation:\n"
-                for msg in recent_history:
-                    role = msg.get("role", "user")
-                    content = msg.get("content", "")[:200] + ("..." if len(msg.get("content", "")) > 200 else "")
-                    history_text += f"{role}: {content}\n"
-                message_parts.append(history_text)
-        
-        # Add workspace/project context for priority questions
-        if agent_context.get("is_priority_question") and agent_context.get("notion_data"):
-            notion_data = agent_context["notion_data"]
-            if notion_data and "Error" not in notion_data:
-                message_parts.append(f"Current project data:\n{notion_data}")
-        
-        # Add media context if present
-        if context.media_info:
-            media_desc = f"Media Type: {context.media_info.media_type.value}"
-            if hasattr(context.media_info, 'file_path') and context.media_info.file_path:
-                media_desc += f"\nFile Path: {context.media_info.file_path}"
-            message_parts.append(media_desc)
-        
-        # Add reply context if present
-        if context.reply_context:
-            reply_info = f"Replying to: {context.reply_context.get('text', 'Previous message')}"
-            if context.reply_context.get('username'):
-                reply_info += f" (from @{context.reply_context['username']})"
-            message_parts.append(reply_info)
-        
-        # Combine context with current message
-        if message_parts:
-            context_block = "\n\n".join(message_parts)
-            return f"{context_block}\n\nCurrent message: {context.cleaned_text}"
-        else:
-            return context.cleaned_text
-
-    async def _apply_intent_optimization(self, agent, intent: Intent, context: MessageContext) -> str | None:
-        """Apply intent-specific system prompt optimization."""
-        try:
-            from integrations.intent_prompts import get_intent_system_prompt, get_intent_guidance
-            from integrations.ollama_intent import IntentResult, MessageIntent
-            
-            prompt_context = {
-                "chat_id": context.chat_id,
-                "username": context.username,
-                "is_group_chat": not context.is_private_chat,
-                "has_image": context.media_info is not None,
-                "has_links": any(url in context.cleaned_text.lower() 
-                               for url in ["http://", "https://", "www."]),
-                "message_length": len(context.cleaned_text)
-            }
-            
-            # Handle both Intent enum and IntentResult objects
-            intent_prompt = None
-            if hasattr(intent, 'intent') and hasattr(intent, 'confidence'):
-                # This is an IntentResult object
-                intent_prompt = get_intent_system_prompt(intent, prompt_context)
-            else:
-                # This is an Intent enum - use the simpler guidance function
-                intent_guidance = get_intent_guidance(MessageIntent.CASUAL_CHAT)  # Default fallback
-                if intent_guidance:
-                    intent_prompt = f"Task guidance: {intent_guidance}"
-            if intent_prompt:
-                original_prompt = agent.system_prompt
-                agent.system_prompt = intent_prompt
-                logger.debug(f"🎯 Applied intent-specific prompt for {intent.value if hasattr(intent, 'value') else str(intent)}")
-                return original_prompt
-            
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to apply intent optimization: {e}")
-        
-        return None
-
-    async def _execute_streaming_agent(self, agent, message: str, context) -> str:
-        """Execute agent in streaming mode with progress updates."""
-        try:
-            # Note: PydanticAI doesn't have built-in streaming for agent.run()
-            # This is a placeholder for when streaming becomes available
-            # For now, fall back to sync execution
-            logger.debug("📡 Streaming mode requested but not available, using sync execution")
-            result = await agent.run(message, deps=context)
-            return result.output if result.output else "No response generated."
-            
-        except Exception as e:
-            logger.error(f"❌ Streaming execution failed: {e}")
-            raise
-
-    def _extract_tool_actions(self, result) -> list[str]:
-        """Extract tool usage information from agent result."""
-        actions = []
-        
-        if not result or not hasattr(result, "messages"):
-            return actions
-            
-        try:
-            # Tool name mapping for user-friendly descriptions
-            tool_action_map = {
-                "search_current_info": "🔍 Web Search",
-                "create_image": "🎨 Image Generation", 
-                "analyze_shared_image": "👁️ Image Analysis",
-                "save_link_for_later": "🔗 Link Saved",
-                "search_saved_links": "📚 Link Search",
-                "query_notion_projects": "📋 Project Query",
-                "delegate_coding_task": "💻 Development Task",
-                "search_telegram_history": "💬 Chat History Search",
-                "get_telegram_context_summary": "📝 Context Summary",
-                "spawn_valor_session": "🚀 Valor Session",
-            }
-            
-            for message in result.messages:
-                if hasattr(message, 'parts'):
-                    for part in message.parts:
-                        if hasattr(part, 'tool_name') and part.tool_name:
-                            action = tool_action_map.get(part.tool_name, f"🔧 {part.tool_name}")
-                            if action not in actions:
-                                actions.append(action)
-                                
-        except Exception as e:
-            logger.warning(f"⚠️ Could not extract tool actions: {e}")
-            
-        return actions
-
-    async def _handle_streaming_response(
-        self, context: MessageContext, agent_context: dict[str, Any]
-    ) -> str:
-        """Legacy streaming method - now redirects to new implementation."""
-        from agents.valor.agent import valor_agent, ValorContext
-        
-        valor_ctx = ValorContext(
-            chat_id=agent_context.get("chat_id"),
-            username=agent_context.get("username"),
-            is_group_chat=not context.is_private_chat,
-            chat_history=agent_context.get("chat_history", []),
-            chat_history_obj=agent_context.get("chat_history_obj"),
-            notion_data=agent_context.get("notion_data"),
-            is_priority_question=agent_context.get("is_priority_question", False)
-        )
-        
-        return await self._execute_streaming_agent(valor_agent, context.cleaned_text, valor_ctx)
-
-    def _parse_agent_response(self, response_text: str) -> AgentResponse:
-        """Parse agent response for special markers and attachments."""
-        response = AgentResponse(content=response_text)
-
-        # Check for async promise marker
-        if response_text.startswith("ASYNC_PROMISE|"):
-            response.metadata["is_async_promise"] = True
-            response.content = response_text.split("|", 1)[1]
-
-        # Check for image generation marker
-        if "TELEGRAM_IMAGE_GENERATED|" in response_text:
-            parts = response_text.split("TELEGRAM_IMAGE_GENERATED|")
-            response.content = parts[0].strip()
-
-            # Parse image info
-            image_info = parts[1].split("|")
-            if len(image_info) >= 2:
-                response.media_attachments.append(
-                    MediaAttachment(
-                        file_path=image_info[0],
-                        media_type="image",
-                        caption=image_info[1] if len(image_info) > 1 else None,
-                    )
+                logger.info(
+                    f"Starting orchestration {orchestration_id} for "
+                    f"message_type={message_type.value}, chat_id={context.chat_id}"
                 )
-
-        # Check for reaction markers
-        reaction_pattern = r"REACTION:(\S+)"
-        import re
-
-        matches = re.findall(reaction_pattern, response_text)
-        if matches:
-            response.reactions.extend(matches)
-            # Remove reaction markers from content
-            response.content = re.sub(reaction_pattern, "", response.content).strip()
-
-        return response
-
-    async def _handle_special_response(
-        self, context: MessageContext, plan: ProcessingPlan
-    ) -> AgentResponse:
-        """Handle responses that don't require agent processing."""
-        # Command responses
-        if "start_command" in plan.special_handlers:
-            return AgentResponse(
-                content=(
-                    "👋 **Welcome to Valor AI Assistant!**\n\n"
-                    "I'm here to help you with:\n"
-                    "• 💬 Natural conversations\n"
-                    "• 🔍 Current information search\n"
-                    "• 💻 Code assistance\n"
-                    "• 🖼️ Image analysis\n"
-                    "• 📊 Project management\n\n"
-                    "Just send me a message or mention me in a group!"
-                ),
-                metadata={"command": "start"},
+                
+                # Determine orchestration strategy
+                strategy = await self._determine_orchestration_strategy(
+                    message_type, context, route_metadata
+                )
+                
+                # Select agents based on strategy
+                selected_agents = await self._select_agents(
+                    message_type, context, strategy, route_metadata
+                )
+                
+                # Identify required tools
+                required_tools = await self._identify_required_tools(
+                    message_type, context, selected_agents
+                )
+                
+                # Execute orchestration based on strategy
+                if strategy == OrchestrationStrategy.SINGLE_AGENT:
+                    result = await self._execute_single_agent(
+                        selected_agents[0], message, context, required_tools
+                    )
+                elif strategy == OrchestrationStrategy.MULTI_AGENT_PARALLEL:
+                    result = await self._execute_parallel_agents(
+                        selected_agents, message, context, required_tools
+                    )
+                elif strategy == OrchestrationStrategy.MULTI_AGENT_SEQUENTIAL:
+                    result = await self._execute_sequential_agents(
+                        selected_agents, message, context, required_tools
+                    )
+                elif strategy == OrchestrationStrategy.AGENT_PIPELINE:
+                    result = await self._execute_agent_pipeline(
+                        selected_agents, message, context, required_tools
+                    )
+                else:  # ADAPTIVE_ROUTING
+                    result = await self._execute_adaptive_routing(
+                        selected_agents, message, context, required_tools
+                    )
+                
+                # Calculate orchestration metrics
+                total_time = time.perf_counter() - start_time
+                result.total_execution_time = total_time
+                result.orchestration_overhead = await self._calculate_overhead(
+                    orchestration_id, total_time
+                )
+                result.orchestration_strategy = strategy
+                
+                # Update agent performance
+                await self._update_agent_performance(selected_agents, result)
+                
+                # Quality assessment
+                await self._assess_result_quality(result, context)
+                
+                # Record orchestration
+                self._record_orchestration(orchestration_id, result, selected_agents)
+                
+                logger.info(
+                    f"Orchestration {orchestration_id} completed in {total_time:.2f}s, "
+                    f"quality_score={result.response_quality_score:.2f}"
+                )
+                
+                return result
+                
+            except Exception as e:
+                logger.error(
+                    f"Orchestration {orchestration_id} failed: {str(e)}", 
+                    exc_info=True
+                )
+                
+                # Return fallback result
+                return AgentResult(
+                    success=False,
+                    agent_name="fallback",
+                    primary_response=f"I apologize, but I encountered an error processing your request: {str(e)}",
+                    errors=[str(e)],
+                    fallback_used=True,
+                    total_execution_time=time.perf_counter() - start_time
+                )
+            
+            finally:
+                self.active_orchestrations.pop(orchestration_id, None)
+    
+    async def _determine_orchestration_strategy(
+        self,
+        message_type: MessageType,
+        context: MessageContext,
+        route_metadata: Optional[Dict[str, Any]]
+    ) -> OrchestrationStrategy:
+        """Determine the best orchestration strategy for the request"""
+        
+        # Complex technical questions benefit from multiple agents
+        if message_type == MessageType.TEXT_TECHNICAL and context.text_content:
+            if len(context.text_content) > 500 or "compare" in context.text_content.lower():
+                return OrchestrationStrategy.MULTI_AGENT_PARALLEL
+        
+        # Image analysis with text description needs pipeline
+        if message_type in [MessageType.IMAGE_PHOTO, MessageType.IMAGE_SCREENSHOT]:
+            return OrchestrationStrategy.AGENT_PIPELINE
+        
+        # Code analysis with multiple files needs sequential processing
+        if message_type == MessageType.DOCUMENT_CODE:
+            return OrchestrationStrategy.MULTI_AGENT_SEQUENTIAL
+        
+        # Voice messages need transcription then processing
+        if message_type == MessageType.AUDIO_VOICE:
+            return OrchestrationStrategy.AGENT_PIPELINE
+        
+        # Use adaptive routing for complex contexts
+        if (context.conversation_history and len(context.conversation_history) > 10 or
+            context.workspace_context):
+            return OrchestrationStrategy.ADAPTIVE_ROUTING
+        
+        # Default to single agent for simple requests
+        return OrchestrationStrategy.SINGLE_AGENT
+    
+    async def _select_agents(
+        self,
+        message_type: MessageType,
+        context: MessageContext,
+        strategy: OrchestrationStrategy,
+        route_metadata: Optional[Dict[str, Any]]
+    ) -> List[AgentInstance]:
+        """Select appropriate agents based on message type and strategy"""
+        
+        selected_agents = []
+        
+        # Get message hash for caching
+        message_hash = self._get_message_hash(message_type, context.text_content or "")
+        
+        # Check routing cache for optimization
+        if self.enable_performance_optimization and message_hash in self.routing_cache:
+            cached_agent_id = self.routing_cache[message_hash]
+            if cached_agent_id in self.agent_instances:
+                cached_agent = self.agent_instances[cached_agent_id]
+                if cached_agent.status == AgentStatus.IDLE:
+                    selected_agents.append(cached_agent)
+                    return selected_agents
+        
+        # Agent selection based on message type
+        primary_agent = await self._select_primary_agent(message_type, context)
+        selected_agents.append(primary_agent)
+        
+        # Add secondary agents based on strategy
+        if strategy == OrchestrationStrategy.MULTI_AGENT_PARALLEL:
+            secondary_agents = await self._select_secondary_agents(
+                message_type, context, exclude=[primary_agent.agent_id]
             )
-
-        elif "help_command" in plan.special_handlers:
-            return AgentResponse(
-                content=(
-                    "🤖 **Valor AI Help**\n\n"
-                    "**Commands:**\n"
-                    "/start - Welcome message\n"
-                    "/help - This help message\n"
-                    "/status - System status\n\n"
-                    "**Features:**\n"
-                    "• Send photos for analysis\n"
-                    "• Share URLs for summarization\n"
-                    "• Ask questions about anything\n"
-                    "• Get coding assistance\n\n"
-                    "**In Groups:**\n"
-                    "Mention me with @valoraibot to get my attention!"
-                ),
-                metadata={"command": "help"},
+            selected_agents.extend(secondary_agents[:2])  # Limit to 3 total
+        
+        elif strategy == OrchestrationStrategy.MULTI_AGENT_SEQUENTIAL:
+            sequential_agents = await self._select_sequential_agents(
+                message_type, context, primary_agent
             )
-
-        elif "status_command" in plan.special_handlers:
-            return AgentResponse(
-                content="✅ System operational. All services running normally.",
-                metadata={"command": "status"},
+            selected_agents.extend(sequential_agents)
+        
+        elif strategy == OrchestrationStrategy.AGENT_PIPELINE:
+            pipeline_agents = await self._select_pipeline_agents(
+                message_type, context
             )
-
-        # Default response
-        return AgentResponse(
-            content="Message received but no handler available.", metadata={"unhandled": True}
+            selected_agents = pipeline_agents
+        
+        # Cache routing decision
+        if self.enable_performance_optimization and selected_agents:
+            self.routing_cache[message_hash] = selected_agents[0].agent_id
+            
+            # Limit cache size
+            if len(self.routing_cache) > 1000:
+                # Remove oldest entries
+                oldest_keys = list(self.routing_cache.keys())[:100]
+                for key in oldest_keys:
+                    del self.routing_cache[key]
+        
+        return selected_agents
+    
+    async def _select_primary_agent(
+        self,
+        message_type: MessageType,
+        context: MessageContext
+    ) -> AgentInstance:
+        """Select the primary agent for processing"""
+        
+        # Check for specialized agents
+        if message_type == MessageType.TEXT_TECHNICAL:
+            return await self._get_or_create_agent("technical_specialist", "technical")
+        
+        elif message_type == MessageType.TEXT_CREATIVE:
+            return await self._get_or_create_agent("creative_specialist", "creative")
+        
+        elif message_type.value.startswith("image_"):
+            return await self._get_or_create_agent("vision_specialist", "vision")
+        
+        elif message_type.value.startswith("document_"):
+            return await self._get_or_create_agent("document_specialist", "document")
+        
+        elif message_type == MessageType.AUDIO_VOICE:
+            return await self._get_or_create_agent("audio_specialist", "audio")
+        
+        # Default to general agent
+        return await self._get_or_create_agent("general_agent", "general")
+    
+    async def _get_or_create_agent(
+        self,
+        agent_id: str,
+        agent_type: str
+    ) -> AgentInstance:
+        """Get existing agent or create new one"""
+        
+        if agent_id in self.agent_instances:
+            return self.agent_instances[agent_id]
+        
+        # Create new agent
+        agent = ValorAgent(
+            model=self.default_model,
+            debug=True
         )
+        
+        # Initialize agent with tools from registry
+        await self._initialize_agent_tools(agent, agent_type)
+        
+        # Create agent instance
+        agent_instance = AgentInstance(
+            agent_id=agent_id,
+            agent=agent,
+            agent_type=agent_type,
+            specializations=[agent_type],
+            max_concurrent_tasks=3 if agent_type == "general" else 2
+        )
+        
+        self.agent_instances[agent_id] = agent_instance
+        self.agent_specializations[agent_type].append(agent_id)
+        
+        logger.info(f"Created new agent: {agent_id} of type {agent_type}")
+        return agent_instance
+    
+    async def _initialize_agent_tools(
+        self,
+        agent: ValorAgent,
+        agent_type: str
+    ) -> None:
+        """Initialize agent with appropriate tools"""
+        
+        # Get all available tools
+        available_tools = self.tool_registry.list_tools()
+        
+        # Tool selection based on agent type
+        if agent_type == "technical":
+            preferred_tools = ["search_tool", "knowledge_search", "code_execution"]
+        elif agent_type == "creative":
+            preferred_tools = ["image_generation", "search_tool"]
+        elif agent_type == "vision":
+            preferred_tools = ["image_analysis", "search_tool"]
+        elif agent_type == "document":
+            preferred_tools = ["knowledge_search", "search_tool", "code_execution"]
+        elif agent_type == "audio":
+            preferred_tools = ["search_tool", "knowledge_search"]
+        else:  # general
+            preferred_tools = ["search_tool", "knowledge_search", "image_analysis"]
+        
+        # Register preferred tools
+        for tool_name in preferred_tools:
+            if tool_name in available_tools:
+                try:
+                    tool_instance = self.tool_registry.get_tool(tool_name)
+                    if tool_instance:
+                        agent.register_tool(tool_instance)
+                except Exception as e:
+                    logger.warning(f"Failed to register tool {tool_name} for agent {agent_type}: {e}")
+    
+    async def _select_secondary_agents(
+        self,
+        message_type: MessageType,
+        context: MessageContext,
+        exclude: List[str]
+    ) -> List[AgentInstance]:
+        """Select secondary agents for parallel processing"""
+        
+        secondary_agents = []
+        
+        # For technical questions, add search specialist
+        if message_type == MessageType.TEXT_TECHNICAL:
+            search_agent = await self._get_or_create_agent("search_specialist", "search")
+            if search_agent.agent_id not in exclude:
+                secondary_agents.append(search_agent)
+        
+        # For complex questions, add knowledge specialist
+        if context.text_content and len(context.text_content) > 200:
+            knowledge_agent = await self._get_or_create_agent("knowledge_specialist", "knowledge")
+            if knowledge_agent.agent_id not in exclude:
+                secondary_agents.append(knowledge_agent)
+        
+        return secondary_agents
+    
+    async def _select_sequential_agents(
+        self,
+        message_type: MessageType,
+        context: MessageContext,
+        primary_agent: AgentInstance
+    ) -> List[AgentInstance]:
+        """Select agents for sequential processing"""
+        
+        sequential_agents = []
+        
+        # For document processing, add analysis then summary agent
+        if message_type == MessageType.DOCUMENT_CODE:
+            analysis_agent = await self._get_or_create_agent("code_analyzer", "analysis")
+            summary_agent = await self._get_or_create_agent("code_summarizer", "summary")
+            sequential_agents.extend([analysis_agent, summary_agent])
+        
+        return sequential_agents
+    
+    async def _select_pipeline_agents(
+        self,
+        message_type: MessageType,
+        context: MessageContext
+    ) -> List[AgentInstance]:
+        """Select agents for pipeline processing"""
+        
+        pipeline_agents = []
+        
+        # Image processing pipeline
+        if message_type.value.startswith("image_"):
+            vision_agent = await self._get_or_create_agent("vision_processor", "vision")
+            description_agent = await self._get_or_create_agent("description_generator", "description")
+            pipeline_agents.extend([vision_agent, description_agent])
+        
+        # Voice processing pipeline
+        elif message_type == MessageType.AUDIO_VOICE:
+            transcription_agent = await self._get_or_create_agent("transcription_processor", "transcription")
+            response_agent = await self._get_or_create_agent("response_generator", "response")
+            pipeline_agents.extend([transcription_agent, response_agent])
+        
+        return pipeline_agents
+    
+    async def _identify_required_tools(
+        self,
+        message_type: MessageType,
+        context: MessageContext,
+        selected_agents: List[AgentInstance]
+    ) -> List[ToolAssignment]:
+        """Identify tools required for processing"""
+        
+        required_tools = []
+        
+        # Message type specific tools
+        if message_type == MessageType.TEXT_QUESTION:
+            required_tools.append(ToolAssignment(
+                tool_name="search_tool",
+                tool_instance=self.tool_registry.get_tool("search_tool"),
+                priority=1,
+                estimated_time=2.0
+            ))
+        
+        if message_type.value.startswith("image_"):
+            image_tool = self.tool_registry.get_tool("image_analysis")
+            if image_tool:
+                required_tools.append(ToolAssignment(
+                    tool_name="image_analysis",
+                    tool_instance=image_tool,
+                    priority=1,
+                    estimated_time=3.0
+                ))
+        
+        if message_type == MessageType.DOCUMENT_CODE:
+            code_tool = self.tool_registry.get_tool("code_execution")
+            if code_tool:
+                required_tools.append(ToolAssignment(
+                    tool_name="code_execution",
+                    tool_instance=code_tool,
+                    priority=2,
+                    estimated_time=5.0
+                ))
+        
+        # Context-based tools
+        if context.text_content and any(keyword in context.text_content.lower() 
+                                       for keyword in ["search", "find", "lookup"]):
+            search_tool = self.tool_registry.get_tool("search_tool")
+            if search_tool and not any(t.tool_name == "search_tool" for t in required_tools):
+                required_tools.append(ToolAssignment(
+                    tool_name="search_tool",
+                    tool_instance=search_tool,
+                    priority=1,
+                    estimated_time=2.0
+                ))
+        
+        return required_tools
+    
+    async def _execute_single_agent(
+        self,
+        agent_instance: AgentInstance,
+        message: Message,
+        context: MessageContext,
+        tools: List[ToolAssignment]
+    ) -> AgentResult:
+        """Execute processing with a single agent"""
+        
+        start_time = time.perf_counter()
+        
+        try:
+            # Update agent status
+            agent_instance.status = AgentStatus.BUSY
+            agent_instance.current_tasks += 1
+            
+            # Prepare message for agent
+            message_text = context.text_content or "[Media message]"
+            
+            # Process message
+            response = await asyncio.wait_for(
+                agent_instance.agent.process_message(
+                    message=message_text,
+                    chat_id=f"telegram_{context.chat_id}",
+                    user_name=f"user_{context.user_id}" if context.user_id else "anonymous"
+                ),
+                timeout=self.agent_timeout_seconds
+            )
+            
+            execution_time = time.perf_counter() - start_time
+            
+            # Extract tool usage information
+            tools_used = []
+            tool_outputs = {}
+            tool_execution_times = {}
+            tool_success_rates = {}
+            
+            if hasattr(response, 'tools_used'):
+                tools_used = response.tools_used
+            
+            # Create result
+            result = AgentResult(
+                success=True,
+                agent_name=agent_instance.agent_id,
+                agent_instances=[agent_instance.agent_id],
+                primary_response=response.content if hasattr(response, 'content') else str(response),
+                tools_used=tools_used,
+                tool_outputs=tool_outputs,
+                tool_execution_times=tool_execution_times,
+                tool_success_rates=tool_success_rates,
+                agent_execution_times={agent_instance.agent_id: execution_time}
+            )
+            
+            return result
+            
+        except asyncio.TimeoutError:
+            logger.warning(f"Agent {agent_instance.agent_id} timed out")
+            agent_instance.error_count += 1
+            
+            return AgentResult(
+                success=False,
+                agent_name=agent_instance.agent_id,
+                primary_response="Request timed out. Please try again with a simpler query.",
+                errors=["Agent execution timeout"],
+                fallback_used=True
+            )
+        
+        except Exception as e:
+            logger.error(f"Agent {agent_instance.agent_id} execution failed: {str(e)}")
+            agent_instance.error_count += 1
+            
+            return AgentResult(
+                success=False,
+                agent_name=agent_instance.agent_id,
+                primary_response=f"I encountered an error: {str(e)}",
+                errors=[str(e)],
+                fallback_used=True
+            )
+        
+        finally:
+            agent_instance.status = AgentStatus.IDLE
+            agent_instance.current_tasks = max(0, agent_instance.current_tasks - 1)
+            agent_instance.last_used = time.time()
+    
+    async def _execute_parallel_agents(
+        self,
+        agent_instances: List[AgentInstance],
+        message: Message,
+        context: MessageContext,
+        tools: List[ToolAssignment]
+    ) -> AgentResult:
+        """Execute processing with multiple agents in parallel"""
+        
+        start_time = time.perf_counter()
+        
+        # Execute all agents in parallel
+        tasks = []
+        for agent_instance in agent_instances:
+            task = asyncio.create_task(
+                self._execute_single_agent(agent_instance, message, context, tools)
+            )
+            tasks.append((agent_instance.agent_id, task))
+        
+        # Wait for all to complete
+        results = []
+        for agent_id, task in tasks:
+            try:
+                result = await task
+                results.append((agent_id, result))
+            except Exception as e:
+                logger.error(f"Parallel agent {agent_id} failed: {str(e)}")
+                results.append((agent_id, AgentResult(
+                    success=False,
+                    agent_name=agent_id,
+                    primary_response=f"Agent {agent_id} failed: {str(e)}",
+                    errors=[str(e)]
+                )))
+        
+        # Combine results
+        primary_result = None
+        supplementary_responses = {}
+        all_tools_used = []
+        all_agent_names = []
+        all_errors = []
+        all_warnings = []
+        
+        for agent_id, result in results:
+            all_agent_names.append(agent_id)
+            all_tools_used.extend(result.tools_used)
+            all_errors.extend(result.errors)
+            all_warnings.extend(result.warnings)
+            
+            if result.success and primary_result is None:
+                primary_result = result
+            elif result.success:
+                supplementary_responses[agent_id] = result.primary_response
+        
+        # Create combined result
+        if primary_result:
+            combined_result = AgentResult(
+                success=True,
+                agent_name=primary_result.agent_name,
+                agent_instances=all_agent_names,
+                primary_response=primary_result.primary_response,
+                supplementary_responses=supplementary_responses,
+                tools_used=list(set(all_tools_used)),
+                errors=all_errors,
+                warnings=all_warnings,
+                total_execution_time=time.perf_counter() - start_time
+            )
+        else:
+            # All agents failed
+            combined_result = AgentResult(
+                success=False,
+                agent_name="parallel_execution",
+                agent_instances=all_agent_names,
+                primary_response="All agents failed to process the request.",
+                errors=all_errors,
+                fallback_used=True,
+                total_execution_time=time.perf_counter() - start_time
+            )
+        
+        return combined_result
+    
+    async def _execute_sequential_agents(
+        self,
+        agent_instances: List[AgentInstance],
+        message: Message,
+        context: MessageContext,
+        tools: List[ToolAssignment]
+    ) -> AgentResult:
+        """Execute processing with multiple agents in sequence"""
+        
+        start_time = time.perf_counter()
+        current_context = context
+        accumulated_response = ""
+        all_tools_used = []
+        all_agent_names = []
+        execution_times = {}
+        
+        for i, agent_instance in enumerate(agent_instances):
+            try:
+                # Execute agent with current context
+                result = await self._execute_single_agent(
+                    agent_instance, message, current_context, tools
+                )
+                
+                all_agent_names.append(agent_instance.agent_id)
+                all_tools_used.extend(result.tools_used)
+                execution_times[agent_instance.agent_id] = result.total_execution_time
+                
+                if result.success:
+                    if i == 0:
+                        accumulated_response = result.primary_response
+                    else:
+                        accumulated_response += f"\n\n{result.primary_response}"
+                    
+                    # Update context for next agent (simplified)
+                    # In a real implementation, you'd update the context with new information
+                    
+                else:
+                    # Agent failed, but continue with others
+                    logger.warning(f"Sequential agent {agent_instance.agent_id} failed: {result.errors}")
+                    
+            except Exception as e:
+                logger.error(f"Sequential agent {agent_instance.agent_id} error: {str(e)}")
+                continue
+        
+        return AgentResult(
+            success=len(accumulated_response) > 0,
+            agent_name=all_agent_names[0] if all_agent_names else "sequential_execution",
+            agent_instances=all_agent_names,
+            primary_response=accumulated_response or "Sequential processing failed",
+            tools_used=list(set(all_tools_used)),
+            agent_execution_times=execution_times,
+            total_execution_time=time.perf_counter() - start_time
+        )
+    
+    async def _execute_agent_pipeline(
+        self,
+        agent_instances: List[AgentInstance],
+        message: Message,
+        context: MessageContext,
+        tools: List[ToolAssignment]
+    ) -> AgentResult:
+        """Execute processing through an agent pipeline"""
+        
+        # For now, implement as sequential processing
+        # In a full implementation, this would include data transformation between stages
+        return await self._execute_sequential_agents(agent_instances, message, context, tools)
+    
+    async def _execute_adaptive_routing(
+        self,
+        agent_instances: List[AgentInstance],
+        message: Message,
+        context: MessageContext,
+        tools: List[ToolAssignment]
+    ) -> AgentResult:
+        """Execute with adaptive routing based on dynamic conditions"""
+        
+        # Choose strategy based on current system load and performance
+        if len(self.active_orchestrations) > 3:
+            # High load, use single agent
+            return await self._execute_single_agent(agent_instances[0], message, context, tools)
+        else:
+            # Normal load, use parallel processing if multiple agents
+            if len(agent_instances) > 1:
+                return await self._execute_parallel_agents(agent_instances, message, context, tools)
+            else:
+                return await self._execute_single_agent(agent_instances[0], message, context, tools)
+    
+    async def _calculate_overhead(
+        self,
+        orchestration_id: str,
+        total_time: float
+    ) -> float:
+        """Calculate orchestration overhead"""
+        
+        orchestration_data = self.active_orchestrations.get(orchestration_id, {})
+        
+        # Simple overhead calculation - difference between total time and agent execution time
+        # In a real implementation, this would be more sophisticated
+        return min(total_time * 0.1, 0.5)  # Max 0.5 seconds or 10% of total time
+    
+    async def _update_agent_performance(
+        self,
+        agent_instances: List[AgentInstance],
+        result: AgentResult
+    ) -> None:
+        """Update agent performance metrics"""
+        
+        for agent_instance in agent_instances:
+            agent_instance.total_tasks_completed += 1
+            agent_instance.total_processing_time += result.total_execution_time
+            
+            # Update performance score based on success and quality
+            if result.success:
+                quality_factor = result.response_quality_score
+                speed_factor = min(1.0, 5.0 / result.total_execution_time)  # Faster is better
+                
+                performance_score = (quality_factor + speed_factor) / 2
+                
+                # Moving average
+                agent_instance.performance_score = (
+                    agent_instance.performance_score * 0.9 + performance_score * 0.1
+                )
+            else:
+                # Reduce performance score for failures
+                agent_instance.performance_score *= 0.95
+    
+    async def _assess_result_quality(
+        self,
+        result: AgentResult,
+        context: MessageContext
+    ) -> None:
+        """Assess and update result quality scores"""
+        
+        # Simple quality assessment - in production this would be more sophisticated
+        
+        # Response completeness
+        if len(result.primary_response) < 50:
+            result.completeness_score = 0.3
+        elif len(result.primary_response) < 200:
+            result.completeness_score = 0.7
+        else:
+            result.completeness_score = 1.0
+        
+        # Tool usage appropriateness
+        if result.tools_used:
+            result.response_quality_score = min(1.0, result.response_quality_score + 0.1)
+        
+        # Error handling
+        if result.errors:
+            result.response_quality_score = max(0.2, result.response_quality_score - 0.2)
+    
+    def _record_orchestration(
+        self,
+        orchestration_id: str,
+        result: AgentResult,
+        agents_used: List[AgentInstance]
+    ) -> None:
+        """Record orchestration for performance analysis"""
+        
+        record = {
+            "orchestration_id": orchestration_id,
+            "timestamp": time.time(),
+            "success": result.success,
+            "agents_used": [a.agent_id for a in agents_used],
+            "tools_used": result.tools_used,
+            "execution_time": result.total_execution_time,
+            "quality_score": result.response_quality_score,
+            "strategy": result.orchestration_strategy.value
+        }
+        
+        self.orchestration_history.append(record)
+        
+        # Keep only recent history
+        if len(self.orchestration_history) > 1000:
+            self.orchestration_history = self.orchestration_history[-500:]
+    
+    def _get_message_hash(self, message_type: MessageType, content: str) -> str:
+        """Generate hash for message caching"""
+        import hashlib
+        hash_input = f"{message_type.value}:{content[:100]}"
+        return hashlib.md5(hash_input.encode()).hexdigest()[:8]
+    
+    async def _initialize_default_agents(self) -> None:
+        """Initialize default agent instances"""
+        try:
+            # Create general purpose agent
+            await self._get_or_create_agent("general_agent", "general")
+            
+            # Create specialized agents
+            await self._get_or_create_agent("technical_specialist", "technical")
+            
+            logger.info("Default agents initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize default agents: {str(e)}")
+    
+    async def get_status(self) -> Dict[str, Any]:
+        """Get orchestrator status and statistics"""
+        
+        active_agents = sum(1 for agent in self.agent_instances.values() 
+                           if agent.status == AgentStatus.BUSY)
+        
+        avg_performance = (
+            sum(agent.performance_score for agent in self.agent_instances.values()) /
+            len(self.agent_instances)
+            if self.agent_instances else 0.0
+        )
+        
+        recent_success_rate = 0.0
+        if self.orchestration_history:
+            recent_orchestrations = self.orchestration_history[-50:]  # Last 50
+            successful = sum(1 for record in recent_orchestrations if record["success"])
+            recent_success_rate = successful / len(recent_orchestrations)
+        
+        return {
+            "total_agents": len(self.agent_instances),
+            "active_agents": active_agents,
+            "active_orchestrations": len(self.active_orchestrations),
+            "total_orchestrations": self.orchestration_count,
+            "recent_success_rate": recent_success_rate,
+            "avg_agent_performance": avg_performance,
+            "routing_cache_size": len(self.routing_cache),
+            "specializations": dict(self.agent_specializations),
+            "performance_optimization": self.enable_performance_optimization,
+            "adaptive_routing": self.enable_adaptive_routing
+        }
+    
+    async def shutdown(self) -> None:
+        """Gracefully shutdown the agent orchestrator"""
+        logger.info("Shutting down agent orchestrator...")
+        
+        # Wait for active orchestrations to complete
+        while self.active_orchestrations:
+            logger.info(f"Waiting for {len(self.active_orchestrations)} active orchestrations...")
+            await asyncio.sleep(0.5)
+        
+        # Shutdown all agents
+        for agent_instance in self.agent_instances.values():
+            try:
+                if hasattr(agent_instance.agent, 'shutdown'):
+                    await agent_instance.agent.shutdown()
+            except Exception as e:
+                logger.warning(f"Error shutting down agent {agent_instance.agent_id}: {e}")
+        
+        logger.info("Agent orchestrator shutdown complete")

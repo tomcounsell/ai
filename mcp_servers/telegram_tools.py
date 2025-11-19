@@ -1,307 +1,1007 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 """
 Telegram Tools MCP Server
 
-Provides Telegram conversation history search and context tools for Claude Code integration.
-This server follows the GOLD STANDARD wrapper pattern by importing functions from 
-standalone tools and adding MCP-specific concerns (context injection, validation).
-
-ARCHITECTURE: MCP Wrapper → Standalone Implementation
-- search_conversation_history → tools/telegram_history_tool.py
-- get_conversation_context → tools/telegram_history_tool.py
-- get_recent_history → Unique MCP implementation (UNIQUE)
-- list_telegram_dialogs → Unique MCP implementation (UNIQUE)
+This module implements MCP server for Telegram integration:
+- Message sending and receiving
+- Chat management and reactions
+- Message history and search
+- Presence and status management
+- Bot functionality
 """
 
-from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+import asyncio
+import logging
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional, Union
+import json
 
-# Import standalone tool implementations following GOLD STANDARD pattern
-from tools.telegram_history_tool import (
-    search_telegram_history,
-    get_telegram_context_summary
+from telethon import TelegramClient, events
+from telethon.tl.types import (
+    Message, User, Chat, Channel, 
+    MessageMediaPhoto, MessageMediaDocument,
+    PeerUser, PeerChat, PeerChannel
 )
+from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError
+from pydantic import BaseModel, Field, validator
 
-# Import context manager for MCP context injection
-import os
-import sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from context_manager import inject_context_for_tool
-
-# Load environment variables
-load_dotenv()
-
-# Initialize MCP server
-mcp = FastMCP("Telegram Tools")
+from .base import MCPServer, MCPToolCapability, MCPRequest, MCPError
+from .context_manager import MCPContextManager, SecurityLevel
 
 
-@mcp.tool()
-def search_conversation_history(query: str, chat_id: str = "", max_results: int = 5) -> str:
-    """Search through Telegram message history for relevant context.
+class TelegramMessage(BaseModel):
+    """Telegram message structure."""
     
-    Use this tool when you need to find specific information from previous conversations
-    that might not be in the immediate recent context. Searches through message content
-    for keywords and returns relevant historical messages.
+    id: int = Field(..., description="Message ID")
+    chat_id: int = Field(..., description="Chat ID")
+    from_id: Optional[int] = Field(None, description="Sender user ID")
+    text: Optional[str] = Field(None, description="Message text")
+    date: datetime = Field(..., description="Message timestamp")
+    
+    # Message metadata
+    reply_to_msg_id: Optional[int] = Field(None, description="Reply to message ID")
+    forward_from_id: Optional[int] = Field(None, description="Forwarded from user ID")
+    edit_date: Optional[datetime] = Field(None, description="Edit timestamp")
+    
+    # Media information
+    has_media: bool = Field(default=False, description="Whether message has media")
+    media_type: Optional[str] = Field(None, description="Media type (photo, document, etc.)")
+    
+    # Message state
+    is_outgoing: bool = Field(default=False, description="Whether message is outgoing")
+    is_read: bool = Field(default=False, description="Whether message is read")
+    is_pinned: bool = Field(default=False, description="Whether message is pinned")
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
-    Args:
-        query: Search terms or keywords to find in message history
-        chat_id: Chat ID to search (extracted from CONTEXT_DATA if available)
-        max_results: Maximum number of relevant messages to return
 
-    Returns:
-        Formatted string of relevant historical messages or "No matches found"
+class TelegramChat(BaseModel):
+    """Telegram chat structure."""
+    
+    id: int = Field(..., description="Chat ID")
+    title: Optional[str] = Field(None, description="Chat title")
+    username: Optional[str] = Field(None, description="Chat username")
+    type: str = Field(..., description="Chat type (user, chat, channel)")
+    
+    # Chat metadata
+    participants_count: Optional[int] = Field(None, description="Number of participants")
+    is_broadcast: bool = Field(default=False, description="Whether chat is a broadcast channel")
+    is_group: bool = Field(default=False, description="Whether chat is a group")
+    is_private: bool = Field(default=False, description="Whether chat is private")
+    
+    # Access information
+    can_send_messages: bool = Field(default=True, description="Can send messages to chat")
+    is_admin: bool = Field(default=False, description="Whether user is admin")
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+
+class TelegramUser(BaseModel):
+    """Telegram user structure."""
+    
+    id: int = Field(..., description="User ID")
+    username: Optional[str] = Field(None, description="Username")
+    first_name: Optional[str] = Field(None, description="First name")
+    last_name: Optional[str] = Field(None, description="Last name")
+    phone: Optional[str] = Field(None, description="Phone number")
+    
+    # Status information
+    is_self: bool = Field(default=False, description="Whether user is current user")
+    is_contact: bool = Field(default=False, description="Whether user is in contacts")
+    is_bot: bool = Field(default=False, description="Whether user is a bot")
+    
+    # Online status
+    last_seen: Optional[datetime] = Field(None, description="Last seen timestamp")
+    is_online: bool = Field(default=False, description="Whether user is currently online")
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+
+class TelegramReaction(BaseModel):
+    """Telegram message reaction structure."""
+    
+    message_id: int = Field(..., description="Message ID")
+    chat_id: int = Field(..., description="Chat ID")
+    user_id: int = Field(..., description="User who reacted")
+    emoji: str = Field(..., description="Reaction emoji")
+    added: bool = Field(..., description="Whether reaction was added (True) or removed (False)")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
+
+
+class TelegramToolsServer(MCPServer):
     """
-    # Validate inputs (MCP-specific validation)
-    if not query or not query.strip():
-        return "❌ Search query cannot be empty."
+    MCP Server implementation for Telegram integration.
     
-    if len(query) > 200:
-        return "❌ Search query too long (max 200 characters)."
-    
-    # Inject context if not provided
-    chat_id, _ = inject_context_for_tool(chat_id, "")
-    
-    if not chat_id:
-        return "❌ No chat ID available for history search. Please ensure context is set or provide chat_id parameter."
-    
-    if max_results < 1 or max_results > 50:
-        return "❌ max_results must be between 1 and 50."
-
-    try:
-        # Import chat history here to avoid import errors if not available
-        from integrations.telegram.chat_history import ChatHistoryManager
-        
-        # Initialize chat history manager
-        chat_history_obj = ChatHistoryManager()
-        
-        if not chat_history_obj:
-            return "❌ Chat history system not available"
-        
-        # Convert chat_id to int if it's a string (MCP-specific handling)
-        try:
-            chat_id_int = int(chat_id)
-        except ValueError:
-            return f"❌ Invalid chat ID format: {chat_id}"
-        
-        # Call standalone implementation following GOLD STANDARD pattern
-        result = search_telegram_history(query, chat_history_obj, chat_id_int, max_results)
-        
-        # Add MCP-specific formatting for enhanced user experience
-        if result.startswith("No messages found"):
-            return f"📂 {result} for chat {chat_id}"
-        elif result.startswith("Found"):
-            return f"📂 **{result.replace('Found', 'Found in chat ' + chat_id + ':')}**"
-        else:
-            return f"📂 **Search Results for '{query}' in chat {chat_id}:**\n\n{result}"
-        
-    except ImportError:
-        return "❌ Telegram chat history system not available - missing integrations"
-    except Exception as e:
-        return f"❌ Error searching message history: {str(e)}"
-
-
-@mcp.tool()
-def get_conversation_context(chat_id: str = "", hours_back: int = 24) -> str:
-    """Get a summary of recent conversation context for understanding the flow.
-    
-    Use this when you need to understand the broader conversation context beyond just
-    the last few messages. Provides extended context from recent hours to help with
-    conversation continuity and reference understanding.
-
-    Args:
-        chat_id: Chat ID to get context for (extracted from CONTEXT_DATA if available)
-        hours_back: How many hours back to summarize
-
-    Returns:
-        Formatted summary of recent conversation or "No recent activity"
+    Provides stateless Telegram functionality with context injection including:
+    - Message sending and receiving
+    - Chat management and search
+    - Message history retrieval
+    - Presence and status management
+    - Bot operations
     """
-    # MCP-specific validation
-    # Inject context if not provided
-    chat_id, _ = inject_context_for_tool(chat_id, "")
     
-    if not chat_id:
-        return "❌ No chat ID available for context retrieval. Please ensure context is set or provide chat_id parameter."
-
-    try:
-        # Import chat history here to avoid import errors if not available
-        from integrations.telegram.chat_history import ChatHistoryManager
+    def __init__(
+        self,
+        name: str = "telegram_tools",
+        version: str = "1.0.0",
+        description: str = "Telegram integration MCP server",
+        api_id: str = None,
+        api_hash: str = None,
+        phone: str = None,
+        bot_token: str = None,
+        session_name: str = "mcp_telegram",
+        **kwargs
+    ):
+        super().__init__(name, version, description, **kwargs)
         
-        # Initialize chat history manager
-        chat_history_obj = ChatHistoryManager()
+        # Telegram API configuration
+        self.api_id = api_id
+        self.api_hash = api_hash
+        self.phone = phone
+        self.bot_token = bot_token
+        self.session_name = session_name
         
-        if not chat_history_obj:
-            return "❌ Chat history system not available"
+        # Telegram client
+        self.client: Optional[TelegramClient] = None
+        self.is_authenticated = False
         
-        # Convert chat_id to int if it's a string (MCP-specific handling)
+        # Message handlers and state
+        self._message_handlers: List[callable] = []
+        self._reaction_handlers: List[callable] = []
+        
+        # In-memory stores for caching
+        self._cached_chats: Dict[int, TelegramChat] = {}
+        self._cached_users: Dict[int, TelegramUser] = {}
+        self._message_cache: Dict[int, List[TelegramMessage]] = {}
+        
+        self.logger.info("Telegram Tools Server initialized")
+    
+    async def initialize(self) -> None:
+        """Initialize the Telegram tools server."""
         try:
-            chat_id_int = int(chat_id)
-        except ValueError:
-            return f"❌ Invalid chat ID format: {chat_id}"
-        
-        # Call standalone implementation following GOLD STANDARD pattern
-        result = get_telegram_context_summary(chat_history_obj, chat_id_int, hours_back)
-        
-        # Add MCP-specific formatting for enhanced user experience
-        if result.startswith("No conversation activity"):
-            return f"📭 {result} for chat {chat_id}"
-        elif result.startswith("Conversation summary"):
-            # Enhanced formatting with chat context
-            enhanced_result = f"💬 **Conversation Context Summary**\n"
-            enhanced_result += f"📅 Last {hours_back} hours | 🔗 Chat {chat_id}\n\n"
-            enhanced_result += result.replace("Conversation summary", "Summary")
-            return enhanced_result
-        else:
-            return f"💬 **Context for chat {chat_id}:**\n\n{result}"
-        
-    except ImportError:
-        return "❌ Telegram chat history system not available - missing integrations"
-    except Exception as e:
-        return f"❌ Error getting conversation summary: {str(e)}"
-
-
-@mcp.tool()
-def get_recent_history(chat_id: str = "", max_messages: int = 10) -> str:
-    """Get the most recent messages from a conversation for immediate context.
-    
-    Use this tool to quickly get recent conversation history when you need to understand
-    what was discussed recently but it's not in the immediate context window.
-
-    Args:
-        chat_id: Chat ID to get history for (extracted from CONTEXT_DATA if available)
-        max_messages: Maximum number of recent messages to retrieve
-
-    Returns:
-        Formatted list of recent messages or "No recent messages"
-    """
-    # Inject context if not provided
-    chat_id, _ = inject_context_for_tool(chat_id, "")
-    
-    if not chat_id:
-        return "❌ No chat ID available for recent history. Please ensure context is set or provide chat_id parameter."
-
-    try:
-        # Import chat history here to avoid import errors if not available
-        from integrations.telegram.chat_history import ChatHistoryManager
-        
-        # Initialize chat history manager
-        chat_history_obj = ChatHistoryManager()
-        
-        if not chat_history_obj:
-            return "❌ Chat history system not available"
-        
-        # Convert chat_id to int if it's a string
-        try:
-            chat_id_int = int(chat_id)
-        except ValueError:
-            return f"❌ Invalid chat ID format: {chat_id}"
-        
-        # Get recent messages
-        recent_messages = chat_history_obj.get_context(
-            chat_id=chat_id_int,
-            max_context_messages=max_messages,
-            max_age_hours=24,  # Last 24 hours
-            always_include_last=max_messages
-        )
-        
-        if not recent_messages:
-            return f"📭 No recent messages found for chat {chat_id}"
-        
-        # Format recent messages
-        result = f"📱 **Recent Messages** (Chat {chat_id}):\n\n"
-        
-        for i, msg in enumerate(recent_messages, 1):
-            timestamp = msg.get('timestamp', 'Unknown time')
-            role = msg.get('role', 'unknown')
-            content = msg.get('content', '').strip()
+            if not self.api_id or not self.api_hash:
+                raise MCPError(
+                    "Telegram API ID and API Hash are required",
+                    error_code="TELEGRAM_CONFIG_MISSING",
+                    recoverable=False
+                )
             
-            # Show full content for recent messages
-            result += f"{i}. **{role}** ({timestamp}):\n   {content}\n\n"
-            
-        return result.strip()
-        
-    except ImportError:
-        return "❌ Telegram chat history system not available - missing integrations"
-    except Exception as e:
-        return f"❌ Error getting recent history: {str(e)}"
-
-
-@mcp.tool()
-def list_telegram_dialogs() -> str:
-    """List all active Telegram groups and DMs with their details.
-    
-    Use this tool to get an overview of all available Telegram conversations,
-    including groups, channels, and direct messages. Useful for understanding
-    which chats are available and their basic information like chat IDs, titles,
-    member counts, and unread message counts.
-
-    Returns:
-        Formatted string listing all groups and DMs with their details,
-        or error message if operation fails
-    """
-    try:
-        # Import required modules
-        import asyncio
-        from integrations.telegram.client import TelegramClient
-        from integrations.telegram.utils import format_dialogs_list, list_telegram_dialogs_safe
-        
-        async def get_dialogs():
-            """Async helper to get dialogs."""
-            # Create a temporary client instance for listing dialogs
-            # Note: This assumes the client can be initialized without starting
-            client = TelegramClient()
-            
-            # Check if there's an existing client session file
-            import os
-            session_file = os.path.join(client.workdir, "ai_project_bot.session")
-            if not os.path.exists(session_file):
-                return None, "❌ No active Telegram session found. Please authenticate first using scripts/telegram_login.sh"
-            
-            # Initialize the client
-            if not await client.initialize():
-                return None, "❌ Failed to initialize Telegram client"
-            
-            try:
-                # Get dialogs safely
-                dialogs_data, error = await list_telegram_dialogs_safe(client)
-                return dialogs_data, error
-            finally:
-                # Always stop the client after getting dialogs
-                await client.stop()
-        
-        # Run the async function
-        try:
-            dialogs_data, error = asyncio.run(get_dialogs())
-        except RuntimeError as e:
-            # If we're already in an event loop, we can't use asyncio.run()
-            if "cannot be called from a running event loop" in str(e):
-                return "❌ Cannot retrieve dialogs from within an active event loop. Please run from a synchronous context or ensure the Telegram client is running independently."
+            # Initialize Telegram client
+            if self.bot_token:
+                # Bot mode
+                self.client = TelegramClient(self.session_name, self.api_id, self.api_hash)
+                await self.client.start(bot_token=self.bot_token)
+                self.is_authenticated = True
+                self.logger.info("Connected to Telegram as bot")
+            elif self.phone:
+                # User mode
+                self.client = TelegramClient(self.session_name, self.api_id, self.api_hash)
+                await self.client.start(phone=self.phone)
+                self.is_authenticated = True
+                self.logger.info("Connected to Telegram as user")
             else:
-                # For other RuntimeError cases, try to get current loop
+                self.logger.warning("No bot token or phone provided - some features may be limited")
+            
+            # Register event handlers
+            if self.client and self.is_authenticated:
+                await self._register_event_handlers()
+            
+            # Register tool capabilities
+            await self._register_message_tools()
+            await self._register_chat_tools()
+            await self._register_user_tools()
+            await self._register_history_tools()
+            await self._register_presence_tools()
+            
+            self.logger.info("Telegram Tools Server initialized successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Telegram Tools Server: {str(e)}")
+            raise MCPError(
+                f"Telegram server initialization failed: {str(e)}",
+                error_code="TELEGRAM_INIT_ERROR",
+                details={"error": str(e)},
+                recoverable=False
+            )
+    
+    async def shutdown(self) -> None:
+        """Shutdown the Telegram tools server."""
+        try:
+            if self.client:
+                await self.client.disconnect()
+            self.logger.info("Telegram Tools Server shut down successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error during Telegram Tools Server shutdown: {str(e)}")
+    
+    async def _register_event_handlers(self) -> None:
+        """Register Telegram event handlers."""
+        if not self.client:
+            return
+        
+        @self.client.on(events.NewMessage)
+        async def handle_new_message(event):
+            """Handle new messages."""
+            try:
+                message = await self._convert_message(event.message)
+                self.logger.debug(f"Received new message: {message.id}")
+                
+                # Cache message
+                chat_id = message.chat_id
+                if chat_id not in self._message_cache:
+                    self._message_cache[chat_id] = []
+                self._message_cache[chat_id].append(message)
+                
+                # Limit cache size
+                if len(self._message_cache[chat_id]) > 1000:
+                    self._message_cache[chat_id] = self._message_cache[chat_id][-500:]
+                
+                # Call registered handlers
+                for handler in self._message_handlers:
+                    try:
+                        await handler(message)
+                    except Exception as e:
+                        self.logger.error(f"Message handler error: {str(e)}")
+                        
+            except Exception as e:
+                self.logger.error(f"Error handling new message: {str(e)}")
+        
+        self.logger.info("Registered Telegram event handlers")
+    
+    # Message Tools
+    
+    async def _register_message_tools(self) -> None:
+        """Register message-related tool capabilities."""
+        
+        # Send message
+        send_message_capability = MCPToolCapability(
+            name="telegram_send_message",
+            description="Send a message to a Telegram chat",
+            parameters={
+                "chat_id": {"type": "string", "required": True, "description": "Chat ID or username"},
+                "text": {"type": "string", "required": True, "description": "Message text"},
+                "reply_to": {"type": "integer", "required": False, "description": "Message ID to reply to"},
+                "parse_mode": {"type": "string", "required": False, "enum": ["markdown", "html"], "description": "Text parse mode"}
+            },
+            returns={"type": "object", "description": "Sent message"},
+            tags=["telegram", "messages", "send"]
+        )
+        self.register_tool(send_message_capability, self._handle_send_message)
+        
+        # Edit message
+        edit_message_capability = MCPToolCapability(
+            name="telegram_edit_message",
+            description="Edit a Telegram message",
+            parameters={
+                "chat_id": {"type": "string", "required": True, "description": "Chat ID or username"},
+                "message_id": {"type": "integer", "required": True, "description": "Message ID to edit"},
+                "text": {"type": "string", "required": True, "description": "New message text"}
+            },
+            returns={"type": "object", "description": "Edited message"},
+            tags=["telegram", "messages", "edit"]
+        )
+        self.register_tool(edit_message_capability, self._handle_edit_message)
+        
+        # Delete message
+        delete_message_capability = MCPToolCapability(
+            name="telegram_delete_message",
+            description="Delete a Telegram message",
+            parameters={
+                "chat_id": {"type": "string", "required": True, "description": "Chat ID or username"},
+                "message_id": {"type": "integer", "required": True, "description": "Message ID to delete"}
+            },
+            returns={"type": "object", "properties": {"success": "boolean", "message_id": "integer"}},
+            tags=["telegram", "messages", "delete"]
+        )
+        self.register_tool(delete_message_capability, self._handle_delete_message)
+        
+        # Forward message
+        forward_message_capability = MCPToolCapability(
+            name="telegram_forward_message",
+            description="Forward a Telegram message to another chat",
+            parameters={
+                "from_chat_id": {"type": "string", "required": True, "description": "Source chat ID or username"},
+                "to_chat_id": {"type": "string", "required": True, "description": "Destination chat ID or username"},
+                "message_id": {"type": "integer", "required": True, "description": "Message ID to forward"}
+            },
+            returns={"type": "object", "description": "Forwarded message"},
+            tags=["telegram", "messages", "forward"]
+        )
+        self.register_tool(forward_message_capability, self._handle_forward_message)
+    
+    async def _handle_send_message(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle send message requests."""
+        if not self.client or not self.is_authenticated:
+            raise MCPError(
+                "Telegram client not authenticated",
+                error_code="TELEGRAM_NOT_AUTHENTICATED",
+                request_id=request.id
+            )
+        
+        chat_id = request.params.get("chat_id")
+        text = request.params.get("text")
+        reply_to = request.params.get("reply_to")
+        parse_mode = request.params.get("parse_mode")
+        
+        if not chat_id or not text:
+            raise MCPError(
+                "Chat ID and text are required",
+                error_code="MISSING_MESSAGE_PARAMS",
+                request_id=request.id
+            )
+        
+        try:
+            # Convert chat_id to proper format
+            entity = await self._resolve_entity(chat_id)
+            
+            # Send message
+            message = await self.client.send_message(
+                entity,
+                text,
+                reply_to=reply_to,
+                parse_mode=parse_mode
+            )
+            
+            # Convert to our format
+            telegram_message = await self._convert_message(message)
+            
+            self.logger.info(f"Sent message to {chat_id}: {message.id}")
+            
+            return telegram_message.dict()
+            
+        except Exception as e:
+            self.logger.error(f"Failed to send message: {str(e)}")
+            raise MCPError(
+                f"Failed to send message: {str(e)}",
+                error_code="TELEGRAM_SEND_MESSAGE_ERROR",
+                details={"chat_id": chat_id, "error": str(e)},
+                request_id=request.id
+            )
+    
+    async def _handle_edit_message(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle edit message requests."""
+        if not self.client or not self.is_authenticated:
+            raise MCPError(
+                "Telegram client not authenticated",
+                error_code="TELEGRAM_NOT_AUTHENTICATED",
+                request_id=request.id
+            )
+        
+        chat_id = request.params.get("chat_id")
+        message_id = request.params.get("message_id")
+        text = request.params.get("text")
+        
+        if not chat_id or not message_id or not text:
+            raise MCPError(
+                "Chat ID, message ID, and text are required",
+                error_code="MISSING_EDIT_PARAMS",
+                request_id=request.id
+            )
+        
+        try:
+            # Convert chat_id to proper format
+            entity = await self._resolve_entity(chat_id)
+            
+            # Edit message
+            message = await self.client.edit_message(entity, message_id, text)
+            
+            # Convert to our format
+            telegram_message = await self._convert_message(message)
+            
+            self.logger.info(f"Edited message {message_id} in {chat_id}")
+            
+            return telegram_message.dict()
+            
+        except Exception as e:
+            self.logger.error(f"Failed to edit message: {str(e)}")
+            raise MCPError(
+                f"Failed to edit message: {str(e)}",
+                error_code="TELEGRAM_EDIT_MESSAGE_ERROR",
+                details={"chat_id": chat_id, "message_id": message_id, "error": str(e)},
+                request_id=request.id
+            )
+    
+    async def _handle_delete_message(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle delete message requests."""
+        if not self.client or not self.is_authenticated:
+            raise MCPError(
+                "Telegram client not authenticated",
+                error_code="TELEGRAM_NOT_AUTHENTICATED",
+                request_id=request.id
+            )
+        
+        chat_id = request.params.get("chat_id")
+        message_id = request.params.get("message_id")
+        
+        if not chat_id or not message_id:
+            raise MCPError(
+                "Chat ID and message ID are required",
+                error_code="MISSING_DELETE_PARAMS",
+                request_id=request.id
+            )
+        
+        try:
+            # Convert chat_id to proper format
+            entity = await self._resolve_entity(chat_id)
+            
+            # Delete message
+            await self.client.delete_messages(entity, message_id)
+            
+            self.logger.info(f"Deleted message {message_id} from {chat_id}")
+            
+            return {
+                "success": True,
+                "message_id": message_id
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Failed to delete message: {str(e)}")
+            raise MCPError(
+                f"Failed to delete message: {str(e)}",
+                error_code="TELEGRAM_DELETE_MESSAGE_ERROR",
+                details={"chat_id": chat_id, "message_id": message_id, "error": str(e)},
+                request_id=request.id
+            )
+    
+    async def _handle_forward_message(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle forward message requests."""
+        if not self.client or not self.is_authenticated:
+            raise MCPError(
+                "Telegram client not authenticated",
+                error_code="TELEGRAM_NOT_AUTHENTICATED",
+                request_id=request.id
+            )
+        
+        from_chat_id = request.params.get("from_chat_id")
+        to_chat_id = request.params.get("to_chat_id")
+        message_id = request.params.get("message_id")
+        
+        if not from_chat_id or not to_chat_id or not message_id:
+            raise MCPError(
+                "From chat ID, to chat ID, and message ID are required",
+                error_code="MISSING_FORWARD_PARAMS",
+                request_id=request.id
+            )
+        
+        try:
+            # Convert chat_ids to proper format
+            from_entity = await self._resolve_entity(from_chat_id)
+            to_entity = await self._resolve_entity(to_chat_id)
+            
+            # Forward message
+            messages = await self.client.forward_messages(to_entity, message_id, from_entity)
+            
+            if messages:
+                # Convert to our format
+                telegram_message = await self._convert_message(messages[0])
+                
+                self.logger.info(f"Forwarded message {message_id} from {from_chat_id} to {to_chat_id}")
+                
+                return telegram_message.dict()
+            else:
+                raise MCPError(
+                    "Failed to forward message",
+                    error_code="TELEGRAM_FORWARD_FAILED",
+                    request_id=request.id
+                )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to forward message: {str(e)}")
+            raise MCPError(
+                f"Failed to forward message: {str(e)}",
+                error_code="TELEGRAM_FORWARD_MESSAGE_ERROR",
+                details={
+                    "from_chat_id": from_chat_id,
+                    "to_chat_id": to_chat_id,
+                    "message_id": message_id,
+                    "error": str(e)
+                },
+                request_id=request.id
+            )
+    
+    # Chat Tools
+    
+    async def _register_chat_tools(self) -> None:
+        """Register chat-related tool capabilities."""
+        
+        # List chats
+        list_chats_capability = MCPToolCapability(
+            name="telegram_list_chats",
+            description="List Telegram chats/dialogs",
+            parameters={
+                "limit": {"type": "integer", "required": False, "default": 50, "description": "Maximum number of chats"},
+                "chat_type": {"type": "string", "required": False, "enum": ["all", "users", "groups", "channels"], "description": "Filter by chat type"}
+            },
+            returns={"type": "array", "items": "TelegramChat"},
+            tags=["telegram", "chats", "list"]
+        )
+        self.register_tool(list_chats_capability, self._handle_list_chats)
+        
+        # Get chat info
+        get_chat_capability = MCPToolCapability(
+            name="telegram_get_chat",
+            description="Get detailed information about a Telegram chat",
+            parameters={
+                "chat_id": {"type": "string", "required": True, "description": "Chat ID or username"}
+            },
+            returns={"type": "object", "description": "Chat information"},
+            tags=["telegram", "chats", "info"]
+        )
+        self.register_tool(get_chat_capability, self._handle_get_chat)
+    
+    async def _handle_list_chats(self, request: MCPRequest, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle list chats requests."""
+        if not self.client or not self.is_authenticated:
+            raise MCPError(
+                "Telegram client not authenticated",
+                error_code="TELEGRAM_NOT_AUTHENTICATED",
+                request_id=request.id
+            )
+        
+        limit = request.params.get("limit", 50)
+        chat_type = request.params.get("chat_type", "all")
+        
+        try:
+            chats = []
+            async for dialog in self.client.iter_dialogs(limit=limit):
                 try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        return "❌ Cannot retrieve dialogs: Event loop is already running. Please use the Telegram client directly."
-                    else:
-                        dialogs_data, error = loop.run_until_complete(get_dialogs())
-                except Exception as loop_error:
-                    return f"❌ Event loop error: {str(loop_error)}"
+                    # Filter by chat type
+                    if chat_type != "all":
+                        if chat_type == "users" and not dialog.is_user:
+                            continue
+                        elif chat_type == "groups" and not dialog.is_group:
+                            continue
+                        elif chat_type == "channels" and not dialog.is_channel:
+                            continue
+                    
+                    chat = await self._convert_chat(dialog)
+                    chats.append(chat)
+                    
+                    # Cache chat
+                    self._cached_chats[chat.id] = chat
+                    
+                except Exception as e:
+                    self.logger.warning(f"Error converting dialog: {str(e)}")
+                    continue
+            
+            self.logger.info(f"Listed {len(chats)} Telegram chats")
+            
+            return [chat.dict() for chat in chats]
+            
+        except Exception as e:
+            self.logger.error(f"Failed to list chats: {str(e)}")
+            raise MCPError(
+                f"Failed to list chats: {str(e)}",
+                error_code="TELEGRAM_LIST_CHATS_ERROR",
+                details={"error": str(e)},
+                request_id=request.id
+            )
+    
+    async def _handle_get_chat(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle get chat requests."""
+        if not self.client or not self.is_authenticated:
+            raise MCPError(
+                "Telegram client not authenticated",
+                error_code="TELEGRAM_NOT_AUTHENTICATED",
+                request_id=request.id
+            )
         
-        if error:
-            return error
+        chat_id = request.params.get("chat_id")
         
-        if not dialogs_data:
-            return "❌ No dialogs data received"
+        if not chat_id:
+            raise MCPError(
+                "Chat ID is required",
+                error_code="MISSING_CHAT_ID",
+                request_id=request.id
+            )
         
-        # Format and return the results
-        formatted_result = format_dialogs_list(dialogs_data)
-        return formatted_result
+        try:
+            # Check cache first
+            try:
+                chat_id_int = int(chat_id)
+                if chat_id_int in self._cached_chats:
+                    return self._cached_chats[chat_id_int].dict()
+            except ValueError:
+                pass  # Not an integer, will resolve by username
+            
+            # Get chat entity
+            entity = await self._resolve_entity(chat_id)
+            
+            # Get full info
+            if hasattr(entity, 'id'):
+                # Create dialog-like object for conversion
+                class DialogLike:
+                    def __init__(self, entity):
+                        self.entity = entity
+                        self.id = entity.id
+                        self.title = getattr(entity, 'title', None)
+                        self.username = getattr(entity, 'username', None)
+                    
+                    @property
+                    def is_user(self):
+                        return isinstance(self.entity, User)
+                    
+                    @property
+                    def is_group(self):
+                        return isinstance(self.entity, Chat)
+                    
+                    @property
+                    def is_channel(self):
+                        return isinstance(self.entity, Channel)
+                
+                dialog_like = DialogLike(entity)
+                chat = await self._convert_chat(dialog_like)
+                
+                # Cache chat
+                self._cached_chats[chat.id] = chat
+                
+                self.logger.info(f"Retrieved Telegram chat: {chat_id}")
+                
+                return chat.dict()
+            else:
+                raise MCPError(
+                    f"Invalid chat entity: {chat_id}",
+                    error_code="INVALID_CHAT_ENTITY",
+                    request_id=request.id
+                )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get chat: {str(e)}")
+            raise MCPError(
+                f"Failed to get chat: {str(e)}",
+                error_code="TELEGRAM_GET_CHAT_ERROR",
+                details={"chat_id": chat_id, "error": str(e)},
+                request_id=request.id
+            )
+    
+    # Message History Tools
+    
+    async def _register_history_tools(self) -> None:
+        """Register message history tool capabilities."""
         
-    except ImportError as e:
-        return f"❌ Telegram integration not available: Missing required modules ({e})"
-    except Exception as e:
-        return f"❌ Error listing Telegram dialogs: {str(e)}"
+        # Get message history
+        get_history_capability = MCPToolCapability(
+            name="telegram_get_message_history",
+            description="Get message history from a Telegram chat",
+            parameters={
+                "chat_id": {"type": "string", "required": True, "description": "Chat ID or username"},
+                "limit": {"type": "integer", "required": False, "default": 50, "description": "Maximum number of messages"},
+                "offset_id": {"type": "integer", "required": False, "description": "Offset message ID for pagination"},
+                "search": {"type": "string", "required": False, "description": "Search query for messages"}
+            },
+            returns={"type": "array", "items": "TelegramMessage"},
+            tags=["telegram", "messages", "history"]
+        )
+        self.register_tool(get_history_capability, self._handle_get_message_history)
+    
+    async def _handle_get_message_history(self, request: MCPRequest, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle get message history requests."""
+        if not self.client or not self.is_authenticated:
+            raise MCPError(
+                "Telegram client not authenticated",
+                error_code="TELEGRAM_NOT_AUTHENTICATED",
+                request_id=request.id
+            )
+        
+        chat_id = request.params.get("chat_id")
+        limit = request.params.get("limit", 50)
+        offset_id = request.params.get("offset_id")
+        search = request.params.get("search")
+        
+        if not chat_id:
+            raise MCPError(
+                "Chat ID is required",
+                error_code="MISSING_CHAT_ID",
+                request_id=request.id
+            )
+        
+        try:
+            # Convert chat_id to proper format
+            entity = await self._resolve_entity(chat_id)
+            
+            messages = []
+            
+            if search:
+                # Search messages
+                async for message in self.client.iter_messages(
+                    entity,
+                    limit=limit,
+                    search=search,
+                    offset_id=offset_id
+                ):
+                    telegram_message = await self._convert_message(message)
+                    messages.append(telegram_message)
+            else:
+                # Get message history
+                async for message in self.client.iter_messages(
+                    entity,
+                    limit=limit,
+                    offset_id=offset_id
+                ):
+                    telegram_message = await self._convert_message(message)
+                    messages.append(telegram_message)
+            
+            self.logger.info(f"Retrieved {len(messages)} messages from {chat_id}")
+            
+            return [msg.dict() for msg in messages]
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get message history: {str(e)}")
+            raise MCPError(
+                f"Failed to get message history: {str(e)}",
+                error_code="TELEGRAM_GET_HISTORY_ERROR",
+                details={"chat_id": chat_id, "error": str(e)},
+                request_id=request.id
+            )
+    
+    # User and Presence Tools
+    
+    async def _register_user_tools(self) -> None:
+        """Register user-related tool capabilities."""
+        
+        # Get user info
+        get_user_capability = MCPToolCapability(
+            name="telegram_get_user",
+            description="Get information about a Telegram user",
+            parameters={
+                "user_id": {"type": "string", "required": True, "description": "User ID or username"}
+            },
+            returns={"type": "object", "description": "User information"},
+            tags=["telegram", "users", "info"]
+        )
+        self.register_tool(get_user_capability, self._handle_get_user)
+    
+    async def _register_presence_tools(self) -> None:
+        """Register presence-related tool capabilities."""
+        
+        # Get online status
+        get_status_capability = MCPToolCapability(
+            name="telegram_get_user_status",
+            description="Get online status of a Telegram user",
+            parameters={
+                "user_id": {"type": "string", "required": True, "description": "User ID or username"}
+            },
+            returns={"type": "object", "properties": {"user_id": "string", "is_online": "boolean", "last_seen": "string"}},
+            tags=["telegram", "users", "presence"]
+        )
+        self.register_tool(get_status_capability, self._handle_get_user_status)
+    
+    async def _handle_get_user(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle get user requests."""
+        if not self.client or not self.is_authenticated:
+            raise MCPError(
+                "Telegram client not authenticated",
+                error_code="TELEGRAM_NOT_AUTHENTICATED",
+                request_id=request.id
+            )
+        
+        user_id = request.params.get("user_id")
+        
+        if not user_id:
+            raise MCPError(
+                "User ID is required",
+                error_code="MISSING_USER_ID",
+                request_id=request.id
+            )
+        
+        try:
+            # Get user entity
+            entity = await self._resolve_entity(user_id)
+            
+            if isinstance(entity, User):
+                user = await self._convert_user(entity)
+                
+                # Cache user
+                self._cached_users[user.id] = user
+                
+                self.logger.info(f"Retrieved Telegram user: {user_id}")
+                
+                return user.dict()
+            else:
+                raise MCPError(
+                    f"Entity is not a user: {user_id}",
+                    error_code="NOT_A_USER",
+                    request_id=request.id
+                )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get user: {str(e)}")
+            raise MCPError(
+                f"Failed to get user: {str(e)}",
+                error_code="TELEGRAM_GET_USER_ERROR",
+                details={"user_id": user_id, "error": str(e)},
+                request_id=request.id
+            )
+    
+    async def _handle_get_user_status(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle get user status requests."""
+        if not self.client or not self.is_authenticated:
+            raise MCPError(
+                "Telegram client not authenticated",
+                error_code="TELEGRAM_NOT_AUTHENTICATED",
+                request_id=request.id
+            )
+        
+        user_id = request.params.get("user_id")
+        
+        if not user_id:
+            raise MCPError(
+                "User ID is required",
+                error_code="MISSING_USER_ID",
+                request_id=request.id
+            )
+        
+        try:
+            # Get user entity
+            entity = await self._resolve_entity(user_id)
+            
+            if isinstance(entity, User):
+                # Determine online status
+                is_online = False
+                last_seen = None
+                
+                if hasattr(entity, 'status') and entity.status:
+                    from telethon.tl.types import UserStatusOnline, UserStatusOffline, UserStatusRecently
+                    
+                    if isinstance(entity.status, UserStatusOnline):
+                        is_online = True
+                    elif isinstance(entity.status, UserStatusOffline):
+                        last_seen = entity.status.was_online
+                    elif isinstance(entity.status, UserStatusRecently):
+                        is_online = False  # Recently online but not now
+                
+                result = {
+                    "user_id": str(entity.id),
+                    "is_online": is_online,
+                    "last_seen": last_seen.isoformat() if last_seen else None
+                }
+                
+                self.logger.info(f"Retrieved user status for: {user_id}")
+                
+                return result
+            else:
+                raise MCPError(
+                    f"Entity is not a user: {user_id}",
+                    error_code="NOT_A_USER",
+                    request_id=request.id
+                )
+            
+        except Exception as e:
+            self.logger.error(f"Failed to get user status: {str(e)}")
+            raise MCPError(
+                f"Failed to get user status: {str(e)}",
+                error_code="TELEGRAM_GET_USER_STATUS_ERROR",
+                details={"user_id": user_id, "error": str(e)},
+                request_id=request.id
+            )
+    
+    # Helper methods
+    
+    async def _resolve_entity(self, identifier: str):
+        """Resolve entity from ID or username."""
+        if not self.client:
+            raise MCPError("Telegram client not available", error_code="TELEGRAM_CLIENT_MISSING")
+        
+        try:
+            # Try to convert to integer (ID)
+            try:
+                entity_id = int(identifier)
+                return await self.client.get_entity(entity_id)
+            except ValueError:
+                # It's a username
+                return await self.client.get_entity(identifier)
+        except Exception as e:
+            raise MCPError(
+                f"Failed to resolve entity '{identifier}': {str(e)}",
+                error_code="ENTITY_RESOLUTION_ERROR",
+                details={"identifier": identifier, "error": str(e)}
+            )
+    
+    async def _convert_message(self, message: Message) -> TelegramMessage:
+        """Convert Telethon message to our format."""
+        # Determine media information
+        has_media = bool(message.media)
+        media_type = None
+        
+        if has_media:
+            if isinstance(message.media, MessageMediaPhoto):
+                media_type = "photo"
+            elif isinstance(message.media, MessageMediaDocument):
+                media_type = "document"
+            else:
+                media_type = "other"
+        
+        return TelegramMessage(
+            id=message.id,
+            chat_id=message.peer_id.user_id if hasattr(message.peer_id, 'user_id') else (
+                message.peer_id.chat_id if hasattr(message.peer_id, 'chat_id') else
+                message.peer_id.channel_id
+            ),
+            from_id=message.from_id.user_id if message.from_id else None,
+            text=message.message or "",
+            date=message.date,
+            reply_to_msg_id=message.reply_to.reply_to_msg_id if message.reply_to else None,
+            edit_date=message.edit_date,
+            has_media=has_media,
+            media_type=media_type,
+            is_outgoing=message.out,
+            is_read=not message.unread,
+            is_pinned=message.pinned
+        )
+    
+    async def _convert_chat(self, dialog) -> TelegramChat:
+        """Convert dialog to our chat format."""
+        entity = dialog.entity
+        
+        # Determine chat type
+        chat_type = "unknown"
+        if isinstance(entity, User):
+            chat_type = "user"
+        elif isinstance(entity, Chat):
+            chat_type = "chat"
+        elif isinstance(entity, Channel):
+            chat_type = "channel"
+        
+        # Get title
+        title = None
+        if hasattr(entity, 'title'):
+            title = entity.title
+        elif hasattr(entity, 'first_name'):
+            title = entity.first_name
+            if hasattr(entity, 'last_name') and entity.last_name:
+                title += f" {entity.last_name}"
+        
+        return TelegramChat(
+            id=entity.id,
+            title=title,
+            username=getattr(entity, 'username', None),
+            type=chat_type,
+            participants_count=getattr(entity, 'participants_count', None),
+            is_broadcast=getattr(entity, 'broadcast', False),
+            is_group=isinstance(entity, Chat),
+            is_private=isinstance(entity, User)
+        )
+    
+    async def _convert_user(self, user: User) -> TelegramUser:
+        """Convert Telethon user to our format."""
+        # Determine online status
+        is_online = False
+        last_seen = None
+        
+        if hasattr(user, 'status') and user.status:
+            from telethon.tl.types import UserStatusOnline, UserStatusOffline
+            
+            if isinstance(user.status, UserStatusOnline):
+                is_online = True
+            elif isinstance(user.status, UserStatusOffline):
+                last_seen = user.status.was_online
+        
+        return TelegramUser(
+            id=user.id,
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            phone=user.phone,
+            is_self=user.is_self,
+            is_contact=user.contact,
+            is_bot=user.bot,
+            last_seen=last_seen,
+            is_online=is_online
+        )
 
 
-if __name__ == "__main__":
-    mcp.run()
+# Export the server class
+__all__ = ["TelegramToolsServer"]

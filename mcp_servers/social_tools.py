@@ -1,1042 +1,844 @@
-#!/usr/bin/env python3
 """
 Social Tools MCP Server
 
-Provides web search, image generation, and link analysis tools for Claude Code integration.
-This server follows the GOLD STANDARD wrapper pattern by importing functions from
-standalone tools and adding MCP-specific concerns (context injection, validation).
-
-ARCHITECTURE: MCP Wrapper → Standalone Implementation
-- search_current_info → tools/search_tool.py
-- create_image → tools/image_generation_tool.py
-- analyze_shared_image → tools/image_analysis_tool.py
-- save_link → tools/link_analysis_tool.py
-- search_links → tools/link_analysis_tool.py
-- technical_analysis → Unique Claude Code delegation approach
+This module implements MCP server for social and web-based tools:
+- Web search functionality
+- Calendar management 
+- Content creation tools
+- Knowledge base access
+- Social media integration
 """
 
-import os
-from typing import Dict, Any
-from urllib.parse import urlparse
+import asyncio
+import logging
+from datetime import datetime, timezone, timedelta
+from typing import Any, Dict, List, Optional, Union
+import json
 
-from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+import httpx
+from pydantic import BaseModel, Field, validator
 
-# Import standalone tool implementations following GOLD STANDARD pattern
-from tools.search_tool import search_web
-from tools.image_generation_tool import generate_image
-from tools.image_analysis_tool import analyze_image as analyze_image_impl
-from tools.link_analysis_tool import (
-    store_link_with_analysis,
-    search_stored_links
-)
-from tools.voice_transcription_tool import transcribe_audio_file
+from .base import MCPServer, MCPToolCapability, MCPRequest, MCPError
+from .context_manager import MCPContextManager, SecurityLevel
 
-# Import YouTube transcription integration
-from integrations.youtube_transcription import (
-    transcribe_youtube_video as transcribe_video_impl,
-    transcribe_youtube_playlist as transcribe_playlist_impl,
-    search_ai_content,
-    AIContentLearner
-)
 
-# Import context manager for MCP context injection
-import sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from context_manager import inject_context_for_tool
+class WebSearchResult(BaseModel):
+    """Web search result structure."""
+    
+    title: str = Field(..., description="Search result title")
+    url: str = Field(..., description="Search result URL")
+    snippet: str = Field(..., description="Search result snippet/description")
+    source: str = Field(..., description="Search engine or source")
+    score: float = Field(default=0.0, description="Relevance score")
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
-# Load environment variables
-load_dotenv()
 
-# Initialize MCP server
-mcp = FastMCP("Social Tools")
+class CalendarEvent(BaseModel):
+    """Calendar event structure."""
+    
+    id: str = Field(..., description="Event ID")
+    title: str = Field(..., description="Event title")
+    description: Optional[str] = Field(None, description="Event description")
+    start_time: datetime = Field(..., description="Event start time")
+    end_time: datetime = Field(..., description="Event end time")
+    location: Optional[str] = Field(None, description="Event location")
+    attendees: List[str] = Field(default_factory=list, description="Event attendees")
+    status: str = Field(default="confirmed", description="Event status")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    
+    @validator('end_time')
+    def end_time_after_start_time(cls, v, values):
+        if 'start_time' in values and v <= values['start_time']:
+            raise ValueError('End time must be after start time')
+        return v
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
-# Default emoji mappings for each MCP tool
-# Using only valid Telegram reaction emojis from our validated set of 72
-MCP_TOOL_EMOJIS = {
-    "search_current_info": "🗿",      # moai - stone face, based, solid info
-    "create_image": "🎉",             # party popper - let's gooo, celebration mode
-    "transcribe_youtube_video": "🎥", # movie camera - video content
-    "transcribe_youtube_playlist": "📝", # memo - multiple transcriptions
-    "search_youtube_transcriptions": "🔍", # magnifying glass - search functionality
-    "learn_from_ai_video": "🧠",      # brain - learning and AI content
-    "analyze_shared_image": "🤩",     # star eyes - shook, amazing, mind blown, obsessed
-    "save_link": "🍾",               # champagne - we poppin bottles, saved successfully
-    "search_links": "🔥",            # fire - that's fire, lit search results
-    "transcribe_voice_message": "✍", # writing hand - taking notes, documenting
-    "technical_analysis": "🤓",      # nerd - big brain time, technical deep dive
-    "manage_claude_code_sessions": "👨‍💻", # technologist - coding time, tech management
-    "show_workspace_prime_content": "💯"  # 100 - facts, complete info, real talk
-}
 
-# Reserved status emojis for system-wide use
-# These should be used consistently across all tools for status indicators
-STATUS_EMOJIS = {
-    "done": "🫡",      # saluting - yes chief, copy that, respect, task completed
-    "error": "🥴",     # woozy - drunk thoughts, confused, lost the plot, error state
-    "read_receipt": "👀"  # eyes - I see you, watching this, acknowledged/seen
-}
+class ContentTemplate(BaseModel):
+    """Content creation template."""
+    
+    name: str = Field(..., description="Template name")
+    type: str = Field(..., description="Content type (blog, social, email, etc.)")
+    template: str = Field(..., description="Template content with placeholders")
+    variables: List[str] = Field(default_factory=list, description="Template variables")
+    tags: List[str] = Field(default_factory=list, description="Template tags")
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
-@mcp.tool()
-def search_current_info(query: str, max_results: int = 3) -> str:
-    """Search the web and return AI-synthesized answers using Perplexity.
 
-    Use this tool when you need current web information or recent news about any topic.
-    Provides AI-synthesized answers based on current web content.
+class KnowledgeBaseEntry(BaseModel):
+    """Knowledge base entry structure."""
+    
+    id: str = Field(..., description="Entry ID")
+    title: str = Field(..., description="Entry title")
+    content: str = Field(..., description="Entry content")
+    category: str = Field(..., description="Entry category")
+    tags: List[str] = Field(default_factory=list, description="Entry tags")
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    author: Optional[str] = Field(None, description="Entry author")
+    
+    class Config:
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }
 
-    Args:
-        query: The search query to execute
-        max_results: Maximum number of results (not used with Perplexity, kept for compatibility)
 
-    Returns:
-        AI-synthesized answer based on current web information
+class SocialToolsServer(MCPServer):
     """
-    try:
-        # Call standalone implementation following GOLD STANDARD pattern
-        return search_web(query, max_results)
-    except Exception as e:
-        return f"🔍 Search error: {str(e)}"
-
-
-@mcp.tool()
-def create_image(
-    prompt: str,
-    size: str = "1024x1024",
-    quality: str = "standard",
-    style: str = "natural",
-    chat_id: str = ""
-) -> str:
-    """Generate an image using DALL-E 3 and save it locally.
-
-    Use this tool when you need to create custom images from text descriptions.
-    Generated images are saved locally and can be shared in conversations.
-
-    Args:
-        prompt: Text description of the image to generate
-        size: Image size - "1024x1024", "1792x1024", or "1024x1792"
-        quality: Image quality - "standard" or "hd"
-        style: Image style - "natural" (realistic) or "vivid" (dramatic/artistic)
-        chat_id: Chat ID for context (extracted from CONTEXT_DATA if available)
-
-    Returns:
-        Path to the generated image file or error message
+    MCP Server implementation for social and web-based tools.
+    
+    Provides stateless social functionality with context injection including:
+    - Web search with multiple engines
+    - Calendar event management
+    - Content creation and templating
+    - Knowledge base access and search
     """
-    try:
-        # Inject context if not provided
-        chat_id, _ = inject_context_for_tool(chat_id, "")
-
-        # Call standalone implementation following GOLD STANDARD pattern
-        image_path = generate_image(prompt, size, quality, style, save_directory=None)
-
-        # Handle error cases (standalone function returns error messages starting with emoji)
-        if image_path.startswith("🎨"):
-            return image_path
-
-        # Format response for Telegram if chat_id provided (MCP-specific feature)
-        if chat_id:
-            return f"TELEGRAM_IMAGE_GENERATED|{image_path}|{chat_id}"
-        else:
-            return image_path
-
-    except Exception as e:
-        return f"🎨 Image generation error: {str(e)}"
-
-
-@mcp.tool()
-def analyze_shared_image(
-    image_path: str,
-    question: str = "",
-    chat_id: str = ""
-) -> str:
-    """Analyze an image using AI vision capabilities.
-
-    Use this tool to analyze images and answer questions about visual content.
-    Supports OCR, object recognition, and scene analysis using GPT-4o vision.
-
-    Args:
-        image_path: Path to the image file to analyze
-        question: Optional specific question about the image content
-        chat_id: Chat ID for context (extracted from CONTEXT_DATA if available)
-
-    Returns:
-        AI analysis of the image content formatted for conversation
-    """
-    try:
-        # Call standalone implementation following GOLD STANDARD pattern
-        # Map parameters: question (optional), chat_id as context (optional)
-        context = chat_id if chat_id else None
-        question_param = question if question and question.strip() else None
-
-        return analyze_image_impl(image_path, question_param, context)
-
-    except Exception as e:
-        return f"👁️ Image analysis error: {str(e)}"
-
-
-
-@mcp.tool()
-def save_link(url: str, chat_id: str = "", username: str = "") -> str:
-    """Save a link with AI-generated analysis to the knowledge base.
-
-    Use this tool when a user shares a URL that should be saved for future reference.
-    Automatically analyzes the content and stores structured metadata.
-
-    Args:
-        url: The URL to analyze and save
-        chat_id: Chat ID for context (extracted from CONTEXT_DATA if available)
-        username: Username for context (extracted from CONTEXT_DATA if available)
-
-    Returns:
-        Success message with analysis summary or error message
-    """
-    try:
-        # Inject context if not provided
-        chat_id, username = inject_context_for_tool(chat_id, username)
-
-        # Call standalone implementation following GOLD STANDARD pattern
-        # Convert chat_id to int if provided, handle optional parameters
-        chat_id_int = int(chat_id) if chat_id and chat_id.isdigit() else None
-        username_param = username if username else None
-
-        # Call standalone function - returns bool
-        success = store_link_with_analysis(url, chat_id_int, None, username_param)
-
-        if success:
-            # Parse URL for domain to create user-friendly response
-            parsed = urlparse(url)
-            domain = parsed.netloc or "Unknown"
-            return f"🔗 **Link Saved**: {domain}\n\n✅ Successfully stored with AI analysis"
-        else:
-            return f"❌ Failed to save link: {url}"
-
-    except Exception as e:
-        return f"🔗 Link save error: {str(e)}"
-
-
-@mcp.tool()
-def search_links(query: str, chat_id: str = "", limit: int = 10) -> str:
-    """Search through previously saved links by domain, content, or timestamp.
-
-    Use this tool to find links that were previously saved to the knowledge base.
-    Searches through domains, URLs, and timestamps.
-
-    Args:
-        query: Search query (domain name, URL content, or date pattern)
-        chat_id: Chat ID for context (extracted from CONTEXT_DATA if available)
-        limit: Maximum number of results to return
-
-    Returns:
-        Formatted list of matching links or message indicating no matches
-    """
-    try:
-        # Inject context if not provided
-        chat_id, _ = inject_context_for_tool(chat_id, "")
-
-        # Call standalone implementation following GOLD STANDARD pattern
-        # Convert chat_id to int if provided, handle optional parameters
-        chat_id_int = int(chat_id) if chat_id and chat_id.isdigit() else None
-
-        # Call standalone function - returns formatted string
-        return search_stored_links(query, chat_id_int, limit)
-
-    except Exception as e:
-        return f"📂 Link search error: {str(e)}"
-
-
-@mcp.tool()
-def transcribe_voice_message(
-    file_path: str,
-    language: str = "",
-    cleanup_file: bool = False,
-    chat_id: str = ""
-) -> str:
-    """Transcribe an audio or voice file to text using OpenAI Whisper API.
-
-    Use this tool when you need to convert voice messages, audio recordings, or any
-    audio file to text. Supports multiple languages and provides high-quality transcription.
-
-    Args:
-        file_path: Path to the audio/voice file to transcribe (supports OGG, MP3, WAV, MP4, etc.)
-        language: Optional language code for better accuracy (e.g., "en", "es", "fr", "de")
-        cleanup_file: Whether to delete the audio file after transcription (useful for temp files)
-        chat_id: Chat ID for context (extracted from CONTEXT_DATA if available)
-
-    Returns:
-        Transcribed text from the audio file, or error message if transcription fails
-    """
-    try:
-        # Call standalone implementation following GOLD STANDARD pattern
-        language_param = language if language and language.strip() else None
-
-        result = transcribe_audio_file(file_path, language_param, cleanup_file)
-
-        # Format for chat context if available
-        if chat_id and result:
-            return f"🎙️ **Voice Transcription**\n\n{result}"
-        else:
+    
+    def __init__(
+        self,
+        name: str = "social_tools",
+        version: str = "1.0.0",
+        description: str = "Social and web-based tools MCP server",
+        search_api_keys: Dict[str, str] = None,
+        calendar_config: Dict[str, Any] = None,
+        knowledge_base_path: str = None,
+        **kwargs
+    ):
+        super().__init__(name, version, description, **kwargs)
+        
+        # Configuration
+        self.search_api_keys = search_api_keys or {}
+        self.calendar_config = calendar_config or {}
+        self.knowledge_base_path = knowledge_base_path
+        
+        # HTTP client for external APIs
+        self.http_client = httpx.AsyncClient(
+            timeout=30.0,
+            follow_redirects=True
+        )
+        
+        # In-memory stores (in production, use proper databases)
+        self._calendar_events: Dict[str, CalendarEvent] = {}
+        self._content_templates: Dict[str, ContentTemplate] = {}
+        self._knowledge_base: Dict[str, KnowledgeBaseEntry] = {}
+        
+        # Search engines configuration
+        self._search_engines = {
+            "duckduckgo": self._search_duckduckgo,
+            "google": self._search_google,
+            "bing": self._search_bing
+        }
+        
+        self.logger.info(f"Social Tools Server initialized with {len(self._search_engines)} search engines")
+    
+    async def initialize(self) -> None:
+        """Initialize the social tools server."""
+        try:
+            # Register all tool capabilities
+            await self._register_web_search_tools()
+            await self._register_calendar_tools()
+            await self._register_content_tools()
+            await self._register_knowledge_base_tools()
+            
+            # Load initial data
+            await self._load_default_templates()
+            if self.knowledge_base_path:
+                await self._load_knowledge_base()
+            
+            self.logger.info("Social Tools Server initialized successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Social Tools Server: {str(e)}")
+            raise MCPError(
+                f"Social tools server initialization failed: {str(e)}",
+                error_code="SOCIAL_TOOLS_INIT_ERROR",
+                details={"error": str(e)},
+                recoverable=False
+            )
+    
+    async def shutdown(self) -> None:
+        """Shutdown the social tools server."""
+        try:
+            await self.http_client.aclose()
+            self.logger.info("Social Tools Server shut down successfully")
+            
+        except Exception as e:
+            self.logger.error(f"Error during Social Tools Server shutdown: {str(e)}")
+            raise MCPError(
+                f"Social tools server shutdown failed: {str(e)}",
+                error_code="SOCIAL_TOOLS_SHUTDOWN_ERROR",
+                details={"error": str(e)},
+                recoverable=False
+            )
+    
+    # Web Search Tools
+    
+    async def _register_web_search_tools(self) -> None:
+        """Register web search tool capabilities."""
+        
+        # Web search tool
+        search_capability = MCPToolCapability(
+            name="web_search",
+            description="Search the web using multiple search engines",
+            parameters={
+                "query": {"type": "string", "required": True, "description": "Search query"},
+                "engine": {
+                    "type": "string", 
+                    "required": False, 
+                    "default": "duckduckgo",
+                    "enum": list(self._search_engines.keys()),
+                    "description": "Search engine to use"
+                },
+                "max_results": {"type": "integer", "required": False, "default": 10, "description": "Maximum number of results"}
+            },
+            returns={"type": "array", "items": "WebSearchResult"},
+            tags=["web", "search", "external"]
+        )
+        self.register_tool(search_capability, self._handle_web_search)
+        
+        # URL content extraction
+        extract_capability = MCPToolCapability(
+            name="extract_url_content",
+            description="Extract content from a specific URL",
+            parameters={
+                "url": {"type": "string", "required": True, "description": "URL to extract content from"},
+                "format": {"type": "string", "required": False, "default": "text", "enum": ["text", "html", "markdown"], "description": "Output format"}
+            },
+            returns={"type": "object", "properties": {"url": "string", "title": "string", "content": "string", "format": "string"}},
+            tags=["web", "extraction", "external"]
+        )
+        self.register_tool(extract_capability, self._handle_extract_url_content)
+    
+    async def _handle_web_search(self, request: MCPRequest, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle web search requests."""
+        query = request.params.get("query")
+        engine = request.params.get("engine", "duckduckgo")
+        max_results = request.params.get("max_results", 10)
+        
+        if not query:
+            raise MCPError(
+                "Search query is required",
+                error_code="MISSING_SEARCH_QUERY",
+                request_id=request.id
+            )
+        
+        if engine not in self._search_engines:
+            raise MCPError(
+                f"Unknown search engine: {engine}",
+                error_code="UNKNOWN_SEARCH_ENGINE",
+                details={"engine": engine, "available_engines": list(self._search_engines.keys())},
+                request_id=request.id
+            )
+        
+        try:
+            # Perform search using selected engine
+            search_function = self._search_engines[engine]
+            results = await search_function(query, max_results)
+            
+            self.logger.info(f"Web search completed: query='{query}', engine={engine}, results={len(results)}")
+            
+            return [result.dict() for result in results]
+            
+        except Exception as e:
+            self.logger.error(f"Web search failed: {str(e)}")
+            raise MCPError(
+                f"Web search failed: {str(e)}",
+                error_code="WEB_SEARCH_ERROR",
+                details={"query": query, "engine": engine, "error": str(e)},
+                request_id=request.id
+            )
+    
+    async def _handle_extract_url_content(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle URL content extraction requests."""
+        url = request.params.get("url")
+        format_type = request.params.get("format", "text")
+        
+        if not url:
+            raise MCPError(
+                "URL is required",
+                error_code="MISSING_URL",
+                request_id=request.id
+            )
+        
+        try:
+            response = await self.http_client.get(url)
+            response.raise_for_status()
+            
+            # Extract title from HTML if present
+            title = ""
+            content = response.text
+            
+            if "text/html" in response.headers.get("content-type", ""):
+                # Simple title extraction
+                import re
+                title_match = re.search(r'<title[^>]*>([^<]+)</title>', content, re.IGNORECASE)
+                if title_match:
+                    title = title_match.group(1).strip()
+                
+                # Format conversion based on requested format
+                if format_type == "text":
+                    # Simple HTML to text conversion
+                    content = re.sub(r'<[^>]+>', ' ', content)
+                    content = re.sub(r'\s+', ' ', content).strip()
+                elif format_type == "markdown":
+                    # Basic HTML to markdown conversion
+                    content = self._html_to_markdown(content)
+                # For HTML format, keep as-is
+            
+            result = {
+                "url": url,
+                "title": title,
+                "content": content,
+                "format": format_type
+            }
+            
+            self.logger.info(f"URL content extracted: url={url}, format={format_type}")
+            
             return result
-
-    except FileNotFoundError:
-        return f"🎙️ Audio file not found: {file_path}"
-    except Exception as e:
-        return f"🎙️ Voice transcription error: {str(e)}"
-
-
-@mcp.tool()
-def technical_analysis(
-    research_topic: str,
-    focus_areas: str = "",
-    chat_id: str = ""
-) -> str:
-    """Perform comprehensive technical research and analysis using Claude Code.
-
-    This tool delegates complex technical research tasks to Claude Code, which excels at:
-    - Exploring codebases and understanding architectures
-    - Analyzing technical documentation and specifications
-    - Researching industry best practices and patterns
-    - Investigating technologies, frameworks, and tools
-    - Comparing different approaches and solutions
-    - Reading and analyzing files across projects
-
-    Unlike delegate_coding_task which focuses on implementation, this tool is optimized
-    for research, analysis, and investigation tasks where you need comprehensive
-    technical insights without modifying files.
-
-    Args:
-        research_topic: The technical topic or question to research and analyze
-        focus_areas: Optional specific areas to focus on (e.g., "performance, security, scalability")
-        chat_id: Chat ID for workspace context (extracted from CONTEXT_DATA if available)
-
-    Returns:
-        Comprehensive technical analysis and research findings
-
-    Examples:
-        >>> technical_analysis("How does the authentication system work in this codebase?")
-        >>> technical_analysis("Compare different image compression approaches", "performance, quality")
-        >>> technical_analysis("What are the current API endpoints and their purposes?")
-    """
-    import time
-    start_time = time.time()
-
-    try:
-        # Import here to avoid circular imports
-        import subprocess
-        import os
-
-        # Use unified workspace resolution and session management
-        from utilities.workspace_validator import WorkspaceResolver
-        from utilities.claude_code_session_manager import ClaudeCodeSessionManager
-        from .context_manager import inject_context_for_tool
-
-        # Inject context if not provided
-        chat_id, username = inject_context_for_tool(chat_id, "")
-
-        working_dir, context_desc = WorkspaceResolver.resolve_working_directory(
-            chat_id=chat_id,
-            username=username,
-            is_group_chat=True,  # Assume group context for technical analysis
-            target_directory=""
-        )
-
-        # Check for recent session to continue
-        recent_session = ClaudeCodeSessionManager.find_recent_session(
-            chat_id=chat_id,
-            username=username,
-            tool_name="technical_analysis",
-            working_directory=working_dir,
-            hours_back=2  # Look for sessions in last 2 hours
-        )
-
-        # Get workspace-specific prime content if this is a new session
-        prime_content = ""
-        if not recent_session:
-            # Import here to avoid circular imports
-            import sys
-            import os
-            sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-            from utilities.claude_code_session_manager import ClaudeCodeSessionManager
-
-            prime_content = ClaudeCodeSessionManager.load_workspace_prime_content(working_dir)
-            if not prime_content:
-                # Fallback to generic project context if no workspace-specific prime found
-                try:
-                    from mcp_servers.development_tools import get_project_context
-                    prime_content = get_project_context(chat_id)
-                except Exception:
-                    pass
-
-        # Build research-focused prompt for Claude Code with session context
-        prompt_parts = [
-            f"TECHNICAL RESEARCH TASK: {research_topic}",
-            "",
-            f"WORKING DIRECTORY: {working_dir}",
-            ""
-        ]
-
-        # Add workspace-specific prime content for new sessions
-        if prime_content and not recent_session:
-            prompt_parts.extend([
-                "WORKSPACE PRIME CONTEXT (/prime equivalent):",
-                prime_content,
-                "",
-                "---",
-                ""
-            ])
-
-        if focus_areas:
-            prompt_parts.extend([f"FOCUS AREAS: {focus_areas}", ""])
-
-        if context_desc:
-            prompt_parts.extend([f"WORKSPACE CONTEXT: {context_desc}", ""])
-
-        if recent_session:
-            prompt_parts.extend([
-                f"CONTINUING SESSION: {recent_session.session_id[:8]}...",
-                f"Previous research: {recent_session.initial_task}",
-                f"Tasks completed: {recent_session.task_count}",
-                ""
-            ])
-
-            # Update session activity
-            ClaudeCodeSessionManager.update_session_activity(
-                recent_session.session_id,
-                research_topic
+            
+        except Exception as e:
+            self.logger.error(f"URL content extraction failed: {str(e)}")
+            raise MCPError(
+                f"URL content extraction failed: {str(e)}",
+                error_code="URL_EXTRACTION_ERROR",
+                details={"url": url, "error": str(e)},
+                request_id=request.id
             )
-
-        prompt_parts.extend([
-            "RESEARCH OBJECTIVES:",
-            "- Conduct comprehensive technical analysis and investigation",
-            "- Focus on understanding, not modifying files",
-            "- Provide detailed findings with code examples and explanations",
-            "- Explore relevant files, documentation, and patterns",
-            "- Research best practices and architectural decisions",
-            "",
-            "RESEARCH GUIDELINES:",
-            "- Use Read, Glob, Grep, and other analysis tools extensively",
-            "- Do NOT edit, write, or modify any files",
-            "- Focus on understanding and explaining what exists",
-            "- Provide code examples and architectural insights",
-            "- Research industry standards and best practices",
-            "- Explain your findings clearly with technical depth",
-            "",
-            "Conduct this technical research thoroughly and provide comprehensive analysis."
-        ])
-
-        full_prompt = "\n".join(prompt_parts)
-
-        # Build Claude Code command with session management
-        if recent_session:
-            command = ClaudeCodeSessionManager.build_session_command(
-                full_prompt,
-                session_id=recent_session.session_id,
-                should_continue=True
+    
+    # Calendar Tools
+    
+    async def _register_calendar_tools(self) -> None:
+        """Register calendar tool capabilities."""
+        
+        # Create calendar event
+        create_event_capability = MCPToolCapability(
+            name="create_calendar_event",
+            description="Create a new calendar event",
+            parameters={
+                "title": {"type": "string", "required": True, "description": "Event title"},
+                "description": {"type": "string", "required": False, "description": "Event description"},
+                "start_time": {"type": "string", "required": True, "description": "Event start time (ISO 8601)"},
+                "end_time": {"type": "string", "required": True, "description": "Event end time (ISO 8601)"},
+                "location": {"type": "string", "required": False, "description": "Event location"},
+                "attendees": {"type": "array", "items": "string", "required": False, "description": "Event attendees"}
+            },
+            returns={"type": "object", "description": "Created calendar event"},
+            tags=["calendar", "scheduling", "events"]
+        )
+        self.register_tool(create_event_capability, self._handle_create_calendar_event)
+        
+        # List calendar events
+        list_events_capability = MCPToolCapability(
+            name="list_calendar_events",
+            description="List calendar events within a date range",
+            parameters={
+                "start_date": {"type": "string", "required": False, "description": "Start date (ISO 8601)"},
+                "end_date": {"type": "string", "required": False, "description": "End date (ISO 8601)"},
+                "limit": {"type": "integer", "required": False, "default": 50, "description": "Maximum number of events"}
+            },
+            returns={"type": "array", "items": "CalendarEvent"},
+            tags=["calendar", "scheduling", "events"]
+        )
+        self.register_tool(list_events_capability, self._handle_list_calendar_events)
+    
+    async def _handle_create_calendar_event(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle create calendar event requests."""
+        try:
+            # Extract and validate parameters
+            title = request.params.get("title")
+            description = request.params.get("description")
+            start_time_str = request.params.get("start_time")
+            end_time_str = request.params.get("end_time")
+            location = request.params.get("location")
+            attendees = request.params.get("attendees", [])
+            
+            if not title or not start_time_str or not end_time_str:
+                raise MCPError(
+                    "Title, start_time, and end_time are required",
+                    error_code="MISSING_EVENT_PARAMETERS",
+                    request_id=request.id
+                )
+            
+            # Parse timestamps
+            start_time = datetime.fromisoformat(start_time_str.replace('Z', '+00:00'))
+            end_time = datetime.fromisoformat(end_time_str.replace('Z', '+00:00'))
+            
+            # Create event
+            event_id = f"event_{len(self._calendar_events)}_{int(datetime.now().timestamp())}"
+            event = CalendarEvent(
+                id=event_id,
+                title=title,
+                description=description,
+                start_time=start_time,
+                end_time=end_time,
+                location=location,
+                attendees=attendees
             )
-        else:
-            command = ClaudeCodeSessionManager.build_session_command(full_prompt)
-
-        # Execute Claude Code for research
-        if working_dir and working_dir != ".":
-            command = f'cd "{working_dir}" && {command}'
-            shell = True
-        else:
-            shell = False
-
-        process = subprocess.run(
-            command,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=7200,  # 2 hour timeout for research tasks
-            shell=shell
-        )
-
-        # Extract and store session ID from output
-        session_id = ClaudeCodeSessionManager.extract_session_id_from_output(process.stdout)
-
-        if session_id and not recent_session:
-            # Store new session
-            ClaudeCodeSessionManager.store_session(
-                session_id=session_id,
-                chat_id=chat_id,
-                username=username,
-                tool_name="technical_analysis",
-                working_directory=working_dir,
-                task_description=research_topic,
-                metadata={"focus_areas": focus_areas} if focus_areas else None
+            
+            self._calendar_events[event_id] = event
+            
+            self.logger.info(f"Calendar event created: {event_id}")
+            
+            return event.dict()
+            
+        except ValueError as e:
+            raise MCPError(
+                f"Invalid date/time format: {str(e)}",
+                error_code="INVALID_DATETIME",
+                request_id=request.id
             )
-            print(f"🔬 Created new Claude Code research session: {session_id[:8]}...")
-        elif recent_session:
-            print(f"🔬 Continued research session: {recent_session.session_id[:8]}...")
-
-        return f"🔬 **Technical Research Results**\n\n{process.stdout}"
-
-    except subprocess.TimeoutExpired:
-        from utilities.swe_error_recovery import SWEErrorRecovery
-        execution_time = time.time() - start_time
-        return SWEErrorRecovery.format_recovery_response(
-            tool_name="technical_analysis",
-            task_description=research_topic,
-            error_message="Research exceeded 2 hour timeout",
-            working_directory=working_dir if 'working_dir' in locals() else ".",
-            execution_time=execution_time
-        )
-
-    except subprocess.CalledProcessError as e:
-        from utilities.swe_error_recovery import SWEErrorRecovery
-        execution_time = time.time() - start_time
-        error_msg = f"Claude Code failed (exit {e.returncode}): {e.stderr or 'Unknown error'}"
-        return SWEErrorRecovery.format_recovery_response(
-            tool_name="technical_analysis",
-            task_description=research_topic,
-            error_message=error_msg,
-            working_directory=working_dir if 'working_dir' in locals() else ".",
-            execution_time=execution_time
-        )
-
-    except Exception as e:
-        from utilities.swe_error_recovery import SWEErrorRecovery
-        execution_time = time.time() - start_time
-        return SWEErrorRecovery.format_recovery_response(
-            tool_name="technical_analysis",
-            task_description=research_topic,
-            error_message=str(e),
-            working_directory=working_dir if 'working_dir' in locals() else ".",
-            execution_time=execution_time
-        )
-
-
-@mcp.tool()
-def manage_claude_code_sessions(
-    action: str = "list",
-    session_id: str = "",
-    chat_id: str = ""
-) -> str:
-    """Manage Claude Code sessions for the current chat.
-
-    This tool allows users to view, continue, or deactivate their Claude Code sessions
-    for better workflow continuity and session management.
-
-    Actions:
-    - "list": Show all active sessions for the current chat
-    - "show": Show details for a specific session (requires session_id)
-    - "deactivate": Mark a session as inactive (requires session_id)
-    - "continue": Get instructions to continue a specific session (requires session_id)
-
-    Args:
-        action: The action to perform ("list", "show", "deactivate", "continue")
-        session_id: Session ID for actions that require it (show, deactivate, continue)
-        chat_id: Chat ID for context (extracted from CONTEXT_DATA if available)
-
-    Returns:
-        Formatted session information or action results
-
-    Examples:
-        >>> manage_claude_code_sessions("list")
-        📋 **Active Claude Code Sessions**...
-
-        >>> manage_claude_code_sessions("show", "a1b2c3d4")
-        📋 **Session Details**...
-    """
-    try:
-        from utilities.claude_code_session_manager import ClaudeCodeSessionManager
-        from .context_manager import inject_context_for_tool
-
-        # Inject context if not provided
-        chat_id, username = inject_context_for_tool(chat_id, "")
-
-        if action == "list":
-            sessions = ClaudeCodeSessionManager.get_chat_sessions(
-                chat_id=chat_id,
-                limit=10,
-                active_only=True
+        except Exception as e:
+            raise MCPError(
+                f"Failed to create calendar event: {str(e)}",
+                error_code="CALENDAR_EVENT_CREATE_ERROR",
+                details={"error": str(e)},
+                request_id=request.id
             )
-
-            if not sessions:
-                return "📋 **No Active Sessions**\n\nNo active Claude Code sessions found for this chat."
-
-            response_parts = ["📋 **Active Claude Code Sessions**\n"]
-
-            for i, session in enumerate(sessions, 1):
-                session_summary = ClaudeCodeSessionManager.format_session_summary(session)
-                response_parts.append(f"{i}. {session_summary}")
-
-            response_parts.extend([
-                "",
-                "💡 **Usage Tips:**",
-                "• Use `manage_claude_code_sessions(\"show\", \"session_id\")` for details",
-                "• Sessions automatically continue when you use the same tool in the same directory",
-                "• Sessions expire after 24 hours of inactivity"
-            ])
-
-            return "\n".join(response_parts)
-
-        elif action == "show":
-            if not session_id:
-                return "❌ Session ID required for 'show' action. Use format: manage_claude_code_sessions(\"show\", \"session_id\")"
-
-            # Find sessions and filter for the requested one
-            sessions = ClaudeCodeSessionManager.get_chat_sessions(chat_id, limit=50, active_only=False)
-            target_session = None
-
-            for session in sessions:
-                if session.session_id.startswith(session_id) or session.session_id == session_id:
-                    target_session = session
-                    break
-
-            if not target_session:
-                return f"❌ Session not found: {session_id}"
-
-            metadata = target_session.session_metadata
-            focus_areas = metadata.get("focus_areas", "") if metadata else ""
-            specific_instructions = metadata.get("specific_instructions", "") if metadata else ""
-
-            details = [
-                f"📋 **Session Details: {target_session.session_id[:8]}...**\n",
-                f"**Tool:** {target_session.tool_name}",
-                f"**Working Directory:** {target_session.working_directory}",
-                f"**Initial Task:** {target_session.initial_task}",
-                f"**Tasks Completed:** {target_session.task_count}",
-                f"**Created:** {target_session.created_at.strftime('%Y-%m-%d %H:%M')}",
-                f"**Last Activity:** {target_session.last_activity.strftime('%Y-%m-%d %H:%M')}",
-                f"**Status:** {'🟢 Active' if target_session.is_active else '🔴 Inactive'}"
+    
+    async def _handle_list_calendar_events(self, request: MCPRequest, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle list calendar events requests."""
+        try:
+            start_date_str = request.params.get("start_date")
+            end_date_str = request.params.get("end_date")
+            limit = request.params.get("limit", 50)
+            
+            # Parse date filters if provided
+            start_date = None
+            end_date = None
+            
+            if start_date_str:
+                start_date = datetime.fromisoformat(start_date_str.replace('Z', '+00:00'))
+            if end_date_str:
+                end_date = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+            
+            # Filter events
+            filtered_events = []
+            for event in self._calendar_events.values():
+                if start_date and event.start_time < start_date:
+                    continue
+                if end_date and event.start_time > end_date:
+                    continue
+                filtered_events.append(event)
+            
+            # Sort by start time and limit results
+            filtered_events.sort(key=lambda e: e.start_time)
+            limited_events = filtered_events[:limit]
+            
+            self.logger.info(f"Listed {len(limited_events)} calendar events")
+            
+            return [event.dict() for event in limited_events]
+            
+        except ValueError as e:
+            raise MCPError(
+                f"Invalid date format: {str(e)}",
+                error_code="INVALID_DATE",
+                request_id=request.id
+            )
+        except Exception as e:
+            raise MCPError(
+                f"Failed to list calendar events: {str(e)}",
+                error_code="CALENDAR_EVENT_LIST_ERROR",
+                details={"error": str(e)},
+                request_id=request.id
+            )
+    
+    # Content Creation Tools
+    
+    async def _register_content_tools(self) -> None:
+        """Register content creation tool capabilities."""
+        
+        # Generate content from template
+        generate_content_capability = MCPToolCapability(
+            name="generate_content",
+            description="Generate content using templates",
+            parameters={
+                "template_name": {"type": "string", "required": True, "description": "Template name"},
+                "variables": {"type": "object", "required": True, "description": "Template variables"}
+            },
+            returns={"type": "object", "properties": {"content": "string", "template": "string"}},
+            tags=["content", "generation", "templates"]
+        )
+        self.register_tool(generate_content_capability, self._handle_generate_content)
+        
+        # List available templates
+        list_templates_capability = MCPToolCapability(
+            name="list_content_templates",
+            description="List available content templates",
+            parameters={
+                "type": {"type": "string", "required": False, "description": "Filter by template type"}
+            },
+            returns={"type": "array", "items": "ContentTemplate"},
+            tags=["content", "templates"]
+        )
+        self.register_tool(list_templates_capability, self._handle_list_content_templates)
+    
+    async def _handle_generate_content(self, request: MCPRequest, context: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle content generation requests."""
+        template_name = request.params.get("template_name")
+        variables = request.params.get("variables", {})
+        
+        if not template_name:
+            raise MCPError(
+                "Template name is required",
+                error_code="MISSING_TEMPLATE_NAME",
+                request_id=request.id
+            )
+        
+        if template_name not in self._content_templates:
+            raise MCPError(
+                f"Template '{template_name}' not found",
+                error_code="TEMPLATE_NOT_FOUND",
+                details={"template_name": template_name},
+                request_id=request.id
+            )
+        
+        try:
+            template = self._content_templates[template_name]
+            
+            # Simple template variable substitution
+            content = template.template
+            for var_name, var_value in variables.items():
+                content = content.replace(f"{{{var_name}}}", str(var_value))
+            
+            result = {
+                "content": content,
+                "template": template_name
+            }
+            
+            self.logger.info(f"Content generated using template: {template_name}")
+            
+            return result
+            
+        except Exception as e:
+            raise MCPError(
+                f"Content generation failed: {str(e)}",
+                error_code="CONTENT_GENERATION_ERROR",
+                details={"template_name": template_name, "error": str(e)},
+                request_id=request.id
+            )
+    
+    async def _handle_list_content_templates(self, request: MCPRequest, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle list content templates requests."""
+        template_type = request.params.get("type")
+        
+        templates = list(self._content_templates.values())
+        
+        if template_type:
+            templates = [t for t in templates if t.type == template_type]
+        
+        self.logger.info(f"Listed {len(templates)} content templates")
+        
+        return [template.dict() for template in templates]
+    
+    # Knowledge Base Tools
+    
+    async def _register_knowledge_base_tools(self) -> None:
+        """Register knowledge base tool capabilities."""
+        
+        # Search knowledge base
+        search_kb_capability = MCPToolCapability(
+            name="search_knowledge_base",
+            description="Search the knowledge base",
+            parameters={
+                "query": {"type": "string", "required": True, "description": "Search query"},
+                "category": {"type": "string", "required": False, "description": "Filter by category"},
+                "max_results": {"type": "integer", "required": False, "default": 10, "description": "Maximum number of results"}
+            },
+            returns={"type": "array", "items": "KnowledgeBaseEntry"},
+            tags=["knowledge", "search", "documentation"]
+        )
+        self.register_tool(search_kb_capability, self._handle_search_knowledge_base)
+    
+    async def _handle_search_knowledge_base(self, request: MCPRequest, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Handle knowledge base search requests."""
+        query = request.params.get("query", "").lower()
+        category = request.params.get("category")
+        max_results = request.params.get("max_results", 10)
+        
+        if not query:
+            raise MCPError(
+                "Search query is required",
+                error_code="MISSING_SEARCH_QUERY",
+                request_id=request.id
+            )
+        
+        try:
+            # Simple text-based search
+            results = []
+            for entry in self._knowledge_base.values():
+                if category and entry.category != category:
+                    continue
+                
+                # Check if query matches title, content, or tags
+                if (query in entry.title.lower() or 
+                    query in entry.content.lower() or
+                    any(query in tag.lower() for tag in entry.tags)):
+                    results.append(entry)
+            
+            # Sort by relevance (simple: title match first, then content)
+            results.sort(key=lambda e: (
+                query not in e.title.lower(),  # Title matches first
+                -len([tag for tag in e.tags if query in tag.lower()])  # More tag matches first
+            ))
+            
+            # Limit results
+            results = results[:max_results]
+            
+            self.logger.info(f"Knowledge base search: query='{query}', results={len(results)}")
+            
+            return [entry.dict() for entry in results]
+            
+        except Exception as e:
+            raise MCPError(
+                f"Knowledge base search failed: {str(e)}",
+                error_code="KNOWLEDGE_BASE_SEARCH_ERROR",
+                details={"query": query, "error": str(e)},
+                request_id=request.id
+            )
+    
+    # Search engine implementations
+    
+    async def _search_duckduckgo(self, query: str, max_results: int) -> List[WebSearchResult]:
+        """Search using DuckDuckGo (free API)."""
+        try:
+            # DuckDuckGo Instant Answer API
+            params = {
+                "q": query,
+                "format": "json",
+                "no_html": "1",
+                "skip_disambig": "1"
+            }
+            
+            response = await self.http_client.get(
+                "https://api.duckduckgo.com/",
+                params=params
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            results = []
+            
+            # Add instant answer if available
+            if data.get("Abstract"):
+                results.append(WebSearchResult(
+                    title=data.get("AbstractText", "DuckDuckGo Result")[:100],
+                    url=data.get("AbstractURL", ""),
+                    snippet=data.get("Abstract", "")[:500],
+                    source="duckduckgo",
+                    score=1.0
+                ))
+            
+            # Add related topics
+            for topic in data.get("RelatedTopics", [])[:max_results-len(results)]:
+                if isinstance(topic, dict) and topic.get("Text"):
+                    results.append(WebSearchResult(
+                        title=topic.get("Text", "")[:100],
+                        url=topic.get("FirstURL", ""),
+                        snippet=topic.get("Text", "")[:500],
+                        source="duckduckgo",
+                        score=0.8
+                    ))
+            
+            return results[:max_results]
+            
+        except Exception as e:
+            self.logger.error(f"DuckDuckGo search failed: {str(e)}")
+            return []
+    
+    async def _search_google(self, query: str, max_results: int) -> List[WebSearchResult]:
+        """Search using Google (requires API key)."""
+        api_key = self.search_api_keys.get("google")
+        if not api_key:
+            raise MCPError(
+                "Google API key not configured",
+                error_code="GOOGLE_API_KEY_MISSING"
+            )
+        
+        try:
+            # Google Custom Search API would be used here
+            # This is a placeholder implementation
+            return [
+                WebSearchResult(
+                    title=f"Google Search Result for '{query}'",
+                    url="https://www.google.com/search?q=" + query.replace(" ", "+"),
+                    snippet=f"Google search results for query: {query}",
+                    source="google",
+                    score=1.0
+                )
             ]
-
-            if focus_areas:
-                details.append(f"**Focus Areas:** {focus_areas}")
-            if specific_instructions:
-                details.append(f"**Instructions:** {specific_instructions}")
-
-            return "\n".join(details)
-
-        elif action == "deactivate":
-            if not session_id:
-                return "❌ Session ID required for 'deactivate' action. Use format: manage_claude_code_sessions(\"deactivate\", \"session_id\")"
-
-            # Find the session first to verify ownership
-            sessions = ClaudeCodeSessionManager.get_chat_sessions(chat_id, limit=50, active_only=True)
-            target_session = None
-
-            for session in sessions:
-                if session.session_id.startswith(session_id) or session.session_id == session_id:
-                    target_session = session
-                    break
-
-            if not target_session:
-                return f"❌ Active session not found: {session_id}"
-
-            success = ClaudeCodeSessionManager.deactivate_session(target_session.session_id)
-
-            if success:
-                return f"✅ **Session Deactivated**\n\nSession {target_session.session_id[:8]}... has been marked as inactive."
-            else:
-                return f"❌ Failed to deactivate session {session_id}"
-
-        elif action == "continue":
-            if not session_id:
-                return "❌ Session ID required for 'continue' action. Use format: manage_claude_code_sessions(\"continue\", \"session_id\")"
-
-            # Find the session
-            sessions = ClaudeCodeSessionManager.get_chat_sessions(chat_id, limit=50, active_only=True)
-            target_session = None
-
-            for session in sessions:
-                if session.session_id.startswith(session_id) or session.session_id == session_id:
-                    target_session = session
-                    break
-
-            if not target_session:
-                return f"❌ Active session not found: {session_id}"
-
-            return f"""🔄 **Continue Session: {target_session.session_id[:8]}...**
-
-**To continue this session**, simply use the same tool (`{target_session.tool_name}`) with a follow-up task in the same workspace.
-
-**Session Context:**
-• Tool: {target_session.tool_name}
-• Directory: {target_session.working_directory}
-• Previous work: {target_session.initial_task}
-• Tasks completed: {target_session.task_count}
-
-The system will automatically detect and continue this session when you:
-1. Use `{target_session.tool_name}` again
-2. In the same working directory: `{target_session.working_directory}`
-3. Within the next 2 hours
-
-**Example follow-up:**
-"Continue the previous work by adding tests for the new features" """
-
-        else:
-            return f"❌ Unknown action: {action}. Valid actions: list, show, deactivate, continue"
-
-    except Exception as e:
-        return f"📋 Session management error: {str(e)}"
-
-
-@mcp.tool()
-def show_workspace_prime_content(
-    working_directory: str = "",
-    chat_id: str = ""
-) -> str:
-    """Show the workspace-specific /prime command content that will be used for new Claude Code sessions.
-
-    This tool displays the prime.md content from the .claude/commands/ directory of the
-    specified workspace, which automatically primes new Claude Code sessions with
-    project-specific context and commands.
-
-    Args:
-        working_directory: Specific directory to check (optional, will resolve from chat if empty)
-        chat_id: Chat ID for workspace context (extracted from CONTEXT_DATA if available)
-
-    Returns:
-        The prime content that would be used for Claude Code sessions, or info if not found
-
-    Examples:
-        >>> show_workspace_prime_content()
-        📋 **Workspace Prime Content**...
-
-        >>> show_workspace_prime_content("/Users/valorengels/src/psyoptimal")
-        📋 **PsyOPTIMAL Prime Content**...
-    """
-    try:
-        from utilities.claude_code_session_manager import ClaudeCodeSessionManager
-        from utilities.workspace_validator import WorkspaceResolver
-        from .context_manager import inject_context_for_tool
-
-        # Inject context if not provided
-        chat_id, username = inject_context_for_tool(chat_id, "")
-
-        # Resolve working directory if not provided
-        if not working_directory:
-            working_directory, context_desc = WorkspaceResolver.resolve_working_directory(
-                chat_id=chat_id,
-                username=username,
-                is_group_chat=True,
-                target_directory=""
+            
+        except Exception as e:
+            self.logger.error(f"Google search failed: {str(e)}")
+            return []
+    
+    async def _search_bing(self, query: str, max_results: int) -> List[WebSearchResult]:
+        """Search using Bing (requires API key)."""
+        api_key = self.search_api_keys.get("bing")
+        if not api_key:
+            raise MCPError(
+                "Bing API key not configured",
+                error_code="BING_API_KEY_MISSING"
             )
+        
+        try:
+            # Bing Web Search API would be used here
+            # This is a placeholder implementation
+            return [
+                WebSearchResult(
+                    title=f"Bing Search Result for '{query}'",
+                    url="https://www.bing.com/search?q=" + query.replace(" ", "+"),
+                    snippet=f"Bing search results for query: {query}",
+                    source="bing",
+                    score=1.0
+                )
+            ]
+            
+        except Exception as e:
+            self.logger.error(f"Bing search failed: {str(e)}")
+            return []
+    
+    # Helper methods
+    
+    async def _load_default_templates(self) -> None:
+        """Load default content templates."""
+        default_templates = [
+            ContentTemplate(
+                name="blog_post",
+                type="blog",
+                template="""# {title}
 
-        # Load prime content
-        prime_content = ClaudeCodeSessionManager.load_workspace_prime_content(working_directory)
+{introduction}
 
-        if prime_content:
-            # Extract title from first line if it exists
-            lines = prime_content.split('\n')
-            title = lines[0].replace('#', '').strip() if lines and lines[0].startswith('#') else "Prime Content"
+## Main Content
 
-            return f"""📋 **Workspace Prime Content**
+{content}
 
-**Directory**: {working_directory}
-**Prime File**: {working_directory}/.claude/commands/prime.md
-**Title**: {title}
-**Length**: {len(prime_content)} characters
+## Conclusion
 
-**Content Preview** (first 500 chars):
-```
-{prime_content[:500]}{'...' if len(prime_content) > 500 else ''}
-```
+{conclusion}
 
-💡 **Note**: This content is automatically included in new Claude Code sessions for this workspace to provide project-specific context and guidance."""
+---
+Published on {date}
+Author: {author}""",
+                variables=["title", "introduction", "content", "conclusion", "date", "author"],
+                tags=["blog", "article", "post"]
+            ),
+            
+            ContentTemplate(
+                name="social_media_post",
+                type="social",
+                template="""{content}
 
-        else:
-            return f"""📋 **No Workspace Prime Content Found**
+{hashtags}
 
-**Directory**: {working_directory}
-**Expected Location**: {working_directory}/.claude/commands/prime.md
+#SocialMedia #{platform}""",
+                variables=["content", "hashtags", "platform"],
+                tags=["social", "twitter", "facebook", "linkedin"]
+            ),
+            
+            ContentTemplate(
+                name="email_template",
+                type="email",
+                template="""Subject: {subject}
 
-❌ No prime.md file found in this workspace's .claude/commands/ directory.
+Dear {recipient_name},
 
-💡 **Note**: Without workspace-specific prime content, new Claude Code sessions will use generic project context as fallback."""
+{greeting}
 
-    except Exception as e:
-        return f"📋 Error loading workspace prime content: {str(e)}"
+{body}
 
+{closing}
 
-@mcp.tool()
-def transcribe_youtube_video(
-    youtube_url: str,
-    device: str = "cpu",
-    batch_size: int = 16,
-    verbose: bool = True,
-    flash: bool = False,
-    chat_id: str = ""
-) -> str:
-    """Transcribe a YouTube video to text using transcribe-anything with advanced AI transcription.
-
-    Use this tool to convert YouTube videos into text transcriptions for learning,
-    analysis, and reference. Supports multiple device modes for optimal performance.
-
-    Args:
-        youtube_url: YouTube video URL to transcribe
-        device: Transcription device ("cpu", "insane" for GPU, "mlx" for Apple Silicon)
-        batch_size: Batch size for transcription processing (higher = faster, more memory)
-        verbose: Enable detailed progress output during transcription
-        flash: Use flash attention for compatible devices (GPU/MLX only)
-        chat_id: Chat ID for context (extracted from CONTEXT_DATA if available)
-
-    Returns:
-        Transcribed text with metadata, or error message if transcription fails
-    """
-    try:
-        # Inject context if not provided
-        chat_id, _ = inject_context_for_tool(chat_id, "")
-
-        # Call standalone implementation following GOLD STANDARD pattern
-        result = transcribe_video_impl(
-            youtube_url,
-            device=device,
-            save_results=True
-        )
-
-        # Format response with metadata
-        metadata = result.get("metadata", {})
-        transcription_info = result.get("transcription_info", {})
-
-        response_parts = [
-            f"🎥 **YouTube Video Transcribed**\n",
-            f"**Title:** {metadata.get('title', 'Unknown')}",
-            f"**Duration:** {metadata.get('duration', 0)}s",
-            f"**Uploader:** {metadata.get('uploader', 'Unknown')}",
-            f"**Device:** {transcription_info.get('device', device)}",
-            f"**Processing Time:** {transcription_info.get('duration_seconds', 0):.1f}s",
-            f"**Word Count:** {transcription_info.get('word_count', 0):,}",
-            "",
-            "**Transcription:**",
-            result.get("transcription", "No transcription available")
+Best regards,
+{sender_name}""",
+                variables=["subject", "recipient_name", "greeting", "body", "closing", "sender_name"],
+                tags=["email", "communication", "business"]
+            )
         ]
-
-        # Add chat context if available
-        if chat_id:
-            response_parts.insert(0, f"💾 Transcription saved for future reference in chat {chat_id}")
-
-        return "\n".join(response_parts)
-
-    except Exception as e:
-        return f"🎥 YouTube transcription error: {str(e)}"
-
-
-@mcp.tool()
-def transcribe_youtube_playlist(
-    playlist_url: str,
-    device: str = "cpu",
-    max_videos: int = 10,
-    skip_existing: bool = True,
-    batch_size: int = 16,
-    chat_id: str = ""
-) -> str:
-    """Transcribe multiple YouTube videos from a playlist for comprehensive learning.
-
-    Use this tool to batch transcribe YouTube playlists containing AI best practices,
-    tutorials, or educational content. Automatically handles multiple videos efficiently.
-
-    Args:
-        playlist_url: YouTube playlist URL to transcribe
-        device: Transcription device ("cpu", "insane" for GPU, "mlx" for Apple Silicon)
-        max_videos: Maximum number of videos to process from the playlist
-        skip_existing: Skip videos that have already been transcribed
-        batch_size: Batch size for transcription processing
-        chat_id: Chat ID for context (extracted from CONTEXT_DATA if available)
-
-    Returns:
-        Summary of transcribed videos with metadata, or error message if fails
-    """
-    try:
-        # Inject context if not provided
-        chat_id, _ = inject_context_for_tool(chat_id, "")
-
-        # Call standalone implementation following GOLD STANDARD pattern
-        results = transcribe_playlist_impl(
-            playlist_url,
-            device=device,
-            max_videos=max_videos
-        )
-
-        if not results:
-            return f"❌ No videos found in playlist or transcription failed"
-
-        # Create summary response
-        total_duration = sum(r.get("metadata", {}).get("duration", 0) for r in results)
-        total_words = sum(r.get("transcription_info", {}).get("word_count", 0) for r in results)
-
-        response_parts = [
-            f"📝 **YouTube Playlist Transcribed**\n",
-            f"**Videos Processed:** {len(results)}",
-            f"**Total Duration:** {total_duration // 60}m {total_duration % 60}s",
-            f"**Total Words:** {total_words:,}",
-            f"**Device Used:** {device}",
-            "",
-            "**Transcribed Videos:**"
-        ]
-
-        # Add individual video summaries
-        for i, result in enumerate(results[:5], 1):  # Show first 5
-            metadata = result.get("metadata", {})
-            title = metadata.get("title", "Unknown")[:60] + "..." if len(metadata.get("title", "")) > 60 else metadata.get("title", "Unknown")
-            word_count = result.get("transcription_info", {}).get("word_count", 0)
-            response_parts.append(f"{i}. {title} ({word_count:,} words)")
-
-        if len(results) > 5:
-            response_parts.append(f"... and {len(results) - 5} more videos")
-
-        response_parts.extend([
-            "",
-            "💡 **Usage:** Use `search_youtube_transcriptions()` to find specific content across all transcriptions",
-            "🧠 **Learning:** Use `learn_from_ai_video()` for AI-specific content analysis"
-        ])
-
-        return "\n".join(response_parts)
-
-    except Exception as e:
-        return f"📝 YouTube playlist transcription error: {str(e)}"
+        
+        for template in default_templates:
+            self._content_templates[template.name] = template
+        
+        self.logger.info(f"Loaded {len(default_templates)} default content templates")
+    
+    async def _load_knowledge_base(self) -> None:
+        """Load knowledge base entries from file."""
+        try:
+            if self.knowledge_base_path:
+                # In a real implementation, this would load from a file or database
+                # For now, create some sample entries
+                sample_entries = [
+                    KnowledgeBaseEntry(
+                        id="kb_001",
+                        title="MCP Server Development Guide",
+                        content="Guide for developing MCP servers with proper context injection and stateless design patterns.",
+                        category="development",
+                        tags=["mcp", "server", "development", "guide"],
+                        author="System"
+                    ),
+                    KnowledgeBaseEntry(
+                        id="kb_002",
+                        title="Social Tools Usage",
+                        content="Documentation for using social tools including web search, calendar management, and content generation.",
+                        category="documentation",
+                        tags=["social", "tools", "documentation", "usage"],
+                        author="System"
+                    )
+                ]
+                
+                for entry in sample_entries:
+                    self._knowledge_base[entry.id] = entry
+                
+                self.logger.info(f"Loaded {len(sample_entries)} knowledge base entries")
+        
+        except Exception as e:
+            self.logger.error(f"Failed to load knowledge base: {str(e)}")
+    
+    def _html_to_markdown(self, html_content: str) -> str:
+        """Simple HTML to Markdown conversion."""
+        import re
+        
+        # Basic HTML to Markdown conversion
+        content = html_content
+        
+        # Headers
+        content = re.sub(r'<h1[^>]*>([^<]+)</h1>', r'# \1', content)
+        content = re.sub(r'<h2[^>]*>([^<]+)</h2>', r'## \1', content)
+        content = re.sub(r'<h3[^>]*>([^<]+)</h3>', r'### \1', content)
+        
+        # Links
+        content = re.sub(r'<a[^>]+href="([^"]+)"[^>]*>([^<]+)</a>', r'[\2](\1)', content)
+        
+        # Bold and italic
+        content = re.sub(r'<strong[^>]*>([^<]+)</strong>', r'**\1**', content)
+        content = re.sub(r'<em[^>]*>([^<]+)</em>', r'*\1*', content)
+        
+        # Paragraphs
+        content = re.sub(r'<p[^>]*>', '', content)
+        content = re.sub(r'</p>', '\n\n', content)
+        
+        # Remove remaining HTML tags
+        content = re.sub(r'<[^>]+>', ' ', content)
+        
+        # Clean up whitespace
+        content = re.sub(r'\n\s*\n', '\n\n', content)
+        content = re.sub(r' +', ' ', content)
+        
+        return content.strip()
 
 
-@mcp.tool()
-def search_youtube_transcriptions(
-    query: str,
-    limit: int = 5,
-    chat_id: str = ""
-) -> str:
-    """Search through previously transcribed YouTube videos for specific content.
-
-    Use this tool to find specific AI best practices, techniques, or concepts
-    across all your transcribed YouTube content. Great for research and reference.
-
-    Args:
-        query: Search term or phrase to find in transcriptions
-        limit: Maximum number of results to return
-        chat_id: Chat ID for context (extracted from CONTEXT_DATA if available)
-
-    Returns:
-        Matching transcription excerpts with context, or no results message
-    """
-    try:
-        # Inject context if not provided
-        chat_id, _ = inject_context_for_tool(chat_id, "")
-
-        # Call standalone implementation following GOLD STANDARD pattern
-        results = search_ai_content(query, limit)
-
-        if not results:
-            return f"🔍 **No Results Found**\n\nNo transcriptions found matching '{query}'. Try different keywords or transcribe more videos first."
-
-        response_parts = [
-            f"🔍 **Search Results for '{query}'**\n",
-            f"Found {len(results)} matching transcription(s):\n"
-        ]
-
-        # Format search results
-        for i, result in enumerate(results, 1):
-            title = result.get("title", "Unknown")[:50] + "..." if len(result.get("title", "")) > 50 else result.get("title", "Unknown")
-            context = result.get("context", "")[:200] + "..." if len(result.get("context", "")) > 200 else result.get("context", "")
-
-            response_parts.extend([
-                f"**{i}. {title}**",
-                f"🔗 {result.get('url', 'Unknown URL')}",
-                f"📝 Context: {context}",
-                f"⭐ Relevance: {result.get('relevance_score', 0)} matches",
-                ""
-            ])
-
-        response_parts.append("💡 **Tip:** Use specific technical terms for better results (e.g., 'transformer', 'prompt engineering', 'fine-tuning')")
-
-        return "\n".join(response_parts)
-
-    except Exception as e:
-        return f"🔍 YouTube transcription search error: {str(e)}"
-
-
-@mcp.tool()
-def learn_from_ai_video(
-    youtube_url: str,
-    tags: str = "",
-    device: str = "cpu",
-    chat_id: str = ""
-) -> str:
-    """Transcribe and automatically learn from AI-focused YouTube videos with intelligent categorization.
-
-    Use this tool specifically for AI best practices videos. It transcribes the video
-    and automatically categorizes content, extracts key concepts, and prepares it for
-    integration into your AI learning system.
-
-    Args:
-        youtube_url: YouTube video URL (should be AI/ML/tech focused)
-        tags: Optional comma-separated tags for categorization (e.g., "llm,prompt-engineering")
-        device: Transcription device ("cpu", "insane" for GPU, "mlx" for Apple Silicon)
-        chat_id: Chat ID for context (extracted from CONTEXT_DATA if available)
-
-    Returns:
-        Transcription with AI-focused analysis and learning insights
-    """
-    try:
-        # Inject context if not provided
-        chat_id, _ = inject_context_for_tool(chat_id, "")
-
-        # Parse tags
-        tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
-
-        # Call AI-focused learning implementation
-        learner = AIContentLearner()
-        result = learner.learn_from_video(youtube_url, tag_list)
-
-        # Extract information
-        metadata = result.get("metadata", {})
-        learning_info = result.get("learning_info", {})
-        transcription_info = result.get("transcription_info", {})
-
-        response_parts = [
-            f"🧠 **AI Video Learning Complete**\n",
-            f"**Title:** {metadata.get('title', 'Unknown')}",
-            f"**Category:** {learning_info.get('category', 'general')}",
-            f"**Duration:** {metadata.get('duration', 0)}s",
-            f"**Word Count:** {transcription_info.get('word_count', 0):,}",
-            ""
-        ]
-
-        # Add key concepts if found
-        key_concepts = learning_info.get("key_concepts", [])
-        if key_concepts:
-            response_parts.extend([
-                "**🔑 Key AI Concepts Identified:**",
-                ", ".join(key_concepts[:8])  # Show first 8 concepts
-            ])
-            if len(key_concepts) > 8:
-                response_parts.append(f"... and {len(key_concepts) - 8} more")
-            response_parts.append("")
-
-        # Add tags if provided
-        if tag_list:
-            response_parts.extend([
-                f"**🏷️ Tags:** {', '.join(tag_list)}",
-                ""
-            ])
-
-        # Add learning summary
-        response_parts.extend([
-            "**📚 Learning Integration:**",
-            f"✅ Content categorized as '{learning_info.get('category', 'general')}'",
-            "✅ Key concepts extracted for future reference",
-            "✅ Transcription stored in learning database",
-            "✅ Available for search and cross-reference",
-            "",
-            "**🔍 Next Steps:**",
-            "• Use `search_youtube_transcriptions()` to find related content",
-            "• Apply learned concepts in your AI development work",
-            "• Reference key concepts in future projects"
-        ])
-
-        # Add portion of transcription for immediate value
-        transcription = result.get("transcription", "")
-        if transcription:
-            preview = transcription[:300] + "..." if len(transcription) > 300 else transcription
-            response_parts.extend([
-                "",
-                "**📝 Transcription Preview:**",
-                preview
-            ])
-
-        return "\n".join(response_parts)
-
-    except Exception as e:
-        return f"🧠 AI video learning error: {str(e)}"
-
-
-if __name__ == "__main__":
-    mcp.run()
+# Export the server class
+__all__ = ["SocialToolsServer"]

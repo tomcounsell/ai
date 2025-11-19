@@ -1,22 +1,9 @@
-"""
-Valor Engels agent module.
+"""Valor Agent Package
 
-This module contains the complete Valor Engels agent implementation with all tools,
-handlers, and persona configuration organized in a structured directory.
+This package contains the Valor AI agent implementation with PydanticAI integration.
 """
 
-from .agent import ValorContext, run_valor_agent, valor_agent
-from .handlers import (
-    handle_general_question,
-    handle_telegram_message,
-    handle_user_priority_question,
-)
+from .agent import ValorAgent
+from .context import ValorContext
 
-__all__ = [
-    "ValorContext",
-    "run_valor_agent",
-    "valor_agent",
-    "handle_telegram_message",
-    "handle_general_question",
-    "handle_user_priority_question",
-]
+__all__ = ["ValorAgent", "ValorContext"]
