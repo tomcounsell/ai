@@ -5,10 +5,10 @@ Tests for Creative Juices MCP Server.
 import pytest
 
 from apps.ai.mcp.creative_juices_server import (
-    get_inspiration,
-    think_outside_the_box,
-    reality_check,
     MUSK_QUESTIONS,
+    get_inspiration,
+    reality_check,
+    think_outside_the_box,
 )
 
 
@@ -66,7 +66,7 @@ async def test_reality_check():
 @pytest.mark.asyncio
 async def test_word_lists_loaded():
     """Test that word lists are properly loaded."""
-    from apps.ai.mcp.creative_juices_words import VERBS, NOUNS
+    from apps.ai.mcp.creative_juices_words import NOUNS, VERBS
 
     # Check both categories exist
     assert "inspiring" in VERBS

@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 
-{% block title %}CTO Tools MCP - Engineering Leadership Frameworks{% endblock %}
+{% block title %}CTO Tools MCP - Security Review & Engineering Leadership{% endblock %}
 
-{% block meta_description %}MCP server providing structured frameworks for CTO activities: weekly reviews, team analysis, and strategic decision-making{% endblock %}
+{% block meta_description %}MCP server for security review, risk correlation, and engineering leadership: automated security analysis and weekly team reviews{% endblock %}
 
 {% block content_width %}12{% endblock %}
 
@@ -299,12 +299,12 @@
     <div class="header">
         <div class="label">MCP_SERVER_02</div>
         <h1>CTO TOOLS</h1>
-        <p class="tagline">ENGINEERING LEADERSHIP FRAMEWORKS</p>
+        <p class="tagline">SECURITY REVIEW & ENGINEERING LEADERSHIP</p>
         <div class="divider" style="margin: var(--space-lg) 0;"></div>
         <p class="intro">
-            CTO Tools provides structured frameworks and best practices for common engineering leadership activities.
-            Helps AI assistants guide technical leaders through weekly reviews, team analysis, and strategic decision-making
-            with analysis-focused, non-prescriptive approaches.
+            CTO Tools provides automated security risk analysis and engineering leadership frameworks.
+            Correlates security alerts from multiple sources (SAST/DAST, CSPM, threat intel) with compliance policies
+            to identify and prioritize risks. Also includes weekly team review frameworks for technical leaders.
         </p>
     </div>
 
@@ -425,55 +425,87 @@
 
     <div class="tool-spec">
         <div class="label">TOOL_01</div>
-        <h3>weekly_review()</h3>
+        <h3>security_review()</h3>
         <p style="font-size: 0.95rem; margin-bottom: var(--space-lg); line-height: 1.8;">
-            Streamlined 3-phase framework for weekly engineering team reviews. Analysis-focused, not prescriptive. Works with ANY codebase.
+            Automated security risk analysis that correlates alerts from multiple tools with compliance policies.
+            Identifies, scores (0-100), and prioritizes security risks with actionable remediation steps.
         </p>
 
-        <h4>Phase 1: Data Gathering</h4>
+        <h4>What It Analyzes</h4>
         <ul>
-            <li>Parallel git commands for efficient data collection</li>
-            <li>Commit analysis across the reporting period</li>
-            <li>Contributor activity tracking</li>
+            <li>SAST/DAST vulnerabilities (SQL injection, XSS, hardcoded credentials)</li>
+            <li>Cloud misconfigurations (public S3 buckets, unencrypted databases)</li>
+            <li>Threat intelligence indicators</li>
+            <li>Compliance policy violations (PII handling, encryption requirements)</li>
         </ul>
 
-        <h4>Phase 2: Internal Analysis</h4>
+        <h4>Risk Scoring Model</h4>
         <ul>
-            <li>Review commits and categorize work</li>
-            <li>Identify patterns and themes</li>
-            <li>Generate contributor statistics</li>
+            <li>Alert Severity (40%) - CVSS scores + scanner criticality</li>
+            <li>Exposure Risk (30%) - Environment, data classification, public access</li>
+            <li>Policy Violations (30%) - Compliance policy weights</li>
+            <li>Business Impact (multiplier) - Up to 1.5x for critical combinations</li>
         </ul>
 
-        <h4>Phase 3: Concise Output</h4>
+        <h4>Output Format</h4>
         <ul>
-            <li>~200 word summary with 5 adaptive categories</li>
-            <li>Contributor recognition and stats</li>
-            <li>Communication-ready format for any channel</li>
+            <li>Natural language risk summary</li>
+            <li>Structured JSON with all details</li>
+            <li>Recommended actions with assignees</li>
+            <li>Ready for copy-paste to ticketing systems</li>
         </ul>
 
         <table class="spec-table" style="margin-top: var(--space-xl);">
             <thead>
                 <tr>
-                    <th>Characteristic</th>
-                    <th>Implementation</th>
+                    <th>Feature</th>
+                    <th>Details</th>
                 </tr>
             </thead>
             <tbody>
                 <tr>
-                    <td>Review Time</td>
+                    <td>Demo Connectors</td>
+                    <td>SAST, CSPM, Policy (works immediately)</td>
+                </tr>
+                <tr>
+                    <td>Risk Severity</td>
+                    <td>Critical, High, Medium, Low (80-100, 50-79, 20-49, &lt;20)</td>
+                </tr>
+                <tr>
+                    <td>Configuration</td>
+                    <td>Zero config with demo data</td>
+                </tr>
+                <tr>
+                    <td>Extensibility</td>
+                    <td>Add custom connectors (Snyk, AWS Security Hub, etc.)</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="tool-spec">
+        <div class="label">TOOL_02</div>
+        <h3>weekly_review()</h3>
+        <p style="font-size: 0.95rem; margin-bottom: var(--space-lg); line-height: 1.8;">
+            Streamlined 3-phase framework for weekly engineering team reviews. Produces ~200 word summaries
+            with 5 adaptive categories based on actual work. 15-20 minute reviews, works with any codebase.
+        </p>
+
+        <table class="spec-table">
+            <tbody>
+                <tr>
+                    <td>Output</td>
+                    <td>~200 words, 5 adaptive categories, contributor stats</td>
+                </tr>
+                <tr>
+                    <td>Time</td>
                     <td>15-20 minutes</td>
                 </tr>
                 <tr>
-                    <td>Output Length</td>
-                    <td>~200 words</td>
-                </tr>
-                <tr>
-                    <td>Categories</td>
-                    <td>5 adaptive, based on actual work</td>
-                </tr>
-                <tr>
-                    <td>Codebase</td>
-                    <td>Universal, no configuration needed</td>
+                    <td>Approach</td>
+                    <td>Analysis-focused, not prescriptive</td>
                 </tr>
             </tbody>
         </table>
@@ -486,26 +518,26 @@
         <div class="features-grid">
             <div class="feature-card">
                 <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_01</div>
-                <h4>3-Phase Framework</h4>
-                <p>Streamlined process: gather data, analyze internally, output concise summary</p>
+                <h4>Multi-Source Correlation</h4>
+                <p>Automatically links alerts from SAST, DAST, CSPM, and threat intel with policy violations</p>
             </div>
 
             <div class="feature-card">
                 <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_02</div>
-                <h4>Adaptive Categorization</h4>
-                <p>AI chooses 5 relevant categories based on actual work, not templates</p>
+                <h4>Intelligent Risk Scoring</h4>
+                <p>0-100 scale based on severity, exposure, policy violations, and business impact</p>
             </div>
 
             <div class="feature-card">
                 <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_03</div>
-                <h4>Concise Output</h4>
-                <p>Single ~200 word summary suitable for any communication channel</p>
+                <h4>Actionable Output</h4>
+                <p>Natural language summaries + structured JSON with recommended actions and assignees</p>
             </div>
 
             <div class="feature-card">
                 <div class="label" style="margin-bottom: var(--space-sm);">FEATURE_04</div>
-                <h4>Focus on Deliverables</h4>
-                <p>Clear what-changed summary without verbose analysis</p>
+                <h4>Zero Configuration</h4>
+                <p>Works immediately with built-in demo connectors, extensible for real tools</p>
             </div>
         </div>
     </div>
@@ -513,12 +545,12 @@
     <div class="divider"></div>
 
     <div class="section">
-        <h2>USAGE WORKFLOW</h2>
+        <h2>USAGE EXAMPLES</h2>
         <ul class="feature-list">
-            <li><strong>Request Tool</strong> — Ask Claude to use CTO Tools for team review</li>
-            <li><strong>Receive Framework</strong> — Get structured instructions and best practices</li>
-            <li><strong>Follow Steps</strong> — Use provided git commands and analysis frameworks</li>
-            <li><strong>Generate Insights</strong> — Create executive summaries and action items</li>
+            <li><strong>Security Review</strong> — "Show me critical PII-related risks in the last 48 hours"</li>
+            <li><strong>Risk Prioritization</strong> — "What are the top 5 security risks in production?"</li>
+            <li><strong>Compliance Check</strong> — "Which cloud resources violate our encryption policies?"</li>
+            <li><strong>Weekly Review</strong> — "Run a weekly review of my team's work"</li>
         </ul>
     </div>
 
@@ -527,24 +559,24 @@
         <table class="spec-table">
             <tbody>
                 <tr>
-                    <td>External API Calls</td>
-                    <td>None</td>
+                    <td>Data Storage</td>
+                    <td>None - all processing in-memory</td>
                 </tr>
                 <tr>
-                    <td>Authentication Required</td>
-                    <td>No</td>
+                    <td>Authentication</td>
+                    <td>Not required (demo connectors)</td>
                 </tr>
                 <tr>
-                    <td>User Data Storage</td>
-                    <td>None</td>
+                    <td>Security Data</td>
+                    <td>Never transmitted or stored</td>
                 </tr>
                 <tr>
-                    <td>Execution Environment</td>
+                    <td>Execution</td>
                     <td>Fully local via MCP protocol</td>
                 </tr>
                 <tr>
-                    <td>Git Commands</td>
-                    <td>Run in your local environment only</td>
+                    <td>Extensibility</td>
+                    <td>Add real connectors with your own API keys</td>
                 </tr>
             </tbody>
         </table>

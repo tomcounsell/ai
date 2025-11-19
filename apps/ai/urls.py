@@ -3,12 +3,6 @@ from typing import List
 from django.urls import URLPattern, path
 
 from apps.ai.views import (
-    CTOToolsBundleView,
-    CTOToolsClientView,
-    CTOToolsLandingView,
-    CTOToolsMCPServerView,
-    CTOToolsManifestView,
-    CTOToolsReadmeView,
     ChatClearView,
     ChatIndexView,
     ChatLoadSessionView,
@@ -18,9 +12,15 @@ from apps.ai.views import (
     CreativeJuicesBundleView,
     CreativeJuicesClientView,
     CreativeJuicesLandingView,
-    CreativeJuicesMCPServerView,
     CreativeJuicesManifestView,
+    CreativeJuicesMCPServerView,
     CreativeJuicesReadmeView,
+    CTOToolsBundleView,
+    CTOToolsClientView,
+    CTOToolsLandingView,
+    CTOToolsManifestView,
+    CTOToolsMCPServerView,
+    CTOToolsReadmeView,
 )
 from apps.ai.views.test_chat import TestChatView
 from apps.ai.views.test_page import TestChatPageView

@@ -34,7 +34,7 @@ ENDPOINTS_TO_CHECK = [
 
 def check_endpoint(
     url: str, expected_status: int, check_cors: bool, description: str
-) -> Tuple[bool, str]:
+) -> tuple[bool, str]:
     """Check a single endpoint."""
     full_url = f"{PRODUCTION_BASE_URL}{url}"
 
@@ -62,7 +62,7 @@ def run_health_checks() -> bool:
     print(f"Running production health checks for {PRODUCTION_BASE_URL}...")
     print("=" * 80)
 
-    results: List[Dict] = []
+    results: list[dict] = []
     all_passed = True
 
     for url, expected_status, check_cors, description in ENDPOINTS_TO_CHECK:

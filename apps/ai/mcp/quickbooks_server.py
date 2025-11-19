@@ -69,7 +69,7 @@ async def get_reports() -> dict:
 @mcp.tool()
 async def create_invoice(
     customer_id: str,
-    line_items: List[Dict[str, Any]],
+    line_items: list[dict[str, Any]],
     due_date: str | None = None,
     invoice_number: str | None = None,
 ) -> dict:
@@ -95,7 +95,7 @@ async def create_invoice(
 async def search_customers(
     query: str,
     max_results: int = 20,
-) -> List[dict]:
+) -> list[dict]:
     """
     Search QuickBooks customers.
 
@@ -124,7 +124,7 @@ async def list_invoices(
     customer_id: str | None = None,
     status: str | None = None,
     limit: int = 20,
-) -> List[dict]:
+) -> list[dict]:
     """
     List QuickBooks invoices.
 
@@ -164,7 +164,7 @@ async def generate_report(
 
 
 @mcp.tool()
-async def sync_data(entity_types: List[str]) -> dict:
+async def sync_data(entity_types: list[str]) -> dict:
     """
     Sync QuickBooks data for specified entity types.
 
