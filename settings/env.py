@@ -31,6 +31,9 @@ elif dt_key == "STAGE":
 else:
     LOCAL = True
 
+# Export DEPLOYMENT_TYPE for use in settings
+DEPLOYMENT_TYPE = dt_key
+
 # Debug mode based on environment
 DEBUG = LOCAL or STAGE or (os.environ.get("DEBUG", "False").lower() == "true")
 
@@ -41,8 +44,8 @@ if not SECRET_KEY and (LOCAL or DEBUG):
 
 # Hosts configuration
 ALLOWED_HOSTS = [
-    'ai.yuda.me',
-    'cuttlefish-ea1h.onrender.com',
+    "ai.yuda.me",
+    "cuttlefish-ea1h.onrender.com",
     # '.amazonaws.com',
     "localhost",
     "127.0.0.1",
@@ -52,9 +55,9 @@ if LOCAL:
     CORS_ORIGIN_ALLOW_ALL = True
 else:
     CORS_ORIGIN_WHITELIST = [
-        'https://cuttlefish-ea1h.onrender.com',
-        'https://ai.yuda.me',
-        'https://*.yuda.me',
+        "https://cuttlefish-ea1h.onrender.com",
+        "https://ai.yuda.me",
+        "https://*.yuda.me",
         # 'https://s3.amazonaws.com',
         # 'https://vendor_api.com',
         "https://localhost",

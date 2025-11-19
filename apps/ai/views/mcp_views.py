@@ -41,7 +41,7 @@ class CreativeJuicesReadmeView(View):
     """Serve the Creative Juices MCP README."""
 
     def get(self, request):
-        """Return the README.md as markdown."""
+        """Return the README.md as markdown with CORS headers."""
         readme_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
             "mcp",
@@ -51,7 +51,11 @@ class CreativeJuicesReadmeView(View):
         with open(readme_path) as f:
             content = f.read()
 
-        return HttpResponse(content, content_type="text/markdown; charset=utf-8")
+        response = HttpResponse(content, content_type="text/markdown; charset=utf-8")
+        response["Access-Control-Allow-Origin"] = "*"
+        response["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response["Access-Control-Allow-Headers"] = "Content-Type"
+        return response
 
 
 class CreativeJuicesClientView(View):
@@ -102,7 +106,7 @@ class CTOToolsReadmeView(View):
     """Serve the CTO Tools MCP README."""
 
     def get(self, request):
-        """Return the README.md as markdown."""
+        """Return the README.md as markdown with CORS headers."""
         readme_path = os.path.join(
             os.path.dirname(os.path.dirname(__file__)),
             "mcp",
@@ -112,7 +116,11 @@ class CTOToolsReadmeView(View):
         with open(readme_path) as f:
             content = f.read()
 
-        return HttpResponse(content, content_type="text/markdown; charset=utf-8")
+        response = HttpResponse(content, content_type="text/markdown; charset=utf-8")
+        response["Access-Control-Allow-Origin"] = "*"
+        response["Access-Control-Allow-Methods"] = "GET, OPTIONS"
+        response["Access-Control-Allow-Headers"] = "Content-Type"
+        return response
 
 
 class CTOToolsClientView(View):
@@ -149,16 +157,14 @@ class CreativeJuicesBundleView(View):
 
         if not os.path.exists(bundle_path):
             return HttpResponse(
-                "Bundle file not found. Please run the build process.",
-                status=404
+                "Bundle file not found. Please run the build process.", status=404
             )
 
-        with open(bundle_path, 'rb') as f:
-            response = HttpResponse(
-                f.read(),
-                content_type='application/zip'
+        with open(bundle_path, "rb") as f:
+            response = HttpResponse(f.read(), content_type="application/zip")
+            response["Content-Disposition"] = (
+                'attachment; filename="creative-juices.mcpb"'
             )
-            response['Content-Disposition'] = 'attachment; filename="creative-juices.mcpb"'
             return response
 
 
@@ -179,14 +185,10 @@ class CTOToolsBundleView(View):
 
         if not os.path.exists(bundle_path):
             return HttpResponse(
-                "Bundle file not found. Please run the build process.",
-                status=404
+                "Bundle file not found. Please run the build process.", status=404
             )
 
-        with open(bundle_path, 'rb') as f:
-            response = HttpResponse(
-                f.read(),
-                content_type='application/zip'
-            )
-            response['Content-Disposition'] = 'attachment; filename="cto-tools.mcpb"'
+        with open(bundle_path, "rb") as f:
+            response = HttpResponse(f.read(), content_type="application/zip")
+            response["Content-Disposition"] = 'attachment; filename="cto-tools.mcpb"'
             return response
