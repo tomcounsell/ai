@@ -35,7 +35,10 @@ try:
     from mcp.client.session import ClientSession
     from mcp.client.stdio import stdio_client
 except ImportError:
-    print("Error: Required packages not found. uvx should install these automatically.", file=sys.stderr)
+    print(
+        "Error: Required packages not found. uvx should install these automatically.",
+        file=sys.stderr,
+    )
     print("If running manually, install with: pip install mcp httpx", file=sys.stderr)
     sys.exit(1)
 
@@ -57,11 +60,14 @@ async def forward_to_hosted_service():
                 response = await http_client.post(
                     HOSTED_SERVICE_URL,
                     headers={"Content-Type": "application/json"},
-                    json={"jsonrpc": "2.0", "method": "initialize", "params": {}}
+                    json={"jsonrpc": "2.0", "method": "initialize", "params": {}},
                 )
 
                 if response.status_code != 200:
-                    print(f"Error connecting to hosted service: {response.status_code}", file=sys.stderr)
+                    print(
+                        f"Error connecting to hosted service: {response.status_code}",
+                        file=sys.stderr,
+                    )
                     sys.exit(1)
 
                 # Forward all protocol messages
@@ -76,7 +82,7 @@ async def forward_to_hosted_service():
                         response = await http_client.post(
                             HOSTED_SERVICE_URL,
                             headers={"Content-Type": "application/json"},
-                            data=line
+                            data=line,
                         )
 
                         # Write response to stdout

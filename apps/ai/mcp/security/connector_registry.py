@@ -96,7 +96,9 @@ class ConnectorRegistry:
                                     or plugin_file.stem
                                 )
                                 self._connectors[connector_name] = connector_instance
-                                logger.info(f"Loaded plugin connector: {connector_name}")
+                                logger.info(
+                                    f"Loaded plugin connector: {connector_name}"
+                                )
                             except Exception as e:
                                 logger.warning(
                                     f"Failed to instantiate {name} from {plugin_file.name}: {e}"

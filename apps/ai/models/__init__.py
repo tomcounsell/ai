@@ -1,12 +1,13 @@
 # AI models package
 
-from .chat import ChatFeedback, ChatMessage, ChatSession
 # QuickBooks models moved to apps.integration.models
-from apps.integration.models import Organization, QuickBooksConnection, MCPSession
+from apps.integration.models import MCPSession, Organization, QuickBooksConnection
+
+from .chat import ChatFeedback, ChatMessage, ChatSession
 
 __all__ = [
-    "ChatSession", 
-    "ChatMessage", 
+    "ChatSession",
+    "ChatMessage",
     "ChatFeedback",
     "Organization",
     "QuickBooksConnection",

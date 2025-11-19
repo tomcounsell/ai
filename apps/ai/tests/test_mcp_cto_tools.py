@@ -7,7 +7,11 @@ import inspect
 import pytest
 
 # Import security review tools
-from apps.ai.mcp.cto_tools_server import security_review, list_connectors, configure_connector
+from apps.ai.mcp.cto_tools_server import (
+    configure_connector,
+    list_connectors,
+    security_review,
+)
 
 # Note: weekly_review tests are kept for future implementation
 # For now, skip them by importing from a stub if needed
@@ -238,7 +242,9 @@ async def test_security_review_returns_risks():
         query="PII-related risks", min_severity="Medium", time_window_hours=72
     )
 
-    assert "Risk Summary" in result or "Top Risk" in result or "No risks found" in result
+    assert (
+        "Risk Summary" in result or "Top Risk" in result or "No risks found" in result
+    )
     assert "Structured Data (JSON)" in result
 
 
@@ -297,7 +303,9 @@ async def test_list_connectors_basic():
     result = await list_connectors()
 
     assert isinstance(result, str)
-    assert "Available Security Tool Connectors" in result or "connector" in result.lower()
+    assert (
+        "Available Security Tool Connectors" in result or "connector" in result.lower()
+    )
 
 
 @pytest.mark.asyncio

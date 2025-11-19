@@ -219,7 +219,9 @@ class LinearClient:
             description += "\n"
 
         description += "---\n"
-        description += "*This ticket was automatically created by CTO Tools Security Review*\n"
+        description += (
+            "*This ticket was automatically created by CTO Tools Security Review*\n"
+        )
 
         return description
 

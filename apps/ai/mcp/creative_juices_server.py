@@ -65,7 +65,7 @@ async def get_inspiration() -> dict:
     in unexpected ways. Helpful when you need to think outside the box from
     the beginning and want unconventional starting points.
     """
-    from .creative_juices_words import VERBS, NOUNS
+    from .creative_juices_words import NOUNS, VERBS
 
     verb_list = VERBS["inspiring"]
     noun_list = NOUNS["inspiring"]
@@ -89,7 +89,7 @@ async def think_outside_the_box() -> dict:
     too linear. Helpful when you need to break out of convergent patterns and
     force radical divergence from your current approach.
     """
-    from .creative_juices_words import VERBS, NOUNS
+    from .creative_juices_words import NOUNS, VERBS
 
     verb_list = VERBS["out_of_the_box"]
     noun_list = NOUNS["out_of_the_box"]

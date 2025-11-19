@@ -8,21 +8,18 @@ from .chat import (
     ChatPollMessageView,
     ChatSendMessageView,
 )
+from .mcp_server_views import CreativeJuicesMCPServerView, CTOToolsMCPServerView
 from .mcp_views import (
-    CTOToolsBundleView,
-    CTOToolsClientView,
-    CTOToolsLandingView,
-    CTOToolsManifestView,
-    CTOToolsReadmeView,
     CreativeJuicesBundleView,
     CreativeJuicesClientView,
     CreativeJuicesLandingView,
     CreativeJuicesManifestView,
     CreativeJuicesReadmeView,
-)
-from .mcp_server_views import (
-    CreativeJuicesMCPServerView,
-    CTOToolsMCPServerView,
+    CTOToolsBundleView,
+    CTOToolsClientView,
+    CTOToolsLandingView,
+    CTOToolsManifestView,
+    CTOToolsReadmeView,
 )
 
 __all__ = [

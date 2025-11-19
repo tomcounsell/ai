@@ -54,9 +54,7 @@ class CreativeJuicesMCPServerView(View):
                 )
 
             # Return successful response
-            return JsonResponse(
-                {"jsonrpc": "2.0", "id": request_id, "result": result}
-            )
+            return JsonResponse({"jsonrpc": "2.0", "id": request_id, "result": result})
 
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in request: {e}")
@@ -208,9 +206,7 @@ class CTOToolsMCPServerView(View):
                 )
 
             # Return successful response
-            return JsonResponse(
-                {"jsonrpc": "2.0", "id": request_id, "result": result}
-            )
+            return JsonResponse({"jsonrpc": "2.0", "id": request_id, "result": result})
 
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in request: {e}")

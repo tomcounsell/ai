@@ -5,7 +5,7 @@ from django.http import Http404, HttpResponse, JsonResponse
 from django.urls import include, path
 from django.views.generic import RedirectView, TemplateView
 
-from apps.api.views.health_views import health_check, deep_health_check
+from apps.api.views.health_views import deep_health_check, health_check
 from apps.public.views.landing_views import HomeView
 from settings.env import DEBUG, LOCAL
 from settings.unfold import (

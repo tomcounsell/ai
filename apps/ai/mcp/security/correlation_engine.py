@@ -44,9 +44,23 @@ class SecurityCorrelationEngine:
 
         # Common security terms
         security_terms = [
-            "sql", "injection", "xss", "csrf", "pii", "credentials",
-            "encryption", "exposed", "public", "vulnerable", "misconfiguration",
-            "bucket", "database", "s3", "rds", "iam", "access"
+            "sql",
+            "injection",
+            "xss",
+            "csrf",
+            "pii",
+            "credentials",
+            "encryption",
+            "exposed",
+            "public",
+            "vulnerable",
+            "misconfiguration",
+            "bucket",
+            "database",
+            "s3",
+            "rds",
+            "iam",
+            "access",
         ]
 
         for term in security_terms:
@@ -111,9 +125,7 @@ class SecurityCorrelationEngine:
                         f"Fetched {len(alerts)} alerts from {connector_type} connector"
                     )
                 except Exception as e:
-                    logger.error(
-                        f"Failed to fetch alerts from {connector_type}: {e}"
-                    )
+                    logger.error(f"Failed to fetch alerts from {connector_type}: {e}")
 
         # Filter by keywords if specified
         if filters.keywords:
@@ -150,7 +162,9 @@ class SecurityCorrelationEngine:
                 for policy_dict in policy_dicts:
                     all_policies.append(Policy(**policy_dict))
 
-                logger.info(f"Fetched {len(policy_dicts)} policies from policy connector")
+                logger.info(
+                    f"Fetched {len(policy_dicts)} policies from policy connector"
+                )
             except Exception as e:
                 logger.error(f"Failed to fetch policies: {e}")
 
@@ -194,7 +208,9 @@ class SecurityCorrelationEngine:
             applicable_policies = self._find_applicable_policies(asset, policies)
 
             # Generate reasoning using simple heuristics (in production, use LLM)
-            reasoning = self._generate_reasoning(asset_alerts, asset, applicable_policies)
+            reasoning = self._generate_reasoning(
+                asset_alerts, asset, applicable_policies
+            )
 
             # Calculate confidence based on data completeness
             confidence = self._calculate_correlation_confidence(
@@ -226,9 +242,7 @@ class SecurityCorrelationEngine:
 
         return correlations
 
-    async def _fetch_asset_details(
-        self, asset_id: str, source: str
-    ) -> Asset | None:
+    async def _fetch_asset_details(self, asset_id: str, source: str) -> Asset | None:
         """Fetch detailed asset information.
 
         Args:
@@ -378,9 +392,7 @@ class SecurityCorrelationEngine:
 
         return min(1.0, confidence)
 
-    def _assess_business_impact(
-        self, asset: Asset, alerts: list[Alert]
-    ) -> str | None:
+    def _assess_business_impact(self, asset: Asset, alerts: list[Alert]) -> str | None:
         """Assess business impact of the risk.
 
         Args:

@@ -198,9 +198,9 @@ class AWSSecurityHubConnector(CSPMConnector):
         self,
         api_key: str,  # AWS_SECRET_ACCESS_KEY
         api_url: str = "",  # Not used for AWS
-        region: Optional[str] = None,
-        access_key_id: Optional[str] = None,
-        account_id: Optional[str] = None,
+        region: str | None = None,
+        access_key_id: str | None = None,
+        account_id: str | None = None,
     ):
         super().__init__(api_key=api_key, api_url=api_url)
         self.region = region or os.environ.get("AWS_REGION", "us-east-1")
@@ -238,8 +238,9 @@ class AWSSecurityHubConnector(CSPMConnector):
             List of Alert objects
         """
         try:
-            import boto3
             from datetime import datetime, timedelta, timezone
+
+            import boto3
 
             client = boto3.client(
                 "securityhub",

@@ -135,7 +135,9 @@ class DemoSASTConnector(SASTConnector):
             ),
         }
 
-        return [demo_assets[asset_id] for asset_id in asset_ids if asset_id in demo_assets]
+        return [
+            demo_assets[asset_id] for asset_id in asset_ids if asset_id in demo_assets
+        ]
 
 
 class DemoCSPMConnector(CSPMConnector):
@@ -263,7 +265,9 @@ class DemoCSPMConnector(CSPMConnector):
             ),
         }
 
-        return [demo_assets[asset_id] for asset_id in asset_ids if asset_id in demo_assets]
+        return [
+            demo_assets[asset_id] for asset_id in asset_ids if asset_id in demo_assets
+        ]
 
 
 class DemoPolicyConnector(PolicyConnector):

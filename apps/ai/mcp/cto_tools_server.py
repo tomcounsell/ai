@@ -120,7 +120,7 @@ async def security_review(
 
     # Score each risk
     risks = []
-    for correlation in correlations[: max_results]:
+    for correlation in correlations[:max_results]:
         risk = risk_scorer.score_risk(correlation)
         risks.append(risk)
 
@@ -157,7 +157,9 @@ async def security_review(
             output += f"{risk.description}\n\n"
 
             if risk.policy_violations:
-                output += f"**Policy Violations**: {', '.join(risk.policy_violations)}\n"
+                output += (
+                    f"**Policy Violations**: {', '.join(risk.policy_violations)}\n"
+                )
             if risk.affected_assets:
                 output += f"**Affected Assets**: {', '.join(risk.affected_assets)}\n"
             if risk.linked_alerts:

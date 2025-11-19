@@ -247,7 +247,9 @@ class RiskScorer:
 
         # Add asset context
         if correlation.assets:
-            asset_list = ", ".join(f"{a.name} ({a.asset_type})" for a in correlation.assets)
+            asset_list = ", ".join(
+                f"{a.name} ({a.asset_type})" for a in correlation.assets
+            )
             description += f"\n\nAffected assets: {asset_list}"
 
         # Add policy context
@@ -281,7 +283,11 @@ class RiskScorer:
                 needs_encryption = True
             if "public" in title_lower or "exposed" in desc_lower:
                 needs_access_control = True
-            if "injection" in title_lower or "xss" in title_lower or "vulnerable" in title_lower:
+            if (
+                "injection" in title_lower
+                or "xss" in title_lower
+                or "vulnerable" in title_lower
+            ):
                 needs_code_fix = True
             if "credential" in title_lower or "password" in desc_lower:
                 needs_credential_rotation = True

@@ -2,10 +2,10 @@
 Integration app models.
 """
 
-from .quickbooks import Organization, QuickBooksConnection, MCPSession
+from .quickbooks import MCPSession, Organization, QuickBooksConnection
 
 __all__ = [
     "Organization",
-    "QuickBooksConnection", 
+    "QuickBooksConnection",
     "MCPSession",
 ]
