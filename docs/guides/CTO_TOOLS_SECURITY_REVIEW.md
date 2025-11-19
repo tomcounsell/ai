@@ -4,7 +4,7 @@
 
 The CTO Tools MCP server's `security_review` tool provides automated correlation of security alerts from multiple sources (SAST/DAST, CSPM, threat intelligence) with policy violations to identify, score, and prioritize security risks.
 
-**Status**: Fully functional with demo connectors. Linear integration deferred to backlog (requires multi-tenant authentication).
+**Status**: Fully functional with built-in and custom connectors. Linear integration deferred to backlog (requires multi-tenant authentication).
 
 ## Architecture
 
@@ -16,12 +16,18 @@ apps/ai/mcp/security/
 ├── __init__.py
 ├── types.py                              # Data models (Alert, Asset, Policy, etc.)
 ├── base_connector.py                     # Abstract base classes for connectors
-├── connector_registry.py                 # Connector management
-├── demo_connectors.py                    # Demo SAST/CSPM/Policy connectors
+├── connector_registry.py                 # Auto-discovery and connector management
+├── builtin_connectors.py                 # Built-in Snyk & AWS Security Hub connectors
 ├── correlation_engine.py                 # Alert-asset-policy correlation
-└── risk_scorer.py                        # Risk scoring (0-100 scale)
+├── risk_scorer.py                        # Risk scoring (0-100 scale)
+├── connectors/                           # Plugin directory for custom connectors
+│   ├── __init__.py
+│   └── README.md                         # How to add custom connectors
+└── examples/                             # Example connector implementations
+    ├── __init__.py
+    └── demo_connectors.py                # Demo SAST/CSPM/Policy (for reference)
 apps/ai/mcp/integrations/
-└── linear_client.py                      # Linear GraphQL API client
+└── linear_client.py                      # Linear GraphQL API client (future use)
 ```
 
 ### Data Flow
@@ -70,22 +76,90 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
 }
 ```
 
-No environment variables needed - works immediately with demo connectors!
-
 ## Configuration
 
-### Environment Variables
+The security review tool supports three types of connectors:
 
-No environment variables required! The tool works with built-in demo connectors.
+1. **Built-in Connectors** - Snyk and AWS Security Hub (activated via environment variables)
+2. **Custom Plugin Connectors** - Your own Python connectors in `apps/ai/mcp/security/connectors/`
+3. **Example Connectors** - Demo implementations in `apps/ai/mcp/security/examples/` (for reference only)
 
-### Demo Connectors
+### Built-in Connectors
 
-The server includes built-in demo connectors with synthetic data:
-- **DemoSASTConnector**: Code vulnerabilities (SQL injection, hardcoded credentials, etc.)
-- **DemoCSPMConnector**: Cloud misconfigurations (public S3 buckets, unencrypted RDS, etc.)
-- **DemoPolicyConnector**: Compliance policies (PII handling, encryption, credentials, IAM)
+#### Snyk SAST Connector
 
-No configuration required to test with demo data!
+Enable by setting environment variables in `.env.local`:
+
+```bash
+SNYK_API_KEY=your_snyk_api_token
+SNYK_ORG_ID=your_organization_id
+SNYK_API_URL=https://api.snyk.io/v1  # Optional, uses default if not set
+```
+
+The connector will auto-register on startup and fetch code vulnerabilities from your Snyk projects.
+
+#### AWS Security Hub CSPM Connector
+
+Enable by setting standard AWS credentials in `.env.local`:
+
+```bash
+AWS_ACCESS_KEY_ID=your_access_key
+AWS_SECRET_ACCESS_KEY=your_secret_key
+AWS_REGION=us-east-1
+AWS_SECURITY_HUB_ACCOUNT_ID=your_account_id  # Optional
+```
+
+The connector will auto-register and fetch security findings from AWS Security Hub.
+
+**Note**: Requires `boto3` package and Security Hub enabled in your AWS account.
+
+### Custom Plugin Connectors
+
+Create your own connectors by adding Python files to `apps/ai/mcp/security/connectors/`.
+
+**Example** (`apps/ai/mcp/security/connectors/my_tool.py`):
+
+```python
+import os
+from apps.ai.mcp.security.base_connector import SASTConnector
+from apps.ai.mcp.security.types import Alert, QueryFilters
+
+class MyToolConnector(SASTConnector):
+    name = "my_tool"
+
+    def __init__(self):
+        api_key = os.environ.get("MY_TOOL_API_KEY")
+        if not api_key:
+            raise ValueError("MY_TOOL_API_KEY required")
+
+        super().__init__(
+            api_key=api_key,
+            api_url=os.environ.get("MY_TOOL_URL", "https://api.mytool.com")
+        )
+
+    async def test_connection(self) -> bool:
+        # Test your API connection
+        return True
+
+    async def fetch_alerts(self, filters: QueryFilters) -> list[Alert]:
+        # Fetch alerts from your tool
+        return []
+
+    async def fetch_assets(self, asset_ids: list[str]) -> list:
+        # Fetch asset details
+        return []
+```
+
+Connectors are auto-discovered at startup. See `apps/ai/mcp/security/connectors/README.md` for full details.
+
+### Example Connectors (Demo Mode)
+
+Example connectors are available in `apps/ai/mcp/security/examples/demo_connectors.py`:
+- **DemoSASTConnector** - Code vulnerabilities (SQL injection, hardcoded credentials, etc.)
+- **DemoCSPMConnector** - Cloud misconfigurations (public S3 buckets, unencrypted RDS, etc.)
+- **DemoPolicyConnector** - Compliance policies (PII handling, encryption, credentials, IAM)
+
+**These are NOT auto-loaded**. They're examples for building custom connectors. To use them for testing, copy them to the `connectors/` directory or reference them in tests.
 
 ## Usage
 

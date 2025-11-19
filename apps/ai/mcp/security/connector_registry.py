@@ -1,6 +1,10 @@
 """Registry for managing security tool connectors."""
 
+import importlib
+import inspect
 import logging
+import os
+from pathlib import Path
 from typing import Literal
 
 from .base_connector import (
@@ -11,11 +15,6 @@ from .base_connector import (
     SASTConnector,
     ThreatIntelConnector,
 )
-from .demo_connectors import (
-    DemoCSPMConnector,
-    DemoPolicyConnector,
-    DemoSASTConnector,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -25,39 +24,89 @@ class ConnectorRegistry:
 
     # Class-level registry shared across instances
     _connectors: dict[str, BaseSecurityConnector] = {}
+    _initialized: bool = False
 
     def __init__(self):
         """Initialize the connector registry.
 
-        Loads demo connectors by default for testing.
+        Auto-discovers and registers:
+        1. Built-in connectors (if env vars are set)
+        2. Plugin connectors from apps/ai/mcp/security/connectors/
         """
-        # Initialize with demo connectors if registry is empty
-        if not self._connectors:
-            self._initialize_demo_connectors()
+        if not self._initialized:
+            self._initialize_connectors()
+            self._initialized = True
 
-    def _initialize_demo_connectors(self):
-        """Initialize demo connectors for testing and demonstration."""
+    def _initialize_connectors(self):
+        """Initialize connectors from built-in and plugin sources."""
+        # Load built-in connectors (activated by env vars)
+        self._load_builtin_connectors()
+
+        # Auto-discover plugin connectors
+        self._load_plugin_connectors()
+
+        logger.info(f"Initialized {len(self._connectors)} connectors")
+
+    def _load_builtin_connectors(self):
+        """Load built-in connectors if their environment variables are set."""
         try:
-            # Demo SAST connector
-            self._connectors["demo_sast"] = DemoSASTConnector(
-                api_key="demo",
-                api_url="https://demo.sast.example.com",
-            )
+            from .builtin_connectors import discover_builtin_connectors
 
-            # Demo CSPM connector
-            self._connectors["demo_cspm"] = DemoCSPMConnector(
-                api_key="demo",
-                api_url="https://demo.cspm.example.com",
-            )
-
-            # Demo policy connector (Memory MCP)
-            self._connectors["demo_policy"] = DemoPolicyConnector(
-                api_key="demo",
-            )
-
-            logger.info("Initialized demo connectors for testing")
+            builtin = discover_builtin_connectors()
+            self._connectors.update(builtin)
+            if builtin:
+                logger.info(
+                    f"Loaded {len(builtin)} built-in connectors: {', '.join(builtin.keys())}"
+                )
+        except ImportError:
+            logger.debug("No built-in connectors available")
         except Exception as e:
-            logger.error(f"Failed to initialize demo connectors: {e}")
+            logger.error(f"Failed to load built-in connectors: {e}")
+
+    def _load_plugin_connectors(self):
+        """Auto-discover and load connector plugins from connectors/ directory."""
+        try:
+            connectors_dir = Path(__file__).parent / "connectors"
+            if not connectors_dir.exists():
+                logger.debug("No connectors plugin directory found")
+                return
+
+            # Discover Python files in connectors/
+            for plugin_file in connectors_dir.glob("*.py"):
+                if plugin_file.name.startswith("_"):
+                    continue
+
+                try:
+                    # Import the plugin module
+                    module_name = f"apps.ai.mcp.security.connectors.{plugin_file.stem}"
+                    module = importlib.import_module(module_name)
+
+                    # Find connector classes in the module
+                    for name, obj in inspect.getmembers(module, inspect.isclass):
+                        if (
+                            issubclass(obj, BaseSecurityConnector)
+                            and obj != BaseSecurityConnector
+                            and not inspect.isabstract(obj)
+                        ):
+                            # Instantiate and register
+                            try:
+                                connector_instance = obj()
+                                connector_name = (
+                                    getattr(connector_instance, "name", None)
+                                    or plugin_file.stem
+                                )
+                                self._connectors[connector_name] = connector_instance
+                                logger.info(f"Loaded plugin connector: {connector_name}")
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to instantiate {name} from {plugin_file.name}: {e}"
+                                )
+
+                except Exception as e:
+                    logger.error(f"Failed to load plugin {plugin_file.name}: {e}")
+
+        except Exception as e:
+            logger.error(f"Failed to discover plugin connectors: {e}")
 
     async def register_connector(
         self,

@@ -1,10 +1,17 @@
-"""Demo connector implementations for testing and demonstration."""
+"""
+Example connector implementations for reference.
+
+These demonstrate how to build custom connectors but are NOT automatically loaded.
+To use these as templates, copy them to apps/ai/mcp/security/connectors/
+
+See apps/ai/mcp/security/connectors/README.md for more details.
+"""
 
 import uuid
 from datetime import datetime, timezone
 
-from .base_connector import CSPMConnector, PolicyConnector, SASTConnector
-from .types import Alert, Asset, Policy, QueryFilters
+from ..base_connector import CSPMConnector, PolicyConnector, SASTConnector
+from ..types import Alert, Asset, Policy, QueryFilters
 
 
 class DemoSASTConnector(SASTConnector):
