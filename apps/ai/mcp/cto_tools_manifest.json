@@ -1,7 +1,7 @@
 {
   "name": "CTO Tools",
-  "version": "1.0.0",
-  "description": "Security review and risk correlation tools for CTOs, Heads of Security, and DevSecOps teams",
+  "version": "1.1.0",
+  "description": "Engineering leadership and security tools for CTOs, including weekly team reviews and risk correlation",
   "homepage": "https://ai.yuda.me/mcp/cto-tools",
   "repository": {
     "type": "git",
@@ -24,6 +24,11 @@
   },
   "tools": [
     {
+      "name": "weekly_review",
+      "description": "Structured framework for conducting weekly engineering team reviews with commit analysis and concise output suitable for stakeholders",
+      "category": "leadership"
+    },
+    {
       "name": "security_review",
       "description": "Correlate security alerts across multiple tools with policy context. Identifies, scores, and prioritizes security risks from SAST/DAST, CSPM, threat intel, and policy violations.",
       "category": "security"
@@ -40,6 +45,8 @@
     }
   ],
   "categories": [
+    "leadership",
+    "engineering-management",
     "security",
     "risk-management",
     "compliance",
@@ -47,6 +54,9 @@
   ],
   "keywords": [
     "cto",
+    "engineering-leadership",
+    "weekly-review",
+    "team-management",
     "security",
     "risk-assessment",
     "SAST",
