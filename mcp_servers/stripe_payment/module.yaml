@@ -10,35 +10,33 @@ metadata:
     name: "Module Builder Agent"
     email: "noreply@example.com"
 
-  created: "2025-11-28T09:07:37.970018+00:00"
-  updated: "2025-11-28T09:07:37.970018+00:00"
+  created: "2025-11-28T09:14:52.382667+00:00"
+  updated: "2025-11-28T09:14:52.382667+00:00"
 
 description:
   short: "Process payments, refunds, and subscriptions via Stripe"
   long: |
     A comprehensive Stripe payment processing module that provides:
     - Customer charging with amount validation
-    - Refund processing with eligibility checks
+    - Refund processing with eligibility checks  
     - Subscription management (create, update, cancel)
     - Payment method validation before charging
-    - Webhook event handling
-    
-    All operations include comprehensive error handling, validation,
-    and side effect tracking for auditability.
+    - Customer creation and management
+    - Invoice generation and retrieval
 
 capabilities:
   - "payment-processing"
   - "refund-handling"
   - "subscription-management"
-  - "payment-validation"
-  - "webhook-handling"
+  - "customer-management"
+  - "invoice-management"
 
 operations:
   - "charge-customer"
   - "process-refund"
   - "create-subscription"
   - "cancel-subscription"
-  - "validate-payment-method"
+  - "create-customer"
 
 dependencies:
   runtime:
@@ -99,24 +97,21 @@ discovery:
   tags:
     - "payments"
     - "stripe"
-    - "financial"
+    - "billing"
     - "subscriptions"
-    - "refunds"
 
   search_keywords:
     - "payment"
     - "charge"
     - "refund"
     - "subscription"
-    - "billing"
     - "stripe"
-    - "credit card"
+    - "billing"
 
   use_cases:
     - "Process customer payments"
     - "Handle subscription billing"
-    - "Issue refunds to customers"
-    - "Validate payment methods before charging"
+    - "Issue refunds"
 
 health:
   validation_command: "pytest tests/"

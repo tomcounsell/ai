@@ -34,7 +34,7 @@ class TestModuleStructure:
     def test_supported_operations(self, module):
         """Test module reports correct operations."""
         ops = module.get_supported_operations()
-        expected = {"charge-customer", "process-refund", "create-subscription", "cancel-subscription", "validate-payment-method"}
+        expected = {"charge-customer", "process-refund", "create-subscription", "cancel-subscription", "create-customer"}
         assert ops == expected
 
     def test_capabilities(self, module):
@@ -109,10 +109,10 @@ class TestOperationValidation:
         assert "missing" in result.error.message.lower() or "required" in result.error.message.lower()
 
     @pytest.mark.asyncio
-    async def test_validate_payment_method_missing_required_params(self, module):
-        """Test validate-payment-method fails with missing required parameters."""
+    async def test_create_customer_missing_required_params(self, module):
+        """Test create-customer fails with missing required parameters."""
         input_data = ModuleInput(
-            operation="validate-payment-method",
+            operation="create-customer",
             parameters={},  # Missing required params
         )
         result = await module.execute(input_data)
@@ -127,10 +127,10 @@ class TestDryRun:
 
     @pytest.mark.asyncio
     async def test_dry_run_does_not_execute(self, module):
-        """Test dry run validates but doesn't execute."""
+        """Test dry run validates operation but skips execution."""
         input_data = ModuleInput(
             operation="charge-customer",
-            parameters={},
+            parameters={},  # Empty params OK for dry run
             dry_run=True,
         )
         result = await module.execute(input_data)

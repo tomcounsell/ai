@@ -114,14 +114,14 @@ class TestCancelsubscriptionIntegration:
         assert result.status in [ExecutionStatus.SUCCESS, ExecutionStatus.PARTIAL_SUCCESS]
 
 
-class TestValidatepaymentmethodIntegration:
-    """Integration tests for validate-payment-method."""
+class TestCreatecustomerIntegration:
+    """Integration tests for create-customer."""
 
     @pytest.mark.asyncio
-    async def test_validate_payment_method_real_api(self, module):
-        """Test validate-payment-method with real API."""
+    async def test_create_customer_real_api(self, module):
+        """Test create-customer with real API."""
         input_data = ModuleInput(
-            operation="validate-payment-method",
+            operation="create-customer",
             parameters={
                 # TODO: Add test parameters
             },

@@ -3,20 +3,18 @@ Stripe Payment Processor Module Implementation
 
 A comprehensive Stripe payment processing module that provides:
 - Customer charging with amount validation
-- Refund processing with eligibility checks
+- Refund processing with eligibility checks  
 - Subscription management (create, update, cancel)
 - Payment method validation before charging
-- Webhook event handling
-
-All operations include comprehensive error handling, validation,
-and side effect tracking for auditability.
+- Customer creation and management
+- Invoice generation and retrieval
 
 Operations:
 - charge-customer: Charge a customer for a one-time payment
 - process-refund: Process a refund for a previous charge
 - create-subscription: Create a new subscription for a customer
 - cancel-subscription: Cancel an existing subscription
-- validate-payment-method: Validate a payment method is ready for charging
+- create-customer: Create a new Stripe customer
 
 NOTE: This is generated scaffolding. Operations marked with TODO require implementation.
 """
@@ -34,7 +32,7 @@ class StripePaymentProcessorModule(BaseModule):
     """
     Process payments, refunds, and subscriptions via Stripe
 
-    Capabilities: payment-processing, refund-handling, subscription-management, payment-validation, webhook-handling
+    Capabilities: payment-processing, refund-handling, subscription-management, customer-management, invoice-management
 
     Completeness: SCAFFOLDING - Requires implementation of operation handlers.
     """
@@ -57,14 +55,14 @@ class StripePaymentProcessorModule(BaseModule):
 
     def get_supported_operations(self) -> Set[str]:
         """Return the set of operations this module supports."""
-        return {"charge-customer", "process-refund", "create-subscription", "cancel-subscription", "validate-payment-method"}
+        return {"charge-customer", "process-refund", "create-subscription", "cancel-subscription", "create-customer"}
 
     def get_capabilities(self) -> ModuleCapabilities:
         """Return module capabilities for discovery."""
         return ModuleCapabilities(
             operations=list(self.get_supported_operations()),
-            capabilities=["payment-processing", "refund-handling", "subscription-management", "payment-validation", "webhook-handling"],
-            tags=["payments", "stripe", "financial", "subscriptions", "refunds"],
+            capabilities=["payment-processing", "refund-handling", "subscription-management", "customer-management", "invoice-management"],
+            tags=["payments", "stripe", "billing", "subscriptions"],
             category="payment",
         )
 
@@ -92,8 +90,8 @@ class StripePaymentProcessorModule(BaseModule):
             missing = [p for p in required if p not in parameters]
             if missing:
                 return f"Missing required parameters: {missing}"
-        if operation == "validate-payment-method":
-            required = ["payment_method_id"]
+        if operation == "create-customer":
+            required = ["email"]
             missing = [p for p in required if p not in parameters]
             if missing:
                 return f"Missing required parameters: {missing}"
@@ -124,8 +122,8 @@ class StripePaymentProcessorModule(BaseModule):
             return await self._handle_create_subscription(parameters, context)
         if operation == "cancel-subscription":
             return await self._handle_cancel_subscription(parameters, context)
-        if operation == "validate-payment-method":
-            return await self._handle_validate_payment_method(parameters, context)
+        if operation == "create-customer":
+            return await self._handle_create_customer(parameters, context)
 
         raise ValueError(f"Unknown operation: {operation}")
 
@@ -138,11 +136,10 @@ class StripePaymentProcessorModule(BaseModule):
         Charge a customer for a one-time payment
 
         Parameters:
-            customer_id: Stripe customer ID (cus_xxx)
-            amount: Amount in cents (e.g., 1000 for $10.00)
+            customer_id: Stripe customer ID
+            amount: Amount in cents
             currency: Currency code (default: usd)
             description: Charge description
-            metadata: Additional metadata for the charge
 
         Returns:
             Operation result
@@ -152,7 +149,6 @@ class StripePaymentProcessorModule(BaseModule):
         amount = parameters["amount"]
         currency = parameters.get("currency", "")
         description = parameters.get("description", "")
-        metadata = parameters.get("metadata", None)
 
         # TODO: Implement charge-customer logic
         # This is scaffolding - replace with actual implementation
@@ -171,9 +167,9 @@ class StripePaymentProcessorModule(BaseModule):
         Process a refund for a previous charge
 
         Parameters:
-            charge_id: Stripe charge ID to refund (ch_xxx)
-            amount: Amount to refund in cents (default: full refund)
-            reason: Refund reason: duplicate, fraudulent, requested_by_customer
+            charge_id: Stripe charge ID to refund
+            amount: Amount to refund in cents
+            reason: Refund reason
 
         Returns:
             Operation result
@@ -201,9 +197,8 @@ class StripePaymentProcessorModule(BaseModule):
 
         Parameters:
             customer_id: Stripe customer ID
-            price_id: Stripe price ID for the subscription plan
-            trial_period_days: Number of trial days
-            metadata: Additional subscription metadata
+            price_id: Stripe price ID
+            trial_days: Trial period days
 
         Returns:
             Operation result
@@ -211,8 +206,7 @@ class StripePaymentProcessorModule(BaseModule):
         # Extract parameters
         customer_id = parameters["customer_id"]
         price_id = parameters["price_id"]
-        trial_period_days = parameters.get("trial_period_days", 0)
-        metadata = parameters.get("metadata", None)
+        trial_days = parameters.get("trial_days", 0)
 
         # TODO: Implement create-subscription logic
         # This is scaffolding - replace with actual implementation
@@ -231,8 +225,8 @@ class StripePaymentProcessorModule(BaseModule):
         Cancel an existing subscription
 
         Parameters:
-            subscription_id: Stripe subscription ID (sub_xxx)
-            immediately: Cancel immediately or at period end (default: period end)
+            subscription_id: Subscription ID
+            immediately: Cancel immediately vs end of period
 
         Returns:
             Operation result
@@ -249,27 +243,31 @@ class StripePaymentProcessorModule(BaseModule):
         )
 
 
-    async def _handle_validate_payment_method(
+    async def _handle_create_customer(
         self,
         parameters: Dict[str, Any],
         context: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
-        Validate a payment method is ready for charging
+        Create a new Stripe customer
 
         Parameters:
-            payment_method_id: Stripe payment method ID (pm_xxx)
+            email: Customer email
+            name: Customer name
+            metadata: Additional metadata
 
         Returns:
             Operation result
         """
         # Extract parameters
-        payment_method_id = parameters["payment_method_id"]
+        email = parameters["email"]
+        name = parameters.get("name", "")
+        metadata = parameters.get("metadata", None)
 
-        # TODO: Implement validate-payment-method logic
+        # TODO: Implement create-customer logic
         # This is scaffolding - replace with actual implementation
         raise NotImplementedError(
-            "validate-payment-method operation not yet implemented. "
+            "create-customer operation not yet implemented. "
             "See README.md for implementation guidance."
         )
 

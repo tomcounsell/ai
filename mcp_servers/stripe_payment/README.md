@@ -18,13 +18,11 @@ Process payments, refunds, and subscriptions via Stripe
 
 A comprehensive Stripe payment processing module that provides:
 - Customer charging with amount validation
-- Refund processing with eligibility checks
+- Refund processing with eligibility checks  
 - Subscription management (create, update, cancel)
 - Payment method validation before charging
-- Webhook event handling
-
-All operations include comprehensive error handling, validation,
-and side effect tracking for auditability.
+- Customer creation and management
+- Invoice generation and retrieval
 
 ## Installation
 
@@ -80,11 +78,10 @@ Charge a customer for a one-time payment
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| customer_id | string | Yes | Stripe customer ID (cus_xxx) |
-| amount | integer | Yes | Amount in cents (e.g., 1000 for $10.00) |
+| customer_id | string | Yes | Stripe customer ID |
+| amount | integer | Yes | Amount in cents |
 | currency | string | No | Currency code (default: usd) |
 | description | string | No | Charge description |
-| metadata | object | No | Additional metadata for the charge |
 
 
 ### process-refund
@@ -95,9 +92,9 @@ Process a refund for a previous charge
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| charge_id | string | Yes | Stripe charge ID to refund (ch_xxx) |
-| amount | integer | No | Amount to refund in cents (default: full refund) |
-| reason | string | No | Refund reason: duplicate, fraudulent, requested_by_customer |
+| charge_id | string | Yes | Stripe charge ID to refund |
+| amount | integer | No | Amount to refund in cents |
+| reason | string | No | Refund reason |
 
 
 ### create-subscription
@@ -109,9 +106,8 @@ Create a new subscription for a customer
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | customer_id | string | Yes | Stripe customer ID |
-| price_id | string | Yes | Stripe price ID for the subscription plan |
-| trial_period_days | integer | No | Number of trial days |
-| metadata | object | No | Additional subscription metadata |
+| price_id | string | Yes | Stripe price ID |
+| trial_days | integer | No | Trial period days |
 
 
 ### cancel-subscription
@@ -122,19 +118,21 @@ Cancel an existing subscription
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| subscription_id | string | Yes | Stripe subscription ID (sub_xxx) |
-| immediately | boolean | No | Cancel immediately or at period end (default: period end) |
+| subscription_id | string | Yes | Subscription ID |
+| immediately | boolean | No | Cancel immediately vs end of period |
 
 
-### validate-payment-method
+### create-customer
 
-Validate a payment method is ready for charging
+Create a new Stripe customer
 
 **Parameters:**
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| payment_method_id | string | Yes | Stripe payment method ID (pm_xxx) |
+| email | string | Yes | Customer email |
+| name | string | No | Customer name |
+| metadata | object | No | Additional metadata |
 
 
 ## Implementation Status
@@ -145,7 +143,7 @@ The following operations require implementation:
 - [ ] `process-refund` - TODO: Implement handler
 - [ ] `create-subscription` - TODO: Implement handler
 - [ ] `cancel-subscription` - TODO: Implement handler
-- [ ] `validate-payment-method` - TODO: Implement handler
+- [ ] `create-customer` - TODO: Implement handler
 
 ## Error Handling
 
