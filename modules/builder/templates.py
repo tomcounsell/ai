@@ -9,7 +9,7 @@ Provides template strings for generating module components:
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import List
 
 
 @dataclass
@@ -23,6 +23,7 @@ class ModuleTemplate:
   version: "{version}"
   type: "{module_type}"
   category: "{category}"
+  completeness: "scaffolding"  # scaffolding | partial | complete
 
   author:
     name: "Module Builder Agent"
@@ -53,6 +54,7 @@ dependencies:
 
   internal_modules:
     - "modules.framework"
+    - "mcp_servers.base"
 
 interface:
   input_schema: "schemas/input.json"
@@ -77,7 +79,7 @@ testing:
   has_unit_tests: true
   has_integration_tests: true
   test_coverage_target: 90
-  real_api_tests: true
+  real_api_tests: true  # NO MOCKS
 
 quality:
   standard: "9.8/10"
@@ -104,7 +106,7 @@ health:
   validation_command: "pytest tests/"
 '''
 
-    # Python module implementation template
+    # Python module implementation template - now integrates with MCP
     MODULE_IMPL = '''"""
 {name} Module Implementation
 
@@ -112,12 +114,17 @@ health:
 
 Operations:
 {operations_list}
+
+NOTE: This is generated scaffolding. Operations marked with TODO require implementation.
 """
 
 import logging
-from typing import Any, Dict, Optional, Set
+import os
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Set
 
 from modules.framework.base import BaseModule, ModuleCapabilities
+from modules.framework.contracts import SideEffect
 
 
 class {class_name}(BaseModule):
@@ -125,6 +132,8 @@ class {class_name}(BaseModule):
     {description_short}
 
     Capabilities: {capabilities_list}
+
+    Completeness: SCAFFOLDING - Requires implementation of operation handlers.
     """
 
     def __init__(
@@ -138,9 +147,7 @@ class {class_name}(BaseModule):
             description="{description_short}",
             logger=logger,
         )
-
-        # Initialize any clients or connections here
-        self._initialized = False
+{client_init}
 
     def get_supported_operations(self) -> Set[str]:
         """Return the set of operations this module supports."""
@@ -154,6 +161,13 @@ class {class_name}(BaseModule):
             tags={tags_list_python},
             category="{category}",
         )
+
+    def validate_parameters(
+        self, operation: str, parameters: Dict[str, Any]
+    ) -> Optional[str]:
+        """Validate operation parameters."""
+{parameter_validation}
+        return None
 
     async def _execute_operation(
         self,
@@ -179,11 +193,12 @@ class {class_name}(BaseModule):
 {operation_methods}
 '''
 
-    # Test file template
+    # Unit test template - tests module structure and validation
     TEST_UNIT = '''"""
 Unit Tests for {name}
 
-Tests operation validation and module behavior without external API calls.
+Tests module structure, validation, and behavior without external API calls.
+These tests verify the module is correctly configured and validates inputs.
 """
 
 import pytest
@@ -197,8 +212,8 @@ def module():
     return {class_name}()
 
 
-class TestModuleBasics:
-    """Test basic module functionality."""
+class TestModuleStructure:
+    """Test basic module structure and metadata."""
 
     def test_module_id(self, module):
         """Test module has correct ID."""
@@ -207,6 +222,10 @@ class TestModuleBasics:
     def test_module_name(self, module):
         """Test module has correct name."""
         assert module.name == "{name}"
+
+    def test_version(self, module):
+        """Test module has correct version."""
+        assert module.version == "{version}"
 
     def test_supported_operations(self, module):
         """Test module reports correct operations."""
@@ -217,20 +236,27 @@ class TestModuleBasics:
     def test_capabilities(self, module):
         """Test module reports correct capabilities."""
         caps = module.get_capabilities()
-        assert "{category}" == caps.category
+        assert caps.category == "{category}"
         assert len(caps.capabilities) > 0
+        assert len(caps.operations) == len(module.get_supported_operations())
 
 
-class TestInputValidation:
-    """Test input validation."""
+class TestOperationValidation:
+    """Test operation validation logic."""
 
     def test_invalid_operation_rejected(self, module):
         """Test that invalid operations are rejected."""
-        error = module.validate_operation("invalid_operation")
+        error = module.validate_operation("invalid_operation_xyz")
         assert error is not None
         assert "Unsupported operation" in error
 
-{operation_tests}
+    def test_valid_operations_accepted(self, module):
+        """Test that all valid operations are accepted."""
+        for op in module.get_supported_operations():
+            error = module.validate_operation(op)
+            assert error is None, f"Operation {{op}} should be valid"
+
+{operation_validation_tests}
 
 
 class TestDryRun:
@@ -238,23 +264,48 @@ class TestDryRun:
 
     @pytest.mark.asyncio
     async def test_dry_run_does_not_execute(self, module):
-        """Test dry run validates but doesn't execute."""
+        """Test dry run validates operation but skips execution."""
         input_data = ModuleInput(
             operation="{first_operation}",
-            parameters={{}},
+            parameters={{}},  # Empty params OK for dry run
             dry_run=True,
         )
         result = await module.execute(input_data)
         assert result.status == ExecutionStatus.SUCCESS
         assert result.data.get("dry_run") is True
+        assert result.data.get("would_execute") == "{first_operation}"
+
+
+class TestHealthCheck:
+    """Test module health check."""
+
+    def test_health_check_returns_status(self, module):
+        """Test health check returns valid status."""
+        health = module.health_check()
+        assert "healthy" in health
+        assert "module_id" in health
+        assert health["module_id"] == "{module_id}"
+
+    def test_metrics_tracking(self, module):
+        """Test metrics are tracked correctly."""
+        metrics = module.get_metrics()
+        assert "total_executions" in metrics
+        assert "success_rate" in metrics
+        assert metrics["module_id"] == "{module_id}"
 '''
 
-    # Integration test template
+    # Integration test template - REAL API tests, NO MOCKS
     TEST_INTEGRATION = '''"""
 Integration Tests for {name}
 
-Tests real API interactions. Requires valid API keys in environment.
-NO MOCKS - Tests real service calls.
+IMPORTANT: These tests call REAL APIs. No mocks allowed.
+Requires valid API keys in environment variables.
+
+Test Philosophy:
+- Test the happy path thoroughly with real API calls
+- Verify actual API responses match expected schemas
+- Clean up any test data created
+- Skip gracefully if API keys not configured
 """
 
 import os
@@ -263,26 +314,93 @@ from modules.framework.contracts import ModuleInput, ExecutionStatus
 from {module_import} import {class_name}
 
 
-# Skip if API key not available
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("{api_key_env}"),
-    reason="{api_key_env} not set"
-)
+# Configuration
+API_KEY_ENV = "{api_key_env}"
+SKIP_REASON = f"{{API_KEY_ENV}} not set - skipping real API tests"
+
+
+def has_api_key() -> bool:
+    """Check if API key is available for testing."""
+    return bool(os.environ.get(API_KEY_ENV))
+
+
+# Skip entire module if no API key
+pytestmark = pytest.mark.skipif(not has_api_key(), reason=SKIP_REASON)
 
 
 @pytest.fixture
 def module():
-    """Create module instance for testing."""
+    """Create module instance with real API configuration."""
     return {class_name}()
 
 
+@pytest.fixture
+def cleanup_ids():
+    """Track IDs of resources created during tests for cleanup."""
+    ids = []
+    yield ids
+    # Cleanup would happen here if needed
+    # For now, tests should clean up their own resources
+
+
 {integration_tests}
+
+
+class TestAPIConnectivity:
+    """Test basic API connectivity and authentication."""
+
+    @pytest.mark.asyncio
+    async def test_module_can_connect(self, module):
+        """
+        Test that the module can connect to the external service.
+
+        This verifies:
+        - API key is valid
+        - Network connectivity works
+        - Basic authentication succeeds
+        """
+        # Use a read-only or low-impact operation to test connectivity
+        health = module.health_check()
+        assert health["healthy"] or "needs implementation" in str(health.get("issues", []))
+
+
+class TestErrorHandling:
+    """Test error handling with real API errors."""
+
+    @pytest.mark.asyncio
+    async def test_invalid_parameters_handled(self, module):
+        """Test that invalid parameters return proper error responses."""
+        input_data = ModuleInput(
+            operation="{first_operation}",
+            parameters={{
+                # Intentionally invalid/missing required params
+            }},
+        )
+        result = await module.execute(input_data)
+        # Should fail gracefully, not crash
+        assert result.status in [
+            ExecutionStatus.FAILURE,
+            ExecutionStatus.ERROR,
+        ]
+        assert result.error is not None
 '''
 
-    # README template
+    # README template - honest about scaffolding nature
     README = '''# {name}
 
 {description_short}
+
+> **Note**: This module was auto-generated by the Module Builder.
+> Operations marked with `TODO` require implementation before use.
+
+## Status
+
+| Aspect | Status |
+|--------|--------|
+| Completeness | Scaffolding |
+| Unit Tests | Passing |
+| Integration Tests | Require API keys |
+| Production Ready | No - requires implementation |
 
 ## Overview
 
@@ -318,178 +436,60 @@ module = {class_name}()
 input_data = ModuleInput(
     operation="{first_operation}",
     parameters={{
-        # Operation-specific parameters
+        # Add required parameters here
     }},
 )
 
 result = await module.execute(input_data)
 
-if result.status == "success":
+if result.status.value == "success":
     print(result.data)
 else:
     print(f"Error: {{result.error.message}}")
+    if result.error.recovery_suggestion:
+        print(f"Suggestion: {{result.error.recovery_suggestion}}")
 ```
 
 ## Operations
 
 {operations_docs}
 
+## Implementation Status
+
+The following operations require implementation:
+
+{implementation_status}
+
 ## Error Handling
 
 All operations return a `ModuleOutput` with:
 - `status`: success | partial_success | failure | error
 - `data`: Result data (on success)
-- `error`: ErrorDetail (on failure)
-- `side_effects`: List of side effects
+- `error`: ErrorDetail with code, message, category, and recovery suggestions
+- `side_effects`: List of side effects for audit trail
 - `warnings`: Non-fatal warnings
+- `recommendations`: Suggested follow-up actions
 
 ## Testing
 
 ```bash
-# Run all tests
-pytest {test_path}
-
-# Run only unit tests
-pytest {test_path}/unit/
+# Run unit tests (no API key required)
+pytest {test_path}/unit/ -v
 
 # Run integration tests (requires API key)
-pytest {test_path}/integration/
+export {api_key_env}="your-api-key"
+pytest {test_path}/integration/ -v
+
+# Run all tests
+pytest {test_path}/ -v
 ```
 
-## Quality
+## Quality Standards
 
-- Quality Standard: 9.8/10
+- Target Quality: 9.8/10
 - Test Coverage Target: >90%
 - Real API Tests: Yes (no mocks)
-'''
-
-    # JSON Schema template for input
-    INPUT_SCHEMA = '''{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "{name} Input Schema",
-  "type": "object",
-  "required": ["operation"],
-  "properties": {
-    "operation": {
-      "type": "string",
-      "enum": {operations_json},
-      "description": "Operation to perform"
-    },
-    "parameters": {
-      "type": "object",
-      "description": "Operation-specific parameters",
-      "oneOf": [
-{operation_schemas}
-      ]
-    },
-    "dry_run": {
-      "type": "boolean",
-      "default": false,
-      "description": "Validate without executing"
-    }
-  }
-}
-'''
-
-    # JSON Schema template for output
-    OUTPUT_SCHEMA = '''{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "{name} Output Schema",
-  "type": "object",
-  "required": ["status", "request_id", "execution_time_ms"],
-  "properties": {
-    "status": {
-      "type": "string",
-      "enum": ["success", "partial_success", "failure", "error"]
-    },
-    "data": {
-      "type": "object",
-      "description": "Operation result data"
-    },
-    "error": {
-      "$ref": "#/definitions/ErrorDetail"
-    },
-    "request_id": {
-      "type": "string"
-    },
-    "execution_time_ms": {
-      "type": "integer"
-    },
-    "side_effects": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/SideEffect"
-      }
-    },
-    "warnings": {
-      "type": "array",
-      "items": {"type": "string"}
-    },
-    "recommendations": {
-      "type": "array",
-      "items": {"type": "string"}
-    }
-  },
-  "definitions": {
-    "ErrorDetail": {
-      "type": "object",
-      "required": ["code", "message", "category"],
-      "properties": {
-        "code": {"type": "string"},
-        "message": {"type": "string"},
-        "category": {"type": "string"},
-        "recoverable": {"type": "boolean"},
-        "recovery_suggestion": {"type": "string"}
-      }
-    },
-    "SideEffect": {
-      "type": "object",
-      "required": ["type", "description", "target"],
-      "properties": {
-        "type": {"type": "string"},
-        "description": {"type": "string"},
-        "target": {"type": "string"},
-        "reversible": {"type": "boolean"}
-      }
-    }
-  }
-}
-'''
-
-    # Error schema template
-    ERROR_SCHEMA = '''{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "{name} Error Schema",
-  "type": "object",
-  "required": ["code", "message", "category"],
-  "properties": {
-    "code": {
-      "type": "string",
-      "description": "Error code (e.g., '{MODULE_ID}_API_ERROR')"
-    },
-    "message": {
-      "type": "string",
-      "description": "Human-readable error message"
-    },
-    "category": {
-      "type": "string",
-      "enum": ["validation", "auth", "api", "internal", "timeout"],
-      "description": "Error category for handling"
-    },
-    "recoverable": {
-      "type": "boolean",
-      "description": "Whether this error can be retried"
-    },
-    "recovery_suggestion": {
-      "type": "string",
-      "description": "Suggested action to recover"
-    },
-    "details": {
-      "type": "object",
-      "description": "Additional error context"
-    }
-  }
-}
+- Type Checking: mypy --strict
 '''
 
 

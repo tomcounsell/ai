@@ -216,6 +216,12 @@ class ModuleBuilderAgent:
         )
         operations_set = to_python_set([op.get("name", "") for op in req.operations])
 
+        # Generate client initialization for external services
+        client_init = self._generate_client_init(req)
+
+        # Generate parameter validation
+        parameter_validation = self._generate_parameter_validation(req)
+
         # Generate operation handlers
         handlers = []
         methods = []
@@ -227,12 +233,36 @@ class ModuleBuilderAgent:
                 f"            return await self.{method_name}(parameters, context)"
             )
 
-            # Generate method stub
+            # Generate method stub with parameter extraction
             params = op.get("parameters", {})
             param_docs = "\n".join(
                 f"            {p}: {params[p].get('description', '')}"
                 for p in params
             )
+
+            # Generate parameter extraction code
+            param_extraction = []
+            for p, details in params.items():
+                p_type = details.get("type", "string")
+                required = details.get("required", False)
+                if required:
+                    param_extraction.append(
+                        f'        {p} = parameters["{p}"]'
+                    )
+                else:
+                    default = "None"
+                    if p_type == "string":
+                        default = '""' if details.get("default") is None else f'"{details.get("default")}"'
+                    elif p_type == "integer":
+                        default = str(details.get("default", 0))
+                    elif p_type == "boolean":
+                        default = str(details.get("default", False))
+                    param_extraction.append(
+                        f'        {p} = parameters.get("{p}", {default})'
+                    )
+
+            param_extract_code = "\n".join(param_extraction) if param_extraction else "        # No parameters"
+
             methods.append(
                 f'    async def {method_name}(\n'
                 f"        self,\n"
@@ -248,9 +278,14 @@ class ModuleBuilderAgent:
                 f"        Returns:\n"
                 f"            Operation result\n"
                 f'        """\n'
+                f"        # Extract parameters\n"
+                f"{param_extract_code}\n"
+                f"\n"
                 f"        # TODO: Implement {op_name} logic\n"
+                f"        # This is scaffolding - replace with actual implementation\n"
                 f"        raise NotImplementedError(\n"
-                f'            "{op_name} operation not yet implemented"\n'
+                f'            "{op_name} operation not yet implemented. "\n'
+                f'            "See README.md for implementation guidance."\n'
                 f"        )\n"
             )
 
@@ -270,9 +305,55 @@ class ModuleBuilderAgent:
             capabilities_list_python=to_python_list(req.capabilities),
             tags_list_python=to_python_list(req.tags),
             category=req.category,
+            client_init=client_init,
+            parameter_validation=parameter_validation,
             operation_handlers=operation_handlers,
             operation_methods=operation_methods,
         )
+
+    def _generate_client_init(self, req: ModuleRequirements) -> str:
+        """Generate client initialization code for external services."""
+        if not req.external_services:
+            return "        # No external services configured"
+
+        lines = []
+        for svc in req.external_services:
+            svc_name = svc.get("name", "")
+            env_var = svc.get("env_var", f"{svc_name.upper()}_API_KEY")
+
+            lines.append(f"        # Initialize {svc_name} client")
+            lines.append(f'        self.{svc_name}_api_key = os.environ.get("{env_var}")')
+            lines.append(f"        if not self.{svc_name}_api_key:")
+            lines.append(f'            self.logger.warning("{env_var} not set - {svc_name} operations will fail")')
+
+        return "\n".join(lines)
+
+    def _generate_parameter_validation(self, req: ModuleRequirements) -> str:
+        """Generate parameter validation code."""
+        validation_blocks = []
+
+        for op in req.operations:
+            op_name = op.get("name", "")
+            params = op.get("parameters", {})
+            required_params = [p for p, d in params.items() if d.get("required", False)]
+
+            if required_params:
+                checks = []
+                for p in required_params:
+                    checks.append(f'"{p}"')
+
+                validation_blocks.append(
+                    f'        if operation == "{op_name}":\n'
+                    f"            required = [{', '.join(checks)}]\n"
+                    f"            missing = [p for p in required if p not in parameters]\n"
+                    f"            if missing:\n"
+                    f'                return f"Missing required parameters: {{missing}}"'
+                )
+
+        if not validation_blocks:
+            return "        # No parameter validation defined"
+
+        return "\n".join(validation_blocks)
 
     def _get_module_import_path(self, req: ModuleRequirements) -> str:
         """Get the Python import path for a module."""
@@ -286,27 +367,39 @@ class ModuleBuilderAgent:
         operations_set = to_python_set([op.get("name", "") for op in req.operations])
         first_operation = req.operations[0].get("name", "") if req.operations else "test"
 
-        # Generate operation tests
-        operation_tests = []
+        # Generate parameter validation tests
+        validation_tests = []
         for op in req.operations:
             op_name = op.get("name", "")
-            test_method = f"test_valid_{op_name.replace('-', '_')}_operation"
-            operation_tests.append(
-                f"    def {test_method}(self, module):\n"
-                f'        """Test {op_name} operation is valid."""\n'
-                f'        error = module.validate_operation("{op_name}")\n'
-                f"        assert error is None\n"
-            )
+            params = op.get("parameters", {})
+            required_params = [p for p, d in params.items() if d.get("required", False)]
+
+            if required_params:
+                test_method = f"test_{op_name.replace('-', '_')}_missing_required_params"
+                validation_tests.append(
+                    f"    @pytest.mark.asyncio\n"
+                    f"    async def {test_method}(self, module):\n"
+                    f'        """Test {op_name} fails with missing required parameters."""\n'
+                    f"        input_data = ModuleInput(\n"
+                    f'            operation="{op_name}",\n'
+                    f"            parameters={{}},  # Missing required params\n"
+                    f"        )\n"
+                    f"        result = await module.execute(input_data)\n"
+                    f"        assert result.status == ExecutionStatus.FAILURE\n"
+                    f"        assert result.error is not None\n"
+                    f'        assert "missing" in result.error.message.lower() or "required" in result.error.message.lower()\n'
+                )
 
         return self.templates.TEST_UNIT.format(
             name=req.name,
             module_import=module_import,
             class_name=class_name,
             module_id=req.module_id,
+            version=req.version,
             operations_set=operations_set,
             category=req.category,
             first_operation=first_operation,
-            operation_tests="\n".join(operation_tests),
+            operation_validation_tests="\n".join(validation_tests) if validation_tests else "    pass  # No parameter validation tests",
         )
 
     def _generate_integration_tests(self, req: ModuleRequirements) -> str:
@@ -346,11 +439,14 @@ class ModuleBuilderAgent:
                 f"        assert result.status in [ExecutionStatus.SUCCESS, ExecutionStatus.PARTIAL_SUCCESS]\n"
             )
 
+        first_operation = req.operations[0].get("name", "") if req.operations else "test"
+
         return self.templates.TEST_INTEGRATION.format(
             name=req.name,
             module_import=module_import,
             class_name=class_name,
             api_key_env=api_key_env,
+            first_operation=first_operation,
             integration_tests="\n\n".join(integration_tests),
         )
 
@@ -362,12 +458,15 @@ class ModuleBuilderAgent:
 
         # Environment variables section
         env_vars = []
+        api_key_env = "API_KEY"
         for svc in req.external_services:
             env_var = svc.get(
                 "env_var",
                 f"{svc.get('name', 'API').upper()}_API_KEY",
             )
             env_vars.append(f"- `{env_var}`: {svc.get('name', '')} API key")
+            if not api_key_env or api_key_env == "API_KEY":
+                api_key_env = env_var
 
         env_vars_section = (
             "\n".join(env_vars) if env_vars else "No environment variables required."
@@ -392,6 +491,12 @@ class ModuleBuilderAgent:
                 f"### {op_name}\n\n{op_desc}\n\n**Parameters:**\n\n{params_table}"
             )
 
+        # Implementation status - all operations are TODO
+        implementation_status = []
+        for op in req.operations:
+            op_name = op.get("name", "")
+            implementation_status.append(f"- [ ] `{op_name}` - TODO: Implement handler")
+
         dir_name = self.OUTPUT_DIRS.get(req.module_type, "modules")
         return self.templates.README.format(
             name=req.name,
@@ -402,7 +507,9 @@ class ModuleBuilderAgent:
             first_operation=first_operation,
             env_vars_section=env_vars_section,
             operations_docs="\n\n".join(operations_docs),
+            implementation_status="\n".join(implementation_status),
             test_path=f"{dir_name}/{req.module_id}/tests",
+            api_key_env=api_key_env,
         )
 
     def _generate_input_schema(self, req: ModuleRequirements) -> str:

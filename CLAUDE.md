@@ -270,3 +270,4 @@ python scripts/telegram_auth.py
 - Performance metrics tracked for all operations
 - Documentation required for all public interfaces
 - after every fix, restart the server
+- There are API keys in the .env file.

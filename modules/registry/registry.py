@@ -188,6 +188,14 @@ class ModuleRegistry:
 
         return AuthStatus.READY
 
+    def _to_relative_path(self, module_path: Path) -> str:
+        """Convert module path to relative path for portability."""
+        try:
+            return str(module_path.relative_to(Path.cwd()))
+        except ValueError:
+            # Path is not relative to cwd, try to make it relative anyway
+            return str(module_path)
+
     def _determine_entry_point(
         self, spec: Dict[str, Any], module_path: Path
     ) -> str:
@@ -253,7 +261,7 @@ class ModuleRegistry:
             operations=spec.get("operations", []),
             tags=discovery.get("tags", []),
             search_keywords=discovery.get("search_keywords", []),
-            path=str(module_path.absolute()),
+            path=self._to_relative_path(module_path),
             entry_point=self._determine_entry_point(spec, module_path),
             auth_status=auth_status,
             health_status=HealthStatus.UNKNOWN,

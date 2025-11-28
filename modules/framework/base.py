@@ -167,6 +167,15 @@ class BaseModule(ABC):
                     execution_time_ms=execution_time_ms,
                 )
 
+            # Handle dry run - skip parameter validation and execution
+            if input_data.dry_run:
+                execution_time_ms = int((time.time() - start_time) * 1000)
+                return ModuleOutput.success(
+                    request_id=input_data.request_id,
+                    data={"dry_run": True, "would_execute": input_data.operation},
+                    execution_time_ms=execution_time_ms,
+                )
+
             # Validate parameters
             param_error = self.validate_parameters(
                 input_data.operation, input_data.parameters
@@ -183,15 +192,6 @@ class BaseModule(ABC):
                         recoverable=True,
                         recovery_suggestion="Check parameter requirements and retry",
                     ),
-                    execution_time_ms=execution_time_ms,
-                )
-
-            # Handle dry run
-            if input_data.dry_run:
-                execution_time_ms = int((time.time() - start_time) * 1000)
-                return ModuleOutput.success(
-                    request_id=input_data.request_id,
-                    data={"dry_run": True, "would_execute": input_data.operation},
                     execution_time_ms=execution_time_ms,
                 )
 

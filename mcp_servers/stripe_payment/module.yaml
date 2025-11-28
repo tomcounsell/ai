@@ -4,13 +4,14 @@ metadata:
   version: "1.0.0"
   type: "mcp-server"
   category: "payment"
+  completeness: "scaffolding"  # scaffolding | partial | complete
 
   author:
     name: "Module Builder Agent"
     email: "noreply@example.com"
 
-  created: "2025-11-28T08:57:18.833765+00:00"
-  updated: "2025-11-28T08:57:18.833765+00:00"
+  created: "2025-11-28T09:07:37.970018+00:00"
+  updated: "2025-11-28T09:07:37.970018+00:00"
 
 description:
   short: "Process payments, refunds, and subscriptions via Stripe"
@@ -54,6 +55,7 @@ dependencies:
 
   internal_modules:
     - "modules.framework"
+    - "mcp_servers.base"
 
 interface:
   input_schema: "schemas/input.json"
@@ -80,7 +82,7 @@ testing:
   has_unit_tests: true
   has_integration_tests: true
   test_coverage_target: 90
-  real_api_tests: true
+  real_api_tests: true  # NO MOCKS
 
 quality:
   standard: "9.8/10"

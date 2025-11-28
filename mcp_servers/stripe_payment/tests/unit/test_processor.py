@@ -1,7 +1,8 @@
 """
 Unit Tests for Stripe Payment Processor
 
-Tests operation validation and module behavior without external API calls.
+Tests module structure, validation, and behavior without external API calls.
+These tests verify the module is correctly configured and validates inputs.
 """
 
 import pytest
@@ -15,8 +16,8 @@ def module():
     return StripePaymentProcessorModule()
 
 
-class TestModuleBasics:
-    """Test basic module functionality."""
+class TestModuleStructure:
+    """Test basic module structure and metadata."""
 
     def test_module_id(self, module):
         """Test module has correct ID."""
@@ -25,6 +26,10 @@ class TestModuleBasics:
     def test_module_name(self, module):
         """Test module has correct name."""
         assert module.name == "Stripe Payment Processor"
+
+    def test_version(self, module):
+        """Test module has correct version."""
+        assert module.version == "1.0.0"
 
     def test_supported_operations(self, module):
         """Test module reports correct operations."""
@@ -35,43 +40,85 @@ class TestModuleBasics:
     def test_capabilities(self, module):
         """Test module reports correct capabilities."""
         caps = module.get_capabilities()
-        assert "payment" == caps.category
+        assert caps.category == "payment"
         assert len(caps.capabilities) > 0
+        assert len(caps.operations) == len(module.get_supported_operations())
 
 
-class TestInputValidation:
-    """Test input validation."""
+class TestOperationValidation:
+    """Test operation validation logic."""
 
     def test_invalid_operation_rejected(self, module):
         """Test that invalid operations are rejected."""
-        error = module.validate_operation("invalid_operation")
+        error = module.validate_operation("invalid_operation_xyz")
         assert error is not None
         assert "Unsupported operation" in error
 
-    def test_valid_charge_customer_operation(self, module):
-        """Test charge-customer operation is valid."""
-        error = module.validate_operation("charge-customer")
-        assert error is None
+    def test_valid_operations_accepted(self, module):
+        """Test that all valid operations are accepted."""
+        for op in module.get_supported_operations():
+            error = module.validate_operation(op)
+            assert error is None, f"Operation {op} should be valid"
 
-    def test_valid_process_refund_operation(self, module):
-        """Test process-refund operation is valid."""
-        error = module.validate_operation("process-refund")
-        assert error is None
+    @pytest.mark.asyncio
+    async def test_charge_customer_missing_required_params(self, module):
+        """Test charge-customer fails with missing required parameters."""
+        input_data = ModuleInput(
+            operation="charge-customer",
+            parameters={},  # Missing required params
+        )
+        result = await module.execute(input_data)
+        assert result.status == ExecutionStatus.FAILURE
+        assert result.error is not None
+        assert "missing" in result.error.message.lower() or "required" in result.error.message.lower()
 
-    def test_valid_create_subscription_operation(self, module):
-        """Test create-subscription operation is valid."""
-        error = module.validate_operation("create-subscription")
-        assert error is None
+    @pytest.mark.asyncio
+    async def test_process_refund_missing_required_params(self, module):
+        """Test process-refund fails with missing required parameters."""
+        input_data = ModuleInput(
+            operation="process-refund",
+            parameters={},  # Missing required params
+        )
+        result = await module.execute(input_data)
+        assert result.status == ExecutionStatus.FAILURE
+        assert result.error is not None
+        assert "missing" in result.error.message.lower() or "required" in result.error.message.lower()
 
-    def test_valid_cancel_subscription_operation(self, module):
-        """Test cancel-subscription operation is valid."""
-        error = module.validate_operation("cancel-subscription")
-        assert error is None
+    @pytest.mark.asyncio
+    async def test_create_subscription_missing_required_params(self, module):
+        """Test create-subscription fails with missing required parameters."""
+        input_data = ModuleInput(
+            operation="create-subscription",
+            parameters={},  # Missing required params
+        )
+        result = await module.execute(input_data)
+        assert result.status == ExecutionStatus.FAILURE
+        assert result.error is not None
+        assert "missing" in result.error.message.lower() or "required" in result.error.message.lower()
 
-    def test_valid_validate_payment_method_operation(self, module):
-        """Test validate-payment-method operation is valid."""
-        error = module.validate_operation("validate-payment-method")
-        assert error is None
+    @pytest.mark.asyncio
+    async def test_cancel_subscription_missing_required_params(self, module):
+        """Test cancel-subscription fails with missing required parameters."""
+        input_data = ModuleInput(
+            operation="cancel-subscription",
+            parameters={},  # Missing required params
+        )
+        result = await module.execute(input_data)
+        assert result.status == ExecutionStatus.FAILURE
+        assert result.error is not None
+        assert "missing" in result.error.message.lower() or "required" in result.error.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_validate_payment_method_missing_required_params(self, module):
+        """Test validate-payment-method fails with missing required parameters."""
+        input_data = ModuleInput(
+            operation="validate-payment-method",
+            parameters={},  # Missing required params
+        )
+        result = await module.execute(input_data)
+        assert result.status == ExecutionStatus.FAILURE
+        assert result.error is not None
+        assert "missing" in result.error.message.lower() or "required" in result.error.message.lower()
 
 
 
@@ -89,3 +136,22 @@ class TestDryRun:
         result = await module.execute(input_data)
         assert result.status == ExecutionStatus.SUCCESS
         assert result.data.get("dry_run") is True
+        assert result.data.get("would_execute") == "charge-customer"
+
+
+class TestHealthCheck:
+    """Test module health check."""
+
+    def test_health_check_returns_status(self, module):
+        """Test health check returns valid status."""
+        health = module.health_check()
+        assert "healthy" in health
+        assert "module_id" in health
+        assert health["module_id"] == "stripe_payment"
+
+    def test_metrics_tracking(self, module):
+        """Test metrics are tracked correctly."""
+        metrics = module.get_metrics()
+        assert "total_executions" in metrics
+        assert "success_rate" in metrics
+        assert metrics["module_id"] == "stripe_payment"
