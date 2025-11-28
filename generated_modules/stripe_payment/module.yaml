@@ -1,0 +1,120 @@
+metadata:
+  id: "stripe_payment"
+  name: "Stripe Payment Processor"
+  version: "1.0.0"
+  type: "mcp-server"
+  category: "payment"
+
+  author:
+    name: "Module Builder Agent"
+    email: "noreply@example.com"
+
+  created: "2025-11-28T08:54:43.162330+00:00"
+  updated: "2025-11-28T08:54:43.162330+00:00"
+
+description:
+  short: "Process payments, refunds, and subscriptions via Stripe"
+  long: |
+    A comprehensive Stripe payment processing module that provides:
+    - Customer charging with amount validation
+    - Refund processing with eligibility checks
+    - Subscription management (create, update, cancel)
+    - Payment method validation before charging
+    - Webhook event handling
+    
+    All operations include comprehensive error handling, validation,
+    and side effect tracking for auditability.
+
+capabilities:
+  - "payment-processing"
+  - "refund-handling"
+  - "subscription-management"
+  - "payment-validation"
+  - "webhook-handling"
+
+operations:
+  - "charge-customer"
+  - "process-refund"
+  - "create-subscription"
+  - "cancel-subscription"
+  - "validate-payment-method"
+
+dependencies:
+  runtime:
+    - "python>=3.9"
+    - "pydantic>=2.0.0"
+    - "stripe>=5.0.0"
+
+
+  external_services:
+    - name: "stripe"
+      auth_type: "api_key"
+      required: true
+
+
+  internal_modules:
+    - "modules.framework"
+
+interface:
+  input_schema: "schemas/input.json"
+  output_schema: "schemas/output.json"
+  error_schema: "schemas/error.json"
+
+configuration:
+  auth_requirements:
+    - type: "api_key"
+      env_var: "STRIPE_API_KEY"
+
+
+  settings:
+    - name: "timeout"
+      type: "integer"
+      default: 30
+      required: false
+    - name: "retry_attempts"
+      type: "integer"
+      default: 3
+      required: false
+
+testing:
+  has_unit_tests: true
+  has_integration_tests: true
+  test_coverage_target: 90
+  real_api_tests: true
+
+quality:
+  standard: "9.8/10"
+  linting: "ruff"
+  formatting: "black"
+  type_checking: "mypy --strict"
+
+documentation:
+  readme: "README.md"
+  api_reference: "docs/API.md"
+  examples: "examples/"
+
+discovery:
+  tags:
+    - "payments"
+    - "stripe"
+    - "financial"
+    - "subscriptions"
+    - "refunds"
+
+  search_keywords:
+    - "payment"
+    - "charge"
+    - "refund"
+    - "subscription"
+    - "billing"
+    - "stripe"
+    - "credit card"
+
+  use_cases:
+    - "Process customer payments"
+    - "Handle subscription billing"
+    - "Issue refunds to customers"
+    - "Validate payment methods before charging"
+
+health:
+  validation_command: "pytest tests/"
