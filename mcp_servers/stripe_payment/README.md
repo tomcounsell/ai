@@ -35,7 +35,7 @@ This module is part of the ai system. No separate installation required.
 
 ```python
 from modules.framework.contracts import ModuleInput
-from generated_modules.stripe_payment.src.processor import StripePaymentProcessorModule
+from mcp_servers.stripe_payment.src.processor import StripePaymentProcessorModule
 
 # Create module instance
 module = StripePaymentProcessorModule()
@@ -136,13 +136,13 @@ All operations return a `ModuleOutput` with:
 
 ```bash
 # Run all tests
-pytest generated_modules/stripe_payment/tests
+pytest mcp_servers/stripe_payment/tests
 
 # Run only unit tests
-pytest generated_modules/stripe_payment/tests/unit/
+pytest mcp_servers/stripe_payment/tests/unit/
 
 # Run integration tests (requires API key)
-pytest generated_modules/stripe_payment/tests/integration/
+pytest mcp_servers/stripe_payment/tests/integration/
 ```
 
 ## Quality

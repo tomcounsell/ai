@@ -6,7 +6,7 @@ Tests operation validation and module behavior without external API calls.
 
 import pytest
 from modules.framework.contracts import ModuleInput, ExecutionStatus
-from generated_modules.stripe_payment.src.processor import StripePaymentProcessorModule
+from mcp_servers.stripe_payment.src.processor import StripePaymentProcessorModule
 
 
 @pytest.fixture

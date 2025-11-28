@@ -89,22 +89,38 @@ class ModuleBuilderAgent:
     - Documentation (README, API docs)
     - JSON schemas for input/output/error
 
+    Output directories by module type:
+    - mcp-server: mcp_servers/{module_id}/
+    - skill: skills/{module_id}/
+
     Usage:
         builder = ModuleBuilderAgent()
         result = await builder.build_module(requirements)
     """
 
+    # Output directories by module type
+    OUTPUT_DIRS = {
+        "mcp-server": "mcp_servers",
+        "skill": "skills",
+    }
+
     def __init__(
         self,
-        output_dir: str = "generated_modules",
+        base_dir: Optional[str] = None,
         registry: Optional[ModuleRegistry] = None,
         logger: Optional[logging.Logger] = None,
     ):
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.base_dir = Path(base_dir) if base_dir else Path.cwd()
         self.registry = registry or ModuleRegistry()
         self.logger = logger or logging.getLogger("module_builder")
         self.templates = ModuleTemplate()
+
+    def _get_output_dir(self, module_type: str) -> Path:
+        """Get the appropriate output directory for module type."""
+        dir_name = self.OUTPUT_DIRS.get(module_type, "modules")
+        output_dir = self.base_dir / dir_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir
 
     def _generate_module_id(self, name: str) -> str:
         """Generate snake_case module ID from name."""
@@ -258,10 +274,15 @@ class ModuleBuilderAgent:
             operation_methods=operation_methods,
         )
 
+    def _get_module_import_path(self, req: ModuleRequirements) -> str:
+        """Get the Python import path for a module."""
+        dir_name = self.OUTPUT_DIRS.get(req.module_type, "modules")
+        return f"{dir_name}.{req.module_id}.src.processor"
+
     def _generate_unit_tests(self, req: ModuleRequirements, module_path: Path) -> str:
         """Generate unit test file."""
         class_name = self._to_class_name(req.name)
-        module_import = f"generated_modules.{req.module_id}.src.processor"
+        module_import = self._get_module_import_path(req)
         operations_set = to_python_set([op.get("name", "") for op in req.operations])
         first_operation = req.operations[0].get("name", "") if req.operations else "test"
 
@@ -291,7 +312,7 @@ class ModuleBuilderAgent:
     def _generate_integration_tests(self, req: ModuleRequirements) -> str:
         """Generate integration test file."""
         class_name = self._to_class_name(req.name)
-        module_import = f"generated_modules.{req.module_id}.src.processor"
+        module_import = self._get_module_import_path(req)
 
         # Determine API key env var
         api_key_env = "API_KEY"
@@ -336,7 +357,7 @@ class ModuleBuilderAgent:
     def _generate_readme(self, req: ModuleRequirements) -> str:
         """Generate README.md."""
         class_name = self._to_class_name(req.name)
-        module_import = f"generated_modules.{req.module_id}.src.processor"
+        module_import = self._get_module_import_path(req)
         first_operation = req.operations[0].get("name", "") if req.operations else "test"
 
         # Environment variables section
@@ -371,6 +392,7 @@ class ModuleBuilderAgent:
                 f"### {op_name}\n\n{op_desc}\n\n**Parameters:**\n\n{params_table}"
             )
 
+        dir_name = self.OUTPUT_DIRS.get(req.module_type, "modules")
         return self.templates.README.format(
             name=req.name,
             description_short=req.description_short,
@@ -380,7 +402,7 @@ class ModuleBuilderAgent:
             first_operation=first_operation,
             env_vars_section=env_vars_section,
             operations_docs="\n\n".join(operations_docs),
-            test_path=f"generated_modules/{req.module_id}/tests",
+            test_path=f"{dir_name}/{req.module_id}/tests",
         )
 
     def _generate_input_schema(self, req: ModuleRequirements) -> str:
@@ -553,7 +575,9 @@ class ModuleBuilderAgent:
         if not requirements.module_id:
             requirements.module_id = self._generate_module_id(requirements.name)
 
-        module_path = self.output_dir / requirements.module_id
+        # Get output directory based on module type
+        output_dir = self._get_output_dir(requirements.module_type)
+        module_path = output_dir / requirements.module_id
         created_at = datetime.now(timezone.utc).isoformat()
 
         try:

@@ -185,7 +185,8 @@ and side effect tracking for auditability.
     )
 
     # Create builder and generate module
-    builder = ModuleBuilderAgent(output_dir="generated_modules")
+    # Modules are output to mcp_servers/ or skills/ based on type
+    builder = ModuleBuilderAgent()
     result = await builder.build_module(requirements, register=True)
 
     # Report results

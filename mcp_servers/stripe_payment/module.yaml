@@ -9,8 +9,8 @@ metadata:
     name: "Module Builder Agent"
     email: "noreply@example.com"
 
-  created: "2025-11-28T08:54:43.162330+00:00"
-  updated: "2025-11-28T08:54:43.162330+00:00"
+  created: "2025-11-28T08:57:18.833765+00:00"
+  updated: "2025-11-28T08:57:18.833765+00:00"
 
 description:
   short: "Process payments, refunds, and subscriptions via Stripe"
