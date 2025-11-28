@@ -1,0 +1,115 @@
+metadata:
+  id: "telegram_messenger"
+  name: "Telegram Messenger"
+  version: "1.0.0"
+  type: "mcp-server"
+  category: "messaging"
+  completeness: "scaffolding"  # scaffolding | partial | complete
+
+  author:
+    name: "Module Builder Agent"
+    email: "noreply@example.com"
+
+  created: "2025-11-28T09:14:51.066413+00:00"
+  updated: "2025-11-28T09:14:51.066413+00:00"
+
+description:
+  short: "Send messages and manage Telegram conversations"
+  long: |
+    A Telegram integration for messaging:
+    - Send messages to users and groups
+    - Manage conversations and history
+    - Handle media and file sharing
+    - React to messages
+    - Get chat information and members
+
+capabilities:
+  - "messaging"
+  - "group-management"
+  - "media-handling"
+  - "conversation-history"
+
+operations:
+  - "send-message"
+  - "get-messages"
+  - "get-chat-info"
+  - "add-reaction"
+  - "search-messages"
+
+dependencies:
+  runtime:
+    - "python>=3.9"
+    - "pydantic>=2.0.0"
+    - "telethon>=1.28.0"
+
+
+  external_services:
+    - name: "telegram"
+      auth_type: "api_key"
+      required: true
+
+
+  internal_modules:
+    - "modules.framework"
+    - "mcp_servers.base"
+
+interface:
+  input_schema: "schemas/input.json"
+  output_schema: "schemas/output.json"
+  error_schema: "schemas/error.json"
+
+configuration:
+  auth_requirements:
+    - type: "api_key"
+      env_var: "TELEGRAM_BOT_TOKEN"
+
+
+  settings:
+    - name: "timeout"
+      type: "integer"
+      default: 30
+      required: false
+    - name: "retry_attempts"
+      type: "integer"
+      default: 3
+      required: false
+
+testing:
+  has_unit_tests: true
+  has_integration_tests: true
+  test_coverage_target: 90
+  real_api_tests: true  # NO MOCKS
+
+quality:
+  standard: "9.8/10"
+  linting: "ruff"
+  formatting: "black"
+  type_checking: "mypy --strict"
+
+documentation:
+  readme: "README.md"
+  api_reference: "docs/API.md"
+  examples: "examples/"
+
+discovery:
+  tags:
+    - "telegram"
+    - "messaging"
+    - "chat"
+    - "bot"
+    - "communication"
+
+  search_keywords:
+    - "telegram"
+    - "message"
+    - "chat"
+    - "bot"
+    - "send"
+
+  use_cases:
+    - "Send notifications"
+    - "Manage group chats"
+    - "Search conversation history"
+
+health:
+  validation_command: "pytest tests/"
