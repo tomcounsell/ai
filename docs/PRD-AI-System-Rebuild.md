@@ -166,25 +166,53 @@ A unified AI system that:
    - Test execution
 
 ### P1 - Core Features (V1)
-1. **MCP Integration**
+1. **Subagent Architecture** (NEW - Nov 2025)
+   - Claude Code native subagents for domain isolation
+   - 6 specialized subagents (Stripe, Sentry, GitHub, Render, Notion, Linear)
+   - Lazy-loading to prevent context pollution
+   - 60% cost savings via model selection per domain
+   - See: [Skills vs Subagents Analysis](architecture/skills-vs-subagents-analysis.md)
+
+2. **MCP Library & Session Management** (NEW - Oct 2025)
+   - Intelligent MCP server selection before sessions
+   - Auth status tracking (ready/needs_auth/error)
+   - Task-based MCP filtering
+   - Reduces Claude Code distraction
+   - See: [MCP Library Requirements](MCP-Library-Requirements.md)
+
+3. **Multi-Model Agent Router** (NEW - Nov 2025)
+   - Hybrid Gemini CLI + Claude Code routing
+   - Gemini CLI for autonomous/background tasks (30% cost savings)
+   - Claude Code for interactive sessions with MCP tools
+   - Intelligent task-based agent selection
+   - See: [Gemini CLI Integration](architecture/gemini-cli-integration-analysis.md)
+
+4. **Agent-SOP Framework** (EVALUATING - Nov 2025)
+   - Structured workflow framework using markdown SOPs
+   - MUST/SHOULD/MAY constraint levels (RFC 2119)
+   - Parameterized, versionable procedures
+   - Replaces brittle keyword detection
+   - See: [Agent-SOP Evaluation](architecture/agent-sop-evaluation.md)
+
+5. **MCP Integration**
    - Claude Code compatibility
    - Tool discovery
    - Context injection
    - Stateless operation
 
-2. **Workspace Management**
+6. **Workspace Management**
    - Multi-project support
    - Security boundaries
    - Configuration management
    - Access control
 
-3. **Performance Optimization**
+7. **Performance Optimization**
    - Context compression (97-99%)
    - Streaming responses
    - Resource monitoring
    - Auto-restart capability
 
-4. **Integration Suite**
+8. **Integration Suite**
    - GitHub (issues, PRs)
    - Notion (documentation)
    - Perplexity (search)
