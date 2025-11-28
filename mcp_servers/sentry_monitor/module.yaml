@@ -1,0 +1,116 @@
+metadata:
+  id: "sentry_monitor"
+  name: "Sentry Error Monitor"
+  version: "1.0.0"
+  type: "mcp-server"
+  category: "monitoring"
+  completeness: "scaffolding"  # scaffolding | partial | complete
+
+  author:
+    name: "Module Builder Agent"
+    email: "noreply@example.com"
+
+  created: "2025-11-28T09:14:50.842859+00:00"
+  updated: "2025-11-28T09:14:50.842859+00:00"
+
+description:
+  short: "Monitor and analyze errors from Sentry"
+  long: |
+    A Sentry integration module for error monitoring and analysis:
+    - Fetch recent errors and issues from projects
+    - Get detailed error stack traces and context
+    - Analyze error patterns and frequency
+    - Resolve and ignore issues programmatically
+    - Get project health metrics
+
+capabilities:
+  - "error-monitoring"
+  - "issue-management"
+  - "error-analysis"
+  - "project-health"
+
+operations:
+  - "get-recent-issues"
+  - "get-issue-details"
+  - "get-error-events"
+  - "resolve-issue"
+  - "get-project-stats"
+
+dependencies:
+  runtime:
+    - "python>=3.9"
+    - "pydantic>=2.0.0"
+    - "sentry-sdk>=1.0.0"
+
+
+  external_services:
+    - name: "sentry"
+      auth_type: "api_key"
+      required: true
+
+
+  internal_modules:
+    - "modules.framework"
+    - "mcp_servers.base"
+
+interface:
+  input_schema: "schemas/input.json"
+  output_schema: "schemas/output.json"
+  error_schema: "schemas/error.json"
+
+configuration:
+  auth_requirements:
+    - type: "api_key"
+      env_var: "SENTRY_AUTH_TOKEN"
+
+
+  settings:
+    - name: "timeout"
+      type: "integer"
+      default: 30
+      required: false
+    - name: "retry_attempts"
+      type: "integer"
+      default: 3
+      required: false
+
+testing:
+  has_unit_tests: true
+  has_integration_tests: true
+  test_coverage_target: 90
+  real_api_tests: true  # NO MOCKS
+
+quality:
+  standard: "9.8/10"
+  linting: "ruff"
+  formatting: "black"
+  type_checking: "mypy --strict"
+
+documentation:
+  readme: "README.md"
+  api_reference: "docs/API.md"
+  examples: "examples/"
+
+discovery:
+  tags:
+    - "monitoring"
+    - "errors"
+    - "sentry"
+    - "debugging"
+    - "observability"
+
+  search_keywords:
+    - "error"
+    - "sentry"
+    - "monitoring"
+    - "issue"
+    - "debug"
+    - "stack trace"
+
+  use_cases:
+    - "Monitor application errors"
+    - "Debug production issues"
+    - "Track error trends"
+
+health:
+  validation_command: "pytest tests/"
