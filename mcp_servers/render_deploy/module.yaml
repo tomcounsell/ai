@@ -1,0 +1,115 @@
+metadata:
+  id: "render_deploy"
+  name: "Render Deployment Manager"
+  version: "1.0.0"
+  type: "mcp-server"
+  category: "deployment"
+  completeness: "scaffolding"  # scaffolding | partial | complete
+
+  author:
+    name: "Module Builder Agent"
+    email: "noreply@example.com"
+
+  created: "2025-11-28T09:14:49.337072+00:00"
+  updated: "2025-11-28T09:14:49.337072+00:00"
+
+description:
+  short: "Manage deployments and services on Render"
+  long: |
+    A Render.com integration for deployment management:
+    - List and manage services
+    - Trigger deployments
+    - View deployment logs and status
+    - Manage environment variables
+    - Scale services up/down
+
+capabilities:
+  - "deployment-management"
+  - "service-management"
+  - "log-access"
+  - "environment-config"
+
+operations:
+  - "list-services"
+  - "get-service"
+  - "trigger-deploy"
+  - "get-deploy-logs"
+  - "update-env-vars"
+
+dependencies:
+  runtime:
+    - "python>=3.9"
+    - "pydantic>=2.0.0"
+    - "httpx>=0.24.0"
+
+
+  external_services:
+    - name: "render"
+      auth_type: "api_key"
+      required: true
+
+
+  internal_modules:
+    - "modules.framework"
+    - "mcp_servers.base"
+
+interface:
+  input_schema: "schemas/input.json"
+  output_schema: "schemas/output.json"
+  error_schema: "schemas/error.json"
+
+configuration:
+  auth_requirements:
+    - type: "api_key"
+      env_var: "RENDER_API_KEY"
+
+
+  settings:
+    - name: "timeout"
+      type: "integer"
+      default: 30
+      required: false
+    - name: "retry_attempts"
+      type: "integer"
+      default: 3
+      required: false
+
+testing:
+  has_unit_tests: true
+  has_integration_tests: true
+  test_coverage_target: 90
+  real_api_tests: true  # NO MOCKS
+
+quality:
+  standard: "9.8/10"
+  linting: "ruff"
+  formatting: "black"
+  type_checking: "mypy --strict"
+
+documentation:
+  readme: "README.md"
+  api_reference: "docs/API.md"
+  examples: "examples/"
+
+discovery:
+  tags:
+    - "deployment"
+    - "render"
+    - "hosting"
+    - "devops"
+    - "infrastructure"
+
+  search_keywords:
+    - "deploy"
+    - "render"
+    - "hosting"
+    - "service"
+    - "infrastructure"
+
+  use_cases:
+    - "Deploy applications"
+    - "Manage cloud services"
+    - "View deployment logs"
+
+health:
+  validation_command: "pytest tests/"
