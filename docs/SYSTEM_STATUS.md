@@ -1,8 +1,8 @@
 # AI System Status Report
 
-**Last Updated:** September 5, 2025  
-**Current Branch:** prepare-rebuild-cleanup  
-**Completion Status:** 62.5% (5 of 8 phases complete)
+**Last Updated:** November 19, 2025
+**Current Branch:** main
+**Completion Status:** 75% (5 of 8 phases complete + architectural planning)
 
 ## 🎯 System Overview
 
@@ -57,6 +57,45 @@ This is a **production-ready unified conversational development environment** th
 - **Unified Processor**: Message processing orchestration (`integrations/telegram/unified_processor.py`)
 - **Test Suite**: Communication layer testing (`tests/test_communication.py`)
 - **Documentation**: Comprehensive Telegram client guide (`docs/TELEGRAM_CLIENT.md`)
+
+## 🎯 Recent Architectural Decisions (Oct-Nov 2025)
+
+### Claude Code Subagent Architecture ✅
+- **Decision**: Use Claude Code native subagents instead of custom implementation
+- **Analysis**: [Skills vs Subagents](architecture/skills-vs-subagents-analysis.md)
+- **Rationale**: Context isolation, cost optimization, domain expertise, resumable sessions
+- **Impact**: 6-1-1 score favoring subagents, 60% cost savings potential
+- **Status**: Design complete, 6 subagent PRDs created, implementation pending
+
+### MCP Library & Session Management 📋
+- **Feature**: Intelligent MCP server selection before Claude Code sessions
+- **Requirements**: [MCP Library Requirements](MCP-Library-Requirements.md)
+- **Problem Solved**: Reduces Claude Code distraction from unnecessary MCP servers
+- **Components**: MCP catalog, auth status tracking, task-based selection
+- **Status**: Requirements documented, awaiting implementation
+
+### Multi-Model Agent Router 📋
+- **Feature**: Hybrid Gemini CLI + Claude Code routing
+- **Analysis**: [Gemini CLI Integration](architecture/gemini-cli-integration-analysis.md)
+- **Use Cases**:
+  - Gemini CLI for autonomous/background tasks (30% cost savings)
+  - Claude Code for interactive sessions with MCP tools
+- **Routing Logic**: Task characteristics determine optimal agent
+- **Status**: Design complete, awaiting implementation
+
+### Agent-SOP Framework Evaluation 🔍
+- **Tool**: Strands Agent-SOP for structured workflows
+- **Evaluation**: [Agent-SOP Analysis](architecture/agent-sop-evaluation.md)
+- **Recommendation**: ADOPT with phased rollout
+- **Benefits**: Standardized workflows, better routing, team collaboration
+- **Status**: POC phase recommended, pending decision
+
+### Architecture Modernization Plan 📋
+- **Initiative**: Update all documentation for consistency
+- **Plan**: [Architecture Modernization](ARCHITECTURE_MODERNIZATION_PLAN.md)
+- **Scope**: 33 documents, 21-day plan, 5 phases
+- **Priority**: 4 critical, 5 high, 7 medium updates needed
+- **Status**: Plan created, execution beginning
 
 ## 📊 Current Architecture
 

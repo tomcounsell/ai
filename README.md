@@ -41,7 +41,20 @@ Then just type `valor` from anywhere to start your AI system!
 
 ## Documentation
 
-See [`docs-rebuild/`](docs-rebuild/) for complete system documentation.
+See [`docs/`](docs/) for complete system documentation:
+
+### Key Documents
+- **[Architecture Overview](docs/architecture/system-overview.md)** - System design and components
+- **[PRD](docs/PRD-AI-System-Rebuild.md)** - Product requirements and roadmap
+- **[CLAUDE.md](CLAUDE.md)** - Development guide and commands
+- **[System Status](docs/SYSTEM_STATUS.md)** - Current implementation status
+- **[Subagents](docs/subagents/)** - Domain-specific agent PRDs
+
+### Recent Architecture Decisions
+- **[MCP Library & Session Management](docs/MCP-Library-Requirements.md)** - Intelligent MCP server selection
+- **[Gemini CLI Integration](docs/architecture/gemini-cli-integration-analysis.md)** - Multi-model agent router
+- **[Skills vs Subagents](docs/architecture/skills-vs-subagents-analysis.md)** - Claude Code subagent approach
+- **[Agent-SOP Evaluation](docs/architecture/agent-sop-evaluation.md)** - Structured workflow framework
 
 ## Contact
 

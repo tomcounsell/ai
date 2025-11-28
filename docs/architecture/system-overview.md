@@ -78,6 +78,49 @@ The architecture represents a **living codebase** where users interact directly 
   └─────────────┘    └─────────────┘   └─────────────┘
 ```
 
+### Subagent Architecture (Nov 2025)
+
+The system employs a **specialized subagent pattern** to prevent context pollution while maintaining domain expertise:
+
+```
+User Query
+    ↓
+Main Agent (Valor) - Clean Context (<10k tokens)
+    ↓
+Routing Layer
+    ├── Task Analyzer
+    ├── MCP Library (auth-aware)
+    └── Multi-Model Router
+    ↓
+┌─────────────────────────────────────────────────┐
+│         Specialized Execution Agents             │
+├─────────────────────────────────────────────────┤
+│ Claude Code Subagents (Interactive)             │
+│  ├── Stripe (payments, billing)                 │
+│  ├── Sentry (errors, monitoring)                │
+│  ├── GitHub (code, PRs, issues)                 │
+│  ├── Render (infrastructure, deployment)        │
+│  ├── Notion (knowledge, docs)                   │
+│  └── Linear (projects, issues)                  │
+│                                                  │
+│ Gemini CLI (Autonomous)                         │
+│  ├── Batch operations                           │
+│  ├── Background maintenance                     │
+│  └── Cost-optimized tasks                       │
+└─────────────────────────────────────────────────┘
+    ↓
+Domain-Specific Tools & MCP Servers
+```
+
+**Key Benefits**:
+- **Context Efficiency**: Main agent uses <10k tokens, subagents lazy-load 10-40k
+- **Cost Optimization**: 60% savings via model selection (haiku/sonnet/opus per domain)
+- **Domain Expertise**: Each subagent has specialized persona and knowledge
+- **Security**: Granular permissions per subagent/tool
+- **Flexibility**: Multiple execution paths (Claude Code + Gemini CLI)
+
+See [Subagent System Design](subagent-mcp-system.md) for details.
+
 ## Design Principles
 
 ### 1. No Legacy Code Tolerance
