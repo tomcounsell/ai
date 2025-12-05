@@ -69,8 +69,8 @@
   ],
   "privacy": {
     "dataCollection": false,
-    "authentication": true,
-    "externalAPIs": true,
+    "authentication": false,
+    "externalAPIs": false,
     "localStorage": false
   },
   "documentation": "https://ai.yuda.me/mcp/cto-tools/README.md"

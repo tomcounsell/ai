@@ -83,9 +83,10 @@
   "license": "Part of Cuttlefish project",
 
   "privacy": {
-    "data_collection": false,
-    "external_apis": false,
-    "authentication_required": false
+    "dataCollection": false,
+    "authentication": false,
+    "externalAPIs": false,
+    "localStorage": false
   },
 
   "categories": [
