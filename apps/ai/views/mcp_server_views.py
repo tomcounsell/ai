@@ -181,6 +181,7 @@ class CTOToolsMCPServerView(View):
     """Handle MCP protocol requests for CTO Tools server.
 
     This view implements the MCP JSON-RPC 2.0 protocol for CTO Tools.
+    Requires OAuth Bearer token authentication.
     """
 
     def get(self, request):
@@ -190,12 +191,27 @@ class CTOToolsMCPServerView(View):
             "version": "1.1.0",
             "description": "MCP server for CTO and engineering leadership tools",
             "protocol": "MCP",
-            "authentication": False,
+            "authentication": True,
             "endpoint": request.build_absolute_uri()
         })
 
     def post(self, request):
         """Handle MCP JSON-RPC requests."""
+        # Validate Bearer token (auto-approve OAuth - just check presence)
+        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
+        if not auth_header.startswith('Bearer '):
+            return JsonResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": None,
+                    "error": {
+                        "code": -32000,
+                        "message": "Authentication required - missing or invalid Bearer token",
+                    },
+                },
+                status=401,
+            )
+
         try:
             # Parse MCP request
             mcp_request = json.loads(request.body)
