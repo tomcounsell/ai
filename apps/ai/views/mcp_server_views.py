@@ -20,6 +20,17 @@ class CreativeJuicesMCPServerView(View):
     and other MCP clients to call tools directly via HTTP.
     """
 
+    def get(self, request):
+        """Handle GET requests - return server info."""
+        return JsonResponse({
+            "name": "creative-juices",
+            "version": "1.0.0",
+            "description": "MCP server for creative thinking tools",
+            "protocol": "MCP",
+            "authentication": False,
+            "endpoint": request.build_absolute_uri()
+        })
+
     def post(self, request):
         """Handle MCP JSON-RPC requests."""
         try:
@@ -171,6 +182,17 @@ class CTOToolsMCPServerView(View):
 
     This view implements the MCP JSON-RPC 2.0 protocol for CTO Tools.
     """
+
+    def get(self, request):
+        """Handle GET requests - return server info."""
+        return JsonResponse({
+            "name": "cto-tools",
+            "version": "1.1.0",
+            "description": "MCP server for CTO and engineering leadership tools",
+            "protocol": "MCP",
+            "authentication": False,
+            "endpoint": request.build_absolute_uri()
+        })
 
     def post(self, request):
         """Handle MCP JSON-RPC requests."""
