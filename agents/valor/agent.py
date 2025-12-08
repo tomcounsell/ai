@@ -204,8 +204,8 @@ Always strive to be helpful while being honest about your limitations."""
             # Run the agent
             result = await self.agent.run(message, deps=context)
 
-            # result.data is now a string (output_type=str)
-            response_content = result.data
+            # result.output is the string response (output_type=str)
+            response_content = result.output
 
             # Add response to context
             context.add_message("assistant", response_content)
