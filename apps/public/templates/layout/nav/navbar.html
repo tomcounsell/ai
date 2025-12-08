@@ -50,9 +50,11 @@
             CTO Tools
           </a>
 
+          {% comment %}Temporarily hidden
           <a href="{% url 'public:pricing' %}" class="{% if active_section == 'pricing' %}active{% endif %}">
             Pricing
           </a>
+          {% endcomment %}
 
           {% if user.is_authenticated %}
             {% if user.teams.exists %}
@@ -105,9 +107,11 @@
         CTO Tools
       </a>
 
+      {% comment %}Temporarily hidden
       <a href="{% url 'public:pricing' %}" class="block px-3 py-2 text-mono {% if active_section == 'pricing' %}active{% endif %}" style="font-size: 0.75rem;">
         Pricing
       </a>
+      {% endcomment %}
 
       {% if user.is_authenticated %}
         {% if user.teams.exists %}
