@@ -21,6 +21,8 @@ from apps.ai.views import (
     CTOToolsManifestView,
     CTOToolsMCPServerView,
     CTOToolsReadmeView,
+    MCPOAuthAuthorizeView,
+    MCPOAuthTokenView,
 )
 from apps.ai.views.test_chat import TestChatView
 from apps.ai.views.test_page import TestChatPageView
@@ -31,6 +33,9 @@ urlpatterns: list[URLPattern] = [
     # Test endpoints (no database required)
     path("test/", TestChatPageView.as_view(), name="test-page"),
     path("test-chat/", TestChatView.as_view(), name="test-chat"),
+    # OAuth endpoints for MCP servers (auto-approve flow)
+    path("oauth/authorize", MCPOAuthAuthorizeView.as_view(), name="mcp-oauth-authorize"),
+    path("oauth/token", MCPOAuthTokenView.as_view(), name="mcp-oauth-token"),
     # MCP server endpoints
     path(
         "creative-juices/",

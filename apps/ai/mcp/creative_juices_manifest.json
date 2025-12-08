@@ -84,11 +84,16 @@
 
   "privacy": {
     "dataCollection": false,
-    "authentication": false,
+    "authentication": true,
     "externalAPIs": false,
     "localStorage": false
   },
-
+  "oauth": {
+    "authorizationUrl": "https://ai.yuda.me/mcp/oauth/authorize",
+    "tokenUrl": "https://ai.yuda.me/mcp/oauth/token",
+    "scopes": ["mcp:read", "mcp:write"],
+    "autoApprove": true
+  },
   "categories": [
     "creativity",
     "productivity",
