@@ -107,19 +107,19 @@ Always strive to be helpful while being honest about your limitations."""
         """Initialize the PydanticAI agent with tools and configuration."""
         # Get available tools from registry
         tools = self.tool_registry.get_available_tools()
-        
+
         # Create the PydanticAI agent
         self.agent = Agent(
             model=self.model,
-            system_prompt=self.system_prompt,
-            result_type=ValorResponse,
+            instructions=self.system_prompt,
+            output_type=str,  # Simple string output
             deps_type=ValorContext
         )
-        
+
         # Register tools with the agent
         for tool_name, tool_func in tools.items():
             self.agent.tool(tool_func)
-        
+
         logger.debug(f"Agent initialized with {len(tools)} tools")
     
     async def create_context(
@@ -195,36 +195,39 @@ Always strive to be helpful while being honest about your limitations."""
         try:
             # Add user message to context
             context.add_message("user", message)
-            
+
             # Manage context window
             if self.context_manager.needs_compression(context):
                 context = await self.context_manager.compress_context(context)
                 logger.debug(f"Context compressed for chat_id: {chat_id}")
-            
+
             # Run the agent
             result = await self.agent.run(message, deps=context)
-            
+
+            # result.data is now a string (output_type=str)
+            response_content = result.data
+
             # Add response to context
-            context.add_message("assistant", result.data.content)
-            
+            context.add_message("assistant", response_content)
+
             # Update context metadata
             response_metadata = {
-                "tools_used": result.data.tools_used,
+                "tools_used": [],  # Would need to extract from result if needed
                 "context_tokens": self.context_manager.count_tokens(context),
                 "timestamp": context.message_history[-1].timestamp.isoformat()
             }
-            
+
             # Create response
             response = ValorResponse(
-                content=result.data.content,
+                content=response_content,
                 context_updated=True,
-                tools_used=result.data.tools_used,
+                tools_used=[],
                 metadata=response_metadata
             )
-            
+
             logger.debug(f"Processed message for chat_id: {chat_id}")
             return response
-            
+
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             # Return error response

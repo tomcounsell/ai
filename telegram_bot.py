@@ -25,6 +25,7 @@ from config import settings
 from utilities.database import DatabaseManager
 from agents.valor.context import ValorContext, MessageEntry
 from agents.context_manager import ContextWindowManager
+from agents.valor.agent import ValorAgent
 
 # Load environment variables
 load_dotenv()
@@ -87,9 +88,14 @@ class TelegramBot:
         # Initialize AI components
         self.db_manager: Optional[DatabaseManager] = None
         self.context_manager: Optional[ContextWindowManager] = None
+        self.valor_agent: Optional[ValorAgent] = None
         self.contexts = {}  # Store user contexts
         self.message_count = 0  # Track total messages
         self.error_count = 0  # Track errors
+
+        # Check if we have API keys for real AI responses
+        self.anthropic_api_key = os.getenv('ANTHROPIC_API_KEY')
+        self.has_ai_keys = bool(self.anthropic_api_key and self.anthropic_api_key != 'your_anthropic_api_key_here')
         logger.debug(f"Initialized with groups: {self.allowed_groups}, DMs: {self.allow_dms}")
         logger.debug(f"Group config loaded: {len(self.group_config.get('groups', {}))} groups configured")
         
@@ -192,6 +198,18 @@ class TelegramBot:
             logger.debug("Creating ContextWindowManager with 100k tokens")
             self.context_manager = ContextWindowManager(max_tokens=100000)
             logger.info("✅ Context manager ready (100k tokens)")
+
+            # Initialize Valor agent if API keys are available
+            if self.has_ai_keys:
+                logger.debug("Initializing ValorAgent with Anthropic Claude")
+                self.valor_agent = ValorAgent(
+                    model="anthropic:claude-sonnet-4-20250514",
+                    max_context_tokens=100000,
+                    debug=True
+                )
+                logger.info("✅ Valor agent ready (Claude Sonnet)")
+            else:
+                logger.warning("⚠️ No API keys found - running in demo mode")
         except Exception as e:
             logger.error(f"Failed to initialize components: {e}")
             logger.error(f"Stack trace:\n{traceback.format_exc()}")
@@ -342,9 +360,23 @@ class TelegramBot:
                         logger.error(f"Database error: {e}")
                         logger.error(f"Database error stack trace:\n{traceback.format_exc()}")
                 
-                # Generate response (demo mode without API keys)
+                # Generate response using AI or demo mode
                 logger.debug("Generating response")
-                response = self._generate_demo_response(event.text, stats)
+                if self.valor_agent:
+                    try:
+                        agent_response = await self.valor_agent.process_message(
+                            message=event.text,
+                            chat_id=chat_id,
+                            user_name=sender.first_name or sender.username or "User",
+                            workspace="telegram"
+                        )
+                        response = agent_response.content
+                        logger.debug(f"AI response generated, tools used: {agent_response.tools_used}")
+                    except Exception as ai_error:
+                        logger.error(f"AI generation failed: {ai_error}")
+                        response = f"I encountered an error processing your message. Please try again."
+                else:
+                    response = self._generate_demo_response(event.text, stats)
                 logger.debug(f"Generated response length: {len(response)} chars")
                 
                 # Send response
