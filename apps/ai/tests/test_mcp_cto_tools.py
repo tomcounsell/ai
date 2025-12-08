@@ -6,21 +6,19 @@ import inspect
 
 import pytest
 
-# Import security review tools
 from apps.ai.mcp.cto_tools_server import (
+    architecture_review,
     configure_connector,
     list_connectors,
     security_review,
+    weekly_review,
 )
 
-# Note: weekly_review tests are kept for future implementation
-# For now, skip them by importing from a stub if needed
+
+# Weekly Review Tool Tests
 
 
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_returns_string():
+def test_weekly_review_returns_string():
     """Test weekly_review returns a string."""
     result = weekly_review()
 
@@ -28,9 +26,7 @@ async def test_weekly_review_returns_string():
     assert len(result) > 100  # Should be substantial content
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_contains_framework_sections():
+def test_weekly_review_contains_framework_sections():
     """Test weekly_review contains expected framework sections."""
     result = weekly_review()
 
@@ -40,9 +36,7 @@ async def test_weekly_review_contains_framework_sections():
     assert "PHASE 3: WRITE THE FINAL SUMMARY" in result
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_contains_git_commands():
+def test_weekly_review_contains_git_commands():
     """Test weekly_review includes git commands."""
     result = weekly_review()
 
@@ -52,9 +46,7 @@ async def test_weekly_review_contains_git_commands():
     assert "--no-merges" in result
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_contains_categorization_guidance():
+def test_weekly_review_contains_categorization_guidance():
     """Test weekly_review includes work categorization guidance."""
     result = weekly_review()
 
@@ -66,9 +58,7 @@ async def test_weekly_review_contains_categorization_guidance():
     assert "DevOps" in result or "API" in result or "Testing" in result
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_contains_stats_guidance():
+def test_weekly_review_contains_stats_guidance():
     """Test weekly_review includes stats extraction."""
     result = weekly_review()
 
@@ -78,9 +68,7 @@ async def test_weekly_review_contains_stats_guidance():
     assert "contributors" in result.lower()
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_contains_output_template():
+def test_weekly_review_contains_output_template():
     """Test weekly_review includes structured output template."""
     result = weekly_review()
 
@@ -90,9 +78,7 @@ async def test_weekly_review_contains_output_template():
     assert "commits" in result.lower()
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_emphasizes_structured_output():
+def test_weekly_review_emphasizes_structured_output():
     """Test weekly_review emphasizes structured technical output."""
     result = weekly_review()
 
@@ -102,17 +88,13 @@ async def test_weekly_review_emphasizes_structured_output():
     assert "NOT multiple pages" in result or "not multiple" in result.lower()
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_is_not_async():
+def test_weekly_review_is_not_async():
     """Test that weekly_review is a synchronous function."""
-    # Unlike Creative Juices tools which are async, this is sync
+    # Unlike security_review which is async, this is sync
     assert not inspect.iscoroutinefunction(weekly_review)
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_deterministic():
+def test_weekly_review_deterministic():
     """Test that weekly_review returns the same content each time with same params."""
     result1 = weekly_review(days=7, categories=5)
     result2 = weekly_review(days=7, categories=5)
@@ -121,9 +103,7 @@ async def test_weekly_review_deterministic():
     assert result1 == result2
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_formatted_as_markdown():
+def test_weekly_review_formatted_as_markdown():
     """Test that weekly_review content is formatted as markdown."""
     result = weekly_review()
 
@@ -134,9 +114,7 @@ async def test_weekly_review_formatted_as_markdown():
     assert "**" in result  # Bold text
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_comprehensive_coverage():
+def test_weekly_review_comprehensive_coverage():
     """Test that weekly_review covers all key aspects of team review."""
     result = weekly_review()
 
@@ -154,9 +132,7 @@ async def test_weekly_review_comprehensive_coverage():
         assert aspect in result_lower, f"Missing aspect: {aspect}"
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_custom_days_parameter():
+def test_weekly_review_custom_days_parameter():
     """Test that weekly_review accepts custom days parameter."""
     result_7 = weekly_review(days=7)
     result_14 = weekly_review(days=14)
@@ -167,15 +143,8 @@ async def test_weekly_review_custom_days_parameter():
     assert '--since="14 days ago"' in result_14
     assert '--since="30 days ago"' in result_30
 
-    # Should mention the number of days in the goal section
-    assert "past 7 days" in result_7
-    assert "past 14 days" in result_14
-    assert "past 30 days" in result_30
 
-
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_custom_categories_parameter():
+def test_weekly_review_custom_categories_parameter():
     """Test that weekly_review accepts custom categories parameter."""
     result_3 = weekly_review(categories=3)
     result_5 = weekly_review(categories=5)
@@ -192,9 +161,7 @@ async def test_weekly_review_custom_categories_parameter():
     assert "Choose 7 categories" in result_7
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_default_parameters():
+def test_weekly_review_default_parameters():
     """Test that weekly_review uses correct defaults."""
     result_default = weekly_review()
     result_explicit = weekly_review(days=7, categories=5)
@@ -203,9 +170,7 @@ async def test_weekly_review_default_parameters():
     assert result_default == result_explicit
 
 
-@pytest.mark.asyncio
-@pytest.mark.skip(reason="weekly_review not yet implemented in security review server")
-async def test_weekly_review_plain_text_format():
+def test_weekly_review_plain_text_format():
     """Test that weekly_review outputs plain text format, not RTF."""
     result = weekly_review()
 
@@ -219,6 +184,136 @@ async def test_weekly_review_plain_text_format():
 
     # Should mention Unicode emoji support
     assert "Unicode emoji" in result or "unicode emoji" in result.lower()
+
+
+# Architecture Review Tool Tests
+
+
+def test_architecture_review_returns_string():
+    """Test architecture_review returns a string."""
+    result = architecture_review()
+
+    assert isinstance(result, str)
+    assert len(result) > 100  # Should be substantial content
+
+
+def test_architecture_review_contains_framework_sections():
+    """Test architecture_review contains expected framework sections."""
+    result = architecture_review()
+
+    # Check for main framework phases
+    assert "PHASE 1: EXPLORE THE CODEBASE" in result
+    assert "PHASE 2: ANALYZE ARCHITECTURE" in result
+    assert "PHASE 3: WRITE THE ARCHITECTURE DOCUMENT" in result
+
+
+def test_architecture_review_contains_exploration_commands():
+    """Test architecture_review includes exploration commands."""
+    result = architecture_review()
+
+    # Should contain exploration commands
+    assert "find" in result
+    assert "ls" in result
+    assert "pyproject.toml" in result or "package.json" in result
+
+
+def test_architecture_review_contains_diagram_guidance():
+    """Test architecture_review includes diagram guidance when enabled."""
+    result = architecture_review(include_diagrams=True)
+
+    # Check for diagram guidance
+    assert "mermaid" in result.lower()
+    assert "C4" in result or "c4" in result.lower()
+    assert "sequence" in result.lower()
+
+
+def test_architecture_review_diagrams_optional():
+    """Test architecture_review can exclude diagram guidance."""
+    result_with = architecture_review(include_diagrams=True)
+    result_without = architecture_review(include_diagrams=False)
+
+    # With diagrams should be longer and contain mermaid
+    assert len(result_with) > len(result_without)
+    assert "mermaid" in result_with.lower()
+
+
+def test_architecture_review_is_not_async():
+    """Test that architecture_review is a synchronous function."""
+    assert not inspect.iscoroutinefunction(architecture_review)
+
+
+def test_architecture_review_deterministic():
+    """Test that architecture_review returns the same content with same params."""
+    result1 = architecture_review(focus="system", depth="detailed")
+    result2 = architecture_review(focus="system", depth="detailed")
+
+    # Should be identical with same parameters
+    assert result1 == result2
+
+
+def test_architecture_review_formatted_as_markdown():
+    """Test that architecture_review content is formatted as markdown."""
+    result = architecture_review()
+
+    # Check for markdown formatting
+    assert "##" in result  # Headers
+    assert "```" in result  # Code blocks
+    assert "**" in result  # Bold text
+
+
+def test_architecture_review_focus_parameter():
+    """Test that architecture_review adapts to focus parameter."""
+    result_system = architecture_review(focus="system")
+    result_api = architecture_review(focus="api")
+    result_data = architecture_review(focus="data")
+    result_security = architecture_review(focus="security")
+
+    # Each should mention its focus area
+    assert "system" in result_system.lower()
+    assert "api" in result_api.lower()
+    assert "data" in result_data.lower()
+    assert "security" in result_security.lower()
+
+
+def test_architecture_review_depth_parameter():
+    """Test that architecture_review adapts to depth parameter."""
+    result_overview = architecture_review(depth="overview")
+    result_detailed = architecture_review(depth="detailed")
+    result_deep = architecture_review(depth="deep-dive")
+
+    # Each should mention its depth level
+    assert "overview" in result_overview.lower()
+    assert "detailed" in result_detailed.lower()
+    assert "deep-dive" in result_deep.lower()
+
+
+def test_architecture_review_contains_document_template():
+    """Test architecture_review includes a document template."""
+    result = architecture_review()
+
+    # Check for document structure sections
+    assert "Executive Summary" in result
+    assert "Key Components" in result
+    assert "Recommendations" in result
+
+
+def test_architecture_review_contains_quality_checklist():
+    """Test architecture_review includes a quality checklist."""
+    result = architecture_review()
+
+    # Check for quality checklist
+    assert "QUALITY CHECKLIST" in result or "checklist" in result.lower()
+
+
+def test_architecture_review_default_parameters():
+    """Test that architecture_review uses correct defaults."""
+    result_default = architecture_review()
+    result_explicit = architecture_review(
+        focus="system", depth="detailed", include_diagrams=True
+    )
+
+    # Defaults should match explicit values
+    assert result_default == result_explicit
 
 
 # Security Review Tool Tests

@@ -92,3 +92,27 @@ class MCPOAuthTokenView(View):
             "expires_in": 31536000,  # 1 year
             "scope": "mcp:read mcp:write"
         })
+
+
+class MCPOAuthMetadataView(View):
+    """OAuth Authorization Server Metadata endpoint (RFC 8414).
+
+    Returns metadata about the OAuth server for discovery.
+    This is accessed at /.well-known/oauth-authorization-server
+    """
+
+    def get(self, request):
+        """Return OAuth server metadata."""
+        base_url = request.build_absolute_uri('/').rstrip('/')
+
+        metadata = {
+            "issuer": base_url,
+            "authorization_endpoint": f"{base_url}/mcp/oauth/authorize",
+            "token_endpoint": f"{base_url}/mcp/oauth/token",
+            "scopes_supported": ["mcp:read", "mcp:write"],
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code"],
+            "token_endpoint_auth_methods_supported": ["none"],
+        }
+
+        return JsonResponse(metadata)

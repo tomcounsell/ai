@@ -9,6 +9,7 @@ CTO Tools is a Model Context Protocol (MCP) server that provides structured fram
 ## Features
 
 - **📊 Weekly Team Reviews**: Structured framework for analyzing team progress
+- **🏗️ Architecture Reviews**: Document system architecture with C4 diagrams
 - **🔍 Git Analysis**: Commands and techniques for extracting insights from commit history
 - **📝 Executive Summaries**: Templates for stakeholder communication
 - **🎯 Action-Oriented**: Clear next steps and decision frameworks
@@ -166,6 +167,64 @@ Claude, use CTO Tools weekly_review with days=30 and categories=7.
 The framework guides you through systematic analysis that produces a concise, scannable summary
 of your team's work with category-based organization and contributor recognition.
 
+### architecture_review(focus="system", depth="detailed", include_diagrams=True)
+
+Provides a structured framework for conducting architecture reviews with diagram guidance.
+
+**Purpose**: Systematically review and document system architecture with clear diagrams. Works with ANY codebase and tech stack.
+
+**Parameters**:
+- `focus` (str, default: "system"): Area to focus on - "system", "api", "data", "security", or a specific component name
+- `depth` (str, default: "detailed"): Level of detail - "overview" (1-2 pages), "detailed" (3-5 pages), or "deep-dive" (5+ pages)
+- `include_diagrams` (bool, default: True): Whether to include Mermaid diagram templates and guidance
+
+**Returns**: Phase-by-phase instructions for creating architecture documentation including:
+
+**Phase 1 - Exploration**:
+- Commands to explore project structure and dependencies
+- Focus-specific guidance (system, api, data, security)
+- Entry point and configuration file discovery
+
+**Phase 2 - Analysis**:
+- Identify architectural style (Monolith, Microservices, etc.)
+- Map key components and boundaries
+- Assess patterns and quality attributes
+- Note concerns for recommendations
+
+**Phase 3 - Documentation**:
+- Complete document template with all sections
+- Mermaid diagram examples (C4 model, sequence, data flow)
+- Quality checklist before finalizing
+
+**Example Usage**:
+
+```
+# Full system architecture review
+Claude, use CTO Tools to review this project's architecture.
+
+# API-focused review with overview depth
+Claude, use CTO Tools architecture_review with focus="api" and depth="overview".
+
+# Deep-dive into data architecture
+Claude, use CTO Tools architecture_review with focus="data" and depth="deep-dive".
+
+# Quick review without diagrams
+Claude, use CTO Tools architecture_review with depth="overview" and include_diagrams=False.
+```
+
+**Diagram Types Included**:
+- 🏗️ C4 Model (Context, Container, Component)
+- 🔄 Sequence diagrams for key flows
+- 📊 Data flow diagrams
+- All in Mermaid syntax (GitHub/Notion compatible)
+
+**Features**:
+- 📐 Structured document template
+- 🎨 Mermaid diagram guidance
+- ✅ Quality checklist
+- 🎯 Focus-specific exploration
+- 📊 Multiple depth levels
+
 ## How It Works
 
 1. **Request a Tool**: Ask Claude to use CTO Tools for engineering leadership tasks
@@ -232,7 +291,6 @@ Future tools planned:
 - `technical_debt_review()` - Debt identification and prioritization
 - `hiring_interview_guide()` - Engineering interview frameworks
 - `incident_postmortem()` - Post-incident review templates
-- `architecture_review()` - Architecture decision frameworks
 
 ## Support
 

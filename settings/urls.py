@@ -5,6 +5,7 @@ from django.http import Http404, HttpResponse, JsonResponse
 from django.urls import include, path
 from django.views.generic import RedirectView, TemplateView
 
+from apps.ai.views import MCPOAuthMetadataView
 from apps.api.views.health_views import deep_health_check, health_check
 from apps.public.views.landing_views import HomeView
 from settings.env import DEBUG, LOCAL
@@ -105,6 +106,12 @@ def serve_markdown_file(request, filename):
 
 
 urlpatterns = [
+    # OAuth Authorization Server Metadata (RFC 8414)
+    path(
+        ".well-known/oauth-authorization-server",
+        MCPOAuthMetadataView.as_view(),
+        name="oauth_metadata",
+    ),
     path("", HomeView.as_view(), name="home"),
     path("", include("apps.public.urls", namespace="public")),
     path("staff/", include("apps.staff.urls", namespace="staff")),

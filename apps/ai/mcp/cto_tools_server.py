@@ -3,6 +3,7 @@ CTO Tools MCP Server implementation using FastMCP.
 
 Provides tools for CTOs and engineering leaders including:
 - Weekly team reviews and commit analysis
+- Architecture reviews with diagram guidance
 - Security review and risk correlation
 - Engineering metrics and productivity insights
 """
@@ -471,6 +472,386 @@ Create a new Google Doc with the formatted content.
 ---
 
 **Start by running the PHASE 1 git commands in parallel, then proceed.**
+"""
+
+    return instructions
+
+
+@mcp.tool()
+def architecture_review(
+    focus: str = "system",
+    depth: Literal["overview", "detailed", "deep-dive"] = "detailed",
+    include_diagrams: bool = True,
+) -> str:
+    """
+    Provides a structured framework for conducting architecture reviews.
+
+    Returns step-by-step instructions that guide you through:
+    - Exploring the codebase structure and dependencies
+    - Identifying architectural patterns and decisions
+    - Creating documentation with diagrams (C4, sequence, etc.)
+
+    This framework works for ANY codebase and tech stack.
+
+    Args:
+        focus: Area to focus on - "system" (full system), "api" (API layer),
+               "data" (data flow/storage), "security", or a specific component name
+        depth: Level of detail - "overview", "detailed", or "deep-dive"
+        include_diagrams: Whether to include diagram suggestions (default: True)
+
+    Returns:
+        str: Step-by-step instructions for conducting an architecture review
+    """
+    depth_guidance = {
+        "overview": "high-level components and their relationships (1-2 pages)",
+        "detailed": "component interactions, key patterns, and trade-offs (3-5 pages)",
+        "deep-dive": "implementation details, edge cases, and recommendations (5+ pages)",
+    }
+
+    diagram_section = ""
+    if include_diagrams:
+        diagram_section = """
+---
+
+## DIAGRAM GUIDELINES
+
+Use Mermaid syntax for all diagrams (renders in GitHub, Notion, and most markdown viewers).
+
+### C4 Model Diagrams (Recommended)
+
+**Level 1 - System Context** (Always include):
+```mermaid
+graph TB
+    subgraph boundary [System Boundary]
+        System[Your System]
+    end
+    User[User/Actor] --> System
+    System --> ExternalA[External System A]
+    System --> ExternalB[External System B]
+```
+
+**Level 2 - Container Diagram** (For detailed/deep-dive):
+```mermaid
+graph TB
+    subgraph system [System Name]
+        WebApp[Web Application<br/>React/Vue/etc]
+        API[API Server<br/>Django/FastAPI/etc]
+        DB[(Database<br/>PostgreSQL)]
+        Cache[(Cache<br/>Redis)]
+    end
+    WebApp --> API
+    API --> DB
+    API --> Cache
+```
+
+**Level 3 - Component Diagram** (For deep-dive):
+```mermaid
+graph LR
+    subgraph api [API Layer]
+        Router[Router]
+        Auth[Auth Middleware]
+        Controllers[Controllers]
+        Services[Services]
+        Models[Models]
+    end
+    Router --> Auth --> Controllers --> Services --> Models
+```
+
+### Sequence Diagrams (For key flows):
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant A as API
+    participant D as Database
+    U->>A: Request
+    A->>D: Query
+    D-->>A: Result
+    A-->>U: Response
+```
+
+### Data Flow Diagrams:
+```mermaid
+flowchart LR
+    Input[Input Source] --> Process[Processing]
+    Process --> Store[(Storage)]
+    Store --> Output[Output/API]
+```
+
+**Diagram Best Practices**:
+- Keep diagrams focused - one concept per diagram
+- Use consistent naming across all diagrams
+- Add brief labels to arrows describing the interaction
+- Color-code by concern (optional): security=red, data=blue, external=gray
+"""
+
+    instructions = f"""
+# Architecture Review Framework
+
+## GOAL
+Produce a comprehensive architecture review focused on **{focus}** at **{depth}** depth level.
+Target output: {depth_guidance[depth]}
+
+The review should be understandable by both technical and non-technical stakeholders,
+with diagrams that visualize the system structure and data flows.
+
+---
+
+## PHASE 1: EXPLORE THE CODEBASE
+
+Run these commands to understand the project structure:
+
+```bash
+# Project structure (top 3 levels)
+find . -type d -not -path '*/\\.*' -not -path '*/node_modules/*' -not -path '*/.venv/*' -not -path '*/venv/*' | head -50
+
+# Key configuration files
+ls -la *.json *.yaml *.yml *.toml pyproject.toml package.json 2>/dev/null
+
+# Entry points and main modules
+find . -name "main.py" -o -name "app.py" -o -name "index.ts" -o -name "index.js" -o -name "manage.py" 2>/dev/null | head -20
+
+# Dependencies (choose based on stack)
+cat requirements.txt pyproject.toml package.json Cargo.toml go.mod 2>/dev/null | head -100
+```
+
+**Then explore based on focus area "{focus}"**:
+
+For **system** focus:
+- Identify main application entry points
+- Map out the directory structure
+- Find configuration and settings files
+
+For **api** focus:
+- Find route/endpoint definitions
+- Identify middleware and auth layers
+- Map request/response patterns
+
+For **data** focus:
+- Find database models and schemas
+- Identify data access patterns (ORM, raw SQL, etc.)
+- Map data transformations and pipelines
+
+For **security** focus:
+- Find authentication/authorization code
+- Identify secrets management
+- Review input validation and sanitization
+
+---
+
+## PHASE 2: ANALYZE ARCHITECTURE (Internal thinking)
+
+Use sequential thinking to analyze what you've found:
+
+1. **Identify the architectural style**:
+   - Monolith vs Microservices vs Modular Monolith
+   - MVC, Clean Architecture, Hexagonal, etc.
+   - Event-driven, Request-response, etc.
+
+2. **Map key components**:
+   - What are the main modules/packages?
+   - How do they communicate?
+   - What are the boundaries?
+
+3. **Identify patterns**:
+   - Design patterns in use (Repository, Factory, Strategy, etc.)
+   - Framework conventions followed
+   - Custom patterns unique to this codebase
+
+4. **Assess quality attributes**:
+   - Scalability approach
+   - Error handling strategy
+   - Testing patterns
+   - Observability (logging, metrics, tracing)
+
+5. **Note concerns** (for recommendations):
+   - Tight coupling between components?
+   - Missing abstractions?
+   - Security gaps?
+   - Performance bottlenecks?
+
+**Important**: This analysis is internal. Don't dump raw findings.
+
+---
+
+## PHASE 3: WRITE THE ARCHITECTURE DOCUMENT
+
+**Document Structure**:
+
+```markdown
+# Architecture Review: [System/Component Name]
+
+📅 **Review Date**: [Date]
+🎯 **Focus**: {focus}
+📊 **Depth**: {depth}
+
+---
+
+## 📋 Executive Summary
+
+[2-3 sentences: What is this system? What does it do? Key architectural decisions.]
+
+---
+
+## 🏗️ System Overview
+
+[High-level description of the architecture style and main components]
+
+### System Context Diagram
+[Mermaid diagram showing system boundaries and external interactions]
+
+---
+
+## 🧩 Key Components
+
+### [Component 1 Name]
+**Purpose**: [What it does]
+**Technology**: [Stack/framework]
+**Key responsibilities**:
+- [Responsibility 1]
+- [Responsibility 2]
+
+### [Component 2 Name]
+[Same structure...]
+
+---
+
+## 🔄 Key Flows
+
+### [Flow Name, e.g., "User Authentication"]
+[Sequence diagram + brief description]
+
+### [Flow Name, e.g., "Data Processing Pipeline"]
+[Flow diagram + brief description]
+
+---
+
+## 📐 Design Patterns
+
+| Pattern | Where Used | Purpose |
+|---------|-----------|---------|
+| [Pattern] | [Location] | [Why] |
+
+---
+
+## 💾 Data Architecture
+
+[Data flow diagram]
+
+**Storage**:
+- Primary database: [Type, purpose]
+- Cache layer: [Type, purpose]
+- File storage: [Type, purpose]
+
+**Data Models**: [Key entities and relationships]
+
+---
+
+## 🔐 Security Architecture
+
+- **Authentication**: [Method]
+- **Authorization**: [Approach]
+- **Secrets Management**: [How handled]
+- **Input Validation**: [Where/how]
+
+---
+
+## 📈 Scalability & Performance
+
+- **Current approach**: [How it scales]
+- **Bottlenecks**: [Known limitations]
+- **Caching strategy**: [What's cached, where]
+
+---
+
+## ✅ Strengths
+
+- [Strength 1 with brief explanation]
+- [Strength 2]
+- [Strength 3]
+
+---
+
+## ⚠️ Areas for Improvement
+
+| Area | Current State | Recommendation | Priority |
+|------|--------------|----------------|----------|
+| [Area] | [Issue] | [Suggestion] | High/Med/Low |
+
+---
+
+## 🎯 Recommendations
+
+1. **[Short-term]**: [Actionable recommendation]
+2. **[Medium-term]**: [Actionable recommendation]
+3. **[Long-term]**: [Actionable recommendation]
+
+---
+
+## 📎 Appendix
+
+- [Links to relevant docs]
+- [Additional diagrams]
+- [Glossary if needed]
+```
+{diagram_section}
+---
+
+## OUTPUT: Save to Repository
+
+**Preferred location**: `docs/architecture/` in the repository
+
+```
+docs/architecture/
+├── README.md                    # Index of architecture docs
+├── system-overview.md           # Full system architecture
+├── api-architecture.md          # API layer details
+├── data-architecture.md         # Data flow and storage
+└── diagrams/                    # Optional: exported diagram images
+    └── system-context.png
+```
+
+**File naming**: `[focus]-architecture.md` or `[component]-architecture.md`
+- `system-overview.md` for full system reviews
+- `api-architecture.md` for API-focused reviews
+- `auth-architecture.md` for specific components
+
+**Why GitHub/GitLab**:
+- ✅ Mermaid diagrams render natively (no export needed)
+- ✅ Versioned alongside code
+- ✅ Team accessible via repo
+- ✅ PR review for architecture changes
+- ✅ Links work from code comments
+
+**After saving**, create a simple `docs/architecture/README.md` index if it doesn't exist:
+
+```markdown
+# Architecture Documentation
+
+- [System Overview](./system-overview.md) - High-level system architecture
+- [API Architecture](./api-architecture.md) - API layer and endpoints
+- [Data Architecture](./data-architecture.md) - Data flow and storage
+```
+
+**Alternative outputs** (if repo write not available):
+- Claude Artifact - for quick sharing
+- `/tmp/architecture_review.md` - local file for manual commit
+
+---
+
+## QUALITY CHECKLIST
+
+Before finalizing, verify:
+
+- [ ] Executive summary is understandable by non-technical readers
+- [ ] All diagrams render correctly (test Mermaid syntax)
+- [ ] Key flows are documented with sequence diagrams
+- [ ] Recommendations are specific and actionable
+- [ ] No sensitive information (credentials, internal URLs) included
+- [ ] Document depth matches requested level: {depth}
+
+---
+
+**Start by running the PHASE 1 exploration commands, then proceed through analysis and documentation.**
 """
 
     return instructions

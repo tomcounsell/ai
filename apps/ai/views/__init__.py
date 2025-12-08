@@ -8,7 +8,11 @@ from .chat import (
     ChatPollMessageView,
     ChatSendMessageView,
 )
-from .mcp_oauth_views import MCPOAuthAuthorizeView, MCPOAuthTokenView
+from .mcp_oauth_views import (
+    MCPOAuthAuthorizeView,
+    MCPOAuthMetadataView,
+    MCPOAuthTokenView,
+)
 from .mcp_server_views import CreativeJuicesMCPServerView, CTOToolsMCPServerView
 from .mcp_views import (
     CreativeJuicesBundleView,
@@ -43,5 +47,6 @@ __all__ = [
     "CreativeJuicesMCPServerView",
     "CreativeJuicesReadmeView",
     "MCPOAuthAuthorizeView",
+    "MCPOAuthMetadataView",
     "MCPOAuthTokenView",
 ]
