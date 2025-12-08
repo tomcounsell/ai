@@ -22,6 +22,7 @@ from apps.ai.views import (
     CTOToolsMCPServerView,
     CTOToolsReadmeView,
     MCPOAuthAuthorizeView,
+    MCPOAuthRegistrationView,
     MCPOAuthTokenView,
 )
 from apps.ai.views.test_chat import TestChatView
@@ -36,6 +37,7 @@ urlpatterns: list[URLPattern] = [
     # OAuth endpoints for MCP servers (auto-approve flow)
     path("oauth/authorize", MCPOAuthAuthorizeView.as_view(), name="mcp-oauth-authorize"),
     path("oauth/token", MCPOAuthTokenView.as_view(), name="mcp-oauth-token"),
+    path("oauth/register", MCPOAuthRegistrationView.as_view(), name="mcp-oauth-register"),
     # MCP server endpoints
     path(
         "creative-juices/",

@@ -2,6 +2,7 @@
 
 import json
 import secrets
+import time
 from urllib.parse import urlencode
 
 from django.http import HttpResponse, JsonResponse
@@ -94,6 +95,38 @@ class MCPOAuthTokenView(View):
         })
 
 
+@method_decorator(csrf_exempt, name="dispatch")
+class MCPOAuthRegistrationView(View):
+    """OAuth Dynamic Client Registration endpoint (RFC 7591).
+
+    Accepts client registration requests and returns client credentials.
+    Since this is auto-approve, we accept all registrations.
+    """
+
+    def post(self, request):
+        """Handle client registration request."""
+        try:
+            data = json.loads(request.body)
+        except json.JSONDecodeError:
+            return JsonResponse(
+                {"error": "invalid_request", "error_description": "Invalid JSON"},
+                status=400
+            )
+
+        # Generate client credentials (no secret needed for public clients)
+        client_id = secrets.token_urlsafe(32)
+
+        # Return registration response
+        return JsonResponse({
+            "client_id": client_id,
+            "client_id_issued_at": int(time.time()),
+            "redirect_uris": data.get("redirect_uris", []),
+            "grant_types": ["authorization_code"],
+            "response_types": ["code"],
+            "token_endpoint_auth_method": "none"
+        })
+
+
 class MCPOAuthMetadataView(View):
     """OAuth Authorization Server Metadata endpoint (RFC 8414).
 
@@ -109,6 +142,7 @@ class MCPOAuthMetadataView(View):
             "issuer": base_url,
             "authorization_endpoint": f"{base_url}/mcp/oauth/authorize",
             "token_endpoint": f"{base_url}/mcp/oauth/token",
+            "registration_endpoint": f"{base_url}/mcp/oauth/register",
             "scopes_supported": ["mcp:read", "mcp:write"],
             "response_types_supported": ["code"],
             "grant_types_supported": ["authorization_code"],
