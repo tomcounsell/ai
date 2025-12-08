@@ -59,7 +59,8 @@ class MCPOAuthTokenView(View):
     def post(self, request):
         """Handle token request."""
         # Parse form data or JSON
-        if request.content_type == "application/json":
+        content_type = request.content_type or ''
+        if 'application/json' in content_type:
             try:
                 data = json.loads(request.body)
             except json.JSONDecodeError:
@@ -68,7 +69,9 @@ class MCPOAuthTokenView(View):
                     status=400
                 )
         else:
-            data = request.POST
+            # Handle form-encoded data - Django populates request.POST automatically
+            # for application/x-www-form-urlencoded requests
+            data = dict(request.POST.items())
 
         grant_type = data.get("grant_type")
         code = data.get("code")
