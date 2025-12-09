@@ -160,6 +160,28 @@ def test_cto_tools_tools_list_with_auth(client, valid_bearer_token):
 
 
 @pytest.mark.django_db
+def test_cto_tools_handles_notifications(client, valid_bearer_token):
+    """Test server handles MCP notifications correctly."""
+    mcp_request = {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {},
+    }
+
+    response = client.post(
+        '/mcp/cto-tools/serve',
+        data=json.dumps(mcp_request),
+        content_type='application/json',
+        HTTP_AUTHORIZATION=f'Bearer {valid_bearer_token}'
+    )
+
+    # Notifications should return 200 with minimal response
+    assert response.status_code == 200
+    data = response.json()
+    assert data['jsonrpc'] == '2.0'
+
+
+@pytest.mark.django_db
 def test_cto_tools_invalid_method(client, valid_bearer_token):
     """Test server returns error for unknown methods."""
     mcp_request = {

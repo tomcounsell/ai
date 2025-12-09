@@ -51,6 +51,10 @@ class CreativeJuicesMCPServerView(View):
                 tool_name = params.get("name")
                 arguments = params.get("arguments", {})
                 result = asyncio.run(self._handle_tool_call(tool_name, arguments))
+            elif method.startswith("notifications/"):
+                # Handle notifications (no response required per MCP spec)
+                logger.info(f"Received notification: {method}")
+                return JsonResponse({"jsonrpc": "2.0"}, status=200)
             else:
                 return JsonResponse(
                     {
@@ -230,6 +234,10 @@ class CTOToolsMCPServerView(View):
                 tool_name = params.get("name")
                 arguments = params.get("arguments", {})
                 result = asyncio.run(self._handle_tool_call(tool_name, arguments))
+            elif method.startswith("notifications/"):
+                # Handle notifications (no response required per MCP spec)
+                logger.info(f"Received notification: {method}")
+                return JsonResponse({"jsonrpc": "2.0"}, status=200)
             else:
                 return JsonResponse(
                     {
