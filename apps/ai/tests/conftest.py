@@ -10,8 +10,8 @@ def setup_test_connectors():
     Demo connectors are not auto-loaded in production, but we need them
     for tests to have data to work with.
     """
-    from apps.ai.mcp.security.connector_registry import ConnectorRegistry
-    from apps.ai.mcp.security.examples.demo_connectors import (
+    from apps.ai.mcp.cto_tools.security.connector_registry import ConnectorRegistry
+    from apps.ai.mcp.cto_tools.security.examples.demo_connectors import (
         DemoCSPMConnector,
         DemoPolicyConnector,
         DemoSASTConnector,

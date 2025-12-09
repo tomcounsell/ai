@@ -19,7 +19,7 @@
       "run",
       "python",
       "-m",
-      "apps.ai.mcp.cto_tools_server"
+      "apps.ai.mcp.cto_tools.server"
     ]
   },
   "tools": [

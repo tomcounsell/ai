@@ -310,7 +310,7 @@ class CTOToolsMCPServerView(View):
 
     async def _handle_tool_call(self, tool_name, arguments):
         """Handle tools/call request - execute the requested tool."""
-        from apps.ai.mcp.cto_tools_server import weekly_review
+        from apps.ai.mcp.cto_tools.server import weekly_review
 
         # Route to appropriate tool
         if tool_name == "weekly_review":
