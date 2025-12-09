@@ -461,6 +461,178 @@ def test_complete_oauth_flow_with_pkce(client, pkce_params):
 
 
 @pytest.mark.django_db
+def test_complete_real_world_mcp_session(client, pkce_params):
+    """Comprehensive end-to-end test simulating a real Claude Code session.
+
+    This test simulates the COMPLETE real-world flow that Claude Code performs,
+    designed to catch issues before they reach production. It validates:
+    - OAuth discovery and dynamic registration
+    - PKCE-secured authorization and token exchange
+    - MCP server discovery and initialization
+    - Complete protocol handshake including notifications
+    - Actual tool operations
+    - Error handling and edge cases
+
+    This test should catch issues like:
+    - Missing protocol steps (notifications/initialized)
+    - Authentication inconsistencies (GET vs POST requirements)
+    - Invalid JSON-RPC responses
+    - Missing required fields in responses
+    - Incorrect HTTP status codes
+    """
+    # PHASE 1: OAuth Discovery
+    metadata = client.get('/.well-known/oauth-authorization-server').json()
+    assert 'registration_endpoint' in metadata
+    assert 'S256' in metadata.get('code_challenge_methods_supported', [])
+    assert 'authorization_endpoint' in metadata
+    assert 'token_endpoint' in metadata
+
+    # PHASE 2: Dynamic Client Registration
+    registration = client.post(
+        metadata['registration_endpoint'],
+        data=json.dumps({'redirect_uris': ['http://localhost:3000/callback']}),
+        content_type='application/json'
+    ).json()
+    client_id = registration['client_id']
+    assert client_id, "Must receive client_id"
+    assert 'client_id_issued_at' in registration
+
+    # PHASE 3: Authorization with PKCE
+    auth_response = client.get(metadata['authorization_endpoint'], {
+        'client_id': client_id,
+        'redirect_uri': 'http://localhost:3000/callback',
+        'response_type': 'code',
+        'state': 'test_state',
+        'code_challenge': pkce_params['code_challenge'],
+        'code_challenge_method': 'S256',
+    })
+    assert auth_response.status_code == 302, "Must redirect with auth code"
+
+    auth_code = parse_qs(urlparse(auth_response['Location']).query)['code'][0]
+    assert len(auth_code) > 0, "Auth code must not be empty"
+
+    # PHASE 4: Token Exchange
+    token_response = client.post(
+        metadata['token_endpoint'],
+        data=json.dumps({
+            'grant_type': 'authorization_code',
+            'code': auth_code,
+            'redirect_uri': 'http://localhost:3000/callback',
+            'code_verifier': pkce_params['code_verifier'],
+        }),
+        content_type='application/json'
+    )
+    assert token_response.status_code == 200, "Token exchange must succeed"
+    token = token_response.json()
+    access_token = token['access_token']
+    assert token['token_type'] == 'Bearer'
+    assert 'expires_in' in token
+
+    # PHASE 5: MCP Server Discovery
+    server_info = client.get('/mcp/cto-tools/serve').json()
+    assert server_info['name'] == 'cto-tools'
+    assert server_info['protocol'] == 'MCP'
+    assert server_info['authentication'] is True, \
+        "Server must advertise authentication requirement"
+
+    # PHASE 6: MCP Initialize (with auth)
+    init_response = client.post(
+        '/mcp/cto-tools/serve',
+        data=json.dumps({
+            'jsonrpc': '2.0',
+            'method': 'initialize',
+            'params': {
+                'protocolVersion': '2024-11-05',
+                'capabilities': {},
+                'clientInfo': {'name': 'claude-code', 'version': '1.0'}
+            },
+            'id': 1
+        }),
+        content_type='application/json',
+        HTTP_AUTHORIZATION=f'Bearer {access_token}'
+    )
+    assert init_response.status_code == 200
+    init_data = init_response.json()
+    assert init_data['jsonrpc'] == '2.0'
+    assert 'result' in init_data
+    assert 'protocolVersion' in init_data['result']
+    assert 'capabilities' in init_data['result']
+    assert 'serverInfo' in init_data['result']
+
+    # PHASE 7: Send initialized notification (CRITICAL - this is where bugs occurred)
+    notification_response = client.post(
+        '/mcp/cto-tools/serve',
+        data=json.dumps({
+            'jsonrpc': '2.0',
+            'method': 'notifications/initialized',
+            'params': {},
+        }),
+        content_type='application/json',
+        HTTP_AUTHORIZATION=f'Bearer {access_token}'
+    )
+    assert notification_response.status_code == 200, \
+        "Notification must succeed - previous bug caused 400 here"
+    assert notification_response.json()['jsonrpc'] == '2.0'
+
+    # PHASE 8: List available tools
+    tools_response = client.post(
+        '/mcp/cto-tools/serve',
+        data=json.dumps({
+            'jsonrpc': '2.0',
+            'method': 'tools/list',
+            'params': {},
+            'id': 2
+        }),
+        content_type='application/json',
+        HTTP_AUTHORIZATION=f'Bearer {access_token}'
+    )
+    assert tools_response.status_code == 200
+    tools_data = tools_response.json()
+    assert 'result' in tools_data
+    assert 'tools' in tools_data['result']
+    tools = tools_data['result']['tools']
+    assert len(tools) > 0, "Must have at least one tool"
+
+    # Validate tool schema
+    for tool in tools:
+        assert 'name' in tool, "Tool must have name"
+        assert 'description' in tool, "Tool must have description"
+        assert 'inputSchema' in tool, "Tool must have inputSchema"
+
+    # PHASE 9: Test error handling - invalid method
+    invalid_response = client.post(
+        '/mcp/cto-tools/serve',
+        data=json.dumps({
+            'jsonrpc': '2.0',
+            'method': 'invalid/method',
+            'params': {},
+            'id': 3
+        }),
+        content_type='application/json',
+        HTTP_AUTHORIZATION=f'Bearer {access_token}'
+    )
+    assert invalid_response.status_code == 400
+    error_data = invalid_response.json()
+    assert 'error' in error_data
+    assert error_data['error']['code'] == -32601  # Method not found
+
+    # PHASE 10: Test authentication is enforced
+    unauth_response = client.post(
+        '/mcp/cto-tools/serve',
+        data=json.dumps({
+            'jsonrpc': '2.0',
+            'method': 'tools/list',
+            'params': {},
+            'id': 4
+        }),
+        content_type='application/json'
+        # No Authorization header
+    )
+    assert unauth_response.status_code == 401, \
+        "Must reject requests without Bearer token"
+
+
+@pytest.mark.django_db
 def test_oauth_flow_matches_claude_code_requirements(client, pkce_params):
     """Test OAuth flow meets all Claude Code HTTP transport requirements.
 
@@ -470,6 +642,9 @@ def test_oauth_flow_matches_claude_code_requirements(client, pkce_params):
     2. PKCE S256 support
     3. Dynamic client registration
     4. Authorization code flow
+    5. MCP server initialization with Bearer token
+    6. MCP notifications/initialized (critical for connection success)
+    7. MCP server operations (tools/list)
     """
     # Requirement 1: OAuth metadata with registration endpoint and PKCE support
     metadata = client.get('/.well-known/oauth-authorization-server').json()
@@ -508,3 +683,52 @@ def test_oauth_flow_matches_claude_code_requirements(client, pkce_params):
     ).json()
     assert 'access_token' in token, "Claude Code requires access_token"
     assert token['token_type'] == 'Bearer', "Claude Code requires Bearer token type"
+
+    # Requirement 5: Initialize MCP server with Bearer token
+    access_token = token['access_token']
+    init_response = client.post(
+        '/mcp/cto-tools/serve',
+        data=json.dumps({
+            'jsonrpc': '2.0',
+            'method': 'initialize',
+            'params': {
+                'protocolVersion': '2024-11-05',
+                'capabilities': {},
+                'clientInfo': {'name': 'claude-code', 'version': '1.0'}
+            },
+            'id': 1
+        }),
+        content_type='application/json',
+        HTTP_AUTHORIZATION=f'Bearer {access_token}'
+    )
+    assert init_response.status_code == 200, "Initialize must succeed with Bearer token"
+    assert 'result' in init_response.json(), "Initialize must return result"
+
+    # Requirement 6: Send notifications/initialized (this is where previous bugs occurred!)
+    notification_response = client.post(
+        '/mcp/cto-tools/serve',
+        data=json.dumps({
+            'jsonrpc': '2.0',
+            'method': 'notifications/initialized',
+            'params': {},
+        }),
+        content_type='application/json',
+        HTTP_AUTHORIZATION=f'Bearer {access_token}'
+    )
+    assert notification_response.status_code == 200, \
+        "Notifications must succeed or Claude Code connection fails"
+
+    # Requirement 7: Verify server operations work (tools/list)
+    tools_response = client.post(
+        '/mcp/cto-tools/serve',
+        data=json.dumps({
+            'jsonrpc': '2.0',
+            'method': 'tools/list',
+            'params': {},
+            'id': 2
+        }),
+        content_type='application/json',
+        HTTP_AUTHORIZATION=f'Bearer {access_token}'
+    )
+    assert tools_response.status_code == 200, "Tools list must succeed"
+    assert 'tools' in tools_response.json()['result'], "Must return available tools"

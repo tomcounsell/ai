@@ -313,10 +313,11 @@ def test_creative_juices_tools_list(client):
 def test_complete_cto_tools_session_with_oauth(client, valid_bearer_token):
     """Test complete MCP session flow with OAuth authentication.
 
-    This simulates what Claude Code does:
+    This simulates the EXACT flow that Claude Code follows:
     1. GET server info to discover capabilities
     2. Initialize with Bearer token
-    3. List available tools
+    3. Send notifications/initialized (critical step that was missing!)
+    4. List available tools
     """
     # Step 1: Discover server info
     info_response = client.get('/mcp/cto-tools/serve')
@@ -348,7 +349,25 @@ def test_complete_cto_tools_session_with_oauth(client, valid_bearer_token):
     assert 'result' in init_data
     assert 'capabilities' in init_data['result']
 
-    # Step 3: List tools
+    # Step 3: Send initialized notification (what Claude Code does after initialize)
+    notification_request = {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized",
+        "params": {},
+    }
+
+    notification_response = client.post(
+        '/mcp/cto-tools/serve',
+        data=json.dumps(notification_request),
+        content_type='application/json',
+        HTTP_AUTHORIZATION=f'Bearer {valid_bearer_token}'
+    )
+
+    # Notifications must succeed or the connection fails
+    assert notification_response.status_code == 200
+    assert notification_response.json()['jsonrpc'] == '2.0'
+
+    # Step 4: List tools (now the server is fully initialized)
     tools_request = {
         "jsonrpc": "2.0",
         "method": "tools/list",
