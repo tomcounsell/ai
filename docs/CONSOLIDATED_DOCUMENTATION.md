@@ -2,7 +2,7 @@
 
 **A Claude Code-Powered AI Assistant for Chat Applications**
 
-*Version: 2.1 | Last Updated: December 17, 2025*
+*Version: 2.2 | Last Updated: December 17, 2025*
 
 ---
 
@@ -19,7 +19,8 @@
 9. [Daydream System](#daydream-system)
 10. [Security & Compliance](#security--compliance)
 11. [Development Guidelines](#development-guidelines)
-12. [Quick Reference](#quick-reference)
+12. [Codebase Context & RAG](#codebase-context--rag)
+13. [Quick Reference](#quick-reference)
 
 ---
 
@@ -1019,6 +1020,80 @@ ai/
 
 ---
 
+# Codebase Context & RAG
+
+## Strategy Overview
+
+For organizing and retrieving information across multiple project workspaces, we recommend a **local embedding approach** over more complex RAG systems.
+
+## Evaluated Options
+
+### Apple CLaRa (Not Recommended Yet)
+
+[Apple's CLaRa](https://github.com/apple/ml-clara) offers state-of-the-art document compression (32x-64x) but:
+- Requires full Mistral-7B base model (~14GB FP16)
+- No MLX version yet (announced "coming soon")
+- Trained on QA datasets, not code
+- Total memory: ~17-20GB FP16
+
+**Wait for MLX version before adopting.**
+
+### Local Embedding + Vector DB (Recommended)
+
+```
+Codebase Files
+    |
+    v
+Local Embeddings (nomic-embed-text via Ollama, ~300MB)
+    |
+    v
+Vector DB (ChromaDB or SQLite-vec)
+    |
+    v
+Relevant chunks passed to Claude Code context
+```
+
+**Memory Budget: ~1-2GB total**
+
+| Component | RAM Usage |
+|-----------|-----------|
+| Embedding model | ~300MB |
+| Vector DB | ~100-500MB |
+| Overhead | ~200MB |
+
+## Per-Workspace Indexing
+
+Each workspace gets its own index:
+
+```json
+{
+  "workspaces": {
+    "project-name": {
+      "index_config": {
+        "enabled": true,
+        "include_patterns": ["**/*.py", "**/*.md"],
+        "exclude_patterns": [".venv/**", "__pycache__/**"]
+      }
+    }
+  }
+}
+```
+
+## File Types to Index
+
+**High Priority:** `*.py`, `*.md`, `CLAUDE.md`, `README.md`, `*.json`
+
+**Exclude:** `node_modules/`, `.venv/`, `__pycache__/`, `.git/`, binaries
+
+## Integration with Subagents
+
+```
+User Query → Main Agent → WorkspaceIndexer.query()
+    → Relevant chunks → Claude Code context
+```
+
+---
+
 # Quick Reference
 
 ## Useful Commands
@@ -1061,4 +1136,4 @@ ai/
 
 *This documentation consolidates the complete Valor AI System documentation for easy reference and printing.*
 
-*Document Version: 2.1 | Generated: December 17, 2025*
+*Document Version: 2.2 | Generated: December 17, 2025*

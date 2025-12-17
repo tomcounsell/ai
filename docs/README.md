@@ -30,6 +30,7 @@ Documentation for the Valor AI System - a Claude Code-powered conversational AI 
 | [System Overview](architecture/system-overview.md) | High-level architecture and design principles |
 | [Subagent System](architecture/subagent-mcp-system.md) | Subagent-based architecture for context isolation |
 | [MCP Integration](architecture/mcp-integration.md) | Model Context Protocol tool integration |
+| [Codebase Context & RAG](architecture/codebase-context-rag.md) | Per-workspace indexing and retrieval strategy |
 
 ### Interface
 
