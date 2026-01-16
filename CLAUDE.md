@@ -185,6 +185,25 @@ Common model functionality via mixins in `apps/common/behaviors/`:
 - **Link to official docs** - Don't duplicate what's readily available elsewhere
 - **Focus on what IS, not what WAS** - This codebase is rebuilt from specs; only the current state matters
 
+### Planning Workflow
+Use a hybrid Notion + codebase approach for planning:
+
+| Location | What Goes Here |
+|----------|---------------|
+| **Notion** | High-level PRDs, feature specs, status tracking, stakeholder context |
+| **`docs/plans/`** | Detailed implementation plans with code paths, architecture decisions |
+
+**Workflow:**
+1. Create/find Notion task with appropriate tag (quickbooks, mcp, podcast, website)
+2. Write high-level spec in Notion page body
+3. When ready to implement, create `docs/plans/[feature-name].md` with detailed plan
+4. Link them: set Notion Description to `Plan: docs/plans/[feature-name].md`
+5. Update Notion status as work progresses
+
+**Why hybrid:**
+- Notion: Multiple AIs can access via MCP, non-developers can comment, real-time collaboration
+- Codebase: Version controlled, stays in sync with code, reviewable in PRs
+
 ### AI Integration
 - **PydanticAI models MUST use `Agent` prefix** (e.g., `AgentChatSession` not `ChatSession`)
 - Use adapter pattern for Django ↔ PydanticAI conversion
