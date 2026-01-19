@@ -1,0 +1,131 @@
+{
+  "servers": [
+    {
+      "mcp_id": "github",
+      "name": "GitHub",
+      "category": "development",
+      "capabilities": ["code", "issues", "prs", "commits", "reviews"],
+      "auth_status": "ready",
+      "auth_type": "token",
+      "env_var": "GITHUB_TOKEN",
+      "tools": ["list_prs", "get_pr", "create_pr", "merge_pr", "list_issues", "create_issue", "get_commits", "get_checks", "search_code", "get_file"],
+      "description": "Code repositories, PRs, issues, and development workflows via GitHub",
+      "setup_instructions": "1. Go to GitHub Settings > Developer settings > Personal access tokens\n2. Create a new token with repo and workflow scopes\n3. Set GITHUB_TOKEN in your .env file"
+    },
+    {
+      "mcp_id": "sentry",
+      "name": "Sentry",
+      "category": "development",
+      "capabilities": ["errors", "performance", "monitoring", "alerts"],
+      "auth_status": "ready",
+      "auth_type": "token",
+      "env_var": "SENTRY_API_KEY",
+      "tools": ["list_issues", "get_issue", "list_events", "get_event", "list_projects", "get_performance_data", "update_issue_status", "resolve_issue"],
+      "description": "Error monitoring, performance analysis, and application observability via Sentry",
+      "setup_instructions": "1. Go to Sentry Settings > API Keys\n2. Create a new API key with project:read and event:read scopes\n3. Set SENTRY_API_KEY and SENTRY_ORG_SLUG in your .env file"
+    },
+    {
+      "mcp_id": "linear",
+      "name": "Linear",
+      "category": "productivity",
+      "capabilities": ["issues", "projects", "sprints", "tracking"],
+      "auth_status": "needs_setup",
+      "auth_type": "api_key",
+      "env_var": "LINEAR_API_KEY",
+      "tools": ["list_issues", "get_issue", "create_issue", "update_issue", "close_issue", "list_cycles", "get_team_velocity", "search_issues", "get_roadmap"],
+      "description": "Project management, issue tracking, sprint planning via Linear",
+      "setup_instructions": "1. Go to Linear Settings > API\n2. Create a new personal API key\n3. Set LINEAR_API_KEY in your .env file"
+    },
+    {
+      "mcp_id": "notion",
+      "name": "Notion",
+      "category": "productivity",
+      "capabilities": ["documentation", "knowledge", "databases", "pages"],
+      "auth_status": "needs_setup",
+      "auth_type": "token",
+      "env_var": "NOTION_API_KEY",
+      "tools": ["search", "get_page", "create_page", "update_page", "append_blocks", "list_databases", "query_database", "create_database_entry"],
+      "description": "Documentation, knowledge bases, and structured information via Notion",
+      "setup_instructions": "1. Go to Notion Settings > Integrations\n2. Create a new internal integration\n3. Set NOTION_API_KEY in your .env file\n4. Share relevant pages with the integration"
+    },
+    {
+      "mcp_id": "render",
+      "name": "Render",
+      "category": "infrastructure",
+      "capabilities": ["deployment", "hosting", "logs", "scaling"],
+      "auth_status": "needs_setup",
+      "auth_type": "api_key",
+      "env_var": "RENDER_API_KEY",
+      "tools": ["list_services", "get_service", "get_service_logs", "deploy_service", "restart_service", "scale_service", "list_deploys", "get_env_vars", "update_env_vars"],
+      "description": "Cloud infrastructure, deployments, and service management via Render",
+      "setup_instructions": "1. Go to Render Account Settings > API Keys\n2. Create a new API key\n3. Set RENDER_API_KEY in your .env file"
+    },
+    {
+      "mcp_id": "stripe",
+      "name": "Stripe",
+      "category": "business",
+      "capabilities": ["payments", "subscriptions", "customers", "invoices"],
+      "auth_status": "needs_setup",
+      "auth_type": "api_key",
+      "env_var": "STRIPE_API_KEY",
+      "tools": ["list_customers", "get_customer", "list_subscriptions", "get_subscription", "list_invoices", "create_refund", "get_balance", "get_mrr", "cancel_subscription"],
+      "description": "Payment processing, subscriptions, billing, and revenue analytics via Stripe",
+      "setup_instructions": "1. Go to Stripe Dashboard > Developers > API Keys\n2. Copy your secret key (use test key for development)\n3. Set STRIPE_API_KEY in your .env file"
+    },
+    {
+      "mcp_id": "filesystem",
+      "name": "Filesystem",
+      "category": "core",
+      "capabilities": ["files", "directories", "read", "write"],
+      "auth_status": "ready",
+      "auth_type": "none",
+      "env_var": null,
+      "tools": ["read_file", "write_file", "list_directory", "create_directory", "delete_file", "move_file", "search_files"],
+      "description": "Local filesystem operations for reading and writing files",
+      "setup_instructions": "No setup required - filesystem access is built-in"
+    },
+    {
+      "mcp_id": "search",
+      "name": "Web Search",
+      "category": "core",
+      "capabilities": ["web", "search", "research"],
+      "auth_status": "ready",
+      "auth_type": "api_key",
+      "env_var": "PERPLEXITY_API_KEY",
+      "tools": ["search", "search_with_context"],
+      "description": "Web search using Perplexity API with AI-powered summarization",
+      "setup_instructions": "1. Sign up at perplexity.ai\n2. Go to API settings and create an API key\n3. Set PERPLEXITY_API_KEY in your .env file"
+    },
+    {
+      "mcp_id": "image_analysis",
+      "name": "Image Analysis",
+      "category": "core",
+      "capabilities": ["vision", "images", "ocr", "analysis"],
+      "auth_status": "ready",
+      "auth_type": "api_key",
+      "env_var": "OPENROUTER_API_KEY",
+      "tools": ["analyze_image", "extract_text", "generate_alt_text"],
+      "description": "Multi-modal vision analysis using AI models for image understanding",
+      "setup_instructions": "1. Sign up at openrouter.ai\n2. Create an API key\n3. Set OPENROUTER_API_KEY in your .env file"
+    },
+    {
+      "mcp_id": "code_execution",
+      "name": "Code Execution",
+      "category": "core",
+      "capabilities": ["execute", "python", "sandbox", "shell"],
+      "auth_status": "ready",
+      "auth_type": "none",
+      "env_var": null,
+      "tools": ["execute_code", "execute_python", "execute_javascript", "execute_bash"],
+      "description": "Sandboxed code execution environment with resource limits",
+      "setup_instructions": "No setup required - runs locally with system Python/Node"
+    }
+  ],
+  "categories": {
+    "development": ["github", "sentry"],
+    "productivity": ["notion", "linear"],
+    "infrastructure": ["render"],
+    "business": ["stripe"],
+    "core": ["filesystem", "search", "image_analysis", "code_execution"]
+  }
+}
