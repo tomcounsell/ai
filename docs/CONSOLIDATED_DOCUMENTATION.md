@@ -17,7 +17,7 @@
 7. [Testing Strategy](#testing-strategy)
 8. [Operations & Monitoring](#operations--monitoring)
 9. [Daydream System](#daydream-system)
-10. [Security & Compliance](#security--compliance)
+10. [Security Model](#security-model)
 11. [Development Guidelines](#development-guidelines)
 12. [Codebase Context & RAG](#codebase-context--rag)
 13. [Quick Reference](#quick-reference)
@@ -641,223 +641,92 @@ scripts/start.sh
 
 ## Overview
 
-The Daydream System is an autonomous AI-powered analysis and reflection framework that performs deep codebase exploration and generates architectural insights. It operates on a 6-phase execution lifecycle, running during non-office hours.
+The Daydream System is a long-running autonomous maintenance process. It runs as a single process that can pick up where it left off if interrupted or if it fails.
 
-## 6-Phase Execution Lifecycle
+## Process Steps
 
-### Phase 1: System Readiness Check
-- Pending tasks < 5
-- No critical system alerts
-- Available memory > 400MB
-- Office hours check (skip 9 AM - 6 PM)
+### Step 1: Clean Up Legacy Code
+- Identify and remove deprecated patterns
+- Delete commented-out code blocks
+- Remove unused imports and dead code
+- Eliminate temporary bridges or half-migrations
 
-### Phase 2: Pre-Analysis Cleanup
-- Kill Claude Code processes > 24 hours old
-- Terminate orphaned Aider sessions
-- Remove temporary analysis files
-- Archive old insight files (keep last 10)
+### Step 2: Review Previous Day's Logs
+- Analyze application logs from the last 24 hours
+- Identify recurring issues or patterns
+- Propose improvements based on observed behavior
+- Flag anomalies for supervisor review
 
-### Phase 3: Comprehensive Context Gathering
-- Workspace analysis (git status, tech stack)
-- System metrics (success rates, trends)
-- Development trends (activity patterns)
-- Recent activity (last 7 days)
+### Step 3: Check Error Logs (Sentry)
+- Query Sentry for new or recurring errors
+- Categorize by severity and frequency
+- Link errors to relevant code sections
+- Suggest fixes for common issues
 
-### Phase 4: AI Analysis Execution
-Uses local AI model (Ollama) for:
-- Architecture Patterns & Design
-- Code Quality & Technical Health
-- Development Velocity & Productivity
-- Technology Stack & Dependencies
-- Strategic Opportunities
-- Future Direction & Vision
+### Step 4: Clean Up Task Management
+- Review and update the to-do list
+- Close completed or stale items
+- Update old plans that are no longer relevant
+- Prioritize remaining work
 
-### Phase 5: Output Processing and Archival
-- Log insights to console
-- Write to `logs/daydream_insights.md`
-- Archive historical insights
-- Web interface at `/daydreams`
+### Step 5: Update Documentation
+- Ensure documentation reflects recent code changes
+- Update API docs if endpoints changed
+- Refresh configuration examples
+- Mark deprecated features
 
-### Phase 6: Post-Analysis Cleanup
-- Kill active Aider process
-- Clean analysis artifacts
-- Archive insights
-- Generate session summary
+### Step 6: Produce Daily Report
+- Summarize all maintenance actions taken
+- List errors found and fixes proposed
+- Report documentation updates
+- Highlight items requiring supervisor attention
 
-## Execution Schedule
+## Resumability
 
-```python
-# Cron: minute=0, hour='18,21,0,3,6'
-# 6:00 PM - Evening analysis
-# 9:00 PM - Night analysis
-# 12:00 AM - Midnight analysis
-# 3:00 AM - Early morning analysis
-# 6:00 AM - Dawn analysis
-```
-
-## Resource Limits
-
-- Session timeout: 2 hours maximum
-- Max workspaces per cycle: 3
-- Database timeout: 5 seconds
-- Memory target: <400MB during analysis
+Each step persists its progress. If the process fails mid-execution:
+- The process restarts from the last incomplete step
+- Completed steps are not repeated
+- Partial work within a step is preserved where possible
 
 ---
 
-# Security & Compliance
+# Security Model
 
-## Security Architecture
+## Machine Ownership
 
-### Defense in Depth
+Valor owns the machine entirely. There are no sandboxes, containers, or restrictions on what Valor can do. Valor has full access to:
+- The entire file system
+- All network resources
+- System processes and calls
+- Hardware resources
 
-```
-Layer 1: Network Security (Firewall, DDoS, TLS)
-    |
-Layer 2: Application Security (Input Validation, Sandboxing)
-    |
-Layer 3: Authentication/Authorization (User Auth, Workspace Isolation)
-    |
-Layer 4: Data Security (Encryption at Rest/Transit, Key Management)
-    |
-Layer 5: Monitoring/Response (Security Monitoring, Incident Response)
-```
+Valor can destroy and rebuild the machine if needed.
 
-### Security Zones
+## What We Do Protect
 
-| Zone | Security Level | Access Control |
-|------|----------------|----------------|
-| **Public** | Standard | Rate limiting, user whitelist |
-| **Application** | High | Authenticated users only |
-| **Execution** | Maximum | Isolated containers |
-| **Data** | Maximum | Encrypted, access logged |
-| **Management** | Critical | MFA, audit trail |
+### API Keys and Secrets
+- Store in `.env` file (git-ignored)
+- Never commit secrets to the repository
+- Rotate keys periodically
 
-## STRIDE Analysis
+### External Communications
+- TLS for API calls to external services
+- Validate responses from external APIs
+- Handle authentication tokens securely
 
-### Spoofing Identity
-- User whitelist validation
-- Session token rotation
-- API key encryption and rotation
-- Rate limiting per user
+### Telegram Access
+- Session file stored locally
+- Only the supervisor communicates with Valor via Telegram
+- Group behavior configurable (mention-only by default)
 
-### Tampering with Data
-- TLS for all communications
-- Database integrity checks
-- Input sanitization
-- Parameterized queries
+## What We Don't Do
 
-### Repudiation
-- Comprehensive audit logging
-- Digital signatures on critical operations
-- Immutable log storage
-
-### Information Disclosure
-- Encryption at rest and in transit
-- Secrets management system
-- Access control lists
-
-### Denial of Service
-- Rate limiting (10 req/min per user)
-- Resource quotas
-- Circuit breakers
-
-### Elevation of Privilege
+This is a single-user system. We don't need:
+- Multi-user authentication
+- Role-based access control
+- Sandboxed execution environments
+- Rate limiting between components
 - Container isolation
-- Principle of least privilege
-- Security boundaries enforcement
-
-## Data Protection
-
-### Encryption Standards
-
-**At Rest:**
-- Algorithm: AES-256-GCM
-- Scope: Database, backups, logs, config
-
-**In Transit:**
-- Protocol: TLS 1.3 minimum
-- Scope: All API communications
-
-### Data Classification
-
-| Level | Examples |
-|-------|----------|
-| **Public** | System status, documentation |
-| **Internal** | Configuration, metrics |
-| **Confidential** | Conversations, code, API responses |
-| **Restricted** | API keys, encryption keys, PII |
-
-## Code Execution Security
-
-### Sandbox Environment
-- Container: Docker with security profiles
-- CPU: 1 core limit
-- Memory: 512MB limit
-- Disk: 100MB limit
-- Network: Restricted egress
-- Time: 30 second timeout
-
-### Restrictions
-- No file system access outside sandbox
-- No network access to internal services
-- No system calls (seccomp)
-- No privilege escalation
-- Read-only root filesystem
-
-## Compliance
-
-### GDPR Requirements
-- User consent for data processing
-- Right to access, delete, port data
-- Data breach notification (72 hours)
-- Privacy policy and DPAs
-
-### SOC 2 Trust Service Criteria
-- Security: Access controls, monitoring
-- Availability: SLA compliance, disaster recovery
-- Confidentiality: Encryption, access restrictions
-- Processing Integrity: Validation, logging
-- Privacy: Collection limits, retention policies
-
-### OWASP Top 10 Addressed
-- A01: Broken Access Control - RBAC, workspace isolation
-- A02: Cryptographic Failures - TLS 1.3, AES-256
-- A03: Injection - Input sanitization
-- A04: Insecure Design - Threat modeling
-- A05: Security Misconfiguration - Hardening
-- A06: Vulnerable Components - Dependency scanning
-- A07: Authentication Failures - MFA, sessions
-- A08: Data Integrity Failures - Integrity checks
-- A09: Logging Failures - Comprehensive audits
-- A10: SSRF - Network restrictions
-
-## Emergency Response
-
-```
-IMMEDIATE (0-15 min):
-1. Isolate affected systems
-2. Preserve evidence
-3. Notify security team
-4. Begin investigation
-
-SHORT TERM (15-60 min):
-5. Assess scope and impact
-6. Implement containment
-7. Notify stakeholders
-8. Prepare communications
-
-RECOVERY (1-24 hours):
-9. Eradicate threat
-10. Restore from clean backups
-11. Verify system integrity
-12. Resume operations
-
-POST-INCIDENT (24-72 hours):
-13. Complete investigation
-14. Document lessons learned
-15. Update security controls
-16. Regulatory notifications
-```
 
 ---
 
@@ -953,11 +822,17 @@ MONITORING_DASHBOARD_PORT=8080
 
 ```
 ai/
+|-- .claude/                  # Claude Code configuration
+|   |-- agents/               # Subagent definitions for Claude Code
+|   |   |-- support/          # Support specialist agents
+|   |   +-- *.md              # Domain agents (github, stripe, sentry, etc.)
+|   |-- commands/             # Skill definitions (/prime, /audit-next-tool, etc.)
+|   |-- settings.local.json   # Local Claude Code settings
+|   +-- README.md             # Last updated: [timestamp of latest Claude Code/SDK changes]
 |-- agents/
-|   |-- valor/
-|   |   |-- agent.py          # Main ValorAgent
-|   |   +-- persona.md        # Persona definition
-|   +-- subagents/            # Specialized subagents
+|   +-- valor/
+|       |-- agent.py          # Main ValorAgent
+|       +-- persona.md        # Persona definition
 |-- config/
 |   |-- workspace_config.json # Multi-workspace config
 |   +-- telegram_groups.json  # Group behavior config
@@ -966,12 +841,14 @@ ai/
 |-- integrations/
 |   +-- telegram/             # Telegram handlers
 |-- logs/                     # Log files
-|-- mcp_servers/              # MCP tool servers
 |-- scripts/                  # Operational scripts
 |-- tests/                    # Test suites
 |-- tools/                    # Tool implementations
+|   +-- mcp/                  # Custom MCP servers
 +-- utilities/                # Shared utilities
 ```
+
+The `.claude/` directory contains Claude Code-specific configuration. Its README should include a timestamp of when it was last updated to reflect the latest Claude Code and Claude SDK improvements.
 
 ---
 
