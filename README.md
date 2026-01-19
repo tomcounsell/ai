@@ -1,65 +1,143 @@
-# AI System - Clean Rebuild
+# Valor AI System
 
-## Status: 🏗️ Rebuilding
+A Claude Code-powered AI coworker that runs on its own machine.
 
-Complete system rebuild in progress. All legacy code removed.
+## What Is This?
+
+Valor is an AI coworker - not an assistant, not a tool, but a colleague with its own Mac, its own work, and its own agency. The supervisor assigns work and provides direction. Valor executes autonomously, reaching out via Telegram only when necessary.
+
+## Current Status
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Telegram Integration | **Working** | User account via Telethon, responds to @valor mentions |
+| Clawdbot Agent | **Working** | Handles AI processing with SOUL.md persona |
+| Self-Management | **Working** | Can restart himself, survives reboots |
+| Service (launchd) | **Installed** | Auto-starts on boot |
+| Skills (MCP) | Planned | Stripe, Sentry, GitHub, Render, Notion, Linear |
+| Daydream (Cron) | Planned | Daily autonomous maintenance |
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Telegram                                 │
+│                    (User sends message)                          │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Python Bridge                                 │
+│              (bridge/telegram_bridge.py)                         │
+│                                                                  │
+│  • Telethon client (user account, not bot)                       │
+│  • Listens for @valor mentions and DMs                           │
+│  • Maintains session continuity per chat                         │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│              clawdbot agent --local                              │
+│                                                                  │
+│  • Loads ~/clawd/SOUL.md (Valor persona)                         │
+│  • Calls Claude API for reasoning                                │
+│  • Returns response to bridge                                    │
+└─────────────────────────┬───────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                       Claude API                                 │
+│                  (anthropic/claude-sonnet-4)                     │
+└─────────────────────────────────────────────────────────────────┘
+```
 
 ## Quick Start
 
-### One-Command Telegram Bot
-
 ```bash
-# Run everything: auth (if needed) → start bot → tail logs
-./scripts/telegram_run.sh
+# 1. Install Clawdbot
+npm install -g clawdbot@latest
+
+# 2. Set up workspace
+mkdir -p ~/clawd
+cp config/SOUL.md ~/clawd/SOUL.md
+
+# 3. Install Python dependencies
+pip install telethon python-dotenv
+
+# 4. Install and start the service
+./scripts/valor-service.sh install
 ```
 
-### Shell Alias Setup
+See [docs/setup.md](docs/setup.md) for detailed setup instructions.
 
-Add this to your shell config (`~/.zshrc` or `~/.bash_profile`):
+## Service Management
 
-```bash
-alias valor="cd /Users/valorengels/src/ai && ./scripts/telegram_run.sh"
+Valor can manage his own process:
+
+| Command | Description |
+|---------|-------------|
+| `./scripts/valor-service.sh status` | Check if running |
+| `./scripts/valor-service.sh restart` | Restart after code changes |
+| `./scripts/valor-service.sh logs` | View logs |
+| `./scripts/valor-service.sh health` | Health check |
+
+The service auto-restarts on crash and on system boot.
+
+## Repository Structure
+
 ```
-
-Then just type `valor` from anywhere to start your AI system!
-
-### Other Commands
-
-```bash
-# Start production server
-./scripts/start.sh
-
-# Start demo server (no API keys needed)
-./scripts/start.sh --demo
-
-# View logs
-./scripts/logs.sh
-
-# Stop all services
-./scripts/stop.sh
+ai/
+├── bridge/                 # Telegram-Clawdbot bridge (Python)
+│   └── telegram_bridge.py  # Main bridge script
+├── config/
+│   ├── SOUL.md             # Valor persona definition
+│   └── clawdbot/           # Clawdbot config templates
+├── scripts/
+│   ├── valor-service.sh    # Service management
+│   └── start_bridge.sh     # Quick start script
+├── docs/
+│   ├── setup.md            # Setup guide
+│   ├── CLAWDBOT_MIGRATION_PLAN.md
+│   └── SKILLS_MIGRATION.md
+├── logs/                   # Runtime logs
+├── data/                   # Session files, state
+├── CLAUDE.md               # Development guide
+└── README.md               # This file
 ```
 
 ## Documentation
 
-See [`docs/`](docs/) for complete system documentation:
+| Document | Purpose |
+|----------|---------|
+| [docs/setup.md](docs/setup.md) | Local setup guide |
+| [docs/CLAWDBOT_MIGRATION_PLAN.md](docs/CLAWDBOT_MIGRATION_PLAN.md) | Migration status and plan |
+| [docs/SKILLS_MIGRATION.md](docs/SKILLS_MIGRATION.md) | Skills implementation guide |
+| [CLAUDE.md](CLAUDE.md) | Development principles |
 
-### Key Documents
-- **[Architecture Overview](docs/architecture/system-overview.md)** - System design and components
-- **[PRD](docs/PRD-AI-System-Rebuild.md)** - Product requirements and roadmap
-- **[CLAUDE.md](CLAUDE.md)** - Development guide and commands
-- **[System Status](docs/SYSTEM_STATUS.md)** - Current implementation status
-- **[Subagents](docs/subagents/)** - Domain-specific agent PRDs
+## Planned: Skills
 
-### Recent Architecture Decisions
-- **[MCP Library & Session Management](docs/MCP-Library-Requirements.md)** - Intelligent MCP server selection
-- **[Gemini CLI Integration](docs/architecture/gemini-cli-integration-analysis.md)** - Multi-model agent router
-- **[Skills vs Subagents](docs/architecture/skills-vs-subagents-analysis.md)** - Claude Code subagent approach
-- **[Agent-SOP Evaluation](docs/architecture/agent-sop-evaluation.md)** - Structured workflow framework
+Business integration skills (not yet implemented):
+
+| Skill | Purpose | Priority |
+|-------|---------|----------|
+| **Sentry** | Error monitoring, performance analysis | High |
+| **GitHub** | Repository operations, PRs, issues | High |
+| **Linear** | Project management, issue tracking | Medium |
+| **Notion** | Knowledge base, documentation | Medium |
+| **Stripe** | Payment processing, subscriptions | Low |
+| **Render** | Deployment, infrastructure | Low |
+
+## Planned: Daydream
+
+Daily autonomous maintenance process (not yet implemented):
+
+1. Clean up legacy code
+2. Review previous day's logs
+3. Check Sentry for errors
+4. Clean up task management (Linear)
+5. Update documentation
+6. Produce daily report
 
 ## Contact
 
 Valor Engels
-
----
-
-*Clean slate. Zero legacy. 9.8/10 standard.*

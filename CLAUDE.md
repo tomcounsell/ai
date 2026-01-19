@@ -9,49 +9,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Running the System
 
 ```bash
-# Start the production server with startup checks
-./scripts/start.sh
+# Start Clawdbot daemon
+clawdbot start
 
-# Start the demo server (no API keys required)
-./scripts/start.sh --demo
+# Check status
+clawdbot status
 
-# Start the Telegram bot
-./scripts/start.sh --telegram
+# View logs
+clawdbot logs
 
-# Validate configuration without starting
-./scripts/start.sh --dry-run
+# Stop daemon
+clawdbot stop
 
-# Start with verbose logging
-./scripts/start.sh --verbose
+# View specific log streams
+clawdbot logs --telegram
+clawdbot logs --errors
+clawdbot logs -n 100
 
-# Shutdown cleanly
-./scripts/stop.sh
+# Run with verbose output
+clawdbot start --verbose
 
-# Alternative: Run Python scripts directly
-python scripts/startup.py    # Production startup
-python telegram_bot.py       # Telegram bot
-python scripts/shutdown.py   # Clean shutdown
-```
-
-### Monitoring Logs
-
-```bash
-# Tail all logs (default - follows updates)
-./scripts/logs.sh
-
-# Tail specific logs
-./scripts/logs.sh --main       # Main application logs only
-./scripts/logs.sh --startup    # Startup logs only
-./scripts/logs.sh --telegram   # Telegram-related logs only
-./scripts/logs.sh --errors     # Error messages only
-
-# Custom options
-./scripts/logs.sh -n 100       # Show last 100 lines
-./scripts/logs.sh --no-follow   # Don't follow updates
-
-# Typical workflow
-./scripts/start.sh              # Start the system
-./scripts/logs.sh               # In another terminal, tail the logs
+# Dry run to validate configuration
+clawdbot start --dry-run
 ```
 
 ### Testing
@@ -67,9 +46,6 @@ pytest tests/performance/
 
 # Run with coverage
 pytest tests/ --cov=. --cov-report=html
-
-# Run the comprehensive test runner with AI judge
-python tests/test_runner.py
 
 # Run a specific test file
 pytest tests/test_agents.py -v
@@ -91,60 +67,61 @@ mypy . --strict
 black . && ruff check . && mypy . --strict
 ```
 
-### Database Management
-
-```bash
-# Initialize database
-python scripts/init_db.py
-
-# Run database maintenance
-python scripts/db_maintenance.py
-
-# Backup database (automatic on startup if configured)
-python scripts/startup.py --backup
-```
-
 ## System Architecture
 
 ### Core Components
 
 The system follows a **Living Codebase** philosophy with these key architectural components:
 
-1. **Unified Agent System** (`agents/`)
-   - Valor persona: Advanced AI assistant with comprehensive capabilities
-   - Context management: Maintains conversation state across 100k+ token windows
-   - Tool orchestration: Seamless integration of multiple tools and APIs
-   - Built on PydanticAI for robust type safety
+```
++-------------------------------------------------------------------+
+|                      User Interface Layer                          |
+|-------------------------------------------------------------------|
+|                       Telegram Client                              |
+|                    (via Clawdbot Gateway)                          |
++-------------------------+-----------------------+------------------+
+                          |                       |
+                          v                       v
++-------------------------+     +-----------------------------------+
+|   Clawdbot Gateway      |     |        Background Workers         |
+|  (Daemon + CLI)         |     |     (Daydreams, Maintenance)      |
++-------------------------+     +-----------------------------------+
+                          |
+                          v
++-------------------------------------------------------------------+
+|                      Core Agent Layer                              |
+|                      (Valor Persona)                               |
+|                   Orchestrated by Claude Code                      |
++-------------------------+-----------------------+------------------+
+                          |                       |
+                          v                       v
++-------------------------+     +-----------------------------------+
+|    Skills & Workflows   |     |          MCP Servers              |
+|   (via Clawdbot)        |     |   (GitHub, Sentry, Notion, etc)   |
++-------------------------+     +-----------------------------------+
+                          |                       |
+                          +----------+------------+
+                                     v
++-------------------------------------------------------------------+
+|                    Data Persistence Layer                          |
+|                        (SQLite)                                    |
++-------------------------------------------------------------------+
+```
 
-2. **MCP Server Integration** (`mcp_servers/`)
-   - Stateless tool architecture following Model Context Protocol
-   - Development tools: Code execution, linting, testing
-   - PM tools: GitHub, Linear, documentation management
-   - Social tools: Search, calendar, content creation
-   - Telegram tools: Message management, reactions, history
+### Design Philosophy
 
-3. **Message Processing Pipeline** (`integrations/telegram/`)
-   - 5-step processing: Security → Type routing → Context → Response → Delivery
-   - Graceful error handling and recovery
+This is a **living codebase**. When the supervisor says "you" or "your code," they mean this repository - the code that runs Valor. Valor is talking about himself, his own implementation, his own capabilities.
 
-4. **Tool Ecosystem** (`tools/`)
-   - Test judge: AI-powered test quality assessment
-   - Search, image generation, knowledge management tools
-   - All tools follow intelligent context-aware patterns (no keyword matching)
-
-5. **Monitoring & Operations** (`utilities/monitoring/`)
-   - Resource monitoring with auto-restart capabilities
-   - Health scoring system (0-100 scale)
-   - Alert management and metrics dashboard
-   - Daydream system for autonomous analysis
+Valor can work on other projects and repositories, but those are separate from "self." Questions about "your features" or "how do you work" refer to this codebase specifically.
 
 ### Key Design Patterns
 
-- **No Mocks Testing**: Always use real integrations and APIs in tests
-- **Context Injection**: All tools receive full conversation context
+- **Pure Agency**: The system handles complexity internally without exposing intermediate steps to the user
+- **Valor as Coworker**: Not solving dev pain points, replacing the development process entirely
+- **No Custom Subagent System**: Valor provides tools/workflows/skills, Claude Code orchestrates
+- **No Restrictions**: Valor owns the machine entirely, no sandboxing
 - **Stateless Tools**: Tools don't maintain state between calls
-- **Error Categorization**: Structured error handling with recovery strategies
-- **Component Isolation**: Each component is independently testable
+- **Context Injection**: All tools receive full conversation context
 
 ## Development Principles
 
@@ -180,6 +157,61 @@ The system follows a **Living Codebase** philosophy with these key architectural
 - Use `git add . && git commit -m "Description" && git push` pattern
 - This ensures all work is properly saved and available for future sessions
 
+**5. CONTEXT COLLECTION AND MANAGEMENT**
+- **Context is the lifeblood of agentic systems**
+- Without proper context, even the most capable model makes poor decisions
+- Maintain task context, conversation context, workspace context, and tool context
+- Explicitly pass context when spawning sub-agents (don't assume inheritance)
+- Summarize and compress context before it exceeds limits (don't truncate blindly)
+- Track the "why" alongside the "what" for every significant action
+
+**6. TOOL AND MCP SELECTION**
+- **Loading all available tools pollutes context and degrades performance**
+- Tools must be selectively exposed based on task relevance via Clawdbot's skill system
+- Analyze the incoming task before loading tools
+- Start with minimal tools, expand only if the agent requests more
+- Use Clawdbot's skill registry for categorization and dynamic filtering
+
+## Tools, Workflows, and Skills
+
+### Philosophy
+
+Valor does not manage its own sub-agent system. Instead, Valor provides **well-documented tools, workflows, and skills** that Claude Code orchestrates via Clawdbot.
+
+Claude Code decides when and how to spawn sub-agents. Valor's job is to make the available capabilities clear and easy to use.
+
+### What Valor Provides
+
+**Tools (via MCP Servers)**
+Individual operations that can be composed into larger workflows:
+- **Stripe**: Payment processing, subscriptions, billing
+- **Sentry**: Error monitoring, performance analysis
+- **GitHub**: Repository operations, PRs, issues
+- **Render**: Deployment, infrastructure management
+- **Notion**: Knowledge base, documentation
+- **Linear**: Project management, issue tracking
+
+**Workflows**
+Multi-step processes that combine tools for common tasks:
+- Code review workflow: fetch PR -> analyze changes -> check tests -> post review
+- Incident response: check Sentry -> identify cause -> create fix -> deploy
+- Research workflow: search web -> summarize -> store in Notion
+
+**Skills (via Clawdbot)**
+Higher-level capabilities with clear invocation patterns:
+- `/commit` - stage, commit, and push changes
+- `/review-pr` - comprehensive PR review
+- `/search` - web search with context
+- `/prime` - unified conversational development environment
+
+### How Claude Code Uses These
+
+When running Valor through Clawdbot:
+1. **Tools are registered** as MCP servers available to Claude Code
+2. **Workflows are documented** so Claude Code knows common patterns
+3. **Skills provide shortcuts** for frequent operations
+4. **Claude Code decides** when to spawn sub-agents for parallel work
+
 ## Testing Philosophy
 
 ### Real Integration Testing
@@ -190,17 +222,49 @@ The system follows a **Living Codebase** philosophy with these key architectural
 - When you write a test, run the test to view results
 - **Don't be tempted to simplify tests to get them working. Don't take shortcuts or cheat**
 
+### Intelligence Validation vs Keyword Matching
+
+```python
+# DON'T: Keyword-based validation
+assert "success" in response.lower()
+
+# DO: Intelligence-based validation using AI judges
+judgment = judge_test_result(
+    test_output=response,
+    expected_criteria=[
+        "provides specific actionable suggestions",
+        "considers user experience principles"
+    ]
+)
+assert judgment.pass_fail and judgment.confidence > 0.8
+```
+
 ### Test Categories
 - **Unit Tests**: Component isolation and function verification
 - **Integration Tests**: Real API and service integration
 - **Performance Tests**: Load testing and resource optimization
 - **E2E Tests**: Complete workflow validation
+- **Intelligence Tests**: AI judges for quality assessment
+
+### Quality Gates
+
+| Test Type | Pass Rate Required |
+|-----------|-------------------|
+| Unit Tests | 100% |
+| Integration Tests | 95% |
+| E2E Tests | 90% |
+| Performance Tests | Meet all baselines |
+| Intelligence Tests | >0.8 confidence |
 
 ## Environment Configuration
 
-### Required Environment Variables
+### Clawdbot Configuration
 
 ```bash
+# Clawdbot daemon settings
+CLAWDBOT_LOG_LEVEL=info
+CLAWDBOT_DATA_DIR=~/.clawdbot
+
 # Telegram Configuration (optional)
 TELEGRAM_API_ID=***
 TELEGRAM_API_HASH=***
@@ -215,57 +279,80 @@ ANTHROPIC_API_KEY=***
 PERPLEXITY_API_KEY=***
 
 # Database
-DATABASE_PATH=data/ai_rebuild.db
+DATABASE_PATH=data/valor.db
 DATABASE_BACKUP_ON_STARTUP=true
 DATABASE_RUN_MIGRATIONS=true
 
 # Monitoring
 MONITORING_ENABLED=true
-MONITORING_DASHBOARD_PORT=8080
-MONITORING_ALERT_EMAIL=admin@example.com
 ```
 
 ### Configuration Files
-- `config/workspace_config.json`: Multi-workspace configuration
+- `.claude/settings.local.json`: Claude Code local settings
+- `.claude/commands/`: Skill definitions
+- `config/telegram_groups.json`: Group behavior configuration
 - `.env`: Environment variables and API keys
-- `pyproject.toml`: Python dependencies and project metadata
+
+## Security Model
+
+### Machine Ownership
+
+Valor owns the machine entirely. There are no sandboxes, containers, or restrictions on what Valor can do. Valor has full access to:
+- The entire file system
+- All network resources
+- System processes and calls
+- Hardware resources
+
+Valor can destroy and rebuild the machine if needed.
+
+### What We Do Protect
+
+**API Keys and Secrets**
+- Store in `.env` file (git-ignored)
+- Never commit secrets to the repository
+- Rotate keys periodically
+
+**External Communications**
+- TLS for API calls to external services
+- Validate responses from external APIs
+- Handle authentication tokens securely
+
+### What We Don't Do
+
+This is a single-user system. We don't need:
+- Multi-user authentication
+- Role-based access control
+- Sandboxed execution environments
+- Rate limiting between components
+- Container isolation
 
 ## Special Considerations
 
 ### Telegram Integration
+- Uses a real Telegram user account via Clawdbot, not a bot
 - If Telegram auth doesn't work, just give up. Human action is needed
-- Session files are stored in `data/` directory
+- Session files are managed by Clawdbot
 - Auto-authentication with phone/password if configured
-- **2FA Authentication**: When starting the Telegram bot with `./scripts/start.sh --telegram`, you will be prompted for your 2FA code if enabled
-- The script runs in foreground mode to allow interactive input during authentication
 
 #### Telegram Setup & Usage
 ```bash
-# First-time authentication (one-time only)
-./scripts/telegram_login.sh
-# This will prompt for verification code and save the session
+# First-time authentication
+clawdbot telegram login
+# Enter verification code when prompted
 
-# Normal operation (uses saved session)
-./scripts/start.sh --telegram
-# Bot runs continuously, handling messages
+# Normal operation
+clawdbot start
+# Telegram client runs as part of the daemon
 
 # Check authentication status
-python scripts/telegram_auth.py
-# Shows if session is valid
+clawdbot telegram status
 ```
-
-**Current Status**: ✅ Authenticated as Valor (@valorengels) - Session is saved and ready to use.
-
-### Server Development
-- Always use startup/shutdown scripts for clean state management
-- Database is automatically backed up on startup if configured
-- Resource monitoring includes auto-restart on failure
 
 ### Quality Standards
 - Error handling with categorized errors
 - Performance metrics tracked for all operations
 - Documentation required for all public interfaces
-- After every fix, restart the server
+- After every fix, restart the server with `clawdbot stop && clawdbot start`
 - There are API keys in the .env file
 
 ### Documentation Standards
@@ -273,3 +360,57 @@ python scripts/telegram_auth.py
 - Features that exist should be documented as current state
 - Features that are planned/roadmap should be clearly marked as such
 - Never mix aspirational descriptions with actual implementation status
+
+## Project Structure
+
+```
+ai/
+|-- .claude/                  # Claude Code configuration
+|   |-- agents/               # Subagent definitions for Claude Code
+|   |-- commands/             # Skill definitions (/prime, /audit-next-tool, etc.)
+|   |-- settings.local.json   # Local Claude Code settings
+|   +-- README.md
+|-- agents/
+|   +-- valor/
+|       |-- agent.py          # Main ValorAgent
+|       +-- persona.md        # Persona definition
+|-- config/
+|   |-- workspace_config.json # Multi-workspace config
+|   +-- telegram_groups.json  # Group behavior config
+|-- data/                     # SQLite databases
+|-- docs/                     # Documentation
+|-- integrations/
+|   +-- telegram/             # Telegram handlers (via Clawdbot)
+|-- logs/                     # Log files
+|-- tests/                    # Test suites
+|-- tools/                    # Tool implementations
+|   +-- mcp/                  # Custom MCP servers
++-- utilities/                # Shared utilities
+```
+
+## Quick Reference
+
+### Useful Commands
+
+| Command | Description |
+|---------|-------------|
+| `clawdbot start` | Start the system |
+| `clawdbot stop` | Stop the system |
+| `clawdbot status` | Check daemon status |
+| `clawdbot logs` | View logs |
+| `clawdbot telegram login` | Authenticate Telegram |
+| `clawdbot telegram status` | Check Telegram status |
+
+### Critical Thresholds
+
+| Metric | Warning | Critical |
+|--------|---------|----------|
+| Memory | 600MB | 800MB |
+| CPU | 80% | 95% |
+| Health Score | <70 | <60 |
+
+### Emergency Recovery
+
+- **System Issues**: Check logs with `clawdbot logs --errors`
+- **Telegram Issues**: Re-authenticate with `clawdbot telegram login`
+- **Database Issues**: Restart daemon (includes recovery)

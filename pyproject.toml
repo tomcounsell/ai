@@ -1,177 +1,31 @@
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
 [project]
-name = "ai-rebuild"
+name = "valor-bridge"
 version = "0.1.0"
-description = "AI System Rebuild - A comprehensive AI agent and tool management system"
-authors = [
-    {name = "AI Development Team", email = "dev@example.com"}
-]
-license = {text = "MIT"}
-requires-python = ">=3.9"
-keywords = ["ai", "agents", "mcp", "tools", "automation"]
-classifiers = [
-    "Development Status :: 3 - Alpha",
-    "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
-    "Topic :: Software Development :: Libraries :: Python Modules",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
-]
-
+description = "Telegram-Clawdbot bridge for Valor AI"
+requires-python = ">=3.11"
 dependencies = [
-    "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0",
-    "click>=8.0.0",
-    "rich>=13.0.0",
-    "httpx>=0.24.0",
-    "asyncio-mqtt>=0.13.0",
+    "telethon>=1.36.0",
     "python-dotenv>=1.0.0",
-    "pydantic-ai>=0.6.2",
-    "fastapi>=0.116.1",
-    "aiosqlite>=0.21.0",
-    "telethon>=1.40.0",
-    "pillow>=11.3.0",
-    "psutil>=7.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.0.0",
-    "black>=23.0.0",
-    "isort>=5.12.0",
-    "flake8>=6.0.0",
-    "mypy>=1.5.0",
-    "pre-commit>=3.0.0",
+    "pytest>=8.0.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
 ]
 
-test = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.0.0",
-    "coverage>=7.0.0",
-]
-
-docs = [
-    "sphinx>=7.0.0",
-    "sphinx-rtd-theme>=1.3.0",
-    "myst-parser>=2.0.0",
-]
-
-[project.urls]
-Homepage = "https://github.com/ai-team/ai-rebuild"
-Documentation = "https://ai-rebuild.readthedocs.io"
-Repository = "https://github.com/ai-team/ai-rebuild"
-"Bug Tracker" = "https://github.com/ai-team/ai-rebuild/issues"
-
-[project.scripts]
-ai-rebuild = "ai_rebuild.cli:main"
-
-
-[tool.black]
-line-length = 88
-target-version = ['py39']
-include = '\.pyi?$'
-exclude = '''
-/(
-    \.eggs
-  | \.git
-  | \.hg
-  | \.mypy_cache
-  | \.tox
-  | \.venv
-  | _build
-  | buck-out
-  | build
-  | dist
-)/
-'''
-
-[tool.isort]
-profile = "black"
-multi_line_output = 3
-line_length = 88
-known_first_party = ["ai_rebuild"]
-
-[tool.mypy]
-python_version = "3.9"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true
-disallow_incomplete_defs = true
-check_untyped_defs = true
-disallow_untyped_decorators = true
-no_implicit_optional = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
-warn_unreachable = true
-strict_equality = true
-
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py", "*_test.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-addopts = "-v --tb=short --strict-markers"
-markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "integration: marks tests as integration tests",
-    "unit: marks tests as unit tests",
-]
-
-[tool.coverage.run]
-source = ["."]
-omit = [
-    "tests/*",
-    "venv/*",
-    ".venv/*",
-    "setup.py",
-    "conftest.py",
-]
-
-[tool.coverage.report]
-exclude_lines = [
-    "pragma: no cover",
-    "def __repr__",
-    "if self.debug:",
-    "if settings.DEBUG",
-    "raise AssertionError",
-    "raise NotImplementedError",
-    "if 0:",
-    "if __name__ == .__main__.:",
-    "class .*\\bProtocol\\):",
-    "@(abc\\.)?abstractmethod",
-]
-
-[dependency-groups]
-dev = [
-    "hatchling>=1.27.0",
-    "ipython>=8.18.1",
-    "pytest>=8.4.1",
-    "pytest-asyncio>=1.1.0",
-    "ruff>=0.12.8",
-]
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [tool.ruff]
-line-length = 88
-target-version = "py39"
+line-length = 100
+target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "W", "F", "I", "N", "B", "A", "C4", "UP"]
-ignore = ["E501", "B008"]
+select = ["E", "F", "I", "N", "W", "UP"]
 
-[tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
-
-[tool.hatch.build.targets.wheel]
-packages = ["agents", "config", "integrations", "tools", "utilities", "tests"]
+[tool.mypy]
+python_version = "3.11"
+strict = true
