@@ -420,4 +420,4 @@ config/workspace_config_local.json
 telegram_session.session
 .env.backup
 .mcp.json
-\!config/*.example.json
+!config/*.example.json
