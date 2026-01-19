@@ -1,0 +1,47 @@
+{
+  "name": "documentation",
+  "version": "1.0.0",
+  "description": "Generate documentation from code including docstrings, README files, and API docs",
+  "type": "api",
+  "status": "stable",
+
+  "source": {
+    "type": "internal",
+    "package": null,
+    "repository": null,
+    "command": null
+  },
+
+  "capabilities": [
+    "generate",
+    "analyze",
+    "read"
+  ],
+
+  "requires": {
+    "env": ["ANTHROPIC_API_KEY"],
+    "python": ">=3.10"
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.documentation import generate_docs; print('OK')\"",
+    "test": "pytest tools/documentation/tests/ -v"
+  },
+
+  "workflows": [
+    {
+      "name": "generate-docstring",
+      "description": "Generate docstring for a function",
+      "steps": [
+        "generate_docs('def foo(): pass', doc_type='docstring')"
+      ]
+    },
+    {
+      "name": "generate-readme",
+      "description": "Generate README from code",
+      "steps": [
+        "generate_docs('code', doc_type='readme')"
+      ]
+    }
+  ]
+}

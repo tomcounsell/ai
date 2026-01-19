@@ -1,0 +1,54 @@
+{
+  "name": "knowledge-search",
+  "version": "1.0.0",
+  "description": "Local knowledge base search with semantic understanding using embeddings",
+  "type": "library",
+  "status": "stable",
+
+  "source": {
+    "type": "internal",
+    "package": null,
+    "repository": null,
+    "command": null
+  },
+
+  "capabilities": [
+    "search",
+    "embed",
+    "read"
+  ],
+
+  "requires": {
+    "env": ["OPENROUTER_API_KEY"],
+    "python": ">=3.10"
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.knowledge_search import search_knowledge; print('OK')\"",
+    "test": "pytest tools/knowledge-search/tests/ -v"
+  },
+
+  "workflows": [
+    {
+      "name": "semantic-search",
+      "description": "Search knowledge base semantically",
+      "steps": [
+        "search_knowledge('query', search_type='semantic')"
+      ]
+    },
+    {
+      "name": "keyword-search",
+      "description": "Search using keywords",
+      "steps": [
+        "search_knowledge('query', search_type='keyword')"
+      ]
+    },
+    {
+      "name": "index-documents",
+      "description": "Index documents for searching",
+      "steps": [
+        "index_document('path/to/doc.md')"
+      ]
+    }
+  ]
+}

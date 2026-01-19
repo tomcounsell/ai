@@ -1,0 +1,37 @@
+{
+  "name": "test-params",
+  "version": "1.0.0",
+  "description": "Generate test parameters for subjective AI testing with diverse variations",
+  "type": "library",
+  "status": "stable",
+
+  "source": {
+    "type": "internal",
+    "package": null,
+    "repository": null,
+    "command": null
+  },
+
+  "capabilities": [
+    "generate"
+  ],
+
+  "requires": {
+    "python": ">=3.10"
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.test_params import generate_params; print('OK')\"",
+    "test": "pytest tools/test-params/tests/ -v"
+  },
+
+  "workflows": [
+    {
+      "name": "generate-test-params",
+      "description": "Generate test parameter variations",
+      "steps": [
+        "generate_params(test_type='api', param_categories=['edge_cases'])"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "name": "code-execution",
+  "version": "1.0.0",
+  "description": "Sandboxed code execution environment with resource limits and safety measures",
+  "type": "library",
+  "status": "stable",
+
+  "source": {
+    "type": "internal",
+    "package": null,
+    "repository": null,
+    "command": null
+  },
+
+  "capabilities": [
+    "execute",
+    "analyze"
+  ],
+
+  "requires": {
+    "python": ">=3.10"
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.code_execution import execute_code; print('OK')\"",
+    "test": "pytest tools/code-execution/tests/ -v"
+  },
+
+  "workflows": [
+    {
+      "name": "basic-execution",
+      "description": "Execute simple code",
+      "steps": [
+        "execute_code('print(\"hello\")', language='python')"
+      ]
+    },
+    {
+      "name": "with-input",
+      "description": "Execute code with input data",
+      "steps": [
+        "execute_code('import json; print(json.loads(input()))', input_data='{\"key\": \"value\"}')"
+      ]
+    },
+    {
+      "name": "with-timeout",
+      "description": "Execute with custom timeout",
+      "steps": [
+        "execute_code('import time; time.sleep(1)', timeout_seconds=5)"
+      ]
+    }
+  ]
+}

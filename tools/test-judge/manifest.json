@@ -1,0 +1,47 @@
+{
+  "name": "test-judge",
+  "version": "1.0.0",
+  "description": "AI-powered test evaluation and quality assessment for subjective testing",
+  "type": "api",
+  "status": "stable",
+
+  "source": {
+    "type": "internal",
+    "package": null,
+    "repository": null,
+    "command": null
+  },
+
+  "capabilities": [
+    "analyze",
+    "classify",
+    "generate"
+  ],
+
+  "requires": {
+    "env": ["ANTHROPIC_API_KEY"],
+    "python": ">=3.10"
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.test_judge import judge_test_result; print('OK')\"",
+    "test": "pytest tools/test-judge/tests/ -v"
+  },
+
+  "workflows": [
+    {
+      "name": "basic-judgment",
+      "description": "Judge a single test result",
+      "steps": [
+        "judge_test_result(test_output='...', expected_criteria=['criterion1', 'criterion2'])"
+      ]
+    },
+    {
+      "name": "batch-judgment",
+      "description": "Judge multiple test results",
+      "steps": [
+        "judge_batch([{'output': '...', 'criteria': [...]}])"
+      ]
+    }
+  ]
+}

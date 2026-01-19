@@ -1,0 +1,47 @@
+{
+  "name": "link-analysis",
+  "version": "1.0.0",
+  "description": "URL extraction, validation, and content analysis",
+  "type": "api",
+  "status": "stable",
+
+  "source": {
+    "type": "internal",
+    "package": null,
+    "repository": null,
+    "command": null
+  },
+
+  "capabilities": [
+    "read",
+    "analyze",
+    "search"
+  ],
+
+  "requires": {
+    "env": ["PERPLEXITY_API_KEY"],
+    "python": ">=3.10"
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.link_analysis import extract_urls; print('OK')\"",
+    "test": "pytest tools/link-analysis/tests/ -v"
+  },
+
+  "workflows": [
+    {
+      "name": "extract-urls",
+      "description": "Extract URLs from text",
+      "steps": [
+        "extract_urls('text with https://example.com links')"
+      ]
+    },
+    {
+      "name": "analyze-url",
+      "description": "Analyze URL content",
+      "steps": [
+        "analyze_url('https://example.com')"
+      ]
+    }
+  ]
+}

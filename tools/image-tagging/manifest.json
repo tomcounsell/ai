@@ -1,0 +1,39 @@
+{
+  "name": "image-tagging",
+  "version": "1.0.0",
+  "description": "Tag and categorize images with AI for organization and search",
+  "type": "api",
+  "status": "stable",
+
+  "source": {
+    "type": "internal",
+    "package": null,
+    "repository": null,
+    "command": null
+  },
+
+  "capabilities": [
+    "classify",
+    "analyze"
+  ],
+
+  "requires": {
+    "env": ["OPENROUTER_API_KEY"],
+    "python": ">=3.10"
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.image_tagging import tag_image; print('OK')\"",
+    "test": "pytest tools/image-tagging/tests/ -v"
+  },
+
+  "workflows": [
+    {
+      "name": "basic-tagging",
+      "description": "Generate tags for an image",
+      "steps": [
+        "tag_image('path/to/image.jpg')"
+      ]
+    }
+  ]
+}

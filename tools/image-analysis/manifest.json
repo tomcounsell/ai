@@ -1,0 +1,54 @@
+{
+  "name": "image-analysis",
+  "version": "1.0.0",
+  "description": "Multi-modal vision analysis using AI models for object detection, OCR, and scene understanding",
+  "type": "api",
+  "status": "stable",
+
+  "source": {
+    "type": "internal",
+    "package": null,
+    "repository": null,
+    "command": null
+  },
+
+  "capabilities": [
+    "analyze",
+    "classify",
+    "read"
+  ],
+
+  "requires": {
+    "env": ["OPENROUTER_API_KEY"],
+    "python": ">=3.10"
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.image_analysis import analyze_image; print('OK')\"",
+    "test": "pytest tools/image-analysis/tests/ -v"
+  },
+
+  "workflows": [
+    {
+      "name": "basic-analysis",
+      "description": "Analyze an image for description and objects",
+      "steps": [
+        "analyze_image('path/to/image.jpg')"
+      ]
+    },
+    {
+      "name": "text-extraction",
+      "description": "Extract text from image (OCR)",
+      "steps": [
+        "analyze_image('path/to/image.jpg', analysis_types=['text'])"
+      ]
+    },
+    {
+      "name": "detailed-analysis",
+      "description": "Comprehensive analysis with all features",
+      "steps": [
+        "analyze_image('path/to/image.jpg', detail_level='comprehensive')"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "name": "telegram-history",
+  "version": "1.0.0",
+  "description": "Search Telegram conversation history with relevance scoring",
+  "type": "library",
+  "status": "stable",
+
+  "source": {
+    "type": "internal",
+    "package": null,
+    "repository": null,
+    "command": null
+  },
+
+  "capabilities": [
+    "search",
+    "read"
+  ],
+
+  "requires": {
+    "python": ">=3.10"
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.telegram_history import search_history; print('OK')\"",
+    "test": "pytest tools/telegram-history/tests/ -v"
+  },
+
+  "workflows": [
+    {
+      "name": "search-messages",
+      "description": "Search chat history",
+      "steps": [
+        "search_history('query', chat_id='12345')"
+      ]
+    }
+  ]
+}
