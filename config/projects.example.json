@@ -2,61 +2,14 @@
   "$schema": "Project configuration for multi-instance Valor deployment",
 
   "projects": {
-    "psyoptimal": {
-      "name": "PsyOPTIMAL",
-      "description": "Mental health optimization platform",
-      "telegram": {
-        "groups": ["PsyOPTIMAL Dev", "PsyOPTIMAL Team"],
-        "respond_to_all": false,
-        "respond_to_mentions": true
-      },
-      "github": {
-        "org": "tomcounsell",
-        "repo": "psyoptimal"
-      },
-      "linear": {
-        "team": "PSYOPT"
-      },
-      "notion": {
-        "workspace_id": null
-      },
-      "context": {
-        "tech_stack": ["Python", "Django", "React", "PostgreSQL"],
-        "description": "Focus on mental health features, user privacy, clinical accuracy"
-      }
-    },
-
-    "flextrip": {
-      "name": "FlexTrip",
-      "description": "Travel planning platform",
-      "telegram": {
-        "groups": ["FlexTrip Dev"],
-        "respond_to_all": false,
-        "respond_to_mentions": true
-      },
-      "github": {
-        "org": "tomcounsell",
-        "repo": "flextrip"
-      },
-      "linear": {
-        "team": "FLEX"
-      },
-      "notion": {
-        "workspace_id": null
-      },
-      "context": {
-        "tech_stack": ["Python", "FastAPI", "React Native", "PostgreSQL"],
-        "description": "Focus on travel UX, booking integrations, itinerary optimization"
-      }
-    },
-
     "valor": {
       "name": "Valor AI",
-      "description": "AI coworker system (this codebase)",
+      "description": "AI coworker system - autonomous agent with agency",
       "telegram": {
-        "groups": ["AI Developers", "Valor Dev"],
+        "groups": ["Dev: Valor"],
         "respond_to_all": false,
-        "respond_to_mentions": true
+        "respond_to_mentions": true,
+        "respond_to_dms": true
       },
       "github": {
         "org": "tomcounsell",
@@ -70,7 +23,57 @@
       },
       "context": {
         "tech_stack": ["Python", "Clawdbot", "Telethon", "Claude API"],
-        "description": "Focus on agentic systems, self-improvement, autonomous operation"
+        "description": "Focus on agentic systems, self-improvement, autonomous operation, Telegram integration"
+      }
+    },
+
+    "django-project-template": {
+      "name": "Django Project Template",
+      "description": "A modern Django project template with best practices",
+      "telegram": {
+        "groups": ["Dev: Django Template"],
+        "respond_to_all": false,
+        "respond_to_mentions": true,
+        "respond_to_dms": false
+      },
+      "github": {
+        "org": "tomcounsell",
+        "repo": "django-project-template"
+      },
+      "linear": {
+        "team": null
+      },
+      "notion": {
+        "workspace_id": null
+      },
+      "context": {
+        "tech_stack": ["Django", "PostgreSQL", "Redis"],
+        "description": "Focus on Django best practices, project structure, developer experience, reusable patterns"
+      }
+    },
+
+    "popoto": {
+      "name": "Popoto",
+      "description": "Redis ORM for Python",
+      "telegram": {
+        "groups": ["Dev: Popoto"],
+        "respond_to_all": false,
+        "respond_to_mentions": true,
+        "respond_to_dms": false
+      },
+      "github": {
+        "org": "tomcounsell",
+        "repo": "popoto"
+      },
+      "linear": {
+        "team": null
+      },
+      "notion": {
+        "workspace_id": null
+      },
+      "context": {
+        "tech_stack": ["Python", "Redis"],
+        "description": "Focus on Redis data modeling, ORM patterns, performance, Python API design"
       }
     }
   },
