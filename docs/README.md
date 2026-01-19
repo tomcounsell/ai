@@ -2,11 +2,11 @@
 
 ## Overview
 
-Documentation for the Valor AI System - a Claude Code-powered conversational AI assistant that operates through chat interfaces like Telegram, with full access to its host MacBook hardware and a rich ecosystem of tools.
+Documentation for the Valor AI System - a unified conversational development environment that eliminates boundaries between natural conversation and code execution. Built on Claude Code, it creates a living codebase where users interact directly WITH the system through chat applications like Telegram.
 
 **Primary Interface**: Telegram (real user account, not a bot)
-**Core Engine**: Claude Code with specialized subagents
-**Architecture**: Subagent-based with lazy-loading MCP tools
+**Core Engine**: Claude Code with rich tool ecosystem
+**Model**: Valor provides tools, workflows, and skills; Claude Code orchestrates
 
 ## Quick Start
 
@@ -27,8 +27,8 @@ Documentation for the Valor AI System - a Claude Code-powered conversational AI 
 
 | Document | Description |
 |----------|-------------|
+| [Consolidated Documentation](CONSOLIDATED_DOCUMENTATION.md) | **Primary reference** - complete system documentation |
 | [System Overview](architecture/system-overview.md) | High-level architecture and design principles |
-| [Subagent System](architecture/subagent-mcp-system.md) | Subagent-based architecture for context isolation |
 | [MCP Integration](architecture/mcp-integration.md) | Model Context Protocol tool integration |
 | [Codebase Context & RAG](architecture/codebase-context-rag.md) | Per-workspace indexing and retrieval strategy |
 
@@ -38,45 +38,27 @@ Documentation for the Valor AI System - a Claude Code-powered conversational AI 
 |----------|-------------|
 | [Telegram Integration](TELEGRAM.md) | Complete Telegram interface documentation |
 
-### Subagent Specifications
-
-| Document | Description |
-|----------|-------------|
-| [Subagents Overview](subagents/README.md) | Subagent architecture and PRD index |
-| [Stripe Subagent](subagents/stripe-subagent-prd.md) | Payment processing |
-| [Sentry Subagent](subagents/sentry-subagent-prd.md) | Error monitoring |
-| [GitHub Subagent](subagents/github-subagent-prd.md) | Code repository |
-| [Render Subagent](subagents/render-subagent-prd.md) | Infrastructure deployment |
-| [Notion Subagent](subagents/notion-subagent-prd.md) | Knowledge management |
-| [Linear Subagent](subagents/linear-subagent-prd.md) | Project management |
-
 ### Operations
 
 | Document | Description |
 |----------|-------------|
 | [Monitoring](operations/monitoring.md) | System monitoring and health checks |
-| [Daydream System](operations/daydream-system.md) | Autonomous analysis system |
+| [Daydream System](operations/daydream-system.md) | Autonomous maintenance process |
 
 ### Quality & Testing
 
 | Document | Description |
 |----------|-------------|
-| [Quality Standards](tools/quality-standards.md) | 9.8/10 gold standard implementation |
+| [Quality Standards](tools/quality-standards.md) | Tool quality standards and patterns |
 | [Testing Strategy](testing/testing-strategy.md) | Real integration testing approach |
 | [Tool Architecture](tools/tool-architecture.md) | Tool design patterns |
 
-### Security
+### Components
 
 | Document | Description |
 |----------|-------------|
-| [Security & Compliance](Security-Compliance-Requirements.md) | Security architecture and compliance |
-
-### Reference
-
-| Document | Description |
-|----------|-------------|
-| [Consolidated Documentation](CONSOLIDATED_DOCUMENTATION.md) | Complete merged documentation |
-| [Consolidated PDF](CONSOLIDATED_DOCUMENTATION.pdf) | Printable PDF version |
+| [Message Processing](components/message-processing.md) | Telegram message handling pipeline |
+| [Resource Monitoring](components/resource-monitoring.md) | System resource management |
 
 ## Architecture Summary
 
@@ -84,32 +66,25 @@ Documentation for the Valor AI System - a Claude Code-powered conversational AI 
 User (Telegram)
     |
     v
-Main Agent (Valor) - Clean context, <10k tokens
+Valor Agent - Conversational AI with full context
     |
     v
-Routing Layer
-    |-- Task Analyzer
-    |-- MCP Library (auth-aware)
-    +-- Multi-Model Router
+Claude Code - Orchestrates tools and subagents
     |
     v
-Specialized Subagents (lazy-loaded)
-    |-- Stripe (payments)
-    |-- Sentry (errors)
-    |-- GitHub (code)
-    |-- Render (infra)
-    |-- Notion (docs)
-    +-- Linear (projects)
+Tool Ecosystem
+    |-- MCP Servers (Stripe, Sentry, GitHub, etc.)
+    |-- Development Tools (search, code, test)
+    +-- Social Tools (Telegram integration)
 ```
 
 ## Key Principles
 
-1. **Subagent Architecture**: Lazy-loaded specialized agents prevent context pollution
+1. **Pure Agency**: System handles complexity without exposing intermediate steps
 2. **No Legacy Code**: Complete elimination of deprecated patterns
-3. **Critical Thinking**: Deep analysis over quick fixes
-4. **Intelligence Over Patterns**: LLM understanding, not keyword matching
+3. **Context Management**: Maintain relevant context across interactions
+4. **Tool Selection**: Dynamic filtering to avoid context pollution
 5. **Real Integration Testing**: No mocks, use actual services
-6. **9.8/10 Quality Standard**: Maintained across all components
 
 ## Environment Setup
 
@@ -124,5 +99,12 @@ ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 PERPLEXITY_API_KEY=pplx-...
 ```
+
+## Claude Code Configuration
+
+The `.claude/` directory contains:
+- `agents/` - Subagent definitions that Claude Code can invoke
+- `commands/` - Slash commands for user-invokable skills
+- `settings.local.json` - Local configuration
 
 See [CLAUDE.md](/CLAUDE.md) for complete development guidelines.
