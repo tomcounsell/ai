@@ -1,0 +1,90 @@
+{
+  "name": "browser",
+  "version": "1.0.0",
+  "description": "Browser automation for web testing, form filling, screenshots, and data extraction",
+  "type": "cli",
+  "status": "stable",
+
+  "source": {
+    "type": "external",
+    "package": "agent-browser",
+    "repository": "https://github.com/vercel-labs/agent-browser",
+    "command": "agent-browser"
+  },
+
+  "capabilities": [
+    "navigate",
+    "interact",
+    "screenshot",
+    "scrape",
+    "automate"
+  ],
+
+  "requires": {
+    "binaries": ["agent-browser"],
+    "node": ">=18"
+  },
+
+  "commands": {
+    "install": "npm install -g agent-browser && agent-browser install",
+    "verify": "agent-browser --version",
+    "help": "agent-browser --help"
+  },
+
+  "workflows": [
+    {
+      "name": "basic-navigation",
+      "description": "Open page, inspect elements, interact",
+      "steps": [
+        "agent-browser open <url>",
+        "agent-browser snapshot -i",
+        "agent-browser click @e1",
+        "agent-browser close"
+      ]
+    },
+    {
+      "name": "form-submission",
+      "description": "Fill and submit a form",
+      "steps": [
+        "agent-browser open <url>",
+        "agent-browser snapshot -i",
+        "agent-browser fill @input 'value'",
+        "agent-browser click @submit",
+        "agent-browser wait --load networkidle",
+        "agent-browser snapshot -i"
+      ]
+    },
+    {
+      "name": "screenshot-capture",
+      "description": "Take full-page screenshot",
+      "steps": [
+        "agent-browser open <url>",
+        "agent-browser wait --load networkidle",
+        "agent-browser screenshot --full output.png"
+      ]
+    },
+    {
+      "name": "data-extraction",
+      "description": "Extract text and attributes from page",
+      "steps": [
+        "agent-browser open <url>",
+        "agent-browser snapshot -i",
+        "agent-browser get text @e1",
+        "agent-browser get attr @e2 href"
+      ]
+    },
+    {
+      "name": "authenticated-session",
+      "description": "Login and save session for reuse",
+      "steps": [
+        "agent-browser open <login-url>",
+        "agent-browser snapshot -i",
+        "agent-browser fill @email 'user@example.com'",
+        "agent-browser fill @password 'secret'",
+        "agent-browser click @submit",
+        "agent-browser wait --url '**/dashboard'",
+        "agent-browser state save auth.json"
+      ]
+    }
+  ]
+}

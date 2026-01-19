@@ -1,0 +1,41 @@
+{
+  "name": "TOOL_NAME",
+  "version": "1.0.0",
+  "description": "DESCRIPTION",
+  "type": "cli",
+  "status": "beta",
+
+  "source": {
+    "type": "external",
+    "package": "PACKAGE_NAME",
+    "repository": "https://github.com/ORG/REPO",
+    "command": "COMMAND_NAME"
+  },
+
+  "capabilities": [
+    "CAPABILITY_1",
+    "CAPABILITY_2"
+  ],
+
+  "requires": {
+    "env": [],
+    "binaries": ["COMMAND_NAME"]
+  },
+
+  "commands": {
+    "install": "INSTALL_COMMAND",
+    "verify": "VERIFY_COMMAND",
+    "help": "HELP_COMMAND"
+  },
+
+  "workflows": [
+    {
+      "name": "basic-usage",
+      "description": "Basic usage pattern",
+      "steps": [
+        "step 1",
+        "step 2"
+      ]
+    }
+  ]
+}

@@ -421,3 +421,4 @@ telegram_session.session
 .env.backup
 .mcp.json
 !config/*.example.json
+!tools/**/manifest.json

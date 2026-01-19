@@ -1,18 +1,37 @@
 # Browser Automation
 
+## Overview
+
 Browser automation capability for web testing, form filling, screenshots, and data extraction.
 
-## Current Implementation
+**Current Implementation**: [agent-browser](https://github.com/vercel-labs/agent-browser) (Vercel Labs) - a CLI-based browser automation tool optimized for AI agents, using Playwright under the hood.
 
-**Tool**: [agent-browser](https://github.com/vercel-labs/agent-browser) (Vercel Labs)
-
-A CLI-based browser automation tool optimized for AI agents. Uses Playwright under the hood.
+**Capabilities**: `navigate`, `interact`, `screenshot`, `scrape`, `automate`
 
 ## Installation
 
 ```bash
 npm install -g agent-browser
 agent-browser install  # Install browser binaries
+```
+
+Verify installation:
+```bash
+agent-browser --version
+```
+
+## Quick Start
+
+```bash
+# Open a page and get interactive elements
+agent-browser open https://example.com
+agent-browser snapshot -i
+
+# Interact with elements using refs from snapshot
+agent-browser click @e1
+
+# Close when done
+agent-browser close
 ```
 
 ## Core Workflow
