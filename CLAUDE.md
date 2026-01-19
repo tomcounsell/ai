@@ -292,6 +292,7 @@ MONITORING_ENABLED=true
 - `.claude/commands/`: Skill definitions
 - `config/projects.json`: Multi-instance project configuration
 - `.env`: Environment variables and API keys
+- `/Users/valorengels/src/.env`: Shared API keys across all projects (OPENROUTER_API_KEY, etc.)
 
 ---
 
