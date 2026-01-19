@@ -18,9 +18,6 @@
       "linear": {
         "team": "VALOR"
       },
-      "notion": {
-        "workspace_id": null
-      },
       "context": {
         "tech_stack": ["Python", "Clawdbot", "Telethon", "Claude API"],
         "description": "Focus on agentic systems, self-improvement, autonomous operation, Telegram integration"
@@ -39,12 +36,6 @@
       "github": {
         "org": "tomcounsell",
         "repo": "django-project-template"
-      },
-      "linear": {
-        "team": null
-      },
-      "notion": {
-        "workspace_id": null
       },
       "context": {
         "tech_stack": ["Django", "PostgreSQL", "Redis"],
@@ -65,15 +56,85 @@
         "org": "tomcounsell",
         "repo": "popoto"
       },
-      "linear": {
-        "team": null
-      },
-      "notion": {
-        "workspace_id": null
-      },
       "context": {
         "tech_stack": ["Python", "Redis"],
         "description": "Focus on Redis data modeling, ORM patterns, performance, Python API design"
+      }
+    },
+
+    "psyoptimal": {
+      "name": "PsyOPTIMAL",
+      "description": "Mental health optimization platform",
+      "telegram": {
+        "groups": ["Dev: PsyOPTIMAL"],
+        "respond_to_all": false,
+        "respond_to_mentions": true,
+        "respond_to_dms": false
+      },
+      "github": {
+        "org": "yudame",
+        "repo": "psyoptimal"
+      },
+      "context": {
+        "tech_stack": ["Python", "Django", "PostgreSQL"],
+        "description": "Focus on mental health features, user privacy, clinical accuracy, evidence-based approaches"
+      }
+    },
+
+    "flutter-project-template": {
+      "name": "Flutter Project Template",
+      "description": "A modern Flutter project template with best practices",
+      "telegram": {
+        "groups": ["Dev: Flutter Template"],
+        "respond_to_all": false,
+        "respond_to_mentions": true,
+        "respond_to_dms": false
+      },
+      "github": {
+        "org": "yudame",
+        "repo": "flutter-project-template"
+      },
+      "context": {
+        "tech_stack": ["Flutter", "Dart"],
+        "description": "Focus on Flutter best practices, cross-platform development, widget patterns, state management"
+      }
+    },
+
+    "cuttlefish": {
+      "name": "Cuttlefish",
+      "description": "AI tools and MCP Servers",
+      "telegram": {
+        "groups": ["Dev: Cuttlefish"],
+        "respond_to_all": false,
+        "respond_to_mentions": true,
+        "respond_to_dms": false
+      },
+      "github": {
+        "org": "yudame",
+        "repo": "cuttlefish"
+      },
+      "context": {
+        "tech_stack": ["Python", "TypeScript", "MCP"],
+        "description": "Focus on AI tooling, MCP server development, Claude integrations, developer productivity"
+      }
+    },
+
+    "yudame-research": {
+      "name": "Yudame Research",
+      "description": "Research tools and frameworks for evidence-based analysis",
+      "telegram": {
+        "groups": ["Dev: Yudame Research"],
+        "respond_to_all": false,
+        "respond_to_mentions": true,
+        "respond_to_dms": false
+      },
+      "github": {
+        "org": "yudame",
+        "repo": "research"
+      },
+      "context": {
+        "tech_stack": ["Python", "Data Analysis"],
+        "description": "Focus on evidence-based analysis across technology, health, economics, and human performance. Outputs include podcasts, reports, and educational materials."
       }
     }
   },
