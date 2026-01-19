@@ -21,6 +21,74 @@ from pathlib import Path
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 
+# =============================================================================
+# File Detection and Sending
+# =============================================================================
+
+# Explicit file marker: <<FILE:/path/to/file>>
+FILE_MARKER_PATTERN = re.compile(r'<<FILE:([^>]+)>>')
+
+# Fallback: detect absolute paths to common file types
+# Matches paths like /Users/foo/bar.png or /tmp/output.pdf
+ABSOLUTE_PATH_PATTERN = re.compile(
+    r'(/(?:Users|home|tmp|var)[^\s\'"<>|]*\.(?:png|jpg|jpeg|gif|webp|bmp|pdf|mp3|mp4|wav|ogg))',
+    re.IGNORECASE
+)
+
+# Image extensions (for choosing send method)
+IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+
+
+def extract_files_from_response(response: str) -> tuple[str, list[Path]]:
+    """
+    Extract files to send from response text.
+
+    Returns (cleaned_text, list_of_file_paths).
+
+    Detection methods:
+    1. Explicit markers: <<FILE:/path/to/file>>
+    2. Fallback: Absolute paths to existing media files
+    """
+    files_to_send: list[Path] = []
+    seen_paths: set[str] = set()  # Use resolved paths to avoid duplicates from symlinks
+
+    # Method 1: Explicit file markers (highest priority)
+    for match in FILE_MARKER_PATTERN.finditer(response):
+        path_str = match.group(1).strip()
+        path = Path(path_str)
+        if path.exists() and path.is_file():
+            resolved = str(path.resolve())
+            if resolved not in seen_paths:
+                files_to_send.append(path)
+                seen_paths.add(resolved)
+
+    # Method 2: Fallback - detect absolute paths to media files
+    for match in ABSOLUTE_PATH_PATTERN.finditer(response):
+        path_str = match.group(1).strip()
+        path = Path(path_str)
+        if path.exists() and path.is_file():
+            resolved = str(path.resolve())
+            if resolved not in seen_paths:
+                files_to_send.append(path)
+                seen_paths.add(resolved)
+
+    # Clean response: remove file markers
+    cleaned = FILE_MARKER_PATTERN.sub('', response)
+
+    # Optionally clean up lines that are just file paths (cosmetic)
+    lines = cleaned.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        stripped = line.strip()
+        # Skip lines that are just a detected file path
+        if stripped and any(stripped == str(f) or stripped.endswith(str(f)) for f in files_to_send):
+            continue
+        cleaned_lines.append(line)
+
+    cleaned = '\n'.join(cleaned_lines).strip()
+
+    return cleaned, files_to_send
+
 # Load environment
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
@@ -175,6 +243,45 @@ def build_context_prefix(project: dict | None, is_dm: bool) -> str:
     return "\n".join(context_parts)
 
 
+async def send_response_with_files(client: TelegramClient, event, response: str) -> None:
+    """
+    Send response to Telegram, handling both files and text.
+
+    1. Extract any files from the response
+    2. Send files first (as separate messages)
+    3. Send remaining text (if any)
+    """
+    text, files = extract_files_from_response(response)
+
+    # Send files first
+    for file_path in files:
+        try:
+            is_image = file_path.suffix.lower() in IMAGE_EXTENSIONS
+            await client.send_file(
+                event.chat_id,
+                file_path,
+                reply_to=event.message.id,
+                # Images get no caption, other files get filename
+                caption=None if is_image else f"📎 {file_path.name}",
+            )
+            logger.info(f"Sent file: {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to send file {file_path}: {e}")
+            # Notify user of failure
+            await event.reply(f"Failed to send file: {file_path.name}")
+
+    # Send text if there's meaningful content
+    if text and not text.isspace():
+        # Truncate if needed
+        max_length = DEFAULTS.get("response", {}).get("max_response_length", 4000)
+        if len(text) > max_length:
+            text = text[: max_length - 3] + "..."
+        await event.reply(text)
+    elif not files:
+        # No files and no text - send a minimal acknowledgment
+        await event.reply("Done.")
+
+
 async def get_agent_response(message: str, session_id: str, sender_name: str, chat_title: str | None, project: dict | None) -> str:
     """Call clawdbot agent and get response."""
     try:
@@ -223,11 +330,7 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
 
         response = stdout.decode().strip()
 
-        # Truncate if needed
-        max_length = DEFAULTS.get("response", {}).get("max_response_length", 4000)
-        if len(response) > max_length:
-            response = response[:max_length - 3] + "..."
-
+        # Log a preview (truncation happens in send_response_with_files)
         logger.info(f"Agent response: {response[:100]}...")
         return response
 
@@ -289,7 +392,7 @@ async def main():
         project_key = project.get("_key", "dm") if project else "dm"
         session_id = f"tg_{project_key}_{event.chat_id}"
 
-        # Show typing indicator
+        # Show typing indicator while getting response
         use_typing = DEFAULTS.get("response", {}).get("typing_indicator", True)
         if use_typing:
             async with client.action(event.chat_id, "typing"):
@@ -297,8 +400,8 @@ async def main():
         else:
             response = await get_agent_response(clean_text, session_id, sender_name, chat_title, project)
 
-        # Send response
-        await event.reply(response)
+        # Send response (handles both files and text)
+        await send_response_with_files(client, event, response)
         logger.info(f"Replied to {sender_name}")
 
     # Start the client
