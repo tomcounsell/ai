@@ -1,0 +1,60 @@
+{
+  "name": "transcribe",
+  "version": "1.0.0",
+  "description": "Audio/voice transcription using local Whisper",
+  "type": "cli",
+  "status": "stable",
+
+  "source": {
+    "type": "external",
+    "package": "insanely-fast-whisper",
+    "repository": "https://github.com/Vaibhavs10/insanely-fast-whisper",
+    "command": "insanely-fast-whisper"
+  },
+
+  "capabilities": [
+    "transcribe",
+    "analyze"
+  ],
+
+  "requires": {
+    "binaries": ["insanely-fast-whisper"],
+    "python": ">=3.10"
+  },
+
+  "commands": {
+    "install": "pipx install insanely-fast-whisper",
+    "verify": "insanely-fast-whisper --help",
+    "help": "insanely-fast-whisper --help"
+  },
+
+  "config": {
+    "default_model": "openai/whisper-large-v3",
+    "models": [
+      "openai/whisper-large-v3",
+      "openai/whisper-medium",
+      "openai/whisper-small",
+      "openai/whisper-tiny"
+    ],
+    "supported_formats": ["mp3", "wav", "m4a", "ogg", "flac", "webm"]
+  },
+
+  "workflows": [
+    {
+      "name": "basic-transcription",
+      "description": "Transcribe an audio file to text",
+      "steps": [
+        "insanely-fast-whisper --file-name audio.mp3"
+      ]
+    },
+    {
+      "name": "telegram-voice",
+      "description": "Transcribe Telegram voice message",
+      "steps": [
+        "Download .ogg file from Telegram",
+        "insanely-fast-whisper --file-name voice.ogg",
+        "Return transcription text"
+      ]
+    }
+  ]
+}
