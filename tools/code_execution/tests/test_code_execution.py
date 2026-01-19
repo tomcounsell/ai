@@ -102,7 +102,7 @@ class TestPythonExecution:
         )
 
         assert "error" in result
-        assert "timeout" in result["error"].lower()
+        assert "timed out" in result["error"].lower()
 
     def test_execution_time_tracked(self):
         """Execution time is tracked."""
