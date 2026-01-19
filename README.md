@@ -17,6 +17,35 @@ Valor is an AI coworker - not an assistant, not a tool, but a colleague with its
 | Skills (MCP) | Planned | Stripe, Sentry, GitHub, Render, Notion, Linear |
 | Daydream (Cron) | Planned | Daily autonomous maintenance |
 
+## Valor's Capabilities
+
+Valor has access to 15 tools that enable autonomous work:
+
+### Research & Information
+- **Web Search**: Find current information via Perplexity API
+- **Knowledge Search**: Semantic search across local documents with embeddings
+- **Link Analysis**: Extract, validate, and summarize URLs
+
+### Vision & Media
+- **Image Analysis**: Describe images, detect objects, extract text (OCR)
+- **Image Tagging**: Categorize and tag images with AI
+- **Image Generation**: Create images from text descriptions
+- **Transcription**: Convert audio to text
+
+### Development
+- **Code Execution**: Run Python, JavaScript, or Bash in a sandbox
+- **Documentation**: Generate docstrings, READMEs, API docs from code
+- **Browser Automation**: Navigate, interact, screenshot web pages
+
+### Testing & Quality
+- **Test Judge**: AI evaluation of test results against criteria
+- **Test Params**: Generate edge cases and parameter variations
+- **Test Scheduler**: Queue and execute tests in background
+
+### Communication
+- **Telegram History**: Search conversation history with relevance scoring
+- **Document Summary**: Summarize documents at configurable detail levels
+
 ## Architecture
 
 ```
@@ -89,6 +118,22 @@ The service auto-restarts on crash and on system boot.
 ai/
 ├── bridge/                 # Telegram-Clawdbot bridge (Python)
 │   └── telegram_bridge.py  # Main bridge script
+├── tools/                  # Valor's capability tools
+│   ├── search/             # Web search (Perplexity)
+│   ├── image_analysis/     # Vision analysis
+│   ├── code_execution/     # Sandboxed code runner
+│   ├── test_judge/         # AI test evaluation
+│   ├── knowledge_search/   # Semantic local search
+│   ├── doc_summary/        # Document summarization
+│   ├── documentation/      # Doc generation
+│   ├── link_analysis/      # URL analysis
+│   ├── telegram_history/   # Chat history search
+│   ├── image_tagging/      # Image categorization
+│   ├── test_params/        # Test parameter generation
+│   ├── test_scheduler/     # Background test runner
+│   ├── browser/            # Browser automation
+│   ├── image_gen/          # Image generation
+│   └── transcribe/         # Audio transcription
 ├── config/
 │   ├── SOUL.md             # Valor persona definition
 │   └── clawdbot/           # Clawdbot config templates
@@ -109,6 +154,8 @@ ai/
 
 | Document | Purpose |
 |----------|---------|
+| [tools/README.md](tools/README.md) | Tools overview and usage |
+| [tools/STANDARD.md](tools/STANDARD.md) | Tool development standard |
 | [docs/setup.md](docs/setup.md) | Local setup guide |
 | [docs/CLAWDBOT_MIGRATION_PLAN.md](docs/CLAWDBOT_MIGRATION_PLAN.md) | Migration status and plan |
 | [docs/SKILLS_MIGRATION.md](docs/SKILLS_MIGRATION.md) | Skills implementation guide |
