@@ -12,8 +12,8 @@
 2. [Product Vision](#product-vision)
 3. [System Architecture](#system-architecture)
 4. [Telegram Integration](#telegram-integration)
-5. [Subagent System](#subagent-system)
-6. [Tool Quality Standards](#tool-quality-standards)
+5. [Tools, Workflows, and Skills](#tools-workflows-and-skills)
+6. [Tool Implementation Patterns](#tool-implementation-patterns)
 7. [Testing Strategy](#testing-strategy)
 8. [Operations & Monitoring](#operations--monitoring)
 9. [Daydream System](#daydream-system)
@@ -33,61 +33,34 @@ The Valor AI System is a **unified conversational development environment** that
 ## Key Capabilities
 
 - **Conversational AI**: Natural language understanding with the Valor Engels persona
-- **Tool Orchestration**: Seamless integration of 15+ specialized tools
+- **Tool Orchestration**: Integration of development, search, and knowledge tools
 - **Telegram Integration**: Real user account (not a bot) for natural presence
 - **Hardware Access**: Runs on a MacBook with full system capabilities
-- **Autonomous Analysis**: Daydream system for self-improvement insights
-- **Production Quality**: 9.8/10 gold standard across all components
 
 ## High-Level Goals
 
-1. **Seamless Integration**: Zero friction between thinking, asking, and executing
+1. **Pure Agency**: The system handles complexity internally without exposing intermediate steps to the user
 2. **Intelligent Context**: System understands project context without repeated explanation
-3. **Production Excellence**: 9.8/10 quality standard across all components
-4. **Scalable Architecture**: Support 50+ concurrent users
-5. **Developer Delight**: Make complex tasks simple and simple tasks instant
+3. **Productivity**: Enable users to accomplish more with less effort
 
 ---
 
 # Product Vision
 
-## Problem Statement
+## The Concept
 
-**Current State Problems:**
-- Developers constantly switch contexts between chat, IDE, terminal, and documentation
-- AI assistants lack persistent project context, requiring repeated explanations
-- Code execution requires manual copy-paste between interfaces
-- Tool integrations are fragmented across multiple platforms
-- No unified experience for conversational development
+Valor is an AI coworker - not an assistant, not a tool, but a colleague with its own personality, its own Mac machine, and its own work to do.
 
-## Solution Overview
+The supervisor assigns work and provides direction. Valor executes autonomously on its machine, using whatever tools and integrations it needs. Only when necessary does Valor reach out via Telegram to ask questions, report progress, or request decisions.
 
-A unified AI system that:
-- **Remembers**: Maintains context across sessions and projects
-- **Executes**: Runs code, tests, and tools directly from conversation
-- **Integrates**: Connects Telegram, Claude Code, GitHub, Notion seamlessly
-- **Personalizes**: Adopts the Valor Engels persona for consistent interaction
-- **Scales**: Handles multiple concurrent users with isolated workspaces
+This isn't about solving pain points in the traditional dev process. It's about replacing that process entirely with a new model: delegate to a capable coworker who handles the details.
 
-## Target Users
+## How It Works
 
-### Primary: Senior Developer
-- Ships features faster with AI assistance
-- Maintains code quality while moving quickly
-- Automates repetitive tasks
-- Gets intelligent code reviews
-
-### Secondary: Technical Product Manager
-- Quick prototypes and POCs
-- Understands technical implications
-- Generates documentation
-- Coordinates with engineering
-
-### Tertiary: Solo Founder
-- Builds MVP quickly
-- Maintains multiple projects
-- Automates operations
-- Scales without hiring
+- **Valor has a machine**: A Mac with full system access, development tools, and API integrations
+- **Valor has context**: Persistent memory of projects, preferences, and past work
+- **Valor has agency**: Makes decisions, executes tasks, and only escalates when appropriate
+- **Valor communicates via Telegram**: Natural conversation with the supervisor, not command-line interaction
 
 ---
 
@@ -95,7 +68,9 @@ A unified AI system that:
 
 ## Design Philosophy
 
-The architecture represents a **living codebase** where users interact directly WITH the system, not just through it. When users communicate, they're talking TO the codebase itself - asking about "your" features, "your" capabilities, "your" implementation.
+This is a **living codebase**. When the supervisor says "you" or "your code," they mean the `/ai` directory (`tomcounsell/ai` repository) - the code that runs Valor. Valor is talking about himself, his own implementation, his own capabilities.
+
+Valor can work on other projects and repositories, but those are separate from "self." Questions about "your features" or "how do you work" refer to this codebase specifically.
 
 ## Core Architecture
 
@@ -109,27 +84,25 @@ The architecture represents a **living codebase** where users interact directly 
                           |                       |
                           v                       v
 +-------------------------+     +-----------------------------------+
-|      FastAPI Server     |     |        Background Workers         |
-|  (main.py - Central Hub)|---->|     (Huey Consumer + Tasks)       |
+|      HTTP Server        |     |        Background Workers         |
 +-------------------------+     +-----------------------------------+
                           |
                           v
 +-------------------------------------------------------------------+
 |                      Core Agent Layer                              |
-|                  (Valor Agent - PydanticAI)                        |
+|                      (Valor Agent)                                 |
 +-------------------------+-----------------------+------------------+
                           |                       |
                           v                       v
 +-------------------------+     +-----------------------------------+
 |      Tool Layer         |     |          MCP Servers              |
-|   (PydanticAI Tools)    |     |    (Claude Code Integration)      |
 +-------------------------+     +-----------------------------------+
                           |                       |
                           +----------+------------+
                                      v
 +-------------------------------------------------------------------+
 |                    Data Persistence Layer                          |
-|                   (SQLite with WAL Mode)                           |
+|                        (SQLite)                                    |
 +-------------------------------------------------------------------+
 ```
 
@@ -149,12 +122,16 @@ The architecture represents a **living codebase** where users interact directly 
 - Consider edge cases and failure modes
 - Prioritize robust solutions over quick fixes
 
-### 3. Intelligent Systems Over Rigid Patterns
-**Principle**: Use LLM intelligence instead of keyword matching.
-- Natural language understanding drives behavior
-- Context-aware decision making
-- Flexible, adaptive responses
-- No rigid command structures
+### 3. Match the Approach to the Context Boundary
+**Principle**: An LLM's competency is bounded by its context. Choose the right tool for the scope.
+
+- **Keyword/exact match**: Best for precise lookups, known identifiers, structured queries
+- **RAG/embeddings**: Required when relevant information exceeds context limits
+- **LLM reasoning**: Effective when all necessary context fits in the window
+
+The danger is LLM confidence without competency - the model sounds certain but the answer isn't in its context. Always ask: does the model have access to the information needed to answer correctly?
+
+When scope is small and context is complete, let the LLM reason naturally. When scope is large, use retrieval first. Don't force LLM reasoning on problems that need search, and don't add retrieval overhead when simple logic suffices.
 
 ### 4. Mandatory Commit and Push Workflow
 **Principle**: Always commit and push changes at task completion.
@@ -162,30 +139,85 @@ The architecture represents a **living codebase** where users interact directly 
 - Clear, descriptive commit messages
 - Push to remote for availability
 
+### 5. Context Collection and Management
+**Principle**: Context is the lifeblood of agentic systems. Without proper context, even the most capable model makes poor decisions.
+
+**Why this matters:**
+- An agent making 10+ tool calls in sequence loses track of why it started
+- Sub-agents spawned without context repeat work or contradict the parent
+- Long conversations drift from the original intent without anchoring
+- Tool results must be synthesized, not just appended to history
+
+**Context categories to maintain:**
+- **Task context**: What are we trying to accomplish? What's the success criteria?
+- **Conversation context**: What has been discussed? What decisions were made?
+- **Workspace context**: What project? What files are relevant? What's the current state?
+- **Tool context**: What tools have been called? What were the results? What failed?
+
+**Implementation requirements:**
+- Explicitly pass context when spawning sub-agents (don't assume inheritance)
+- Summarize and compress context before it exceeds limits (don't truncate blindly)
+- Track the "why" alongside the "what" for every significant action
+- Maintain a task-level summary that persists across tool calls
+
+### 6. Tool and MCP Selection
+**Principle**: Loading all available tools pollutes context and degrades performance. Tools must be selectively exposed based on task relevance.
+
+**The problem:**
+- MCP servers like GitHub, Notion, or Stripe expose 20-50+ tools each
+- Loading all tools consumes 40-60k tokens before any work begins
+- The model wastes reasoning capacity parsing irrelevant tool schemas
+- More tools = more confusion about which tool to use
+
+**The solution - dynamic tool filtering:**
+- Analyze the incoming task before loading tools
+- Load only the MCP servers relevant to the task domain
+- Within each server, filter to only the tools likely needed
+- Tools like [mcproxy](https://github.com/team-attention/mcproxy) demonstrate this pattern
+
+**Implementation approach:**
+- Maintain a tool registry with categorization and descriptions
+- Use a lightweight classifier to match tasks to tool categories
+- Start with minimal tools, expand only if the agent requests more
+- Cache tool schemas to avoid repeated loading overhead
+
+**Example flow:**
+```
+User: "Check if there are any critical errors in Sentry"
+→ Classifier identifies: monitoring/error-tracking domain
+→ Load: Sentry MCP (filtered to read-only tools)
+→ Skip: GitHub, Stripe, Notion, Linear MCPs entirely
+→ Result: ~5 tools loaded instead of 100+
+```
+
 ## Technology Stack
 
-| Component | Technology | Purpose |
-|-----------|------------|---------|
-| **Web Framework** | FastAPI v0.104.0+ | Async web framework with OpenAPI docs |
-| **AI Framework** | PydanticAI v0.0.13+ | Type-safe agent framework |
+**Required:**
+| Component | Technology | Why |
+|-----------|------------|-----|
 | **AI Engine** | Anthropic Claude | Primary reasoning engine |
-| **Database** | SQLite with WAL Mode | Zero-config, excellent concurrency |
-| **Task Queue** | Huey | Lightweight, SQLite-backed |
-| **Messaging** | Telegram (Telethon) | Real user account interface |
+| **Local LLMs** | Ollama | Lightweight tasks: sentiment, labeling, transcription, classification |
+| **Messaging** | Telegram (Telethon) | Real user account, not a bot |
+| **Database** | SQLite | Simple, zero-config persistence |
 | **Tool Protocol** | MCP | Model Context Protocol for tools |
-| **Package Manager** | UV | Fast, modern Python packaging |
 
-## Performance Characteristics
+**When to use local vs Claude:**
+- **Local (Ollama)**: Sentiment analysis, text classification, labeling, transcription, simple extraction, test judging - tasks that are repetitive, low-stakes, or need fast iteration
+- **Claude**: Complex reasoning, code generation, multi-step planning, nuanced decisions - tasks requiring deep understanding
 
-| Metric | Target | Achieved |
-|--------|--------|----------|
-| Response Latency (P95) | <2s | 1.8s |
-| Streaming Interval | 2-3s | 2.21s |
-| Context Compression | >95% | 97-99% |
-| Memory Baseline | <50MB | 23-26MB |
-| Concurrent Users | 50+ | 75 tested |
-| Tool Success Rate | >95% | 97.3% |
-| Uptime | 99.9% | 99.94% |
+**Current choices** (not prescriptive):
+- PydanticAI for agent framework
+- FastAPI for HTTP server
+- UV for package management
+
+## Performance Targets
+
+| Metric | Target |
+|--------|--------|
+| Response Latency (P95) | <2s |
+| Streaming Interval | 2-3s |
+| Context Compression | >95% |
+| Memory Baseline | <50MB |
 
 ---
 
@@ -286,140 +318,63 @@ TELEGRAM_ALLOW_DMS=true
 
 ---
 
-# Subagent System
+# Tools, Workflows, and Skills
 
-## The Problem: Context Pollution
+## Philosophy
 
-Loading all MCP tools (Stripe, Sentry, Render, GitHub, Notion, Linear, etc.) into the main agent would consume 60k+ tokens of context with tool schemas, leaving minimal space for actual conversation and degrading performance.
+Valor does not manage its own sub-agent system. Instead, Valor provides **well-documented tools, workflows, and skills** that Claude Code orchestrates via the SDK.
 
-## The Solution: Specialized Subagents
+Claude Code decides when and how to spawn sub-agents. Valor's job is to make the available capabilities clear and easy to use.
 
-Each subagent:
-- **Activates on-demand** via intelligent routing
-- **Maintains focused context** with only domain-specific tools
-- **Has specialized expertise** through domain-focused prompts
-- **Operates independently** without polluting main agent context
-- **Caches for reuse** after first activation
+## What Valor Provides
 
-## Architecture
+### Tools (via MCP Servers)
+Individual operations that can be composed into larger workflows:
+- **Stripe**: Payment processing, subscriptions, billing
+- **Sentry**: Error monitoring, performance analysis
+- **GitHub**: Repository operations, PRs, issues
+- **Render**: Deployment, infrastructure management
+- **Notion**: Knowledge base, documentation
+- **Linear**: Project management, issue tracking
 
-```
-User Query
-    |
-    v
-Main Agent (Valor) - Clean Context (<10k tokens)
-    |
-    v
-Routing Layer
-    |-- Task Analyzer
-    |-- MCP Library (auth-aware)
-    +-- Multi-Model Router
-    |
-    v
-+-----------------------------------------------+
-|         Specialized Execution Agents           |
-|-----------------------------------------------|
-| Claude Code Subagents (Interactive)           |
-|   |-- Stripe (payments, billing)              |
-|   |-- Sentry (errors, monitoring)             |
-|   |-- GitHub (code, PRs, issues)              |
-|   |-- Render (infrastructure, deployment)     |
-|   |-- Notion (knowledge, docs)                |
-|   +-- Linear (projects, issues)               |
-|                                               |
-| Gemini CLI (Autonomous)                       |
-|   |-- Batch operations                        |
-|   |-- Background maintenance                  |
-|   +-- Cost-optimized tasks                    |
-+-----------------------------------------------+
-    |
-    v
-Domain-Specific Tools & MCP Servers
-```
+### Workflows
+Multi-step processes that combine tools for common tasks:
+- Code review workflow: fetch PR → analyze changes → check tests → post review
+- Incident response: check Sentry → identify cause → create fix → deploy
+- Research workflow: search web → summarize → store in Notion
 
-## Available Subagents
+### Skills
+Higher-level capabilities with clear invocation patterns:
+- `/commit` - stage, commit, and push changes
+- `/review-pr` - comprehensive PR review
+- `/search` - web search with context
 
-### 1. Stripe Subagent
-- **Domain**: Payment Processing & Financial Operations
-- **Tools**: 18+ Stripe MCP tools
-- **Context**: <15k tokens
-- **Capabilities**: Payment processing, subscription management, billing, refunds, revenue reporting
+## How Claude Code Uses These
 
-### 2. Sentry Subagent
-- **Domain**: Error Monitoring & Performance Analysis
-- **Tools**: 14+ Sentry MCP tools
-- **Context**: <20k tokens
-- **Capabilities**: Error investigation, performance monitoring, alert triage, stack traces
+When running Valor through the Claude Code SDK:
+1. **Tools are registered** as MCP servers available to Claude Code
+2. **Workflows are documented** so Claude Code knows common patterns
+3. **Skills provide shortcuts** for frequent operations
+4. **Claude Code decides** when to spawn sub-agents for parallel work
 
-### 3. Render Subagent
-- **Domain**: Infrastructure & Deployment Operations
-- **Tools**: 16+ Render MCP tools
-- **Context**: <25k tokens
-- **Capabilities**: Service deployment, infrastructure monitoring, log analysis, scaling
+We can provide light suggestions (e.g., "this task might benefit from parallel execution") but Claude Code handles the orchestration.
 
-### 4. GitHub Subagent
-- **Domain**: Code Repository & Collaboration
-- **Tools**: 30+ GitHub MCP tools
-- **Context**: <30k tokens
-- **Capabilities**: PR management, code review, issue tracking, CI/CD workflows
+## Documentation Requirements
 
-### 5. Notion Subagent
-- **Domain**: Knowledge Management & Documentation
-- **Tools**: 15+ Notion MCP tools
-- **Context**: <20k tokens
-- **Capabilities**: Documentation, knowledge search, database management
-
-### 6. Linear Subagent
-- **Domain**: Project Management & Issue Tracking
-- **Tools**: 25+ Linear MCP tools
-- **Context**: <20k tokens
-- **Capabilities**: Issue creation, sprint planning, roadmap management
-
-## Context Efficiency Comparison
-
-| Configuration | Total Tools | Context Size | Status |
-|--------------|-------------|--------------|--------|
-| All-in-One | 118+ tools | 100k+ tokens | Context pollution |
-| Main Agent Only | 6 core tools | <10k tokens | Clean baseline |
-| Main + On-Demand Subagents | 6-36 tools | 10k-40k tokens | **Our approach** |
-
-## Key Benefits
-
-- **Context Efficiency**: Main agent uses <10k tokens, subagents lazy-load 10-40k
-- **Cost Optimization**: 60% savings via model selection (haiku/sonnet/opus per domain)
-- **Domain Expertise**: Each subagent has specialized persona and knowledge
-- **Security**: Granular permissions per subagent/tool
-- **Flexibility**: Multiple execution paths (Claude Code + Gemini CLI)
+For Claude Code to effectively use these capabilities:
+- Every tool must have clear input/output schemas
+- Every workflow must document its steps and when to use it
+- Every skill must explain what it does and its prerequisites
+- Error cases must be documented with recovery suggestions
 
 ---
 
-# Tool Quality Standards
+# Tool Implementation Patterns
 
-## Quality Scoring Framework
-
-| Score Range | Tier | Status | Requirements |
-|-------------|------|--------|--------------|
-| **9.0-10.0** | Gold Standard | Reference Implementation | Perfect test coverage, sophisticated error handling |
-| **7.0-8.9** | Production Ready | Meets All Requirements | Comprehensive error handling, >80% test coverage |
-| **5.0-6.9** | Needs Improvement | Requires Updates | Basic functionality, incomplete error handling |
-| **<5.0** | Critical Issues | Immediate Attention | Major functionality gaps |
-
-## Weighted Scoring Components
-
-```
-Implementation Quality: 30%
-Error Handling: 25%
-Test Coverage: 20%
-Documentation: 15%
-Performance: 10%
-```
-
-## Gold Standard Requirements
-
-### 1. Sophisticated Error Categorization
+## Error Categorization
 
 ```python
-# GOLD STANDARD: Hierarchical error handling
+# Hierarchical error handling
 ERROR_CATEGORIES = {
     1: "Configuration Errors",     # Missing API keys
     2: "Validation Errors",        # Invalid inputs
@@ -430,7 +385,7 @@ ERROR_CATEGORIES = {
 }
 ```
 
-### 2. Pre-Validation for Efficiency
+## Pre-Validation
 
 ```python
 # Validate inputs BEFORE expensive operations
@@ -440,7 +395,7 @@ if file_extension not in valid_extensions:
     return f"Error: Unsupported format '{file_extension}'"
 ```
 
-### 3. Three-Layer Architecture
+## Three-Layer Architecture
 
 ```
 Layer 1: Agent Tool (Context Extraction)
@@ -450,7 +405,7 @@ Layer 2: Implementation (Core Logic)
 Layer 3: MCP Tool (Claude Code Integration)
 ```
 
-### 4. Context-Aware Behavior
+## Context-Aware Behavior
 
 Tools adapt their behavior based on:
 - Different prompts for different use cases
@@ -458,7 +413,7 @@ Tools adapt their behavior based on:
 - Context injection for relevance
 - Adaptive response length limits
 
-## Performance Standards
+## Operation Timing Targets
 
 | Operation Type | Target | Maximum |
 |----------------|--------|---------|

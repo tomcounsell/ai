@@ -28,7 +28,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ./scripts/stop.sh
 
 # Alternative: Run Python scripts directly
-python demo_server.py        # Demo server
 python scripts/startup.py    # Production startup
 python telegram_bot.py       # Telegram bot
 python scripts/shutdown.py   # Clean shutdown
@@ -126,11 +125,9 @@ The system follows a **Living Codebase** philosophy with these key architectural
 
 3. **Message Processing Pipeline** (`integrations/telegram/`)
    - 5-step processing: Security → Type routing → Context → Response → Delivery
-   - 91% complexity reduction through component isolation
    - Graceful error handling and recovery
 
 4. **Tool Ecosystem** (`tools/`)
-   - Quality framework: 9.8/10 gold standard implementation
    - Test judge: AI-powered test quality assessment
    - Search, image generation, knowledge management tools
    - All tools follow intelligent context-aware patterns (no keyword matching)
@@ -265,9 +262,14 @@ python scripts/telegram_auth.py
 - Resource monitoring includes auto-restart on failure
 
 ### Quality Standards
-- All new tools must meet 9.8/10 quality standard
-- Comprehensive error handling with categorized errors
+- Error handling with categorized errors
 - Performance metrics tracked for all operations
 - Documentation required for all public interfaces
-- after every fix, restart the server
-- There are API keys in the .env file.
+- After every fix, restart the server
+- There are API keys in the .env file
+
+### Documentation Standards
+- **Always clearly separate what is built vs what is planned** in documentation
+- Features that exist should be documented as current state
+- Features that are planned/roadmap should be clearly marked as such
+- Never mix aspirational descriptions with actual implementation status
