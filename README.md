@@ -1,65 +1,80 @@
-# AI System - Clean Rebuild
+# Valor AI System
 
-## Status: 🏗️ Rebuilding
+A Claude Code-powered AI coworker that runs on its own machine.
 
-Complete system rebuild in progress. All legacy code removed.
+## What Is This?
+
+Valor is an AI coworker - not an assistant, not a tool, but a colleague with its own Mac, its own work, and its own agency. The supervisor assigns work and provides direction. Valor executes autonomously, reaching out via Telegram only when necessary.
+
+## Architecture
+
+This system uses [Clawdbot](https://github.com/clawdbot/clawdbot) as the messaging and gateway layer, with custom skills for business integrations.
+
+```
+Supervisor (Telegram) → Clawdbot Gateway → Claude Code → Skills
+                                                           ├── Stripe
+                                                           ├── Sentry
+                                                           ├── GitHub
+                                                           ├── Render
+                                                           ├── Notion
+                                                           └── Linear
+```
 
 ## Quick Start
 
-### One-Command Telegram Bot
+### 1. Install Clawdbot
 
 ```bash
-# Run everything: auth (if needed) → start bot → tail logs
-./scripts/telegram_run.sh
+npm install -g clawdbot@latest
+clawdbot onboard --install-daemon
 ```
 
-### Shell Alias Setup
-
-Add this to your shell config (`~/.zshrc` or `~/.bash_profile`):
+### 2. Configure
 
 ```bash
-alias valor="cd /Users/valorengels/src/ai && ./scripts/telegram_run.sh"
+# Copy persona to Clawdbot workspace
+cp config/SOUL.md ~/clawd/SOUL.md
+
+# Configure Clawdbot
+cp config/clawdbot/clawdbot.json ~/.clawdbot/clawdbot.json
+# Edit with your API keys and Telegram credentials
 ```
 
-Then just type `valor` from anywhere to start your AI system!
-
-### Other Commands
+### 3. Start
 
 ```bash
-# Start production server
-./scripts/start.sh
-
-# Start demo server (no API keys needed)
-./scripts/start.sh --demo
-
-# View logs
-./scripts/logs.sh
-
-# Stop all services
-./scripts/stop.sh
+clawdbot start
 ```
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `clawdbot start` | Start the daemon |
+| `clawdbot stop` | Stop the daemon |
+| `clawdbot status` | Check status |
+| `clawdbot logs` | View logs |
 
 ## Documentation
 
-See [`docs/`](docs/) for complete system documentation:
+- **[CLAUDE.md](CLAUDE.md)** - Development guide
+- **[docs/CONSOLIDATED_DOCUMENTATION.md](docs/CONSOLIDATED_DOCUMENTATION.md)** - Complete system documentation
+- **[docs/CLAWDBOT_MIGRATION_PLAN.md](docs/CLAWDBOT_MIGRATION_PLAN.md)** - Migration details
+- **[docs/SKILLS_MIGRATION.md](docs/SKILLS_MIGRATION.md)** - Skills implementation guide
 
-### Key Documents
-- **[Architecture Overview](docs/architecture/system-overview.md)** - System design and components
-- **[PRD](docs/PRD-AI-System-Rebuild.md)** - Product requirements and roadmap
-- **[CLAUDE.md](CLAUDE.md)** - Development guide and commands
-- **[System Status](docs/SYSTEM_STATUS.md)** - Current implementation status
-- **[Subagents](docs/subagents/)** - Domain-specific agent PRDs
+## Skills
 
-### Recent Architecture Decisions
-- **[MCP Library & Session Management](docs/MCP-Library-Requirements.md)** - Intelligent MCP server selection
-- **[Gemini CLI Integration](docs/architecture/gemini-cli-integration-analysis.md)** - Multi-model agent router
-- **[Skills vs Subagents](docs/architecture/skills-vs-subagents-analysis.md)** - Claude Code subagent approach
-- **[Agent-SOP Evaluation](docs/architecture/agent-sop-evaluation.md)** - Structured workflow framework
+Custom Clawdbot skills for business integrations:
+
+| Skill | Purpose |
+|-------|---------|
+| **Stripe** | Payment processing, subscriptions, billing |
+| **Sentry** | Error monitoring, performance analysis |
+| **GitHub** | Repository operations, PRs, issues |
+| **Render** | Deployment, infrastructure management |
+| **Notion** | Knowledge base, documentation |
+| **Linear** | Project management, issue tracking |
 
 ## Contact
 
 Valor Engels
-
----
-
-*Clean slate. Zero legacy. 9.8/10 standard.*
