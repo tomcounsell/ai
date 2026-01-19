@@ -1,9 +1,9 @@
 # Clawdbot Migration Plan
 
-**Document Version**: 3.0
+**Document Version**: 4.0
 **Created**: 2025-01-19
 **Updated**: 2026-01-19
-**Status**: Phase 5 Complete - All Features Implemented
+**Status**: Phase 6 Complete - Agentic Philosophy Integrated
 
 ---
 
@@ -26,6 +26,10 @@
 | 4 | Stripe Skill | **Done** | 9 tools for payment processing |
 | 4 | Render Skill | **Done** | 9 tools for deployment |
 | 5 | Daydream Cron | **Done** | 6-step daily maintenance process |
+| 6 | Agentic Philosophy | **Done** | Core Four, Thread Types, Validation Loops in SOUL.md |
+| 6 | /pthread Skill | **Done** | Parallel thread execution, auto-parallelization |
+| 6 | /sdlc Skill | **Done** | Autonomous Plan→Build→Test→Review→Ship workflow |
+| 6 | .claude/README.md | **Done** | Philosophy docs, thread types, skills reference |
 
 ---
 
@@ -65,6 +69,8 @@ Telegram → Python Bridge (Telethon) → clawdbot agent --local → Claude API
 | `scripts/valor-service.sh` | Service management |
 | `~/Library/LaunchAgents/com.valor.bridge.plist` | Auto-start service |
 | `~/clawd/skills/` | All Clawdbot skills |
+| `.claude/commands/` | Claude Code skills (/prime, /pthread, /sdlc) |
+| `.claude/README.md` | Agentic philosophy documentation |
 
 ---
 
@@ -212,6 +218,81 @@ Cloud infrastructure and deployment management.
 
 Daily autonomous maintenance process scheduled at 6 AM Pacific.
 
+---
+
+## Phase 6: Agentic Philosophy & Advanced Skills (Complete)
+
+Enhanced system with agentic engineering principles and autonomous workflows.
+
+### Core Four Framework (in SOUL.md)
+
+Everything reduces to four primitives:
+
+| Primitive | Description |
+|-----------|-------------|
+| **Context** | What information the agent has access to |
+| **Model** | The intelligence powering the agent |
+| **Prompt** | The instructions driving behavior |
+| **Tools** | The capabilities the agent can invoke |
+
+### Thread-Based Engineering
+
+| Thread Type | Description | Use Case |
+|-------------|-------------|----------|
+| **Base** | Single prompt → work → review | Simple tasks |
+| **P-Thread** | Multiple agents in parallel | Independent subtasks |
+| **C-Thread** | Chained phases with checkpoints | Large changes |
+| **F-Thread** | Same prompt to multiple agents | Exploring approaches |
+| **B-Thread** | Agents orchestrating other agents | Complex orchestration |
+| **L-Thread** | Extended autonomous work | Long-running tasks |
+
+### /pthread Skill
+
+Parallel thread execution with auto-parallelization:
+
+- **Triggers**: Multiple independent searches, multi-file analysis, exploration
+- **Patterns**: Fusion threads (same goal, multiple agents)
+- **Aggregation**: Merge, Best-of-N, Synthesize, Deduplicate
+- **Integration**: Ralph Wiggum pattern (don't stop until aggregation complete)
+
+### /sdlc Skill
+
+Autonomous AI Developer Workflow:
+
+```
+Plan → Build → Test → Review → Ship
+         ↑           │
+         └───────────┘ (loop on failure)
+```
+
+- **Quality gates** at each phase
+- **Auto loop-back** on test failures (up to 5 iterations)
+- **Self-verification** via validation loops
+- **Completion criteria**: All gates pass, code pushed
+
+### Validation Loops (Ralph Wiggum Pattern)
+
+Agents verify their own work:
+
+1. Agent attempts completion
+2. Validation runs (tests, linting, checks)
+3. If fail → continue with feedback
+4. If pass → complete
+
+Creates closed-loop systems that self-correct.
+
+### Key Philosophy
+
+*"Master the agent, master engineering."*
+
+*"Scale your compute to scale your impact."*
+
+*"Build the system that builds the system."*
+
+---
+
+## Phase 5: Daydream Details
+
 ### Steps
 
 | Step | Name | Description |
@@ -279,6 +360,16 @@ State persisted to `~/.clawd/skills/daydream/state.json`:
 - [x] Resumability with state persistence
 - [x] Daily report step included
 
+### Phase 6: Agentic Philosophy (Complete)
+
+- [x] SOUL.md enhanced with Core Four Framework
+- [x] Thread-Based Engineering documented (6 thread types)
+- [x] /pthread skill created (parallel execution)
+- [x] /sdlc skill created (autonomous dev workflow)
+- [x] Validation Loops (Ralph Wiggum Pattern) documented
+- [x] .claude/README.md updated with philosophy reference
+- [x] Key wisdom quotes integrated
+
 ---
 
 ## Service Commands
@@ -330,6 +421,8 @@ If issues arise:
 
 ## Skills Directory Summary
 
+### Clawdbot Skills (`~/clawd/skills/`)
+
 ```
 ~/clawd/skills/
 ├── daydream/     # 6-step daily maintenance (cron)
@@ -343,6 +436,23 @@ If issues arise:
 
 Total: 454 JavaScript files, 1085 files overall
 ```
+
+### Claude Code Skills (`.claude/commands/`)
+
+```
+.claude/commands/
+├── prime.md          # Codebase primer and context loader
+├── pthread.md        # Parallel thread execution
+├── sdlc.md           # Autonomous dev workflow (Plan→Build→Test→Ship)
+└── audit-next-tool.md # Tool quality audits
+```
+
+| Skill | Purpose |
+|-------|---------|
+| `/prime` | Load codebase context and architecture |
+| `/pthread` | Scale compute via parallel agent execution |
+| `/sdlc` | Autonomous Plan→Build→Test→Review→Ship workflow |
+| `/audit-next-tool` | Quality audits for tools |
 
 ---
 
