@@ -364,29 +364,149 @@ clawdbot telegram status
 ## Project Structure
 
 ```
-ai/
-|-- .claude/                  # Claude Code configuration
-|   |-- agents/               # Subagent definitions for Claude Code
-|   |-- commands/             # Skill definitions (/prime, /audit-next-tool, etc.)
-|   |-- settings.local.json   # Local Claude Code settings
-|   +-- README.md
-|-- agents/
-|   +-- valor/
-|       |-- agent.py          # Main ValorAgent
-|       +-- persona.md        # Persona definition
-|-- config/
-|   |-- workspace_config.json # Multi-workspace config
-|   +-- telegram_groups.json  # Group behavior config
-|-- data/                     # SQLite databases
-|-- docs/                     # Documentation
-|-- integrations/
-|   +-- telegram/             # Telegram handlers (via Clawdbot)
-|-- logs/                     # Log files
-|-- tests/                    # Test suites
-|-- tools/                    # Tool implementations
-|   +-- mcp/                  # Custom MCP servers
-+-- utilities/                # Shared utilities
+ai/                              # This repository (Valor's codebase)
+├── .claude/                     # Claude Code configuration
+│   ├── commands/                # Slash command skills (/prime, /pthread, /sdlc)
+│   ├── agents/                  # Subagent definitions
+│   └── README.md                # Philosophy and skills reference
+├── bridge/                      # Telegram-Clawdbot bridge
+│   └── telegram_bridge.py       # Telethon user account bridge
+├── config/                      # Configuration files
+│   ├── SOUL.md                  # Valor persona (copy to ~/clawd/)
+│   └── telegram_groups.json     # Group behavior config
+├── scripts/                     # Service management
+│   └── valor-service.sh         # start/stop/restart/status
+├── logs/                        # Runtime logs
+├── data/                        # Session files, state
+├── docs/                        # Documentation
+├── CLAUDE.md                    # This file
+└── README.md                    # Project overview
+
+~/clawd/                         # Clawdbot workspace (external)
+├── SOUL.md                      # Active Valor persona
+└── skills/                      # Clawdbot skills
+    ├── sentry/                  # Error monitoring (8 tools)
+    ├── github/                  # Repository ops (10 tools)
+    ├── linear/                  # Project management (9 tools)
+    ├── notion/                  # Documentation (8 tools)
+    ├── stripe/                  # Payments (9 tools)
+    ├── render/                  # Deployment (9 tools)
+    ├── daydream/                # Daily maintenance cron
+    └── self-manage/             # Self-management utilities
 ```
+
+---
+
+## How to Add New Features
+
+### Adding a Clawdbot Skill
+
+Skills live in `~/clawd/skills/<skill-name>/` with this structure:
+
+```
+~/clawd/skills/my-skill/
+├── manifest.json     # Metadata, tools list, permissions, env requirements
+├── index.js          # Skill entry point (loads tools)
+├── prompts/
+│   └── system.md     # Skill-specific system prompt
+├── tools/
+│   ├── tool_one.js   # Individual tool implementation
+│   └── tool_two.js   # Each tool exports: name, description, parameters, execute
+└── README.md         # Documentation
+```
+
+**manifest.json template:**
+```json
+{
+  "name": "my-skill",
+  "version": "1.0.0",
+  "description": "What this skill does",
+  "model": "sonnet",
+  "tools": ["tool_one", "tool_two"],
+  "requires": {
+    "env": ["API_KEY_NAME"],
+    "dependencies": ["axios"]
+  },
+  "permissions": {
+    "accept": ["list_*", "get_*"],
+    "prompt": ["create_*", "update_*"],
+    "reject": ["delete_*"]
+  }
+}
+```
+
+**Tool template (tools/tool_one.js):**
+```javascript
+module.exports = {
+  name: 'tool_one',
+  description: 'What this tool does',
+  parameters: {
+    type: 'object',
+    properties: {
+      param1: { type: 'string', description: 'Parameter description' }
+    },
+    required: ['param1']
+  },
+  async execute({ param1 }) {
+    // Implementation
+    return { success: true, data: result };
+  }
+};
+```
+
+### Adding a Claude Code Skill (Slash Command)
+
+Claude Code skills live in `.claude/commands/<skill>.md`:
+
+```markdown
+# Skill Name
+
+Description of what this skill does.
+
+## When to Use
+
+- Trigger condition 1
+- Trigger condition 2
+
+## Implementation
+
+[Instructions for Claude Code to follow when skill is invoked]
+```
+
+**Examples:**
+- `/prime` - Codebase onboarding
+- `/pthread` - Parallel thread execution
+- `/sdlc` - Autonomous dev workflow
+
+### Adding to the Telegram Bridge
+
+The bridge is in `bridge/telegram_bridge.py`. To add new message handling:
+
+1. Add pattern matching in the message handler
+2. Call appropriate Clawdbot skill or tool
+3. Format and return response
+
+### Adding New Documentation
+
+1. Add to `docs/` directory
+2. Update `docs/CLAWDBOT_MIGRATION_PLAN.md` if it's a new capability
+3. Update this file (CLAUDE.md) if it affects development workflow
+
+### Workflow for New Features
+
+1. **Plan**: Understand what you're building and where it fits
+2. **Implement**: Create the skill/tool/feature
+3. **Test**: Verify it works (manually or with tests)
+4. **Document**: Update relevant docs
+5. **Commit**: `git add . && git commit -m "Add feature X" && git push`
+
+### Permission Model for Tools
+
+| Pattern | Behavior | Use For |
+|---------|----------|---------|
+| `accept` | Auto-approve | Read operations (list, get, search) |
+| `prompt` | Ask user | Write operations (create, update) |
+| `reject` | Block | Dangerous operations (delete, destroy) |
 
 ## Quick Reference
 

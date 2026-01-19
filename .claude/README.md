@@ -41,10 +41,18 @@ Skills in `.claude/commands/` define reusable workflows:
 
 | Skill | Purpose |
 |-------|---------|
-| `/prime` | Load codebase context and architecture |
+| `/prime` | **Start here** - Codebase onboarding for new sessions |
 | `/pthread` | Scale compute via parallel agent execution |
 | `/sdlc` | Autonomous Plan→Build→Test→Ship workflow |
 | `/audit-next-tool` | Quality audits for tools |
+
+### /prime - Codebase Onboarding (NEW SESSIONS START HERE)
+
+Run `/prime` at the start of any session to understand:
+- Current architecture (Clawdbot + Python bridge)
+- Where things live (this repo vs ~/clawd/skills/)
+- How to add new features
+- Key files to read
 
 ### /pthread - Parallel Threads
 
