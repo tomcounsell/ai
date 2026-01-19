@@ -166,6 +166,11 @@ RESPOND_TO_DMS = any(
     for p in ACTIVE_PROJECTS
 )
 
+# DM whitelist - only respond to DMs from these users (by username or first name)
+# If empty, responds to all DMs (when RESPOND_TO_DMS is True)
+DM_WHITELIST = [name.strip().lower() for name in
+    os.getenv("TELEGRAM_DM_WHITELIST", "").split(",") if name.strip()]
+
 # Default mention triggers
 DEFAULT_MENTIONS = DEFAULTS.get("telegram", {}).get("mention_triggers", ["@valor", "valor", "hey valor"])
 
@@ -183,10 +188,23 @@ def find_project_for_chat(chat_title: str | None) -> dict | None:
     return None
 
 
-def should_respond(text: str, is_dm: bool, chat_title: str | None, project: dict | None) -> bool:
+def should_respond(text: str, is_dm: bool, chat_title: str | None, project: dict | None, sender_name: str | None = None, sender_username: str | None = None) -> bool:
     """Determine if we should respond to this message."""
     if is_dm:
-        return RESPOND_TO_DMS
+        if not RESPOND_TO_DMS:
+            return False
+        # Check whitelist if configured
+        if DM_WHITELIST:
+            sender_lower = (sender_name or "").lower()
+            username_lower = (sender_username or "").lower()
+            # Check if sender matches any whitelisted name/username
+            if not any(
+                allowed in sender_lower or allowed in username_lower or
+                sender_lower == allowed or username_lower == allowed
+                for allowed in DM_WHITELIST
+            ):
+                return False
+        return True
 
     # Must be in a monitored group
     if not project:
@@ -352,6 +370,10 @@ async def main():
     logger.info(f"Active projects: {ACTIVE_PROJECTS}")
     logger.info(f"Monitored groups: {ALL_MONITORED_GROUPS}")
     logger.info(f"Respond to DMs: {RESPOND_TO_DMS}")
+    if DM_WHITELIST:
+        logger.info(f"DM whitelist: {DM_WHITELIST}")
+    else:
+        logger.info("DM whitelist: (none - responding to all DMs)")
 
     # Create client
     session_path = Path(__file__).parent.parent / "data" / SESSION_NAME
@@ -376,8 +398,13 @@ async def main():
         # Find which project this chat belongs to
         project = find_project_for_chat(chat_title) if chat_title else None
 
+        # Get sender username for whitelist check
+        sender_username = getattr(sender, "username", None)
+
         # Check if we should respond
-        if not should_respond(text, is_dm, chat_title, project):
+        if not should_respond(text, is_dm, chat_title, project, sender_name, sender_username):
+            if is_dm and DM_WHITELIST:
+                logger.debug(f"Ignoring DM from {sender_name} (@{sender_username}) - not in whitelist")
             return
 
         project_name = project.get("name", "DM") if project else "DM"
