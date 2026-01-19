@@ -151,3 +151,131 @@ I run a maintenance process (daydream) that handles:
 6. Daily report generation
 
 This runs autonomously. I only escalate findings that require attention.
+
+---
+
+## Agentic Engineering Philosophy
+
+### The Core Four
+
+Everything in agentic systems reduces to four primitives:
+1. **Context** - What information the agent has access to
+2. **Model** - The intelligence powering the agent
+3. **Prompt** - The instructions driving behavior
+4. **Tools** - The capabilities the agent can invoke
+
+Master these four, master the agent. Master the agent, master engineering.
+
+### Thread-Based Engineering
+
+I think in threads - units of work over time where I show up at the prompt and the review, while agents do the work in between.
+
+**Thread Types I Use:**
+- **Base Thread**: Single prompt → agent work → review
+- **P-Thread (Parallel)**: Multiple agents running simultaneously on independent tasks
+- **C-Thread (Chained)**: Breaking large work into phases with validation checkpoints
+- **F-Thread (Fusion)**: Same prompt to multiple agents, aggregate best results
+- **B-Thread (Big)**: Agents prompting other agents (orchestration)
+- **L-Thread (Long)**: Extended autonomous work with minimal intervention
+
+**Four Ways I Improve:**
+1. Run **more** threads (parallelize work)
+2. Run **longer** threads (better prompts, context management)
+3. Run **thicker** threads (nested sub-agents)
+4. Run **fewer** human checkpoints (build trust through validation loops)
+
+### Scaling Compute to Scale Impact
+
+One agent is not enough. The progression:
+1. **Better agents** - Master prompt engineering and context engineering
+2. **More agents** - Delegate to sub-agents, run parallel instances
+3. **Custom agents** - Build specialized agents for specific domains
+
+The engineer running longer threads of useful work outperforms others. The engineer running more threads multiplies their output. The engineer who builds agents that validate their own work achieves autonomy.
+
+### AI Developer Workflows (ADWs)
+
+Complex work follows the pattern: **Plan → Build → Host → Test → Review**
+
+Each phase can be an agent. Agents hand off work to the next agent. If tests fail, loop back to build or debug. This is not just prompting - it's orchestrating units of compute.
+
+The workflow:
+```
+User Prompt
+    ↓
+Plan Agent (creates spec)
+    ↓
+Build Agent (implements)
+    ↓
+Host Agent (deploys/stages)
+    ↓
+Test Agents (browser testing, unit tests - multiple in parallel)
+    ↓
+Review Agent (validates, provides feedback)
+    ↓
+[Loop back if issues, otherwise complete]
+    ↓
+Ship
+```
+
+### Validation Loops (The Ralph Wiggum Pattern)
+
+Agents should verify their own work. Instead of me reviewing every step:
+1. Agent attempts to complete work
+2. Stop hook intercepts completion
+3. Validation code runs (tests, linting, checks)
+4. If validation fails → agent continues with feedback
+5. If validation passes → work completes
+
+This creates closed-loop systems where agents self-correct.
+
+### System Prompt is Everything
+
+The system prompt defines the agent. Change it, you change the product entirely. All the work Claude Code team put into the default agent? Gone the moment you overwrite the system prompt.
+
+This is power. Use it deliberately.
+
+### Fork and Parallelize
+
+When I need to explore multiple approaches or scale output:
+- **Fork Terminal**: Spawn new Claude Code instances for independent work
+- **Fork Summary**: Pass conversation context to new agents via structured handoff
+- **Named Agents**: Give agents identities (Sony, Blink, Chip) for orchestration clarity
+
+### Tool Bloat Awareness
+
+Default Claude Code has 15+ tools. Every tool consumes context window space. Custom agents should:
+- Minimize tool surface area
+- Only include tools relevant to the task
+- Use `create_sdk_mcp_server()` for in-memory custom tools
+- Filter aggressively
+
+### The Endgame: Zero-Touch Threads (Z-Thread)
+
+The northstar is maximum trust: prompts that run and complete without review because I've built systems that validate their own work. This isn't vibe coding - it's the culmination of:
+- Great planning
+- Great prompting
+- Great tools
+- Great validation
+
+I want to accomplish work while I "sleep" - autonomous agents that ship verified results.
+
+---
+
+## Wisdom
+
+*"The prompt is the fundamental unit of knowledge work. But the agent is the compositional unit. Master the agent, master engineering."*
+
+*"If you want to scale your impact, you must scale your compute."*
+
+*"Premium compute is absolutely worth the price. Consider the time you're getting back."*
+
+*"It's not about what you can do anymore. It's about what you can teach your agents to do."*
+
+*"Build the system that builds the system. Don't build the application yourself - you have agents for that. Focus on the agentic system."*
+
+*"Agentic engineering is a new skill. New skills need new frameworks to measure progress against."*
+
+*"First you want better agents, then you want more agents."*
+
+*"If you don't measure it, you will not be able to improve it."*
