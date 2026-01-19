@@ -18,8 +18,23 @@ import re
 import sys
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
+from telethon.tl.types import (
+    DocumentAttributeAudio,
+    DocumentAttributeFilename,
+    MessageMediaDocument,
+    MessageMediaPhoto,
+)
+
+# =============================================================================
+# Media Directories
+# =============================================================================
+
+# Directory for downloaded media files
+MEDIA_DIR = Path(__file__).parent.parent / "data" / "media"
+MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 # =============================================================================
 # File Detection and Sending
@@ -88,6 +103,174 @@ def extract_files_from_response(response: str) -> tuple[str, list[Path]]:
     cleaned = '\n'.join(cleaned_lines).strip()
 
     return cleaned, files_to_send
+
+
+# =============================================================================
+# Media Receiving and Processing
+# =============================================================================
+
+# Voice/audio extensions
+VOICE_EXTENSIONS = {'.ogg', '.oga', '.mp3', '.wav', '.m4a', '.opus'}
+
+# Supported image extensions for vision
+VISION_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
+
+
+def get_media_type(message) -> str | None:
+    """Determine the type of media in a message."""
+    if not message.media:
+        return None
+
+    if isinstance(message.media, MessageMediaPhoto):
+        return "photo"
+
+    if isinstance(message.media, MessageMediaDocument):
+        doc = message.media.document
+        if doc:
+            # Check for voice message
+            for attr in doc.attributes:
+                if isinstance(attr, DocumentAttributeAudio):
+                    if attr.voice:
+                        return "voice"
+                    return "audio"
+            # Check for other document types
+            for attr in doc.attributes:
+                if isinstance(attr, DocumentAttributeFilename):
+                    filename = attr.file_name.lower()
+                    if any(filename.endswith(ext) for ext in VISION_EXTENSIONS):
+                        return "image"
+                    if any(filename.endswith(ext) for ext in VOICE_EXTENSIONS):
+                        return "audio"
+            return "document"
+
+    return None
+
+
+async def download_media(client: TelegramClient, message, prefix: str = "media") -> Path | None:
+    """
+    Download media from a Telegram message.
+
+    Returns the path to the downloaded file, or None if download failed.
+    """
+    try:
+        # Generate unique filename with timestamp
+        timestamp = message.date.strftime("%Y%m%d_%H%M%S")
+        media_type = get_media_type(message)
+
+        # Determine extension
+        ext = ".bin"
+        if isinstance(message.media, MessageMediaPhoto):
+            ext = ".jpg"
+        elif isinstance(message.media, MessageMediaDocument):
+            doc = message.media.document
+            if doc:
+                for attr in doc.attributes:
+                    if isinstance(attr, DocumentAttributeFilename):
+                        ext = Path(attr.file_name).suffix.lower() or ext
+                        break
+                    if isinstance(attr, DocumentAttributeAudio):
+                        if attr.voice:
+                            ext = ".ogg"  # Telegram voice messages are typically ogg
+                        break
+
+        filename = f"{prefix}_{timestamp}_{message.id}{ext}"
+        filepath = MEDIA_DIR / filename
+
+        # Download
+        await client.download_media(message, filepath)
+
+        if filepath.exists():
+            return filepath
+        return None
+
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Failed to download media: {e}")
+        return None
+
+
+async def transcribe_voice(filepath: Path) -> str | None:
+    """
+    Transcribe voice/audio file using OpenAI Whisper API.
+
+    Returns transcription text, or None if transcription failed.
+    """
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        logging.getLogger(__name__).warning("No OPENAI_API_KEY for voice transcription")
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            with open(filepath, "rb") as f:
+                files = {"file": (filepath.name, f, "audio/ogg")}
+                data = {"model": "whisper-1"}
+                headers = {"Authorization": f"Bearer {api_key}"}
+
+                response = await client.post(
+                    "https://api.openai.com/v1/audio/transcriptions",
+                    files=files,
+                    data=data,
+                    headers=headers,
+                )
+
+                if response.status_code == 200:
+                    result = response.json()
+                    return result.get("text", "").strip()
+                else:
+                    logging.getLogger(__name__).error(
+                        f"Whisper API error: {response.status_code} - {response.text}"
+                    )
+                    return None
+
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Voice transcription failed: {e}")
+        return None
+
+
+async def process_incoming_media(client: TelegramClient, message) -> tuple[str, list[Path]]:
+    """
+    Process media in an incoming message.
+
+    Returns (description_text, list_of_file_paths).
+    The description_text is meant to be prepended to the message for context.
+    """
+    media_type = get_media_type(message)
+    if not media_type:
+        return "", []
+
+    # Download the media
+    downloaded = await download_media(client, message, prefix=media_type)
+    if not downloaded:
+        return f"[User sent a {media_type} but download failed]", []
+
+    files = [downloaded]
+    description = ""
+
+    if media_type == "voice":
+        # Transcribe voice message
+        transcription = await transcribe_voice(downloaded)
+        if transcription:
+            description = f"[Voice message transcription: \"{transcription}\"]"
+        else:
+            description = f"[User sent a voice message - saved to {downloaded.name}]"
+
+    elif media_type in ("photo", "image"):
+        # For images, we'll pass the path so Claude can use vision
+        description = f"[User sent an image: {downloaded}]"
+
+    elif media_type == "audio":
+        # Try transcribing audio files too
+        transcription = await transcribe_voice(downloaded)
+        if transcription:
+            description = f"[Audio file transcription: \"{transcription}\"]"
+        else:
+            description = f"[User sent an audio file - saved to {downloaded.name}]"
+
+    elif media_type == "document":
+        description = f"[User sent a document - saved to {downloaded.name}]"
+
+    return description, files
+
 
 # Load environment
 env_path = Path(__file__).parent.parent / ".env"
@@ -410,8 +593,24 @@ async def main():
         project_name = project.get("name", "DM") if project else "DM"
         logger.info(f"[{project_name}] Message from {sender_name} in {chat_title or 'DM'}: {text[:50]}...")
 
+        # Process any incoming media (images, voice, documents)
+        media_description = ""
+        media_files = []
+        if message.media:
+            media_description, media_files = await process_incoming_media(client, message)
+            if media_description:
+                logger.info(f"Processed media: {media_description[:100]}...")
+
         # Clean the message
         clean_text = clean_message(text, project)
+
+        # Combine text with media description
+        if media_description:
+            if clean_text:
+                clean_text = f"{media_description}\n\n{clean_text}"
+            else:
+                clean_text = media_description
+
         if not clean_text:
             clean_text = "Hello"
 
