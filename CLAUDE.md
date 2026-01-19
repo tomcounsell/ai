@@ -297,31 +297,26 @@ MONITORING_ENABLED=true
 
 ## Multi-Instance Deployment
 
-Each Valor instance runs on a dedicated machine for one project. This allows:
-- Project-specific Telegram groups
-- Context-aware AI responses
-- Isolated sessions per project
+Valor runs on every machine as a service. Each machine is configured to monitor specific Telegram groups. When a message arrives:
+1. Bridge checks if the group matches any active project
+2. If yes, injects that project's context and responds
+3. If no, ignores the message
+
+This allows multiple machines to run Valor, each monitoring different groups.
 
 ### Setup
 
-1. **Set PROJECT_NAME in .env:**
-   ```bash
-   PROJECT_NAME=psyoptimal  # or flextrip, valor, etc.
-   ```
-
-2. **Add project to config/projects.json:**
+1. **Define projects in config/projects.json:**
    ```json
    {
      "projects": {
        "myproject": {
          "name": "MyProject",
-         "description": "What this project does",
          "telegram": {
-           "groups": ["MyProject Dev", "MyProject Team"],
+           "groups": ["Dev: MyProject"],
            "respond_to_mentions": true
          },
          "github": { "org": "myorg", "repo": "myrepo" },
-         "linear": { "team": "MYPROJ" },
          "context": {
            "tech_stack": ["Python", "React"],
            "description": "Focus areas for AI responses"
@@ -331,6 +326,15 @@ Each Valor instance runs on a dedicated machine for one project. This allows:
    }
    ```
 
+2. **Set ACTIVE_PROJECTS in .env:**
+   ```bash
+   # Single project
+   ACTIVE_PROJECTS=myproject
+
+   # Multiple projects on same machine
+   ACTIVE_PROJECTS=valor,popoto,django-project-template
+   ```
+
 3. **Start the service:**
    ```bash
    ./scripts/valor-service.sh install
@@ -338,26 +342,27 @@ Each Valor instance runs on a dedicated machine for one project. This allows:
 
 ### How It Works
 
-1. Bridge reads `PROJECT_NAME` from environment
-2. Loads project config from `config/projects.json`
-3. Only responds in configured Telegram groups
-4. Injects project context into every AI request:
+1. Bridge loads all projects listed in `ACTIVE_PROJECTS`
+2. Builds a map: Telegram group → project config
+3. When a message arrives, finds which project's group it's in
+4. Injects that project's context:
    ```
    PROJECT: MyProject
    FOCUS: Focus areas for AI responses
    TECH: Python, React
    REPO: myorg/myrepo
    ```
+5. Session IDs are scoped per project (`tg_myproject_123456`)
 
 ### Example Deployment
 
-| Machine | PROJECT_NAME | Telegram Groups |
-|---------|--------------|-----------------|
-| mac-psyoptimal | psyoptimal | PsyOPTIMAL Dev, PsyOPTIMAL Team |
-| mac-flextrip | flextrip | FlexTrip Dev |
-| mac-valor | valor | AI Developers, Valor Dev |
+| Machine | ACTIVE_PROJECTS | Monitors |
+|---------|-----------------|----------|
+| mac-a | valor | Dev: Valor |
+| mac-b | popoto,django-project-template | Dev: Popoto, Dev: Django Template |
+| mac-c | valor,popoto,django-project-template | All groups |
 
-Each machine runs the same codebase with different `PROJECT_NAME` values.
+Multiple machines can monitor different groups, or one machine can monitor all.
 
 ## Security Model
 
