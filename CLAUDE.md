@@ -290,8 +290,74 @@ MONITORING_ENABLED=true
 ### Configuration Files
 - `.claude/settings.local.json`: Claude Code local settings
 - `.claude/commands/`: Skill definitions
-- `config/telegram_groups.json`: Group behavior configuration
+- `config/projects.json`: Multi-instance project configuration
 - `.env`: Environment variables and API keys
+
+---
+
+## Multi-Instance Deployment
+
+Each Valor instance runs on a dedicated machine for one project. This allows:
+- Project-specific Telegram groups
+- Context-aware AI responses
+- Isolated sessions per project
+
+### Setup
+
+1. **Set PROJECT_NAME in .env:**
+   ```bash
+   PROJECT_NAME=psyoptimal  # or flextrip, valor, etc.
+   ```
+
+2. **Add project to config/projects.json:**
+   ```json
+   {
+     "projects": {
+       "myproject": {
+         "name": "MyProject",
+         "description": "What this project does",
+         "telegram": {
+           "groups": ["MyProject Dev", "MyProject Team"],
+           "respond_to_mentions": true
+         },
+         "github": { "org": "myorg", "repo": "myrepo" },
+         "linear": { "team": "MYPROJ" },
+         "context": {
+           "tech_stack": ["Python", "React"],
+           "description": "Focus areas for AI responses"
+         }
+       }
+     }
+   }
+   ```
+
+3. **Start the service:**
+   ```bash
+   ./scripts/valor-service.sh install
+   ```
+
+### How It Works
+
+1. Bridge reads `PROJECT_NAME` from environment
+2. Loads project config from `config/projects.json`
+3. Only responds in configured Telegram groups
+4. Injects project context into every AI request:
+   ```
+   PROJECT: MyProject
+   FOCUS: Focus areas for AI responses
+   TECH: Python, React
+   REPO: myorg/myrepo
+   ```
+
+### Example Deployment
+
+| Machine | PROJECT_NAME | Telegram Groups |
+|---------|--------------|-----------------|
+| mac-psyoptimal | psyoptimal | PsyOPTIMAL Dev, PsyOPTIMAL Team |
+| mac-flextrip | flextrip | FlexTrip Dev |
+| mac-valor | valor | AI Developers, Valor Dev |
+
+Each machine runs the same codebase with different `PROJECT_NAME` values.
 
 ## Security Model
 
