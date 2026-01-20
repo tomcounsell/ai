@@ -172,6 +172,16 @@ Valor can work on other projects and repositories, but those are separate from "
 - Start with minimal tools, expand only if the agent requests more
 - Use Clawdbot's skill registry for categorization and dynamic filtering
 
+**7. DEFINITION OF DONE**
+- **"Done" means COMPLETELY done** - not partially implemented
+- A task is only done when ALL of the following are complete:
+  1. **Built**: Code is implemented and working
+  2. **Tested**: Unit tests passing, manual verification complete
+  3. **Documented**: Code comments, API docs, or user docs as appropriate
+  4. **Plans migrated**: Plan documents in `docs/plans/` moved to `docs/features/` as feature documentation
+- Never mark something as done if any of these steps are incomplete
+- If you run out of context, document remaining steps clearly for the next session
+
 ## Tools, Workflows, and Skills
 
 ### Philosophy

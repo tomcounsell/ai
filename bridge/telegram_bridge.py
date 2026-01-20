@@ -287,13 +287,45 @@ SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "valor_bridge")
 # Example: ACTIVE_PROJECTS=valor,popoto,django-project-template
 ACTIVE_PROJECTS = [p.strip().lower() for p in os.getenv("ACTIVE_PROJECTS", "valor").split(",") if p.strip()]
 
-# Logging
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+
+LOG_DIR = Path(__file__).parent.parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+# Create formatters
+CONSOLE_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
+FILE_FORMAT = "%(asctime)s [%(levelname)s] [%(funcName)s] %(message)s"
+
+# Setup root logger
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format=CONSOLE_FORMAT,
     handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
+
+# Add file handler for detailed logs
+file_handler = logging.FileHandler(LOG_DIR / "bridge.log")
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter(FILE_FORMAT))
+logger.addHandler(file_handler)
+logger.setLevel(logging.DEBUG)
+
+
+def log_event(event_type: str, **kwargs) -> None:
+    """Log a structured event for analysis."""
+    import time
+    event = {
+        "timestamp": time.time(),
+        "type": event_type,
+        **kwargs
+    }
+    # Write to events log as JSON lines
+    events_log = LOG_DIR / "bridge.events.jsonl"
+    with open(events_log, "a") as f:
+        f.write(json.dumps(event) + "\n")
 
 
 def load_config() -> dict:
@@ -485,6 +517,10 @@ async def send_response_with_files(client: TelegramClient, event, response: str)
 
 async def get_agent_response(message: str, session_id: str, sender_name: str, chat_title: str | None, project: dict | None) -> str:
     """Call clawdbot agent and get response."""
+    import time
+    start_time = time.time()
+    request_id = f"{session_id}_{int(start_time)}"
+
     try:
         # Build context-enriched message
         context = build_context_prefix(project, chat_title is None)
@@ -508,7 +544,23 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
             "medium",
         ]
 
-        logger.info(f"Calling clawdbot agent for {project_name}, session {session_id}")
+        # Log full request details
+        logger.info(f"[{request_id}] Calling clawdbot agent for {project_name}")
+        logger.debug(f"[{request_id}] Session: {session_id}")
+        logger.debug(f"[{request_id}] Command: {' '.join(cmd[:6])}...")
+        logger.debug(f"[{request_id}] Enriched message:\n{enriched_message}")
+
+        # Log structured event
+        log_event(
+            "agent_request",
+            request_id=request_id,
+            session_id=session_id,
+            project=project_name,
+            sender=sender_name,
+            chat=chat_title,
+            message_length=len(message),
+            enriched_length=len(enriched_message),
+        )
 
         timeout = DEFAULTS.get("response", {}).get("timeout_seconds", 300)
 
@@ -520,26 +572,86 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
             env={**os.environ, "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", "")},
         )
 
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(),
-            timeout=timeout,
-        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            # Kill the process and try to capture partial output
+            elapsed = time.time() - start_time
+            logger.error(f"[{request_id}] Agent request timed out after {elapsed:.1f}s")
+
+            # Try to terminate gracefully first
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                process.kill()
+
+            # Log structured timeout event
+            log_event(
+                "agent_timeout",
+                request_id=request_id,
+                session_id=session_id,
+                elapsed_seconds=elapsed,
+                timeout_seconds=timeout,
+            )
+
+            return "Request timed out. Please try again."
+
+        elapsed = time.time() - start_time
 
         if process.returncode != 0:
-            logger.error(f"Clawdbot error: {stderr.decode()}")
-            return f"Error processing request: {stderr.decode()[:200]}"
+            stderr_text = stderr.decode()
+            logger.error(f"[{request_id}] Clawdbot error (exit {process.returncode}) after {elapsed:.1f}s")
+            logger.error(f"[{request_id}] Stderr: {stderr_text[:500]}")
+
+            log_event(
+                "agent_error",
+                request_id=request_id,
+                session_id=session_id,
+                exit_code=process.returncode,
+                elapsed_seconds=elapsed,
+                stderr_preview=stderr_text[:200],
+            )
+
+            return f"Error processing request: {stderr_text[:200]}"
 
         response = stdout.decode().strip()
+        stderr_text = stderr.decode().strip()
 
-        # Log a preview (truncation happens in send_response_with_files)
-        logger.info(f"Agent response: {response[:100]}...")
+        # Log success with timing
+        logger.info(f"[{request_id}] Agent responded in {elapsed:.1f}s ({len(response)} chars)")
+        logger.debug(f"[{request_id}] Response preview: {response[:200]}...")
+        if stderr_text:
+            logger.debug(f"[{request_id}] Stderr: {stderr_text[:200]}")
+
+        log_event(
+            "agent_response",
+            request_id=request_id,
+            session_id=session_id,
+            elapsed_seconds=elapsed,
+            response_length=len(response),
+            has_stderr=bool(stderr_text),
+        )
+
         return response
 
-    except asyncio.TimeoutError:
-        logger.error("Agent request timed out")
-        return "Request timed out. Please try again."
     except Exception as e:
-        logger.error(f"Error calling agent: {e}")
+        elapsed = time.time() - start_time
+        logger.error(f"[{request_id}] Error calling agent after {elapsed:.1f}s: {e}")
+        logger.exception(f"[{request_id}] Full traceback:")
+
+        log_event(
+            "agent_exception",
+            request_id=request_id,
+            session_id=session_id,
+            elapsed_seconds=elapsed,
+            error=str(e),
+            error_type=type(e).__name__,
+        )
+
         return f"Error: {str(e)}"
 
 
@@ -591,7 +703,22 @@ async def main():
             return
 
         project_name = project.get("name", "DM") if project else "DM"
-        logger.info(f"[{project_name}] Message from {sender_name} in {chat_title or 'DM'}: {text[:50]}...")
+        message_id = message.id
+        logger.info(f"[{project_name}] Message {message_id} from {sender_name} in {chat_title or 'DM'}: {text[:50]}...")
+        logger.debug(f"[{project_name}] Full message text: {text}")
+
+        # Log incoming message event
+        log_event(
+            "message_received",
+            message_id=message_id,
+            project=project_name,
+            sender=sender_name,
+            sender_username=sender_username,
+            chat=chat_title,
+            is_dm=is_dm,
+            text_length=len(text),
+            has_media=bool(message.media),
+        )
 
         # Process any incoming media (images, voice, documents)
         media_description = ""
@@ -628,7 +755,16 @@ async def main():
 
         # Send response (handles both files and text)
         await send_response_with_files(client, event, response)
-        logger.info(f"Replied to {sender_name}")
+        logger.info(f"[{project_name}] Replied to {sender_name} (msg {message_id})")
+
+        # Log reply event
+        log_event(
+            "reply_sent",
+            message_id=message_id,
+            project=project_name,
+            sender=sender_name,
+            response_length=len(response),
+        )
 
     # Start the client
     logger.info("Starting Telegram bridge...")
