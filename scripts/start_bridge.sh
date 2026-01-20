@@ -8,6 +8,14 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 cd "$PROJECT_DIR"
 
+# Kill any existing bridge processes
+EXISTING_PID=$(pgrep -f "python.*telegram_bridge.py" 2>/dev/null || true)
+if [ -n "$EXISTING_PID" ]; then
+    echo "Stopping existing bridge (PID: $EXISTING_PID)..."
+    kill $EXISTING_PID 2>/dev/null || true
+    sleep 1
+fi
+
 # Activate virtual environment if it exists
 if [ -d ".venv" ]; then
     source .venv/bin/activate
