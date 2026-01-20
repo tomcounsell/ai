@@ -38,7 +38,7 @@ async def describe_image(image_path: Path) -> str:
     import ollama
 
     response = ollama.chat(
-        model='llama3.2-vision',
+        model='llama3.2-vision:11b',
         messages=[{
             'role': 'user',
             'content': 'Describe this image in detail. What do you see?',
@@ -62,7 +62,7 @@ async def describe_image(image_path: Path) -> str:
 
 ## Implementation Plan
 
-1. **Install vision model**: `ollama pull llama3.2-vision:11b`
+1. **Install vision model**: `ollama pull llama3.2-vision:11b:11b`
 2. **Add image description function** to `bridge/telegram_bridge.py`
 3. **Update `process_incoming_media()`** to call vision model for photos/images
 4. **Include description in message** instead of just file path
