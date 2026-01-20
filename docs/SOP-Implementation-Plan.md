@@ -1,7 +1,8 @@
 # Standard Operating Procedures (SOP) Implementation Plan
 
 **Created**: 2025-11-19
-**Status**: Planning
+**Updated**: 2026-01-19
+**Status**: Phase 1 Complete (9 SOPs Created)
 **Goal**: Structure all agentic skills with formal SOPs
 
 ---
@@ -23,20 +24,45 @@ Every agentic skill in our system should be derived from a structured Standard O
 
 ## SOP Hierarchy
 
+### Current State (9 SOPs Implemented)
+
 ```
 sops/
-├── routing/                    # High-level routing SOPs
-│   ├── task-analyzer.sop.md
-│   ├── mcp-library-selector.sop.md
-│   └── coding-agent-router.sop.md
+├── templates/
+│   └── sop-template.md              ✅ Created
 │
-├── subagents/                  # Domain-specific subagent SOPs
+├── routing/                         ✅ All 3 complete
+│   ├── task-analyzer.sop.md         ✅ Created
+│   ├── mcp-library-selector.sop.md  ✅ Created
+│   └── coding-agent-router.sop.md   ✅ Created
+│
+├── subagents/                       ⏳ 2 of ~18 planned
 │   ├── stripe/
-│   │   ├── payment-processing.sop.md
+│   │   └── payment-processing.sop.md ✅ Created
+│   └── sentry/
+│       └── error-investigation.sop.md ✅ Created
+│
+├── tools/                           ⏳ 2 of 5 planned
+│   ├── search-tool.sop.md           ✅ Created
+│   └── code-execution.sop.md        ✅ Created
+│
+├── operations/                      ⏳ 1 of 5 planned
+│   └── daydream/
+│       └── daily-health-check.sop.md ✅ Created
+│
+└── workflows/                       ⏳ 1 of 4 planned
+    └── feature-development.sop.md   ✅ Created
+```
+
+### Planned SOPs (Not Yet Created)
+
+```
+sops/
+├── subagents/
+│   ├── stripe/
 │   │   ├── subscription-management.sop.md
 │   │   └── refund-handling.sop.md
 │   ├── sentry/
-│   │   ├── error-investigation.sop.md
 │   │   ├── performance-analysis.sop.md
 │   │   └── alert-triage.sop.md
 │   ├── github/
@@ -56,24 +82,20 @@ sops/
 │       ├── sprint-planning.sop.md
 │       └── roadmap-coordination.sop.md
 │
-├── tools/                      # Tool-specific SOPs
-│   ├── search-tool.sop.md
+├── tools/
 │   ├── image-generation.sop.md
 │   ├── image-analysis.sop.md
-│   ├── code-execution.sop.md
 │   └── knowledge-search.sop.md
 │
-├── operations/                 # Operational SOPs
+├── operations/
 │   ├── daydream/
-│   │   ├── daily-health-check.sop.md
 │   │   ├── code-maintenance.sop.md
 │   │   └── performance-optimization.sop.md
 │   └── monitoring/
 │       ├── resource-tracking.sop.md
 │       └── alert-handling.sop.md
 │
-└── workflows/                  # Common workflow SOPs
-    ├── feature-development.sop.md
+└── workflows/
     ├── bug-investigation.sop.md
     ├── code-review.sop.md
     └── deployment.sop.md
@@ -325,73 +347,98 @@ Expected Output:
 
 ## Implementation Roadmap
 
-### Week 1: Foundation & Routing SOPs
+### Week 1: Foundation & Routing SOPs ✅ COMPLETE
 **Goal**: Set up SOP infrastructure and critical routing
 
 #### Tasks
-1. Install `strands-agents-sops` package
-2. Create SOP directory structure
-3. Write routing SOPs:
-   - task-analyzer.sop.md
-   - mcp-library-selector.sop.md
-   - coding-agent-router.sop.md
-4. Integrate with existing routing code
-5. Test routing accuracy improvements
+1. ~~Install `strands-agents-sops` package~~ (using custom template instead)
+2. ✅ Create SOP directory structure
+3. ✅ Write routing SOPs:
+   - task-analyzer.sop.md ✅
+   - mcp-library-selector.sop.md ✅
+   - coding-agent-router.sop.md ✅
+4. ⏳ Integrate with existing routing code (partial - SOPs exist, routing uses intent module)
+5. ⏳ Test routing accuracy improvements
 
 **Success Criteria**:
-- [ ] All routing decisions use SOPs
+- [x] SOP directory structure created
+- [x] All 3 routing SOPs written
+- [ ] All routing decisions use SOPs (intent module created, not fully integrated)
 - [ ] Routing accuracy >90%
-- [ ] Team can edit routing rules via markdown
+- [x] Team can edit routing rules via markdown
 
 ---
 
-### Week 2: Stripe Subagent SOPs (POC)
+### Week 2: Stripe Subagent SOPs (POC) ⏳ PARTIAL
 **Goal**: Prove value with one complete subagent
 
 #### Tasks
 1. Write Stripe SOPs:
-   - payment-processing.sop.md
-   - subscription-management.sop.md
-   - refund-handling.sop.md
-2. Refactor StripeSubagent to use SOPs
-3. Compare with keyword-based detection
-4. Measure context usage reduction
+   - payment-processing.sop.md ✅
+   - subscription-management.sop.md ⏳
+   - refund-handling.sop.md ⏳
+2. ⏳ Refactor StripeSubagent to use SOPs
+3. ⏳ Compare with keyword-based detection
+4. ⏳ Measure context usage reduction
 
 **Success Criteria**:
+- [x] Stripe payment-processing SOP written
+- [ ] All 3 Stripe SOPs complete
 - [ ] Stripe subagent fully SOP-driven
 - [ ] >15% context token reduction
 - [ ] >95% routing accuracy for Stripe tasks
-- [ ] Team can modify Stripe workflows without code
+- [x] Team can modify Stripe workflows without code
 
 ---
 
-### Week 3: All Subagent SOPs
+### Week 3: All Subagent SOPs ⏳ PARTIAL
 **Goal**: Complete SOP coverage for all 6 subagents
 
 #### Tasks
 1. Write remaining subagent SOPs (5 x 3-4 SOPs each)
-2. Refactor all subagents to use SOPs
-3. Remove keyword detection code
-4. Set up MCP server for SOP discovery
+   - Sentry: error-investigation.sop.md ✅ (1 of 3)
+   - GitHub: 0 of 3 ⏳
+   - Render: 0 of 3 ⏳
+   - Notion: 0 of 3 ⏳
+   - Linear: 0 of 3 ⏳
+2. ⏳ Refactor all subagents to use SOPs
+3. ⏳ Remove keyword detection code
+4. ⏳ Set up MCP server for SOP discovery
 
 **Success Criteria**:
-- [ ] All subagents SOP-driven
+- [x] Sentry error-investigation SOP written
+- [ ] All subagents have SOPs (2 of ~18 complete)
 - [ ] Keyword detection deprecated
 - [ ] SOPs accessible via MCP
-- [ ] Team authoring guide complete
+- [x] Team authoring guide complete (template exists)
 
 ---
 
-### Week 4: Tool & Operational SOPs
+### Week 4: Tool & Operational SOPs ⏳ PARTIAL
 **Goal**: Extend SOPs beyond subagents
 
 #### Tasks
 1. Write tool SOPs (5 major tools)
+   - search-tool.sop.md ✅
+   - code-execution.sop.md ✅
+   - image-generation.sop.md ⏳
+   - image-analysis.sop.md ⏳
+   - knowledge-search.sop.md ⏳
 2. Write daydream operational SOPs
+   - daily-health-check.sop.md ✅
+   - code-maintenance.sop.md ⏳
+   - performance-optimization.sop.md ⏳
 3. Create workflow SOPs (feature dev, bug fix, etc.)
-4. Set up SOP validation and testing
+   - feature-development.sop.md ✅
+   - bug-investigation.sop.md ⏳
+   - code-review.sop.md ⏳
+   - deployment.sop.md ⏳
+4. ⏳ Set up SOP validation and testing
 
 **Success Criteria**:
+- [x] Tool SOPs started (2 of 5 complete)
+- [x] Daydream SOPs started (1 of 3 complete)
+- [x] Workflow SOPs started (1 of 4 complete)
 - [ ] All tools have SOPs
 - [ ] Daydream runs via SOPs
 - [ ] Common workflows documented

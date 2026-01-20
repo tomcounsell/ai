@@ -1,5 +1,16 @@
 # MCP Library & Session Management Requirements
 
+**Status**: ✅ Core Implementation Complete (2026-01-19)
+**Implementation**: `mcp/library.py`, `config/mcp_library.json`
+
+Core features implemented:
+- MCP server catalog with 10 servers configured
+- Authentication status checking (ready/needs_setup/error)
+- Task-based server selection with greedy set cover algorithm
+- Capability-based querying and filtering
+
+---
+
 ## Overview
 
 Intelligent MCP (Model Context Protocol) server management to reduce Claude Code distractions and improve focus during sessions.

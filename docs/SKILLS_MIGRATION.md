@@ -1,5 +1,15 @@
 # MCP Server to Clawdbot Skills Migration Guide
 
+**Status**: ✅ Migration Complete (2026-01-19)
+
+All 6 MCP server skills have been migrated to Clawdbot:
+- Sentry (8 tools), GitHub (10 tools), Linear (9 tools)
+- Notion (8 tools), Stripe (9 tools), Render (9 tools)
+
+See [CLAWDBOT_MIGRATION_PLAN.md](CLAWDBOT_MIGRATION_PLAN.md) for current architecture.
+
+---
+
 This document details how to convert our existing MCP servers (currently defined as Claude Code subagents in `.claude/agents/`) to Clawdbot skills for the unified conversational development environment.
 
 ## Overview

@@ -1,8 +1,9 @@
 # Agent-SOP Framework Evaluation
 
 **Created**: 2025-11-19
-**Status**: Evaluation
-**Decision**: Pending Review
+**Updated**: 2026-01-20
+**Status**: ✅ Adopted
+**Decision**: Implemented (9 SOPs created in `sops/`)
 
 ---
 

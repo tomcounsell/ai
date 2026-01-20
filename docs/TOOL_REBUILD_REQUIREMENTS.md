@@ -1,14 +1,28 @@
 # Tool Rebuild Requirements
 
 **Created**: 2026-01-19
+**Updated**: 2026-01-20
 **Status**: ✅ Complete (2026-01-19)
 
-This document captured requirements for rebuilding 12 tools from the old codebase.
+This document captured requirements for rebuilding tools from the old codebase.
 
-All tools have been rebuilt and are available in `tools/`:
+## Completed Tools (15 total)
+
+All tools are available in `tools/`:
+
+### Original 12 Tools (Rebuilt)
 - search, image_analysis, code_execution, test_judge (High Priority)
 - knowledge_search, link_analysis, doc_summary, documentation (Medium Priority)
 - telegram_history, image_tagging, test_params, test_scheduler (Lower Priority)
+
+### New Tools (Added 2026-01-19)
+- **transcribe** - Whisper API integration for audio transcription
+- **browser** - Playwright-based web automation (navigate, screenshot, extract, click, fill_form)
+- **image-gen** - Image generation tool
+
+### Supporting Modules (Added 2026-01-19)
+- **analytics/** - Metrics collection, SQLite storage, dashboard reporting
+- **intent/** - Ollama-based intent classification with heuristic fallback
 
 See [tools/README.md](../tools/README.md) for usage documentation.
 
