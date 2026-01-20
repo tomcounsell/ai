@@ -9,28 +9,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Running the System
 
 ```bash
-# Start Clawdbot daemon
-clawdbot start
+# Start Telegram bridge (real user account via Telethon)
+./scripts/start_bridge.sh
+# Or run directly:
+python bridge/telegram_bridge.py
+
+# Start Clawdbot gateway daemon
+clawdbot daemon install   # First time only
+clawdbot daemon start
+clawdbot daemon restart
+clawdbot daemon stop
 
 # Check status
 clawdbot status
+clawdbot daemon status
+clawdbot health
 
 # View logs
 clawdbot logs
-
-# Stop daemon
-clawdbot stop
-
-# View specific log streams
-clawdbot logs --telegram
-clawdbot logs --errors
-clawdbot logs -n 100
-
-# Run with verbose output
-clawdbot start --verbose
-
-# Dry run to validate configuration
-clawdbot start --dry-run
+tail -f logs/bridge.log   # Telegram bridge logs
 ```
 
 ### Testing
@@ -440,30 +437,33 @@ This is a single-user system. We don't need:
 ## Special Considerations
 
 ### Telegram Integration
-- Uses a real Telegram user account via Clawdbot, not a bot
-- If Telegram auth doesn't work, just give up. Human action is needed
-- Session files are managed by Clawdbot
-- Auto-authentication with phone/password if configured
+- Uses a real Telegram user account via Telethon (not a bot)
+- The bridge runs separately from the clawdbot gateway
+- Session files stored in `data/` directory
+- If Telegram auth doesn't work, human action is needed
 
 #### Telegram Setup & Usage
 ```bash
 # First-time authentication
-clawdbot telegram login
+python scripts/telegram_login.py
 # Enter verification code when prompted
 
-# Normal operation
-clawdbot start
-# Telegram client runs as part of the daemon
+# Start the bridge
+./scripts/start_bridge.sh
+# Or: python bridge/telegram_bridge.py
 
-# Check authentication status
-clawdbot telegram status
+# Check if bridge is running
+pgrep -f telegram_bridge.py
+
+# View bridge logs
+tail -f logs/bridge.log
 ```
 
 ### Quality Standards
 - Error handling with categorized errors
 - Performance metrics tracked for all operations
 - Documentation required for all public interfaces
-- After every fix, restart the server with `clawdbot stop && clawdbot start`
+- After every fix, restart services: kill the bridge process and run `./scripts/start_bridge.sh`
 - There are API keys in the .env file
 
 ### Documentation Standards
@@ -625,12 +625,14 @@ The bridge is in `bridge/telegram_bridge.py`. To add new message handling:
 
 | Command | Description |
 |---------|-------------|
-| `clawdbot start` | Start the system |
-| `clawdbot stop` | Stop the system |
-| `clawdbot status` | Check daemon status |
-| `clawdbot logs` | View logs |
-| `clawdbot telegram login` | Authenticate Telegram |
-| `clawdbot telegram status` | Check Telegram status |
+| `./scripts/start_bridge.sh` | Start Telegram bridge |
+| `pkill -f telegram_bridge` | Stop Telegram bridge |
+| `pgrep -f telegram_bridge` | Check if bridge is running |
+| `tail -f logs/bridge.log` | View bridge logs |
+| `clawdbot daemon start` | Start clawdbot gateway |
+| `clawdbot daemon stop` | Stop clawdbot gateway |
+| `clawdbot status` | Check clawdbot status |
+| `python scripts/telegram_login.py` | Authenticate Telegram |
 
 ### Critical Thresholds
 
@@ -642,6 +644,7 @@ The bridge is in `bridge/telegram_bridge.py`. To add new message handling:
 
 ### Emergency Recovery
 
-- **System Issues**: Check logs with `clawdbot logs --errors`
-- **Telegram Issues**: Re-authenticate with `clawdbot telegram login`
-- **Database Issues**: Restart daemon (includes recovery)
+- **Bridge Issues**: Check `tail -f logs/bridge.log`, restart with `pkill -f telegram_bridge && ./scripts/start_bridge.sh`
+- **Telegram Auth Issues**: Re-authenticate with `python scripts/telegram_login.py`
+- **Gateway Issues**: Check `clawdbot status`, restart with `clawdbot daemon restart`
+- **Database Issues**: Check `data/` directory for SQLite files
