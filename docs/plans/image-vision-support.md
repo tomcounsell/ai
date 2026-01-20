@@ -1,6 +1,6 @@
 # Image Vision Support
 
-**Status**: Planned
+**Status**: Implemented
 **Priority**: P0
 **Created**: 2026-01-20
 

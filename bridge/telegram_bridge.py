@@ -21,8 +21,8 @@ from pathlib import Path
 import httpx
 
 # Local tool imports for message and link storage
-from tools.telegram_history import store_message, store_link, get_recent_messages
-from tools.link_analysis import extract_urls
+from tools.telegram_history import store_message, store_link, get_recent_messages, get_link_by_url
+from tools.link_analysis import extract_urls, summarize_url_content, get_metadata
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import SendReactionRequest
@@ -233,6 +233,42 @@ async def transcribe_voice(filepath: Path) -> str | None:
         return None
 
 
+async def describe_image(filepath: Path) -> str | None:
+    """
+    Describe an image using Ollama LLaVA vision model.
+
+    Returns image description text, or None if description failed.
+    Falls back gracefully if Ollama or LLaVA is not available.
+    """
+    try:
+        import ollama
+    except ImportError:
+        logging.getLogger(__name__).warning("ollama library not installed for image vision")
+        return None
+
+    try:
+        # Run the synchronous ollama.chat in a thread pool to not block the event loop
+        loop = asyncio.get_event_loop()
+
+        def _describe():
+            response = ollama.chat(
+                model='llava',
+                messages=[{
+                    'role': 'user',
+                    'content': 'Describe this image in detail. What do you see?',
+                    'images': [str(filepath)]
+                }]
+            )
+            return response['message']['content']
+
+        description = await loop.run_in_executor(None, _describe)
+        return description.strip() if description else None
+
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Image description failed: {e}")
+        return None
+
+
 async def process_incoming_media(client: TelegramClient, message) -> tuple[str, list[Path]]:
     """
     Process media in an incoming message.
@@ -261,8 +297,13 @@ async def process_incoming_media(client: TelegramClient, message) -> tuple[str, 
             description = f"[User sent a voice message - saved to {downloaded.name}]"
 
     elif media_type in ("photo", "image"):
-        # For images, we'll pass the path so Claude can use vision
-        description = f"[User sent an image: {downloaded}]"
+        # Use Ollama LLaVA to describe the image
+        image_description = await describe_image(downloaded)
+        if image_description:
+            description = f"[User sent an image]\nImage description: {image_description}"
+        else:
+            # Fallback if vision model is not available
+            description = f"[User sent an image - saved to {downloaded.name}]"
 
     elif media_type == "audio":
         # Try transcribing audio files too
@@ -396,6 +437,10 @@ DM_WHITELIST = [name.strip().lower() for name in
 # When these users share a URL, it gets saved with metadata
 LINK_COLLECTORS = [name.strip().lower() for name in
     os.getenv("TELEGRAM_LINK_COLLECTORS", "").split(",") if name.strip()]
+
+# Link summarization settings
+MAX_LINKS_PER_MESSAGE = 5  # Don't summarize more than 5 links per message
+LINK_SUMMARY_CACHE_HOURS = 24  # Don't re-summarize URLs within 24 hours
 
 # Default mention triggers
 DEFAULT_MENTIONS = DEFAULTS.get("telegram", {}).get("mention_triggers", ["@valor", "valor", "hey valor"])
