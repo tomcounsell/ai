@@ -10,6 +10,11 @@ from tools.telegram_history import (
     search_history,
     get_recent_messages,
     get_chat_stats,
+    store_link,
+    search_links,
+    list_links,
+    update_link,
+    get_link_stats,
 )
 
 
@@ -215,3 +220,279 @@ class TestDatabaseIsolation:
         assert "error" not in result
         assert result["total_matches"] == 1
         assert result["results"][0]["content"] == "Python in chat1"
+
+
+# =============================================================================
+# Link Storage Tests
+# =============================================================================
+
+
+class TestStoreLink:
+    """Test link storage."""
+
+    def test_store_basic_link(self, tmp_path):
+        """Test storing a basic link."""
+        db_path = tmp_path / "test.db"
+        result = store_link(
+            url="https://example.com/article",
+            sender="Tom",
+            chat_id="chat1",
+            db_path=db_path
+        )
+
+        assert result.get("stored") is True
+        assert result.get("url") == "https://example.com/article"
+        assert result.get("domain") == "example.com"
+
+    def test_store_link_extracts_domain(self, tmp_path):
+        """Test that domain is extracted correctly."""
+        db_path = tmp_path / "test.db"
+
+        result = store_link(
+            url="https://www.github.com/user/repo",
+            sender="Tom",
+            chat_id="chat1",
+            db_path=db_path
+        )
+
+        assert result.get("domain") == "github.com"
+
+    def test_store_link_with_metadata(self, tmp_path):
+        """Test storing a link with metadata."""
+        db_path = tmp_path / "test.db"
+        result = store_link(
+            url="https://example.com/article",
+            sender="Tom",
+            chat_id="chat1",
+            title="Test Article",
+            description="A test article about testing",
+            tags=["test", "article"],
+            db_path=db_path
+        )
+
+        assert result.get("stored") is True
+
+    def test_store_duplicate_link_updates(self, tmp_path):
+        """Test that duplicate links are updated, not duplicated."""
+        db_path = tmp_path / "test.db"
+
+        # Store initial link
+        store_link(
+            url="https://example.com/article",
+            sender="Tom",
+            chat_id="chat1",
+            message_id=100,
+            db_path=db_path
+        )
+
+        # Store same link again with more metadata
+        store_link(
+            url="https://example.com/article",
+            sender="Tom",
+            chat_id="chat1",
+            message_id=100,
+            title="Updated Title",
+            db_path=db_path
+        )
+
+        # Should still only have one link
+        result = list_links(db_path=db_path)
+        assert result["total"] == 1
+
+
+class TestSearchLinks:
+    """Test link search."""
+
+    def test_search_by_query(self, tmp_path):
+        """Test searching links by text query."""
+        db_path = tmp_path / "test.db"
+
+        store_link(url="https://python.org", sender="Tom", chat_id="chat1",
+                   title="Python Programming", db_path=db_path)
+        store_link(url="https://javascript.info", sender="Tom", chat_id="chat1",
+                   title="JavaScript Tutorial", db_path=db_path)
+
+        result = search_links(query="Python", db_path=db_path)
+
+        assert "error" not in result
+        assert result["count"] == 1
+        assert "python" in result["links"][0]["url"].lower()
+
+    def test_search_by_domain(self, tmp_path):
+        """Test filtering links by domain."""
+        db_path = tmp_path / "test.db"
+
+        store_link(url="https://github.com/repo1", sender="Tom", chat_id="chat1", db_path=db_path)
+        store_link(url="https://github.com/repo2", sender="Tom", chat_id="chat1", db_path=db_path)
+        store_link(url="https://gitlab.com/repo", sender="Tom", chat_id="chat1", db_path=db_path)
+
+        result = search_links(domain="github.com", db_path=db_path)
+
+        assert "error" not in result
+        assert result["count"] == 2
+        assert all(link["domain"] == "github.com" for link in result["links"])
+
+    def test_search_by_sender(self, tmp_path):
+        """Test filtering links by sender."""
+        db_path = tmp_path / "test.db"
+
+        store_link(url="https://example.com/1", sender="Tom", chat_id="chat1", db_path=db_path)
+        store_link(url="https://example.com/2", sender="Alice", chat_id="chat1", db_path=db_path)
+
+        result = search_links(sender="Tom", db_path=db_path)
+
+        assert "error" not in result
+        assert result["count"] == 1
+        assert result["links"][0]["sender"] == "Tom"
+
+    def test_search_by_status(self, tmp_path):
+        """Test filtering links by status."""
+        db_path = tmp_path / "test.db"
+
+        store_link(url="https://example.com/1", sender="Tom", chat_id="chat1", db_path=db_path)
+        store_link(url="https://example.com/2", sender="Tom", chat_id="chat1", db_path=db_path)
+
+        # Update one to read status
+        links = list_links(db_path=db_path)
+        update_link(links["links"][0]["id"], status="read", db_path=db_path)
+
+        result = search_links(status="unread", db_path=db_path)
+
+        assert "error" not in result
+        assert result["count"] == 1
+
+
+class TestListLinks:
+    """Test listing links."""
+
+    def test_list_empty(self, tmp_path):
+        """Test listing when no links exist."""
+        db_path = tmp_path / "test.db"
+        result = list_links(db_path=db_path)
+
+        assert "error" not in result
+        assert result["count"] == 0
+        assert result["total"] == 0
+
+    def test_list_with_pagination(self, tmp_path):
+        """Test pagination of links."""
+        db_path = tmp_path / "test.db"
+
+        for i in range(10):
+            store_link(url=f"https://example.com/{i}", sender="Tom", chat_id="chat1", db_path=db_path)
+
+        # First page
+        result1 = list_links(limit=3, offset=0, db_path=db_path)
+        assert result1["count"] == 3
+        assert result1["total"] == 10
+        assert result1["has_more"] is True
+
+        # Second page
+        result2 = list_links(limit=3, offset=3, db_path=db_path)
+        assert result2["count"] == 3
+        assert result2["has_more"] is True
+
+        # Last page
+        result3 = list_links(limit=3, offset=9, db_path=db_path)
+        assert result3["count"] == 1
+        assert result3["has_more"] is False
+
+
+class TestUpdateLink:
+    """Test updating links."""
+
+    def test_update_status(self, tmp_path):
+        """Test updating link status."""
+        db_path = tmp_path / "test.db"
+
+        store_link(url="https://example.com", sender="Tom", chat_id="chat1", db_path=db_path)
+        links = list_links(db_path=db_path)
+        link_id = links["links"][0]["id"]
+
+        result = update_link(link_id, status="read", db_path=db_path)
+
+        assert result.get("updated") is True
+
+        # Verify the change
+        updated = list_links(db_path=db_path)
+        assert updated["links"][0]["status"] == "read"
+
+    def test_update_tags(self, tmp_path):
+        """Test updating link tags."""
+        db_path = tmp_path / "test.db"
+
+        store_link(url="https://example.com", sender="Tom", chat_id="chat1", db_path=db_path)
+        links = list_links(db_path=db_path)
+        link_id = links["links"][0]["id"]
+
+        result = update_link(link_id, tags=["python", "tutorial"], db_path=db_path)
+
+        assert result.get("updated") is True
+
+        updated = list_links(db_path=db_path)
+        assert updated["links"][0]["tags"] == ["python", "tutorial"]
+
+    def test_update_notes(self, tmp_path):
+        """Test updating link notes."""
+        db_path = tmp_path / "test.db"
+
+        store_link(url="https://example.com", sender="Tom", chat_id="chat1", db_path=db_path)
+        links = list_links(db_path=db_path)
+        link_id = links["links"][0]["id"]
+
+        result = update_link(link_id, notes="Great article about testing", db_path=db_path)
+
+        assert result.get("updated") is True
+
+    def test_update_nonexistent_link(self, tmp_path):
+        """Test updating a link that doesn't exist."""
+        db_path = tmp_path / "test.db"
+        result = update_link(9999, status="read", db_path=db_path)
+
+        assert "error" in result
+        assert "not found" in result["error"]
+
+
+class TestGetLinkStats:
+    """Test link statistics."""
+
+    def test_stats_empty(self, tmp_path):
+        """Test stats when no links exist."""
+        db_path = tmp_path / "test.db"
+        result = get_link_stats(db_path=db_path)
+
+        assert "error" not in result
+        assert result["total_links"] == 0
+
+    def test_stats_with_links(self, tmp_path):
+        """Test stats with links."""
+        db_path = tmp_path / "test.db"
+
+        store_link(url="https://github.com/repo1", sender="Tom", chat_id="chat1", db_path=db_path)
+        store_link(url="https://github.com/repo2", sender="Tom", chat_id="chat1", db_path=db_path)
+        store_link(url="https://python.org", sender="Alice", chat_id="chat1", db_path=db_path)
+
+        result = get_link_stats(db_path=db_path)
+
+        assert "error" not in result
+        assert result["total_links"] == 3
+        assert result["unique_domains"] == 2
+        assert result["unique_senders"] == 2
+        assert result["by_status"]["unread"] == 3
+
+    def test_stats_top_domains(self, tmp_path):
+        """Test that top domains are returned."""
+        db_path = tmp_path / "test.db"
+
+        for i in range(5):
+            store_link(url=f"https://github.com/repo{i}", sender="Tom", chat_id="chat1", db_path=db_path)
+        for i in range(3):
+            store_link(url=f"https://python.org/page{i}", sender="Tom", chat_id="chat1", db_path=db_path)
+
+        result = get_link_stats(db_path=db_path)
+
+        assert "error" not in result
+        assert len(result["top_domains"]) >= 2
+        # github.com should be first with 5 links
+        assert result["top_domains"][0]["domain"] == "github.com"
+        assert result["top_domains"][0]["count"] == 5

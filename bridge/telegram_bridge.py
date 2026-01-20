@@ -19,6 +19,10 @@ import sys
 from pathlib import Path
 
 import httpx
+
+# Local tool imports for message and link storage
+from tools.telegram_history import store_message, store_link
+from tools.link_analysis import extract_urls
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.tl.types import (
@@ -386,6 +390,11 @@ RESPOND_TO_DMS = any(
 DM_WHITELIST = [name.strip().lower() for name in
     os.getenv("TELEGRAM_DM_WHITELIST", "").split(",") if name.strip()]
 
+# Link collectors - usernames whose links are automatically stored
+# When these users share a URL, it gets saved with metadata
+LINK_COLLECTORS = [name.strip().lower() for name in
+    os.getenv("TELEGRAM_LINK_COLLECTORS", "").split(",") if name.strip()]
+
 # Default mention triggers
 DEFAULT_MENTIONS = DEFAULTS.get("telegram", {}).get("mention_triggers", ["@valor", "valor", "hey valor"])
 
@@ -669,6 +678,10 @@ async def main():
         logger.info(f"DM whitelist: {DM_WHITELIST}")
     else:
         logger.info("DM whitelist: (none - responding to all DMs)")
+    if LINK_COLLECTORS:
+        logger.info(f"Link collectors: {LINK_COLLECTORS}")
+    else:
+        logger.info("Link collectors: (none - not storing links)")
 
     # Create client
     session_path = Path(__file__).parent.parent / "data" / SESSION_NAME
@@ -695,6 +708,42 @@ async def main():
 
         # Get sender username for whitelist check
         sender_username = getattr(sender, "username", None)
+
+        # Store ALL incoming messages for history (regardless of whether we respond)
+        try:
+            store_result = store_message(
+                chat_id=str(event.chat_id),
+                content=text,
+                sender=sender_name,
+                message_id=message.id,
+                timestamp=message.date,
+                message_type="text" if not message.media else get_media_type(message) or "media",
+            )
+            if store_result.get("stored"):
+                logger.debug(f"Stored message {message.id} from {sender_name}")
+            elif store_result.get("error"):
+                logger.warning(f"Failed to store message: {store_result['error']}")
+        except Exception as e:
+            logger.error(f"Error storing message: {e}")
+
+        # Extract and store links from whitelisted senders
+        if sender_username and sender_username.lower() in LINK_COLLECTORS:
+            try:
+                urls_result = extract_urls(text)
+                for url in urls_result.get("urls", []):
+                    link_result = store_link(
+                        url=url,
+                        sender=sender_name,
+                        chat_id=str(event.chat_id),
+                        message_id=message.id,
+                        timestamp=message.date,
+                    )
+                    if link_result.get("stored"):
+                        logger.info(f"Stored link from {sender_name}: {url[:50]}...")
+                    elif link_result.get("error"):
+                        logger.warning(f"Failed to store link: {link_result['error']}")
+            except Exception as e:
+                logger.error(f"Error extracting/storing links: {e}")
 
         # Check if we should respond
         if not should_respond(text, is_dm, chat_title, project, sender_name, sender_username):

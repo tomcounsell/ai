@@ -2,11 +2,14 @@
 Telegram History Tool
 
 Search Telegram conversation history with relevance scoring.
+Store and manage links shared in Telegram chats.
 """
 
+import json
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 DEFAULT_DB_PATH = Path.home() / ".valor" / "telegram_history.db"
 
@@ -46,6 +49,40 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp)
     """)
+
+    # Links table for storing shared URLs with metadata
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            url TEXT NOT NULL,
+            final_url TEXT,
+            title TEXT,
+            description TEXT,
+            domain TEXT,
+            sender TEXT,
+            chat_id TEXT,
+            message_id INTEGER,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            tags TEXT,
+            notes TEXT,
+            status TEXT DEFAULT 'unread',
+            ai_summary TEXT,
+            UNIQUE(url, chat_id, message_id)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_links_domain ON links(domain)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_links_sender ON links(sender)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_links_timestamp ON links(timestamp)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_links_status ON links(status)
+    """)
+
     conn.commit()
 
     return conn
@@ -293,6 +330,390 @@ def get_chat_stats(chat_id: str, db_path: Path | None = None) -> dict:
             "unique_senders": row["unique_senders"],
             "first_message": row["first_message"],
             "last_message": row["last_message"],
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        conn.close()
+
+
+# =============================================================================
+# Link Storage Functions
+# =============================================================================
+
+
+def store_link(
+    url: str,
+    sender: str,
+    chat_id: str,
+    message_id: int | None = None,
+    timestamp: datetime | None = None,
+    title: str | None = None,
+    description: str | None = None,
+    final_url: str | None = None,
+    tags: list[str] | None = None,
+    notes: str | None = None,
+    ai_summary: str | None = None,
+    db_path: Path | None = None,
+) -> dict:
+    """
+    Store a link in the history database.
+
+    Args:
+        url: The URL to store
+        sender: Who shared the link
+        chat_id: Telegram chat ID
+        message_id: Telegram message ID
+        timestamp: When the link was shared
+        title: Page title (optional, can be fetched)
+        description: Page description (optional)
+        final_url: Final URL after redirects
+        tags: List of tags for categorization
+        notes: User notes about the link
+        ai_summary: AI-generated summary
+        db_path: Custom database path
+
+    Returns:
+        dict with storage result
+    """
+    conn = _get_db_connection(db_path)
+
+    if timestamp is None:
+        timestamp = datetime.now()
+
+    # Extract domain from URL
+    try:
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        # Remove www. prefix if present
+        if domain.startswith("www."):
+            domain = domain[4:]
+    except Exception:
+        domain = None
+
+    # Serialize tags as JSON
+    tags_json = json.dumps(tags) if tags else None
+
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO links (url, final_url, title, description, domain, sender,
+                              chat_id, message_id, timestamp, tags, notes, ai_summary)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url, chat_id, message_id) DO UPDATE SET
+                title = COALESCE(excluded.title, links.title),
+                description = COALESCE(excluded.description, links.description),
+                final_url = COALESCE(excluded.final_url, links.final_url),
+                ai_summary = COALESCE(excluded.ai_summary, links.ai_summary)
+            """,
+            (url, final_url, title, description, domain, sender,
+             chat_id, message_id, timestamp, tags_json, notes, ai_summary),
+        )
+        conn.commit()
+
+        return {
+            "stored": True,
+            "id": cursor.lastrowid,
+            "url": url,
+            "domain": domain,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        conn.close()
+
+
+def search_links(
+    query: str | None = None,
+    domain: str | None = None,
+    sender: str | None = None,
+    status: str | None = None,
+    limit: int = 20,
+    db_path: Path | None = None,
+) -> dict:
+    """
+    Search stored links with various filters.
+
+    Args:
+        query: Text search in URL, title, description, notes
+        domain: Filter by domain
+        sender: Filter by sender
+        status: Filter by status (unread, read, archived)
+        limit: Maximum results
+        db_path: Custom database path
+
+    Returns:
+        dict with matching links
+    """
+    conn = _get_db_connection(db_path)
+
+    conditions = []
+    params = []
+
+    if query:
+        conditions.append("""
+            (url LIKE ? OR title LIKE ? OR description LIKE ?
+             OR notes LIKE ? OR ai_summary LIKE ?)
+        """)
+        query_param = f"%{query}%"
+        params.extend([query_param] * 5)
+
+    if domain:
+        conditions.append("domain = ?")
+        params.append(domain.lower())
+
+    if sender:
+        conditions.append("sender LIKE ?")
+        params.append(f"%{sender}%")
+
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+    try:
+        cursor = conn.execute(
+            f"""
+            SELECT id, url, final_url, title, description, domain, sender,
+                   chat_id, message_id, timestamp, tags, notes, status, ai_summary
+            FROM links
+            WHERE {where_clause}
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            params + [limit],
+        )
+
+        links = []
+        for row in cursor.fetchall():
+            link = dict(row)
+            # Parse tags from JSON
+            if link.get("tags"):
+                try:
+                    link["tags"] = json.loads(link["tags"])
+                except json.JSONDecodeError:
+                    link["tags"] = []
+            links.append(link)
+
+        return {
+            "links": links,
+            "count": len(links),
+            "query": query,
+            "filters": {
+                "domain": domain,
+                "sender": sender,
+                "status": status,
+            },
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        conn.close()
+
+
+def list_links(
+    limit: int = 20,
+    offset: int = 0,
+    status: str | None = None,
+    db_path: Path | None = None,
+) -> dict:
+    """
+    List recent links with pagination.
+
+    Args:
+        limit: Maximum results
+        offset: Skip first N results
+        status: Filter by status
+        db_path: Custom database path
+
+    Returns:
+        dict with links and pagination info
+    """
+    conn = _get_db_connection(db_path)
+
+    conditions = []
+    params = []
+
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
+
+    where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+    try:
+        # Get total count
+        count_cursor = conn.execute(
+            f"SELECT COUNT(*) FROM links WHERE {where_clause}",
+            params,
+        )
+        total = count_cursor.fetchone()[0]
+
+        # Get links
+        cursor = conn.execute(
+            f"""
+            SELECT id, url, final_url, title, description, domain, sender,
+                   chat_id, message_id, timestamp, tags, notes, status, ai_summary
+            FROM links
+            WHERE {where_clause}
+            ORDER BY timestamp DESC
+            LIMIT ? OFFSET ?
+            """,
+            params + [limit, offset],
+        )
+
+        links = []
+        for row in cursor.fetchall():
+            link = dict(row)
+            if link.get("tags"):
+                try:
+                    link["tags"] = json.loads(link["tags"])
+                except json.JSONDecodeError:
+                    link["tags"] = []
+            links.append(link)
+
+        return {
+            "links": links,
+            "count": len(links),
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "has_more": offset + len(links) < total,
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        conn.close()
+
+
+def update_link(
+    link_id: int,
+    status: str | None = None,
+    tags: list[str] | None = None,
+    notes: str | None = None,
+    ai_summary: str | None = None,
+    db_path: Path | None = None,
+) -> dict:
+    """
+    Update a stored link.
+
+    Args:
+        link_id: ID of the link to update
+        status: New status (unread, read, archived)
+        tags: New tags (replaces existing)
+        notes: New notes (replaces existing)
+        ai_summary: New AI summary
+        db_path: Custom database path
+
+    Returns:
+        dict with update result
+    """
+    conn = _get_db_connection(db_path)
+
+    updates = []
+    params = []
+
+    if status is not None:
+        updates.append("status = ?")
+        params.append(status)
+
+    if tags is not None:
+        updates.append("tags = ?")
+        params.append(json.dumps(tags))
+
+    if notes is not None:
+        updates.append("notes = ?")
+        params.append(notes)
+
+    if ai_summary is not None:
+        updates.append("ai_summary = ?")
+        params.append(ai_summary)
+
+    if not updates:
+        return {"error": "No fields to update"}
+
+    params.append(link_id)
+
+    try:
+        cursor = conn.execute(
+            f"""
+            UPDATE links
+            SET {", ".join(updates)}
+            WHERE id = ?
+            """,
+            params,
+        )
+        conn.commit()
+
+        if cursor.rowcount == 0:
+            return {"error": f"Link {link_id} not found"}
+
+        return {
+            "updated": True,
+            "id": link_id,
+            "fields_updated": len(updates),
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        conn.close()
+
+
+def get_link_stats(db_path: Path | None = None) -> dict:
+    """
+    Get statistics about stored links.
+
+    Args:
+        db_path: Custom database path
+
+    Returns:
+        dict with link statistics
+    """
+    conn = _get_db_connection(db_path)
+
+    try:
+        cursor = conn.execute("""
+            SELECT
+                COUNT(*) as total_links,
+                COUNT(DISTINCT domain) as unique_domains,
+                COUNT(DISTINCT sender) as unique_senders,
+                SUM(CASE WHEN status = 'unread' THEN 1 ELSE 0 END) as unread,
+                SUM(CASE WHEN status = 'read' THEN 1 ELSE 0 END) as read,
+                SUM(CASE WHEN status = 'archived' THEN 1 ELSE 0 END) as archived,
+                MIN(timestamp) as first_link,
+                MAX(timestamp) as last_link
+            FROM links
+        """)
+
+        row = cursor.fetchone()
+
+        # Get top domains
+        domain_cursor = conn.execute("""
+            SELECT domain, COUNT(*) as count
+            FROM links
+            WHERE domain IS NOT NULL
+            GROUP BY domain
+            ORDER BY count DESC
+            LIMIT 10
+        """)
+        top_domains = [{"domain": r[0], "count": r[1]} for r in domain_cursor.fetchall()]
+
+        return {
+            "total_links": row["total_links"],
+            "unique_domains": row["unique_domains"],
+            "unique_senders": row["unique_senders"],
+            "by_status": {
+                "unread": row["unread"],
+                "read": row["read"],
+                "archived": row["archived"],
+            },
+            "first_link": row["first_link"],
+            "last_link": row["last_link"],
+            "top_domains": top_domains,
         }
 
     except Exception as e:
