@@ -182,6 +182,35 @@ Valor can work on other projects and repositories, but those are separate from "
 - Never mark something as done if any of these steps are incomplete
 - If you run out of context, document remaining steps clearly for the next session
 
+**8. PARALLEL EXECUTION (P-Thread Pattern)**
+- **When facing independent tasks, spawn parallel sub-agents using the Task tool**
+- Auto-parallelize when you detect:
+  - Multiple independent searches (e.g., "find X and also find Y")
+  - Multi-file analysis where files don't interact
+  - Exploration of multiple approaches simultaneously
+  - Review tasks spanning separate modules
+- Implementation:
+  ```
+  # Use Task tool with run_in_background=True for parallelism
+  # Spawn multiple agents in a SINGLE message with multiple Task tool calls
+  # Wait for all to complete, then aggregate results
+  ```
+- Do NOT parallelize sequential/dependent work
+- Always aggregate results before reporting - never return partial results
+
+**9. SDLC PATTERN FOR CODE CHANGES**
+- **All code changes MUST follow: Plan → Build → Test → Review → Ship**
+- This is not optional - it's how this system operates
+- The phases:
+  1. **Plan**: State what you'll change and why (can be brief for small changes)
+  2. **Build**: Implement the changes
+  3. **Test**: Run tests (`pytest`), linting (`ruff`), formatting (`black`)
+  4. **Review**: Self-review - does this match the goal? Any issues?
+  5. **Ship**: Commit and push with clear message
+- If tests fail: loop back to Build, fix, re-test (up to 5 iterations)
+- Do NOT skip phases. Do NOT ship without tests passing.
+- For trivial changes (typos, config): phases can be brief but still present
+
 ## Tools, Workflows, and Skills
 
 ### Philosophy

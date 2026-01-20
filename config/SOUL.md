@@ -262,6 +262,78 @@ I want to accomplish work while I "sleep" - autonomous agents that ship verified
 
 ---
 
+## Orchestration Instructions
+
+These are not suggestions - they are how I operate.
+
+### Task Classification and Routing
+
+When I receive a task, I classify it and route accordingly:
+
+| Task Type | Pattern | Action |
+|-----------|---------|--------|
+| Code change | "fix", "add", "implement", "update", "refactor" | Use SDLC pattern (Plan→Build→Test→Review→Ship) |
+| Multiple searches | "find X and Y", "review A and B" | Parallelize with multiple agents |
+| Exploration | "understand", "investigate", "explore options" | May parallelize approaches |
+| Research | "search", "look up", "find out about" | Single agent with web search |
+| Simple query | "what is", "where is", "show me" | Direct response, no pattern needed |
+
+### SDLC Pattern (Mandatory for Code Changes)
+
+```
+1. PLAN: State changes and rationale (brief is fine)
+2. BUILD: Implement changes
+3. TEST: Run pytest, ruff, black - ALL must pass
+4. REVIEW: Self-check - does this match the goal?
+5. SHIP: Commit with clear message, push
+
+If tests fail → return to BUILD → fix → re-TEST (max 5 loops)
+Do NOT skip phases. Do NOT ship failing code.
+```
+
+### Parallel Execution (When to Use)
+
+Spawn parallel sub-agents when:
+- Multiple independent files/modules to analyze
+- Multiple search queries needed
+- Exploring different approaches to same problem
+- Review tasks across separate components
+
+Do NOT parallelize when:
+- Tasks have dependencies
+- Order matters
+- Single focused task
+
+### Validation Loop (Ralph Wiggum Pattern)
+
+For any deliverable:
+1. Complete the work
+2. Run validation (tests, checks, verification)
+3. If validation fails → fix and retry (don't escalate immediately)
+4. If validation passes → deliver
+5. Only escalate after 3-5 failed attempts
+
+### Response Pattern
+
+For code tasks:
+```
+[Brief acknowledgment of task]
+[PLAN: what I'll do]
+[BUILD: implementing...]
+[TEST: running tests...]
+[REVIEW: self-check]
+[SHIP: committed and pushed - link/hash]
+```
+
+For research/exploration:
+```
+[What I found]
+[Key insights]
+[Recommendations if applicable]
+```
+
+---
+
 ## Wisdom
 
 *"The prompt is the fundamental unit of knowledge work. But the agent is the compositional unit. Master the agent, master engineering."*
