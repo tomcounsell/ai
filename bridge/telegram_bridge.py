@@ -21,15 +21,17 @@ from pathlib import Path
 import httpx
 
 # Local tool imports for message and link storage
-from tools.telegram_history import store_message, store_link
+from tools.telegram_history import store_message, store_link, get_recent_messages
 from tools.link_analysis import extract_urls
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
+from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import (
     DocumentAttributeAudio,
     DocumentAttributeFilename,
     MessageMediaDocument,
     MessageMediaPhoto,
+    ReactionEmoji,
 )
 
 # =============================================================================
@@ -485,6 +487,41 @@ def build_context_prefix(project: dict | None, is_dm: bool) -> str:
     return "\n".join(context_parts)
 
 
+def build_conversation_history(chat_id: str, limit: int = 5) -> str:
+    """
+    Build recent conversation history for context.
+
+    Args:
+        chat_id: Telegram chat ID (numeric, without prefix)
+        limit: Number of recent messages to include
+
+    Returns:
+        Formatted conversation history string
+    """
+    result = get_recent_messages(str(chat_id), limit=limit)
+
+    if "error" in result or not result.get("messages"):
+        return ""
+
+    messages = result["messages"]
+    if not messages:
+        return ""
+
+    # Reverse to show oldest first (chronological order)
+    messages = list(reversed(messages))
+
+    history_lines = ["RECENT CONVERSATION:"]
+    for msg in messages:
+        sender = msg.get("sender", "Unknown")
+        content = msg.get("content", "")
+        # Truncate long messages
+        if len(content) > 200:
+            content = content[:200] + "..."
+        history_lines.append(f"  {sender}: {content}")
+
+    return "\n".join(history_lines)
+
+
 async def send_response_with_files(client: TelegramClient, event, response: str) -> None:
     """
     Send response to Telegram, handling both files and text.
@@ -524,7 +561,7 @@ async def send_response_with_files(client: TelegramClient, event, response: str)
         await event.reply("Done.")
 
 
-async def get_agent_response(message: str, session_id: str, sender_name: str, chat_title: str | None, project: dict | None) -> str:
+async def get_agent_response(message: str, session_id: str, sender_name: str, chat_title: str | None, project: dict | None, chat_id: str | None = None) -> str:
     """Call clawdbot agent and get response."""
     import time
     start_time = time.time()
@@ -533,7 +570,16 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
     try:
         # Build context-enriched message
         context = build_context_prefix(project, chat_title is None)
-        enriched_message = f"{context}\n\nFROM: {sender_name}"
+
+        # Add recent conversation history for continuity
+        history = ""
+        if chat_id:
+            history = build_conversation_history(chat_id, limit=5)
+
+        enriched_message = context
+        if history:
+            enriched_message += f"\n\n{history}"
+        enriched_message += f"\n\nFROM: {sender_name}"
         if chat_title:
             enriched_message += f" in {chat_title}"
         enriched_message += f"\nMESSAGE: {message}"
@@ -793,18 +839,47 @@ async def main():
         # Build session ID: include project key for context isolation
         project_key = project.get("_key", "dm") if project else "dm"
         session_id = f"tg_{project_key}_{event.chat_id}"
+        telegram_chat_id = str(event.chat_id)  # For history lookup
 
-        # Show typing indicator while getting response
-        use_typing = DEFAULTS.get("response", {}).get("typing_indicator", True)
-        if use_typing:
-            async with client.action(event.chat_id, "typing"):
-                response = await get_agent_response(clean_text, session_id, sender_name, chat_title, project)
-        else:
-            response = await get_agent_response(clean_text, session_id, sender_name, chat_title, project)
+        # Add eyes reaction to indicate we're processing
+        try:
+            await client(SendReactionRequest(
+                peer=event.chat_id,
+                msg_id=message.id,
+                reaction=[ReactionEmoji(emoticon="👀")],
+            ))
+        except Exception as e:
+            logger.debug(f"Could not add reaction: {e}")
+
+        # Get the agent response
+        response = await get_agent_response(clean_text, session_id, sender_name, chat_title, project, telegram_chat_id)
+
+        # Remove the eyes reaction after responding
+        try:
+            await client(SendReactionRequest(
+                peer=event.chat_id,
+                msg_id=message.id,
+                reaction=[],  # Empty list removes reactions
+            ))
+        except Exception as e:
+            logger.debug(f"Could not remove reaction: {e}")
 
         # Send response (handles both files and text)
         await send_response_with_files(client, event, response)
         logger.info(f"[{project_name}] Replied to {sender_name} (msg {message_id})")
+
+        # Store Valor's response in history for conversation continuity
+        try:
+            from datetime import datetime as dt
+            store_message(
+                chat_id=telegram_chat_id,
+                content=response[:1000],  # Truncate long responses for history
+                sender="Valor",
+                timestamp=dt.now(),
+                message_type="response",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to store response in history: {e}")
 
         # Log reply event
         log_event(
