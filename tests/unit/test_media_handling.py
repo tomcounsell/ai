@@ -203,105 +203,26 @@ class TestProcessIncomingMedia:
 
 
 class TestDescribeImage:
-    """Tests for describe_image function using Ollama LLaVA."""
+    """Tests for describe_image function using real Ollama LLaVA.
 
-    @pytest.mark.asyncio
-    async def test_describe_image_no_ollama(self):
-        """Returns None when ollama library is not installed."""
-        from bridge.telegram_bridge import describe_image
+    These tests use the actual local Ollama installation - no mocking.
+    Local models are free and should always be tested directly.
+    """
 
-        # Mock the import to fail
-        with patch.dict('sys.modules', {'ollama': None}):
-            result = await describe_image(Path("/tmp/fake.jpg"))
-            assert result is None
-
-    @pytest.mark.asyncio
-    async def test_describe_image_exception_handling(self):
-        """Returns None and logs error on exception."""
-        from bridge.telegram_bridge import describe_image
-
-        # Create a mock ollama module
-        mock_ollama = MagicMock()
-        mock_ollama.chat = MagicMock(side_effect=Exception("Connection refused"))
-
-        with patch.dict('sys.modules', {'ollama': mock_ollama}):
-            result = await describe_image(Path("/tmp/fake.jpg"))
-            assert result is None
-
-    @pytest.mark.asyncio
-    async def test_describe_image_returns_content(self):
-        """Returns description when ollama succeeds."""
-        from bridge.telegram_bridge import describe_image
-
-        mock_response = {
-            'message': {
-                'content': 'This is a photo of a cat sitting on a windowsill.'
-            }
-        }
-
-        mock_ollama = MagicMock()
-        mock_ollama.chat = MagicMock(return_value=mock_response)
-
-        with patch.dict('sys.modules', {'ollama': mock_ollama}):
-            result = await describe_image(Path("/tmp/fake.jpg"))
-            assert result is not None
-            assert "cat" in result.lower()
-
-    @pytest.mark.asyncio
-    async def test_describe_image_empty_content(self):
-        """Returns None when ollama returns empty content."""
-        from bridge.telegram_bridge import describe_image
-
-        mock_response = {
-            'message': {
-                'content': ''
-            }
-        }
-
-        mock_ollama = MagicMock()
-        mock_ollama.chat = MagicMock(return_value=mock_response)
-
-        with patch.dict('sys.modules', {'ollama': mock_ollama}):
-            result = await describe_image(Path("/tmp/fake.jpg"))
-            # Empty content should return None or empty string
-            assert result is None or result == ""
-
-    @pytest.mark.asyncio
-    async def test_describe_image_strips_whitespace(self):
-        """Strips whitespace from returned description."""
-        from bridge.telegram_bridge import describe_image
-
-        mock_response = {
-            'message': {
-                'content': '  A beautiful sunset over the ocean.  \n'
-            }
-        }
-
-        mock_ollama = MagicMock()
-        mock_ollama.chat = MagicMock(return_value=mock_response)
-
-        with patch.dict('sys.modules', {'ollama': mock_ollama}):
-            result = await describe_image(Path("/tmp/fake.jpg"))
-            assert result == "A beautiful sunset over the ocean."
-
-
-class TestDescribeImageIntegration:
-    """Integration tests for describe_image with real Ollama."""
-
-    @pytest.fixture
-    def ollama_available(self):
+    @pytest.fixture(autouse=True)
+    def check_ollama(self):
         """Check if Ollama is available with llama3.2-vision model."""
         try:
-            import ollama
-            models = ollama.list()
-            model_names = [m.get('name', '') for m in models.get('models', [])]
-            if not any('llama3.2-vision' in name for name in model_names):
+            import httpx
+            response = httpx.get("http://localhost:11434/api/tags", timeout=5.0)
+            if response.status_code != 200:
+                pytest.skip("Ollama not responding")
+            models = response.json().get("models", [])
+            model_names = [m.get("name", "") for m in models]
+            if not any("llama3.2-vision" in name for name in model_names):
                 pytest.skip("llama3.2-vision model not available")
-            return True
-        except ImportError:
-            pytest.skip("Ollama library not installed")
-        except Exception:
-            pytest.skip("Ollama not available")
+        except Exception as e:
+            pytest.skip(f"Ollama not available: {e}")
 
     @pytest.fixture
     def sample_image(self, tmp_path):
@@ -331,13 +252,75 @@ class TestDescribeImageIntegration:
         test_image.write_bytes(create_minimal_png())
         return test_image
 
+    @pytest.fixture
+    def colored_image(self, tmp_path):
+        """Create a PNG with actual colors for more interesting descriptions."""
+        import struct
+        import zlib
+
+        width, height = 50, 50
+
+        # Create a red square
+        signature = b'\x89PNG\r\n\x1a\n'
+
+        ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+        ihdr_crc = zlib.crc32(b'IHDR' + ihdr_data) & 0xffffffff
+        ihdr = struct.pack('>I', 13) + b'IHDR' + ihdr_data + struct.pack('>I', ihdr_crc)
+
+        # Red pixels (RGB)
+        row_data = b'\x00' + (b'\xff\x00\x00' * width)  # Filter byte + red pixels
+        raw_data = row_data * height
+        compressed = zlib.compress(raw_data)
+        idat_crc = zlib.crc32(b'IDAT' + compressed) & 0xffffffff
+        idat = struct.pack('>I', len(compressed)) + b'IDAT' + compressed + struct.pack('>I', idat_crc)
+
+        iend_crc = zlib.crc32(b'IEND') & 0xffffffff
+        iend = struct.pack('>I', 0) + b'IEND' + struct.pack('>I', iend_crc)
+
+        test_image = tmp_path / "red_square.png"
+        test_image.write_bytes(signature + ihdr + idat + iend)
+        return test_image
+
     @pytest.mark.asyncio
-    async def test_describe_real_image(self, ollama_available, sample_image):
-        """Integration test: describe a real image with Ollama."""
+    async def test_describe_image_returns_description(self, sample_image):
+        """describe_image returns a meaningful text description."""
         from bridge.telegram_bridge import describe_image
 
         result = await describe_image(sample_image)
 
         assert result is not None
-        assert len(result) > 10  # Should have meaningful description
         assert isinstance(result, str)
+        assert len(result) > 10  # Should have meaningful content
+
+    @pytest.mark.asyncio
+    async def test_describe_image_no_leading_trailing_whitespace(self, sample_image):
+        """Description should not have leading or trailing whitespace."""
+        from bridge.telegram_bridge import describe_image
+
+        result = await describe_image(sample_image)
+
+        assert result is not None
+        assert result == result.strip()
+
+    @pytest.mark.asyncio
+    async def test_describe_colored_image(self, colored_image):
+        """Vision model can describe a colored image."""
+        from bridge.telegram_bridge import describe_image
+
+        result = await describe_image(colored_image)
+
+        assert result is not None
+        assert len(result) > 10
+        # The model should mention something about the color or shape
+        # We don't assert specific words since LLM output varies
+
+    @pytest.mark.asyncio
+    async def test_describe_nonexistent_image(self):
+        """Returns None for non-existent image file."""
+        from bridge.telegram_bridge import describe_image
+
+        result = await describe_image(Path("/nonexistent/path/image.jpg"))
+
+        # Should handle gracefully (return None or raise handled exception)
+        # The function catches exceptions and returns None
+        assert result is None
