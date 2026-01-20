@@ -71,14 +71,48 @@ async def authorize_telegram_client():
 
     try:
         client = TelegramClient(str(SESSION_PATH), API_ID, API_HASH)
+        await client.connect()
 
-        print("📱 Starting authorization process...")
-        print("\nThis will prompt for:")
-        print("  1. Verification code (sent via Telegram)")
-        print("  2. Two-factor password (if enabled)")
+        print(f"📱 Requesting verification code for {PHONE}...")
 
-        # start() handles all interactive prompts automatically
-        await client.start(phone=PHONE, password=PASSWORD)
+        # Explicitly request the code
+        try:
+            sent_code = await client.send_code_request(PHONE, force_sms=False)
+            code_type = sent_code.type.__class__.__name__
+            print(f"✅ Code sent via: {code_type}")
+            print(f"   Code length: {sent_code.type.length if hasattr(sent_code.type, 'length') else 'unknown'}")
+
+            code = None  # Will be set below
+
+            # Show where to look for the code
+            if "App" in code_type:
+                print("\n💡 Code sent to your Telegram app!")
+                print("   Check for a message from 'Telegram' (blue checkmark)")
+                print("   Look on ALL devices: phone, desktop, web")
+        except Exception as e:
+            print(f"❌ Failed to send code: {e}")
+            await client.disconnect()
+            return False
+
+        print("\n📨 Check your Telegram app or SMS for the code!")
+
+        # Get code from user (if not already entered above)
+        if not code:
+            code = input("\nEnter the verification code: ").strip()
+
+        try:
+            await client.sign_in(PHONE, code)
+        except Exception as e:
+            error_str = str(e).lower()
+            if "two-step" in error_str or "password" in error_str or "2fa" in error_str:
+                print("🔐 Two-factor authentication required...")
+                if PASSWORD:
+                    await client.sign_in(password=PASSWORD)
+                else:
+                    pwd = input("Enter your 2FA password: ").strip()
+                    await client.sign_in(password=pwd)
+            else:
+                raise
 
         me = await client.get_me()
         print(f"\n✅ Authorization successful!")
