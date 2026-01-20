@@ -42,9 +42,11 @@ is_running() {
 }
 
 start_bridge() {
+    # Always stop any existing processes first to ensure clean state
     if is_running; then
-        echo "Bridge is already running (PID: $(get_pid))"
-        return 0
+        echo "Stopping existing bridge process..."
+        stop_bridge
+        sleep 1
     fi
 
     echo "Starting Valor bridge..."
