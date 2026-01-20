@@ -55,6 +55,55 @@ MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 # Explicit file marker: <<FILE:/path/to/file>>
 FILE_MARKER_PATTERN = re.compile(r'<<FILE:([^>]+)>>')
 
+# =============================================================================
+# Response Filtering - Remove Tool Logs
+# =============================================================================
+
+# Patterns for tool execution logs that should be filtered from responses
+TOOL_LOG_PATTERNS = [
+    re.compile(r'^🛠️\s*exec:', re.IGNORECASE),      # Bash execution
+    re.compile(r'^📖\s*read:', re.IGNORECASE),       # File read
+    re.compile(r'^🔎\s*web_search:', re.IGNORECASE), # Web search
+    re.compile(r'^✏️\s*edit:', re.IGNORECASE),       # File edit
+    re.compile(r'^📝\s*write:', re.IGNORECASE),      # File write
+    re.compile(r'^🔍\s*search:', re.IGNORECASE),     # Search
+    re.compile(r'^📁\s*glob:', re.IGNORECASE),       # Glob
+    re.compile(r'^🌐\s*fetch:', re.IGNORECASE),      # Web fetch
+]
+
+
+def filter_tool_logs(response: str) -> str:
+    """
+    Remove tool execution traces from response.
+
+    Clawdbot may include lines like "🛠️ exec: ls -la" in stdout.
+    These are internal logs, not meant for the user.
+
+    Returns:
+        Filtered response, or empty string if only logs remain.
+    """
+    if not response:
+        return ""
+
+    lines = response.split('\n')
+    filtered = []
+
+    for line in lines:
+        stripped = line.strip()
+        # Skip lines matching tool log patterns
+        if any(pattern.match(stripped) for pattern in TOOL_LOG_PATTERNS):
+            continue
+        filtered.append(line)
+
+    result = '\n'.join(filtered).strip()
+
+    # If filtering removed everything meaningful, return empty
+    # (response was just tool logs)
+    if not result or len(result) < 5:
+        return ""
+
+    return result
+
 # Fallback: detect absolute paths to common file types
 # Matches paths like /Users/foo/bar.png or /tmp/output.pdf
 ABSOLUTE_PATH_PATTERN = re.compile(
@@ -538,6 +587,94 @@ def build_context_prefix(project: dict | None, is_dm: bool) -> str:
     return "\n".join(context_parts)
 
 
+# =============================================================================
+# Activity Context - What Valor is Working On
+# =============================================================================
+
+# Patterns that indicate the user is asking about current work/status
+STATUS_QUESTION_PATTERNS = [
+    re.compile(r"what.*(?:working|doing|up to)", re.IGNORECASE),
+    re.compile(r"what.*status", re.IGNORECASE),
+    re.compile(r"what'?s.*going on", re.IGNORECASE),
+    re.compile(r"how.*going", re.IGNORECASE),
+    re.compile(r"any.*updates?", re.IGNORECASE),
+    re.compile(r"what.*progress", re.IGNORECASE),
+    re.compile(r"what.*been doing", re.IGNORECASE),
+    re.compile(r"catch me up", re.IGNORECASE),
+    re.compile(r"what.*happening", re.IGNORECASE),
+]
+
+
+def is_status_question(text: str) -> bool:
+    """Check if the message is asking about current work or status."""
+    return any(pattern.search(text) for pattern in STATUS_QUESTION_PATTERNS)
+
+
+def build_activity_context(working_dir: str | None = None) -> str:
+    """
+    Build context about recent project activity.
+
+    This gives Valor awareness of recent work so status questions
+    get informed answers instead of "nothing specific."
+    """
+    import subprocess
+
+    context_parts = []
+
+    # Use project working directory or default
+    cwd = working_dir or str(Path(__file__).parent.parent)
+
+    # Recent git commits (last 24h)
+    try:
+        result = subprocess.run(
+            ["git", "log", "--oneline", "--since=24 hours ago", "-5"],
+            capture_output=True, text=True, timeout=5, cwd=cwd
+        )
+        if result.stdout.strip():
+            context_parts.append(f"RECENT COMMITS (last 24h):\n{result.stdout.strip()}")
+    except Exception as e:
+        logger.debug(f"Could not get git log: {e}")
+
+    # Current branch and status
+    try:
+        branch_result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            capture_output=True, text=True, timeout=5, cwd=cwd
+        )
+        if branch_result.stdout.strip():
+            context_parts.append(f"CURRENT BRANCH: {branch_result.stdout.strip()}")
+
+        status_result = subprocess.run(
+            ["git", "status", "--short"],
+            capture_output=True, text=True, timeout=5, cwd=cwd
+        )
+        if status_result.stdout.strip():
+            modified_files = status_result.stdout.strip().split('\n')[:5]
+            context_parts.append(f"MODIFIED FILES:\n" + "\n".join(modified_files))
+    except Exception as e:
+        logger.debug(f"Could not get git status: {e}")
+
+    # Recent plan docs
+    plans_dir = Path(cwd) / "docs" / "plans"
+    if plans_dir.exists():
+        try:
+            recent_plans = sorted(
+                plans_dir.glob("*.md"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True
+            )[:3]
+            if recent_plans:
+                plan_names = [p.stem for p in recent_plans]
+                context_parts.append(f"ACTIVE PLANS: {', '.join(plan_names)}")
+        except Exception as e:
+            logger.debug(f"Could not get plan docs: {e}")
+
+    if not context_parts:
+        return ""
+
+    return "ACTIVITY CONTEXT:\n" + "\n".join(context_parts)
+
+
 def build_conversation_history(chat_id: str, limit: int = 5) -> str:
     """
     Build recent conversation history for context.
@@ -789,10 +926,20 @@ async def send_response_with_files(client: TelegramClient, event, response: str)
     """
     Send response to Telegram, handling both files and text.
 
-    1. Extract any files from the response
-    2. Send files first (as separate messages)
-    3. Send remaining text (if any)
+    1. Filter out tool execution logs
+    2. Extract any files from the response
+    3. Send files first (as separate messages)
+    4. Send remaining text (if any)
+
+    Returns True if any content was sent, False otherwise.
     """
+    # Filter out tool logs before processing
+    response = filter_tool_logs(response)
+
+    # If filtering removed everything, no response needed
+    if not response:
+        return False
+
     text, files = extract_files_from_response(response)
 
     # Send files first
@@ -833,6 +980,17 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
     start_time = time.time()
     request_id = f"{session_id}_{int(start_time)}"
 
+    # CRITICAL: Determine working directory to prevent agent from wandering into wrong directories
+    if project:
+        working_dir = project.get("working_directory", DEFAULTS.get("working_directory"))
+    else:
+        working_dir = DEFAULTS.get("working_directory")
+
+    # Fallback to current directory if not configured (shouldn't happen)
+    if not working_dir:
+        working_dir = str(Path(__file__).parent.parent)
+        logger.warning(f"[{request_id}] No working_directory configured, using {working_dir}")
+
     try:
         # Build context-enriched message
         context = build_context_prefix(project, chat_title is None)
@@ -842,7 +1000,15 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
         if chat_id:
             history = build_conversation_history(chat_id, limit=5)
 
+        # Check if this is a status question - inject activity context
+        activity_context = ""
+        if is_status_question(message):
+            activity_context = build_activity_context(working_dir)
+            logger.debug(f"[{request_id}] Status question detected, injecting activity context")
+
         enriched_message = context
+        if activity_context:
+            enriched_message += f"\n\n{activity_context}"
         if history:
             enriched_message += f"\n\n{history}"
         enriched_message += f"\n\nFROM: {sender_name}"
@@ -868,6 +1034,7 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
         # Log full request details
         logger.info(f"[{request_id}] Calling clawdbot agent for {project_name}")
         logger.debug(f"[{request_id}] Session: {session_id}")
+        logger.debug(f"[{request_id}] Working directory: {working_dir}")
         logger.debug(f"[{request_id}] Command: {' '.join(cmd[:6])}...")
         logger.debug(f"[{request_id}] Enriched message:\n{enriched_message}")
 
@@ -877,6 +1044,7 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
             request_id=request_id,
             session_id=session_id,
             project=project_name,
+            working_dir=working_dir,
             sender=sender_name,
             chat=chat_title,
             message_length=len(message),
@@ -885,9 +1053,10 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
 
         timeout = DEFAULTS.get("response", {}).get("timeout_seconds", 300)
 
-        # Run with timeout
+        # Run with timeout - CRITICAL: cwd ensures agent works in correct project directory
         process = await asyncio.create_subprocess_exec(
             *cmd,
+            cwd=working_dir,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env={**os.environ, "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", "")},
@@ -974,6 +1143,156 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
         )
 
         return f"Error: {str(e)}"
+
+
+# =============================================================================
+# Retry with Self-Healing
+# =============================================================================
+
+# Retry configuration
+MAX_RETRIES = 3
+RETRY_DELAYS = [5, 15, 30]  # Seconds between retries
+
+
+async def attempt_self_healing(error: str, session_id: str) -> None:
+    """
+    Attempt to fix the cause of failure before retry.
+
+    This runs basic diagnostics and cleanup to improve retry success.
+    """
+    logger.info(f"Attempting self-healing for session {session_id}: {error[:100]}")
+
+    try:
+        # Kill any stuck clawdbot processes
+        kill_result = await asyncio.create_subprocess_exec(
+            "pkill", "-f", "clawdbot agent",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(kill_result.wait(), timeout=5)
+        logger.debug("Killed stuck clawdbot processes")
+    except Exception as e:
+        logger.debug(f"No stuck processes to kill: {e}")
+
+    # Brief pause to let processes terminate
+    await asyncio.sleep(1)
+
+
+async def create_failure_plan(message: str, error: str, session_id: str) -> None:
+    """
+    Create a plan doc for failures that couldn't be self-healed.
+
+    Instead of showing errors to the user, we document them for later review.
+    """
+    from datetime import datetime
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    plan_path = Path(__file__).parent.parent / "docs" / "plans" / f"fix-bridge-failure-{timestamp}.md"
+
+    # Ensure plans directory exists
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+
+    content = f"""# Fix Bridge Failure
+
+**Status**: Todo
+**Created**: {datetime.now().strftime("%Y-%m-%d %H:%M")}
+**Session**: {session_id}
+
+## Error
+{error}
+
+## Original Message
+{message[:500]}{"..." if len(message) > 500 else ""}
+
+## Investigation Needed
+- [ ] Review logs for this session
+- [ ] Identify root cause
+- [ ] Implement fix
+- [ ] Test with similar message
+"""
+
+    plan_path.write_text(content)
+    logger.info(f"Created failure plan: {plan_path.name}")
+
+    # Log structured event
+    log_event(
+        "failure_plan_created",
+        session_id=session_id,
+        plan_file=plan_path.name,
+        error_preview=error[:200],
+    )
+
+
+async def get_agent_response_with_retry(
+    message: str,
+    session_id: str,
+    sender_name: str,
+    chat_title: str | None,
+    project: dict | None,
+    chat_id: str | None = None,
+    client: TelegramClient | None = None,
+    msg_id: int | None = None,
+) -> str:
+    """
+    Call agent with retry and self-healing on failure.
+
+    On timeout or error:
+    1. Attempt self-healing (kill stuck processes)
+    2. Wait with progressive backoff
+    3. Retry up to MAX_RETRIES times
+
+    If all retries fail, create a plan doc instead of showing error to user.
+    """
+    last_error = None
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            # Update reaction to show retry attempt
+            if attempt > 0 and client and msg_id:
+                await set_reaction(client, int(chat_id) if chat_id else 0, msg_id, "🔄")
+                logger.info(f"Retry attempt {attempt + 1}/{MAX_RETRIES}")
+
+            response = await get_agent_response(
+                message, session_id, sender_name,
+                chat_title, project, chat_id
+            )
+
+            # Check if response looks like an error
+            if response.startswith("Error:") or response.startswith("Request timed out"):
+                last_error = response
+                if attempt < MAX_RETRIES - 1:
+                    await attempt_self_healing(response, session_id)
+                    await asyncio.sleep(RETRY_DELAYS[attempt])
+                    continue
+
+            # Check if response is just tool logs (will be filtered to empty)
+            filtered = filter_tool_logs(response)
+            if not filtered and response:
+                # Response was just logs - could indicate an issue
+                last_error = "Response contained only tool logs"
+                if attempt < MAX_RETRIES - 1:
+                    await asyncio.sleep(RETRY_DELAYS[attempt])
+                    continue
+
+            return response
+
+        except asyncio.TimeoutError:
+            last_error = "timeout"
+            if attempt < MAX_RETRIES - 1:
+                await attempt_self_healing("timeout", session_id)
+                await asyncio.sleep(RETRY_DELAYS[attempt])
+
+        except Exception as e:
+            last_error = str(e)
+            if attempt < MAX_RETRIES - 1:
+                await attempt_self_healing(str(e), session_id)
+                await asyncio.sleep(RETRY_DELAYS[attempt])
+
+    # All retries failed - create plan doc for future fix
+    await create_failure_plan(message, last_error or "Unknown error", session_id)
+
+    # Return empty response - reaction will indicate status
+    return ""
 
 
 async def main():
@@ -1140,10 +1459,34 @@ async def main():
             clean_text = f"{clean_text}\n\n--- LINK SUMMARIES ---\n{link_summary_text}"
             logger.info(f"Added {len(link_summaries)} link summaries to message context")
 
-        # Build session ID: include project key for context isolation
+        # Build session ID with reply-based continuity
+        # - Reply to Valor's message → continue that session
+        # - New message (no reply) → fresh session using message ID
         project_key = project.get("_key", "dm") if project else "dm"
-        session_id = f"tg_{project_key}_{event.chat_id}"
         telegram_chat_id = str(event.chat_id)  # For history lookup
+
+        # Check if this is a reply to one of Valor's messages
+        is_continuation = False
+        continuation_msg_id = None
+
+        if message.reply_to_msg_id:
+            try:
+                replied_msg = await client.get_messages(event.chat_id, ids=message.reply_to_msg_id)
+                if replied_msg and replied_msg.out:  # .out means it was sent by us (Valor)
+                    is_continuation = True
+                    continuation_msg_id = message.reply_to_msg_id
+                    logger.debug(f"Reply to Valor's message {continuation_msg_id} - continuing session")
+            except Exception as e:
+                logger.debug(f"Could not check replied message: {e}")
+
+        if is_continuation and continuation_msg_id:
+            # Continue the session from the replied message
+            session_id = f"tg_{project_key}_{event.chat_id}_{continuation_msg_id}"
+        else:
+            # Fresh session - use this message's ID as unique identifier
+            session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
+
+        logger.debug(f"Session ID: {session_id} (continuation: {is_continuation})")
 
         # === REACTION WORKFLOW ===
         # 1. 👀 Eyes = Message received/acknowledged
@@ -1163,7 +1506,10 @@ async def main():
             # Start both tasks in parallel
             classification_task = asyncio.create_task(classify_and_update_reaction())
             agent_task = asyncio.create_task(
-                get_agent_response(clean_text, session_id, sender_name, chat_title, project, telegram_chat_id)
+                get_agent_response_with_retry(
+                    clean_text, session_id, sender_name, chat_title, project,
+                    telegram_chat_id, client, message.id
+                )
             )
 
             # Wait for both (classification will finish first, updating the reaction)
