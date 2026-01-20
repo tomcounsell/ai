@@ -22,7 +22,13 @@ import httpx
 
 # Local tool imports for message and link storage
 from tools.telegram_history import store_message, store_link, get_recent_messages, get_link_by_url
-from tools.link_analysis import extract_urls, summarize_url_content, get_metadata
+from tools.link_analysis import (
+    extract_urls,
+    summarize_url_content,
+    get_metadata,
+    extract_youtube_urls,
+    process_youtube_urls_in_text,
+)
 from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import SendReactionRequest
@@ -568,6 +574,137 @@ def build_conversation_history(chat_id: str, limit: int = 5) -> str:
 
 
 # =============================================================================
+# Link Summarization
+# =============================================================================
+
+
+async def get_link_summaries(
+    text: str,
+    sender: str,
+    chat_id: str,
+    message_id: int,
+    timestamp,
+) -> list[dict]:
+    """
+    Extract URLs from text and get summaries for each.
+
+    Uses caching to avoid re-summarizing URLs we've seen recently.
+    Applies rate limiting (max 5 links per message).
+
+    Args:
+        text: Message text containing URLs
+        sender: Who shared the link
+        chat_id: Telegram chat ID
+        message_id: Telegram message ID
+        timestamp: When the message was sent
+
+    Returns:
+        List of dicts with url, summary, title, and cached flag
+    """
+    # Extract URLs from message
+    urls_result = extract_urls(text)
+    urls = urls_result.get("urls", [])
+
+    if not urls:
+        return []
+
+    # Rate limit: max 5 links per message
+    urls = urls[:MAX_LINKS_PER_MESSAGE]
+    if len(urls_result.get("urls", [])) > MAX_LINKS_PER_MESSAGE:
+        logger.info(f"Rate limiting: only processing {MAX_LINKS_PER_MESSAGE} of {len(urls_result.get('urls', []))} links")
+
+    summaries = []
+
+    for url in urls:
+        try:
+            # Check cache: do we already have a summary for this URL?
+            existing = get_link_by_url(url, max_age_hours=LINK_SUMMARY_CACHE_HOURS)
+
+            if existing and existing.get("ai_summary"):
+                # Use cached summary
+                logger.debug(f"Using cached summary for: {url[:50]}...")
+                summaries.append({
+                    "url": url,
+                    "summary": existing["ai_summary"],
+                    "title": existing.get("title"),
+                    "cached": True,
+                })
+                continue
+
+            # Need to fetch new summary
+            logger.info(f"Fetching summary for: {url[:50]}...")
+
+            # Get metadata (title, description) synchronously
+            metadata = get_metadata(url)
+            title = metadata.get("title")
+            description = metadata.get("description")
+            final_url = metadata.get("final_url", url)
+
+            # Get AI summary via Perplexity
+            summary = await summarize_url_content(url)
+
+            # Store the link with summary
+            store_link(
+                url=url,
+                sender=sender,
+                chat_id=chat_id,
+                message_id=message_id,
+                timestamp=timestamp,
+                title=title,
+                description=description,
+                final_url=final_url,
+                ai_summary=summary,
+            )
+
+            if summary:
+                summaries.append({
+                    "url": url,
+                    "summary": summary,
+                    "title": title,
+                    "cached": False,
+                })
+                logger.info(f"Stored link with summary: {url[:50]}...")
+            else:
+                logger.warning(f"No summary generated for: {url[:50]}...")
+
+        except Exception as e:
+            logger.error(f"Error processing URL {url[:50]}...: {e}")
+            continue
+
+    return summaries
+
+
+def format_link_summaries(summaries: list[dict]) -> str:
+    """
+    Format link summaries for inclusion in message context.
+
+    Args:
+        summaries: List of summary dicts from get_link_summaries()
+
+    Returns:
+        Formatted string to append to message
+    """
+    if not summaries:
+        return ""
+
+    parts = []
+    for s in summaries:
+        url = s["url"]
+        summary = s["summary"]
+        title = s.get("title", "")
+
+        # Build the summary line
+        if title:
+            parts.append(f"[Link: {title}]\n{summary}")
+        else:
+            # Use a truncated URL as the header
+            short_url = url[:60] + "..." if len(url) > 60 else url
+            parts.append(f"[Link: {short_url}]\n{summary}")
+
+    return "\n\n".join(parts)
+
+
+# =============================================================================
 # Reaction Status Workflow
 # =============================================================================
 
@@ -964,6 +1101,44 @@ async def main():
 
         if not clean_text:
             clean_text = "Hello"
+
+        # Process YouTube URLs in the message (transcribe videos)
+        youtube_urls = extract_youtube_urls(text)
+        if youtube_urls:
+            logger.info(f"Found {len(youtube_urls)} YouTube URL(s), processing...")
+            try:
+                enriched_text, youtube_results = await process_youtube_urls_in_text(text)
+                # Count successful transcriptions
+                successful = sum(1 for r in youtube_results if r.get("success"))
+                if successful > 0:
+                    # Replace clean_text with enriched version that includes transcripts
+                    clean_text = clean_message(enriched_text, project)
+                    if media_description:
+                        clean_text = f"{media_description}\n\n{clean_text}"
+                    logger.info(f"Successfully transcribed {successful}/{len(youtube_urls)} YouTube video(s)")
+                else:
+                    # Log errors but continue with original text
+                    for r in youtube_results:
+                        if r.get("error"):
+                            logger.warning(f"YouTube processing failed for {r.get('video_id')}: {r.get('error')}")
+            except Exception as e:
+                logger.error(f"Error processing YouTube URLs: {e}")
+                # Continue with original text on error
+
+        # Get link summaries for any non-YouTube URLs in the message
+        link_summaries = await get_link_summaries(
+            text=text,
+            sender=sender_name,
+            chat_id=str(event.chat_id),
+            message_id=message.id,
+            timestamp=message.date,
+        )
+        link_summary_text = format_link_summaries(link_summaries)
+
+        # Append link summaries to the message for context
+        if link_summary_text:
+            clean_text = f"{clean_text}\n\n--- LINK SUMMARIES ---\n{link_summary_text}"
+            logger.info(f"Added {len(link_summaries)} link summaries to message context")
 
         # Build session ID: include project key for context isolation
         project_key = project.get("_key", "dm") if project else "dm"
