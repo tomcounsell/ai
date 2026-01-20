@@ -522,7 +522,44 @@ def build_conversation_history(chat_id: str, limit: int = 5) -> str:
     return "\n".join(history_lines)
 
 
-async def send_response_with_files(client: TelegramClient, event, response: str) -> None:
+# =============================================================================
+# Reaction Status Workflow
+# =============================================================================
+
+# Reaction emojis for different stages
+REACTION_RECEIVED = "👀"      # Message acknowledged
+REACTION_PROCESSING = "🧑‍💻"  # Working on response
+REACTION_SUCCESS = "👍"       # Completed successfully
+REACTION_ERROR = "❌"         # Something went wrong
+
+
+async def set_reaction(client: TelegramClient, chat_id: int, msg_id: int, emoji: str | None) -> bool:
+    """
+    Set a reaction on a message.
+
+    Args:
+        client: Telegram client
+        chat_id: Chat ID
+        msg_id: Message ID
+        emoji: Emoji to react with, or None to remove reactions
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        reaction = [ReactionEmoji(emoticon=emoji)] if emoji else []
+        await client(SendReactionRequest(
+            peer=chat_id,
+            msg_id=msg_id,
+            reaction=reaction,
+        ))
+        return True
+    except Exception as e:
+        logger.debug(f"Could not set reaction '{emoji}': {e}")
+        return False
+
+
+async def send_response_with_files(client: TelegramClient, event, response: str) -> bool:
     """
     Send response to Telegram, handling both files and text.
 
@@ -549,6 +586,9 @@ async def send_response_with_files(client: TelegramClient, event, response: str)
             # Notify user of failure
             await event.reply(f"Failed to send file: {file_path.name}")
 
+    # Track if we sent anything
+    sent_content = bool(files)
+
     # Send text if there's meaningful content
     if text and not text.isspace():
         # Truncate if needed
@@ -556,9 +596,9 @@ async def send_response_with_files(client: TelegramClient, event, response: str)
         if len(text) > max_length:
             text = text[: max_length - 3] + "..."
         await event.reply(text)
-    elif not files:
-        # No files and no text - send a minimal acknowledgment
-        await event.reply("Done.")
+        sent_content = True
+
+    return sent_content
 
 
 async def get_agent_response(message: str, session_id: str, sender_name: str, chat_title: str | None, project: dict | None, chat_id: str | None = None) -> str:
@@ -841,32 +881,33 @@ async def main():
         session_id = f"tg_{project_key}_{event.chat_id}"
         telegram_chat_id = str(event.chat_id)  # For history lookup
 
-        # Add eyes reaction to indicate we're processing
+        # === REACTION WORKFLOW ===
+        # 1. 👀 Eyes = Message received/acknowledged
+        await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
+
         try:
-            await client(SendReactionRequest(
-                peer=event.chat_id,
-                msg_id=message.id,
-                reaction=[ReactionEmoji(emoticon="👀")],
-            ))
+            # 2. 🧑‍💻 Technologist = Working on response
+            await set_reaction(client, event.chat_id, message.id, REACTION_PROCESSING)
+
+            # Get the agent response
+            response = await get_agent_response(clean_text, session_id, sender_name, chat_title, project, telegram_chat_id)
+
+            # Send response if there's content (files or text)
+            sent_response = await send_response_with_files(client, event, response)
+
+            # 3. 👍 Thumbs up = Completed successfully
+            await set_reaction(client, event.chat_id, message.id, REACTION_SUCCESS)
+
+            if sent_response:
+                logger.info(f"[{project_name}] Replied to {sender_name} (msg {message_id})")
+            else:
+                logger.info(f"[{project_name}] Processed message from {sender_name} (msg {message_id}) - no response needed")
+
         except Exception as e:
-            logger.debug(f"Could not add reaction: {e}")
-
-        # Get the agent response
-        response = await get_agent_response(clean_text, session_id, sender_name, chat_title, project, telegram_chat_id)
-
-        # Remove the eyes reaction after responding
-        try:
-            await client(SendReactionRequest(
-                peer=event.chat_id,
-                msg_id=message.id,
-                reaction=[],  # Empty list removes reactions
-            ))
-        except Exception as e:
-            logger.debug(f"Could not remove reaction: {e}")
-
-        # Send response (handles both files and text)
-        await send_response_with_files(client, event, response)
-        logger.info(f"[{project_name}] Replied to {sender_name} (msg {message_id})")
+            # 4. ❌ Error = Something went wrong
+            await set_reaction(client, event.chat_id, message.id, REACTION_ERROR)
+            logger.error(f"[{project_name}] Error processing message from {sender_name}: {e}")
+            raise  # Re-raise to be caught by outer handler if needed
 
         # Store Valor's response in history for conversation continuity
         try:
