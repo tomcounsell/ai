@@ -15,6 +15,7 @@ from tools.telegram_history import (
     list_links,
     update_link,
     get_link_stats,
+    get_link_by_url,
 )
 
 
@@ -496,3 +497,116 @@ class TestGetLinkStats:
         # github.com should be first with 5 links
         assert result["top_domains"][0]["domain"] == "github.com"
         assert result["top_domains"][0]["count"] == 5
+
+
+class TestGetLinkByUrl:
+    """Test link lookup by URL for caching."""
+
+    def test_get_link_by_url_not_found(self, tmp_path):
+        """Test that None is returned when link doesn't exist."""
+        db_path = tmp_path / "test.db"
+        result = get_link_by_url("https://example.com", db_path=db_path)
+
+        assert result is None
+
+    def test_get_link_by_url_no_summary(self, tmp_path):
+        """Test that None is returned when link exists but has no summary."""
+        db_path = tmp_path / "test.db"
+
+        # Store link without summary
+        store_link(
+            url="https://example.com/article",
+            sender="Tom",
+            chat_id="chat1",
+            db_path=db_path
+        )
+
+        result = get_link_by_url("https://example.com/article", db_path=db_path)
+
+        # Should return None because no ai_summary
+        assert result is None
+
+    def test_get_link_by_url_with_summary(self, tmp_path):
+        """Test that link is returned when it has a summary."""
+        db_path = tmp_path / "test.db"
+
+        # Store link with summary
+        store_link(
+            url="https://example.com/article",
+            sender="Tom",
+            chat_id="chat1",
+            ai_summary="This is a test article about Python programming.",
+            db_path=db_path
+        )
+
+        result = get_link_by_url("https://example.com/article", db_path=db_path)
+
+        assert result is not None
+        assert result["url"] == "https://example.com/article"
+        assert result["ai_summary"] == "This is a test article about Python programming."
+
+    def test_get_link_by_url_respects_max_age(self, tmp_path):
+        """Test that max_age_hours filter works."""
+        db_path = tmp_path / "test.db"
+
+        # Store link with summary and old timestamp
+        old_time = datetime.now() - timedelta(hours=48)
+        store_link(
+            url="https://example.com/article",
+            sender="Tom",
+            chat_id="chat1",
+            timestamp=old_time,
+            ai_summary="Old summary",
+            db_path=db_path
+        )
+
+        # With 24 hour max age, should not find the old link
+        result = get_link_by_url(
+            "https://example.com/article",
+            max_age_hours=24,
+            db_path=db_path
+        )
+
+        assert result is None
+
+        # Without max age, should find it
+        result_no_age = get_link_by_url(
+            "https://example.com/article",
+            db_path=db_path
+        )
+
+        assert result_no_age is not None
+        assert result_no_age["ai_summary"] == "Old summary"
+
+    def test_get_link_by_url_returns_most_recent(self, tmp_path):
+        """Test that the most recent link is returned when multiple exist."""
+        db_path = tmp_path / "test.db"
+
+        # Store same URL multiple times with different timestamps
+        older_time = datetime.now() - timedelta(hours=5)
+        newer_time = datetime.now() - timedelta(hours=1)
+
+        store_link(
+            url="https://example.com/article",
+            sender="Tom",
+            chat_id="chat1",
+            message_id=100,
+            timestamp=older_time,
+            ai_summary="Older summary",
+            db_path=db_path
+        )
+
+        store_link(
+            url="https://example.com/article",
+            sender="Tom",
+            chat_id="chat1",
+            message_id=200,  # Different message ID to allow storing
+            timestamp=newer_time,
+            ai_summary="Newer summary",
+            db_path=db_path
+        )
+
+        result = get_link_by_url("https://example.com/article", db_path=db_path)
+
+        assert result is not None
+        assert result["ai_summary"] == "Newer summary"

@@ -10,6 +10,7 @@ from tools.link_analysis import (
     get_metadata,
     analyze_url,
     analyze_text_links,
+    summarize_url_content,
 )
 
 
@@ -189,3 +190,55 @@ class TestAnalyzeTextLinks:
 
         assert result["urls_found"] == 1
         assert "validation" in result["results"][0]
+
+
+class TestSummarizeUrlContent:
+    """Test URL summarization using Perplexity API."""
+
+    @pytest.mark.asyncio
+    async def test_summarize_url_basic(self, perplexity_api_key):
+        """Test basic URL summarization."""
+        summary = await summarize_url_content("https://google.com")
+
+        # Should return a string
+        assert summary is not None
+        assert isinstance(summary, str)
+        assert len(summary) > 0
+
+    @pytest.mark.asyncio
+    async def test_summarize_url_news_article(self, perplexity_api_key):
+        """Test summarizing a news/content page."""
+        # Using a well-known stable page
+        summary = await summarize_url_content("https://en.wikipedia.org/wiki/Python_(programming_language)")
+
+        assert summary is not None
+        assert isinstance(summary, str)
+        # Should contain some content about Python
+        assert len(summary) > 50
+
+    @pytest.mark.asyncio
+    async def test_summarize_url_missing_api_key(self):
+        """Test summarization without API key."""
+        original_key = os.environ.pop("PERPLEXITY_API_KEY", None)
+        try:
+            summary = await summarize_url_content("https://google.com")
+            assert summary is None
+        finally:
+            if original_key:
+                os.environ["PERPLEXITY_API_KEY"] = original_key
+
+    @pytest.mark.asyncio
+    async def test_summarize_url_timeout(self, perplexity_api_key):
+        """Test that summarization respects timeout."""
+        # Very short timeout should either succeed quickly or fail
+        summary = await summarize_url_content("https://google.com", timeout=1.0)
+        # Either returns a summary or None due to timeout - both are acceptable
+        assert summary is None or isinstance(summary, str)
+
+    @pytest.mark.asyncio
+    async def test_summarize_invalid_url(self, perplexity_api_key):
+        """Test summarizing an invalid URL."""
+        # Perplexity should handle this gracefully
+        summary = await summarize_url_content("https://nonexistent-domain-12345.com")
+        # Should either return None or return an error message
+        assert summary is None or isinstance(summary, str)

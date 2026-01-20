@@ -589,6 +589,75 @@ def list_links(
         conn.close()
 
 
+def get_link_by_url(
+    url: str,
+    max_age_hours: int | None = None,
+    db_path: Path | None = None,
+) -> dict | None:
+    """
+    Get an existing link record by URL.
+
+    Used for caching - check if we already have a summary for this URL.
+
+    Args:
+        url: URL to look up
+        max_age_hours: Only return if summary is newer than this (None = any age)
+        db_path: Custom database path
+
+    Returns:
+        dict with link data if found and has summary, None otherwise
+    """
+    conn = _get_db_connection(db_path)
+
+    try:
+        # Build query based on whether we want to filter by age
+        if max_age_hours is not None:
+            cutoff = datetime.now() - timedelta(hours=max_age_hours)
+            cursor = conn.execute(
+                """
+                SELECT id, url, final_url, title, description, domain, sender,
+                       chat_id, message_id, timestamp, tags, notes, status, ai_summary
+                FROM links
+                WHERE url = ?
+                  AND ai_summary IS NOT NULL
+                  AND timestamp >= ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (url, cutoff),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                SELECT id, url, final_url, title, description, domain, sender,
+                       chat_id, message_id, timestamp, tags, notes, status, ai_summary
+                FROM links
+                WHERE url = ?
+                  AND ai_summary IS NOT NULL
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (url,),
+            )
+
+        row = cursor.fetchone()
+        if row:
+            link = dict(row)
+            if link.get("tags"):
+                try:
+                    link["tags"] = json.loads(link["tags"])
+                except json.JSONDecodeError:
+                    link["tags"] = []
+            return link
+
+        return None
+
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
 def update_link(
     link_id: int,
     status: str | None = None,

@@ -17,7 +17,7 @@ import httpx
 import requests
 
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
-DEFAULT_MODEL = "llama-3.1-sonar-small-128k-online"
+DEFAULT_MODEL = "sonar"  # Current Perplexity model
 
 logger = logging.getLogger(__name__)
 
