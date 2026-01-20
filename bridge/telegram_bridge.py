@@ -528,9 +528,53 @@ def build_conversation_history(chat_id: str, limit: int = 5) -> str:
 
 # Reaction emojis for different stages
 REACTION_RECEIVED = "👀"      # Message acknowledged
-REACTION_PROCESSING = "🧑‍💻"  # Working on response
+REACTION_PROCESSING = "🤔"    # Default thinking emoji
 REACTION_SUCCESS = "👍"       # Completed successfully
 REACTION_ERROR = "❌"         # Something went wrong
+
+# Intent-specific processing emojis (classified by local Ollama)
+INTENT_REACTIONS = {
+    "search": "🔍",           # Searching the web
+    "code_execution": "💻",   # Running code
+    "image_generation": "🎨", # Creating an image
+    "image_analysis": "👁️",   # Analyzing an image
+    "file_operation": "📁",   # File operations
+    "git_operation": "🔀",    # Git work
+    "chat": "🤔",             # Thinking/conversation
+    "tool_use": "🔧",         # Using a tool
+    "system": "⚙️",           # System task
+    "unknown": "🤔",          # Default thinking
+}
+
+
+def get_processing_emoji(message: str) -> str:
+    """
+    Get the appropriate processing emoji based on message intent.
+    Uses local Ollama for fast classification.
+
+    Args:
+        message: The user's message
+
+    Returns:
+        Emoji string for the processing stage
+    """
+    try:
+        from intent import classify_intent
+        result = classify_intent(message, use_ollama=True)
+        intent = result.get("intent", "unknown")
+        return INTENT_REACTIONS.get(intent, REACTION_PROCESSING)
+    except Exception as e:
+        logger.debug(f"Intent classification failed: {e}")
+        return REACTION_PROCESSING
+
+
+async def get_processing_emoji_async(message: str) -> str:
+    """
+    Async wrapper for intent classification.
+    Runs in executor to not block the event loop.
+    """
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, get_processing_emoji, message)
 
 
 async def set_reaction(client: TelegramClient, chat_id: int, msg_id: int, emoji: str | None) -> bool:
@@ -886,11 +930,29 @@ async def main():
         await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
 
         try:
-            # 2. 🧑‍💻 Technologist = Working on response
-            await set_reaction(client, event.chat_id, message.id, REACTION_PROCESSING)
+            # 2. Start parallel tasks:
+            #    - Fast: Ollama classifies intent -> update reaction emoji
+            #    - Slow: Claude processes message -> get response
 
-            # Get the agent response
-            response = await get_agent_response(clean_text, session_id, sender_name, chat_title, project, telegram_chat_id)
+            async def classify_and_update_reaction():
+                """Classify intent with Ollama and update reaction emoji."""
+                emoji = await get_processing_emoji_async(clean_text)
+                await set_reaction(client, event.chat_id, message.id, emoji)
+                logger.debug(f"Intent classified, reaction set to {emoji}")
+
+            # Start both tasks in parallel
+            classification_task = asyncio.create_task(classify_and_update_reaction())
+            agent_task = asyncio.create_task(
+                get_agent_response(clean_text, session_id, sender_name, chat_title, project, telegram_chat_id)
+            )
+
+            # Wait for both (classification will finish first, updating the reaction)
+            # Agent response is what we actually need
+            response = await agent_task
+
+            # Cancel classification if it's somehow still running
+            if not classification_task.done():
+                classification_task.cancel()
 
             # Send response if there's content (files or text)
             sent_response = await send_response_with_files(client, event, response)

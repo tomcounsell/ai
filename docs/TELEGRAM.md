@@ -130,10 +130,28 @@ During processing, the interface shows status through emoji reactions:
 
 | Stage | Emoji | Meaning |
 |-------|-------|---------|
-| Received | :eyes: | Message acknowledged |
-| Processing | :technologist: | Working on response |
-| Success | :+1: | Completed successfully |
-| Error | :x: | Something went wrong |
+| Received | 👀 | Message acknowledged |
+| Processing | (varies) | Working on response |
+| Success | 👍 | Completed successfully |
+| Error | ❌ | Something went wrong |
+
+### Intent-Specific Processing Emojis
+
+The processing emoji is determined by classifying the message intent using a local Ollama model (fast, ~100-500ms). This runs in parallel with the main agent processing:
+
+| Intent | Emoji | Example Messages |
+|--------|-------|------------------|
+| search | 🔍 | "search for...", "what is...", "find..." |
+| code_execution | 💻 | "run this code", code blocks |
+| image_generation | 🎨 | "draw...", "create an image of..." |
+| image_analysis | 👁️ | "analyze this image", "what's in this photo" |
+| file_operation | 📁 | "read file...", "save to..." |
+| git_operation | 🔀 | "commit", "push", "create PR" |
+| chat | 🤔 | General conversation |
+| tool_use | 🔧 | Explicit tool requests |
+| system | ⚙️ | "status", "restart" |
+
+This provides immediate visual feedback about what type of task is being processed.
 
 ## Configuration
 
