@@ -20,6 +20,14 @@ from pathlib import Path
 
 import httpx
 
+# Feature flag for Claude Agent SDK migration
+# Set USE_CLAUDE_SDK=true in .env to use the new SDK instead of clawdbot
+USE_CLAUDE_SDK = os.getenv("USE_CLAUDE_SDK", "false").lower() == "true"
+
+# Import SDK client if enabled (lazy import to avoid loading if not used)
+if USE_CLAUDE_SDK:
+    from agent import get_agent_response_sdk
+
 # Local tool imports for message and link storage
 from tools.telegram_history import store_message, store_link, get_recent_messages, get_link_by_url
 from tools.link_analysis import (
@@ -558,14 +566,109 @@ def find_project_for_chat(chat_title: str | None) -> dict | None:
 # Pattern to detect @mentions in messages
 AT_MENTION_PATTERN = re.compile(r'@(\w+)')
 
+# Known Valor usernames for @mention detection
+VALOR_USERNAMES = {"valor", "valorengels"}
+
 
 def extract_at_mentions(text: str) -> list[str]:
     """Extract all @mentions from text, returning lowercase usernames."""
     return [m.lower() for m in AT_MENTION_PATTERN.findall(text)]
 
 
-def should_respond(text: str, is_dm: bool, chat_title: str | None, project: dict | None, sender_name: str | None = None, sender_username: str | None = None) -> bool:
-    """Determine if we should respond to this message."""
+def get_valor_usernames(project: dict | None) -> set[str]:
+    """Get all usernames that should be treated as Valor."""
+    usernames = VALOR_USERNAMES.copy()
+    if project:
+        mentions = project.get("telegram", {}).get("mention_triggers", DEFAULT_MENTIONS)
+        for trigger in mentions:
+            clean_trigger = trigger.lstrip("@").lower()
+            usernames.add(clean_trigger)
+    return usernames
+
+
+def is_message_for_valor(text: str, project: dict | None) -> bool:
+    """Check if message explicitly @mentions Valor."""
+    at_mentions = extract_at_mentions(text)
+    if not at_mentions:
+        return False
+    valor_usernames = get_valor_usernames(project)
+    return any(mention in valor_usernames for mention in at_mentions)
+
+
+def is_message_for_others(text: str, project: dict | None) -> bool:
+    """Check if message is @directed to someone other than Valor."""
+    at_mentions = extract_at_mentions(text)
+    if not at_mentions:
+        return False
+    valor_usernames = get_valor_usernames(project)
+    # If ALL @mentions are for others (none for Valor), it's directed elsewhere
+    return not any(mention in valor_usernames for mention in at_mentions)
+
+
+def classify_needs_response(text: str) -> bool:
+    """
+    Use Ollama to quickly classify if a message needs a response.
+
+    Returns True if the message appears to be a work request, question, or
+    instruction that needs action. Returns False for acknowledgments like
+    "thanks", "ok", "got it", side conversations, etc.
+    """
+    # Fast path: very short messages are usually acknowledgments
+    if len(text.strip()) < 3:
+        return False
+
+    # Fast path: common acknowledgments (case-insensitive)
+    acknowledgments = {
+        "thanks", "thank you", "thx", "ty",
+        "ok", "okay", "k", "kk",
+        "got it", "gotcha", "understood",
+        "nice", "great", "awesome", "perfect", "cool",
+        "yes", "yep", "yeah", "yup", "no", "nope",
+        "👍", "👌", "✅", "🙏", "❤️", "🔥",
+        "lol", "lmao", "haha", "heh",
+        "brb", "afk", "bbl",
+    }
+    text_lower = text.strip().lower().rstrip("!.,")
+    if text_lower in acknowledgments:
+        return False
+
+    # Use Ollama for more nuanced classification
+    try:
+        import ollama
+        response = ollama.chat(
+            model='llama3.2:3b',
+            messages=[{
+                'role': 'user',
+                'content': f"""Classify this message. Reply with ONLY "work" or "ignore".
+
+- "work" = question, request, instruction, bug report, or anything needing action
+- "ignore" = acknowledgment, thanks, greeting, side chat, or social message
+
+Message: {text[:200]}
+
+Classification:"""
+            }],
+            options={'temperature': 0}
+        )
+        result = response['message']['content'].strip().lower()
+        return 'work' in result
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"Ollama classification failed, defaulting to respond: {e}")
+        # Default to responding if Ollama fails
+        return True
+
+
+async def classify_needs_response_async(text: str) -> bool:
+    """Async wrapper for Ollama classification."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, classify_needs_response, text)
+
+
+def should_respond_sync(text: str, is_dm: bool, chat_title: str | None, project: dict | None, sender_name: str | None = None, sender_username: str | None = None) -> bool:
+    """
+    Synchronous check for basic response conditions.
+    Used for DMs and groups without respond_to_unaddressed.
+    """
     if is_dm:
         if not RESPOND_TO_DMS:
             return False
@@ -573,7 +676,6 @@ def should_respond(text: str, is_dm: bool, chat_title: str | None, project: dict
         if DM_WHITELIST:
             sender_lower = (sender_name or "").lower()
             username_lower = (sender_username or "").lower()
-            # Check if sender matches any whitelisted name/username
             if not any(
                 allowed in sender_lower or allowed in username_lower or
                 sender_lower == allowed or username_lower == allowed
@@ -588,42 +690,91 @@ def should_respond(text: str, is_dm: bool, chat_title: str | None, project: dict
 
     telegram_config = project.get("telegram", {})
 
-    # If respond_to_all is set, respond to everything in this group
+    # If respond_to_all is set, respond to everything
     if telegram_config.get("respond_to_all", False):
         return True
 
-    # If respond_to_unaddressed is set, respond to messages that aren't @directed elsewhere
-    # This is ideal for dev groups where most messages are meant for Valor
-    if telegram_config.get("respond_to_unaddressed", False):
-        mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
-        # Extract @mentions from the message
-        at_mentions = extract_at_mentions(text)
-
-        if not at_mentions:
-            # No @mentions at all - respond
-            return True
-
-        # Check if any @mention is for us (Valor)
-        valor_usernames = {"valor", "valorengels"}  # Known Valor usernames
-        for trigger in mentions:
-            # Handle both "@valor" and "valor" style triggers
-            clean_trigger = trigger.lstrip("@").lower()
-            valor_usernames.add(clean_trigger)
-
-        # If message @mentions Valor, respond
-        if any(mention in valor_usernames for mention in at_mentions):
-            return True
-
-        # Message has @mentions but none are for Valor - skip
-        return False
-
-    # Check for mentions (original behavior)
-    if telegram_config.get("respond_to_mentions", True):
-        mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
-        text_lower = text.lower()
-        return any(mention.lower() in text_lower for mention in mentions)
+    # For groups NOT using respond_to_unaddressed, use mention-based logic
+    if not telegram_config.get("respond_to_unaddressed", False):
+        if telegram_config.get("respond_to_mentions", True):
+            mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
+            text_lower = text.lower()
+            return any(mention.lower() in text_lower for mention in mentions)
 
     return False
+
+
+async def should_respond_async(
+    client,
+    event,
+    text: str,
+    is_dm: bool,
+    chat_title: str | None,
+    project: dict | None,
+    sender_name: str | None = None,
+    sender_username: str | None = None,
+) -> tuple[bool, bool]:
+    """
+    Async response decision with full context.
+
+    Returns (should_respond, is_reply_to_valor) tuple.
+
+    Decision logic for groups with respond_to_unaddressed:
+    - Case 1: Unaddressed message → Ollama classifies if it needs work
+    - Case 2: Reply to Valor → Always respond (continue session)
+    - Case 3: @valor → Always respond
+    - Case 4: @someoneelse → Always ignore
+    """
+    message = event.message
+
+    # DMs: use sync logic
+    if is_dm:
+        return should_respond_sync(text, is_dm, chat_title, project, sender_name, sender_username), False
+
+    # Must be in a monitored group
+    if not project:
+        return False, False
+
+    telegram_config = project.get("telegram", {})
+
+    # respond_to_all means respond to everything
+    if telegram_config.get("respond_to_all", False):
+        return True, False
+
+    # For groups NOT using respond_to_unaddressed, use sync mention-based logic
+    if not telegram_config.get("respond_to_unaddressed", False):
+        return should_respond_sync(text, is_dm, chat_title, project, sender_name, sender_username), False
+
+    # === respond_to_unaddressed logic (the 4 cases) ===
+
+    # Case 2: Reply to Valor's message → always respond (no Ollama needed)
+    is_reply_to_valor = False
+    if message.reply_to_msg_id:
+        try:
+            replied_msg = await client.get_messages(event.chat_id, ids=message.reply_to_msg_id)
+            if replied_msg and replied_msg.out:  # .out means sent by us (Valor)
+                is_reply_to_valor = True
+                logger.debug(f"Case 2: Reply to Valor - responding")
+                return True, True
+        except Exception as e:
+            logger.debug(f"Could not check replied message: {e}")
+
+    # Case 3: @valor → always respond (no Ollama needed)
+    if is_message_for_valor(text, project):
+        logger.debug(f"Case 3: @valor mentioned - responding")
+        return True, False
+
+    # Case 4: @someoneelse → always ignore (no Ollama needed)
+    if is_message_for_others(text, project):
+        logger.debug(f"Case 4: Message @directed to others - ignoring")
+        return False, False
+
+    # Case 1: Unaddressed message → use Ollama to classify
+    logger.debug(f"Case 1: Unaddressed message - classifying with Ollama")
+    needs_response = await classify_needs_response_async(text)
+    if not needs_response:
+        logger.info(f"Ollama classified as ignore: {text[:50]}...")
+    return needs_response, False
 
 
 def clean_message(text: str, project: dict | None) -> str:
@@ -1060,8 +1211,8 @@ async def send_response_with_files(client: TelegramClient, event, response: str)
     return sent_content
 
 
-async def get_agent_response(message: str, session_id: str, sender_name: str, chat_title: str | None, project: dict | None, chat_id: str | None = None) -> str:
-    """Call clawdbot agent and get response."""
+async def get_agent_response_clawdbot(message: str, session_id: str, sender_name: str, chat_title: str | None, project: dict | None, chat_id: str | None = None) -> str:
+    """Call clawdbot agent and get response (legacy implementation)."""
     import time
     start_time = time.time()
     request_id = f"{session_id}_{int(start_time)}"
@@ -1249,6 +1400,31 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
         return f"Error: {str(e)}"
 
 
+async def get_agent_response(
+    message: str,
+    session_id: str,
+    sender_name: str,
+    chat_title: str | None,
+    project: dict | None,
+    chat_id: str | None = None,
+) -> str:
+    """
+    Route to appropriate agent backend based on USE_CLAUDE_SDK flag.
+
+    When USE_CLAUDE_SDK=true, uses the Claude Agent SDK directly.
+    Otherwise, uses the legacy clawdbot subprocess approach.
+    """
+    if USE_CLAUDE_SDK:
+        logger.debug(f"Using Claude Agent SDK for session {session_id}")
+        return await get_agent_response_sdk(
+            message, session_id, sender_name, chat_title, project, chat_id
+        )
+    else:
+        return await get_agent_response_clawdbot(
+            message, session_id, sender_name, chat_title, project, chat_id
+        )
+
+
 # =============================================================================
 # Retry with Self-Healing
 # =============================================================================
@@ -1407,6 +1583,7 @@ async def main():
         sys.exit(1)
 
     logger.info(f"Starting Valor bridge")
+    logger.info(f"Agent backend: {'Claude Agent SDK' if USE_CLAUDE_SDK else 'Clawdbot (legacy)'}")
     logger.info(f"Active projects: {ACTIVE_PROJECTS}")
     logger.info(f"Monitored groups: {ALL_MONITORED_GROUPS}")
     logger.info(f"Respond to DMs: {RESPOND_TO_DMS}")
@@ -1481,8 +1658,11 @@ async def main():
             except Exception as e:
                 logger.error(f"Error extracting/storing links: {e}")
 
-        # Check if we should respond
-        if not should_respond(text, is_dm, chat_title, project, sender_name, sender_username):
+        # Check if we should respond (async for Ollama classification on unaddressed messages)
+        should_reply, is_reply_to_valor = await should_respond_async(
+            client, event, text, is_dm, chat_title, project, sender_name, sender_username
+        )
+        if not should_reply:
             if is_dm and DM_WHITELIST:
                 logger.debug(f"Ignoring DM from {sender_name} (@{sender_username}) - not in whitelist")
             return
@@ -1570,28 +1750,16 @@ async def main():
         project_key = project.get("_key", "dm") if project else "dm"
         telegram_chat_id = str(event.chat_id)  # For history lookup
 
-        # Check if this is a reply to one of Valor's messages
-        is_continuation = False
-        continuation_msg_id = None
-
-        if message.reply_to_msg_id:
-            try:
-                replied_msg = await client.get_messages(event.chat_id, ids=message.reply_to_msg_id)
-                if replied_msg and replied_msg.out:  # .out means it was sent by us (Valor)
-                    is_continuation = True
-                    continuation_msg_id = message.reply_to_msg_id
-                    logger.debug(f"Reply to Valor's message {continuation_msg_id} - continuing session")
-            except Exception as e:
-                logger.debug(f"Could not check replied message: {e}")
-
-        if is_continuation and continuation_msg_id:
+        # Use the is_reply_to_valor flag from should_respond_async
+        # (already checked there, no need to query Telegram again)
+        if is_reply_to_valor and message.reply_to_msg_id:
             # Continue the session from the replied message
-            session_id = f"tg_{project_key}_{event.chat_id}_{continuation_msg_id}"
+            session_id = f"tg_{project_key}_{event.chat_id}_{message.reply_to_msg_id}"
+            logger.debug(f"Session ID: {session_id} (continuation: True)")
         else:
             # Fresh session - use this message's ID as unique identifier
             session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
-
-        logger.debug(f"Session ID: {session_id} (continuation: {is_continuation})")
+            logger.debug(f"Session ID: {session_id} (continuation: False)")
 
         # === REACTION WORKFLOW ===
         # 1. 👀 Eyes = Message received/acknowledged

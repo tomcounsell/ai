@@ -1,6 +1,6 @@
 # Claude Agent SDK Migration Plan
 
-**Status**: Planning
+**Status**: Phase 1 Complete
 **Created**: 2026-01-21
 **Goal**: Replace Clawdbot with Claude Agent SDK so Valor's engineering work is equivalent to Claude Code
 
@@ -155,11 +155,11 @@ async with ClaudeSDKClient(options=options) as client:
 5. Test basic message flow (coding tools only - Read, Write, Bash, etc.)
 
 **Deliverables**:
-- [ ] SDK installed and importable
-- [ ] Basic agent wrapper class
-- [ ] Bridge uses SDK for responses
-- [ ] System prompt loaded from config
-- [ ] Built-in coding tools working
+- [x] SDK installed and importable (claude-agent-sdk 0.1.20)
+- [x] Basic agent wrapper class (agent/sdk_client.py)
+- [x] Bridge uses SDK for responses (USE_CLAUDE_SDK=true flag)
+- [x] System prompt loaded from config (config/SOUL.md)
+- [ ] Built-in coding tools working (pending integration test)
 
 ### Phase 2: Standalone MCP Servers - Core Services
 **Goal**: Build Sentry, GitHub, Linear as standalone MCP servers usable by any client
