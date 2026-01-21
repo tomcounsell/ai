@@ -60,15 +60,30 @@ FILE_MARKER_PATTERN = re.compile(r'<<FILE:([^>]+)>>')
 # =============================================================================
 
 # Patterns for tool execution logs that should be filtered from responses
+# These are clawdbot internal logs that shouldn't be shown to users
 TOOL_LOG_PATTERNS = [
     re.compile(r'^🛠️\s*exec:', re.IGNORECASE),      # Bash execution
     re.compile(r'^📖\s*read:', re.IGNORECASE),       # File read
     re.compile(r'^🔎\s*web_search:', re.IGNORECASE), # Web search
     re.compile(r'^✏️\s*edit:', re.IGNORECASE),       # File edit
     re.compile(r'^📝\s*write:', re.IGNORECASE),      # File write
+    re.compile(r'^✍️\s*write:', re.IGNORECASE),      # File write (alternate emoji)
     re.compile(r'^🔍\s*search:', re.IGNORECASE),     # Search
     re.compile(r'^📁\s*glob:', re.IGNORECASE),       # Glob
     re.compile(r'^🌐\s*fetch:', re.IGNORECASE),      # Web fetch
+    re.compile(r'^🧰\s*process:', re.IGNORECASE),    # Process/task
+    re.compile(r'^🔧\s*tool:', re.IGNORECASE),       # Tool usage
+    re.compile(r'^⚙️\s*config:', re.IGNORECASE),     # Config
+    re.compile(r'^📂\s*list:', re.IGNORECASE),       # Directory listing
+    re.compile(r'^🗂️\s*file:', re.IGNORECASE),       # File operations
+    re.compile(r'^💻\s*run:', re.IGNORECASE),        # Run command
+    re.compile(r'^🖥️\s*shell:', re.IGNORECASE),      # Shell command
+    re.compile(r'^📋\s*task:', re.IGNORECASE),       # Task
+    re.compile(r'^🔄\s*sync:', re.IGNORECASE),       # Sync
+    re.compile(r'^📦\s*package:', re.IGNORECASE),    # Package operations
+    re.compile(r'^🗑️\s*delete:', re.IGNORECASE),     # Delete
+    re.compile(r'^➡️\s*move:', re.IGNORECASE),       # Move
+    re.compile(r'^📋\s*copy:', re.IGNORECASE),       # Copy
 ]
 
 
@@ -88,14 +103,40 @@ def filter_tool_logs(response: str) -> str:
     lines = response.split('\n')
     filtered = []
 
+    # Generic pattern: emoji followed by word and colon (catches most tool logs)
+    generic_tool_pattern = re.compile(r'^[\U0001F300-\U0001F9FF\u2600-\u26FF\u2700-\u27BF]\s*\w+:', re.UNICODE)
+
     for line in lines:
         stripped = line.strip()
-        # Skip lines matching tool log patterns
+
+        # Skip empty lines in sequence (but keep some structure)
+        if not stripped:
+            # Only add blank line if last line wasn't blank
+            if filtered and filtered[-1].strip():
+                filtered.append(line)
+            continue
+
+        # Skip lines matching explicit tool log patterns
         if any(pattern.match(stripped) for pattern in TOOL_LOG_PATTERNS):
             continue
+
+        # Skip lines matching generic emoji+word: pattern (tool logs)
+        if generic_tool_pattern.match(stripped):
+            continue
+
+        # Skip backtick-wrapped command lines (like `cd foo && ls`)
+        if stripped.startswith('`') and stripped.endswith('`') and len(stripped) > 2:
+            inner = stripped[1:-1]
+            if any(cmd in inner.lower() for cmd in ['cd ', 'ls ', 'cat ', 'grep ', 'find ', 'mkdir ', 'rm ', 'mv ', 'cp ']):
+                continue
+
         filtered.append(line)
 
     result = '\n'.join(filtered).strip()
+
+    # Clean up multiple consecutive blank lines
+    while '\n\n\n' in result:
+        result = result.replace('\n\n\n', '\n\n')
 
     # If filtering removed everything meaningful, return empty
     # (response was just tool logs)
@@ -702,10 +743,21 @@ def build_conversation_history(chat_id: str, limit: int = 5) -> str:
     for msg in messages:
         sender = msg.get("sender", "Unknown")
         content = msg.get("content", "")
+
+        # Filter tool logs from Valor's historical responses
+        if sender == "Valor":
+            content = filter_tool_logs(content)
+            if not content:
+                continue  # Skip if response was only tool logs
+
         # Truncate long messages
         if len(content) > 200:
             content = content[:200] + "..."
         history_lines.append(f"  {sender}: {content}")
+
+    # If we only have the header, return empty
+    if len(history_lines) <= 1:
+        return ""
 
     return "\n".join(history_lines)
 
@@ -1248,8 +1300,9 @@ async def get_agent_response_with_retry(
     for attempt in range(MAX_RETRIES):
         try:
             # Update reaction to show retry attempt
+            # Note: 🔄 is not a valid Telegram reaction, use 🔥 (fire/trying hard) instead
             if attempt > 0 and client and msg_id:
-                await set_reaction(client, int(chat_id) if chat_id else 0, msg_id, "🔄")
+                await set_reaction(client, int(chat_id) if chat_id else 0, msg_id, "🔥")
                 logger.info(f"Retry attempt {attempt + 1}/{MAX_RETRIES}")
 
             response = await get_agent_response(
@@ -1538,15 +1591,18 @@ async def main():
             raise  # Re-raise to be caught by outer handler if needed
 
         # Store Valor's response in history for conversation continuity
+        # IMPORTANT: Store the filtered response, not the raw one with tool logs
         try:
             from datetime import datetime as dt
-            store_message(
-                chat_id=telegram_chat_id,
-                content=response[:1000],  # Truncate long responses for history
-                sender="Valor",
-                timestamp=dt.now(),
-                message_type="response",
-            )
+            filtered_for_history = filter_tool_logs(response)
+            if filtered_for_history:  # Only store if there's actual content
+                store_message(
+                    chat_id=telegram_chat_id,
+                    content=filtered_for_history[:1000],  # Truncate long responses for history
+                    sender="Valor",
+                    timestamp=dt.now(),
+                    message_type="response",
+                )
         except Exception as e:
             logger.warning(f"Failed to store response in history: {e}")
 
