@@ -52,3 +52,13 @@ grep '"project": "Valor"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | g
 ```bash
 grep -o '"project": "[^"]*"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | sort -u
 ```
+
+## If No Results
+
+If a project filter returns no results, list available projects and report them:
+
+```bash
+# No results? Check available projects:
+grep -o '"project": "[^"]*"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | sort -u
+# Then retry with a valid project name from the list
+```

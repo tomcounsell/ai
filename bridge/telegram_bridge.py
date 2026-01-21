@@ -18,7 +18,17 @@ import re
 import sys
 from pathlib import Path
 
+# Ensure user site-packages is available for claude_agent_sdk
+user_site = Path.home() / "Library/Python/3.12/lib/python/site-packages"
+if user_site.exists() and str(user_site) not in sys.path:
+    sys.path.insert(0, str(user_site))
+
 import httpx
+from dotenv import load_dotenv
+
+# Load environment variables FIRST before any env checks
+env_path = Path(__file__).parent.parent / ".env"
+load_dotenv(env_path)
 
 # Feature flag for Claude Agent SDK migration
 # Set USE_CLAUDE_SDK=true in .env to use the new SDK instead of clawdbot
@@ -37,7 +47,6 @@ from tools.link_analysis import (
     extract_youtube_urls,
     process_youtube_urls_in_text,
 )
-from dotenv import load_dotenv
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import (
@@ -423,11 +432,7 @@ async def process_incoming_media(client: TelegramClient, message) -> tuple[str, 
     return description, files
 
 
-# Load environment
-env_path = Path(__file__).parent.parent / ".env"
-load_dotenv(env_path)
-
-# Configuration
+# Configuration (environment already loaded at top of file)
 API_ID = int(os.getenv("TELEGRAM_API_ID", "0"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "")
 PHONE = os.getenv("TELEGRAM_PHONE", "")
