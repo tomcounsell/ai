@@ -555,6 +555,15 @@ def find_project_for_chat(chat_title: str | None) -> dict | None:
     return None
 
 
+# Pattern to detect @mentions in messages
+AT_MENTION_PATTERN = re.compile(r'@(\w+)')
+
+
+def extract_at_mentions(text: str) -> list[str]:
+    """Extract all @mentions from text, returning lowercase usernames."""
+    return [m.lower() for m in AT_MENTION_PATTERN.findall(text)]
+
+
 def should_respond(text: str, is_dm: bool, chat_title: str | None, project: dict | None, sender_name: str | None = None, sender_username: str | None = None) -> bool:
     """Determine if we should respond to this message."""
     if is_dm:
@@ -583,7 +592,32 @@ def should_respond(text: str, is_dm: bool, chat_title: str | None, project: dict
     if telegram_config.get("respond_to_all", False):
         return True
 
-    # Check for mentions
+    # If respond_to_unaddressed is set, respond to messages that aren't @directed elsewhere
+    # This is ideal for dev groups where most messages are meant for Valor
+    if telegram_config.get("respond_to_unaddressed", False):
+        mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
+        # Extract @mentions from the message
+        at_mentions = extract_at_mentions(text)
+
+        if not at_mentions:
+            # No @mentions at all - respond
+            return True
+
+        # Check if any @mention is for us (Valor)
+        valor_usernames = {"valor", "valorengels"}  # Known Valor usernames
+        for trigger in mentions:
+            # Handle both "@valor" and "valor" style triggers
+            clean_trigger = trigger.lstrip("@").lower()
+            valor_usernames.add(clean_trigger)
+
+        # If message @mentions Valor, respond
+        if any(mention in valor_usernames for mention in at_mentions):
+            return True
+
+        # Message has @mentions but none are for Valor - skip
+        return False
+
+    # Check for mentions (original behavior)
     if telegram_config.get("respond_to_mentions", True):
         mentions = telegram_config.get("mention_triggers", DEFAULT_MENTIONS)
         text_lower = text.lower()
