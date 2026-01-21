@@ -1,13 +1,38 @@
 # Clawdbot Migration Plan
 
-**Document Version**: 4.0
+**Document Version**: 5.0
 **Created**: 2025-01-19
-**Updated**: 2026-01-19
-**Status**: Phase 6 Complete - Agentic Philosophy Integrated
+**Updated**: 2026-01-21
+**Status**: Legacy - Superseded by Claude Agent SDK
 
 ---
 
-## Migration Progress
+## Important: SDK Transition
+
+**As of January 2026, the Claude Agent SDK is now the primary agent backend.**
+
+Clawdbot remains available as a fallback option but is no longer the recommended approach. See [claude-agent-sdk-migration.md](plans/claude-agent-sdk-migration.md) for the new architecture.
+
+### Current Backend Selection
+
+```bash
+# In .env:
+USE_CLAUDE_SDK=true   # Recommended: Use Claude Agent SDK
+USE_CLAUDE_SDK=false  # Legacy: Use Clawdbot
+```
+
+### Why the Change?
+
+1. **Official SDK** - Claude Agent SDK is Anthropic's official Python SDK
+2. **Same Capabilities** - Identical tools to Claude Code CLI
+3. **No Third-Party Dependency** - Direct API access without subprocess
+4. **Better Integration** - Native Python, easier to extend
+
+The documentation below remains valid for the Clawdbot fallback mode.
+
+---
+
+## Migration Progress (Historical)
 
 ### Completed
 

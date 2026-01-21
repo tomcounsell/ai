@@ -1,50 +1,21 @@
 # Valor AI System
 
-A Claude Code-powered AI coworker that runs on its own machine.
+An AI coworker powered by the Claude Agent SDK that runs autonomously on its own Mac.
 
 ## What Is This?
 
-Valor is an AI coworker - not an assistant, not a tool, but a colleague with its own Mac, its own work, and its own agency. The supervisor assigns work and provides direction. Valor executes autonomously, reaching out via Telegram only when necessary.
+Valor is an AI coworker - not an assistant, not a tool, but a colleague with its own Mac, its own work, and its own agency. The supervisor assigns work and provides direction. Valor executes autonomously, reaching out via Telegram when necessary.
 
 ## Current Status
 
 | Component | Status | Notes |
 |-----------|--------|-------|
+| Claude Agent SDK | **Active** | Primary agent backend (v0.1.20) |
 | Telegram Integration | **Working** | User account via Telethon, responds to @valor mentions |
-| Clawdbot Agent | **Working** | Handles AI processing with SOUL.md persona |
+| Clawdbot (Legacy) | **Available** | Fallback via `USE_CLAUDE_SDK=false` |
 | Self-Management | **Working** | Can restart himself, survives reboots |
-| Service (launchd) | **Installed** | Auto-starts on boot |
-| Skills (MCP) | Planned | Stripe, Sentry, GitHub, Render, Notion, Linear |
-| Daydream (Cron) | Planned | Daily autonomous maintenance |
-
-## Valor's Capabilities
-
-Valor has access to 15 tools that enable autonomous work:
-
-### Research & Information
-- **Web Search**: Find current information via Perplexity API
-- **Knowledge Search**: Semantic search across local documents with embeddings
-- **Link Analysis**: Extract, validate, and summarize URLs
-
-### Vision & Media
-- **Image Analysis**: Describe images, detect objects, extract text (OCR)
-- **Image Tagging**: Categorize and tag images with AI
-- **Image Generation**: Create images from text descriptions
-- **Transcription**: Convert audio to text
-
-### Development
-- **Code Execution**: Run Python, JavaScript, or Bash in a sandbox
-- **Documentation**: Generate docstrings, READMEs, API docs from code
-- **Browser Automation**: Navigate, interact, screenshot web pages
-
-### Testing & Quality
-- **Test Judge**: AI evaluation of test results against criteria
-- **Test Params**: Generate edge cases and parameter variations
-- **Test Scheduler**: Queue and execute tests in background
-
-### Communication
-- **Telegram History**: Search conversation history with relevance scoring
-- **Document Summary**: Summarize documents at configurable detail levels
+| MCP Skills | **Working** | Sentry, GitHub, Linear, Notion, Stripe, Render |
+| Daydream (Cron) | **Working** | Daily autonomous maintenance at 6 AM Pacific |
 
 ## Architecture
 
@@ -62,18 +33,22 @@ Valor has access to 15 tools that enable autonomous work:
 │  • Telethon client (user account, not bot)                       │
 │  • Listens for @valor mentions and DMs                           │
 │  • Maintains session continuity per chat                         │
+│  • USE_CLAUDE_SDK flag routes to appropriate backend             │
 └─────────────────────────┬───────────────────────────────────────┘
                           │
-                          ▼
-┌─────────────────────────────────────────────────────────────────┐
-│              clawdbot agent --local                              │
-│                                                                  │
-│  • Loads ~/clawd/SOUL.md (Valor persona)                         │
-│  • Calls Claude API for reasoning                                │
-│  • Returns response to bridge                                    │
-└─────────────────────────┬───────────────────────────────────────┘
-                          │
-                          ▼
+            ┌─────────────┴─────────────┐
+            │                           │
+            ▼                           ▼
+┌───────────────────────┐   ┌───────────────────────────┐
+│  Claude Agent SDK     │   │  Clawdbot (Legacy)        │
+│  (USE_CLAUDE_SDK=true)│   │  (USE_CLAUDE_SDK=false)   │
+│                       │   │                           │
+│  • agent/sdk_client.py│   │  • subprocess call        │
+│  • Same tools as      │   │  • ~/clawd/skills/        │
+│    Claude Code CLI    │   │                           │
+└───────────┬───────────┘   └───────────────────────────┘
+            │
+            ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                       Claude API                                 │
 │                  (anthropic/claude-sonnet-4)                     │
@@ -83,67 +58,75 @@ Valor has access to 15 tools that enable autonomous work:
 ## Quick Start
 
 ```bash
-# 1. Install Clawdbot
-npm install -g clawdbot@latest
+# 1. Install dependencies
+pip install -e .
 
-# 2. Set up workspace
-mkdir -p ~/clawd
-cp config/SOUL.md ~/clawd/SOUL.md
+# 2. Configure environment
+cp .env.example .env
+# Edit .env with your API keys and Telegram credentials
 
-# 3. Install Python dependencies
-pip install telethon python-dotenv
+# 3. Enable Claude Agent SDK (recommended)
+# In .env:
+USE_CLAUDE_SDK=true
 
-# 4. Install and start the service
-./scripts/valor-service.sh install
+# 4. Start the bridge
+./scripts/start_bridge.sh
 ```
 
 See [docs/setup.md](docs/setup.md) for detailed setup instructions.
 
+## Configuration
+
+### Agent Backend Selection
+
+The system supports two agent backends via the `USE_CLAUDE_SDK` environment variable:
+
+| Setting | Backend | Description |
+|---------|---------|-------------|
+| `USE_CLAUDE_SDK=true` | **Claude Agent SDK** | Official SDK with same capabilities as Claude Code CLI |
+| `USE_CLAUDE_SDK=false` | Clawdbot (Legacy) | Third-party tool, subprocess-based |
+
+The Claude Agent SDK is now the **recommended default**.
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `agent/sdk_client.py` | Claude Agent SDK wrapper |
+| `bridge/telegram_bridge.py` | Telegram ↔ Agent bridge |
+| `config/SOUL.md` | Valor persona definition |
+| `.env` | Environment variables and API keys |
+
 ## Service Management
 
-Valor can manage his own process:
-
-| Command | Description |
-|---------|-------------|
-| `./scripts/valor-service.sh status` | Check if running |
-| `./scripts/valor-service.sh restart` | Restart after code changes |
-| `./scripts/valor-service.sh logs` | View logs |
-| `./scripts/valor-service.sh health` | Health check |
-
-The service auto-restarts on crash and on system boot.
+```bash
+./scripts/valor-service.sh status   # Check if running
+./scripts/valor-service.sh restart  # Restart after code changes
+./scripts/valor-service.sh logs     # View logs
+./scripts/valor-service.sh health   # Health check
+```
 
 ## Repository Structure
 
 ```
 ai/
-├── bridge/                 # Telegram-Clawdbot bridge (Python)
-│   └── telegram_bridge.py  # Main bridge script
-├── tools/                  # Valor's capability tools
-│   ├── search/             # Web search (Perplexity)
-│   ├── image_analysis/     # Vision analysis
-│   ├── code_execution/     # Sandboxed code runner
-│   ├── test_judge/         # AI test evaluation
-│   ├── knowledge_search/   # Semantic local search
-│   ├── doc_summary/        # Document summarization
-│   ├── documentation/      # Doc generation
-│   ├── link_analysis/      # URL analysis
-│   ├── telegram_history/   # Chat history search
-│   ├── image_tagging/      # Image categorization
-│   ├── test_params/        # Test parameter generation
-│   ├── test_scheduler/     # Background test runner
-│   ├── browser/            # Browser automation
-│   ├── image_gen/          # Image generation
-│   └── transcribe/         # Audio transcription
+├── agent/                  # Claude Agent SDK integration
+│   ├── __init__.py
+│   └── sdk_client.py       # SDK wrapper (ValorAgent class)
+├── bridge/                 # Telegram-Agent bridge
+│   └── telegram_bridge.py  # Main bridge with routing logic
+├── tools/                  # Local Python tools
+│   ├── telegram_history/   # Chat history storage
+│   └── link_analysis/      # URL analysis
 ├── config/
 │   ├── SOUL.md             # Valor persona definition
-│   └── clawdbot/           # Clawdbot config templates
+│   └── projects.json       # Multi-project configuration
 ├── scripts/
 │   ├── valor-service.sh    # Service management
 │   └── start_bridge.sh     # Quick start script
 ├── docs/
 │   ├── setup.md            # Setup guide
-│   ├── CLAWDBOT_MIGRATION_PLAN.md
-│   └── SKILLS_MIGRATION.md
+│   └── plans/              # Migration and planning docs
 ├── logs/                   # Runtime logs
 ├── data/                   # Session files, state
 ├── CLAUDE.md               # Development guide
@@ -154,36 +137,62 @@ ai/
 
 | Document | Purpose |
 |----------|---------|
-| [tools/README.md](tools/README.md) | Tools overview and usage |
-| [tools/STANDARD.md](tools/STANDARD.md) | Tool development standard |
+| [CLAUDE.md](CLAUDE.md) | Development principles and architecture |
 | [docs/setup.md](docs/setup.md) | Local setup guide |
-| [docs/CLAWDBOT_MIGRATION_PLAN.md](docs/CLAWDBOT_MIGRATION_PLAN.md) | Migration status and plan |
-| [docs/SKILLS_MIGRATION.md](docs/SKILLS_MIGRATION.md) | Skills implementation guide |
-| [CLAUDE.md](CLAUDE.md) | Development principles |
+| [docs/plans/claude-agent-sdk-migration.md](docs/plans/claude-agent-sdk-migration.md) | SDK migration plan and status |
 
-## Planned: Skills
+## MCP Skills (via Clawdbot Legacy)
 
-Business integration skills (not yet implemented):
+When using Clawdbot backend, these skills are available in `~/clawd/skills/`:
 
-| Skill | Purpose | Priority |
-|-------|---------|----------|
-| **Sentry** | Error monitoring, performance analysis | High |
-| **GitHub** | Repository operations, PRs, issues | High |
-| **Linear** | Project management, issue tracking | Medium |
-| **Notion** | Knowledge base, documentation | Medium |
-| **Stripe** | Payment processing, subscriptions | Low |
-| **Render** | Deployment, infrastructure | Low |
+| Skill | Tools | Purpose |
+|-------|-------|---------|
+| Sentry | 8 | Error monitoring, performance analysis |
+| GitHub | 10 | Repository operations, PRs, issues |
+| Linear | 9 | Project management, issue tracking |
+| Notion | 8 | Knowledge base, documentation |
+| Stripe | 9 | Payment processing, subscriptions |
+| Render | 9 | Deployment, infrastructure |
+| Daydream | 6 steps | Daily autonomous maintenance |
 
-## Planned: Daydream
+**Note**: Phase 2 of the SDK migration will rebuild these as standalone MCP servers usable by both Claude Code and Valor.
 
-Daily autonomous maintenance process (not yet implemented):
+## Daydream (Daily Maintenance)
 
-1. Clean up legacy code
-2. Review previous day's logs
-3. Check Sentry for errors
-4. Clean up task management (Linear)
-5. Update documentation
-6. Produce daily report
+Valor runs autonomous maintenance daily at 6 AM Pacific:
+
+1. **clean_legacy** - Remove deprecated patterns
+2. **review_logs** - Analyze yesterday's logs
+3. **check_sentry** - Query for errors
+4. **clean_tasks** - Update Linear issues
+5. **update_docs** - Ensure docs match code
+6. **daily_report** - Summary to supervisor
+
+## Development
+
+### Running Tests
+
+```bash
+pytest tests/ -v
+```
+
+### Code Quality
+
+```bash
+black . && ruff check . && mypy . --strict
+```
+
+### Switching Agent Backends
+
+To switch from SDK to Clawdbot (for debugging or rollback):
+
+```bash
+# In .env
+USE_CLAUDE_SDK=false
+
+# Restart bridge
+./scripts/valor-service.sh restart
+```
 
 ## Contact
 

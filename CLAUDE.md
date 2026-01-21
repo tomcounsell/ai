@@ -14,20 +14,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Or run directly:
 python bridge/telegram_bridge.py
 
-# Start Clawdbot gateway daemon
-clawdbot daemon install   # First time only
-clawdbot daemon start
-clawdbot daemon restart
-clawdbot daemon stop
-
 # Check status
-clawdbot status
-clawdbot daemon status
-clawdbot health
+./scripts/valor-service.sh status
 
 # View logs
-clawdbot logs
 tail -f logs/bridge.log   # Telegram bridge logs
+
+# Restart after code changes
+./scripts/valor-service.sh restart
+```
+
+### Agent Backend Configuration
+
+The system uses the Claude Agent SDK by default. Configure in `.env`:
+
+```bash
+# Recommended: Use Claude Agent SDK (same capabilities as Claude Code)
+USE_CLAUDE_SDK=true
+
+# Legacy fallback: Use Clawdbot
+USE_CLAUDE_SDK=false
 ```
 
 ### Testing
@@ -75,35 +81,35 @@ The system follows a **Living Codebase** philosophy with these key architectural
 |                      User Interface Layer                          |
 |-------------------------------------------------------------------|
 |                       Telegram Client                              |
-|                    (via Clawdbot Gateway)                          |
+|                 (Telethon - User Account)                          |
++-------------------------------------------------------------------+
+                          |
+                          v
++-------------------------------------------------------------------+
+|                     Python Bridge Layer                            |
+|                (bridge/telegram_bridge.py)                         |
+|                                                                    |
+|  Routes to backend based on USE_CLAUDE_SDK flag                    |
 +-------------------------+-----------------------+------------------+
                           |                       |
+          (SDK=true)      |                       |    (SDK=false)
                           v                       v
 +-------------------------+     +-----------------------------------+
-|   Clawdbot Gateway      |     |        Background Workers         |
-|  (Daemon + CLI)         |     |     (Daydreams, Maintenance)      |
+|   Claude Agent SDK      |     |   Clawdbot (Legacy Fallback)      |
+|  (agent/sdk_client.py)  |     |     (subprocess call)             |
+|                         |     |                                   |
+| Same tools as Claude    |     | ~/clawd/skills/ (JS-based)        |
+| Code CLI                |     |                                   |
 +-------------------------+     +-----------------------------------+
                           |
                           v
 +-------------------------------------------------------------------+
-|                      Core Agent Layer                              |
-|                      (Valor Persona)                               |
-|                   Orchestrated by Claude Code                      |
-+-------------------------+-----------------------+------------------+
-                          |                       |
-                          v                       v
-+-------------------------+     +-----------------------------------+
-|    Skills & Workflows   |     |          MCP Servers              |
-|   (via Clawdbot)        |     |   (GitHub, Sentry, Notion, etc)   |
-+-------------------------+     +-----------------------------------+
-                          |                       |
-                          +----------+------------+
-                                     v
-+-------------------------------------------------------------------+
-|                    Data Persistence Layer                          |
-|                        (SQLite)                                    |
+|                        Claude API                                  |
+|                  (anthropic/claude-sonnet-4)                       |
 +-------------------------------------------------------------------+
 ```
+
+**Note**: The Claude Agent SDK is the primary backend as of January 2026.
 
 ### Design Philosophy
 
@@ -480,11 +486,18 @@ ai/                              # This repository (Valor's codebase)
 │   ├── commands/                # Slash command skills (/prime, /pthread, /sdlc)
 │   ├── agents/                  # Subagent definitions
 │   └── README.md                # Philosophy and skills reference
-├── bridge/                      # Telegram-Clawdbot bridge
-│   └── telegram_bridge.py       # Telethon user account bridge
+├── agent/                       # Claude Agent SDK integration
+│   ├── __init__.py
+│   └── sdk_client.py            # SDK wrapper (ValorAgent class)
+├── bridge/                      # Telegram-Agent bridge
+│   └── telegram_bridge.py       # Routes to SDK or Clawdbot based on flag
 ├── config/                      # Configuration files
-│   ├── SOUL.md                  # Valor persona (copy to ~/clawd/)
+│   ├── SOUL.md                  # Valor persona
+│   ├── projects.json            # Multi-project configuration
 │   └── telegram_groups.json     # Group behavior config
+├── tools/                       # Local Python tools
+│   ├── telegram_history/        # Chat history storage
+│   └── link_analysis/           # URL analysis
 ├── scripts/                     # Service management
 │   └── valor-service.sh         # start/stop/restart/status
 ├── logs/                        # Runtime logs
@@ -493,9 +506,9 @@ ai/                              # This repository (Valor's codebase)
 ├── CLAUDE.md                    # This file
 └── README.md                    # Project overview
 
-~/clawd/                         # Clawdbot workspace (external)
-├── SOUL.md                      # Active Valor persona
-└── skills/                      # Clawdbot skills
+~/clawd/                         # Clawdbot workspace (legacy fallback)
+├── SOUL.md                      # Valor persona (copy from config/)
+└── skills/                      # Clawdbot skills (JS-based)
     ├── sentry/                  # Error monitoring (8 tools)
     ├── github/                  # Repository ops (10 tools)
     ├── linear/                  # Project management (9 tools)
@@ -626,12 +639,11 @@ The bridge is in `bridge/telegram_bridge.py`. To add new message handling:
 | Command | Description |
 |---------|-------------|
 | `./scripts/start_bridge.sh` | Start Telegram bridge |
-| `pkill -f telegram_bridge` | Stop Telegram bridge |
-| `pgrep -f telegram_bridge` | Check if bridge is running |
-| `tail -f logs/bridge.log` | View bridge logs |
-| `clawdbot daemon start` | Start clawdbot gateway |
-| `clawdbot daemon stop` | Stop clawdbot gateway |
-| `clawdbot status` | Check clawdbot status |
+| `./scripts/valor-service.sh status` | Check bridge status |
+| `./scripts/valor-service.sh restart` | Restart after code changes |
+| `./scripts/valor-service.sh logs` | View recent logs |
+| `tail -f logs/bridge.log` | Stream bridge logs |
+| `pkill -f telegram_bridge` | Force stop bridge |
 | `python scripts/telegram_login.py` | Authenticate Telegram |
 
 ### Critical Thresholds
@@ -644,7 +656,8 @@ The bridge is in `bridge/telegram_bridge.py`. To add new message handling:
 
 ### Emergency Recovery
 
-- **Bridge Issues**: Check `tail -f logs/bridge.log`, restart with `pkill -f telegram_bridge && ./scripts/start_bridge.sh`
+- **Bridge Issues**: Check `tail -f logs/bridge.log`, restart with `./scripts/valor-service.sh restart`
 - **Telegram Auth Issues**: Re-authenticate with `python scripts/telegram_login.py`
-- **Gateway Issues**: Check `clawdbot status`, restart with `clawdbot daemon restart`
+- **SDK Issues**: Check logs for errors, verify `USE_CLAUDE_SDK=true` in `.env`
+- **Rollback to Clawdbot**: Set `USE_CLAUDE_SDK=false` in `.env`, restart bridge
 - **Database Issues**: Check `data/` directory for SQLite files

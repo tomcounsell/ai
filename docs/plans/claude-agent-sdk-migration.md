@@ -1,8 +1,32 @@
 # Claude Agent SDK Migration Plan
 
-**Status**: Phase 1 Complete
+**Status**: Phase 1 Active in Production
 **Created**: 2026-01-21
+**Updated**: 2026-01-21
 **Goal**: Replace Clawdbot with Claude Agent SDK so Valor's engineering work is equivalent to Claude Code
+
+---
+
+## Current Status
+
+**The Claude Agent SDK is now the primary agent backend.**
+
+| Component | Status | Details |
+|-----------|--------|---------|
+| SDK Integration | **Active** | `agent/sdk_client.py` wraps ClaudeSDKClient |
+| Feature Flag | **Enabled** | `USE_CLAUDE_SDK=true` in production |
+| Clawdbot Fallback | Available | `USE_CLAUDE_SDK=false` for rollback |
+| Phase 1 | Complete | Basic flow working via Telegram |
+| Phase 2 | Pending | Standalone MCP servers |
+
+### Quick Verification
+
+```bash
+# Check current backend
+./scripts/valor-service.sh status
+tail -5 logs/bridge.log | grep "Agent backend"
+# Should show: Agent backend: Claude Agent SDK
+```
 
 ---
 

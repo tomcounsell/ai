@@ -17,34 +17,39 @@ The architecture represents a **living codebase** where users interact directly 
 │                         User Interface Layer                         │
 ├─────────────────────────────────────────────────────────────────────┤
 │                          Telegram Client                             │
-│                    (WebSocket + Bot Interface)                       │
-└───────────────┬─────────────────────────────────┬───────────────────┘
-                │                                 │
-                ▼                                 ▼
-┌───────────────────────────┐     ┌───────────────────────────────────┐
-│      FastAPI Server       │     │       Background Workers          │
-│   (main.py - Central Hub) │────▶│    (Huey Consumer + Tasks)        │
-└───────────────┬───────────┘     └───────────────────────────────────┘
-                │                                 
-                ▼                                 
-┌─────────────────────────────────────────────────────────────────────┐
-│                        Core Agent Layer                              │
-│                    (Valor Agent - PydanticAI)                        │
-└───────────────┬─────────────────────────────────┬───────────────────┘
-                │                                 │
-                ▼                                 ▼
-┌───────────────────────────┐     ┌───────────────────────────────────┐
-│      Tool Layer           │     │         MCP Servers               │
-│  (PydanticAI Tools)       │     │    (Claude Code Integration)      │
-└───────────────────────────┘     └───────────────────────────────────┘
-                │                                 │
-                └────────────────┬────────────────┘
+│                 (Telethon - User Account, not Bot)                   │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│                      Data Persistence Layer                          │
-│                    (SQLite with WAL Mode)                            │
+│                       Python Bridge Layer                            │
+│                   (bridge/telegram_bridge.py)                        │
+│                                                                      │
+│  • Message routing via USE_CLAUDE_SDK flag                           │
+│  • Session management per chat                                       │
+│  • Multi-project support                                             │
+└───────────────────────────────┬─────────────────────────────────────┘
+                                │
+              ┌─────────────────┴─────────────────┐
+              │                                   │
+              ▼                                   ▼
+┌─────────────────────────────┐   ┌─────────────────────────────────┐
+│   Claude Agent SDK          │   │   Clawdbot (Legacy Fallback)    │
+│   (USE_CLAUDE_SDK=true)     │   │   (USE_CLAUDE_SDK=false)        │
+│                             │   │                                 │
+│  • agent/sdk_client.py      │   │  • subprocess: clawdbot agent   │
+│  • Same tools as Claude Code│   │  • ~/clawd/skills/ (JS)         │
+│  • Native Python integration│   │  • Third-party dependency       │
+└──────────────┬──────────────┘   └─────────────────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Claude API                                   │
+│                   (anthropic/claude-sonnet-4)                        │
 └─────────────────────────────────────────────────────────────────────┘
 ```
+
+**Note**: The Claude Agent SDK is now the primary backend (January 2026). Clawdbot remains available for fallback.
 
 ### Component Relationships
 
