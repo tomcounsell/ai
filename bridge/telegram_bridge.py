@@ -1071,6 +1071,7 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
         project_name = project.get("name", "Valor") if project else "Valor"
 
         # Use subprocess to call clawdbot agent
+        # Use --json to get clean output without tool execution logs mixed in
         cmd = [
             "clawdbot",
             "agent",
@@ -1081,6 +1082,7 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
             enriched_message,
             "--thinking",
             "medium",
+            "--json",
         ]
 
         # Log full request details
@@ -1160,8 +1162,24 @@ async def get_agent_response(message: str, session_id: str, sender_name: str, ch
 
             return f"Error processing request: {stderr_text[:200]}"
 
-        response = stdout.decode().strip()
+        raw_output = stdout.decode().strip()
         stderr_text = stderr.decode().strip()
+
+        # Parse JSON response from clawdbot --json mode
+        # Structure: {"payloads": [{"text": "...", "mediaUrl": null}], "meta": {...}}
+        try:
+            result = json.loads(raw_output)
+            payloads = result.get("payloads", [])
+            if payloads and payloads[0].get("text"):
+                response = payloads[0]["text"]
+            else:
+                # Fallback to raw output if JSON parsing succeeds but no text
+                response = raw_output
+                logger.warning(f"[{request_id}] JSON response had no text payload")
+        except json.JSONDecodeError:
+            # Fallback to raw output if not valid JSON (shouldn't happen with --json)
+            response = raw_output
+            logger.warning(f"[{request_id}] Failed to parse JSON response, using raw output")
 
         # Log success with timing
         logger.info(f"[{request_id}] Agent responded in {elapsed:.1f}s ({len(response)} chars)")
