@@ -1,43 +1,54 @@
 ---
 name: checking-system-logs
-description: Find bridge events, agent responses, timeouts, and errors in system logs. Use when debugging system behavior, investigating errors, or checking what the agent did.
+description: Find bridge events, agent responses, timeouts, and errors in system logs. ALWAYS filter by project name. Use when debugging system behavior, investigating errors, or checking what the agent did.
 ---
 
 # System Logs
 
 **Location**: `/Users/valorengels/src/ai/logs/bridge.events.jsonl`
 
-JSONL format with fields:
+**IMPORTANT**: Always filter by project to get relevant results.
+
+## Fields
+
+- `project` - **required filter** ("DM", "Valor", "Django Project Template", etc.)
 - `type` - event type (see below)
-- `project` - project context ("DM", "Valor", etc.)
 - `chat` - group name (null for DMs)
 - `session_id` - e.g., "tg_dm_179144806"
 - `sender` - who triggered the event
 
-Event types:
+## Event Types
+
 - `message_received` - incoming message
 - `agent_request` - request sent to agent
 - `agent_response` - Valor's response
 - `agent_timeout` - response timed out
+- `reply_sent` - message sent back to user
 - `error` - system error
 
 ## Query Examples
 
 ```bash
-# Recent events
-tail -50 /Users/valorengels/src/ai/logs/bridge.events.jsonl | jq .
+# ALWAYS filter by project first, then by type or other criteria
 
-# Filter by event type
-grep '"type": "agent_response"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | tail -10 | jq .
-grep '"type": "error"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | tail -10 | jq .
+# All recent events for a project
+grep '"project": "Valor"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | tail -20 | jq .
 
-# Filter by project
-grep '"project": "Valor"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | tail -10 | jq .
-grep '"project": "DM"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | tail -10 | jq .
+# Agent responses for a project
+grep '"project": "Valor"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | grep '"type": "agent_response"' | tail -10 | jq .
 
-# Combine filters (project + type)
-grep '"project": "Valor"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | grep '"type": "agent_response"' | tail -5 | jq .
+# Errors for a project
+grep '"project": "Valor"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | grep '"type": "error"' | tail -10 | jq .
 
-# Search for keyword
-grep -i "keyword" /Users/valorengels/src/ai/logs/bridge.events.jsonl | tail -10 | jq .
+# Timeouts for a project
+grep '"project": "Valor"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | grep '"type": "agent_timeout"' | tail -10 | jq .
+
+# Search keyword within a project
+grep '"project": "Valor"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | grep -i "keyword" | tail -10 | jq .
+```
+
+## List Available Projects
+
+```bash
+grep -o '"project": "[^"]*"' /Users/valorengels/src/ai/logs/bridge.events.jsonl | sort -u
 ```
