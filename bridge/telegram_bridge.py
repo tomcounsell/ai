@@ -34,9 +34,9 @@ load_dotenv(env_path)
 # Set USE_CLAUDE_SDK=true in .env to use the new SDK instead of clawdbot
 USE_CLAUDE_SDK = os.getenv("USE_CLAUDE_SDK", "false").lower() == "true"
 
-# Import SDK client if enabled (lazy import to avoid loading if not used)
+# Import SDK client and messenger if enabled (lazy import to avoid loading if not used)
 if USE_CLAUDE_SDK:
-    from agent import get_agent_response_sdk
+    from agent import get_agent_response_sdk, BossMessenger, BackgroundTask
 
 # Local tool imports for message and link storage
 from tools.telegram_history import store_message, store_link, get_recent_messages, get_link_by_url
@@ -1431,7 +1431,18 @@ async def get_agent_response(
 
 
 # =============================================================================
-# Retry with Self-Healing
+# Background Task Configuration
+# =============================================================================
+
+# How long to wait before sending "I'm working on this" acknowledgment
+# Only sends if no message has been sent to the chat yet
+ACKNOWLEDGMENT_TIMEOUT_SECONDS = 180  # 3 minutes
+
+# Message to send when work is taking a while
+ACKNOWLEDGMENT_MESSAGE = "I'm working on this."
+
+# =============================================================================
+# Retry with Self-Healing (Legacy - for Clawdbot backend)
 # =============================================================================
 
 # Retry configuration
@@ -1770,75 +1781,134 @@ async def main():
         # 1. 👀 Eyes = Message received/acknowledged
         await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
 
-        try:
-            # 2. Start parallel tasks:
-            #    - Fast: Ollama classifies intent -> update reaction emoji
-            #    - Slow: Claude processes message -> get response
+        # Classify intent with Ollama (fast, for reaction emoji)
+        async def classify_and_update_reaction():
+            """Classify intent with Ollama and update reaction emoji."""
+            emoji = await get_processing_emoji_async(clean_text)
+            await set_reaction(client, event.chat_id, message.id, emoji)
+            logger.debug(f"Intent classified, reaction set to {emoji}")
 
-            async def classify_and_update_reaction():
-                """Classify intent with Ollama and update reaction emoji."""
-                emoji = await get_processing_emoji_async(clean_text)
-                await set_reaction(client, event.chat_id, message.id, emoji)
-                logger.debug(f"Intent classified, reaction set to {emoji}")
+        # Start intent classification (don't await)
+        asyncio.create_task(classify_and_update_reaction())
 
-            # Start both tasks in parallel
-            classification_task = asyncio.create_task(classify_and_update_reaction())
-            agent_task = asyncio.create_task(
-                get_agent_response_with_retry(
-                    clean_text, session_id, sender_name, chat_title, project,
-                    telegram_chat_id, client, message.id
-                )
+        # === SDK MODE: Background task with messenger ===
+        if USE_CLAUDE_SDK:
+            # Create messenger with send callback
+            async def send_to_telegram(msg: str) -> None:
+                """Callback to send messages back to the chat."""
+                filtered = filter_tool_logs(msg)
+                if not filtered:
+                    return
+
+                # Send via Telegram
+                sent = await send_response_with_files(client, event, filtered)
+
+                if sent:
+                    # Update reaction to success
+                    await set_reaction(client, event.chat_id, message.id, REACTION_SUCCESS)
+
+                    # Store in history
+                    try:
+                        from datetime import datetime as dt
+                        store_message(
+                            chat_id=telegram_chat_id,
+                            content=filtered[:1000],
+                            sender="Valor",
+                            timestamp=dt.now(),
+                            message_type="response",
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to store response in history: {e}")
+
+                    # Log event
+                    log_event(
+                        "reply_sent",
+                        message_id=message_id,
+                        project=project_name,
+                        sender=sender_name,
+                        response_length=len(filtered),
+                    )
+
+                    logger.info(f"[{project_name}] Replied to {sender_name} (msg {message_id})")
+
+            messenger = BossMessenger(
+                _send_callback=send_to_telegram,
+                chat_id=telegram_chat_id,
+                session_id=session_id,
             )
 
-            # Wait for both (classification will finish first, updating the reaction)
-            # Agent response is what we actually need
-            response = await agent_task
-
-            # Cancel classification if it's somehow still running
-            if not classification_task.done():
-                classification_task.cancel()
-
-            # Send response if there's content (files or text)
-            sent_response = await send_response_with_files(client, event, response)
-
-            # 3. 👍 Thumbs up = Completed successfully
-            await set_reaction(client, event.chat_id, message.id, REACTION_SUCCESS)
-
-            if sent_response:
-                logger.info(f"[{project_name}] Replied to {sender_name} (msg {message_id})")
-            else:
-                logger.info(f"[{project_name}] Processed message from {sender_name} (msg {message_id}) - no response needed")
-
-        except Exception as e:
-            # 4. ❌ Error = Something went wrong
-            await set_reaction(client, event.chat_id, message.id, REACTION_ERROR)
-            logger.error(f"[{project_name}] Error processing message from {sender_name}: {e}")
-            raise  # Re-raise to be caught by outer handler if needed
-
-        # Store Valor's response in history for conversation continuity
-        # IMPORTANT: Store the filtered response, not the raw one with tool logs
-        try:
-            from datetime import datetime as dt
-            filtered_for_history = filter_tool_logs(response)
-            if filtered_for_history:  # Only store if there's actual content
-                store_message(
-                    chat_id=telegram_chat_id,
-                    content=filtered_for_history[:1000],  # Truncate long responses for history
-                    sender="Valor",
-                    timestamp=dt.now(),
-                    message_type="response",
+            # Create the agent work coroutine
+            async def do_agent_work() -> str:
+                return await get_agent_response_sdk(
+                    clean_text, session_id, sender_name, chat_title, project, telegram_chat_id
                 )
-        except Exception as e:
-            logger.warning(f"Failed to store response in history: {e}")
 
-        # Log reply event
-        log_event(
-            "reply_sent",
-            message_id=message_id,
-            project=project_name,
-            sender=sender_name,
-            response_length=len(response),
-        )
+            # Launch as background task with watchdog
+            task = BackgroundTask(
+                messenger=messenger,
+                acknowledgment_timeout=ACKNOWLEDGMENT_TIMEOUT_SECONDS,
+                acknowledgment_message=ACKNOWLEDGMENT_MESSAGE,
+            )
+
+            # Fire and forget - task handles sending results via messenger
+            await task.run(do_agent_work(), send_result=True)
+
+            logger.info(f"[{project_name}] Launched background task for {sender_name} (msg {message_id})")
+            # Handler returns immediately - work continues in background
+
+        # === LEGACY MODE: Synchronous with retry ===
+        else:
+            try:
+                agent_task = asyncio.create_task(
+                    get_agent_response_with_retry(
+                        clean_text, session_id, sender_name, chat_title, project,
+                        telegram_chat_id, client, message.id
+                    )
+                )
+
+                # Wait for response (legacy blocking mode)
+                response = await agent_task
+
+                # Send response if there's content (files or text)
+                sent_response = await send_response_with_files(client, event, response)
+
+                # 👍 Thumbs up = Completed successfully
+                await set_reaction(client, event.chat_id, message.id, REACTION_SUCCESS)
+
+                if sent_response:
+                    logger.info(f"[{project_name}] Replied to {sender_name} (msg {message_id})")
+                else:
+                    logger.info(f"[{project_name}] Processed message from {sender_name} (msg {message_id}) - no response needed")
+
+                # Store in history
+                try:
+                    from datetime import datetime as dt
+                    filtered_for_history = filter_tool_logs(response)
+                    if filtered_for_history:
+                        store_message(
+                            chat_id=telegram_chat_id,
+                            content=filtered_for_history[:1000],
+                            sender="Valor",
+                            timestamp=dt.now(),
+                            message_type="response",
+                        )
+                except Exception as e:
+                    logger.warning(f"Failed to store response in history: {e}")
+
+                # Log reply event
+                log_event(
+                    "reply_sent",
+                    message_id=message_id,
+                    project=project_name,
+                    sender=sender_name,
+                    response_length=len(response),
+                )
+
+            except Exception as e:
+                # ❌ Error = Something went wrong
+                await set_reaction(client, event.chat_id, message.id, REACTION_ERROR)
+                logger.error(f"[{project_name}] Error processing message from {sender_name}: {e}")
+                raise
 
     # Start the client
     logger.info("Starting Telegram bridge...")
