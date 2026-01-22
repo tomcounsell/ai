@@ -1,4 +1,4 @@
-"""MCP (Model Context Protocol) integration module.
+"""MCP Catalog - Server catalog and selection tools.
 
 This module provides tools for managing MCP servers, including:
 - Server catalog management
@@ -7,7 +7,7 @@ This module provides tools for managing MCP servers, including:
 - Minimal server set selection for tasks
 
 Example usage:
-    from mcp import MCPLibrary, AuthStatus
+    from mcp_catalog import MCPLibrary, AuthStatus
 
     library = MCPLibrary()
     library.load_catalog()
@@ -20,6 +20,6 @@ Example usage:
     print(f"{len(ready)} servers ready to use")
 """
 
-from mcp.library import AuthStatus, MCPLibrary, MCPServer
+from mcp_catalog.library import AuthStatus, MCPLibrary, MCPServer
 
 __all__ = ["AuthStatus", "MCPLibrary", "MCPServer"]
