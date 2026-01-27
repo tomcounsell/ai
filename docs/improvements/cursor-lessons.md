@@ -1,8 +1,8 @@
-# Cursor IDE Lessons - What We Can Learn
+# Cursor IDE Lessons - Adapted for Valor's Autonomous Architecture
 
 ## Research Summary
 
-Based on analysis of Cursor's 2026 architecture and user workflows, here are key insights we can apply to Valor.
+Based on analysis of Cursor's 2026 architecture and user workflows, adapted for Valor's unique model: **Telegram messages trigger autonomous background work with no human in the loop**.
 
 **Sources:**
 - [How Cursor AI IDE Works](https://blog.sshh.io/p/how-cursor-ai-ide-works)
@@ -11,309 +11,362 @@ Based on analysis of Cursor's 2026 architecture and user workflows, here are key
 
 ---
 
-## What Cursor Does Well
+## Key Difference: Cursor vs Valor
 
-### 1. **Tool Calling Pattern**
-```
-read_file(path)
-write_file(path, content)
-run_command(command)
-codebase_search / grep_search / file_search
-reapply (self-correction with more expensive model)
-```
+| Aspect | Cursor | Valor |
+|--------|--------|-------|
+| Interface | Human actively types in IDE | Telegram message → autonomous work |
+| Human in loop | Yes (during execution) | No (only at start/end) |
+| Context control | Human attaches files via @ | Agent must intelligently discover context |
+| Execution model | Synchronous with user | Background (2+ hours possible) |
+| Feedback | Real-time | Via messenger when ready |
 
-**Our status:** ✅ We have similar via Claude Agent SDK tools
-
-### 2. **Context Management - Explicit References**
-- `@file`, `@folder`, `@codebase`, `@web`, `@docs` syntax
-- User explicitly attaches relevant code sections
-- Wrapped in `<attached-files>` blocks
-
-**Our status:** ⚠️ **We rely on agent to find context** - could improve with explicit attachment
-
-**Opportunity:** Add syntax like `@file:path/to/file.py` in Telegram messages that get expanded into context
-
-### 3. **Semantic Search with Re-ranking**
-- Codebase indexed into vectorstore using encoder LLMs
-- At query time, secondary LLM re-ranks results for relevance
-- Main agent gets "perfect" results
-
-**Our status:** ⚠️ **No semantic search yet** - agent uses grep/glob
-
-**Opportunity:** Build codebase indexing per project (could use pgvector or similar)
-
-### 4. **Semantic Diff + Apply Model**
-- Main agent produces **partial changes** with insertion guidance (not full files)
-- Cheaper "apply model" generates actual file contents + fixes syntax
-- Results pass through linters with feedback for self-correction
-
-**Our status:** ❌ **Agent generates full files** - wasteful for large files
-
-**Opportunity:** Implement diff-based editing pattern
-
-### 5. **Static System Prompt for Caching**
-- System prompt stays static (no personalization)
-- Maximizes Anthropic's prompt caching for cost/latency reduction
-- User context added via separate blocks
-
-**Our status:** ✅ We use static SOUL.md + project context appended
-
-### 6. **Rules System**
-- `.cursorrules` files at project/user/team level
-- Agent reads these before every task
-- Ensures consistency across codebase
-
-**Our status:** ✅ We have project-specific context in `projects.json`
-
-**Opportunity:** Add per-project `.valorrules` files for coding standards
-
-### 7. **Plan Mode - Separate Architecture from Execution**
-- Use powerful model (Opus) for planning
-- Use faster model for implementation
-- Creates reviewable blueprint before coding
-
-**Our status:** ⚠️ **We have `/sdlc` and plan mode, but not separate model selection**
-
-**Opportunity:** Use Opus for planning, Sonnet for execution (cost optimization)
-
-### 8. **Multi-Agent Parallel Execution**
-- Run up to 8 agents in parallel
-- Each in isolated environment
-- Can work on different parts simultaneously
-
-**Our status:** ❌ **Single agent per session**
-
-**Opportunity:** P-Thread pattern (already documented in SOUL) - spawn multiple agents
-
-### 9. **Custom Commands/Workflows**
-- Users build reusable commands: `/plan`, `/refactor`, `/test`, `/review`
-- Reduces repetition
-
-**Our status:** ✅ We have Claude Code skills (`/prime`, `/pthread`, `/sdlc`)
+**Implication:** Many Cursor features assume real-time human interaction. We need different adaptations.
 
 ---
 
-## Key Architectural Patterns We Should Adopt
+## What Cursor Does Well (And How We Can Adapt)
 
-### Priority 1: Diff-Based Editing (High Impact, Medium Effort)
+### 1. ✅ **Tool Calling Pattern**
+**Cursor:** `read_file`, `write_file`, `run_command`, `codebase_search`
+**Valor:** Already have via Claude Agent SDK
+**Status:** No action needed
 
-**Problem:** Agent generates full files even for small changes
+### 2. ❌ **Explicit Context Attachment (@file syntax)**
+**Cursor:** Human types `@file:path` in IDE, IDE attaches file
+**Valor:** No human typing during execution
+**Adaptation needed:** Agent-initiated context gathering (see below)
 
-**Solution:**
+### 3. ⚠️ **Semantic Search with Re-ranking**
+**Cursor:** Human asks question → semantic search finds relevant code
+**Valor:** Agent asks question autonomously → semantic search would help
+**Status:** Could implement for agent's benefit
+
+### 4. ❌ **Semantic Diff + Apply Model**
+**Cursor:** Two-phase editing (plan diff → apply)
+**Valor:** Agent SDK has Edit tool but doesn't prefer it
+**Status:** Should guide agent to prefer Edit over Write
+
+### 5. ✅ **Static System Prompt for Caching**
+**Cursor:** Maximize prompt caching
+**Valor:** Already using SOUL.md + project context
+**Status:** Already optimized
+
+### 6. ✅ **Rules System (.cursorrules)**
+**Cursor:** Project-level coding standards
+**Valor:** Have `projects.json` context
+**Status:** Could enhance with `.valorrules` files
+
+### 7. ⚠️ **Plan Mode with Model Selection**
+**Cursor:** Opus for planning, Sonnet for execution
+**Valor:** Use Sonnet for everything
+**Status:** Could optimize (Opus for complex planning)
+
+### 8. ❌ **Multi-Agent Parallel Execution**
+**Cursor:** Run 8 agents in parallel
+**Valor:** Single agent per session
+**Status:** Could implement P-Thread pattern
+
+---
+
+## Viable Improvements for Valor's Autonomous Model
+
+### **Feature 1: Prompt Agent to Prefer Edit Over Write** (Priority: High)
+
+**Problem:** Agent uses Write for full file rewrites, wasteful for small changes
+
+**Current behavior:**
 ```python
-# Current: agent.write_file(path, entire_content)
-
-# Better: agent.edit_file(path, old_text, new_text)
-# Or:     agent.apply_diff(path, diff_patch)
+Write(file_path="bridge.py", content="[entire 2000 line file]")
 ```
 
-**Benefits:**
-- Faster execution (less tokens)
-- Cheaper (less generation cost)
-- Clearer what changed
-- Better for large files
-
-**Implementation:**
-1. Add `apply_diff` tool to SDK client
-2. Modify system prompt to prefer diffs over full rewrites
-3. Use Claude's native Edit tool from Claude Code
-
-**Estimate:** 2-4 hours
-
----
-
-### Priority 2: Explicit Context Attachment (High Impact, Low Effort)
-
-**Problem:** Agent must search for relevant files, wastes time/tokens
-
-**Solution:**
-```
-User in Telegram:
-"Fix the authentication bug @file:bridge/telegram_bridge.py @file:config/SOUL.md"
-
-Bridge expands:
-<attached-files>
-<file path="bridge/telegram_bridge.py">
-[contents]
-</file>
-<file path="config/SOUL.md">
-[contents]
-</file>
-</attached-files>
-
-Please fix the authentication bug.
-```
-
-**Benefits:**
-- Agent starts with exact context
-- No wasted search operations
-- User controls what's relevant
-
-**Implementation:**
-1. Detect `@file:path`, `@folder:path` in messages
-2. Read contents and wrap in `<attached-files>` block
-3. Pass to agent
-
-**Estimate:** 2-3 hours
-
----
-
-### Priority 3: Semantic Codebase Search (High Impact, High Effort)
-
-**Problem:** Agent uses grep (regex) - misses semantic matches
-
-**Solution:**
-- Index codebase using embeddings (OpenAI ada-002 or Voyage)
-- Store in pgvector or similar
-- At query time, semantic search + LLM re-rank
-- Return top results to agent
-
-**Benefits:**
-- Agent finds relevant code faster
-- Understands concepts, not just keywords
-
-**Challenges:**
-- Requires vector DB setup
-- Must re-index on code changes
-- More infrastructure
-
-**Implementation:**
-1. Add pgvector to dependencies
-2. Build indexing job (runs after git commits)
-3. Add `semantic_search` tool to agent
-4. Update system prompt to prefer semantic search
-
-**Estimate:** 1-2 days
-
----
-
-### Priority 4: Plan Mode with Model Selection (Medium Impact, Low Effort)
-
-**Problem:** Use Sonnet for everything (expensive planning, slow execution)
-
-**Solution:**
+**Better behavior:**
 ```python
-# Planning phase: Use Opus (best reasoning)
-plan = await agent.query(message, model="opus")
-
-# Execution phase: Use Sonnet (fast, capable)
-result = await agent.execute_plan(plan, model="sonnet")
+Edit(file_path="bridge.py",
+     old_string="def foo():\n    pass",
+     new_string="def foo():\n    return True")
 ```
 
+**Implementation:**
+Add to SOUL.md:
+```markdown
+## File Editing Best Practices
+
+**CRITICAL:** When modifying existing files:
+1. Use the Edit tool for targeted changes (preferred)
+2. Only use Write tool for:
+   - Creating new files
+   - Complete file restructures where >50% changes
+
+**Why:** Edit is 10x faster, 80% cheaper, and clearer in diffs.
+
+**Example:**
+- ❌ Read entire file → modify → Write entire file
+- ✅ Edit(old_string="...", new_string="...")
+```
+
+**Effort:** 30 minutes (prompt change)
+**Impact:** High (cost + speed)
+**Risk:** Low (just guidance, agent can still use Write if needed)
+
+---
+
+### **Feature 2: Per-Project `.valorrules` Files** (Priority: Medium)
+
+**Problem:** All projects use same generic coding standards from SOUL.md
+
+**Solution:** Let each project define specific standards
+
+**Example `.valorrules` (project root):**
+```yaml
+# Valor Rules for Django Project Template
+
+style:
+  - "Always use type hints in function signatures"
+  - "Max line length: 100 characters"
+  - "Use dataclasses over dict for structured data"
+
+testing:
+  - "Write pytest test for every new function"
+  - "Tests go in tests/ with test_ prefix"
+  - "Use fixtures in conftest.py"
+
+architecture:
+  - "Models in app/models/"
+  - "Views in app/views/"
+  - "Templates in app/templates/"
+
+git:
+  - "Commit format: <type>: <description>"
+  - "Always push after completing work"
+  - "Merge to main when tests pass"
+```
+
+**Implementation:**
+1. Bridge checks for `.valorrules` in project working directory
+2. Parse YAML
+3. Append to system prompt before sending to agent:
+   ```
+   ## Project-Specific Rules
+   {parsed rules}
+   ```
+
+**Effort:** 2-3 hours
+**Impact:** Medium (consistency across projects)
+**Risk:** Low (just additional context)
+
+---
+
+### **Feature 3: Semantic Codebase Search for Agent** (Priority: Medium-High)
+
+**Problem:** Agent uses grep (keyword matching), misses semantically relevant code
+
+**Solution:** Pre-index codebase with embeddings, agent queries semantically
+
+**How it works:**
+1. **Indexing (on git commit):**
+   - Chunk codebase into functions/classes
+   - Generate embeddings (OpenAI or Voyage)
+   - Store in SQLite with vector extension (or pgvector)
+
+2. **Query time (agent asks):**
+   - Agent: "Find authentication logic"
+   - Embed query
+   - Semantic search returns: `login.py`, `token_validator.py`, `auth_middleware.py`
+   - Even if they don't contain word "auth"
+
+3. **LLM re-ranking:**
+   - Quick LLM pass to re-rank by relevance
+   - Return top 5 to agent
+
 **Benefits:**
-- Better plans (Opus thinks deeper)
-- Faster execution (Sonnet is quicker)
-- Cost optimization
+- Agent finds code by meaning, not keywords
+- Better context discovery
+- Fewer false positives
+
+**Implementation:**
+1. Add SQLite with vector extension (or pgvector)
+2. Create indexing script (runs post-commit)
+3. Add `semantic_search` tool to agent's toolset
+4. Update SOUL.md: "Prefer semantic_search over grep for concept queries"
+
+**Effort:** 1-2 days
+**Impact:** High (agent effectiveness)
+**Risk:** Medium (infrastructure dependency, re-indexing overhead)
+
+---
+
+### **Feature 4: Model Selection Based on Task Complexity** (Priority: Medium)
+
+**Problem:** Use Sonnet for everything - expensive for simple tasks, maybe not deep enough for complex planning
+
+**Solution:** Route to appropriate model based on task
+
+**Heuristics:**
+- **Opus (deep reasoning):**
+  - Message contains "plan", "design", "architecture"
+  - Complex multi-file changes
+  - Ambiguous requirements
+
+- **Sonnet (balanced):**
+  - Standard implementation
+  - Bug fixes
+  - Most day-to-day work
+
+- **Haiku (fast/cheap):**
+  - Simple queries
+  - Code review
+  - Documentation updates
 
 **Implementation:**
 1. Add `model` parameter to `ValorAgent.query()`
-2. Detect "plan" vs "execute" mode
+2. Bridge classifies task complexity (regex or Ollama)
 3. Route to appropriate model
 
-**Estimate:** 2-3 hours
+**Example:**
+```python
+# In bridge before calling agent
+if "plan" in message.lower() or "design" in message.lower():
+    model = "opus"
+elif "review" in message.lower() or "document" in message.lower():
+    model = "haiku"
+else:
+    model = "sonnet"
+
+agent = ValorAgent(model=model)
+```
+
+**Effort:** 2-3 hours
+**Impact:** Medium (cost optimization, better planning)
+**Risk:** Low (can default to Sonnet if uncertain)
 
 ---
 
-### Priority 5: Multi-Agent Parallel Execution (High Impact, High Effort)
+### **Feature 5: Intelligent Context Pre-Loading** (Priority: High)
 
-**Problem:** Single agent blocks - can't parallelize work
+**Problem:** Agent must discover relevant files via grep/glob, wastes time
 
-**Solution:**
+**Solution:** Bridge intelligently pre-loads likely relevant context before calling agent
+
+**How it works:**
+
+**Phase 1: Simple keyword matching**
 ```python
-# P-Thread pattern (already documented in SOUL)
-agents = [
-    BackgroundTask(agent1.query("Implement feature A")),
-    BackgroundTask(agent2.query("Write tests for B")),
-    BackgroundTask(agent3.query("Update docs for C")),
-]
+# User: "Fix the auth bug in telegram_bridge"
+# Bridge detects keywords:
+keywords = ["auth", "telegram_bridge"]
 
-await asyncio.gather(*[a.run() for a in agents])
+# Pre-load related files:
+- bridge/telegram_bridge.py (name match)
+- config/SOUL.md (always include)
+- Recent git log (for context)
+- Any file with "auth" in recent commits
 ```
 
-**Benefits:**
-- Work completes faster
-- Better resource utilization
-- Natural for independent tasks
+**Phase 2: Semantic context (if we build Feature 3)**
+```python
+# User: "Fix the authentication bug"
+# Semantic search returns:
+- bridge/telegram_bridge.py (has login logic)
+- tools/telegram_history.py (stores auth sessions)
+- config/projects.json (auth whitelist)
 
-**Challenges:**
-- Agents might conflict (same file)
-- Coordination needed
-- More complex orchestration
+# Pre-attach these to message
+```
 
 **Implementation:**
-1. Spawn multiple SDK client instances
-2. Assign different working dirs or lock files
-3. Aggregate results
-4. Resolve conflicts if any
+1. Parse user message for file mentions
+2. Check recent git commits for related files
+3. If semantic search available, query for relevant files
+4. Wrap in `<context>` block:
+   ```xml
+   <context>
+   <file path="bridge/telegram_bridge.py">
+   [contents]
+   </file>
+   <recent-commits>
+   [last 5 commits touching auth]
+   </recent-commits>
+   </context>
 
-**Estimate:** 1 day
+   User message: Fix the authentication bug
+   ```
 
----
-
-## Lessons from Cursor User Workflow
-
-### Shift from "Agent" to "Architect"
-
-**Current Valor:** User sends request → Valor does everything
-
-**Better Valor:** User provides architecture → Valor executes
-
-**How:**
-1. Encourage users to use `/plan` first
-2. Review plan before execution
-3. Separate "what" from "how"
-
-### Encode Principles Locally
-
-**Current:** SOUL.md is universal
-
-**Better:** Per-project `.valorrules`
-
-**Example `.valorrules`:**
-```yaml
-style:
-  - "Always use type hints"
-  - "Prefer dataclasses over dicts"
-  - "Write docstrings for public functions"
-
-testing:
-  - "Write pytest tests for all new functions"
-  - "Use fixtures for common test data"
-
-git:
-  - "Commit messages: <type>: <description>"
-  - "Push after every completed feature"
-```
-
-### Custom Workflows
-
-Users build shortcuts like `/fix-bug`, `/add-feature`, `/refactor`
-
-We already have skills - could expand with user-customizable skills
+**Effort:** 4-6 hours
+**Impact:** High (faster context discovery)
+**Risk:** Low (worst case agent ignores pre-loaded context)
 
 ---
 
-## Recommended Implementation Order
+### **Feature 6: Multi-Agent Parallel Execution (P-Threads)** (Priority: Low)
 
-| Priority | Feature | Impact | Effort | Est. Time |
-|----------|---------|--------|--------|-----------|
-| 1 | Diff-based editing | High | Medium | 2-4 hours |
-| 2 | Explicit context (`@file`) | High | Low | 2-3 hours |
-| 3 | Per-project `.valorrules` | Medium | Low | 2-3 hours |
-| 4 | Plan mode with model selection | Medium | Low | 2-3 hours |
-| 5 | Semantic codebase search | High | High | 1-2 days |
-| 6 | Multi-agent parallel execution | High | High | 1 day |
+**Problem:** Large tasks that could parallelize still run sequentially
 
-**Quick wins (< 1 day):** Items 1-4
-**High-impact but longer:** Items 5-6
+**Solution:** Detect parallelizable subtasks, spawn multiple agents
+
+**When to use:**
+- User explicitly requests parallel work
+- Bridge detects independent subtasks
+- Example: "Implement auth + write tests + update docs"
+
+**Implementation:**
+1. Bridge detects parallelizable work (regex or LLM)
+2. Spawn N `BackgroundTask` instances
+3. Each gets isolated session
+4. Results aggregate back to user
+
+**Challenges:**
+- Agents might conflict (edit same file)
+- Need conflict resolution
+- More complex orchestration
+- Higher cost (N agents running)
+
+**Effort:** 1-2 days
+**Impact:** Medium (speed for large parallelizable tasks)
+**Risk:** High (conflicts, coordination complexity)
+
+**Decision:** Defer until we see clear need
+
+---
+
+## Recommended Implementation Priority
+
+| # | Feature | Impact | Effort | Risk | Recommend |
+|---|---------|--------|--------|------|-----------|
+| 1 | Prompt to prefer Edit over Write | High | 30min | Low | ✅ Do first |
+| 5 | Intelligent context pre-loading | High | 4-6h | Low | ✅ Do second |
+| 2 | Per-project `.valorrules` | Medium | 2-3h | Low | ✅ Do third |
+| 4 | Model selection (Opus/Sonnet/Haiku) | Medium | 2-3h | Low | ✅ Quick win |
+| 3 | Semantic codebase search | High | 1-2d | Medium | ⏸️ If needed |
+| 6 | Multi-agent P-threads | Medium | 1-2d | High | ⏸️ Defer |
+
+**Quick wins (< 1 day total):** Features 1, 2, 4
+**High-value but longer:** Feature 5 (context pre-loading)
+**Infrastructure projects:** Features 3, 6 (defer until clear need)
+
+---
+
+## What We CANNOT Adapt from Cursor
+
+These Cursor features don't map to Valor's autonomous model:
+
+1. **Real-time @file attachment** - No human typing during execution
+2. **Interactive plan review** - Agent works autonomously, can't pause for approval
+3. **Inline suggestions** - No IDE interface
+4. **Tab completion** - Not applicable
+5. **Visual diff review** - User sees results in git, not live
+
+**Our strength:** Autonomous long-running sessions (2+ hours) - Cursor can't do this
 
 ---
 
 ## Next Steps
 
-1. **Validate with user** - Which features would be most valuable?
-2. **Start with diff-based editing** - Biggest immediate impact
-3. **Add explicit context attachment** - Simple but powerful
-4. **Build semantic search** - If codebase complexity justifies it
+1. ✅ **Feature 1** - Add "prefer Edit" to SOUL.md (30 min)
+2. ✅ **Feature 2** - Implement `.valorrules` parsing (2-3 hours)
+3. ✅ **Feature 4** - Add model selection routing (2-3 hours)
+4. ⏸️ **Feature 5** - Intelligent context pre-loading (4-6 hours) - await approval
+5. ⏸️ **Feature 3** - Semantic search (1-2 days) - await clear need
+6. ⏸️ **Feature 6** - P-threads (1-2 days) - defer
 
-The goal: Move Valor from "AI assistant" to "AI coworker with architect-level understanding"
+**Goal:** Make Valor's autonomous discovery smarter, faster, and cheaper - not try to replicate Cursor's interactive model.
