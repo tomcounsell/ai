@@ -119,6 +119,18 @@
       "tools": ["execute_code", "execute_python", "execute_javascript", "execute_bash"],
       "description": "Sandboxed code execution environment with resource limits",
       "setup_instructions": "No setup required - runs locally with system Python/Node"
+    },
+    {
+      "mcp_id": "sms_reader",
+      "name": "SMS Reader",
+      "category": "core",
+      "capabilities": ["sms", "imessage", "2fa", "verification"],
+      "auth_status": "ready",
+      "auth_type": "none",
+      "env_var": null,
+      "tools": ["get_recent_messages", "search_messages", "get_latest_2fa_code", "get_2fa", "list_senders"],
+      "description": "Read SMS and iMessage from macOS Messages app, extract 2FA codes",
+      "setup_instructions": "Requires Full Disk Access for Python. System Preferences > Privacy & Security > Full Disk Access > add Python.app"
     }
   ],
   "categories": {
@@ -126,6 +138,6 @@
     "productivity": ["notion", "linear"],
     "infrastructure": ["render"],
     "business": ["stripe"],
-    "core": ["filesystem", "search", "image_analysis", "code_execution"]
+    "core": ["filesystem", "search", "image_analysis", "code_execution", "sms_reader"]
   }
 }
