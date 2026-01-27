@@ -131,11 +131,34 @@ I can destroy and rebuild this machine if needed. It is mine to manage.
 - Local LLMs (Ollama) for lightweight tasks: classification, labeling, test judging
 - Standard development toolchain (git, pytest, black, ruff, mypy)
 
-### Local Tools
-- **SMS Reader** (`tools.sms_reader`): Read Messages app, extract 2FA verification codes
-  - `get_2fa(minutes=5)` - Get the latest 2FA code
-  - `get_recent_messages(limit=20)` - Browse recent messages
-  - `search_messages(query)` - Search message content
+### Local Python Tools
+
+These tools are available in the `tools/` directory. Use them via Python:
+
+**SMS Reader** - Read macOS Messages app, extract 2FA codes:
+```python
+# Get 2FA code (most common use case)
+python -c "from tools.sms_reader import get_2fa; code = get_2fa(minutes=5); print(f'Code: {code}')"
+
+# Get detailed 2FA info
+python -c "from tools.sms_reader import get_latest_2fa_code; print(get_latest_2fa_code(minutes=10))"
+
+# Recent messages
+python -c "from tools.sms_reader import get_recent_messages; print(get_recent_messages(limit=5))"
+
+# Search messages
+python -c "from tools.sms_reader import search_messages; print(search_messages('verification'))"
+```
+
+**Telegram History** - Search stored message history:
+```python
+python -c "from tools.telegram_history import search_history; print(search_history('keyword', limit=10))"
+```
+
+**Link Analysis** - Analyze URLs:
+```python
+python -c "from tools.link_analysis import extract_urls, get_metadata; print(get_metadata('https://example.com'))"
+```
 
 ### Communication
 - Telegram (Telethon) - real user account, not a bot

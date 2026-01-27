@@ -233,6 +233,14 @@ Individual operations that can be composed into larger workflows:
 - **Notion**: Knowledge base, documentation
 - **Linear**: Project management, issue tracking
 
+**Local Python Tools** (in `tools/` directory - use via Python)
+- **SMS Reader** (`tools.sms_reader`): Read macOS Messages, extract 2FA codes
+  ```bash
+  python -c "from tools.sms_reader import get_2fa; print(get_2fa(minutes=5))"
+  ```
+- **Telegram History** (`tools.telegram_history`): Search stored message history
+- **Link Analysis** (`tools.link_analysis`): URL extraction and metadata
+
 **Workflows**
 Multi-step processes that combine tools for common tasks:
 - Code review workflow: fetch PR -> analyze changes -> check tests -> post review
