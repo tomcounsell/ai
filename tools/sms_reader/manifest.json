@@ -1,0 +1,36 @@
+{
+  "name": "sms_reader",
+  "version": "1.0.0",
+  "description": "Read SMS and iMessage messages from macOS Messages app, with 2FA code extraction",
+  "type": "library",
+  "status": "beta",
+
+  "source": {
+    "type": "internal"
+  },
+
+  "capabilities": [
+    "read_messages",
+    "search_messages",
+    "extract_2fa_codes",
+    "list_contacts"
+  ],
+
+  "requires": {
+    "python": ">=3.10",
+    "permissions": ["Full Disk Access (for ~/Library/Messages/chat.db)"]
+  },
+
+  "commands": {
+    "verify": "python -c \"from tools.sms_reader import get_recent_messages; print('OK')\"",
+    "help": "python -c \"from tools.sms_reader import __doc__; print(__doc__)\""
+  },
+
+  "workflows": [
+    {
+      "name": "get_2fa_code",
+      "description": "Extract the most recent 2FA/verification code from SMS",
+      "steps": ["search for verification messages", "extract code pattern", "return code"]
+    }
+  ]
+}
