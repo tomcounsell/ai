@@ -37,6 +37,12 @@ USE_CLAUDE_SDK = os.getenv("USE_CLAUDE_SDK", "false").lower() == "true"
 # Import SDK client and messenger if enabled (lazy import to avoid loading if not used)
 if USE_CLAUDE_SDK:
     from agent import get_agent_response_sdk, BossMessenger, BackgroundTask
+    from agent.branch_manager import (
+        get_branch_state,
+        initialize_work_branch,
+        format_branch_state_message,
+        return_to_main,
+    )
 
 # Local tool imports for message and link storage
 from tools.telegram_history import store_message, store_link, get_recent_messages, get_link_by_url
@@ -1793,6 +1799,35 @@ async def main():
 
         # === SDK MODE: Background task with messenger ===
         if USE_CLAUDE_SDK:
+            # Check branch state if this is a project (not DM)
+            if project and not is_reply_to_valor:
+                working_dir = Path(project.get("working_directory", DEFAULTS.get("working_directory")))
+                branch_state = get_branch_state(working_dir)
+
+                # If work in progress, notify user
+                if branch_state.work_status == "IN_PROGRESS":
+                    state_msg = format_branch_state_message(branch_state)
+                    await event.reply(state_msg)
+
+                    # Check if user wants to continue or start fresh
+                    if "continue" not in clean_text.lower():
+                        # Return to main for fresh work
+                        logger.info(f"Starting fresh work, switching to main from {branch_state.current_branch}")
+                        return_to_main(working_dir)
+                    else:
+                        logger.info(f"Continuing work on {branch_state.current_branch}")
+
+                # If clean state, initialize branch for new work
+                elif branch_state.work_status == "CLEAN":
+                    branch_created, branch_name, plan_file = initialize_work_branch(
+                        working_dir,
+                        clean_text
+                    )
+                    if branch_created:
+                        logger.info(f"Created work branch: {branch_name}")
+                        # Prepend branch context to message
+                        clean_text = f"[Working in branch: {branch_name}]\n\n{clean_text}"
+
             # Create messenger with send callback
             async def send_to_telegram(msg: str) -> None:
                 """Callback to send messages back to the chat."""

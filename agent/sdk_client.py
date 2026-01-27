@@ -26,12 +26,37 @@ logger = logging.getLogger(__name__)
 SOUL_PATH = Path(__file__).parent.parent / "config" / "SOUL.md"
 
 
+def load_completion_criteria() -> str:
+    """Load completion criteria from CLAUDE.md."""
+    claude_md = Path(__file__).parent.parent / "CLAUDE.md"
+    if not claude_md.exists():
+        return ""
+
+    import re
+    content = claude_md.read_text()
+    match = re.search(
+        r'## Work Completion Criteria\n\n(.*?)(?=\n## |\Z)',
+        content,
+        re.DOTALL
+    )
+    return match.group(0) if match else ""
+
+
 def load_system_prompt() -> str:
-    """Load Valor's system prompt from SOUL.md."""
+    """Load Valor's system prompt from SOUL.md with completion criteria."""
+    soul_prompt = ""
     if SOUL_PATH.exists():
-        return SOUL_PATH.read_text()
-    logger.warning(f"SOUL.md not found at {SOUL_PATH}, using default prompt")
-    return "You are Valor, an AI coworker. Be direct, concise, and helpful."
+        soul_prompt = SOUL_PATH.read_text()
+    else:
+        logger.warning(f"SOUL.md not found at {SOUL_PATH}, using default prompt")
+        soul_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
+
+    # Append completion criteria
+    criteria = load_completion_criteria()
+    if criteria:
+        soul_prompt += f"\n\n---\n\n{criteria}"
+
+    return soul_prompt
 
 
 class ValorAgent:
@@ -42,11 +67,38 @@ class ValorAgent:
     using the Claude Agent SDK with Valor's configuration.
     """
 
+    # Pre-approved operations - Valor has YOLO mode (full system access)
+    ALLOWED_PROMPTS = [
+        # Git operations - full autonomy
+        {"tool": "Bash", "prompt": "git operations"},
+        {"tool": "Bash", "prompt": "git commit"},
+        {"tool": "Bash", "prompt": "git push"},
+        {"tool": "Bash", "prompt": "git pull"},
+        {"tool": "Bash", "prompt": "git checkout"},
+        {"tool": "Bash", "prompt": "git branch"},
+        {"tool": "Bash", "prompt": "git merge"},
+        {"tool": "Bash", "prompt": "git rebase"},
+        {"tool": "Bash", "prompt": "git stash"},
+        {"tool": "Bash", "prompt": "gh operations"},
+        # Development commands
+        {"tool": "Bash", "prompt": "run tests"},
+        {"tool": "Bash", "prompt": "run pytest"},
+        {"tool": "Bash", "prompt": "run linting"},
+        {"tool": "Bash", "prompt": "run formatting"},
+        {"tool": "Bash", "prompt": "install dependencies"},
+        {"tool": "Bash", "prompt": "build project"},
+        # System operations
+        {"tool": "Bash", "prompt": "file operations"},
+        {"tool": "Bash", "prompt": "process management"},
+        {"tool": "Bash", "prompt": "service management"},
+        {"tool": "Bash", "prompt": "script execution"},
+    ]
+
     def __init__(
         self,
         working_dir: str | Path | None = None,
         system_prompt: str | None = None,
-        permission_mode: str = "acceptEdits",
+        permission_mode: str = "bypassPermissions",
     ):
         """
         Initialize ValorAgent.
@@ -54,18 +106,20 @@ class ValorAgent:
         Args:
             working_dir: Working directory for the agent. Defaults to ai/ repo root.
             system_prompt: Custom system prompt. Defaults to SOUL.md contents.
-            permission_mode: Permission mode for tool use. Defaults to "acceptEdits".
+            permission_mode: Permission mode for tool use. Defaults to "bypassPermissions" (YOLO mode).
         """
         self.working_dir = Path(working_dir) if working_dir else Path(__file__).parent.parent
         self.system_prompt = system_prompt or load_system_prompt()
         self.permission_mode = permission_mode
 
     def _create_options(self, session_id: str | None = None) -> ClaudeAgentOptions:
-        """Create ClaudeAgentOptions configured for Valor."""
+        """Create ClaudeAgentOptions configured for Valor with full permissions."""
         return ClaudeAgentOptions(
             system_prompt=self.system_prompt,
             cwd=str(self.working_dir),
             permission_mode=self.permission_mode,  # type: ignore[arg-type]
+            # Pre-approved operations for autonomous execution
+            allowed_prompts=self.ALLOWED_PROMPTS,
             # Use continue_conversation for session continuity
             continue_conversation=session_id is not None,
             resume=session_id,

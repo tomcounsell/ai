@@ -624,6 +624,65 @@ The bridge is in `bridge/telegram_bridge.py`. To add new message handling:
 4. **Document**: Update relevant docs
 5. **Commit**: `git add . && git commit -m "Add feature X" && git push`
 
+## Work Completion Criteria
+
+**When work delegated via Telegram is considered DONE:**
+
+This section defines the completion criteria used by the SDK agent. The agent has a `mark_complete` tool that checks these criteria before marking work as finished.
+
+### Required Completion Checks
+
+All must pass for work to be marked complete:
+
+1. **✅ Deliverable Exists and Works**
+   - Code runs without errors
+   - Feature behaves as specified in the request
+   - Tests pass (if tests exist or were requested)
+
+2. **✅ Code Quality Standards Met**
+   - Python: Linted with `ruff`, formatted with `black`
+   - Type hints present where applicable (checked with `mypy` if configured)
+   - No commented-out code blocks
+   - No unresolved TODO comments (move to issues if needed)
+
+3. **✅ Changes Committed to Git**
+   - All work committed with clear message
+   - Pushed to remote (`origin`)
+   - Commit message explains what changed and why
+
+4. **✅ Artifacts Created (if requested)**
+   - Plan requested → plan doc exists in `/docs/plans/`
+   - Code requested → implementation exists and runs
+   - Docs requested → documentation written
+   - PR requested → PR created with link provided
+
+5. **✅ Original Request Fulfilled**
+   - Success criteria from request are met
+   - Edge cases handled or documented as limitations
+   - No known blockers remaining
+
+6. **✅ Branch Merged to Main**
+   - Feature branch merged into `main` (or `master`)
+   - Plan document deleted (or moved to `docs/completed/`)
+   - Repository on main branch, ready for next work
+
+### Why This Matters
+
+**Session Continuity**: The SDK agent uses long-running sessions (2+ hours possible). Without explicit completion tracking:
+- Bridge doesn't know when to close session vs continue
+- User doesn't know if work is done or in progress
+- Follow-up messages might create new sessions unnecessarily
+
+**Single Source of Truth**: These criteria are read programmatically by the `mark_complete` tool. Update here, not in code comments.
+
+### Using the Completion System
+
+**Agent perspective**: Call `mark_complete()` when all checks pass. Tool will verify and report status.
+
+**Bridge perspective**: Check `completion_status` in session metadata. If `COMPLETE`, start fresh session on next message. If `IN_PROGRESS`, resume existing session.
+
+**User perspective**: Receive clear completion summary with artifacts list and verification status.
+
 ### Permission Model for Tools
 
 | Pattern | Behavior | Use For |
