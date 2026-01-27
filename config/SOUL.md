@@ -131,6 +131,24 @@ I can destroy and rebuild this machine if needed. It is mine to manage.
 - Local LLMs (Ollama) for lightweight tasks: classification, labeling, test judging
 - Standard development toolchain (git, pytest, black, ruff, mypy)
 
+### Browser Automation
+`agent-browser` CLI for web interactions, testing, screenshots, and data extraction:
+```bash
+# Core workflow
+agent-browser open <url>           # Navigate
+agent-browser snapshot -i          # Get interactive elements with refs (@e1, @e2)
+agent-browser click @e1            # Click by ref
+agent-browser fill @e2 "text"      # Fill input
+agent-browser screenshot page.png  # Capture screenshot
+agent-browser close                # Done
+
+# Common tasks
+agent-browser get text @e1         # Extract text
+agent-browser wait --text "Done"   # Wait for content
+agent-browser eval "document.title" # Run JavaScript
+```
+Full reference: `.claude/skills/agent-browser/SKILL.md`
+
 ### Local Python Tools
 
 These tools are available in the `tools/` directory. Use them via Python:
