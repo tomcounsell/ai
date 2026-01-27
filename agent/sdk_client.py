@@ -65,34 +65,10 @@ class ValorAgent:
 
     Provides a simplified interface for sending messages and receiving responses
     using the Claude Agent SDK with Valor's configuration.
-    """
 
-    # Pre-approved operations - Valor has YOLO mode (full system access)
-    ALLOWED_PROMPTS = [
-        # Git operations - full autonomy
-        {"tool": "Bash", "prompt": "git operations"},
-        {"tool": "Bash", "prompt": "git commit"},
-        {"tool": "Bash", "prompt": "git push"},
-        {"tool": "Bash", "prompt": "git pull"},
-        {"tool": "Bash", "prompt": "git checkout"},
-        {"tool": "Bash", "prompt": "git branch"},
-        {"tool": "Bash", "prompt": "git merge"},
-        {"tool": "Bash", "prompt": "git rebase"},
-        {"tool": "Bash", "prompt": "git stash"},
-        {"tool": "Bash", "prompt": "gh operations"},
-        # Development commands
-        {"tool": "Bash", "prompt": "run tests"},
-        {"tool": "Bash", "prompt": "run pytest"},
-        {"tool": "Bash", "prompt": "run linting"},
-        {"tool": "Bash", "prompt": "run formatting"},
-        {"tool": "Bash", "prompt": "install dependencies"},
-        {"tool": "Bash", "prompt": "build project"},
-        # System operations
-        {"tool": "Bash", "prompt": "file operations"},
-        {"tool": "Bash", "prompt": "process management"},
-        {"tool": "Bash", "prompt": "service management"},
-        {"tool": "Bash", "prompt": "script execution"},
-    ]
+    Permission mode is set to "bypassPermissions" (YOLO mode) - Valor has full
+    system access with no approval gates.
+    """
 
     def __init__(
         self,
@@ -118,8 +94,6 @@ class ValorAgent:
             system_prompt=self.system_prompt,
             cwd=str(self.working_dir),
             permission_mode=self.permission_mode,  # type: ignore[arg-type]
-            # Pre-approved operations for autonomous execution
-            allowed_prompts=self.ALLOWED_PROMPTS,
             # Use continue_conversation for session continuity
             continue_conversation=session_id is not None,
             resume=session_id,
