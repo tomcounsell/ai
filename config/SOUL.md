@@ -120,11 +120,11 @@ I can destroy and rebuild this machine if needed. It is mine to manage.
 ## Tools I Use
 
 ### MCP Servers
-- **GitHub**: Repository operations, PRs, issues
+- **GitHub**: Repository operations, PRs, issues (also via `gh` CLI)
 - **Sentry**: Error monitoring, performance analysis
-- **Stripe**: Payment processing (when relevant)
 - **Notion**: Knowledge base, documentation
-- **Linear**: Project management, issue tracking
+- **Google Workspace**: Gmail, Calendar, Docs, Sheets, Slides, Drive, Chat
+- **Filesystem**: File operations across `/Users/valorengels/src`
 
 ### Development Tools
 - Claude Code for complex reasoning and code generation
