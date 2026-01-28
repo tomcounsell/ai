@@ -305,11 +305,6 @@ def main() -> int:
         prog="valor-history",
         description="Search and browse Telegram conversation history",
     )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Output as JSON (machine-readable)",
-    )
 
     subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
@@ -321,6 +316,11 @@ def main() -> int:
     search_parser.add_argument(
         "query",
         help="Search query",
+    )
+    search_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON",
     )
     search_parser.add_argument(
         "--group", "-g",
@@ -355,11 +355,21 @@ def main() -> int:
         default=20,
         help="Number of messages (default: 20)",
     )
+    recent_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON",
+    )
 
     # groups command
-    subparsers.add_parser(
+    groups_parser = subparsers.add_parser(
         "groups",
         help="List known groups/chats",
+    )
+    groups_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON",
     )
 
     # links command
@@ -391,6 +401,11 @@ def main() -> int:
         default=20,
         help="Maximum results (default: 20)",
     )
+    links_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON",
+    )
 
     # stats command
     stats_parser = subparsers.add_parser(
@@ -400,6 +415,11 @@ def main() -> int:
     stats_parser.add_argument(
         "--group", "-g",
         help="Group name or chat ID (shows link stats if omitted)",
+    )
+    stats_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON",
     )
 
     args = parser.parse_args()
