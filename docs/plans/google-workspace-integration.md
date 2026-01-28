@@ -1,5 +1,21 @@
 # Google Workspace Integration Plan
 
+## Prerequisites (REQUIRED BEFORE STARTING)
+
+These items must be provided by Tom before implementation can begin:
+
+- [ ] **Google Cloud Project ID** - Project where OAuth credentials will be created
+- [ ] **OAuth Client Credentials** - Download JSON from Google Cloud Console with:
+  - Application type: Desktop app
+  - Scopes configured (see Authentication section below)
+  - Provide path to downloaded `credentials.json` file
+- [ ] **Confirmation of authorized redirect URIs** - Verify `http://localhost:8080/` is whitelisted
+- [ ] **Workspace domain verification** (if needed) - Confirm valor@yuda.me has necessary permissions
+
+**Location to place credentials:** `/Users/valorengels/.config/valor/google_credentials.json`
+
+---
+
 ## Problem
 
 The Google Workspace MCP extension (from `gemini-cli-extensions/workspace`) connects to Claude Code but its tools aren't discoverable. The extension was built for Gemini CLI and uses an incompatible tool format.
@@ -98,8 +114,8 @@ Investigate why the Gemini extension tools aren't discoverable and fix.
 
 ## Recommendation
 
-**Phase 1 (Now):** Option A - Gemini sub-agent for immediate access
-**Phase 2 (Later):** Option B - Native MCP server for better integration
+**Phase 1:** Option A - Gemini sub-agent for immediate access
+**Phase 2:** Option B - Native MCP server for better integration
 
 ## Authentication
 
