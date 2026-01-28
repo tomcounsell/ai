@@ -362,6 +362,65 @@ def initialize_work_branch(
     return True, branch_name, plan_file
 
 
+def mark_work_done(working_dir: Path, branch_name: str) -> bool:
+    """
+    Mark work as "done for now" - making the session dormant.
+
+    This:
+    1. Renames ACTIVE-*.md to COMPLETED-*.md (archives the plan)
+    2. Commits the plan archival
+    3. Returns to main branch
+
+    The session is now dormant and won't trigger revival notifications
+    until explicitly resumed via reply-to.
+
+    Returns:
+        True if successfully marked as done
+    """
+    try:
+        # Find and rename the active plan
+        plans_dir = working_dir / "docs" / "plans"
+        active_plans = list(plans_dir.glob("ACTIVE-*.md"))
+
+        if active_plans:
+            active_plan = active_plans[0]
+            completed_plan = plans_dir / active_plan.name.replace("ACTIVE-", "COMPLETED-")
+
+            # Update status in plan file
+            content = active_plan.read_text()
+            content = content.replace("**Status**: IN_PROGRESS", "**Status**: COMPLETED")
+            completed_plan.write_text(content)
+
+            # Remove active plan
+            active_plan.unlink()
+
+            # Commit the change
+            subprocess.run(
+                ["git", "add", str(plans_dir)],
+                cwd=working_dir,
+                capture_output=True,
+                timeout=5,
+                check=True
+            )
+
+            subprocess.run(
+                ["git", "commit", "-m", f"Mark work as done: {branch_name}"],
+                cwd=working_dir,
+                capture_output=True,
+                timeout=10,
+                check=True
+            )
+
+            logger.info(f"Marked work as done: {branch_name}")
+
+        # Return to main
+        return return_to_main(working_dir)
+
+    except Exception as e:
+        logger.error(f"Failed to mark work as done: {e}")
+        return False
+
+
 def return_to_main(working_dir: Path) -> bool:
     """
     Switch back to main branch.
@@ -398,28 +457,72 @@ def return_to_main(working_dir: Path) -> bool:
             return False
 
 
-def format_branch_state_message(state: BranchState) -> str:
+def get_plan_context(plan_file: Path) -> str:
+    """
+    Extract key information from a plan file for revival.
+
+    Args:
+        plan_file: Path to the ACTIVE-*.md plan file
+
+    Returns:
+        Summary of the plan for context
+    """
+    if not plan_file.exists():
+        return ""
+
+    try:
+        content = plan_file.read_text()
+
+        # Extract original request
+        request_match = re.search(r'## Original Request\n\n(.*?)\n\n##', content, re.DOTALL)
+        if request_match:
+            return request_match.group(1).strip()
+
+        return content[:500]  # Fallback: first 500 chars
+    except Exception as e:
+        logger.error(f"Failed to read plan file {plan_file}: {e}")
+        return ""
+
+
+def format_branch_state_message(state: BranchState, revival_mode: bool = False) -> str:
     """
     Format branch state for user notification.
 
-    Returns a human-readable message about current work state.
+    Args:
+        state: Current branch state
+        revival_mode: If True, indicates we're reviving the old session in background
+
+    Returns:
+        Human-readable message about current work state.
     """
     if state.work_status == "CLEAN":
         return "✅ Repository is clean. Ready for new work."
 
     elif state.work_status == "IN_PROGRESS":
-        msg = f"⚠️ Work in progress detected:\n\n"
-        msg += f"**Branch**: `{state.current_branch}`\n"
-
-        if state.active_plan:
-            msg += f"**Plan**: `{state.active_plan.name}`\n\n"
-            msg += "Options:\n"
-            msg += "- Reply 'continue' to resume this work\n"
-            msg += "- Send a new request to start fresh (will switch to main)\n"
+        if revival_mode:
+            # Background revival message - non-blocking, informative
+            msg = f"🔄 **Unfinished work detected - reviving in background**\n\n"
+            msg += f"Branch: `{state.current_branch}`\n"
+            if state.active_plan:
+                msg += f"Plan: `{state.active_plan.name}`\n\n"
+            msg += "The previous session is being resumed separately. "
+            msg += "Your current message will be processed in parallel.\n\n"
+            msg += "_Sessions are dormant until revived. Reply to any Valor message to continue that specific thread._"
+            return msg
         else:
-            msg += "\nNo active plan found. You may want to commit or stash changes."
+            # Legacy format (for direct replies or manual checks)
+            msg = f"⚠️ Work in progress detected:\n\n"
+            msg += f"**Branch**: `{state.current_branch}`\n"
 
-        return msg
+            if state.active_plan:
+                msg += f"**Plan**: `{state.active_plan.name}`\n\n"
+                msg += "Options:\n"
+                msg += "- Reply 'continue' to resume this work\n"
+                msg += "- Send a new request to start fresh (will switch to main)\n"
+            else:
+                msg += "\nNo active plan found. You may want to commit or stash changes."
+
+            return msg
 
     else:  # BLOCKED
         return f"⚠️ Unusual state: uncommitted changes on {state.current_branch}"

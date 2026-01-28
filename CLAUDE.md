@@ -691,6 +691,72 @@ All must pass for work to be marked complete:
 
 **User perspective**: Receive clear completion summary with artifacts list and verification status.
 
+## Session Management & Lifecycle
+
+### Session States
+
+Sessions have three lifecycle states:
+
+1. **Active** - Currently processing a message and responding
+2. **Dormant** - Work paused or completed, waiting for revival via reply
+3. **Abandoned** - Unfinished work detected by system, automatically revived in background
+
+### "Done For Now" - Marking Sessions as Dormant
+
+When work is complete or you need to pause, mark the session as "done for now":
+
+```python
+from agent.branch_manager import mark_work_done
+
+# When work is complete or pausing
+mark_work_done(working_dir, branch_name)
+```
+
+This function:
+1. Renames `ACTIVE-*.md` to `COMPLETED-*.md` (archives the plan)
+2. Commits the plan archival
+3. Returns to main branch
+
+**Effect**: The session becomes dormant and won't trigger automatic revival notifications.
+
+### Session Revival
+
+**Explicit Revival** (user-initiated):
+- User replies to a previous Valor message
+- System resumes that specific session ID
+- Work continues where it left off
+
+**Automatic Revival** (system-initiated):
+- System detects abandoned work (ACTIVE plan + feature branch)
+- Notification sent to user: "Unfinished work detected, reviving in background"
+- Background task spawned to check status and optionally continue
+- Original user message processed in parallel (not blocked)
+
+**Revival Logic**:
+- Only notifies once per chat per 24 hours (session-aware)
+- Always switches to main branch for new work
+- Background revival runs independently, doesn't interfere with current message
+
+### Best Practices
+
+**When to mark as "done for now"**:
+- ✅ Work is complete and merged to main
+- ✅ Work is blocked and waiting for external input
+- ✅ Taking a break, will resume later
+- ✅ Pivoting to different task
+
+**When NOT to mark as done**:
+- ❌ In the middle of active development
+- ❌ Tests are failing
+- ❌ Work is half-committed
+- ❌ User is actively asking questions about this work
+
+**Session Continuity**:
+- Fresh messages create new sessions (unless replying)
+- Reply-to messages resume the original session
+- Dormant sessions don't spam notifications
+- Abandoned work is proactively managed
+
 ### Permission Model for Tools
 
 | Pattern | Behavior | Use For |

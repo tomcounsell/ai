@@ -558,6 +558,11 @@ GROUP_TO_PROJECT = build_group_to_project_map(CONFIG)
 # Collect all monitored groups
 ALL_MONITORED_GROUPS = list(GROUP_TO_PROJECT.keys())
 
+# Session awareness - track which chats have been notified about unfinished work
+# Key: chat_id, Value: timestamp when notified
+# This prevents spamming the user with "unfinished work" messages every time
+UNFINISHED_WORK_NOTIFICATIONS: dict[int, float] = {}
+
 # DM settings - respond to DMs if any active project allows it
 RESPOND_TO_DMS = any(
     CONFIG.get("projects", {}).get(p, {}).get("telegram", {}).get("respond_to_dms", True)
@@ -1972,18 +1977,79 @@ async def main():
                 working_dir = Path(working_dir_str)
                 branch_state = get_branch_state(working_dir)
 
-                # If work in progress, notify user
+                # Session-aware unfinished work detection
                 if branch_state.work_status == "IN_PROGRESS":
-                    state_msg = format_branch_state_message(branch_state)
-                    await event.reply(state_msg)
+                    import time
+                    chat_id_int = event.chat_id
+                    last_notified = UNFINISHED_WORK_NOTIFICATIONS.get(chat_id_int, 0)
+                    time_since_notification = time.time() - last_notified
 
-                    # Check if user wants to continue or start fresh
-                    if "continue" not in clean_text.lower():
-                        # Return to main for fresh work
-                        logger.info(f"Starting fresh work, switching to main from {branch_state.current_branch}")
-                        return_to_main(working_dir)
-                    else:
-                        logger.info(f"Continuing work on {branch_state.current_branch}")
+                    # Only notify once per session (24 hour window)
+                    if time_since_notification > 86400:
+                        # Mark as notified
+                        UNFINISHED_WORK_NOTIFICATIONS[chat_id_int] = time.time()
+
+                        # Send revival notification (non-blocking)
+                        state_msg = format_branch_state_message(branch_state, revival_mode=True)
+                        await event.reply(state_msg)
+
+                        # Spawn background task to check on old work
+                        # This happens in parallel, doesn't block current message
+                        if branch_state.active_plan:
+                            from agent.branch_manager import get_plan_context
+                            plan_context = get_plan_context(branch_state.active_plan)
+
+                            # Create a revival message to the old session
+                            revival_session_id = f"tg_{project_key}_{event.chat_id}_revival_{int(time.time())}"
+                            revival_message = f"Status check on previous work:\n\n{plan_context}\n\nWhat's the current state of this work?"
+
+                            # Spawn background task for revival (fire and forget)
+                            async def revive_old_work():
+                                """Background task to check on abandoned work."""
+                                try:
+                                    logger.info(f"Reviving old session for branch {branch_state.current_branch}")
+
+                                    # Create messenger for revival updates
+                                    async def send_revival_update(msg: str) -> None:
+                                        filtered = filter_tool_logs(msg)
+                                        if filtered:
+                                            await client.send_message(event.chat_id, f"📋 **Old work update**:\n\n{filtered}")
+
+                                    revival_messenger = BossMessenger(
+                                        _send_callback=send_revival_update,
+                                        chat_id=telegram_chat_id,
+                                        session_id=revival_session_id,
+                                    )
+
+                                    # Query the old session
+                                    revival_task = BackgroundTask(
+                                        messenger=revival_messenger,
+                                        acknowledgment_timeout=ACKNOWLEDGMENT_TIMEOUT_SECONDS,
+                                        acknowledgment_message=ACKNOWLEDGMENT_MESSAGE,
+                                    )
+
+                                    async def check_old_work() -> str:
+                                        return await get_agent_response_sdk(
+                                            revival_message,
+                                            revival_session_id,
+                                            "System",
+                                            chat_title,
+                                            project,
+                                            telegram_chat_id
+                                        )
+
+                                    await revival_task.run(check_old_work(), send_result=True)
+
+                                except Exception as e:
+                                    logger.error(f"Failed to revive old session: {e}")
+
+                            # Fire and forget - don't await
+                            asyncio.create_task(revive_old_work())
+
+                        logger.info(f"Notified about unfinished work on {branch_state.current_branch}, continuing with current message")
+
+                    # Always switch to main for new work (don't stay on feature branch)
+                    return_to_main(working_dir)
 
                 # If clean state, initialize branch for new work
                 elif branch_state.work_status == "CLEAN":

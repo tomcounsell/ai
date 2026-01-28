@@ -14,6 +14,8 @@ from .branch_manager import (
     initialize_work_branch,
     create_work_branch,
     return_to_main,
+    mark_work_done,
+    format_branch_state_message,
     BranchState,
     WorkStatus,
 )
@@ -32,6 +34,8 @@ __all__ = [
     "initialize_work_branch",
     "create_work_branch",
     "return_to_main",
+    "mark_work_done",
+    "format_branch_state_message",
     "BranchState",
     "WorkStatus",
 ]
