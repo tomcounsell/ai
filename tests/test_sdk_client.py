@@ -28,7 +28,7 @@ def test_valor_agent_init():
     agent = ValorAgent()
     assert agent.system_prompt is not None
     assert agent.working_dir.exists()
-    assert agent.permission_mode == "acceptEdits"
+    assert agent.permission_mode == "bypassPermissions"
 
 
 def test_valor_agent_custom_working_dir():

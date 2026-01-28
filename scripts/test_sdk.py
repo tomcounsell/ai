@@ -56,7 +56,7 @@ async def test_sdk_direct():
     options = ClaudeAgentOptions(
         system_prompt="You are a helpful assistant. Keep responses very brief.",
         cwd=str(project_root),
-        permission_mode="acceptEdits",
+        permission_mode="bypassPermissions",
         max_turns=1,
         env={
             "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
@@ -136,7 +136,7 @@ async def test_sdk_with_stderr():
     options = ClaudeAgentOptions(
         system_prompt="You are a helpful assistant.",
         cwd=str(project_root),
-        permission_mode="acceptEdits",
+        permission_mode="bypassPermissions",
         max_turns=1,
         stderr=stderr_callback,
         extra_args={"debug-to-stderr": None},  # Enable debug mode
