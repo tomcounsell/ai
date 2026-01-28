@@ -180,10 +180,31 @@ python -c "from tools.sms_reader import get_recent_messages; print(get_recent_me
 python -c "from tools.sms_reader import search_messages; print(search_messages('verification'))"
 ```
 
-**Telegram History** - Search stored message history:
-```python
-python -c "from tools.telegram_history import search_history; print(search_history('keyword', limit=10))"
+**Telegram History** - Search stored message history via CLI:
+```bash
+# Search across all chats
+valor-history search "keyword" --days 30
+
+# Search specific group
+valor-history search "authentication" --group "Dev: Valor"
+
+# Recent messages from a group
+valor-history recent --group "Dev: Valor" --limit 20
+
+# List known groups
+valor-history groups
+
+# Search stored links
+valor-history links --domain github.com
 ```
+
+**When to check history**: Use valor-history when context cues suggest prior messages may be relevant:
+- "what do you think of these" / "those links I shared"
+- "as I mentioned earlier" / "like we discussed"
+- References to recent work without explicit details
+- Any hint that the current message relates to recent conversation
+
+When in doubt, check. The cost of an unnecessary search is low; missing context is costly.
 
 **Link Analysis** - Analyze URLs:
 ```python

@@ -942,6 +942,12 @@ def build_conversation_history(chat_id: str, limit: int = 5) -> str:
     """
     Build recent conversation history for context.
 
+    NOTE: This is NOT called by default. The agent should use the valor-history
+    CLI tool to fetch relevant history when context cues suggest prior messages
+    may be relevant (e.g., "what do you think of these", "as I mentioned",
+    references to recent discussions, etc.). For explicit threading, users
+    can use Telegram's reply-to feature.
+
     Args:
         chat_id: Telegram chat ID (numeric, without prefix)
         limit: Number of recent messages to include
@@ -1376,10 +1382,10 @@ async def get_agent_response_clawdbot(message: str, session_id: str, sender_name
         # Build context-enriched message
         context = build_context_prefix(project, chat_title is None)
 
-        # Add recent conversation history for continuity
-        history = ""
-        if chat_id:
-            history = build_conversation_history(chat_id, limit=5)
+        # Note: Recent conversation history is NOT injected by default.
+        # The agent should use valor-history CLI to fetch relevant context
+        # when subtle cues suggest prior messages may be relevant.
+        # Users can also use Telegram's reply-to feature for explicit threading.
 
         # Check if this is a status question - inject activity context
         activity_context = ""
@@ -1390,8 +1396,6 @@ async def get_agent_response_clawdbot(message: str, session_id: str, sender_name
         enriched_message = context
         if activity_context:
             enriched_message += f"\n\n{activity_context}"
-        if history:
-            enriched_message += f"\n\n{history}"
         enriched_message += f"\n\nFROM: {sender_name}"
         if chat_title:
             enriched_message += f" in {chat_title}"
