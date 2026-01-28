@@ -958,6 +958,113 @@ def build_conversation_history(chat_id: str, limit: int = 5) -> str:
     return "\n".join(history_lines)
 
 
+async def fetch_reply_chain(
+    client: TelegramClient,
+    chat_id: int,
+    message_id: int,
+    max_depth: int = 20,
+) -> list[dict]:
+    """
+    Fetch the entire reply chain for a message.
+
+    Walks backward through reply_to_msg_id references to build the full thread.
+    Returns messages in chronological order (oldest first).
+
+    Args:
+        client: Telegram client
+        chat_id: Chat ID to fetch from
+        message_id: Starting message ID (the one being replied to)
+        max_depth: Maximum number of messages to fetch in the chain
+
+    Returns:
+        List of message dicts with 'sender', 'content', 'message_id', 'date'
+    """
+    chain = []
+    current_id = message_id
+    seen_ids = set()
+
+    for _ in range(max_depth):
+        if current_id in seen_ids:
+            break  # Avoid infinite loops
+        seen_ids.add(current_id)
+
+        try:
+            msg = await client.get_messages(chat_id, ids=current_id)
+            if not msg:
+                break
+
+            # Get sender info
+            sender = await msg.get_sender()
+            sender_name = getattr(sender, "first_name", "Unknown")
+
+            # Check if this is our own message (Valor's response)
+            if msg.out:
+                sender_name = "Valor"
+
+            chain.append({
+                "sender": sender_name,
+                "content": msg.text or "[media]",
+                "message_id": msg.id,
+                "date": msg.date,
+            })
+
+            # Move to parent message
+            if msg.reply_to_msg_id:
+                current_id = msg.reply_to_msg_id
+            else:
+                break  # No more parents
+
+        except Exception as e:
+            logger.debug(f"Could not fetch message {current_id} in reply chain: {e}")
+            break
+
+    # Reverse to get chronological order (oldest first)
+    chain.reverse()
+    return chain
+
+
+def format_reply_chain(chain: list[dict]) -> str:
+    """
+    Format a reply chain for inclusion in agent context.
+
+    Args:
+        chain: List of message dicts from fetch_reply_chain()
+
+    Returns:
+        Formatted string showing the thread
+    """
+    if not chain:
+        return ""
+
+    lines = ["REPLY THREAD CONTEXT (oldest to newest):"]
+    lines.append("-" * 40)
+
+    for msg in chain:
+        sender = msg["sender"]
+        content = msg["content"]
+
+        # Filter tool logs from Valor's messages
+        if sender == "Valor":
+            content = filter_tool_logs(content)
+            if not content:
+                continue
+
+        # Truncate very long messages but keep more context than normal history
+        if len(content) > 500:
+            content = content[:500] + "..."
+
+        # Format with timestamp if available
+        date_str = ""
+        if msg.get("date"):
+            date_str = msg["date"].strftime(" [%H:%M]")
+
+        lines.append(f"{sender}{date_str}: {content}")
+        lines.append("")  # Blank line between messages
+
+    lines.append("-" * 40)
+    return "\n".join(lines)
+
+
 # =============================================================================
 # Link Summarization
 # =============================================================================
@@ -1765,6 +1872,27 @@ async def main():
         if link_summary_text:
             clean_text = f"{clean_text}\n\n--- LINK SUMMARIES ---\n{link_summary_text}"
             logger.info(f"Added {len(link_summaries)} link summaries to message context")
+
+        # Fetch reply chain context if this message is replying to something
+        # This gives Valor full thread context when someone replies to an old message
+        reply_chain_context = ""
+        if message.reply_to_msg_id:
+            try:
+                reply_chain = await fetch_reply_chain(
+                    client,
+                    event.chat_id,
+                    message.reply_to_msg_id,
+                    max_depth=20,
+                )
+                if reply_chain:
+                    reply_chain_context = format_reply_chain(reply_chain)
+                    logger.info(f"Fetched reply chain with {len(reply_chain)} messages")
+            except Exception as e:
+                logger.warning(f"Could not fetch reply chain: {e}")
+
+        # Prepend reply chain context if available (gives thread history)
+        if reply_chain_context:
+            clean_text = f"{reply_chain_context}\n\nCURRENT MESSAGE:\n{clean_text}"
 
         # Build session ID with reply-based continuity
         # - Reply to Valor's message → continue that session
