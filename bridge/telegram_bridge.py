@@ -499,13 +499,25 @@ def load_config() -> dict:
         return {"projects": {}, "defaults": {}}
 
     with open(config_path) as f:
-        return json.load(f)
+        config = json.load(f)
+
+    # Validate defaults section has working_directory
+    defaults = config.get("defaults", {})
+    if not defaults.get("working_directory"):
+        logger.warning(
+            "No 'working_directory' in defaults section of projects.json. "
+            "Projects without working_directory may fail. "
+            "See config/projects.json.example for proper setup."
+        )
+
+    return config
 
 
 def build_group_to_project_map(config: dict) -> dict:
     """Build a mapping from group names (lowercase) to project configs."""
     group_map = {}
     projects = config.get("projects", {})
+    defaults = config.get("defaults", {})
 
     for project_key in ACTIVE_PROJECTS:
         if project_key not in projects:
@@ -514,6 +526,15 @@ def build_group_to_project_map(config: dict) -> dict:
 
         project = projects[project_key]
         project["_key"] = project_key  # Store the key for reference
+
+        # Validate working_directory is configured
+        working_dir = project.get("working_directory") or defaults.get("working_directory")
+        if not working_dir:
+            logger.error(
+                f"Project '{project_key}' missing 'working_directory' field and no default set. "
+                "This will cause errors. Add 'working_directory' to the project or defaults section "
+                "in config/projects.json. See config/projects.json.example for reference."
+            )
 
         telegram_config = project.get("telegram", {})
         groups = telegram_config.get("groups", [])
@@ -1929,7 +1950,18 @@ async def main():
         if USE_CLAUDE_SDK:
             # Check branch state if this is a project (not DM)
             if project and not is_reply_to_valor:
-                working_dir = Path(project.get("working_directory", DEFAULTS.get("working_directory")))
+                working_dir_str = project.get("working_directory", DEFAULTS.get("working_directory"))
+                if not working_dir_str:
+                    logger.error(
+                        f"Project '{project.get('name', project.get('_key'))}' has no working_directory configured. "
+                        "Add 'working_directory' field to the project or defaults section in config/projects.json"
+                    )
+                    await event.reply(
+                        "⚠️ Configuration error: working_directory not set for this project. "
+                        "Please contact the admin to fix config/projects.json"
+                    )
+                    return
+                working_dir = Path(working_dir_str)
                 branch_state = get_branch_state(working_dir)
 
                 # If work in progress, notify user

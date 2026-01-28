@@ -128,21 +128,47 @@ Look for:
 
 ### Multi-Project Configuration
 
-Edit `config/projects.json` to configure which Telegram groups each project monitors:
+Edit `config/projects.json` to configure which Telegram groups each project monitors.
+
+**IMPORTANT**: Each project MUST have a `working_directory` field specifying the absolute path to the project directory.
+
+Example configuration:
 
 ```json
 {
   "projects": {
     "valor": {
       "name": "Valor AI",
+      "working_directory": "/Users/yourname/src/ai",
       "telegram": {
         "groups": ["Dev: Valor"],
+        "respond_to_all": false,
         "respond_to_mentions": true
+      },
+      "github": {
+        "org": "yourorg",
+        "repo": "ai"
       }
+    },
+    "popoto": {
+      "name": "Popoto",
+      "working_directory": "/Users/yourname/src/popoto",
+      "telegram": {
+        "groups": ["Dev: Popoto"],
+        "respond_to_all": true
+      }
+    }
+  },
+  "defaults": {
+    "working_directory": "/Users/yourname/src/ai",
+    "telegram": {
+      "respond_to_mentions": true
     }
   }
 }
 ```
+
+See `config/projects.json.example` for a complete template with all available fields.
 
 Set which projects this machine monitors:
 ```bash

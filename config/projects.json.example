@@ -1,0 +1,53 @@
+{
+  "$schema": "Project configuration for multi-instance Valor deployment",
+  "$comment": "This is an example configuration. Copy to projects.json and customize for your setup.",
+
+  "projects": {
+    "example-project": {
+      "name": "Example Project",
+      "description": "A sample project configuration",
+      "working_directory": "/path/to/your/project",
+      "telegram": {
+        "groups": ["Dev: Example Project"],
+        "respond_to_all": false,
+        "respond_to_mentions": true,
+        "respond_to_dms": false
+      },
+      "github": {
+        "org": "your-org",
+        "repo": "your-repo"
+      },
+      "context": {
+        "tech_stack": ["Python", "JavaScript"],
+        "description": "Focus areas for AI responses - what the agent should prioritize"
+      }
+    }
+  },
+
+  "defaults": {
+    "working_directory": "/Users/yourname/src/ai",
+    "telegram": {
+      "respond_to_all": false,
+      "respond_to_mentions": true,
+      "respond_to_dms": true,
+      "mention_triggers": ["@valor", "valor", "hey valor"]
+    },
+    "response": {
+      "typing_indicator": true,
+      "max_response_length": 4000,
+      "timeout_seconds": 300
+    }
+  },
+
+  "_field_descriptions": {
+    "working_directory": "REQUIRED: Absolute path to the project directory where the agent will operate",
+    "telegram.groups": "List of Telegram group names this project monitors",
+    "telegram.respond_to_all": "If true, responds to all messages. If false, only responds based on respond_to_mentions",
+    "telegram.respond_to_mentions": "If true, responds when mentioned. Requires respond_to_all=false",
+    "telegram.respond_to_dms": "If true, responds to direct messages for this project",
+    "github.org": "GitHub organization name",
+    "github.repo": "GitHub repository name",
+    "context.tech_stack": "Technologies used in this project",
+    "context.description": "Focus areas and priorities for the AI agent"
+  }
+}
