@@ -20,6 +20,9 @@ dev = [
     "mypy>=1.10.0",
 ]
 
+[project.scripts]
+valor-history = "tools.telegram_history.cli:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

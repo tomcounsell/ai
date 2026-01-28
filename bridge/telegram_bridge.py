@@ -45,7 +45,7 @@ if USE_CLAUDE_SDK:
     )
 
 # Local tool imports for message and link storage
-from tools.telegram_history import store_message, store_link, get_recent_messages, get_link_by_url
+from tools.telegram_history import store_message, store_link, get_recent_messages, get_link_by_url, register_chat
 from tools.link_analysis import (
     extract_urls,
     summarize_url_content,
@@ -1784,6 +1784,14 @@ async def main():
             )
             if store_result.get("stored"):
                 logger.debug(f"Stored message {message.id} from {sender_name}")
+                # Register chat mapping for CLI lookup
+                if chat_title:
+                    chat_type = "private" if is_dm else "group"
+                    register_chat(
+                        chat_id=str(event.chat_id),
+                        chat_name=chat_title,
+                        chat_type=chat_type,
+                    )
             elif store_result.get("error"):
                 logger.warning(f"Failed to store message: {store_result['error']}")
         except Exception as e:

@@ -9,12 +9,69 @@ This tool provides local storage and search for Telegram messages:
 - Keyword search with relevance scoring
 - Time-based filtering
 - Chat statistics
+- Link storage and management
 
 ## Installation
 
-No external dependencies required. Uses local SQLite storage.
+```bash
+# Install the package (creates valor-history CLI)
+pip install -e /Users/valorengels/src/ai
 
-## Quick Start
+# Verify installation
+valor-history --help
+```
+
+## CLI Usage
+
+The `valor-history` command provides easy access to message history:
+
+```bash
+# Search messages across all chats
+valor-history search "authentication flow"
+
+# Search in a specific group
+valor-history search "error handling" --group "Dev: Valor" --days 30
+
+# Show recent messages from a group
+valor-history recent --group "Dev: Valor" --limit 20
+
+# List known groups/chats
+valor-history groups
+
+# Search/list stored links
+valor-history links --domain github.com
+valor-history links --status unread
+
+# Show statistics
+valor-history stats
+valor-history stats --group "Dev: Valor"
+
+# Output as JSON (for scripting)
+valor-history search "query" --json
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `search <query>` | Search message history |
+| `recent` | Show recent messages from a group |
+| `groups` | List known groups/chats |
+| `links` | Search or list stored links |
+| `stats` | Show statistics |
+
+### Options
+
+| Option | Description |
+|--------|-------------|
+| `--group, -g` | Group name or chat ID |
+| `--days, -d` | Search within last N days |
+| `--limit, -n` | Maximum results |
+| `--json` | Output as JSON |
+
+## Python API
+
+### Quick Start
 
 ```python
 from tools.telegram_history import search_history, store_message

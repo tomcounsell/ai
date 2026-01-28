@@ -83,6 +83,19 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_links_status ON links(status)
     """)
 
+    # Chats table for mapping chat_id → chat_name
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS chats (
+            chat_id TEXT PRIMARY KEY,
+            chat_name TEXT NOT NULL,
+            chat_type TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_chats_name ON chats(chat_name)
+    """)
+
     conn.commit()
 
     return conn
@@ -783,6 +796,247 @@ def get_link_stats(db_path: Path | None = None) -> dict:
             "first_link": row["first_link"],
             "last_link": row["last_link"],
             "top_domains": top_domains,
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        conn.close()
+
+
+# =============================================================================
+# Chat Mapping Functions
+# =============================================================================
+
+
+def register_chat(
+    chat_id: str,
+    chat_name: str,
+    chat_type: str | None = None,
+    db_path: Path | None = None,
+) -> dict:
+    """
+    Register or update a chat mapping.
+
+    Called by the bridge when messages are received to maintain
+    the chat_id → chat_name mapping.
+
+    Args:
+        chat_id: Telegram chat ID
+        chat_name: Human-readable chat name/title
+        chat_type: Type of chat (private, group, supergroup, channel)
+        db_path: Custom database path
+
+    Returns:
+        dict with registration result
+    """
+    conn = _get_db_connection(db_path)
+
+    try:
+        conn.execute(
+            """
+            INSERT INTO chats (chat_id, chat_name, chat_type, updated_at)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                chat_name = excluded.chat_name,
+                chat_type = COALESCE(excluded.chat_type, chats.chat_type),
+                updated_at = CURRENT_TIMESTAMP
+            """,
+            (chat_id, chat_name, chat_type),
+        )
+        conn.commit()
+
+        return {
+            "registered": True,
+            "chat_id": chat_id,
+            "chat_name": chat_name,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        conn.close()
+
+
+def list_chats(db_path: Path | None = None) -> dict:
+    """
+    List all known chats with their message counts.
+
+    Returns:
+        dict with list of chats and their stats
+    """
+    conn = _get_db_connection(db_path)
+
+    try:
+        cursor = conn.execute("""
+            SELECT
+                c.chat_id,
+                c.chat_name,
+                c.chat_type,
+                c.updated_at,
+                COUNT(m.id) as message_count,
+                MAX(m.timestamp) as last_message
+            FROM chats c
+            LEFT JOIN messages m ON c.chat_id = m.chat_id
+            GROUP BY c.chat_id, c.chat_name, c.chat_type, c.updated_at
+            ORDER BY last_message DESC NULLS LAST
+        """)
+
+        chats = [dict(row) for row in cursor.fetchall()]
+
+        return {
+            "chats": chats,
+            "count": len(chats),
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+    finally:
+        conn.close()
+
+
+def resolve_chat_id(
+    chat_name: str,
+    db_path: Path | None = None,
+) -> str | None:
+    """
+    Resolve a chat name to its chat_id.
+
+    Supports partial matching and case-insensitive search.
+
+    Args:
+        chat_name: Chat name to search for
+        db_path: Custom database path
+
+    Returns:
+        chat_id if found, None otherwise
+    """
+    conn = _get_db_connection(db_path)
+
+    try:
+        # Try exact match first
+        cursor = conn.execute(
+            "SELECT chat_id FROM chats WHERE chat_name = ?",
+            (chat_name,),
+        )
+        row = cursor.fetchone()
+        if row:
+            return row["chat_id"]
+
+        # Try case-insensitive match
+        cursor = conn.execute(
+            "SELECT chat_id FROM chats WHERE LOWER(chat_name) = LOWER(?)",
+            (chat_name,),
+        )
+        row = cursor.fetchone()
+        if row:
+            return row["chat_id"]
+
+        # Try partial match (contains)
+        cursor = conn.execute(
+            "SELECT chat_id FROM chats WHERE LOWER(chat_name) LIKE LOWER(?)",
+            (f"%{chat_name}%",),
+        )
+        row = cursor.fetchone()
+        if row:
+            return row["chat_id"]
+
+        return None
+
+    except Exception:
+        return None
+    finally:
+        conn.close()
+
+
+def search_all_chats(
+    query: str,
+    max_results: int = 20,
+    max_age_days: int = 30,
+    db_path: Path | None = None,
+) -> dict:
+    """
+    Search across all chats.
+
+    Args:
+        query: Search query
+        max_results: Maximum results total
+        max_age_days: Time window in days
+        db_path: Custom database path
+
+    Returns:
+        dict with results grouped by chat
+    """
+    if not query or not query.strip():
+        return {"error": "Query cannot be empty"}
+
+    conn = _get_db_connection(db_path)
+    cutoff = datetime.now() - timedelta(days=max_age_days)
+
+    try:
+        cursor = conn.execute(
+            """
+            SELECT m.id, m.chat_id, m.message_id, m.sender, m.content,
+                   m.timestamp, m.message_type,
+                   c.chat_name
+            FROM messages m
+            LEFT JOIN chats c ON m.chat_id = c.chat_id
+            WHERE m.content LIKE ?
+              AND m.timestamp >= ?
+            ORDER BY m.timestamp DESC
+            LIMIT ?
+            """,
+            (f"%{query}%", cutoff, max_results * 3),
+        )
+
+        rows = cursor.fetchall()
+
+        # Score and rank results
+        results = []
+        query_lower = query.lower()
+        query_words = set(query_lower.split())
+
+        for row in rows:
+            content = row["content"]
+            content_lower = content.lower()
+
+            # Calculate relevance score
+            score = 0.0
+
+            if query_lower in content_lower:
+                score += 0.5
+
+            content_words = set(content_lower.split())
+            matching_words = query_words & content_words
+            score += len(matching_words) * 0.2
+
+            try:
+                msg_time = datetime.fromisoformat(row["timestamp"])
+                days_old = (datetime.now() - msg_time).days
+                recency_bonus = max(0, (max_age_days - days_old) / max_age_days) * 0.3
+                score += recency_bonus
+            except (ValueError, TypeError):
+                pass
+
+            results.append({
+                "id": row["id"],
+                "chat_id": row["chat_id"],
+                "chat_name": row["chat_name"] or row["chat_id"],
+                "message_id": row["message_id"],
+                "sender": row["sender"],
+                "content": content,
+                "timestamp": row["timestamp"],
+                "message_type": row["message_type"],
+                "relevance_score": round(score, 3),
+            })
+
+        results.sort(key=lambda x: x["relevance_score"], reverse=True)
+        results = results[:max_results]
+
+        return {
+            "query": query,
+            "results": results,
+            "total_matches": len(results),
+            "time_window_days": max_age_days,
         }
 
     except Exception as e:
