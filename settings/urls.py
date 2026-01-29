@@ -115,6 +115,7 @@ urlpatterns = [
     path("", HomeView.as_view(), name="home"),
     path("", include("apps.public.urls", namespace="public")),
     path("staff/", include("apps.staff.urls", namespace="staff")),
+    path("drugs/", include("apps.drugs.urls", namespace="drugs")),
     # Legacy redirect for old /ai/mcp/ URLs
     path(
         "ai/mcp/<path:subpath>",
