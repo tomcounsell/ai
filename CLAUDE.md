@@ -529,48 +529,9 @@ ai/                              # This repository (Valor's codebase)
 
 ---
 
-## New Machine Setup Flow
+## New Machine Setup
 
-When setting up this codebase on a new machine (user says "setup this machine" or similar), follow this exact sequence. **You** do the automated steps; only ask the user for interactive steps.
-
-### Step 1: Install Dependencies (you do this)
-```bash
-cd /Users/valorengels/src/ai
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
-
-### Step 2: Configure Environment (you do this)
-- Copy `.env.example` to `.env` if `.env` doesn't exist
-- Edit `.env` with the project-specific settings (ACTIVE_PROJECTS, etc.)
-- Copy `config/projects.json.example` to `config/projects.json` if it doesn't exist
-- Edit `config/projects.json` for this machine's projects
-- **IMPORTANT**: Every project MUST have `working_directory`. Always include the full `defaults` section.
-- **DO NOT** set `respond_to_all: false` — the default is `true` and should stay that way for group chats
-
-### Step 3: Telegram Login (user does this)
-- Check if `data/*.session` exists
-- If not, tell the user: "Please run this command and complete the login:"
-  ```bash
-  cd /Users/valorengels/src/ai && source .venv/bin/activate && python scripts/telegram_login.py
-  ```
-- **WAIT for the user to confirm** they have completed the login
-- Do NOT proceed to Step 4 until the user confirms
-
-### Step 4: Start the Bridge (you do this)
-After the user confirms login:
-```bash
-./scripts/start_bridge.sh
-```
-- Verify it started by checking logs
-- Confirm to the user that the bridge is running and connected
-
-### Key Rules
-- **You** install deps, create configs, and start the bridge
-- **User** only does the interactive Telegram login
-- Never ask the user to start the bridge — that's your job
-- Never skip the login check before starting
+Run `/setup` to configure a new machine. See `.claude/commands/setup.md` for the full flow.
 
 ---
 
