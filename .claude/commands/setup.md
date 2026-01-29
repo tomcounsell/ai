@@ -1,93 +1,219 @@
 # Setup - New Machine Configuration
 
-Set up this machine to run the Valor bridge for one or more projects.
+Configure this machine to run the Valor Telegram bridge. You do everything except the interactive Telegram login step.
 
-## Flow
+## Prerequisites
 
-You handle everything automated. The user only does the interactive Telegram login.
+Before starting, confirm the user has:
+- Python 3.11+ installed
+- The `ai` repo cloned at `/Users/valorengels/src/ai`
+- Telegram API credentials (api_id and api_hash from https://my.telegram.org). If they don't have these, pause and explain how to get them before continuing.
 
-### Step 1: Dependencies
+## Step 1: Virtual Environment & Dependencies
 
 ```bash
 cd /Users/valorengels/src/ai
 ```
 
-- Create `.venv` if it doesn't exist: `python3 -m venv .venv`
-- Activate: `source .venv/bin/activate`
-- Install: `pip install -e .`
+Create the virtual environment if it doesn't exist, then install all dependencies:
 
-### Step 2: Environment
+```bash
+python3 -m venv .venv       # skip if .venv/ already exists
+source .venv/bin/activate
+pip install -e .
+```
 
-If `.env` does not exist, copy the example:
+Verify key imports work:
+
+```bash
+python -c "import telethon; import httpx; import dotenv; print('Dependencies OK')"
+```
+
+If this fails, debug before continuing.
+
+## Step 2: Environment File (.env)
+
+Check if `.env` exists. If not:
+
 ```bash
 cp .env.example .env
 ```
 
-Ask the user which project(s) this machine should monitor. Then edit `.env`:
-- Set `ACTIVE_PROJECTS=` to the project key(s)
-- Ensure `USE_CLAUDE_SDK=true` is set
-- Ensure Telegram credentials are filled in (API_ID, API_HASH, PHONE, PASSWORD)
+**Ask the user** which project(s) this machine should monitor. The available projects are defined in `config/projects.json` — check the full list there. Common options:
+- Single project: `ACTIVE_PROJECTS=psyoptimal`
+- Multiple: `ACTIVE_PROJECTS=valor,popoto`
+- All: `ACTIVE_PROJECTS=valor,django-project-template,popoto,psyoptimal,flutter-project-template,cuttlefish,yudame-research`
 
-If the user needs Telegram API credentials, direct them to https://my.telegram.org.
+Edit `.env` and ensure these are set:
 
-### Step 3: Project Config
+| Variable | Required | Notes |
+|----------|----------|-------|
+| `ACTIVE_PROJECTS` | Yes | Comma-separated project keys |
+| `USE_CLAUDE_SDK` | Yes | Must be `true` |
+| `ANTHROPIC_API_KEY` | Yes | Starts with `sk-ant-` |
+| `TELEGRAM_API_ID` | Yes | Numeric, from my.telegram.org |
+| `TELEGRAM_API_HASH` | Yes | Hex string, from my.telegram.org |
+| `TELEGRAM_PHONE` | Yes | With country code, e.g. `+1234567890` |
+| `TELEGRAM_PASSWORD` | If 2FA on | Telegram 2FA password |
+| `TELEGRAM_SESSION_NAME` | No | Defaults to `valor_bridge` |
+| `TELEGRAM_DM_WHITELIST` | No | Comma-separated names, e.g. `Tom` |
 
-If `config/projects.json` does not exist, copy the example:
+If any required values are placeholder/missing, ask the user to provide them. The shared API keys file at `/Users/valorengels/src/.env` may have `ANTHROPIC_API_KEY` and other keys — check there first.
+
+## Step 3: Project Configuration (config/projects.json)
+
+Check if `config/projects.json` exists. If not:
+
 ```bash
 cp config/projects.json.example config/projects.json
 ```
 
-Edit `config/projects.json` for this machine. **Required rules:**
-- Every project MUST have `working_directory` (absolute path)
-- Include the full `defaults` section from the example
-- **DO NOT set `respond_to_all: false`** — the default is `true`, which is correct for group chats
-- Keep project telegram config minimal: just `"groups": ["Dev: ProjectName"]`
-- Verify the `working_directory` path exists on disk
+Edit `config/projects.json` for this machine's projects.
 
-### Step 4: Telegram Login
+**Critical rules when editing projects.json:**
 
-Check if a session file exists:
+1. **Every project MUST have `working_directory`** — absolute path to the repo on this machine
+2. **Always include the full `defaults` section** — copy it from the example if missing
+3. **DO NOT set `respond_to_all: false`** — the default is `true`, which is correct. Omit the field entirely from project-level telegram config.
+4. **Keep project telegram config minimal** — usually just `"groups": ["Dev: ProjectName"]` is sufficient
+5. **Verify paths exist on disk** — run `ls` on each `working_directory` to confirm
+
+Example minimal project entry:
+
+```json
+{
+  "projects": {
+    "myproject": {
+      "name": "My Project",
+      "working_directory": "/Users/valorengels/src/myproject",
+      "telegram": {
+        "groups": ["Dev: My Project"]
+      },
+      "github": {
+        "org": "orgname",
+        "repo": "reponame"
+      },
+      "context": {
+        "tech_stack": ["Python"],
+        "description": "What the agent should focus on"
+      }
+    }
+  },
+  "defaults": {
+    "working_directory": "/Users/valorengels/src/ai",
+    "telegram": {
+      "respond_to_all": true,
+      "respond_to_mentions": true,
+      "respond_to_dms": true,
+      "mention_triggers": ["@valor", "valor", "hey valor"]
+    },
+    "response": {
+      "typing_indicator": true,
+      "max_response_length": 4000,
+      "timeout_seconds": 300
+    }
+  }
+}
+```
+
+If the project is already defined in the main repo's `config/projects.json`, copy its entry rather than writing from scratch. The canonical project list is in the main repo on the `main` branch.
+
+After editing, verify all working directories exist:
+
+```bash
+# For each project's working_directory, confirm it exists
+ls /Users/valorengels/src/<project_dir>
+```
+
+## Step 4: Telegram Login (USER ACTION REQUIRED)
+
+Check for an existing session:
+
 ```bash
 ls data/*.session 2>/dev/null
 ```
 
-If no session file exists:
-1. Tell the user: "Please run this command and complete the Telegram login:"
-   ```
-   cd /Users/valorengels/src/ai && source .venv/bin/activate && python scripts/telegram_login.py
-   ```
-2. **STOP and WAIT** for the user to confirm they completed the login
-3. Do NOT proceed until they confirm
+**If a session file exists**: Skip to Step 5.
 
-If a session file already exists, skip to Step 5.
+**If no session file exists**: The user must complete an interactive login. Tell them:
 
-### Step 5: Start Bridge
+> I've finished all the automated setup. One step requires your input — the Telegram login sends a verification code to your phone.
+>
+> Please run this in a terminal:
+> ```
+> cd /Users/valorengels/src/ai && source .venv/bin/activate && python scripts/telegram_login.py
+> ```
+> Let me know when you're done.
 
-After login is confirmed (or session already exists):
+**STOP HERE. Do not proceed until the user confirms the login is complete.**
+
+After they confirm, verify the session was created:
+
 ```bash
-./scripts/start_bridge.sh
+ls data/*.session
 ```
 
-Verify by checking logs:
+If no session file appeared, something went wrong. Ask the user what happened and help debug.
+
+## Step 5: Start the Bridge
+
+Ensure the logs directory exists, then start the bridge as a background process:
+
 ```bash
-sleep 3 && tail -10 logs/bridge.log
+mkdir -p logs
 ```
 
-Confirm to the user:
-- Bridge is running
-- Which project(s) and group(s) are being monitored
-- Agent backend is Claude Agent SDK
+Start the bridge using the service script:
 
-### Step 6: Test
+```bash
+./scripts/start_bridge.sh &
+```
 
-Ask the user to send a test message in the Telegram group to verify the bridge responds.
+Wait a few seconds, then verify it started:
 
-## Key Rules
+```bash
+sleep 4 && tail -20 logs/bridge.log 2>/dev/null
+```
 
-- **You** install deps, create configs, and start the bridge
-- **User** only does the interactive Telegram login
-- Never ask the user to start the bridge — that's your job
-- Never skip the login check before starting
+Check for these indicators in the logs:
+- `Agent backend: Claude Agent SDK` — correct backend
+- `Active projects: [...]` — the projects you configured
+- `Monitored groups: [...]` — the Telegram groups
+- `Connected to Telegram` — successful connection
+
+Also verify the process is running:
+
+```bash
+pgrep -f telegram_bridge.py
+```
+
+## Step 6: Confirm to User
+
+Report the final status to the user with:
+
+- **Bridge status**: Running (with PID)
+- **Agent backend**: Claude Agent SDK
+- **Active projects**: Which projects are configured
+- **Monitored groups**: Which Telegram groups are being watched
+- **Next step**: "Send a test message in the Telegram group to verify it responds"
+
+Example:
+
+> Setup complete. The bridge is running in the background.
+>
+> - PID: 12345
+> - Backend: Claude Agent SDK
+> - Monitoring: "Dev: PsyOPTIMAL" (psyoptimal project)
+>
+> Send a test message in the group to verify it responds.
+
+## Rules
+
+- **You** do everything: deps, config, starting the bridge, verification
+- **User** only does the interactive Telegram login (Step 4)
+- Never ask the user to start the bridge or check logs — do it yourself
 - Never set `respond_to_all: false` in project configs
 - Always include the `defaults` section in `projects.json`
-- Always verify `working_directory` paths exist
+- Always verify `working_directory` paths exist on disk before starting
+- The bridge must be confirmed running before you report success
+- If anything fails, debug it yourself. Only escalate to the user if it requires their credentials or interactive input.
