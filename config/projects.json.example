@@ -8,10 +8,7 @@
       "description": "A sample project configuration",
       "working_directory": "/path/to/your/project",
       "telegram": {
-        "groups": ["Dev: Example Project"],
-        "respond_to_all": true,
-        "respond_to_mentions": true,
-        "respond_to_dms": false
+        "groups": ["Dev: Example Project"]
       },
       "github": {
         "org": "your-org",
@@ -42,9 +39,9 @@
   "_field_descriptions": {
     "working_directory": "REQUIRED: Absolute path to the project directory where the agent will operate",
     "telegram.groups": "List of Telegram group names this project monitors",
-    "telegram.respond_to_all": "If true, responds to all messages. If false, only responds based on respond_to_mentions",
-    "telegram.respond_to_mentions": "If true, responds when mentioned. Requires respond_to_all=false",
-    "telegram.respond_to_dms": "If true, responds to direct messages for this project",
+    "telegram.respond_to_all": "Defaults to true. Only set to false if you want mention-only responses",
+    "telegram.respond_to_mentions": "If true, responds when mentioned. Only relevant when respond_to_all=false",
+    "telegram.respond_to_dms": "If true, responds to direct messages for this project. Defaults to true",
     "github.org": "GitHub organization name",
     "github.repo": "GitHub repository name",
     "context.tech_stack": "Technologies used in this project",
