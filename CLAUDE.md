@@ -214,6 +214,13 @@ Valor can work on other projects and repositories, but those are separate from "
 - Do NOT skip phases. Do NOT ship without tests passing.
 - For trivial changes (typos, config): phases can be brief but still present
 
+**10. ALWAYS RESTART RUNNING SERVICES AFTER CODE CHANGES**
+- **If the Telegram bridge is running and you modify bridge or agent code, restart it immediately after committing**
+- Do not wait for the user to ask — the old code is still in memory until restarted
+- Restart command: `pkill -f telegram_bridge.py; sleep 2 && source .venv/bin/activate && nohup python bridge/telegram_bridge.py >> logs/bridge.log 2>&1 &`
+- Verify restart by checking `tail -5 logs/bridge.log` for "Connected to Telegram"
+- This applies to any running service, not just the bridge
+
 ## Tools, Workflows, and Skills
 
 ### Philosophy
