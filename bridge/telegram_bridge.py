@@ -493,22 +493,53 @@ def log_event(event_type: str, **kwargs) -> None:
 def load_config() -> dict:
     """Load project configuration from projects.json."""
     config_path = Path(__file__).parent.parent / "config" / "projects.json"
+    example_path = config_path.with_suffix(".json.example")
 
     if not config_path.exists():
-        logger.warning(f"Project config not found at {config_path}, using defaults")
+        if example_path.exists():
+            logger.error(
+                f"Project config not found at {config_path}. "
+                f"Copy the example: cp {example_path} {config_path}"
+            )
+        else:
+            logger.warning(f"Project config not found at {config_path}, using defaults")
         return {"projects": {}, "defaults": {}}
 
     with open(config_path) as f:
         config = json.load(f)
 
-    # Validate defaults section has working_directory
+    # Validate defaults section exists and has working_directory
     defaults = config.get("defaults", {})
-    if not defaults.get("working_directory"):
+    if not defaults:
         logger.warning(
-            "No 'working_directory' in defaults section of projects.json. "
-            "Projects without working_directory may fail. "
+            "No 'defaults' section in projects.json. "
+            "Add a defaults section with working_directory and telegram settings. "
             "See config/projects.json.example for proper setup."
         )
+    elif not defaults.get("working_directory"):
+        logger.warning(
+            "No 'working_directory' in defaults section of projects.json. "
+            "Projects without working_directory will fail. "
+            "See config/projects.json.example for proper setup."
+        )
+
+    # Validate each active project
+    projects = config.get("projects", {})
+    for project_key in ACTIVE_PROJECTS:
+        if project_key not in projects:
+            continue
+        project = projects[project_key]
+        working_dir = project.get("working_directory") or defaults.get("working_directory")
+        if not working_dir:
+            logger.error(
+                f"Project '{project_key}' has no working_directory and no default set. "
+                "The bridge WILL fail when processing messages for this project. "
+                "Fix: add 'working_directory' to the project in config/projects.json"
+            )
+        elif not Path(working_dir).exists():
+            logger.warning(
+                f"Project '{project_key}' working_directory does not exist: {working_dir}"
+            )
 
     return config
 
@@ -517,7 +548,6 @@ def build_group_to_project_map(config: dict) -> dict:
     """Build a mapping from group names (lowercase) to project configs."""
     group_map = {}
     projects = config.get("projects", {})
-    defaults = config.get("defaults", {})
 
     for project_key in ACTIVE_PROJECTS:
         if project_key not in projects:
@@ -526,15 +556,6 @@ def build_group_to_project_map(config: dict) -> dict:
 
         project = projects[project_key]
         project["_key"] = project_key  # Store the key for reference
-
-        # Validate working_directory is configured
-        working_dir = project.get("working_directory") or defaults.get("working_directory")
-        if not working_dir:
-            logger.error(
-                f"Project '{project_key}' missing 'working_directory' field and no default set. "
-                "This will cause errors. Add 'working_directory' to the project or defaults section "
-                "in config/projects.json. See config/projects.json.example for reference."
-            )
 
         telegram_config = project.get("telegram", {})
         groups = telegram_config.get("groups", [])

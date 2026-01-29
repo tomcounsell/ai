@@ -56,11 +56,10 @@ Every project configuration MUST include:
    Set which Telegram groups each project monitors:
    ```json
    "telegram": {
-     "groups": ["Dev: My Project"],
-     "respond_to_all": false,
-     "respond_to_mentions": true
+     "groups": ["Dev: My Project"]
    }
    ```
+   Note: `respond_to_all` defaults to `true` if not specified.
 
 4. **Set active projects** in `.env`:
    ```bash

@@ -141,9 +141,7 @@ Example configuration:
       "name": "Valor AI",
       "working_directory": "/Users/yourname/src/ai",
       "telegram": {
-        "groups": ["Dev: Valor"],
-        "respond_to_all": false,
-        "respond_to_mentions": true
+        "groups": ["Dev: Valor"]
       },
       "github": {
         "org": "yourorg",
@@ -154,15 +152,22 @@ Example configuration:
       "name": "Popoto",
       "working_directory": "/Users/yourname/src/popoto",
       "telegram": {
-        "groups": ["Dev: Popoto"],
-        "respond_to_all": true
+        "groups": ["Dev: Popoto"]
       }
     }
   },
   "defaults": {
     "working_directory": "/Users/yourname/src/ai",
     "telegram": {
-      "respond_to_mentions": true
+      "respond_to_all": true,
+      "respond_to_mentions": true,
+      "respond_to_dms": true,
+      "mention_triggers": ["@valor", "valor", "hey valor"]
+    },
+    "response": {
+      "typing_indicator": true,
+      "max_response_length": 4000,
+      "timeout_seconds": 300
     }
   }
 }
