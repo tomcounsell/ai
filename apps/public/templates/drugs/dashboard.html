@@ -147,6 +147,11 @@
 
 <!-- HTMX Event Handlers -->
 <script>
+    // Ensure CSRF token is available for HTMX requests
+    document.body.addEventListener('htmx:configRequest', function(evt) {
+        evt.detail.headers['X-CSRFToken'] = '{{ csrf_token }}';
+    });
+
     // Reload page when medications are updated
     document.body.addEventListener('medicationUpdated', function() {
         window.location.reload();
