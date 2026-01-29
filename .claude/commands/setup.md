@@ -15,18 +15,20 @@ Before starting, confirm the user has:
 cd /Users/valorengels/src/ai
 ```
 
-Create the virtual environment if it doesn't exist, then install all dependencies:
+Create the virtual environment if it doesn't exist, then install all dependencies **into the venv** (never user-site):
 
 ```bash
 python3 -m venv .venv       # skip if .venv/ already exists
 source .venv/bin/activate
-pip install -e .
+.venv/bin/pip install -e .
 ```
 
-Verify key imports work:
+Always use `.venv/bin/pip` and `.venv/bin/python` explicitly to guarantee packages land in the venv, not in `~/.local` or system site-packages.
+
+Verify key imports work using the venv python:
 
 ```bash
-python -c "import telethon; import httpx; import dotenv; print('Dependencies OK')"
+.venv/bin/python -c "import telethon; import httpx; import dotenv; print('Dependencies OK')"
 ```
 
 If this fails, debug before continuing.

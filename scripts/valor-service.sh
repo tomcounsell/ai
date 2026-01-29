@@ -7,6 +7,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+VENV="$PROJECT_DIR/.venv"
 PLIST_NAME="com.valor.bridge"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_NAME}.plist"
 LOG_DIR="$PROJECT_DIR/logs"
@@ -43,17 +44,15 @@ is_running() {
 
 ensure_setup() {
     # Ensure virtual environment exists
-    if [ ! -d "$PROJECT_DIR/.venv" ]; then
+    if [ ! -d "$VENV" ]; then
         echo "Creating virtual environment..."
-        python3 -m venv "$PROJECT_DIR/.venv"
+        python3 -m venv "$VENV"
     fi
 
-    source "$PROJECT_DIR/.venv/bin/activate" 2>/dev/null || true
-
-    # Ensure dependencies are installed
-    if ! python -c "import telethon; import httpx; import dotenv" 2>/dev/null; then
+    # Ensure dependencies are installed (use explicit venv paths, no user-site)
+    if ! "$VENV/bin/python" -c "import telethon; import httpx; import dotenv" 2>/dev/null; then
         echo "Installing dependencies..."
-        pip install -e "$PROJECT_DIR" 2>&1
+        "$VENV/bin/pip" install -e "$PROJECT_DIR" 2>&1
     fi
 
     # Check for required config files
@@ -74,7 +73,7 @@ ensure_setup() {
     # Warn about missing Telegram session
     if ! ls "$PROJECT_DIR"/data/*.session 2>/dev/null | grep -q .; then
         echo "WARNING: No Telegram session found. Run first:"
-        echo "  cd $PROJECT_DIR && source .venv/bin/activate && python scripts/telegram_login.py"
+        echo "  $VENV/bin/python $PROJECT_DIR/scripts/telegram_login.py"
     fi
 
     return 0
@@ -97,8 +96,8 @@ start_bridge() {
         return 1
     fi
 
-    # Start with nohup so it survives terminal close
-    nohup python bridge/telegram_bridge.py \
+    # Start with nohup so it survives terminal close (explicit venv python)
+    nohup "$VENV/bin/python" bridge/telegram_bridge.py \
         >> "$LOG_DIR/bridge.log" \
         2>> "$LOG_DIR/bridge.error.log" &
 

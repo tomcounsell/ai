@@ -5,6 +5,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+VENV="$PROJECT_DIR/.venv"
 
 cd "$PROJECT_DIR"
 
@@ -17,17 +18,15 @@ if [ -n "$EXISTING_PID" ]; then
 fi
 
 # Ensure virtual environment exists
-if [ ! -d ".venv" ]; then
+if [ ! -d "$VENV" ]; then
     echo "Creating virtual environment..."
-    python3 -m venv .venv
+    python3 -m venv "$VENV"
 fi
 
-source .venv/bin/activate
-
-# Ensure dependencies are installed
-if ! python -c "import telethon; import httpx; import dotenv" 2>/dev/null; then
+# Ensure dependencies are installed (use explicit venv paths, no user-site)
+if ! "$VENV/bin/python" -c "import telethon; import httpx; import dotenv" 2>/dev/null; then
     echo "Installing dependencies..."
-    pip install -e . 2>&1
+    "$VENV/bin/pip" install -e . 2>&1
 fi
 
 # Check for required config files
@@ -48,9 +47,9 @@ fi
 # Check for Telegram session
 if ! ls data/*.session 2>/dev/null | grep -q .; then
     echo "WARNING: No Telegram session found. Run first:"
-    echo "  source .venv/bin/activate && python scripts/telegram_login.py"
+    echo "  $VENV/bin/python scripts/telegram_login.py"
 fi
 
 # Start the bridge
 echo "Starting Telegram-Clawdbot bridge..."
-exec python bridge/telegram_bridge.py
+exec "$VENV/bin/python" bridge/telegram_bridge.py
