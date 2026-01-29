@@ -728,7 +728,7 @@ def should_respond_sync(text: str, is_dm: bool, chat_title: str | None, project:
     telegram_config = project.get("telegram", {})
 
     # If respond_to_all is set, respond to everything
-    if telegram_config.get("respond_to_all", False):
+    if telegram_config.get("respond_to_all", True):
         return True
 
     # For groups NOT using respond_to_unaddressed, use mention-based logic
@@ -775,7 +775,7 @@ async def should_respond_async(
     telegram_config = project.get("telegram", {})
 
     # respond_to_all means respond to everything
-    if telegram_config.get("respond_to_all", False):
+    if telegram_config.get("respond_to_all", True):
         return True, False
 
     # For groups NOT using respond_to_unaddressed, use sync mention-based logic
