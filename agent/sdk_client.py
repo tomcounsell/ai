@@ -103,19 +103,22 @@ class ValorAgent:
             },
         )
 
-    async def query(self, message: str, session_id: str | None = None) -> str:
+    async def query(self, message: str, session_id: str | None = None, max_retries: int = 2) -> str:
         """
-        Send a message and get a response.
+        Send a message and get a response. On error, feeds the error back
+        to the agent so it can attempt a different approach.
 
         Args:
             message: The user message to send
             session_id: Optional session ID for conversation continuity
+            max_retries: Max times to retry by feeding error back to agent
 
         Returns:
             The assistant's text response
         """
         options = self._create_options(session_id)
         response_parts: list[str] = []
+        retries = 0
 
         try:
             async with ClaudeSDKClient(options) as client:
@@ -127,17 +130,25 @@ class ValorAgent:
                             if isinstance(block, TextBlock):
                                 response_parts.append(block.text)
                     elif isinstance(msg, ResultMessage):
-                        # Log usage info
                         if msg.total_cost_usd is not None:
                             logger.debug(
                                 f"Query completed: {msg.num_turns} turns, "
                                 f"${msg.total_cost_usd:.4f}, "
                                 f"{msg.duration_ms}ms"
                             )
-                        if msg.is_error:
-                            logger.error(f"Agent returned error: {msg.result}")
-                            if msg.result:
-                                return f"Error: {msg.result}"
+                        if msg.is_error and retries < max_retries:
+                            retries += 1
+                            logger.warning(
+                                f"Agent error (attempt {retries}/{max_retries}), "
+                                f"feeding error back: {msg.result}"
+                            )
+                            response_parts.clear()
+                            await client.query(
+                                f"That failed with this error:\n{msg.result}\n\n"
+                                f"Please try a different approach to accomplish the original task."
+                            )
+                        elif msg.is_error:
+                            logger.error(f"Agent error after {retries} retries: {msg.result}")
 
         except Exception as e:
             logger.error(f"SDK query failed: {e}")
@@ -202,4 +213,4 @@ async def get_agent_response_sdk(
     except Exception as e:
         elapsed = time.time() - start_time
         logger.error(f"[{request_id}] SDK error after {elapsed:.1f}s: {e}")
-        return f"Error: {str(e)}"
+        return "Sorry, I ran into an issue and couldn't recover. The error has been logged for investigation."
