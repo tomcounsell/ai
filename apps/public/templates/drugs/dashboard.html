@@ -1,0 +1,159 @@
+{% extends base_template %}
+{% load static %}
+
+{% block title %}Medication Tracker{% endblock %}
+
+{% block content %}
+<div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <!-- Header -->
+    <div class="mb-8">
+        <h1 class="text-3xl font-bold text-gray-900">Medication Tracker</h1>
+        <p class="mt-2 text-sm text-gray-600">
+            Track your medications, view interactions, and get timing suggestions.
+        </p>
+    </div>
+
+    <!-- Disclaimer -->
+    <div class="mb-8 bg-yellow-50 border-l-4 border-yellow-400 p-4">
+        <div class="flex">
+            <div class="flex-shrink-0">
+                <i class="fas fa-exclamation-triangle text-yellow-400"></i>
+            </div>
+            <div class="ml-3">
+                <p class="text-sm text-yellow-700">
+                    <strong>Disclaimer:</strong> This tool is for informational purposes only and does not replace professional medical advice.
+                    Always consult your doctor or pharmacist about your medications.
+                </p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="mb-6 flex gap-3">
+        <button
+            hx-get="{% url 'drugs:medication_add' %}"
+            hx-target="#modal-container"
+            hx-swap="innerHTML"
+            class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+        >
+            <i class="fas fa-plus mr-2"></i>
+            Add Medication
+        </button>
+
+        <button
+            hx-get="{% url 'drugs:meal_schedule' %}"
+            hx-target="#modal-container"
+            hx-swap="innerHTML"
+            class="inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+        >
+            <i class="fas fa-utensils mr-2"></i>
+            Set Meal Times
+        </button>
+    </div>
+
+    <!-- Main Content Grid -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- Left Column: Medication List (2/3 width on large screens) -->
+        <div class="lg:col-span-2">
+            <div class="bg-white shadow rounded-lg">
+                <div class="px-6 py-4 border-b border-gray-200">
+                    <h2 class="text-lg font-medium text-gray-900">My Medications</h2>
+                </div>
+                <div id="medication-list" class="divide-y divide-gray-200">
+                    {% if has_medications %}
+                        {% for user_med in user_medications %}
+                            {% include 'drugs/partials/medication_card.html' with user_medication=user_med %}
+                        {% endfor %}
+                    {% else %}
+                        <div class="px-6 py-12 text-center">
+                            <i class="fas fa-pills text-gray-400 text-4xl mb-4"></i>
+                            <p class="text-gray-500">No medications added yet.</p>
+                            <p class="text-sm text-gray-400 mt-1">Click "Add Medication" to get started.</p>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Column: Interactions & Schedule -->
+        <div class="space-y-6">
+            <!-- Interactions -->
+            <div class="bg-white shadow rounded-lg">
+                <div class="px-6 py-4 border-b border-gray-200">
+                    <h2 class="text-lg font-medium text-gray-900">
+                        <i class="fas fa-exclamation-triangle text-orange-500 mr-2"></i>
+                        Interactions
+                    </h2>
+                </div>
+                <div class="px-6 py-4">
+                    {% if interactions %}
+                        <div class="space-y-3">
+                            {% for interaction in interactions %}
+                                <div class="p-3 bg-orange-50 border border-orange-200 rounded-md text-sm">
+                                    <div class="font-medium text-orange-800 mb-1">
+                                        {{ interaction.medication_a.name }} + {{ interaction.medication_b.name }}
+                                    </div>
+                                    <p class="text-orange-700">{{ interaction.warning }}</p>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="text-sm text-gray-500">
+                            <i class="fas fa-check-circle text-green-500 mr-1"></i>
+                            No known interactions
+                        </p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Daily Schedule -->
+            <div class="bg-white shadow rounded-lg">
+                <div class="px-6 py-4 border-b border-gray-200">
+                    <h2 class="text-lg font-medium text-gray-900">
+                        <i class="fas fa-calendar-day mr-2"></i>
+                        Daily Schedule
+                    </h2>
+                </div>
+                <div class="px-6 py-4">
+                    {% if daily_schedule %}
+                        <div class="space-y-4">
+                            {% for item in daily_schedule %}
+                                <div class="flex">
+                                    <div class="flex-shrink-0 w-20 text-sm font-medium text-gray-700">
+                                        {{ item.time_display }}
+                                    </div>
+                                    <div class="flex-1">
+                                        <div class="text-sm font-medium text-gray-900">
+                                            {{ item.medication.medication.name }} {{ item.medication.dosage }}
+                                        </div>
+                                        <div class="text-xs text-gray-500 mt-1">
+                                            {{ item.note }}
+                                        </div>
+                                    </div>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="text-sm text-gray-500">Add medications to see suggested schedule</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal Container -->
+<div id="modal-container"></div>
+
+<!-- HTMX Event Handlers -->
+<script>
+    // Reload page when medications are updated
+    document.body.addEventListener('medicationUpdated', function() {
+        window.location.reload();
+    });
+
+    document.body.addEventListener('mealScheduleUpdated', function() {
+        window.location.reload();
+    });
+</script>
+{% endblock %}

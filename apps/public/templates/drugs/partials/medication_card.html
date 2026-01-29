@@ -1,0 +1,55 @@
+<!-- Single medication card in the list -->
+<div class="px-6 py-4 hover:bg-gray-50">
+    <div class="flex items-start justify-between">
+        <div class="flex-1">
+            <div class="flex items-center">
+                <h3 class="text-base font-medium text-gray-900">
+                    {{ user_medication.medication.name }}
+                </h3>
+                {% if user_medication.medication.medication_type == 'supplement' %}
+                    <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                        Supplement
+                    </span>
+                {% elif user_medication.medication.medication_type == 'otc' %}
+                    <span class="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                        OTC
+                    </span>
+                {% endif %}
+            </div>
+
+            <div class="mt-1 text-sm text-gray-600">
+                <span class="font-medium">{{ user_medication.dosage }}</span>
+                <span class="mx-2">•</span>
+                <span>{{ user_medication.frequency }}</span>
+                {% if user_medication.time_preference != 'anytime' %}
+                    <span class="mx-2">•</span>
+                    <span class="capitalize">{{ user_medication.get_time_preference_display }}</span>
+                {% endif %}
+            </div>
+
+            {% if user_medication.notes %}
+                <p class="mt-2 text-sm text-gray-500">{{ user_medication.notes }}</p>
+            {% endif %}
+        </div>
+
+        <div class="ml-4 flex-shrink-0 flex items-center space-x-2">
+            <button
+                hx-get="{% url 'drugs:medication_edit' user_medication.pk %}"
+                hx-target="#modal-container"
+                hx-swap="innerHTML"
+                class="text-blue-600 hover:text-blue-800 text-sm font-medium"
+                title="Edit"
+            >
+                <i class="fas fa-edit"></i>
+            </button>
+            <button
+                hx-delete="{% url 'drugs:medication_delete' user_medication.pk %}"
+                hx-confirm="Are you sure you want to remove this medication?"
+                class="text-red-600 hover:text-red-800 text-sm font-medium"
+                title="Remove"
+            >
+                <i class="fas fa-trash"></i>
+            </button>
+        </div>
+    </div>
+</div>
