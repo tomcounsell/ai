@@ -41,6 +41,45 @@ is_running() {
     [ -n "$pid" ]
 }
 
+ensure_setup() {
+    # Ensure virtual environment exists
+    if [ ! -d "$PROJECT_DIR/.venv" ]; then
+        echo "Creating virtual environment..."
+        python3 -m venv "$PROJECT_DIR/.venv"
+    fi
+
+    source "$PROJECT_DIR/.venv/bin/activate" 2>/dev/null || true
+
+    # Ensure dependencies are installed
+    if ! python -c "import telethon; import httpx; import dotenv" 2>/dev/null; then
+        echo "Installing dependencies..."
+        pip install -e "$PROJECT_DIR" 2>&1
+    fi
+
+    # Check for required config files
+    if [ ! -f "$PROJECT_DIR/.env" ]; then
+        echo "ERROR: .env file not found."
+        echo "  cp $PROJECT_DIR/.env.example $PROJECT_DIR/.env"
+        echo "  # Then edit .env with your credentials"
+        return 1
+    fi
+
+    if [ ! -f "$PROJECT_DIR/config/projects.json" ]; then
+        echo "ERROR: config/projects.json not found."
+        echo "  cp $PROJECT_DIR/config/projects.json.example $PROJECT_DIR/config/projects.json"
+        echo "  # Then edit with your project settings"
+        return 1
+    fi
+
+    # Warn about missing Telegram session
+    if ! ls "$PROJECT_DIR"/data/*.session 2>/dev/null | grep -q .; then
+        echo "WARNING: No Telegram session found. Run first:"
+        echo "  cd $PROJECT_DIR && source .venv/bin/activate && python scripts/telegram_login.py"
+    fi
+
+    return 0
+}
+
 start_bridge() {
     # Always stop any existing processes first to ensure clean state
     if is_running; then
@@ -51,9 +90,12 @@ start_bridge() {
 
     echo "Starting Valor bridge..."
 
-    # Activate venv and start bridge
+    # Ensure environment is ready
     cd "$PROJECT_DIR"
-    source .venv/bin/activate 2>/dev/null || true
+    if ! ensure_setup; then
+        echo "Setup checks failed. Fix the issues above and try again."
+        return 1
+    fi
 
     # Start with nohup so it survives terminal close
     nohup python bridge/telegram_bridge.py \

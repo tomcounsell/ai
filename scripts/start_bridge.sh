@@ -1,5 +1,5 @@
 #!/bin/bash
-# Start the Telegram-Clawdbot bridge
+# Start the Telegram bridge
 
 set -e
 
@@ -16,15 +16,39 @@ if [ -n "$EXISTING_PID" ]; then
     sleep 1
 fi
 
-# Activate virtual environment if it exists
-if [ -d ".venv" ]; then
-    source .venv/bin/activate
+# Ensure virtual environment exists
+if [ ! -d ".venv" ]; then
+    echo "Creating virtual environment..."
+    python3 -m venv .venv
 fi
 
-# Check if dependencies are installed
-if ! python -c "import telethon" 2>/dev/null; then
+source .venv/bin/activate
+
+# Ensure dependencies are installed
+if ! python -c "import telethon; import httpx; import dotenv" 2>/dev/null; then
     echo "Installing dependencies..."
-    pip install telethon python-dotenv
+    pip install -e . 2>&1
+fi
+
+# Check for required config files
+if [ ! -f ".env" ]; then
+    echo "ERROR: .env file not found."
+    echo "  cp .env.example .env"
+    echo "  # Then edit .env with your credentials"
+    exit 1
+fi
+
+if [ ! -f "config/projects.json" ]; then
+    echo "ERROR: config/projects.json not found."
+    echo "  cp config/projects.json.example config/projects.json"
+    echo "  # Then edit with your project settings"
+    exit 1
+fi
+
+# Check for Telegram session
+if ! ls data/*.session 2>/dev/null | grep -q .; then
+    echo "WARNING: No Telegram session found. Run first:"
+    echo "  source .venv/bin/activate && python scripts/telegram_login.py"
 fi
 
 # Start the bridge
