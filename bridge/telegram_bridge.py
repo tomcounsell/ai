@@ -2305,20 +2305,8 @@ async def main():
         # Start intent classification (don't await)
         asyncio.create_task(classify_and_update_reaction())
 
-        # Queue message for retry if bridge is killed mid-processing
-        message_queue.add(
-            chat_id=event.chat_id,
-            message_id=message.id,
-            text=clean_text,
-            sender_name=sender_name,
-            sender_username=sender_username,
-            chat_title=chat_title,
-            project_key=project_key,
-            session_id=session_id,
-            is_dm=is_dm,
-        )
-
         # === SDK MODE: Job queue with per-session branching ===
+        # (Job queue persists to disk, so no separate message_queue needed)
         if USE_CLAUDE_SDK:
             from agent.job_queue import (
                 Job, enqueue_job, check_revival,
@@ -2389,6 +2377,18 @@ async def main():
 
         # === LEGACY MODE: Synchronous with retry ===
         else:
+            # Queue for retry — legacy mode has no job queue persistence
+            message_queue.add(
+                chat_id=event.chat_id,
+                message_id=message.id,
+                text=clean_text,
+                sender_name=sender_name,
+                sender_username=sender_username,
+                chat_title=chat_title,
+                project_key=project_key,
+                session_id=session_id,
+                is_dm=is_dm,
+            )
             try:
                 agent_task = asyncio.create_task(
                     get_agent_response_with_retry(
@@ -2517,51 +2517,32 @@ async def main():
             if cleaned:
                 logger.info(f"[{_pkey}] Cleaned {len(cleaned)} stale session branches")
 
-    # Replay any messages that were interrupted by a previous restart
+    # Restart job queue workers for any persisted jobs from previous session
+    if USE_CLAUDE_SDK:
+        from agent.job_queue import ProjectJobQueue, _ensure_worker
+        for _pkey in ACTIVE_PROJECTS:
+            pq = ProjectJobQueue(_pkey)
+            pending_jobs = pq._load()
+            if pending_jobs:
+                logger.info(f"[{_pkey}] Found {len(pending_jobs)} persisted job(s), restarting worker")
+                _ensure_worker(_pkey)
+
+    # Replay legacy message queue entries (only used by non-SDK mode)
     pending = message_queue.get_pending()
     if pending:
-        logger.info(f"Found {len(pending)} queued message(s) from previous session, replaying...")
         if USE_CLAUDE_SDK:
-            from agent.job_queue import Job, enqueue_job
-
-        for entry in pending:
-            try:
-                chat_id = entry["chat_id"]
-                msg_id = entry["message_id"]
-                entry_text = entry["text"]
-                entry_sender = entry["sender_name"]
-                entry_session = entry["session_id"]
-                entry_chat_title = entry.get("chat_title")
-                entry_project_key = entry.get("project_key", "dm")
-                entry_project = find_project_for_chat(entry_chat_title) if entry_chat_title else None
-
-                logger.info(f"Replaying message {msg_id} from {entry_sender} in {entry_chat_title or 'DM'}")
-
-                if USE_CLAUDE_SDK and entry_project:
-                    # Enqueue via job queue (will be processed by worker)
-                    working_dir = entry_project.get("working_directory", DEFAULTS.get("working_directory", ""))
-                    job = Job(
-                        session_id=entry_session,
-                        project_key=entry_project_key,
-                        working_dir=working_dir,
-                        message_text=entry_text,
-                        sender_name=entry_sender,
-                        chat_id=str(chat_id),
-                        message_id=msg_id,
-                        chat_title=entry_chat_title,
-                        priority="high",
-                    )
-                    await enqueue_job(job)
-                    logger.info(f"Enqueued replay job for message {msg_id}")
-                    # Remove from message_queue since job_queue now owns it
-                    message_queue.remove(chat_id, msg_id)
-                else:
-                    logger.warning(f"Cannot replay message {msg_id} (no SDK or no project), removing from queue")
-                    message_queue.remove(chat_id, msg_id)
-
-            except Exception as e:
-                logger.error(f"Failed to replay queued message {entry.get('message_id')}: {e}")
-                message_queue.remove(entry.get("chat_id", 0), entry.get("message_id", 0))
+            # These entries are from a stale SDK session — clear them
+            # (SDK mode now uses job_queue for persistence)
+            logger.info(f"Clearing {len(pending)} stale message_queue entries (SDK mode uses job_queue)")
+            message_queue.clear()
+        else:
+            logger.info(f"Found {len(pending)} queued message(s) from previous session")
+            for entry in pending:
+                logger.warning(
+                    f"Legacy replay not supported — discarding message {entry.get('message_id')} "
+                    f"from {entry.get('sender_name')}"
+                )
+            message_queue.clear()
     else:
         logger.debug("No pending messages to replay")
 
