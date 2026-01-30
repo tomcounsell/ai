@@ -2472,9 +2472,11 @@ async def main():
     # Register job queue callbacks for each project
     if USE_CLAUDE_SDK:
         from agent.job_queue import register_callbacks as register_queue_callbacks
-        from agent.job_queue import cleanup_stale_branches
+        from agent.job_queue import cleanup_stale_branches, register_project_config
 
         for _pkey, _pconfig in CONFIG.get("projects", {}).items():
+            # Register project config so job queue can read auto_merge etc.
+            register_project_config(_pkey, _pconfig)
             _wd = _pconfig.get("working_directory", DEFAULTS.get("working_directory", ""))
             if not _wd:
                 continue

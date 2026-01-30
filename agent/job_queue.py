@@ -126,6 +126,9 @@ class ProjectJobQueue:
 
 _active_workers: dict[str, asyncio.Task] = {}
 
+# Project configs registered by the bridge (for auto_merge lookup etc.)
+_project_configs: dict[str, dict] = {}
+
 # Callbacks registered by the bridge for sending messages and reactions
 SendCallback = Callable[[str, str, int], Awaitable[None]]
 ReactionCallback = Callable[[str, int, str | None], Awaitable[None]]
@@ -134,6 +137,16 @@ ResponseCallback = Callable[[object, str, str, int], Awaitable[None]]
 _send_callbacks: dict[str, SendCallback] = {}
 _reaction_callbacks: dict[str, ReactionCallback] = {}
 _response_callbacks: dict[str, ResponseCallback] = {}
+
+
+def register_project_config(project_key: str, config: dict) -> None:
+    """Register a project's config for use by the job queue."""
+    _project_configs[project_key] = config
+
+
+def get_project_config(project_key: str) -> dict:
+    """Get a project's registered config."""
+    return _project_configs.get(project_key, {})
 
 
 def register_callbacks(
@@ -274,8 +287,10 @@ async def _execute_job(job: Job) -> None:
                 logger.warning(f"Failed to set reaction: {e}")
 
     finally:
-        # Step 5: Merge and cleanup, always return to main
-        _merge_and_cleanup(working_dir, branch_name)
+        # Step 5: Merge (or push branch for review) and return to main
+        project_cfg = get_project_config(job.project_key)
+        auto_merge = project_cfg.get("auto_merge", True)
+        _finish_branch(working_dir, branch_name, auto_merge, job.project_key)
 
 
 def _session_branch_name(session_id: str) -> str:
@@ -321,8 +336,18 @@ def _checkout_session_branch(working_dir: Path, branch_name: str) -> bool:
         return False
 
 
-def _merge_and_cleanup(working_dir: Path, branch_name: str) -> bool:
-    """Merge session branch to main and delete it."""
+def _finish_branch(
+    working_dir: Path,
+    branch_name: str,
+    auto_merge: bool,
+    project_key: str,
+) -> bool:
+    """
+    Finish work on a session branch.
+
+    If auto_merge=True: merge to main, delete branch, push.
+    If auto_merge=False: push branch to remote for PR/review, return to main.
+    """
     try:
         # Commit any uncommitted work on the session branch
         if has_uncommitted_changes(working_dir):
@@ -341,51 +366,71 @@ def _merge_and_cleanup(working_dir: Path, branch_name: str) -> bool:
                 check=True,
             )
 
-        # Switch to main
-        subprocess.run(
-            ["git", "checkout", "main"],
-            cwd=working_dir,
-            capture_output=True,
-            timeout=10,
-            check=True,
-        )
-
-        # Merge session branch
-        result = subprocess.run(
-            ["git", "merge", "--no-ff", branch_name, "-m", f"Merge {branch_name}"],
-            cwd=working_dir,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-        if result.returncode != 0:
-            logger.warning(
-                f"Merge conflict for {branch_name}, leaving branch for manual resolution"
+        if auto_merge:
+            # === Auto-merge: merge to main, delete branch, push ===
+            subprocess.run(
+                ["git", "checkout", "main"],
+                cwd=working_dir,
+                capture_output=True,
+                timeout=10,
+                check=True,
             )
-            return False
 
-        # Delete the session branch
-        subprocess.run(
-            ["git", "branch", "-d", branch_name],
-            cwd=working_dir,
-            capture_output=True,
-            timeout=10,
-        )
+            result = subprocess.run(
+                ["git", "merge", "--no-ff", branch_name, "-m", f"Merge {branch_name}"],
+                cwd=working_dir,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
 
-        # Push merged changes
-        subprocess.run(
-            ["git", "push"],
-            cwd=working_dir,
-            capture_output=True,
-            timeout=30,
-        )
+            if result.returncode != 0:
+                logger.warning(
+                    f"Merge conflict for {branch_name}, leaving branch for manual resolution"
+                )
+                return False
 
-        logger.info(f"Merged and cleaned up: {branch_name}")
+            subprocess.run(
+                ["git", "branch", "-d", branch_name],
+                cwd=working_dir,
+                capture_output=True,
+                timeout=10,
+            )
+
+            subprocess.run(
+                ["git", "push"],
+                cwd=working_dir,
+                capture_output=True,
+                timeout=30,
+            )
+
+            logger.info(f"[{project_key}] Auto-merged and cleaned up: {branch_name}")
+
+        else:
+            # === Awaiting review: push branch to remote, return to main ===
+            subprocess.run(
+                ["git", "push", "-u", "origin", branch_name],
+                cwd=working_dir,
+                capture_output=True,
+                timeout=30,
+            )
+
+            subprocess.run(
+                ["git", "checkout", "main"],
+                cwd=working_dir,
+                capture_output=True,
+                timeout=10,
+                check=True,
+            )
+
+            logger.info(
+                f"[{project_key}] Pushed branch {branch_name} for review (auto_merge=false)"
+            )
+
         return True
 
     except subprocess.CalledProcessError as e:
-        logger.error(f"Merge/cleanup failed for {branch_name}: {e}")
+        logger.error(f"Branch finish failed for {branch_name}: {e}")
         return_to_main(working_dir)
         return False
 
