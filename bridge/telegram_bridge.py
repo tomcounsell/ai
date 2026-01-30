@@ -11,11 +11,15 @@ project's group it belongs to and injects appropriate context.
 """
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
 import re
+import signal
 import sys
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Ensure user site-packages is available for claude_agent_sdk
@@ -70,6 +74,102 @@ from telethon.tl.types import (
 # Directory for downloaded media files
 MEDIA_DIR = Path(__file__).parent.parent / "data" / "media"
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+
+# =============================================================================
+# Message Queue for Graceful Restart
+# =============================================================================
+
+# Shutdown flag - set by signal handlers to stop accepting new messages
+SHUTTING_DOWN = False
+
+QUEUE_FILE = Path(__file__).parent.parent / "data" / "pending_messages.json"
+QUEUE_MAX_ENTRIES = 50
+QUEUE_MAX_AGE_SECONDS = 3600  # 1 hour
+
+
+class MessageQueue:
+    """Persists in-flight messages to disk so they survive bridge restarts."""
+
+    def __init__(self, path: Path = QUEUE_FILE):
+        self.path = path
+
+    def _read(self) -> list[dict]:
+        if not self.path.exists():
+            return []
+        try:
+            with open(self.path, "r") as f:
+                fcntl.flock(f, fcntl.LOCK_SH)
+                data = json.load(f)
+                fcntl.flock(f, fcntl.LOCK_UN)
+                return data if isinstance(data, list) else []
+        except (json.JSONDecodeError, OSError) as e:
+            logging.getLogger(__name__).warning(f"Corrupt message queue, resetting: {e}")
+            return []
+
+    def _write(self, entries: list[dict]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.path, "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            json.dump(entries, f, indent=2, default=str)
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+    def add(self, chat_id: int, message_id: int, text: str, sender_name: str,
+            sender_username: str | None, chat_title: str | None, project_key: str,
+            session_id: str, is_dm: bool) -> None:
+        entries = self._read()
+        entries.append({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "sender_name": sender_name,
+            "sender_username": sender_username,
+            "chat_title": chat_title,
+            "project_key": project_key,
+            "session_id": session_id,
+            "is_dm": is_dm,
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+        })
+        # Cap size
+        if len(entries) > QUEUE_MAX_ENTRIES:
+            dropped = len(entries) - QUEUE_MAX_ENTRIES
+            entries = entries[-QUEUE_MAX_ENTRIES:]
+            logging.getLogger(__name__).warning(f"Message queue full, dropped {dropped} oldest entries")
+        self._write(entries)
+
+    def remove(self, chat_id: int, message_id: int) -> None:
+        entries = self._read()
+        entries = [e for e in entries if not (e["chat_id"] == chat_id and e["message_id"] == message_id)]
+        self._write(entries)
+
+    def get_pending(self) -> list[dict]:
+        entries = self._read()
+        now = datetime.now(timezone.utc)
+        fresh = []
+        for e in entries:
+            try:
+                queued = datetime.fromisoformat(e["queued_at"])
+                if queued.tzinfo is None:
+                    queued = queued.replace(tzinfo=timezone.utc)
+                age = (now - queued).total_seconds()
+                if age <= QUEUE_MAX_AGE_SECONDS:
+                    fresh.append(e)
+                else:
+                    logging.getLogger(__name__).warning(
+                        f"Discarding stale queued message {e.get('message_id')} "
+                        f"(age: {age:.0f}s) from {e.get('sender_name')}"
+                    )
+            except (ValueError, KeyError):
+                continue
+        # Rewrite without stale entries
+        if len(fresh) != len(entries):
+            self._write(fresh)
+        return fresh
+
+    def clear(self) -> None:
+        self._write([])
+
+
+message_queue = MessageQueue()
 
 # =============================================================================
 # File Detection and Sending
@@ -1808,8 +1908,6 @@ async def create_failure_plan(message: str, error: str, session_id: str) -> None
 
     Instead of showing errors to the user, we document them for later review.
     """
-    from datetime import datetime
-
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     plan_path = Path(__file__).parent.parent / "docs" / "plans" / f"fix-bridge-failure-{timestamp}.md"
 
@@ -1949,6 +2047,11 @@ async def main():
         """Handle incoming messages."""
         # Skip outgoing messages
         if event.out:
+            return
+
+        # Reject new messages during shutdown
+        if SHUTTING_DOWN:
+            logger.info("Ignoring message during shutdown")
             return
 
         # Get message details
@@ -2148,6 +2251,19 @@ async def main():
         # Start intent classification (don't await)
         asyncio.create_task(classify_and_update_reaction())
 
+        # Queue message for retry if bridge is killed mid-processing
+        message_queue.add(
+            chat_id=event.chat_id,
+            message_id=message.id,
+            text=clean_text,
+            sender_name=sender_name,
+            sender_username=sender_username,
+            chat_title=chat_title,
+            project_key=project_key,
+            session_id=session_id,
+            is_dm=is_dm,
+        )
+
         # === SDK MODE: Background task with messenger ===
         if USE_CLAUDE_SDK:
             # Check branch state if this is a project (not DM)
@@ -2262,17 +2378,19 @@ async def main():
                 sent = await send_response_with_files(client, event, filtered)
 
                 if sent:
+                    # Message delivered — remove from retry queue
+                    message_queue.remove(event.chat_id, message.id)
+
                     # Update reaction to success
                     await set_reaction(client, event.chat_id, message.id, REACTION_SUCCESS)
 
                     # Store in history
                     try:
-                        from datetime import datetime as dt
                         store_message(
                             chat_id=telegram_chat_id,
                             content=filtered[:1000],
                             sender="Valor",
-                            timestamp=dt.now(),
+                            timestamp=datetime.now(),
                             message_type="response",
                         )
                     except Exception as e:
@@ -2330,6 +2448,9 @@ async def main():
                 # Send response if there's content (files or text)
                 sent_response = await send_response_with_files(client, event, response)
 
+                # Message delivered — remove from retry queue
+                message_queue.remove(event.chat_id, message.id)
+
                 # 👍 Thumbs up = Completed successfully
                 await set_reaction(client, event.chat_id, message.id, REACTION_SUCCESS)
 
@@ -2340,14 +2461,13 @@ async def main():
 
                 # Store in history
                 try:
-                    from datetime import datetime as dt
                     filtered_for_history = filter_tool_logs(response)
                     if filtered_for_history:
                         store_message(
                             chat_id=telegram_chat_id,
                             content=filtered_for_history[:1000],
                             sender="Valor",
-                            timestamp=dt.now(),
+                            timestamp=datetime.now(),
                             message_type="response",
                         )
                 except Exception as e:
@@ -2368,10 +2488,93 @@ async def main():
                 logger.error(f"[{project_name}] Error processing message from {sender_name}: {e}")
                 raise
 
+    # Register signal handlers for graceful shutdown
+    loop = asyncio.get_event_loop()
+
+    def _shutdown_handler(sig, frame):
+        global SHUTTING_DOWN
+        sig_name = signal.Signals(sig).name
+        logger.info(f"Received {sig_name}, shutting down gracefully...")
+        SHUTTING_DOWN = True
+        # Schedule client disconnect on the event loop
+        loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_graceful_shutdown(client)))
+
+    async def _graceful_shutdown(tg_client):
+        """Wait briefly for in-flight work, then disconnect."""
+        logger.info("Waiting 2s for in-flight tasks to finish...")
+        await asyncio.sleep(2)
+        logger.info("Disconnecting Telegram client...")
+        await tg_client.disconnect()
+
+    signal.signal(signal.SIGTERM, _shutdown_handler)
+    signal.signal(signal.SIGINT, _shutdown_handler)
+
     # Start the client
     logger.info("Starting Telegram bridge...")
     await client.start(phone=PHONE, password=PASSWORD)
     logger.info("Connected to Telegram")
+
+    # Replay any messages that were interrupted by a previous restart
+    pending = message_queue.get_pending()
+    if pending:
+        logger.info(f"Found {len(pending)} queued message(s) from previous session, replaying...")
+        for entry in pending:
+            try:
+                chat_id = entry["chat_id"]
+                msg_id = entry["message_id"]
+                entry_text = entry["text"]
+                entry_sender = entry["sender_name"]
+                entry_session = entry["session_id"]
+                entry_chat_title = entry.get("chat_title")
+                entry_project_key = entry.get("project_key", "dm")
+                entry_project = find_project_for_chat(entry_chat_title) if entry_chat_title else None
+
+                logger.info(f"Replaying message {msg_id} from {entry_sender} in {entry_chat_title or 'DM'}")
+
+                # Send a notice to the chat
+                await client.send_message(chat_id, f"Resuming interrupted request from {entry_sender}...")
+
+                # Route through the agent
+                if USE_CLAUDE_SDK and entry_project:
+                    telegram_chat_id = str(chat_id)
+
+                    async def send_replay_response(msg: str, _cid=chat_id, _mid=msg_id) -> None:
+                        filtered = filter_tool_logs(msg)
+                        if filtered:
+                            await client.send_message(_cid, filtered)
+                            message_queue.remove(_cid, _mid)
+
+                    messenger = BossMessenger(
+                        _send_callback=send_replay_response,
+                        chat_id=telegram_chat_id,
+                        session_id=entry_session,
+                    )
+
+                    async def do_replay_work(_text=entry_text, _sid=entry_session,
+                                             _sender=entry_sender, _title=entry_chat_title,
+                                             _proj=entry_project, _tcid=telegram_chat_id) -> str:
+                        return await get_agent_response_sdk(
+                            _text, _sid, _sender, _title, _proj, _tcid
+                        )
+
+                    task = BackgroundTask(
+                        messenger=messenger,
+                        acknowledgment_timeout=ACKNOWLEDGMENT_TIMEOUT_SECONDS,
+                        acknowledgment_message=ACKNOWLEDGMENT_MESSAGE,
+                    )
+                    await task.run(do_replay_work(), send_result=True)
+                    logger.info(f"Launched replay task for message {msg_id}")
+                else:
+                    # Legacy or no project — just remove from queue (can't replay without context)
+                    logger.warning(f"Cannot replay message {msg_id} (no SDK or no project), removing from queue")
+                    message_queue.remove(chat_id, msg_id)
+
+            except Exception as e:
+                logger.error(f"Failed to replay queued message {entry.get('message_id')}: {e}")
+                # Remove failed entries to avoid infinite retry loops
+                message_queue.remove(entry.get("chat_id", 0), entry.get("message_id", 0))
+    else:
+        logger.debug("No pending messages to replay")
 
     # Keep running
     await client.run_until_disconnected()
