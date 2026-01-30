@@ -108,6 +108,9 @@ class ValorAgent:
         Send a message and get a response. On error, feeds the error back
         to the agent so it can attempt a different approach.
 
+        For file-related errors (invalid PDF, corrupted files), instructs the
+        agent to avoid reading the problematic file and work with text context only.
+
         Args:
             message: The user message to send
             session_id: Optional session ID for conversation continuity
@@ -138,15 +141,14 @@ class ValorAgent:
                             )
                         if msg.is_error and retries < max_retries:
                             retries += 1
+                            error_text = msg.result or ""
+                            recovery_msg = _build_error_recovery_message(error_text)
                             logger.warning(
                                 f"Agent error (attempt {retries}/{max_retries}), "
-                                f"feeding error back: {msg.result}"
+                                f"feeding error back: {error_text}"
                             )
                             response_parts.clear()
-                            await client.query(
-                                f"That failed with this error:\n{msg.result}\n\n"
-                                f"Please try a different approach to accomplish the original task."
-                            )
+                            await client.query(recovery_msg)
                         elif msg.is_error:
                             logger.error(f"Agent error after {retries} retries: {msg.result}")
 
@@ -155,6 +157,48 @@ class ValorAgent:
             raise
 
         return "\n".join(response_parts) if response_parts else ""
+
+
+# Patterns that indicate file/media-related API errors
+_FILE_ERROR_PATTERNS = [
+    "pdf",
+    "image",
+    "base64",
+    "file",
+    "media_type",
+    "not valid",
+    "could not process",
+    "invalid_request_error",
+]
+
+
+def _is_file_related_error(error_text: str) -> bool:
+    """Check if an error is related to file/media processing."""
+    error_lower = error_text.lower()
+    return any(pattern in error_lower for pattern in _FILE_ERROR_PATTERNS)
+
+
+def _build_error_recovery_message(error_text: str) -> str:
+    """
+    Build an appropriate recovery message based on the error type.
+
+    For file-related errors, instructs the agent to avoid reading problematic files.
+    For other errors, uses the generic retry approach.
+    """
+    if _is_file_related_error(error_text):
+        return (
+            f"That failed with a file-related error:\n{error_text}\n\n"
+            f"IMPORTANT: Do NOT attempt to read any PDF, image, or binary files from "
+            f"the data/media/ directory. These files may be corrupted or invalid. "
+            f"Work only with the text context provided in the conversation. "
+            f"If you need file contents, they have already been extracted as text "
+            f"in the message above. Please respond to the user's request using "
+            f"only the text context available."
+        )
+    return (
+        f"That failed with this error:\n{error_text}\n\n"
+        f"Please try a different approach to accomplish the original task."
+    )
 
 
 async def get_agent_response_sdk(

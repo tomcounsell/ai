@@ -240,6 +240,140 @@ VOICE_EXTENSIONS = {'.ogg', '.oga', '.mp3', '.wav', '.m4a', '.opus'}
 # Supported image extensions for vision
 VISION_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
 
+# Magic bytes for file type validation
+FILE_MAGIC_BYTES = {
+    "pdf": b"%PDF",
+    "png": b"\x89PNG",
+    "jpg": (b"\xff\xd8\xff",),
+    "gif": (b"GIF87a", b"GIF89a"),
+    "webp": b"RIFF",  # RIFF....WEBP
+}
+
+# Text-extractable document extensions
+TEXT_DOCUMENT_EXTENSIONS = {
+    '.txt', '.md', '.csv', '.json', '.xml', '.html', '.htm',
+    '.py', '.js', '.ts', '.jsx', '.tsx', '.css', '.yaml', '.yml',
+    '.toml', '.ini', '.cfg', '.conf', '.log', '.sh', '.bash',
+    '.sql', '.r', '.rb', '.go', '.rs', '.java', '.kt', '.swift',
+}
+
+
+def validate_media_file(filepath: Path) -> tuple[bool, str]:
+    """
+    Validate a downloaded media file by checking magic bytes and basic structure.
+
+    Returns (is_valid, error_reason). If valid, error_reason is empty.
+    Uses stdlib only — no external dependencies.
+    """
+    if not filepath.exists():
+        return False, "file does not exist"
+
+    if filepath.stat().st_size == 0:
+        return False, "file is empty (0 bytes)"
+
+    ext = filepath.suffix.lower()
+
+    try:
+        with open(filepath, "rb") as f:
+            header = f.read(32)
+
+        if ext == ".pdf":
+            if not header.startswith(b"%PDF"):
+                return False, "file does not start with %PDF header"
+            # Check for minimal PDF structure: must contain at least some content
+            with open(filepath, "rb") as f:
+                content = f.read()
+            if b"%%EOF" not in content and b"endobj" not in content:
+                return False, "PDF file is truncated or corrupted (no EOF marker)"
+
+        elif ext in (".png",):
+            if not header.startswith(b"\x89PNG"):
+                return False, "file does not have PNG magic bytes"
+
+        elif ext in (".jpg", ".jpeg"):
+            if not header.startswith(b"\xff\xd8\xff"):
+                return False, "file does not have JPEG magic bytes"
+
+        elif ext in (".gif",):
+            if not header.startswith((b"GIF87a", b"GIF89a")):
+                return False, "file does not have GIF magic bytes"
+
+        elif ext == ".webp":
+            if not header.startswith(b"RIFF") or b"WEBP" not in header[:16]:
+                return False, "file does not have WebP magic bytes"
+
+        # For other extensions, just check it's not empty (already done above)
+        return True, ""
+
+    except Exception as e:
+        return False, f"validation error: {e}"
+
+
+def extract_document_text(filepath: Path, max_chars: int = 5000) -> str | None:
+    """
+    Extract text content from a document file.
+
+    For text-based files, reads directly. For PDFs, extracts what we can with stdlib.
+    Returns extracted text, or None if extraction failed.
+    This allows us to inline document content so the agent doesn't need to read the raw file.
+    """
+    ext = filepath.suffix.lower()
+
+    try:
+        # Text-based documents: read directly
+        if ext in TEXT_DOCUMENT_EXTENSIONS:
+            content = filepath.read_text(errors="replace")
+            if len(content) > max_chars:
+                content = content[:max_chars] + f"\n\n[... truncated, {len(filepath.read_bytes())} bytes total]"
+            return content
+
+        # PDF: try to extract text with stdlib
+        if ext == ".pdf":
+            return _extract_pdf_text_stdlib(filepath, max_chars)
+
+        return None
+
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Could not extract text from {filepath.name}: {e}")
+        return None
+
+
+def _extract_pdf_text_stdlib(filepath: Path, max_chars: int = 5000) -> str | None:
+    """
+    Best-effort PDF text extraction using only stdlib.
+
+    Handles simple text PDFs by finding text stream objects.
+    Won't work for scanned/image PDFs, but catches most text-based ones.
+    """
+    try:
+        with open(filepath, "rb") as f:
+            content = f.read()
+
+        # Decode raw text between stream/endstream markers
+        text_parts = []
+        import re as _re
+        for match in _re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", content, _re.DOTALL):
+            stream_data = match.group(1)
+            # Try to extract text operators (Tj, TJ, ')
+            for text_match in _re.finditer(rb"\(([^)]*)\)", stream_data):
+                try:
+                    decoded = text_match.group(1).decode("latin-1", errors="replace")
+                    if decoded.strip():
+                        text_parts.append(decoded)
+                except Exception:
+                    continue
+
+        if text_parts:
+            extracted = " ".join(text_parts)
+            if len(extracted) > max_chars:
+                extracted = extracted[:max_chars] + "..."
+            return extracted
+
+        return None
+
+    except Exception:
+        return None
+
 
 def get_media_type(message) -> str | None:
     """Determine the type of media in a message."""
@@ -394,6 +528,10 @@ async def process_incoming_media(client: TelegramClient, message) -> tuple[str, 
 
     Returns (description_text, list_of_file_paths).
     The description_text is meant to be prepended to the message for context.
+
+    Files are validated after download. Invalid/corrupted files are described
+    but not referenced by path, preventing downstream API errors when the agent
+    tries to read them.
     """
     media_type = get_media_type(message)
     if not media_type:
@@ -403,6 +541,24 @@ async def process_incoming_media(client: TelegramClient, message) -> tuple[str, 
     downloaded = await download_media(client, message, prefix=media_type)
     if not downloaded:
         return f"[User sent a {media_type} but download failed]", []
+
+    # Validate the downloaded file
+    is_valid, validation_error = validate_media_file(downloaded)
+    if not is_valid:
+        logging.getLogger(__name__).warning(
+            f"Invalid {media_type} file {downloaded.name}: {validation_error}"
+        )
+        # Try to extract text content even from invalid files (best effort)
+        extracted = extract_document_text(downloaded)
+        if extracted:
+            return (
+                f"[User sent a {media_type} (file appears corrupted: {validation_error}), "
+                f"but partial text was extracted]\n\nExtracted content:\n{extracted}"
+            ), []
+        return (
+            f"[User sent a {media_type} but the file is invalid/corrupted: {validation_error}. "
+            f"File cannot be read.]"
+        ), []
 
     files = [downloaded]
     description = ""
@@ -433,7 +589,15 @@ async def process_incoming_media(client: TelegramClient, message) -> tuple[str, 
             description = f"[User sent an audio file - saved to {downloaded.name}]"
 
     elif media_type == "document":
-        description = f"[User sent a document - saved to {downloaded.name}]"
+        # Try to extract and inline document text content
+        extracted = extract_document_text(downloaded)
+        if extracted:
+            description = (
+                f"[User sent a document: {downloaded.name}]\n\n"
+                f"Document content:\n{extracted}"
+            )
+        else:
+            description = f"[User sent a document - saved to {downloaded.name}]"
 
     return description, files
 
