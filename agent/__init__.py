@@ -19,6 +19,17 @@ from .branch_manager import (
     BranchState,
     WorkStatus,
 )
+from .job_queue import (
+    Job,
+    ProjectJobQueue,
+    enqueue_job,
+    check_revival,
+    register_callbacks,
+    cleanup_stale_branches,
+    get_revival_info,
+    record_revival_notification,
+    queue_revival_job,
+)
 
 __all__ = [
     "ValorAgent",
@@ -38,4 +49,13 @@ __all__ = [
     "format_branch_state_message",
     "BranchState",
     "WorkStatus",
+    "Job",
+    "ProjectJobQueue",
+    "enqueue_job",
+    "check_revival",
+    "register_callbacks",
+    "cleanup_stale_branches",
+    "get_revival_info",
+    "record_revival_notification",
+    "queue_revival_job",
 ]

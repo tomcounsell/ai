@@ -1584,7 +1584,13 @@ async def set_reaction(client: TelegramClient, chat_id: int, msg_id: int, emoji:
         return False
 
 
-async def send_response_with_files(client: TelegramClient, event, response: str) -> bool:
+async def send_response_with_files(
+    client: TelegramClient,
+    event,
+    response: str,
+    chat_id: int | None = None,
+    reply_to: int | None = None,
+) -> bool:
     """
     Send response to Telegram, handling both files and text.
 
@@ -1593,8 +1599,17 @@ async def send_response_with_files(client: TelegramClient, event, response: str)
     3. Send files first (as separate messages)
     4. Send remaining text (if any)
 
+    Can be called with event (handler context) or chat_id+reply_to (queue context).
     Returns True if any content was sent, False otherwise.
     """
+    # Resolve chat_id and reply_to from event or explicit params
+    _chat_id = chat_id or (event.chat_id if event else None)
+    _reply_to = reply_to or (event.message.id if event and hasattr(event, 'message') else None)
+
+    if not _chat_id:
+        logger.error("send_response_with_files: no chat_id available")
+        return False
+
     # Filter out tool logs before processing
     response = filter_tool_logs(response)
 
@@ -1609,17 +1624,16 @@ async def send_response_with_files(client: TelegramClient, event, response: str)
         try:
             is_image = file_path.suffix.lower() in IMAGE_EXTENSIONS
             await client.send_file(
-                event.chat_id,
+                _chat_id,
                 file_path,
-                reply_to=event.message.id,
+                reply_to=_reply_to,
                 # Images get no caption, other files get filename
                 caption=None if is_image else f"📎 {file_path.name}",
             )
             logger.info(f"Sent file: {file_path}")
         except Exception as e:
             logger.error(f"Failed to send file {file_path}: {e}")
-            # Notify user of failure
-            await event.reply(f"Failed to send file: {file_path.name}")
+            await client.send_message(_chat_id, f"Failed to send file: {file_path.name}")
 
     # Track if we sent anything
     sent_content = bool(files)
@@ -1630,7 +1644,7 @@ async def send_response_with_files(client: TelegramClient, event, response: str)
         max_length = DEFAULTS.get("response", {}).get("max_response_length", 4000)
         if len(text) > max_length:
             text = text[: max_length - 3] + "..."
-        await event.reply(text)
+        await client.send_message(_chat_id, text, reply_to=_reply_to)
         sent_content = True
 
     return sent_content
@@ -2032,6 +2046,56 @@ async def main():
     session_path = Path(__file__).parent.parent / "data" / SESSION_NAME
     client = TelegramClient(str(session_path), API_ID, API_HASH)
 
+    # === Revival reaction handler (thumbs-up on revival notifications) ===
+    if USE_CLAUDE_SDK:
+        from telethon import events as telethon_events
+
+        @client.on(telethon_events.Raw)
+        async def handle_revival_reaction(update):
+            """Detect thumbs-up on revival notification messages."""
+            # Only handle reaction updates
+            from telethon.tl.types import UpdateMessageReactions
+            if not isinstance(update, UpdateMessageReactions):
+                return
+
+            try:
+                from agent.job_queue import get_revival_info, queue_revival_job
+
+                # Extract chat_id from peer
+                peer = update.peer
+                if hasattr(peer, 'channel_id'):
+                    reaction_chat_id = str(peer.channel_id)
+                elif hasattr(peer, 'chat_id'):
+                    reaction_chat_id = str(peer.chat_id)
+                elif hasattr(peer, 'user_id'):
+                    reaction_chat_id = str(peer.user_id)
+                else:
+                    return
+
+                msg_id = update.msg_id
+                revival = get_revival_info(reaction_chat_id, msg_id)
+                if not revival:
+                    return
+
+                # Check if thumbs up was added
+                reactions = getattr(update, 'reactions', None)
+                if not reactions:
+                    return
+
+                recent = getattr(reactions, 'recent_reactions', None) or []
+                for reaction in recent:
+                    emoticon = getattr(getattr(reaction, 'reaction', None), 'emoticon', None)
+                    if emoticon == "\U0001f44d":
+                        logger.info(f"Revival accepted via reaction for branch {revival['branch']}")
+                        await queue_revival_job(
+                            revival_info=revival,
+                            chat_id=reaction_chat_id,
+                            message_id=msg_id,
+                        )
+                        break
+            except Exception as e:
+                logger.debug(f"Revival reaction handler error: {e}")
+
     @client.on(events.NewMessage)
     async def handler(event):
         """Handle incoming messages."""
@@ -2254,73 +2318,74 @@ async def main():
             is_dm=is_dm,
         )
 
-        # === SDK MODE: Background task with messenger ===
+        # === SDK MODE: Job queue with per-session branching ===
         if USE_CLAUDE_SDK:
+            from agent.job_queue import (
+                Job, enqueue_job, check_revival,
+                record_revival_notification, get_revival_info,
+                queue_revival_job,
+            )
 
-            # Create messenger with send callback
-            async def send_to_telegram(msg: str) -> None:
-                """Callback to send messages back to the chat."""
-                filtered = filter_tool_logs(msg)
-                if not filtered:
+            # Check if this is a reply to a revival notification
+            if message.reply_to_msg_id:
+                revival = get_revival_info(telegram_chat_id, message.reply_to_msg_id)
+                if revival:
+                    logger.info(f"[{project_name}] Reply to revival notification, queuing revival with context")
+                    await queue_revival_job(
+                        revival_info=revival,
+                        chat_id=telegram_chat_id,
+                        message_id=message.id,
+                        additional_context=clean_text,
+                    )
+                    await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
                     return
 
-                # Send via Telegram
-                sent = await send_response_with_files(client, event, filtered)
+            # Lightweight revival check (no SDK agent, just git state)
+            working_dir_str = ""
+            if project:
+                working_dir_str = project.get("working_directory", DEFAULTS.get("working_directory", ""))
+            if not working_dir_str:
+                working_dir_str = str(Path(__file__).parent.parent)
 
-                if sent:
-                    # Message delivered — remove from retry queue
-                    message_queue.remove(event.chat_id, message.id)
+            revival_info = check_revival(project_key, working_dir_str, telegram_chat_id)
+            if revival_info:
+                revival_msg = f"Unfinished work detected on branch `{revival_info['branch']}`"
+                if revival_info.get("plan_context"):
+                    revival_msg += f"\n\n> {revival_info['plan_context']}"
+                revival_msg += "\n\nReact with \U0001f44d to resume, or reply to this message with instructions."
+                sent_revival = await client.send_message(event.chat_id, revival_msg)
+                record_revival_notification(
+                    chat_id=telegram_chat_id,
+                    msg_id=sent_revival.id,
+                    session_id=session_id,
+                    project_key=project_key,
+                    branch=revival_info["branch"],
+                    working_dir=working_dir_str,
+                )
+                logger.info(f"[{project_name}] Sent revival prompt for branch {revival_info['branch']}")
 
-                    # Update reaction to success
-                    await set_reaction(client, event.chat_id, message.id, REACTION_SUCCESS)
-
-                    # Store in history
-                    try:
-                        store_message(
-                            chat_id=telegram_chat_id,
-                            content=filtered[:1000],
-                            sender="Valor",
-                            timestamp=datetime.now(),
-                            message_type="response",
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to store response in history: {e}")
-
-                    # Log event
-                    log_event(
-                        "reply_sent",
-                        message_id=message_id,
-                        project=project_name,
-                        sender=sender_name,
-                        response_length=len(filtered),
-                    )
-
-                    logger.info(f"[{project_name}] Replied to {sender_name} (msg {message_id})")
-
-            messenger = BossMessenger(
-                _send_callback=send_to_telegram,
-                chat_id=telegram_chat_id,
+            # Build and enqueue the job (HIGH priority — top of FILO stack)
+            job = Job(
                 session_id=session_id,
+                project_key=project_key,
+                working_dir=working_dir_str,
+                message_text=clean_text,
+                sender_name=sender_name,
+                chat_id=telegram_chat_id,
+                message_id=message.id,
+                chat_title=chat_title,
+                priority="high",
             )
 
-            # Create the agent work coroutine
-            async def do_agent_work() -> str:
-                return await get_agent_response_sdk(
-                    clean_text, session_id, sender_name, chat_title, project, telegram_chat_id
+            depth = await enqueue_job(job)
+            if depth > 1:
+                await client.send_message(
+                    event.chat_id,
+                    f"Queued (position {depth}). Working on a previous task first.",
+                    reply_to=message.id,
                 )
 
-            # Launch as background task with watchdog
-            task = BackgroundTask(
-                messenger=messenger,
-                acknowledgment_timeout=ACKNOWLEDGMENT_TIMEOUT_SECONDS,
-                acknowledgment_message=ACKNOWLEDGMENT_MESSAGE,
-            )
-
-            # Fire and forget - task handles sending results via messenger
-            await task.run(do_agent_work(), send_result=True)
-
-            logger.info(f"[{project_name}] Launched background task for {sender_name} (msg {message_id})")
-            # Handler returns immediately - work continues in background
+            logger.info(f"[{project_name}] Queued job for {sender_name} (msg {message_id}, depth={depth})")
 
         # === LEGACY MODE: Synchronous with retry ===
         else:
@@ -2404,10 +2469,59 @@ async def main():
     await client.start(phone=PHONE, password=PASSWORD)
     logger.info("Connected to Telegram")
 
+    # Register job queue callbacks for each project
+    if USE_CLAUDE_SDK:
+        from agent.job_queue import register_callbacks as register_queue_callbacks
+        from agent.job_queue import cleanup_stale_branches
+
+        for _pkey, _pconfig in CONFIG.get("projects", {}).items():
+            _wd = _pconfig.get("working_directory", DEFAULTS.get("working_directory", ""))
+            if not _wd:
+                continue
+
+            # Create send callback that uses the Telegram client
+            async def _make_send_cb(_client=client):
+                async def _send(chat_id: str, text: str, reply_to_msg_id: int) -> None:
+                    filtered = filter_tool_logs(text)
+                    if filtered:
+                        sent = await send_response_with_files(_client, None, filtered, chat_id=int(chat_id), reply_to=reply_to_msg_id)
+                        if sent:
+                            try:
+                                store_message(
+                                    chat_id=chat_id,
+                                    content=filtered[:1000],
+                                    sender="Valor",
+                                    timestamp=datetime.now(),
+                                    message_type="response",
+                                )
+                            except Exception:
+                                pass
+                return _send
+
+            async def _make_react_cb(_client=client):
+                async def _react(chat_id: str, msg_id: int, emoji: str | None) -> None:
+                    await set_reaction(_client, int(chat_id), msg_id, emoji)
+                return _react
+
+            register_queue_callbacks(
+                _pkey,
+                await _make_send_cb(),
+                await _make_react_cb(),
+            )
+            logger.info(f"[{_pkey}] Registered job queue callbacks")
+
+            # Clean up stale session branches on startup
+            cleaned = await cleanup_stale_branches(_wd)
+            if cleaned:
+                logger.info(f"[{_pkey}] Cleaned {len(cleaned)} stale session branches")
+
     # Replay any messages that were interrupted by a previous restart
     pending = message_queue.get_pending()
     if pending:
         logger.info(f"Found {len(pending)} queued message(s) from previous session, replaying...")
+        if USE_CLAUDE_SDK:
+            from agent.job_queue import Job, enqueue_job
+
         for entry in pending:
             try:
                 chat_id = entry["chat_id"]
@@ -2421,47 +2535,30 @@ async def main():
 
                 logger.info(f"Replaying message {msg_id} from {entry_sender} in {entry_chat_title or 'DM'}")
 
-                # Send a notice to the chat
-                await client.send_message(chat_id, f"Resuming interrupted request from {entry_sender}...")
-
-                # Route through the agent
                 if USE_CLAUDE_SDK and entry_project:
-                    telegram_chat_id = str(chat_id)
-
-                    async def send_replay_response(msg: str, _cid=chat_id, _mid=msg_id) -> None:
-                        filtered = filter_tool_logs(msg)
-                        if filtered:
-                            await client.send_message(_cid, filtered)
-                            message_queue.remove(_cid, _mid)
-
-                    messenger = BossMessenger(
-                        _send_callback=send_replay_response,
-                        chat_id=telegram_chat_id,
+                    # Enqueue via job queue (will be processed by worker)
+                    working_dir = entry_project.get("working_directory", DEFAULTS.get("working_directory", ""))
+                    job = Job(
                         session_id=entry_session,
+                        project_key=entry_project_key,
+                        working_dir=working_dir,
+                        message_text=entry_text,
+                        sender_name=entry_sender,
+                        chat_id=str(chat_id),
+                        message_id=msg_id,
+                        chat_title=entry_chat_title,
+                        priority="high",
                     )
-
-                    async def do_replay_work(_text=entry_text, _sid=entry_session,
-                                             _sender=entry_sender, _title=entry_chat_title,
-                                             _proj=entry_project, _tcid=telegram_chat_id) -> str:
-                        return await get_agent_response_sdk(
-                            _text, _sid, _sender, _title, _proj, _tcid
-                        )
-
-                    task = BackgroundTask(
-                        messenger=messenger,
-                        acknowledgment_timeout=ACKNOWLEDGMENT_TIMEOUT_SECONDS,
-                        acknowledgment_message=ACKNOWLEDGMENT_MESSAGE,
-                    )
-                    await task.run(do_replay_work(), send_result=True)
-                    logger.info(f"Launched replay task for message {msg_id}")
+                    await enqueue_job(job)
+                    logger.info(f"Enqueued replay job for message {msg_id}")
+                    # Remove from message_queue since job_queue now owns it
+                    message_queue.remove(chat_id, msg_id)
                 else:
-                    # Legacy or no project — just remove from queue (can't replay without context)
                     logger.warning(f"Cannot replay message {msg_id} (no SDK or no project), removing from queue")
                     message_queue.remove(chat_id, msg_id)
 
             except Exception as e:
                 logger.error(f"Failed to replay queued message {entry.get('message_id')}: {e}")
-                # Remove failed entries to avoid infinite retry loops
                 message_queue.remove(entry.get("chat_id", 0), entry.get("message_id", 0))
     else:
         logger.debug("No pending messages to replay")
