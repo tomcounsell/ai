@@ -152,12 +152,23 @@ Valor can work on other projects and repositories, but those are separate from "
 - Flexible, adaptive responses based on conversation flow
 - Future-proof designs that leverage AI capabilities
 
-**4. MANDATORY COMMIT AND PUSH WORKFLOW**
-- **ALWAYS commit and push changes at the end of every task**
+**4. MANDATORY COMMIT AND COMPLETION WORKFLOW**
+- **ALWAYS commit changes at the end of every task**
 - **Never leave work uncommitted in the repository**
 - Create clear, descriptive commit messages explaining the changes
-- Push to remote repository to ensure changes are preserved
-- Use `git add . && git commit -m "Description" && git push` pattern
+- **Completion method depends on repository configuration:**
+
+  **For repositories with protected main branch (require_pr: true):**
+  - Work is done on feature branches (created automatically via `branch_manager.py`)
+  - Complete work by creating a PR using `pr_manager.complete_work_with_pr()`
+  - PR will include plan context and completion checklist
+  - Do NOT attempt to push directly to main - it will fail
+  - The "ai" repository (Valor's own codebase) uses this workflow
+
+  **For repositories without branch protection:**
+  - Use standard `git add . && git commit -m "Description" && git push` pattern
+  - Push directly to main branch
+
 - This ensures all work is properly saved and available for future sessions
 
 **5. CONTEXT COLLECTION AND MANAGEMENT**
@@ -643,7 +654,75 @@ The bridge is in `bridge/telegram_bridge.py`. To add new message handling:
 2. **Implement**: Create the skill/tool/feature
 3. **Test**: Verify it works (manually or with tests)
 4. **Document**: Update relevant docs
-5. **Commit**: `git add . && git commit -m "Add feature X" && git push`
+5. **Commit & Submit**:
+   - For AI repo (protected main): `git add . && git commit -m "Add feature X"` then create PR
+   - For other repos: `git add . && git commit -m "Add feature X" && git push`
+
+## Protected Branch Workflow (PR-Based)
+
+### Overview
+
+The AI repository (Valor's own codebase) has a protected main branch that requires all changes to go through pull requests. This workflow is automatically configured in `config/projects.json` with:
+
+```json
+"github": {
+  "org": "tomcounsell",
+  "repo": "ai",
+  "protected_branches": ["main"],
+  "require_pr": true
+}
+```
+
+### How It Works
+
+1. **Automatic Branch Creation**
+   - When work begins, `branch_manager.initialize_work_branch()` creates a feature branch
+   - Branch naming: `feature/YYYYMMDD-sanitized-description`
+   - A plan document (`ACTIVE-*.md`) is created in `docs/plans/`
+
+2. **Development Workflow**
+   - All work happens on the feature branch
+   - Commits are made locally on the feature branch
+   - Never attempt to push to main - it will fail
+
+3. **Completion via PR**
+   - Use `pr_manager.complete_work_with_pr()` to finish work
+   - This function:
+     - Pushes the feature branch to origin
+     - Creates a PR with title and description from the plan
+     - Includes completion checklist in PR body
+     - Returns PR URL for user review
+
+4. **Manual Merge**
+   - User reviews and merges the PR on GitHub
+   - Feature branch can be deleted after merge
+   - Plan document (`ACTIVE-*.md`) should be deleted or archived
+
+### Usage in Code
+
+```python
+from agent.pr_manager import is_pr_required, complete_work_with_pr
+from pathlib import Path
+
+working_dir = Path("/Users/valorengels/src/ai")
+
+# Check if PR workflow is needed
+if is_pr_required(working_dir):
+    # Complete work with PR instead of direct push
+    success, pr_url = complete_work_with_pr(
+        working_dir=working_dir,
+        branch_name="feature/20260130-add-pr-support",
+        plan_file=Path("docs/plans/ACTIVE-20260130-add-pr-support.md")
+    )
+    if success:
+        print(f"PR created: {pr_url}")
+```
+
+### Key Files
+
+- `agent/branch_manager.py` - Feature branch creation and management
+- `agent/pr_manager.py` - PR creation and protected branch detection
+- `config/projects.json` - Project-specific configuration including PR requirements
 
 ## Work Completion Criteria
 
