@@ -510,6 +510,9 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
     wd = Path(working_dir)
     cleaned = []
 
+    if not wd.exists():
+        return cleaned
+
     try:
         result = subprocess.run(
             ["git", "branch", "--list", "session/*"],
