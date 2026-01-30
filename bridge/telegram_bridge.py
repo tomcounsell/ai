@@ -41,12 +41,6 @@ USE_CLAUDE_SDK = os.getenv("USE_CLAUDE_SDK", "false").lower() == "true"
 # Import SDK client and messenger if enabled (lazy import to avoid loading if not used)
 if USE_CLAUDE_SDK:
     from agent import get_agent_response_sdk, BossMessenger, BackgroundTask
-    from agent.branch_manager import (
-        get_branch_state,
-        initialize_work_branch,
-        format_branch_state_message,
-        return_to_main,
-    )
 
 # Local tool imports for message and link storage
 from tools.telegram_history import store_message, store_link, get_recent_messages, get_link_by_url, register_chat
@@ -843,10 +837,6 @@ GROUP_TO_PROJECT = build_group_to_project_map(CONFIG)
 # Collect all monitored groups
 ALL_MONITORED_GROUPS = list(GROUP_TO_PROJECT.keys())
 
-# Session awareness - track which chats have been notified about unfinished work
-# Key: chat_id, Value: timestamp when notified
-# This prevents spamming the user with "unfinished work" messages every time
-UNFINISHED_WORK_NOTIFICATIONS: dict[int, float] = {}
 
 # DM settings - respond to DMs if any active project allows it
 RESPOND_TO_DMS = any(
@@ -2266,106 +2256,6 @@ async def main():
 
         # === SDK MODE: Background task with messenger ===
         if USE_CLAUDE_SDK:
-            # Check branch state if this is a project (not DM)
-            if project and not is_reply_to_valor:
-                working_dir_str = project.get("working_directory", DEFAULTS.get("working_directory"))
-                if not working_dir_str:
-                    logger.error(
-                        f"Project '{project.get('name', project.get('_key'))}' has no working_directory configured. "
-                        "Add 'working_directory' field to the project or defaults section in config/projects.json"
-                    )
-                    await event.reply(
-                        "⚠️ Configuration error: working_directory not set for this project. "
-                        "Please contact the admin to fix config/projects.json"
-                    )
-                    return
-                working_dir = Path(working_dir_str)
-                branch_state = get_branch_state(working_dir)
-
-                # Session-aware unfinished work detection
-                if branch_state.work_status == "IN_PROGRESS":
-                    import time
-                    chat_id_int = event.chat_id
-                    last_notified = UNFINISHED_WORK_NOTIFICATIONS.get(chat_id_int, 0)
-                    time_since_notification = time.time() - last_notified
-
-                    # Only notify once per session (24 hour window)
-                    if time_since_notification > 86400:
-                        # Mark as notified
-                        UNFINISHED_WORK_NOTIFICATIONS[chat_id_int] = time.time()
-
-                        # Send revival notification (non-blocking)
-                        state_msg = format_branch_state_message(branch_state, revival_mode=True)
-                        await event.reply(state_msg)
-
-                        # Spawn background task to check on old work
-                        # This happens in parallel, doesn't block current message
-                        if branch_state.active_plan:
-                            from agent.branch_manager import get_plan_context
-                            plan_context = get_plan_context(branch_state.active_plan)
-
-                            # Create a revival message to the old session
-                            revival_session_id = f"tg_{project_key}_{event.chat_id}_revival_{int(time.time())}"
-                            revival_message = f"Status check on previous work:\n\n{plan_context}\n\nWhat's the current state of this work?"
-
-                            # Spawn background task for revival (fire and forget)
-                            async def revive_old_work():
-                                """Background task to check on abandoned work."""
-                                try:
-                                    logger.info(f"Reviving old session for branch {branch_state.current_branch}")
-
-                                    # Create messenger for revival updates
-                                    async def send_revival_update(msg: str) -> None:
-                                        filtered = filter_tool_logs(msg)
-                                        if filtered:
-                                            await client.send_message(event.chat_id, f"📋 **Old work update**:\n\n{filtered}")
-
-                                    revival_messenger = BossMessenger(
-                                        _send_callback=send_revival_update,
-                                        chat_id=telegram_chat_id,
-                                        session_id=revival_session_id,
-                                    )
-
-                                    # Query the old session
-                                    revival_task = BackgroundTask(
-                                        messenger=revival_messenger,
-                                        acknowledgment_timeout=ACKNOWLEDGMENT_TIMEOUT_SECONDS,
-                                        acknowledgment_message=ACKNOWLEDGMENT_MESSAGE,
-                                    )
-
-                                    async def check_old_work() -> str:
-                                        return await get_agent_response_sdk(
-                                            revival_message,
-                                            revival_session_id,
-                                            "System",
-                                            chat_title,
-                                            project,
-                                            telegram_chat_id
-                                        )
-
-                                    await revival_task.run(check_old_work(), send_result=True)
-
-                                except Exception as e:
-                                    logger.error(f"Failed to revive old session: {e}")
-
-                            # Fire and forget - don't await
-                            asyncio.create_task(revive_old_work())
-
-                        logger.info(f"Notified about unfinished work on {branch_state.current_branch}, continuing with current message")
-
-                    # Always switch to main for new work (don't stay on feature branch)
-                    return_to_main(working_dir)
-
-                # If clean state, initialize branch for new work
-                elif branch_state.work_status == "CLEAN":
-                    branch_created, branch_name, plan_file = initialize_work_branch(
-                        working_dir,
-                        clean_text
-                    )
-                    if branch_created:
-                        logger.info(f"Created work branch: {branch_name}")
-                        # Prepend branch context to message
-                        clean_text = f"[Working in branch: {branch_name}]\n\n{clean_text}"
 
             # Create messenger with send callback
             async def send_to_telegram(msg: str) -> None:
