@@ -1,6 +1,6 @@
 ---
 name: make-plan
-description: Create or update feature plan documents using Shape Up principles. Use when the user wants to plan a new feature, flesh out a plan, update an existing plan, or needs a structured approach to scoping work. Outputs to docs/plans/feature_{name}.md with problem statement, appetite, solution, risks, and boundaries.
+description: Create or update feature plan documents using Shape Up principles. Use when the user wants to plan a new feature, flesh out a plan, update an existing plan, or needs a structured approach to scoping work. Outputs to docs/plans/{slug}.md with problem statement, appetite, solution, risks, and boundaries. Always work in a new branch when creating plans.
 allowed-tools: Read, Write, Edit, Glob, AskUserQuestion
 ---
 
@@ -20,19 +20,20 @@ Creates structured feature plans in `docs/plans/` following Shape Up principles:
 
 ### Phase 1: Flesh Out at High Level
 
-1. **Understand the request** - What's being asked?
-2. **Narrow the problem** - Challenge vague requests:
+1. **Create a branch** - `git checkout -b plan/{slug}`
+2. **Understand the request** - What's being asked?
+3. **Narrow the problem** - Challenge vague requests:
    - Not: "redesign the auth system"
    - Yes: "login fails when users have 2FA enabled on certain providers"
-3. **Set appetite** - Based on scope:
+4. **Set appetite** - Based on scope:
    - **Small**: 1-2 days (bug fixes, small enhancements)
    - **Medium**: 3-5 days (feature additions, moderate refactors)
    - **Large**: 1-2 weeks (new subsystems, major features)
-4. **Rough out solution** - Key components and flow, stay abstract
+5. **Rough out solution** - Key components and flow, stay abstract
 
 ### Phase 2: Write Initial Plan
 
-Create `docs/plans/{feature_name}.md` with:
+Create `docs/plans/{slug}.md` with:
 
 ```markdown
 ---
@@ -136,9 +137,9 @@ After writing the initial plan:
 
 **Message format:**
 ```
-Plan draft created: docs/plans/{feature_name}.md
+Plan draft created: docs/plans/{slug}.md
 
-GitHub URL: https://github.com/tomcounsell/ai/blob/{branch}/docs/plans/{feature_name}.md
+GitHub URL: https://github.com/tomcounsell/ai/blob/{branch}/docs/plans/{slug}.md
 
 I've made the following key assumptions:
 - [Assumption 1]
@@ -158,14 +159,14 @@ After receiving answers:
 
 **Message format:**
 ```
-Plan finalized: docs/plans/{feature_name}.md
+Plan finalized: docs/plans/{slug}.md
 
-GitHub URL: https://github.com/tomcounsell/ai/blob/{branch}/docs/plans/{feature_name}.md
+GitHub URL: https://github.com/tomcounsell/ai/blob/{branch}/docs/plans/{slug}.md
 
 When you're ready to implement, use this prompt:
 
 ---
-Implement the plan in docs/plans/{feature_name}.md
+Implement the plan in docs/plans/{slug}.md
 
 Follow the solution approach, stay within the appetite, and avoid the identified rabbit holes. Check off success criteria as you complete them.
 ---
@@ -284,12 +285,20 @@ Starting with Medium appetite (3-5 days) since it involves workflow changes and 
 
 ## Output Location
 
-All plans go to: `docs/plans/{feature_name}.md`
+All plans go to: `docs/plans/{slug}.md`
 
-Use snake_case for filenames:
+Use snake_case for slugs:
 - `async_meeting_reschedule.md`
 - `dark_mode_toggle.md`
 - `api_response_caching.md`
+
+## Branch Workflow
+
+**Always create plans in a new branch:**
+1. Create branch: `git checkout -b plan/{slug}`
+2. Write plan document
+3. Commit and push plan
+4. Provide GitHub URL to the plan in the branch
 
 ## Status Tracking
 
