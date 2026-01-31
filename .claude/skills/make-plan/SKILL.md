@@ -32,9 +32,16 @@ Creates structured feature plans in `docs/plans/` following Shape Up principles:
 
 ### Phase 2: Write Initial Plan
 
-Create `docs/plans/feature_{name}.md` with:
+Create `docs/plans/{feature_name}.md` with:
 
 ```markdown
+---
+status: Planning
+appetite: [Small: 1-2 days | Medium: 3-5 days | Large: 1-2 weeks]
+owner: [Name]
+created: [YYYY-MM-DD]
+---
+
 # [Feature Name]
 
 ## Problem
@@ -129,7 +136,9 @@ After writing the initial plan:
 
 **Message format:**
 ```
-Plan draft created: docs/plans/feature_{name}.md
+Plan draft created: docs/plans/{feature_name}.md
+
+GitHub URL: https://github.com/tomcounsell/ai/blob/{branch}/docs/plans/{feature_name}.md
 
 I've made the following key assumptions:
 - [Assumption 1]
@@ -144,17 +153,19 @@ Please review the Open Questions section at the end of the plan and provide answ
 After receiving answers:
 
 1. **Update plan** - Incorporate feedback, remove Open Questions section
-2. **Mark as finalized** - Add "Status: Ready for implementation" at top
+2. **Mark as finalized** - Update frontmatter: `status: Ready`
 3. **Suggest implementation prompt** - Provide a clear prompt for starting work
 
 **Message format:**
 ```
-Plan finalized: docs/plans/feature_{name}.md
+Plan finalized: docs/plans/{feature_name}.md
+
+GitHub URL: https://github.com/tomcounsell/ai/blob/{branch}/docs/plans/{feature_name}.md
 
 When you're ready to implement, use this prompt:
 
 ---
-Implement the plan in docs/plans/feature_{name}.md
+Implement the plan in docs/plans/{feature_name}.md
 
 Follow the solution approach, stay within the appetite, and avoid the identified rabbit holes. Check off success criteria as you complete them.
 ---
@@ -273,9 +284,20 @@ Starting with Medium appetite (3-5 days) since it involves workflow changes and 
 
 ## Output Location
 
-All plans go to: `docs/plans/feature_{name}.md`
+All plans go to: `docs/plans/{feature_name}.md`
 
 Use snake_case for filenames:
-- `feature_async_meeting_reschedule.md`
-- `feature_dark_mode_toggle.md`
-- `feature_api_response_caching.md`
+- `async_meeting_reschedule.md`
+- `dark_mode_toggle.md`
+- `api_response_caching.md`
+
+## Status Tracking
+
+Status is tracked in the plan document's YAML frontmatter:
+- `status: Planning` - Initial draft being created
+- `status: Ready` - Finalized and ready for implementation
+- `status: In Progress` - Being implemented
+- `status: Complete` - Shipped to production
+- `status: Cancelled` - Not pursuing this
+
+Update status as work progresses. Keep all tracking in the plan document itself.
