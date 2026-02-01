@@ -10,7 +10,7 @@
       "telegram": {
         "groups": ["Dev: Valor"],
         "respond_to_unaddressed": true,
-        "respond_to_dms": false
+        "respond_to_dms": true
       },
       "github": {
         "org": "tomcounsell",
