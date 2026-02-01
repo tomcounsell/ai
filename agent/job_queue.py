@@ -116,25 +116,21 @@ async def _push_job(
     revival_context: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project."""
-
-    def _create():
-        RedisJob.create(
-            project_key=project_key,
-            status="pending",
-            priority=priority,
-            created_at=time.time(),
-            session_id=session_id,
-            working_dir=working_dir,
-            message_text=message_text,
-            sender_name=sender_name,
-            chat_id=chat_id,
-            message_id=message_id,
-            chat_title=chat_title,
-            revival_context=revival_context,
-        )
-        return len(RedisJob.query.filter(project_key=project_key, status="pending"))
-
-    return await asyncio.to_thread(_create)
+    await RedisJob.async_create(
+        project_key=project_key,
+        status="pending",
+        priority=priority,
+        created_at=time.time(),
+        session_id=session_id,
+        working_dir=working_dir,
+        message_text=message_text,
+        sender_name=sender_name,
+        chat_id=chat_id,
+        message_id=message_id,
+        chat_title=chat_title,
+        revival_context=revival_context,
+    )
+    return await RedisJob.query.async_count(project_key=project_key, status="pending")
 
 
 async def _pop_job(project_key: str) -> Job | None:
@@ -143,57 +139,41 @@ async def _pop_job(project_key: str) -> Job | None:
 
     Order: high priority first, then within same priority FILO (newest first).
     """
+    pending = await RedisJob.query.async_filter(project_key=project_key, status="pending")
+    if not pending:
+        return None
 
-    def _pop():
-        pending = RedisJob.query.filter(project_key=project_key, status="pending")
-        if not pending:
-            return None
+    # Sort: high priority first, then newest first (FILO)
+    def sort_key(j):
+        prio = 0 if j.priority == "high" else 1
+        return (prio, -(j.created_at or 0))
 
-        # Sort: high priority first, then newest first (FILO)
-        def sort_key(j):
-            prio = 0 if j.priority == "high" else 1
-            return (prio, -(j.created_at or 0))
-
-        pending.sort(key=sort_key)
-        chosen = pending[0]
-        chosen.status = "running"
-        chosen.save()
-        return Job(chosen)
-
-    return await asyncio.to_thread(_pop)
+    pending.sort(key=sort_key)
+    chosen = pending[0]
+    chosen.status = "running"
+    await chosen.async_save()
+    return Job(chosen)
 
 
 async def _pending_depth(project_key: str) -> int:
     """Count of pending jobs for a project."""
-
-    def _count():
-        return len(RedisJob.query.filter(project_key=project_key, status="pending"))
-
-    return await asyncio.to_thread(_count)
+    return await RedisJob.query.async_count(project_key=project_key, status="pending")
 
 
 async def _remove_by_session(project_key: str, session_id: str) -> bool:
     """Remove all pending jobs for a session. Returns True if any removed."""
-
-    def _remove():
-        jobs = RedisJob.query.filter(project_key=project_key, status="pending")
-        removed = False
-        for j in jobs:
-            if j.session_id == session_id:
-                j.delete()
-                removed = True
-        return removed
-
-    return await asyncio.to_thread(_remove)
+    jobs = await RedisJob.query.async_filter(project_key=project_key, status="pending")
+    removed = False
+    for j in jobs:
+        if j.session_id == session_id:
+            await j.async_delete()
+            removed = True
+    return removed
 
 
 async def _complete_job(job: Job) -> None:
     """Mark a running job as completed and delete it from Redis."""
-
-    def _complete():
-        job._rj.delete()
-
-    await asyncio.to_thread(_complete)
+    await job._rj.async_delete()
 
 
 def _get_pending_jobs_sync(project_key: str) -> list[RedisJob]:
