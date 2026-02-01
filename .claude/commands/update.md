@@ -29,18 +29,36 @@ Pull the latest changes from the remote repository and restart the bridge servic
 
 5. **Verify CLI tools are available**
 
-   Run each check and report pass/fail:
+   Run each check and report pass/fail. Group results by category.
+
+   **System tools:**
    ```bash
    claude --version          # Claude Code CLI
    gh --version              # GitHub CLI
    git --version             # Git
-   .venv/bin/python --version  # Python (venv)
-   .venv/bin/pytest --version  # Pytest
-   .venv/bin/ruff --version    # Ruff linter
-   .venv/bin/python -m tools.sms_reader.cli recent --limit 1  # SMS CLI tool
+   ```
+
+   **Python environment:**
+   ```bash
+   .venv/bin/python --version
+   .venv/bin/pytest --version
+   .venv/bin/ruff --version
    .venv/bin/python -c "import telethon; import httpx; import dotenv; print('Core Python deps OK')"
    ```
-   - If any tool is missing, attempt to install it (pip for Python packages, brew for system tools).
+
+   **Valor CLI tools:**
+   ```bash
+   # SMS reader - reads macOS Messages for 2FA codes etc.
+   .venv/bin/python -m tools.sms_reader.cli recent --limit 1
+
+   # Browser automation - headless browser for web interaction
+   agent-browser --version
+
+   # Calendar time tracking (when implemented)
+   # .venv/bin/python -m tools.valor_calendar --help
+   ```
+
+   - If any tool is missing, attempt to install it (pip for Python packages, brew/npm for system tools).
    - Report which tools passed and which failed.
 
 6. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, whether the service restarted successfully, and CLI tool health.
