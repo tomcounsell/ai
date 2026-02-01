@@ -147,7 +147,7 @@
   },
 
   "defaults": {
-    "working_directory": "/Users/valorengels/src/ai",
+    "working_directory": "/Users/valorengels/src",
     "telegram": {
       "respond_to_all": true,
       "respond_to_mentions": true,
