@@ -62,7 +62,62 @@ Edit `.env` and ensure these are set:
 
 If any required values are placeholder/missing, ask the user to provide them. The shared API keys file at `/Users/valorengels/src/.env` may have `ANTHROPIC_API_KEY` and other keys — check there first.
 
-## Step 3: Project Configuration (config/projects.json)
+## Step 3: Calendar Configuration
+
+Set up Google Calendar integration for work time tracking.
+
+1. **Ensure PATH includes pip script directory:**
+   ```bash
+   if ! grep -q 'Library/Python/3.12/bin' ~/.zshrc 2>/dev/null; then
+     echo 'export PATH="$HOME/Library/Python/3.12/bin:$PATH"' >> ~/.zshrc
+   fi
+   export PATH="$HOME/Library/Python/3.12/bin:$PATH"
+   ```
+
+2. **Install dependencies** (if not already done in Step 1):
+   ```bash
+   pip3 install google-auth-oauthlib google-api-python-client --quiet
+   ```
+
+3. **Check for Google OAuth credentials:**
+   ```bash
+   ls ~/Desktop/claude_code/google_credentials.json
+   ```
+   If missing, ask the user to download OAuth client credentials from Google Cloud Console (project: Yudame General) and place at `~/Desktop/claude_code/google_credentials.json`.
+
+4. **Run initial OAuth consent** (if no token exists):
+   ```bash
+   ls ~/Desktop/claude_code/google_token.json 2>/dev/null
+   ```
+   If no token, run `valor-calendar test` — this will open a browser for Google OAuth consent. The user must complete this in their browser.
+
+5. **Create calendar config** at `~/Desktop/claude_code/calendar_config.json`:
+
+   First, list available calendars:
+   ```bash
+   python3 -c "
+   import sys; sys.path.insert(0, '/Users/valorengels/src/ai')
+   from tools.google_workspace.auth import get_service
+   service = get_service('calendar', 'v3')
+   for cal in service.calendarList().list().execute().get('items', []):
+       print(f'{cal[\"summary\"]:40s} {cal[\"id\"]}')
+   "
+   ```
+
+   **Ask the user** which calendar each active project should use. Then create the config:
+   ```json
+   {
+     "calendars": {
+       "default": "<calendar-id-for-default>",
+       "project-slug": "<calendar-id-for-project>"
+     }
+   }
+   ```
+   Write to `~/Desktop/claude_code/calendar_config.json`.
+
+   Every project in `ACTIVE_PROJECTS` should have either a specific mapping or use the `default` calendar. Prefer project-specific calendars over the default.
+
+## Step 4: Project Configuration (config/projects.json)
 
 Check if `config/projects.json` exists. If not:
 
@@ -127,7 +182,7 @@ After editing, verify all working directories exist:
 ls /Users/valorengels/src/<project_dir>
 ```
 
-## Step 4: Telegram Login (USER ACTION REQUIRED)
+## Step 5: Telegram Login (USER ACTION REQUIRED)
 
 Check for an existing session:
 
@@ -135,7 +190,7 @@ Check for an existing session:
 ls data/*.session 2>/dev/null
 ```
 
-**If a session file exists**: Skip to Step 5.
+**If a session file exists**: Skip to Step 6.
 
 **If no session file exists**: The user must complete an interactive login. Tell them:
 
@@ -157,7 +212,7 @@ ls data/*.session
 
 If no session file appeared, something went wrong. Ask the user what happened and help debug.
 
-## Step 5: Start the Bridge
+## Step 6: Start the Bridge
 
 Ensure the logs directory exists, then start the bridge as a background process:
 
@@ -189,7 +244,7 @@ Also verify the process is running:
 pgrep -f telegram_bridge.py
 ```
 
-## Step 6: Confirm to User
+## Step 7: Confirm to User
 
 Report the final status to the user with:
 

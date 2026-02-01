@@ -14,16 +14,15 @@ import asyncio
 import logging
 import subprocess
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Callable, Awaitable
 
-from popoto import Model, AutoKeyField, KeyField, SortedField, Field
+from popoto import AutoKeyField, Field, KeyField, Model, SortedField
 
 from agent.branch_manager import (
     get_branch_state,
-    return_to_main,
-    sanitize_branch_name,
     get_plan_context,
+    sanitize_branch_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -362,14 +361,32 @@ async def _worker_loop(project_key: str) -> None:
         _active_workers.pop(project_key, None)
 
 
+async def _calendar_heartbeat(slug: str) -> None:
+    """Fire-and-forget calendar heartbeat via subprocess."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "valor-calendar", slug,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await asyncio.wait_for(proc.wait(), timeout=10)
+    except Exception as e:
+        logger.debug(f"Calendar heartbeat failed for '{slug}': {e}")
+
+
+# Interval between calendar heartbeats during long-running jobs
+CALENDAR_HEARTBEAT_INTERVAL = 25 * 60  # 25 minutes (fits within 30-min segments)
+
+
 async def _execute_job(job: Job) -> None:
     """
     Execute a single job:
-    1. Run agent work via BackgroundTask + BossMessenger (in project working dir)
-    2. Wait for completion
-    3. Set reaction based on result
+    1. Log calendar heartbeat (start)
+    2. Run agent work via BackgroundTask + BossMessenger (in project working dir)
+    3. Periodic calendar heartbeats during long-running work
+    4. Set reaction based on result
     """
-    from agent import get_agent_response_sdk, BossMessenger, BackgroundTask
+    from agent import BackgroundTask, BossMessenger, get_agent_response_sdk
 
     working_dir = Path(job.working_dir)
     branch_name = _session_branch_name(job.session_id)
@@ -378,6 +395,9 @@ async def _execute_job(job: Job) -> None:
         f"[{job.project_key}] Executing job {job.job_id} "
         f"(session={job.session_id}, branch={branch_name}, cwd={working_dir})"
     )
+
+    # Calendar heartbeat at session start
+    asyncio.create_task(_calendar_heartbeat(job.project_key))
 
     # Create messenger with bridge callbacks
     send_cb = _send_callbacks.get(job.project_key)
@@ -413,9 +433,13 @@ async def _execute_job(job: Job) -> None:
     task = BackgroundTask(messenger=messenger, acknowledgment_timeout=180.0)
     await task.run(do_work(), send_result=True)
 
-    # Wait for the background task to complete
+    # Wait for the background task to complete, with periodic calendar heartbeats
+    last_heartbeat = time.time()
     while task.is_running:
         await asyncio.sleep(2)
+        if time.time() - last_heartbeat >= CALENDAR_HEARTBEAT_INTERVAL:
+            asyncio.create_task(_calendar_heartbeat(job.project_key))
+            last_heartbeat = time.time()
 
     # Set reaction based on result
     if react_cb:
