@@ -5,20 +5,19 @@ Serializes agent work per project working directory so git operations
 never conflict. Each session gets its own feature branch.
 
 Architecture:
-- ProjectJobQueue: FILO stack persisted to JSON, one per project
+- RedisJob: popoto Model persisted atomically in Redis (replaces JSON files)
 - Worker loop: one asyncio.Task per project, processes jobs sequentially
 - Revival detection: lightweight git state check, no SDK agent call
 """
 
 import asyncio
-import json
 import logging
 import subprocess
 import time
-from dataclasses import dataclass, field, asdict
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Awaitable
+
+from popoto import Model, AutoKeyField, KeyField, SortedField, Field
 
 from agent.branch_manager import (
     get_branch_state,
@@ -30,96 +29,176 @@ from agent.branch_manager import (
 
 logger = logging.getLogger(__name__)
 
-QUEUE_DIR = Path(__file__).parent.parent / "data" / "job_queue"
+
+class RedisJob(Model):
+    """A queued unit of work, persisted atomically in Redis via popoto."""
+
+    job_id = AutoKeyField()
+    project_key = KeyField()
+    status = KeyField(default="pending")  # pending | running | completed | failed
+    priority = Field(default="high")  # "high" (top of stack) or "low" (bottom)
+    created_at = SortedField(type=float, sort_by="project_key")
+    session_id = Field()
+    working_dir = Field()
+    message_text = Field()
+    sender_name = Field()
+    chat_id = Field()
+    message_id = Field(type=int)
+    chat_title = Field(null=True)
+    revival_context = Field(null=True)
 
 
-@dataclass
 class Job:
-    """A queued unit of work."""
+    """Convenience wrapper around RedisJob for the worker interface."""
 
-    session_id: str
-    project_key: str
-    working_dir: str
-    message_text: str
-    sender_name: str
-    chat_id: str
-    message_id: int
-    chat_title: str | None = None
-    priority: str = "high"  # "high" (top of stack) or "low" (bottom)
-    revival_context: str | None = None
-    created_at: str = ""
-    job_id: str = ""
+    def __init__(self, redis_job: RedisJob):
+        self._rj = redis_job
 
-    def __post_init__(self):
-        if not self.created_at:
-            self.created_at = datetime.now(timezone.utc).isoformat()
-        if not self.job_id:
-            self.job_id = f"{self.project_key}_{int(time.time() * 1000)}"
+    @property
+    def job_id(self) -> str:
+        return self._rj.job_id
+
+    @property
+    def project_key(self) -> str:
+        return self._rj.project_key
+
+    @property
+    def session_id(self) -> str:
+        return self._rj.session_id
+
+    @property
+    def working_dir(self) -> str:
+        return self._rj.working_dir
+
+    @property
+    def message_text(self) -> str:
+        return self._rj.message_text
+
+    @property
+    def sender_name(self) -> str:
+        return self._rj.sender_name
+
+    @property
+    def chat_id(self) -> str:
+        return self._rj.chat_id
+
+    @property
+    def message_id(self) -> int:
+        return self._rj.message_id
+
+    @property
+    def chat_title(self) -> str | None:
+        return self._rj.chat_title
+
+    @property
+    def priority(self) -> str:
+        return self._rj.priority or "high"
+
+    @property
+    def revival_context(self) -> str | None:
+        return self._rj.revival_context
+
+    @property
+    def created_at(self) -> float:
+        return self._rj.created_at
 
 
-class ProjectJobQueue:
+async def _push_job(
+    project_key: str,
+    session_id: str,
+    working_dir: str,
+    message_text: str,
+    sender_name: str,
+    chat_id: str,
+    message_id: int,
+    chat_title: str | None = None,
+    priority: str = "high",
+    revival_context: str | None = None,
+) -> int:
+    """Create a job in Redis and return the pending queue depth for this project."""
+
+    def _create():
+        RedisJob.create(
+            project_key=project_key,
+            status="pending",
+            priority=priority,
+            created_at=time.time(),
+            session_id=session_id,
+            working_dir=working_dir,
+            message_text=message_text,
+            sender_name=sender_name,
+            chat_id=chat_id,
+            message_id=message_id,
+            chat_title=chat_title,
+            revival_context=revival_context,
+        )
+        return len(RedisJob.query.filter(project_key=project_key, status="pending"))
+
+    return await asyncio.to_thread(_create)
+
+
+async def _pop_job(project_key: str) -> Job | None:
     """
-    FILO stack for a single project. Persisted to disk as JSON.
+    Pop the highest priority pending job for a project.
 
-    HIGH priority jobs go to top (index 0).
-    LOW priority jobs go to bottom (end).
-    Worker always pops from index 0.
+    Order: high priority first, then within same priority FILO (newest first).
     """
 
-    def __init__(self, project_key: str):
-        self.project_key = project_key
-        self._file = QUEUE_DIR / f"{project_key}.json"
-        self._lock = asyncio.Lock()
-        QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    def _pop():
+        pending = RedisJob.query.filter(project_key=project_key, status="pending")
+        if not pending:
+            return None
 
-    def _load(self) -> list[dict]:
-        if not self._file.exists():
-            return []
-        try:
-            return json.loads(self._file.read_text())
-        except (json.JSONDecodeError, OSError):
-            logger.warning(f"Corrupt queue file for {self.project_key}, resetting")
-            return []
+        # Sort: high priority first, then newest first (FILO)
+        def sort_key(j):
+            prio = 0 if j.priority == "high" else 1
+            return (prio, -(j.created_at or 0))
 
-    def _save(self, jobs: list[dict]) -> None:
-        self._file.write_text(json.dumps(jobs, indent=2, default=str))
+        pending.sort(key=sort_key)
+        chosen = pending[0]
+        chosen.status = "running"
+        chosen.save()
+        return Job(chosen)
 
-    async def push(self, job: Job) -> int:
-        """Push job onto stack. Returns queue depth after push."""
-        async with self._lock:
-            jobs = self._load()
-            job_dict = asdict(job)
-            if job.priority == "low":
-                jobs.append(job_dict)
-            else:
-                jobs.insert(0, job_dict)
-            self._save(jobs)
-            return len(jobs)
+    return await asyncio.to_thread(_pop)
 
-    async def pop(self) -> Job | None:
-        """Pop highest priority job (index 0). Returns None if empty."""
-        async with self._lock:
-            jobs = self._load()
-            if not jobs:
-                return None
-            job_dict = jobs.pop(0)
-            self._save(jobs)
-            return Job(**job_dict)
 
-    async def depth(self) -> int:
-        """Number of jobs in queue."""
-        async with self._lock:
-            return len(self._load())
+async def _pending_depth(project_key: str) -> int:
+    """Count of pending jobs for a project."""
 
-    async def remove_by_session(self, session_id: str) -> bool:
-        """Remove all jobs for a session. Returns True if any removed."""
-        async with self._lock:
-            jobs = self._load()
-            filtered = [j for j in jobs if j["session_id"] != session_id]
-            if len(filtered) < len(jobs):
-                self._save(filtered)
-                return True
-            return False
+    def _count():
+        return len(RedisJob.query.filter(project_key=project_key, status="pending"))
+
+    return await asyncio.to_thread(_count)
+
+
+async def _remove_by_session(project_key: str, session_id: str) -> bool:
+    """Remove all pending jobs for a session. Returns True if any removed."""
+
+    def _remove():
+        jobs = RedisJob.query.filter(project_key=project_key, status="pending")
+        removed = False
+        for j in jobs:
+            if j.session_id == session_id:
+                j.delete()
+                removed = True
+        return removed
+
+    return await asyncio.to_thread(_remove)
+
+
+async def _complete_job(job: Job) -> None:
+    """Mark a running job as completed and delete it from Redis."""
+
+    def _complete():
+        job._rj.delete()
+
+    await asyncio.to_thread(_complete)
+
+
+def _get_pending_jobs_sync(project_key: str) -> list[RedisJob]:
+    """Synchronous helper for startup: get pending jobs for a project."""
+    return RedisJob.query.filter(project_key=project_key, status="pending")
 
 
 # === Per-project worker ===
@@ -168,17 +247,38 @@ def register_callbacks(
         _response_callbacks[project_key] = response_callback
 
 
-async def enqueue_job(job: Job) -> int:
+async def enqueue_job(
+    project_key: str,
+    session_id: str,
+    working_dir: str,
+    message_text: str,
+    sender_name: str,
+    chat_id: str,
+    message_id: int,
+    chat_title: str | None = None,
+    priority: str = "high",
+    revival_context: str | None = None,
+) -> int:
     """
-    Add a job to the appropriate project queue and ensure worker is running.
+    Add a job to Redis and ensure worker is running.
     Returns queue depth after push.
     """
-    queue = ProjectJobQueue(job.project_key)
-    depth = await queue.push(job)
-    _ensure_worker(job.project_key)
+    depth = await _push_job(
+        project_key=project_key,
+        session_id=session_id,
+        working_dir=working_dir,
+        message_text=message_text,
+        sender_name=sender_name,
+        chat_id=chat_id,
+        message_id=message_id,
+        chat_title=chat_title,
+        priority=priority,
+        revival_context=revival_context,
+    )
+    _ensure_worker(project_key)
     logger.info(
-        f"[{job.project_key}] Enqueued job {job.job_id} "
-        f"(priority={job.priority}, depth={depth})"
+        f"[{project_key}] Enqueued job "
+        f"(priority={priority}, depth={depth})"
     )
     return depth
 
@@ -198,11 +298,9 @@ async def _worker_loop(project_key: str) -> None:
     Process jobs sequentially for one project.
     Runs until queue is empty, then exits (restarted on next enqueue).
     """
-    queue = ProjectJobQueue(project_key)
-
     try:
         while True:
-            job = await queue.pop()
+            job = await _pop_job(project_key)
             if job is None:
                 logger.info(f"[{project_key}] Queue empty, worker exiting")
                 break
@@ -212,6 +310,7 @@ async def _worker_loop(project_key: str) -> None:
             except Exception as e:
                 logger.error(f"[{project_key}] Job {job.job_id} failed: {e}")
             finally:
+                await _complete_job(job)
                 await asyncio.sleep(1)
     finally:
         _active_workers.pop(project_key, None)
@@ -533,9 +632,9 @@ async def queue_revival_job(
     if additional_context:
         revival_text += f"\n\nAdditional context from user: {additional_context}"
 
-    job = Job(
-        session_id=revival_info["session_id"],
+    return await enqueue_job(
         project_key=revival_info["project_key"],
+        session_id=revival_info["session_id"],
         working_dir=revival_info["working_dir"],
         message_text=revival_text,
         sender_name="System (Revival)",
@@ -544,7 +643,6 @@ async def queue_revival_job(
         priority="low",
         revival_context=additional_context,
     )
-    return await enqueue_job(job)
 
 
 async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) -> list[str]:

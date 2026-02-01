@@ -20,8 +20,8 @@ from .branch_manager import (
     WorkStatus,
 )
 from .job_queue import (
+    RedisJob,
     Job,
-    ProjectJobQueue,
     enqueue_job,
     check_revival,
     register_callbacks,
@@ -51,8 +51,8 @@ __all__ = [
     "format_branch_state_message",
     "BranchState",
     "WorkStatus",
+    "RedisJob",
     "Job",
-    "ProjectJobQueue",
     "enqueue_job",
     "check_revival",
     "register_callbacks",

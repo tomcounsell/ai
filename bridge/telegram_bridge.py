@@ -11,7 +11,6 @@ project's group it belongs to and injects appropriate context.
 """
 
 import asyncio
-import fcntl
 import json
 import logging
 import os
@@ -23,9 +22,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # Ensure user site-packages is available for claude_agent_sdk
+# Add user site-packages as fallback (after venv packages take priority)
 user_site = Path.home() / "Library/Python/3.12/lib/python/site-packages"
 if user_site.exists() and str(user_site) not in sys.path:
-    sys.path.insert(0, str(user_site))
+    sys.path.append(str(user_site))
 
 import httpx
 from dotenv import load_dotenv
@@ -76,94 +76,6 @@ MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 # Shutdown flag - set by signal handlers to stop accepting new messages
 SHUTTING_DOWN = False
 
-QUEUE_FILE = Path(__file__).parent.parent / "data" / "pending_messages.json"
-QUEUE_MAX_ENTRIES = 50
-QUEUE_MAX_AGE_SECONDS = 3600  # 1 hour
-
-
-class MessageQueue:
-    """Persists in-flight messages to disk so they survive bridge restarts."""
-
-    def __init__(self, path: Path = QUEUE_FILE):
-        self.path = path
-
-    def _read(self) -> list[dict]:
-        if not self.path.exists():
-            return []
-        try:
-            with open(self.path, "r") as f:
-                fcntl.flock(f, fcntl.LOCK_SH)
-                data = json.load(f)
-                fcntl.flock(f, fcntl.LOCK_UN)
-                return data if isinstance(data, list) else []
-        except (json.JSONDecodeError, OSError) as e:
-            logging.getLogger(__name__).warning(f"Corrupt message queue, resetting: {e}")
-            return []
-
-    def _write(self, entries: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "w") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            json.dump(entries, f, indent=2, default=str)
-            fcntl.flock(f, fcntl.LOCK_UN)
-
-    def add(self, chat_id: int, message_id: int, text: str, sender_name: str,
-            sender_username: str | None, chat_title: str | None, project_key: str,
-            session_id: str, is_dm: bool) -> None:
-        entries = self._read()
-        entries.append({
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "text": text,
-            "sender_name": sender_name,
-            "sender_username": sender_username,
-            "chat_title": chat_title,
-            "project_key": project_key,
-            "session_id": session_id,
-            "is_dm": is_dm,
-            "queued_at": datetime.now(timezone.utc).isoformat(),
-        })
-        # Cap size
-        if len(entries) > QUEUE_MAX_ENTRIES:
-            dropped = len(entries) - QUEUE_MAX_ENTRIES
-            entries = entries[-QUEUE_MAX_ENTRIES:]
-            logging.getLogger(__name__).warning(f"Message queue full, dropped {dropped} oldest entries")
-        self._write(entries)
-
-    def remove(self, chat_id: int, message_id: int) -> None:
-        entries = self._read()
-        entries = [e for e in entries if not (e["chat_id"] == chat_id and e["message_id"] == message_id)]
-        self._write(entries)
-
-    def get_pending(self) -> list[dict]:
-        entries = self._read()
-        now = datetime.now(timezone.utc)
-        fresh = []
-        for e in entries:
-            try:
-                queued = datetime.fromisoformat(e["queued_at"])
-                if queued.tzinfo is None:
-                    queued = queued.replace(tzinfo=timezone.utc)
-                age = (now - queued).total_seconds()
-                if age <= QUEUE_MAX_AGE_SECONDS:
-                    fresh.append(e)
-                else:
-                    logging.getLogger(__name__).warning(
-                        f"Discarding stale queued message {e.get('message_id')} "
-                        f"(age: {age:.0f}s) from {e.get('sender_name')}"
-                    )
-            except (ValueError, KeyError):
-                continue
-        # Rewrite without stale entries
-        if len(fresh) != len(entries):
-            self._write(fresh)
-        return fresh
-
-    def clear(self) -> None:
-        self._write([])
-
-
-message_queue = MessageQueue()
 
 # =============================================================================
 # File Detection and Sending
@@ -2306,10 +2218,9 @@ async def main():
         asyncio.create_task(classify_and_update_reaction())
 
         # === SDK MODE: Job queue with per-session branching ===
-        # (Job queue persists to disk, so no separate message_queue needed)
         if USE_CLAUDE_SDK:
             from agent.job_queue import (
-                Job, enqueue_job, check_revival,
+                enqueue_job, check_revival,
                 record_revival_notification, get_revival_info,
                 queue_revival_job,
             )
@@ -2353,9 +2264,9 @@ async def main():
                 logger.info(f"[{project_name}] Sent revival prompt for branch {revival_info['branch']}")
 
             # Build and enqueue the job (HIGH priority — top of FILO stack)
-            job = Job(
-                session_id=session_id,
+            depth = await enqueue_job(
                 project_key=project_key,
+                session_id=session_id,
                 working_dir=working_dir_str,
                 message_text=clean_text,
                 sender_name=sender_name,
@@ -2364,8 +2275,6 @@ async def main():
                 chat_title=chat_title,
                 priority="high",
             )
-
-            depth = await enqueue_job(job)
             if depth > 1:
                 await client.send_message(
                     event.chat_id,
@@ -2377,18 +2286,6 @@ async def main():
 
         # === LEGACY MODE: Synchronous with retry ===
         else:
-            # Queue for retry — legacy mode has no job queue persistence
-            message_queue.add(
-                chat_id=event.chat_id,
-                message_id=message.id,
-                text=clean_text,
-                sender_name=sender_name,
-                sender_username=sender_username,
-                chat_title=chat_title,
-                project_key=project_key,
-                session_id=session_id,
-                is_dm=is_dm,
-            )
             try:
                 agent_task = asyncio.create_task(
                     get_agent_response_with_retry(
@@ -2402,9 +2299,6 @@ async def main():
 
                 # Send response if there's content (files or text)
                 sent_response = await send_response_with_files(client, event, response)
-
-                # Message delivered — remove from retry queue
-                message_queue.remove(event.chat_id, message.id)
 
                 # 👍 Thumbs up = Completed successfully
                 await set_reaction(client, event.chat_id, message.id, REACTION_SUCCESS)
@@ -2519,32 +2413,12 @@ async def main():
 
     # Restart job queue workers for any persisted jobs from previous session
     if USE_CLAUDE_SDK:
-        from agent.job_queue import ProjectJobQueue, _ensure_worker
+        from agent.job_queue import _get_pending_jobs_sync, _ensure_worker
         for _pkey in ACTIVE_PROJECTS:
-            pq = ProjectJobQueue(_pkey)
-            pending_jobs = pq._load()
+            pending_jobs = _get_pending_jobs_sync(_pkey)
             if pending_jobs:
                 logger.info(f"[{_pkey}] Found {len(pending_jobs)} persisted job(s), restarting worker")
                 _ensure_worker(_pkey)
-
-    # Replay legacy message queue entries (only used by non-SDK mode)
-    pending = message_queue.get_pending()
-    if pending:
-        if USE_CLAUDE_SDK:
-            # These entries are from a stale SDK session — clear them
-            # (SDK mode now uses job_queue for persistence)
-            logger.info(f"Clearing {len(pending)} stale message_queue entries (SDK mode uses job_queue)")
-            message_queue.clear()
-        else:
-            logger.info(f"Found {len(pending)} queued message(s) from previous session")
-            for entry in pending:
-                logger.warning(
-                    f"Legacy replay not supported — discarding message {entry.get('message_id')} "
-                    f"from {entry.get('sender_name')}"
-                )
-            message_queue.clear()
-    else:
-        logger.debug("No pending messages to replay")
 
     # Keep running
     await client.run_until_disconnected()
