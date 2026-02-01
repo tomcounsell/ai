@@ -5,6 +5,10 @@ owner: Valor Engels
 created: 2026-01-31
 finalized: 2026-01-31
 tracking: https://github.com/tomcounsell/ai/issues/20
+google_cloud_project: Yudame General
+google_cloud_project_id: quickstart-1586433403044
+google_project_number: 224102219743
+credentials: ~/Desktop/claude_code/google_credentials.json
 ---
 
 # Work Time Tracking via Google Calendar
