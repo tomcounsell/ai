@@ -61,4 +61,16 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - If any tool is missing, attempt to install it (pip for Python packages, brew/npm for system tools).
    - Report which tools passed and which failed.
 
-6. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, whether the service restarted successfully, and CLI tool health.
+6. **Verify MCP servers**
+
+   The Agent SDK inherits MCP servers from Claude Code's local/project settings via `setting_sources`. Check what's configured:
+
+   ```bash
+   claude mcp list
+   ```
+
+   - Report the list of configured MCP servers (these are shared with the Agent SDK)
+   - If none are configured, note that the SDK agent will only have built-in tools (bash, file read/write, etc.)
+   - MCP servers are managed via `claude mcp add/remove` — any changes take effect on next bridge restart
+
+7. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, whether the service restarted successfully, CLI tool health, and MCP server status.

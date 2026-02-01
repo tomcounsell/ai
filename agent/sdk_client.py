@@ -97,6 +97,8 @@ class ValorAgent:
             # Use continue_conversation for session continuity
             continue_conversation=session_id is not None,
             resume=session_id,
+            # Inherit MCP servers and settings from Claude Code's config
+            setting_sources=["local", "project"],
             # Environment variables for API access
             env={
                 "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
