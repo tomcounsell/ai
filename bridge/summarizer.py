@@ -1,12 +1,12 @@
 """
 Response summarization for Telegram delivery.
 
-Long agent responses are summarized via a fast LLM call (Haiku)
-before sending to Telegram. Key artifacts (commit hashes, URLs,
-file paths) are extracted and preserved in the summary.
+Long agent responses are summarized into concise PM-facing messages
+using Haiku (primary) or local Ollama (fallback). Key artifacts
+(commit hashes, URLs, PRs) are extracted and preserved.
 
-For very long responses, the full output is also saved as a .txt
-file for attachment.
+For very long responses, the full output is saved as a .txt file
+for attachment.
 """
 
 import logging
@@ -17,14 +17,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import anthropic
+import httpx
 
 logger = logging.getLogger(__name__)
 
 # Thresholds
 SUMMARIZE_THRESHOLD = 1500  # Summarize responses longer than this
 FILE_ATTACH_THRESHOLD = 3000  # Attach full output as file above this
-MAX_SUMMARY_CHARS = 1200  # Target max length for summary
+MAX_SUMMARY_CHARS = 600  # Target max — a few sentences + links
 SAFETY_TRUNCATE = 4096  # Telegram hard limit
+
+# Ollama config
+OLLAMA_BASE_URL = "http://localhost:11434"
+OLLAMA_MODEL = "qwen3:8b"
 
 
 @dataclass
@@ -47,12 +52,15 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
     artifacts: dict[str, list[str]] = {}
 
     # Git commit hashes (7-40 hex chars preceded by common keywords)
-    commit_pat = r'(?:commit|pushed|merged|created)\s+([a-f0-9]{7,40})'
+    commit_pat = (
+        r'(?:commit|pushed|merged|created)\s+([a-f0-9]{7,40})'
+    )
     commits = re.findall(commit_pat, text, re.IGNORECASE)
     # Also match standalone short hashes in common git output patterns
     commits += re.findall(r'\b([a-f0-9]{7,12})\b(?=\s)', text)
     if commits:
-        artifacts["commits"] = list(dict.fromkeys(commits))  # dedupe preserving order
+        # dedupe preserving order
+        artifacts["commits"] = list(dict.fromkeys(commits))
 
     # URLs (http/https)
     urls = re.findall(r'https?://[^\s\)>\]"\']+', text)
@@ -60,48 +68,82 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
         artifacts["urls"] = list(dict.fromkeys(urls))
 
     # Files changed (common git diff output patterns)
-    file_pat = r'(?:modified|created|deleted|renamed|changed):\s*(.+?)(?:\n|$)'
+    file_pat = (
+        r'(?:modified|created|deleted|renamed|changed):\s*'
+        r'(.+?)(?:\n|$)'
+    )
     files_changed = re.findall(file_pat, text, re.IGNORECASE)
-    files_changed += re.findall(r'^\s*[MADR]\s+(\S+)', text, re.MULTILINE)
+    files_changed += re.findall(
+        r'^\s*[MADR]\s+(\S+)', text, re.MULTILINE
+    )
     if files_changed:
-        artifacts["files_changed"] = list(dict.fromkeys(f.strip() for f in files_changed))
+        artifacts["files_changed"] = list(
+            dict.fromkeys(f.strip() for f in files_changed)
+        )
 
     # Test results
-    test_pat = r'(\d+\s+passed(?:,\s*\d+\s+(?:failed|error|warning|skipped))*)'
+    test_pat = (
+        r'(\d+\s+passed'
+        r'(?:,\s*\d+\s+(?:failed|error|warning|skipped))*)'
+    )
     test_matches = re.findall(test_pat, text, re.IGNORECASE)
     if test_matches:
         artifacts["test_results"] = test_matches
 
     # Error indicators
-    errors = re.findall(r'(?:error|exception|failed|failure):\s*(.+?)(?:\n|$)', text, re.IGNORECASE)
+    errors = re.findall(
+        r'(?:error|exception|failed|failure):\s*(.+?)(?:\n|$)',
+        text,
+        re.IGNORECASE,
+    )
     if errors:
         artifacts["errors"] = errors[:5]  # Cap at 5
 
     return artifacts
 
 
-def _build_summary_prompt(text: str, artifacts: dict[str, list[str]]) -> str:
-    """Build the prompt for Haiku summarization."""
+def _build_summary_prompt(
+    text: str, artifacts: dict[str, list[str]]
+) -> str:
+    """Build the summarization prompt.
+
+    Valor is a senior dev reporting to his project manager via
+    Telegram. The summary should read like a status update from
+    a competent coworker — not a play-by-play of tool usage.
+    """
     artifact_section = ""
     if artifacts:
         parts = []
         for key, values in artifacts.items():
             parts.append(f"- {key}: {', '.join(values[:10])}")
         artifact_section = (
-            "\n\nIMPORTANT — These artifacts MUST appear verbatim in your summary:\n"
+            "\n\nThese artifacts MUST appear verbatim:\n"
             + "\n".join(parts)
         )
 
-    return f"""Summarize this AI agent's work output into a concise Telegram message.
+    return f"""/no_think
+You are Valor, a senior AI developer reporting to your project \
+manager via Telegram. Rewrite this agent work output as a brief \
+status update.
 
 Rules:
-- Maximum {MAX_SUMMARY_CHARS} characters
-- Preserve ALL commit hashes, URLs, and error messages exactly as-is
-- Use short, direct sentences — no filler words
-- Use markdown formatting (bold for emphasis, code blocks for hashes/paths)
-- Start with what was done, then key details
-- If there were errors or failures, lead with those
-- Do NOT include meta-commentary about summarizing{artifact_section}
+- Maximum {MAX_SUMMARY_CHARS} characters total
+- Write 1-3 short sentences: what was done, outcome, any blockers
+- Include commit hashes and URLs inline so the PM can click through
+- If tests failed or errors occurred, lead with that
+- No play-by-play of steps taken, files read, or tools used
+- No preamble, no sign-off, no "Here's what I did"
+- Tone: direct, professional, like a Slack status update
+- If there are PR or commit URLs, those replace verbose explanations{artifact_section}
+
+Examples of good output:
+- "Fixed the payment webhook race condition. Tests passing. \
+`abc1234` https://github.com/org/repo/pull/42"
+- "Deployed rate limiting to the API. 3 files changed, all tests \
+green. Details: https://github.com/org/repo/pull/55"
+- "Investigated the auth timeout — root cause is session expiry \
+not being refreshed. Fix ready but needs your call on TTL \
+(currently 24h)."
 
 Agent output to summarize:
 {text}"""
@@ -109,24 +151,66 @@ Agent output to summarize:
 
 def _write_full_output_file(text: str) -> Path:
     """Write full agent output to a temp file for attachment."""
-    fd, path = tempfile.mkstemp(suffix=".txt", prefix="valor_full_output_")
+    fd, path = tempfile.mkstemp(
+        suffix=".txt", prefix="valor_full_output_"
+    )
     with os.fdopen(fd, "w") as f:
         f.write(text)
     return Path(path)
 
 
-async def summarize_response(raw_response: str) -> SummarizedResponse:
+async def _summarize_with_haiku(prompt: str) -> str | None:
+    """Try summarization via Anthropic Haiku API."""
+    try:
+        client = anthropic.AsyncAnthropic()
+        response = await client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=512,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.content[0].text
+    except Exception as e:
+        logger.warning(f"Haiku summarization failed: {e}")
+        return None
+
+
+async def _summarize_with_ollama(prompt: str) -> str | None:
+    """Fallback: summarize via local Ollama model."""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{OLLAMA_BASE_URL}/api/generate",
+                json={
+                    "model": OLLAMA_MODEL,
+                    "prompt": prompt,
+                    "stream": False,
+                    "options": {"num_predict": 512},
+                },
+            )
+            response.raise_for_status()
+            return response.json().get("response", "").strip()
+    except Exception as e:
+        logger.warning(f"Ollama summarization failed: {e}")
+        return None
+
+
+async def summarize_response(
+    raw_response: str,
+) -> SummarizedResponse:
     """
     Summarize an agent response for Telegram delivery.
 
     - Responses <= SUMMARIZE_THRESHOLD chars: returned as-is
-    - Longer responses: summarized via Haiku with artifact preservation
-    - Very long responses (> FILE_ATTACH_THRESHOLD): full output attached as file
+    - Longer responses: summarized via Haiku, then Ollama fallback
+    - Very long responses (> FILE_ATTACH_THRESHOLD): full output
+      attached as file
 
-    Falls back to safety truncation if summarization fails.
+    Falls back to safety truncation if all summarization fails.
     """
     if not raw_response or len(raw_response) <= SUMMARIZE_THRESHOLD:
-        return SummarizedResponse(text=raw_response or "", was_summarized=False)
+        return SummarizedResponse(
+            text=raw_response or "", was_summarized=False
+        )
 
     artifacts = extract_artifacts(raw_response)
 
@@ -138,24 +222,25 @@ async def summarize_response(raw_response: str) -> SummarizedResponse:
         except Exception as e:
             logger.warning(f"Failed to write full output file: {e}")
 
-    # Attempt LLM summarization
-    try:
-        client = anthropic.AsyncAnthropic()
-        prompt = _build_summary_prompt(raw_response, artifacts)
+    # Build prompt once, try multiple backends
+    prompt = _build_summary_prompt(raw_response, artifacts)
 
-        response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            messages=[{"role": "user", "content": prompt}],
-        )
+    # Try Haiku first, then Ollama
+    summary_text = await _summarize_with_haiku(prompt)
+    if summary_text is None:
+        logger.info("Falling back to Ollama for summarization")
+        summary_text = await _summarize_with_ollama(prompt)
 
-        summary_text = response.content[0].text
-
-        # Safety check: if summary is somehow longer than original, use original
+    if summary_text is not None:
+        # Safety: if summary is somehow longer than original, truncate
         if len(summary_text) >= len(raw_response):
-            logger.warning("Summary longer than original, using truncated original")
+            logger.warning(
+                "Summary longer than original, using truncated original"
+            )
             if len(raw_response) > SAFETY_TRUNCATE:
-                summary_text = raw_response[:SAFETY_TRUNCATE - 3] + "..."
+                summary_text = (
+                    raw_response[: SAFETY_TRUNCATE - 3] + "..."
+                )
             else:
                 summary_text = raw_response
 
@@ -166,16 +251,15 @@ async def summarize_response(raw_response: str) -> SummarizedResponse:
             artifacts=artifacts,
         )
 
-    except Exception as e:
-        logger.error(f"Summarization failed, falling back to truncation: {e}")
-        # Fallback: truncate with ellipsis
-        truncated = raw_response
-        if len(truncated) > SAFETY_TRUNCATE:
-            truncated = truncated[:SAFETY_TRUNCATE - 3] + "..."
+    # All backends failed — truncate as last resort
+    logger.error("All summarization backends failed, truncating")
+    truncated = raw_response
+    if len(truncated) > SAFETY_TRUNCATE:
+        truncated = truncated[: SAFETY_TRUNCATE - 3] + "..."
 
-        return SummarizedResponse(
-            text=truncated,
-            full_output_file=full_output_file,
-            was_summarized=False,
-            artifacts=artifacts,
-        )
+    return SummarizedResponse(
+        text=truncated,
+        full_output_file=full_output_file,
+        was_summarized=False,
+        artifacts=artifacts,
+    )

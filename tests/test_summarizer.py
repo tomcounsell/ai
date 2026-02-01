@@ -1,6 +1,6 @@
 """Tests for bridge.summarizer — response summarization for Telegram."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -15,21 +15,31 @@ class TestExtractArtifacts:
     """Unit tests for artifact extraction from agent output."""
 
     def test_extracts_commit_hashes(self):
-        text = "Created commit abc1234 and pushed to remote.\nCommit def5678901 merged."
+        text = (
+            "Created commit abc1234 and pushed to remote.\n"
+            "Commit def5678901 merged."
+        )
         artifacts = extract_artifacts(text)
         assert "commits" in artifacts
         assert "abc1234" in artifacts["commits"]
         assert "def5678901" in artifacts["commits"]
 
     def test_extracts_urls(self):
-        text = "PR created: https://github.com/org/repo/pull/42\nSee https://sentry.io/issues/123"
+        text = (
+            "PR created: https://github.com/org/repo/pull/42\n"
+            "See https://sentry.io/issues/123"
+        )
         artifacts = extract_artifacts(text)
         assert "urls" in artifacts
         assert "https://github.com/org/repo/pull/42" in artifacts["urls"]
         assert "https://sentry.io/issues/123" in artifacts["urls"]
 
     def test_extracts_files_changed(self):
-        text = "modified: src/main.py\ncreated: tests/test_new.py\ndeleted: old_file.txt"
+        text = (
+            "modified: src/main.py\n"
+            "created: tests/test_new.py\n"
+            "deleted: old_file.txt"
+        )
         artifacts = extract_artifacts(text)
         assert "files_changed" in artifacts
         assert "src/main.py" in artifacts["files_changed"]
@@ -41,7 +51,10 @@ class TestExtractArtifacts:
         assert "test_results" in artifacts
 
     def test_extracts_errors(self):
-        text = "Error: ModuleNotFoundError: No module named 'foo'\nFailed: connection timeout"
+        text = (
+            "Error: ModuleNotFoundError: No module named 'foo'\n"
+            "Failed: connection timeout"
+        )
         artifacts = extract_artifacts(text)
         assert "errors" in artifacts
         assert len(artifacts["errors"]) >= 1
@@ -52,7 +65,6 @@ class TestExtractArtifacts:
     def test_no_artifacts(self):
         text = "Everything looks good. The task is complete."
         artifacts = extract_artifacts(text)
-        # May have empty or no keys — just verify no crash
         assert isinstance(artifacts, dict)
 
     def test_deduplicates_artifacts(self):
@@ -99,34 +111,69 @@ class TestSummarizeResponse:
 
     @pytest.mark.asyncio
     async def test_long_response_calls_haiku(self):
-        """Responses over threshold trigger LLM summarization."""
-        long_text = "Detailed work output. " * 200  # Well over 1500 chars
+        """Responses over threshold trigger Haiku summarization."""
+        long_text = "Detailed work output. " * 200
 
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="Summary: did the work. Commit abc1234.")]
-
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-        with patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client):
+        mock_haiku = AsyncMock(
+            return_value="Summary: did the work. `abc1234`"
+        )
+        with patch(
+            "bridge.summarizer._summarize_with_haiku", mock_haiku
+        ):
             result = await summarize_response(long_text)
 
         assert result.was_summarized is True
-        assert result.text == "Summary: did the work. Commit abc1234."
-        mock_client.messages.create.assert_called_once()
+        assert result.text == "Summary: did the work. `abc1234`"
+        mock_haiku.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_haiku_fails_falls_back_to_ollama(self):
+        """If Haiku fails, Ollama is tried next."""
+        long_text = "Detailed work output. " * 200
+
+        mock_haiku = AsyncMock(return_value=None)
+        mock_ollama = AsyncMock(
+            return_value="Ollama summary of work."
+        )
+        with patch(
+            "bridge.summarizer._summarize_with_haiku", mock_haiku
+        ), patch(
+            "bridge.summarizer._summarize_with_ollama", mock_ollama
+        ):
+            result = await summarize_response(long_text)
+
+        assert result.was_summarized is True
+        assert result.text == "Ollama summary of work."
+        mock_haiku.assert_called_once()
+        mock_ollama.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_all_backends_fail_truncates(self):
+        """If all summarization backends fail, truncate."""
+        long_text = "x" * 5000
+
+        mock_haiku = AsyncMock(return_value=None)
+        mock_ollama = AsyncMock(return_value=None)
+        with patch(
+            "bridge.summarizer._summarize_with_haiku", mock_haiku
+        ), patch(
+            "bridge.summarizer._summarize_with_ollama", mock_ollama
+        ):
+            result = await summarize_response(long_text)
+
+        assert result.was_summarized is False
+        assert len(result.text) <= 4096
+        assert result.text.endswith("...")
 
     @pytest.mark.asyncio
     async def test_very_long_response_creates_file(self):
         """Responses over FILE_ATTACH_THRESHOLD get a full output file."""
-        long_text = "Output line.\n" * 500  # Well over 3000 chars
+        long_text = "Output line.\n" * 500
 
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="Summary of work.")]
-
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-        with patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client):
+        mock_haiku = AsyncMock(return_value="Summary of work.")
+        with patch(
+            "bridge.summarizer._summarize_with_haiku", mock_haiku
+        ):
             result = await summarize_response(long_text)
 
         assert result.full_output_file is not None
@@ -138,29 +185,14 @@ class TestSummarizeResponse:
         result.full_output_file.unlink(missing_ok=True)
 
     @pytest.mark.asyncio
-    async def test_api_failure_falls_back_to_truncation(self):
-        """If Haiku call fails, falls back to truncated original."""
-        long_text = "x" * 5000
-
-        with patch("bridge.summarizer.anthropic.AsyncAnthropic", side_effect=Exception("API down")):
-            result = await summarize_response(long_text)
-
-        assert result.was_summarized is False
-        assert len(result.text) <= 4096
-        assert result.text.endswith("...")
-
-    @pytest.mark.asyncio
-    async def test_short_response_under_file_threshold_no_file(self):
-        """Responses between summarize and file thresholds don't get a file."""
+    async def test_mid_length_response_no_file(self):
+        """Responses between summarize and file thresholds: no file."""
         text = "x" * 2000  # Over 1500, under 3000
 
-        mock_response = MagicMock()
-        mock_response.content = [MagicMock(text="Short summary.")]
-
-        mock_client = AsyncMock()
-        mock_client.messages.create = AsyncMock(return_value=mock_response)
-
-        with patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client):
+        mock_haiku = AsyncMock(return_value="Short summary.")
+        with patch(
+            "bridge.summarizer._summarize_with_haiku", mock_haiku
+        ):
             result = await summarize_response(text)
 
         assert result.full_output_file is None
@@ -176,23 +208,22 @@ class TestSummarizeResponseIntegration:
         reason="ANTHROPIC_API_KEY not set",
     )
     async def test_real_haiku_summarization(self):
-        """Test actual Haiku summarization of a realistic agent output."""
-        # Build a realistic long agent output (>1500 chars)
+        """Test actual Haiku produces a concise PM-style summary."""
         agent_output = "\n\n".join([
             "I've completed the requested changes to the response "
             "summarization system. Here's a detailed breakdown:",
             "First, I analyzed the existing codebase. I read through "
             "bridge/telegram_bridge.py, paying special attention to "
-            "send_response_with_files() at line 1499. The current flow "
-            "hard-truncates at 4000 chars, losing commit hashes, file "
-            "lists, and test results.",
+            "send_response_with_files() at line 1499. The current "
+            "flow hard-truncates at 4000 chars, losing commit "
+            "hashes, file lists, and test results.",
             "I reviewed agent/sdk_client.py to understand how raw "
             "responses are collected from the Claude Agent SDK. The "
             "query() method concatenates all AssistantMessage text "
             "blocks, producing very long outputs.",
             "I examined agent/completion.py and its format_summary() "
             "method. While useful, it's a separate concern.",
-            "I created bridge/summarizer.py with these components:\n"
+            "I created bridge/summarizer.py with components:\n"
             "1. extract_artifacts() - Regex extraction of commits, "
             "URLs, file paths, test results, errors\n"
             "2. summarize_response() - Async Haiku summarization\n"
@@ -220,6 +251,5 @@ class TestSummarizeResponseIntegration:
 
         assert result.was_summarized is True
         assert len(result.text) < len(agent_output)
-        assert len(result.text) <= 1500  # Should be reasonably short
-        # Key artifacts should be preserved
-        assert "a1b2c3d" in result.text or "commit" in result.text.lower()
+        # Summary should be concise — a few sentences, not a wall
+        assert len(result.text) <= 800

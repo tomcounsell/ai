@@ -1268,9 +1268,12 @@ def format_reply_chain(chain: list[dict]) -> str:
             if not content:
                 continue
 
-        # Truncate very long messages but keep more context than normal history
-        if len(content) > 500:
-            content = content[:500] + "..."
+        # Valor's messages are already summarized — include in full
+        # so resumed sessions have complete context of what was sent.
+        # Other users' messages get truncated to keep context manageable.
+        max_len = 2000 if sender == "Valor" else 500
+        if len(content) > max_len:
+            content = content[:max_len] + "..."
 
         # Format with timestamp if available
         date_str = ""
