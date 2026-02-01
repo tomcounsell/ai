@@ -1958,93 +1958,6 @@ async def main():
     session_path = Path(__file__).parent.parent / "data" / SESSION_NAME
     client = TelegramClient(str(session_path), API_ID, API_HASH)
 
-    # === Revival reaction handler (thumbs-up on revival notifications) ===
-    if USE_CLAUDE_SDK:
-        from telethon import events as telethon_events
-
-        @client.on(telethon_events.Raw)
-        async def handle_revival_reaction(update):
-            """Detect thumbs-up on revival notification messages.
-
-            Stateless: fetches the message from Telegram to extract the branch
-            name, so this works even after a bridge restart.
-            """
-            from telethon.tl.types import UpdateMessageReactions
-            if not isinstance(update, UpdateMessageReactions):
-                return
-
-            logger.debug(f"Reaction update received: msg_id={update.msg_id}, peer={update.peer}")
-
-            try:
-                from agent.job_queue import queue_revival_job
-
-                # Check if thumbs up was added
-                reactions = getattr(update, 'reactions', None)
-                if not reactions:
-                    logger.debug("No reactions attr on update")
-                    return
-                recent = getattr(reactions, 'recent_reactions', None) or []
-                logger.debug(f"Recent reactions: {[getattr(getattr(r, 'reaction', None), 'emoticon', None) for r in recent]}")
-                has_thumbs_up = any(
-                    getattr(getattr(r, 'reaction', None), 'emoticon', None) == "\U0001f44d"
-                    for r in recent
-                )
-                if not has_thumbs_up:
-                    return
-
-                # Extract chat_id from peer
-                peer = update.peer
-                if hasattr(peer, 'channel_id'):
-                    reaction_chat_id = str(peer.channel_id)
-                elif hasattr(peer, 'chat_id'):
-                    reaction_chat_id = str(peer.chat_id)
-                elif hasattr(peer, 'user_id'):
-                    reaction_chat_id = str(peer.user_id)
-                else:
-                    return
-
-                # Fetch the message to check if it's a revival notification
-                import re
-                msg_id = update.msg_id
-                msg = await client.get_messages(int(reaction_chat_id), ids=msg_id)
-                if not msg or not msg.text:
-                    return
-                if not msg.text.startswith("Unfinished work detected"):
-                    return
-
-                # Extract branch name from "on branch `branch_name`"
-                branch_match = re.search(r'`([^`]+)`', msg.text)
-                if not branch_match:
-                    return
-                branch = branch_match.group(1)
-
-                # Resolve project from chat
-                chat = await client.get_entity(int(reaction_chat_id))
-                chat_title = getattr(chat, 'title', None)
-                project = find_project_for_chat(chat_title)
-                if not project:
-                    return
-
-                project_key = project.get("_key", "dm")
-                working_dir = project.get("working_directory", DEFAULTS.get("working_directory", ""))
-                if not working_dir:
-                    working_dir = str(Path(__file__).parent.parent)
-                session_id = f"tg_{project_key}_{reaction_chat_id}_{msg_id}"
-
-                logger.info(f"Revival accepted via reaction for branch {branch}")
-                await queue_revival_job(
-                    revival_info={
-                        "branch": branch,
-                        "project_key": project_key,
-                        "session_id": session_id,
-                        "working_dir": working_dir,
-                    },
-                    chat_id=reaction_chat_id,
-                    message_id=msg_id,
-                )
-            except Exception as e:
-                logger.warning(f"Revival reaction handler error: {e}", exc_info=True)
-
     @client.on(events.NewMessage)
     async def handler(event):
         """Handle incoming messages."""
@@ -2305,7 +2218,7 @@ async def main():
                 revival_msg = f"Unfinished work detected on branch `{revival_info['branch']}`"
                 if revival_info.get("plan_context"):
                     revival_msg += f"\n\n> {revival_info['plan_context']}"
-                revival_msg += "\n\nReact with \U0001f44d to resume, or reply to this message with instructions."
+                revival_msg += "\n\nReply to this message to resume."
                 await client.send_message(event.chat_id, revival_msg)
                 record_revival_cooldown(telegram_chat_id)
                 logger.info(f"[{project_name}] Sent revival prompt for branch {revival_info['branch']}")

@@ -589,7 +589,9 @@ async def queue_revival_job(
     """
     revival_text = f"Continue the unfinished work on branch `{revival_info['branch']}`."
     if additional_context:
-        revival_text += f"\n\nAdditional context from user: {additional_context}"
+        revival_text += (
+            f"\n\nAsked user whether to resume and user responded with: {additional_context}"
+        )
 
     return await enqueue_job(
         project_key=revival_info["project_key"],
