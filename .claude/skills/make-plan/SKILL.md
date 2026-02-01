@@ -1,7 +1,7 @@
 ---
 name: make-plan
 description: Create or update feature plan documents using Shape Up principles. Use when the user wants to plan a new feature, flesh out a plan, update an existing plan, or needs a structured approach to scoping work. Outputs to docs/plans/{slug}.md with problem statement, appetite, solution, risks, and boundaries. Always work in a new branch when creating plans.
-allowed-tools: Read, Write, Edit, Glob, AskUserQuestion
+allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion
 ---
 
 # Make a Plan (Shape Up Methodology)
@@ -41,6 +41,7 @@ status: Planning
 appetite: [Small: 1-2 days | Medium: 3-5 days | Large: 1-2 weeks]
 owner: [Name]
 created: [YYYY-MM-DD]
+tracking: [GitHub Issue URL or Notion page URL - added automatically]
 ---
 
 # [Feature Name]
@@ -125,6 +126,46 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 3. [Question about technical constraint]
 ```
 
+### Phase 2.5: Create Tracking Issue
+
+After writing the plan document, create a corresponding tracking issue. Determine which tracker to use by checking the project configuration:
+
+1. **Check `config/projects.json`** for the current project (match by `working_directory` or git remote)
+2. **Determine tracker** based on project config keys:
+   - If `notion` key exists → create a Notion task (use the Notion MCP tools)
+   - If only `github` key exists → create a GitHub issue (use `gh` CLI)
+   - If neither → skip tracking, just use the plan doc
+
+**GitHub Issue (default for most projects):**
+```bash
+gh issue create \
+  --repo {org}/{repo} \
+  --title "[Plan] {Feature Name}" \
+  --label "plan" \
+  --body "$(cat <<'EOF'
+## Plan Document
+
+See: docs/plans/{slug}.md (branch: plan/{slug})
+
+**Appetite:** {appetite}
+**Status:** Planning
+
+---
+This issue tracks the plan at `docs/plans/{slug}.md`. Update the plan document for details; this issue is for tracking and discussion.
+EOF
+)"
+```
+
+**Notion Task:**
+Use the Notion MCP tools to create a page in the project's configured database with:
+- Title: `[Plan] {Feature Name}`
+- Status: Planning
+- Link to the plan document in the page body
+
+**After creating the tracking issue:**
+- Update the plan's YAML frontmatter `tracking:` field with the issue URL (e.g., `https://github.com/org/repo/issues/14`) or Notion page URL
+- Commit the updated plan
+
 ### Phase 3: Critique and Enumerate Questions
 
 After writing the initial plan:
@@ -139,7 +180,8 @@ After writing the initial plan:
 ```
 Plan draft created: docs/plans/{slug}.md
 
-GitHub URL: https://github.com/tomcounsell/ai/blob/{branch}/docs/plans/{slug}.md
+GitHub URL: https://github.com/{org}/{repo}/blob/{branch}/docs/plans/{slug}.md
+Tracking: {GitHub issue URL or Notion page URL}
 
 I've made the following key assumptions:
 - [Assumption 1]
@@ -310,3 +352,8 @@ Status is tracked in the plan document's YAML frontmatter:
 - `status: Cancelled` - Not pursuing this
 
 Update status as work progresses. Keep all tracking in the plan document itself.
+
+**Tracking issue lifecycle:**
+- When plan status changes to `Ready` or `In Progress`, update the GitHub issue / Notion task status accordingly
+- When plan status changes to `Complete`, close the GitHub issue (`gh issue close`) or mark the Notion task as done
+- When plan status changes to `Cancelled`, close the issue with a comment explaining why
