@@ -22,9 +22,9 @@ import ollama as ollama_pkg
 logger = logging.getLogger(__name__)
 
 # Thresholds
-SUMMARIZE_THRESHOLD = 1500  # Summarize responses longer than this
+SUMMARIZE_THRESHOLD = 500  # ~3 sentences; anything longer gets summarized
 FILE_ATTACH_THRESHOLD = 3000  # Attach full output as file above this
-MAX_SUMMARY_CHARS = 600  # Target max — a few sentences + links
+MAX_SUMMARY_CHARS = 400  # Target: 3 concise sentences + links
 SAFETY_TRUNCATE = 4096  # Telegram hard limit
 
 # Ollama config — model can be overridden via env var

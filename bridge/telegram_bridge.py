@@ -1535,7 +1535,7 @@ async def send_response_with_files(
     text, files = extract_files_from_response(response)
 
     # Summarize long responses before sending
-    if text and len(text) > 1500:
+    if text and len(text) > 500:
         try:
             from bridge.summarizer import summarize_response
             summarized = await summarize_response(text)
