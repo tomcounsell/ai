@@ -72,11 +72,19 @@ Pull the latest changes from the remote repository and restart the bridge servic
    # Browser automation - headless browser for web interaction
    agent-browser --version
 
-   # Calendar time tracking (when implemented)
-   # .venv/bin/python -m tools.valor_calendar --help
+   # Calendar time tracking
+   valor-calendar 2>&1 || true
    ```
 
    - If any tool is missing, attempt to install it (pip for Python packages, brew/npm for system tools).
+   - Ensure `~/Library/Python/3.12/bin` is on PATH (where pip installs script entry points):
+     ```bash
+     if ! grep -q 'Library/Python/3.12/bin' ~/.zshrc 2>/dev/null; then
+       echo 'export PATH="$HOME/Library/Python/3.12/bin:$PATH"' >> ~/.zshrc
+       echo "Added Python 3.12 bin to PATH in ~/.zshrc"
+     fi
+     export PATH="$HOME/Library/Python/3.12/bin:$PATH"
+     ```
    - Report which tools passed and which failed.
 
 7. **Verify MCP servers**
