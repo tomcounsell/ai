@@ -1531,6 +1531,19 @@ async def send_response_with_files(
 
     text, files = extract_files_from_response(response)
 
+    # Summarize long responses before sending
+    if text and len(text) > 1500:
+        try:
+            from bridge.summarizer import summarize_response
+            summarized = await summarize_response(text)
+            text = summarized.text
+            if summarized.full_output_file:
+                files.append(summarized.full_output_file)
+            if summarized.was_summarized:
+                logger.info(f"Summarized response: {len(response)} -> {len(text)} chars")
+        except Exception as e:
+            logger.warning(f"Summarization failed, using original: {e}")
+
     # Send files first
     for file_path in files:
         try:
@@ -1552,10 +1565,9 @@ async def send_response_with_files(
 
     # Send text if there's meaningful content
     if text and not text.isspace():
-        # Truncate if needed
-        max_length = DEFAULTS.get("response", {}).get("max_response_length", 4000)
-        if len(text) > max_length:
-            text = text[: max_length - 3] + "..."
+        # Safety truncation at Telegram's limit (summarizer handles graceful shortening)
+        if len(text) > 4096:
+            text = text[:4093] + "..."
         await client.send_message(_chat_id, text, reply_to=_reply_to)
         sent_content = True
 
