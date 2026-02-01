@@ -1430,15 +1430,15 @@ REACTION_ERROR = "❌"         # Something went wrong
 
 # Intent-specific processing emojis (classified by local Ollama)
 INTENT_REACTIONS = {
-    "search": "🔍",           # Searching the web
+    "search": "🤔",           # Searching the web
     "code_execution": "💻",   # Running code
     "image_generation": "🎨", # Creating an image
-    "image_analysis": "👁️",   # Analyzing an image
-    "file_operation": "📁",   # File operations
-    "git_operation": "🔀",    # Git work
+    "image_analysis": "🤔",   # Analyzing an image
+    "file_operation": "🤔",   # File operations
+    "git_operation": "💻",    # Git work
     "chat": "🤔",             # Thinking/conversation
-    "tool_use": "🔧",         # Using a tool
-    "system": "⚙️",           # System task
+    "tool_use": "🤔",         # Using a tool
+    "system": "🤔",           # System task
     "unknown": "🤔",          # Default thinking
 }
 
