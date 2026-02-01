@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import anthropic
-import httpx
+import ollama as ollama_pkg
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +27,8 @@ FILE_ATTACH_THRESHOLD = 3000  # Attach full output as file above this
 MAX_SUMMARY_CHARS = 600  # Target max — a few sentences + links
 SAFETY_TRUNCATE = 4096  # Telegram hard limit
 
-# Ollama config
-OLLAMA_BASE_URL = "http://localhost:11434"
-OLLAMA_MODEL = "qwen3:8b"
+# Ollama config — model can be overridden via env var
+OLLAMA_MODEL = os.environ.get("OLLAMA_SUMMARIZER_MODEL", "qwen3:4b")
 
 
 @dataclass
@@ -177,18 +176,13 @@ async def _summarize_with_haiku(prompt: str) -> str | None:
 async def _summarize_with_ollama(prompt: str) -> str | None:
     """Fallback: summarize via local Ollama model."""
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(
-                f"{OLLAMA_BASE_URL}/api/generate",
-                json={
-                    "model": OLLAMA_MODEL,
-                    "prompt": prompt,
-                    "stream": False,
-                    "options": {"num_predict": 512},
-                },
-            )
-            response.raise_for_status()
-            return response.json().get("response", "").strip()
+        client = ollama_pkg.AsyncClient()
+        response = await client.generate(
+            model=OLLAMA_MODEL,
+            prompt=prompt,
+            options={"num_predict": 512},
+        )
+        return response.get("response", "").strip() or None
     except Exception as e:
         logger.warning(f"Ollama summarization failed: {e}")
         return None
