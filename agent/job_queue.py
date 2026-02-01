@@ -275,23 +275,47 @@ def _ensure_worker(project_key: str) -> None:
 
 async def _worker_loop(project_key: str) -> None:
     """
-    Process jobs sequentially for one project.
+    Process jobs in parallel for one project using git worktrees.
     Runs until queue is empty, then exits (restarted on next enqueue).
     """
+    active_tasks = set()
+    max_concurrent = 3  # Limit concurrent jobs per project
+
     try:
         while True:
+            # Wait if we're at max concurrency
+            while len(active_tasks) >= max_concurrent:
+                done, active_tasks = await asyncio.wait(active_tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    try:
+                        await task  # Re-raise any exceptions
+                    except Exception as e:
+                        logger.error(f"[{project_key}] Job task failed: {e}")
+
+            # Try to pop a job
             job = await _pop_job(project_key)
             if job is None:
-                logger.info(f"[{project_key}] Queue empty, worker exiting")
+                # No more jobs — wait for active tasks to complete
+                if active_tasks:
+                    logger.info(f"[{project_key}] Queue empty, waiting for {len(active_tasks)} active jobs")
+                    await asyncio.gather(*active_tasks, return_exceptions=True)
+                else:
+                    logger.info(f"[{project_key}] Queue empty, worker exiting")
                 break
 
-            try:
-                await _execute_job(job)
-            except Exception as e:
-                logger.error(f"[{project_key}] Job {job.job_id} failed: {e}")
-            finally:
-                await _complete_job(job)
-                await asyncio.sleep(1)
+            # Spawn job execution as background task (non-blocking)
+            async def execute_and_complete(j: Job) -> None:
+                try:
+                    await _execute_job(j)
+                except Exception as e:
+                    logger.error(f"[{project_key}] Job {j.job_id} failed: {e}")
+                finally:
+                    await _complete_job(j)
+
+            task = asyncio.create_task(execute_and_complete(job))
+            active_tasks.add(task)
+            await asyncio.sleep(0.5)  # Brief pause before next pop
+
     finally:
         _active_workers.pop(project_key, None)
 
@@ -299,10 +323,10 @@ async def _worker_loop(project_key: str) -> None:
 async def _execute_job(job: Job) -> None:
     """
     Execute a single job:
-    1. Checkout/create session branch
-    2. Run agent work via BackgroundTask + BossMessenger
-    3. Wait for completion (serializes work)
-    4. Merge branch to main and cleanup
+    1. Create git worktree for isolated execution
+    2. Run agent work via BackgroundTask + BossMessenger (in worktree)
+    3. Wait for completion
+    4. Merge branch and remove worktree
     """
     from agent import get_agent_response_sdk, BossMessenger, BackgroundTask
 
@@ -314,9 +338,11 @@ async def _execute_job(job: Job) -> None:
         f"(session={job.session_id}, branch={branch_name})"
     )
 
-    # Step 1: Branch management
-    if not _checkout_session_branch(working_dir, branch_name):
-        logger.error(f"Failed to checkout branch {branch_name}, running on current branch")
+    # Step 1: Create worktree for isolated execution
+    worktree_dir = _create_worktree(working_dir, branch_name)
+    if not worktree_dir:
+        logger.error(f"Failed to create worktree for {branch_name}, aborting job")
+        return
 
     try:
         # Step 2: Create messenger with bridge callbacks
@@ -333,10 +359,10 @@ async def _execute_job(job: Job) -> None:
             session_id=job.session_id,
         )
 
-        # Step 3: Run agent work
+        # Step 3: Run agent work (in worktree directory)
         project_config = {
             "_key": job.project_key,
-            "working_directory": job.working_dir,
+            "working_directory": str(worktree_dir),  # Agent runs in worktree
             "name": job.project_key,
         }
 
@@ -353,7 +379,7 @@ async def _execute_job(job: Job) -> None:
         task = BackgroundTask(messenger=messenger, acknowledgment_timeout=180.0)
         await task.run(do_work(), send_result=True)
 
-        # Wait for the background task to complete (this serializes work)
+        # Wait for the background task to complete
         while task.is_running:
             await asyncio.sleep(2)
 
@@ -366,10 +392,10 @@ async def _execute_job(job: Job) -> None:
                 logger.warning(f"Failed to set reaction: {e}")
 
     finally:
-        # Step 5: Merge (or push branch for review) and return to main
+        # Step 5: Merge (or push branch for review) and remove worktree
         project_cfg = get_project_config(job.project_key)
         auto_merge = project_cfg.get("auto_merge", True)
-        _finish_branch(working_dir, branch_name, auto_merge, job.project_key)
+        _finish_worktree(working_dir, worktree_dir, branch_name, auto_merge, job.project_key)
 
 
 def _session_branch_name(session_id: str) -> str:
@@ -378,83 +404,95 @@ def _session_branch_name(session_id: str) -> str:
     return f"session/{safe}"
 
 
-def _checkout_session_branch(working_dir: Path, branch_name: str) -> bool:
-    """Checkout existing session branch or create from main."""
-    try:
-        result = subprocess.run(
-            ["git", "checkout", branch_name],
-            cwd=working_dir,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            logger.info(f"Checked out existing branch: {branch_name}")
-            return True
+def _create_worktree(working_dir: Path, branch_name: str) -> Path | None:
+    """
+    Create a git worktree for isolated parallel execution.
 
-        # Branch doesn't exist — create from main
-        subprocess.run(
-            ["git", "checkout", "main"],
+    Returns the worktree directory path on success, None on failure.
+    """
+    worktree_dir = working_dir / ".worktrees" / branch_name.replace("/", "-")
+
+    try:
+        # Check if branch already exists (resuming previous work)
+        branch_check = subprocess.run(
+            ["git", "rev-parse", "--verify", branch_name],
             cwd=working_dir,
             capture_output=True,
-            timeout=10,
-            check=True,
+            timeout=5,
         )
-        subprocess.run(
-            ["git", "checkout", "-b", branch_name],
-            cwd=working_dir,
-            capture_output=True,
-            timeout=10,
-            check=True,
-        )
-        logger.info(f"Created new branch: {branch_name}")
-        return True
+        branch_exists = branch_check.returncode == 0
+
+        # Check if worktree already exists
+        if worktree_dir.exists():
+            logger.info(f"Reusing existing worktree: {worktree_dir}")
+            return worktree_dir
+
+        # Create worktree directory parent
+        worktree_dir.parent.mkdir(parents=True, exist_ok=True)
+
+        if branch_exists:
+            # Worktree for existing branch
+            subprocess.run(
+                ["git", "worktree", "add", str(worktree_dir), branch_name],
+                cwd=working_dir,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True,
+            )
+            logger.info(f"Created worktree for existing branch {branch_name}: {worktree_dir}")
+        else:
+            # Create new branch from main in worktree
+            subprocess.run(
+                ["git", "worktree", "add", "-b", branch_name, str(worktree_dir), "main"],
+                cwd=working_dir,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True,
+            )
+            logger.info(f"Created worktree with new branch {branch_name}: {worktree_dir}")
+
+        return worktree_dir
 
     except subprocess.CalledProcessError as e:
-        logger.error(f"Branch checkout failed: {e.stderr}")
-        return False
+        logger.error(f"Worktree creation failed for {branch_name}: {e.stderr if hasattr(e, 'stderr') else e}")
+        return None
 
 
-def _finish_branch(
+def _finish_worktree(
     working_dir: Path,
+    worktree_dir: Path,
     branch_name: str,
     auto_merge: bool,
     project_key: str,
 ) -> bool:
     """
-    Finish work on a session branch.
+    Finish work on a worktree: commit changes, merge/push, remove worktree.
 
     If auto_merge=True: merge to main, delete branch, push.
-    If auto_merge=False: push branch to remote for PR/review, return to main.
+    If auto_merge=False: push branch to remote for PR/review.
     """
     try:
-        # Commit any uncommitted work on the session branch
-        if has_uncommitted_changes(working_dir):
+        # Commit any uncommitted work in the worktree
+        if has_uncommitted_changes(worktree_dir):
             subprocess.run(
                 ["git", "add", "-A"],
-                cwd=working_dir,
+                cwd=worktree_dir,
                 capture_output=True,
                 timeout=10,
                 check=True,
             )
             subprocess.run(
                 ["git", "commit", "-m", f"Auto-commit session work: {branch_name}"],
-                cwd=working_dir,
+                cwd=worktree_dir,
                 capture_output=True,
                 timeout=10,
                 check=True,
             )
 
         if auto_merge:
-            # === Auto-merge: merge to main, delete branch, push ===
-            subprocess.run(
-                ["git", "checkout", "main"],
-                cwd=working_dir,
-                capture_output=True,
-                timeout=10,
-                check=True,
-            )
-
+            # === Auto-merge: merge from main worktree, then cleanup ===
             result = subprocess.run(
                 ["git", "merge", "--no-ff", branch_name, "-m", f"Merge {branch_name}"],
                 cwd=working_dir,
@@ -465,10 +503,17 @@ def _finish_branch(
 
             if result.returncode != 0:
                 logger.warning(
-                    f"Merge conflict for {branch_name}, leaving branch for manual resolution"
+                    f"Merge conflict for {branch_name}, leaving worktree for manual resolution"
                 )
                 return False
 
+            # Remove worktree and branch
+            subprocess.run(
+                ["git", "worktree", "remove", str(worktree_dir)],
+                cwd=working_dir,
+                capture_output=True,
+                timeout=10,
+            )
             subprocess.run(
                 ["git", "branch", "-d", branch_name],
                 cwd=working_dir,
@@ -483,34 +528,25 @@ def _finish_branch(
                 timeout=30,
             )
 
-            logger.info(f"[{project_key}] Auto-merged and cleaned up: {branch_name}")
+            logger.info(f"[{project_key}] Auto-merged and removed worktree: {branch_name}")
 
         else:
-            # === Awaiting review: push branch to remote, return to main ===
+            # === Awaiting review: push branch, keep worktree for now ===
             subprocess.run(
                 ["git", "push", "-u", "origin", branch_name],
-                cwd=working_dir,
+                cwd=worktree_dir,
                 capture_output=True,
                 timeout=30,
             )
 
-            subprocess.run(
-                ["git", "checkout", "main"],
-                cwd=working_dir,
-                capture_output=True,
-                timeout=10,
-                check=True,
-            )
-
             logger.info(
-                f"[{project_key}] Pushed branch {branch_name} for review (auto_merge=false)"
+                f"[{project_key}] Pushed branch {branch_name} for review (worktree kept)"
             )
 
         return True
 
     except subprocess.CalledProcessError as e:
-        logger.error(f"Branch finish failed for {branch_name}: {e}")
-        return_to_main(working_dir)
+        logger.error(f"Worktree finish failed for {branch_name}: {e}")
         return False
 
 
@@ -661,5 +697,70 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
 
     except Exception as e:
         logger.error(f"Branch cleanup error: {e}")
+
+    return cleaned
+
+
+async def cleanup_orphaned_worktrees(working_dir: str) -> list[str]:
+    """
+    Clean up orphaned worktrees (left over from crashes).
+    Returns list of cleaned worktree paths.
+    """
+    wd = Path(working_dir)
+    cleaned = []
+
+    if not wd.exists():
+        return cleaned
+
+    try:
+        # Prune stale worktree references
+        subprocess.run(
+            ["git", "worktree", "prune"],
+            cwd=wd,
+            capture_output=True,
+            timeout=10,
+        )
+
+        # List existing worktrees
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=wd,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        if result.returncode != 0:
+            return cleaned
+
+        # Parse worktree list (format: "worktree <path>\n...")
+        worktrees = []
+        for line in result.stdout.split("\n"):
+            if line.startswith("worktree "):
+                wt_path = line.split(" ", 1)[1]
+                if ".worktrees/" in wt_path:
+                    worktrees.append(Path(wt_path))
+
+        # Remove orphaned .worktrees directories
+        worktrees_dir = wd / ".worktrees"
+        if worktrees_dir.exists():
+            for item in worktrees_dir.iterdir():
+                if item.is_dir() and item not in worktrees:
+                    try:
+                        # Force remove if git worktree remove fails
+                        remove_result = subprocess.run(
+                            ["git", "worktree", "remove", "--force", str(item)],
+                            cwd=wd,
+                            capture_output=True,
+                            timeout=10,
+                        )
+                        if remove_result.returncode == 0:
+                            cleaned.append(str(item))
+                            logger.info(f"Cleaned orphaned worktree: {item}")
+                    except Exception as e:
+                        logger.warning(f"Failed to remove orphaned worktree {item}: {e}")
+
+    except Exception as e:
+        logger.error(f"Worktree cleanup error: {e}")
 
     return cleaned

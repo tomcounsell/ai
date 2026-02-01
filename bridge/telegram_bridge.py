@@ -2326,7 +2326,11 @@ async def main():
     # Register job queue callbacks for each project
     if USE_CLAUDE_SDK:
         from agent.job_queue import register_callbacks as register_queue_callbacks
-        from agent.job_queue import cleanup_stale_branches, register_project_config
+        from agent.job_queue import (
+            cleanup_stale_branches,
+            cleanup_orphaned_worktrees,
+            register_project_config,
+        )
 
         for _pkey, _pconfig in CONFIG.get("projects", {}).items():
             # Register project config so job queue can read auto_merge etc.
@@ -2366,10 +2370,14 @@ async def main():
             )
             logger.info(f"[{_pkey}] Registered job queue callbacks")
 
-            # Clean up stale session branches on startup
+            # Clean up stale session branches and orphaned worktrees on startup
             cleaned = await cleanup_stale_branches(_wd)
             if cleaned:
                 logger.info(f"[{_pkey}] Cleaned {len(cleaned)} stale session branches")
+
+            cleaned_wt = await cleanup_orphaned_worktrees(_wd)
+            if cleaned_wt:
+                logger.info(f"[{_pkey}] Cleaned {len(cleaned_wt)} orphaned worktrees")
 
     # Restart job queue workers for any persisted jobs from previous session
     if USE_CLAUDE_SDK:
