@@ -27,4 +27,20 @@ Pull the latest changes from the remote repository and restart the bridge servic
    sleep 2 && /Users/valorengels/src/ai/scripts/valor-service.sh status
    ```
 
-5. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, and whether the service restarted successfully.
+5. **Verify CLI tools are available**
+
+   Run each check and report pass/fail:
+   ```bash
+   claude --version          # Claude Code CLI
+   gh --version              # GitHub CLI
+   git --version             # Git
+   .venv/bin/python --version  # Python (venv)
+   .venv/bin/pytest --version  # Pytest
+   .venv/bin/ruff --version    # Ruff linter
+   .venv/bin/python -m tools.sms_reader.cli recent --limit 1  # SMS CLI tool
+   .venv/bin/python -c "import telethon; import httpx; import dotenv; print('Core Python deps OK')"
+   ```
+   - If any tool is missing, attempt to install it (pip for Python packages, brew for system tools).
+   - Report which tools passed and which failed.
+
+6. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, whether the service restarted successfully, and CLI tool health.
