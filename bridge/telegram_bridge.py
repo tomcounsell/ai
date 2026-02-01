@@ -2324,7 +2324,18 @@ async def main():
         loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_graceful_shutdown(client)))
 
     async def _graceful_shutdown(tg_client):
-        """Wait briefly for in-flight work, then disconnect."""
+        """Reset in-flight jobs and disconnect."""
+        if USE_CLAUDE_SDK:
+            from agent.job_queue import _reset_running_jobs
+            for _pkey in ACTIVE_PROJECTS:
+                try:
+                    reset = await _reset_running_jobs(_pkey)
+                    if reset:
+                        logger.info(
+                            f"[{_pkey}] Reset {reset} running job(s) to pending"
+                        )
+                except Exception as e:
+                    logger.error(f"[{_pkey}] Failed to reset running jobs: {e}")
         logger.info("Waiting 2s for in-flight tasks to finish...")
         await asyncio.sleep(2)
         logger.info("Disconnecting Telegram client...")
@@ -2394,10 +2405,19 @@ async def main():
             if cleaned_wt:
                 logger.info(f"[{_pkey}] Cleaned {len(cleaned_wt)} orphaned worktrees")
 
-    # Restart job queue workers for any persisted jobs from previous session
+    # Recover interrupted jobs and restart workers for any persisted jobs
     if USE_CLAUDE_SDK:
-        from agent.job_queue import _get_pending_jobs_sync, _ensure_worker
+        from agent.job_queue import (
+            _ensure_worker,
+            _get_pending_jobs_sync,
+            _recover_interrupted_jobs,
+        )
         for _pkey in ACTIVE_PROJECTS:
+            recovered = _recover_interrupted_jobs(_pkey)
+            if recovered:
+                logger.info(
+                    f"[{_pkey}] Recovered {recovered} interrupted job(s)"
+                )
             pending_jobs = _get_pending_jobs_sync(_pkey)
             if pending_jobs:
                 logger.info(f"[{_pkey}] Found {len(pending_jobs)} persisted job(s), restarting worker")

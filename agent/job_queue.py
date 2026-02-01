@@ -183,6 +183,54 @@ def _get_pending_jobs_sync(project_key: str) -> list[RedisJob]:
     return RedisJob.query.filter(project_key=project_key, status="pending")
 
 
+def _recover_interrupted_jobs(project_key: str) -> int:
+    """
+    Reset any jobs stuck in 'running' status back to 'pending' with high priority.
+
+    Called at startup to recover jobs orphaned by a previous crash or restart.
+    Returns the number of recovered jobs.
+    """
+    running_jobs = RedisJob.query.filter(project_key=project_key, status="running")
+    if not running_jobs:
+        return 0
+
+    for job in running_jobs:
+        logger.warning(
+            f"[{project_key}] Recovering interrupted job {job.job_id} "
+            f"(session={job.session_id}, msg={job.message_text[:80]!r}...)"
+        )
+        job.status = "pending"
+        job.priority = "high"
+        job.save()
+
+    logger.warning(
+        f"[{project_key}] Recovered {len(running_jobs)} interrupted job(s)"
+    )
+    return len(running_jobs)
+
+
+async def _reset_running_jobs(project_key: str) -> int:
+    """
+    Async version: reset running jobs back to pending during graceful shutdown.
+    Returns the number of reset jobs.
+    """
+    running_jobs = await RedisJob.query.async_filter(
+        project_key=project_key, status="running"
+    )
+    if not running_jobs:
+        return 0
+
+    for job in running_jobs:
+        logger.info(
+            f"[{project_key}] Resetting in-flight job {job.job_id} to pending for next startup"
+        )
+        job.status = "pending"
+        job.priority = "high"
+        await job.async_save()
+
+    return len(running_jobs)
+
+
 # === Per-project worker ===
 
 _active_workers: dict[str, asyncio.Task] = {}
