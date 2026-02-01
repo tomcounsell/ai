@@ -28,8 +28,7 @@ from .job_queue import (
     register_project_config,
     get_project_config,
     cleanup_stale_branches,
-    get_revival_info,
-    record_revival_notification,
+    record_revival_cooldown,
     queue_revival_job,
 )
 
@@ -59,7 +58,6 @@ __all__ = [
     "register_project_config",
     "get_project_config",
     "cleanup_stale_branches",
-    "get_revival_info",
-    "record_revival_notification",
+    "record_revival_cooldown",
     "queue_revival_job",
 ]

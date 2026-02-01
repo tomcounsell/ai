@@ -516,9 +516,6 @@ def _finish_branch(
 
 # === Revival Detection ===
 
-# Track revival notifications: {(chat_id, msg_id): revival_info_dict}
-_revival_messages: dict[tuple[str, int], dict] = {}
-
 # Cooldown: {chat_id: timestamp} — one revival prompt per chat per 24h
 _revival_cooldowns: dict[str, float] = {}
 REVIVAL_COOLDOWN_SECONDS = 86400
@@ -575,27 +572,9 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
     }
 
 
-def record_revival_notification(
-    chat_id: str,
-    msg_id: int,
-    session_id: str,
-    project_key: str,
-    branch: str,
-    working_dir: str,
-) -> None:
-    """Record that we sent a revival notification for reaction/reply tracking."""
+def record_revival_cooldown(chat_id: str) -> None:
+    """Record that we sent a revival notification so we don't spam."""
     _revival_cooldowns[chat_id] = time.time()
-    _revival_messages[(chat_id, msg_id)] = {
-        "session_id": session_id,
-        "branch": branch,
-        "project_key": project_key,
-        "working_dir": working_dir,
-    }
-
-
-def get_revival_info(chat_id: str, msg_id: int) -> dict | None:
-    """Check if a message ID is a revival notification we sent."""
-    return _revival_messages.get((chat_id, msg_id))
 
 
 async def queue_revival_job(

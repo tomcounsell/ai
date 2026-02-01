@@ -1964,14 +1964,29 @@ async def main():
 
         @client.on(telethon_events.Raw)
         async def handle_revival_reaction(update):
-            """Detect thumbs-up on revival notification messages."""
-            # Only handle reaction updates
+            """Detect thumbs-up on revival notification messages.
+
+            Stateless: fetches the message from Telegram to extract the branch
+            name, so this works even after a bridge restart.
+            """
             from telethon.tl.types import UpdateMessageReactions
             if not isinstance(update, UpdateMessageReactions):
                 return
 
             try:
-                from agent.job_queue import get_revival_info, queue_revival_job
+                from agent.job_queue import queue_revival_job
+
+                # Check if thumbs up was added
+                reactions = getattr(update, 'reactions', None)
+                if not reactions:
+                    return
+                recent = getattr(reactions, 'recent_reactions', None) or []
+                has_thumbs_up = any(
+                    getattr(getattr(r, 'reaction', None), 'emoticon', None) == "\U0001f44d"
+                    for r in recent
+                )
+                if not has_thumbs_up:
+                    return
 
                 # Extract chat_id from peer
                 peer = update.peer
@@ -1984,27 +1999,45 @@ async def main():
                 else:
                     return
 
+                # Fetch the message to check if it's a revival notification
+                import re
                 msg_id = update.msg_id
-                revival = get_revival_info(reaction_chat_id, msg_id)
-                if not revival:
+                msg = await client.get_messages(int(reaction_chat_id), ids=msg_id)
+                if not msg or not msg.text:
+                    return
+                if not msg.text.startswith("Unfinished work detected"):
                     return
 
-                # Check if thumbs up was added
-                reactions = getattr(update, 'reactions', None)
-                if not reactions:
+                # Extract branch name from "on branch `branch_name`"
+                branch_match = re.search(r'`([^`]+)`', msg.text)
+                if not branch_match:
+                    return
+                branch = branch_match.group(1)
+
+                # Resolve project from chat
+                chat = await client.get_entity(int(reaction_chat_id))
+                chat_title = getattr(chat, 'title', None)
+                project = find_project_for_chat(chat_title)
+                if not project:
                     return
 
-                recent = getattr(reactions, 'recent_reactions', None) or []
-                for reaction in recent:
-                    emoticon = getattr(getattr(reaction, 'reaction', None), 'emoticon', None)
-                    if emoticon == "\U0001f44d":
-                        logger.info(f"Revival accepted via reaction for branch {revival['branch']}")
-                        await queue_revival_job(
-                            revival_info=revival,
-                            chat_id=reaction_chat_id,
-                            message_id=msg_id,
-                        )
-                        break
+                project_key = project.get("_key", "dm")
+                working_dir = project.get("working_directory", DEFAULTS.get("working_directory", ""))
+                if not working_dir:
+                    working_dir = str(Path(__file__).parent.parent)
+                session_id = f"tg_{project_key}_{reaction_chat_id}_{msg_id}"
+
+                logger.info(f"Revival accepted via reaction for branch {branch}")
+                await queue_revival_job(
+                    revival_info={
+                        "branch": branch,
+                        "project_key": project_key,
+                        "session_id": session_id,
+                        "working_dir": working_dir,
+                    },
+                    chat_id=reaction_chat_id,
+                    message_id=msg_id,
+                )
             except Exception as e:
                 logger.debug(f"Revival reaction handler error: {e}")
 
@@ -2219,25 +2252,42 @@ async def main():
 
         # === SDK MODE: Job queue with per-session branching ===
         if USE_CLAUDE_SDK:
+            import re as _re
             from agent.job_queue import (
                 enqueue_job, check_revival,
-                record_revival_notification, get_revival_info,
-                queue_revival_job,
+                record_revival_cooldown, queue_revival_job,
             )
 
-            # Check if this is a reply to a revival notification
+            # Check if this is a reply to a revival notification (stateless: read the replied-to message)
             if message.reply_to_msg_id:
-                revival = get_revival_info(telegram_chat_id, message.reply_to_msg_id)
-                if revival:
-                    logger.info(f"[{project_name}] Reply to revival notification, queuing revival with context")
-                    await queue_revival_job(
-                        revival_info=revival,
-                        chat_id=telegram_chat_id,
-                        message_id=message.id,
-                        additional_context=clean_text,
-                    )
-                    await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
-                    return
+                try:
+                    replied_msg = await client.get_messages(event.chat_id, ids=message.reply_to_msg_id)
+                    if replied_msg and replied_msg.text and replied_msg.text.startswith("Unfinished work detected"):
+                        branch_match = _re.search(r'`([^`]+)`', replied_msg.text)
+                        if branch_match:
+                            revival_branch = branch_match.group(1)
+                            working_dir_str = ""
+                            if project:
+                                working_dir_str = project.get("working_directory", DEFAULTS.get("working_directory", ""))
+                            if not working_dir_str:
+                                working_dir_str = str(Path(__file__).parent.parent)
+                            revival_info = {
+                                "branch": revival_branch,
+                                "project_key": project_key,
+                                "session_id": session_id,
+                                "working_dir": working_dir_str,
+                            }
+                            logger.info(f"[{project_name}] Reply to revival notification, queuing revival with context")
+                            await queue_revival_job(
+                                revival_info=revival_info,
+                                chat_id=telegram_chat_id,
+                                message_id=message.id,
+                                additional_context=clean_text,
+                            )
+                            await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
+                            return
+                except Exception as e:
+                    logger.debug(f"Revival reply check error: {e}")
 
             # Lightweight revival check (no SDK agent, just git state)
             working_dir_str = ""
@@ -2252,15 +2302,8 @@ async def main():
                 if revival_info.get("plan_context"):
                     revival_msg += f"\n\n> {revival_info['plan_context']}"
                 revival_msg += "\n\nReact with \U0001f44d to resume, or reply to this message with instructions."
-                sent_revival = await client.send_message(event.chat_id, revival_msg)
-                record_revival_notification(
-                    chat_id=telegram_chat_id,
-                    msg_id=sent_revival.id,
-                    session_id=session_id,
-                    project_key=project_key,
-                    branch=revival_info["branch"],
-                    working_dir=working_dir_str,
-                )
+                await client.send_message(event.chat_id, revival_msg)
+                record_revival_cooldown(telegram_chat_id)
                 logger.info(f"[{project_name}] Sent revival prompt for branch {revival_info['branch']}")
 
             # Build and enqueue the job (HIGH priority — top of FILO stack)
