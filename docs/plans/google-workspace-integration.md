@@ -4,15 +4,15 @@
 
 These items must be provided by Tom before implementation can begin:
 
-- [ ] **Google Cloud Project ID** - Project where OAuth credentials will be created
-- [ ] **OAuth Client Credentials** - Download JSON from Google Cloud Console with:
+- [x] **Google Cloud Project ID** - Project credentials provided ✅
+- [x] **OAuth Client Credentials** - Stored in `.env` ✅
   - Application type: Desktop app
   - Scopes configured (see Authentication section below)
-  - Provide path to downloaded `credentials.json` file
-- [ ] **Confirmation of authorized redirect URIs** - Verify `http://localhost:8080/` is whitelisted
+  - Environment variables: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
+- [ ] **Confirmation of authorized redirect URIs** - Verify `http://localhost` is whitelisted
 - [ ] **Workspace domain verification** (if needed) - Confirm valor@yuda.me has necessary permissions
 
-**Location to place credentials:** `/Users/valorengels/.config/valor/google_credentials.json`
+**Credentials location:** `.env` (git-ignored)
 
 ---
 
