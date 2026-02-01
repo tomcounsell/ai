@@ -1,3 +1,7 @@
+---
+tracking: https://github.com/tomcounsell/ai/issues/17
+---
+
 # Plan: Structured Issue Classification Commands
 
 ## Overview

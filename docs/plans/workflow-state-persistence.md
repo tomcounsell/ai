@@ -1,3 +1,7 @@
+---
+tracking: https://github.com/tomcounsell/ai/issues/16
+---
+
 # Plan: Workflow State Persistence
 
 ## Overview

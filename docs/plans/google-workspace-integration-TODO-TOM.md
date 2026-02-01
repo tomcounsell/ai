@@ -13,7 +13,7 @@ These items are required before Valor can implement the Google Workspace integra
    - Application type: **Desktop app**
    - Name: `Valor Desktop Client` (or similar)
 6. Download the JSON file
-7. **Provide to Valor:** Place at `/Users/valorengels/.config/valor/google_credentials.json`
+7. **Provide to Valor:** Place at `~/Desktop/claude_code/google_credentials.json` (iCloud-synced across machines)
 
 ### Required OAuth Scopes
 
@@ -27,16 +27,17 @@ https://www.googleapis.com/auth/documents
 https://www.googleapis.com/auth/spreadsheets
 https://www.googleapis.com/auth/presentations
 https://www.googleapis.com/auth/userinfo.profile
+https://www.googleapis.com/auth/chat.messages
+https://www.googleapis.com/auth/chat.spaces.readonly
 ```
 
-## 2. Verify Authorized Redirect URIs
+**Note:** `userinfo.profile` is used for `people.getMe()` (user context). Timezone is retrieved via the Calendar API settings, no extra scope needed. Chat scopes enable reading spaces and sending/reading messages.
 
-Ensure the OAuth client has this redirect URI configured:
-```
-http://localhost:8080/
-```
+## 2. ~~Verify Authorized Redirect URIs~~ DONE
 
-This is used during the initial authentication flow.
+The credentials file already has `http://localhost` configured as the redirect URI. This matches the `.env` setting and is correct for a Desktop app OAuth flow (Google's auth library picks an available port automatically).
+
+No action needed.
 
 ## 3. Workspace Domain Verification (if applicable)
 
@@ -44,12 +45,12 @@ If your Google Workspace has domain restrictions:
 - Verify that `valor@yuda.me` has permission to use these APIs
 - Add the OAuth client to the allowed apps list (if internal-only mode is enabled)
 
-## 4. Project Information
+## 4. ~~Project Information~~ DONE
 
-Please provide:
-- **Google Cloud Project ID:** `_____________________`
-- **Project Number (if needed):** `_____________________`
-- **Credentials file location:** (confirm it's at the path above)
+- **Google Cloud Project Name:** Yudame General
+- **Google Cloud Project ID:** `quickstart-1586433403044`
+- **Project Number:** `224102219743`
+- **Credentials file location:** `~/Desktop/claude_code/google_credentials.json` (iCloud-synced)
 
 ---
 

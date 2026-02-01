@@ -4,6 +4,7 @@ appetite: Small (1-2 days)
 owner: Valor Engels
 created: 2026-01-31
 finalized: 2026-01-31
+tracking: https://github.com/tomcounsell/ai/issues/20
 ---
 
 # Work Time Tracking via Google Calendar

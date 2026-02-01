@@ -3,6 +3,7 @@
 **Status**: Phase 1 Active in Production
 **Created**: 2026-01-21
 **Updated**: 2026-01-21
+**Tracking**: https://github.com/tomcounsell/ai/issues/14
 **Goal**: Replace Clawdbot with Claude Agent SDK so Valor's engineering work is equivalent to Claude Code
 
 ---

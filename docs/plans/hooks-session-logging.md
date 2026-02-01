@@ -1,3 +1,7 @@
+---
+tracking: https://github.com/tomcounsell/ai/issues/15
+---
+
 # Plan: Hooks System + Session Logging
 
 ## Overview
