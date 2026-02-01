@@ -1973,14 +1973,18 @@ async def main():
             if not isinstance(update, UpdateMessageReactions):
                 return
 
+            logger.debug(f"Reaction update received: msg_id={update.msg_id}, peer={update.peer}")
+
             try:
                 from agent.job_queue import queue_revival_job
 
                 # Check if thumbs up was added
                 reactions = getattr(update, 'reactions', None)
                 if not reactions:
+                    logger.debug("No reactions attr on update")
                     return
                 recent = getattr(reactions, 'recent_reactions', None) or []
+                logger.debug(f"Recent reactions: {[getattr(getattr(r, 'reaction', None), 'emoticon', None) for r in recent]}")
                 has_thumbs_up = any(
                     getattr(getattr(r, 'reaction', None), 'emoticon', None) == "\U0001f44d"
                     for r in recent
@@ -2039,7 +2043,7 @@ async def main():
                     message_id=msg_id,
                 )
             except Exception as e:
-                logger.debug(f"Revival reaction handler error: {e}")
+                logger.warning(f"Revival reaction handler error: {e}", exc_info=True)
 
     @client.on(events.NewMessage)
     async def handler(event):
