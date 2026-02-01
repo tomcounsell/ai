@@ -12,6 +12,8 @@ dependencies = [
     "yt-dlp>=2024.1.0",  # YouTube audio download for transcription
     "claude-agent-sdk>=0.1.20",  # Official Claude Agent SDK
     "popoto>=0.9.0",  # Redis ORM for job queue persistence (async support)
+    "google-auth-oauthlib>=1.2.0",  # Google OAuth for Workspace APIs
+    "google-api-python-client>=2.100.0",  # Google API client
 ]
 
 [project.optional-dependencies]
@@ -24,6 +26,7 @@ dev = [
 
 [project.scripts]
 valor-history = "tools.telegram_history.cli:main"
+valor-calendar = "tools.valor_calendar:main"
 
 [build-system]
 requires = ["hatchling"]
