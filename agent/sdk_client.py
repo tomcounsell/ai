@@ -129,30 +129,40 @@ class ValorAgent:
             async with ClaudeSDKClient(options) as client:
                 await client.query(message)
 
-                async for msg in client.receive_response():
-                    if isinstance(msg, AssistantMessage):
-                        for block in msg.content:
-                            if isinstance(block, TextBlock):
-                                response_parts.append(block.text)
-                    elif isinstance(msg, ResultMessage):
-                        if msg.total_cost_usd is not None:
-                            logger.debug(
-                                f"Query completed: {msg.num_turns} turns, "
-                                f"${msg.total_cost_usd:.4f}, "
-                                f"{msg.duration_ms}ms"
-                            )
-                        if msg.is_error and retries < max_retries:
-                            retries += 1
-                            error_text = msg.result or ""
-                            recovery_msg = _build_error_recovery_message(error_text)
-                            logger.warning(
-                                f"Agent error (attempt {retries}/{max_retries}), "
-                                f"feeding error back: {error_text}"
-                            )
-                            response_parts.clear()
-                            await client.query(recovery_msg)
-                        elif msg.is_error:
-                            logger.error(f"Agent error after {retries} retries: {msg.result}")
+                while True:
+                    async for msg in client.receive_response():
+                        if isinstance(msg, AssistantMessage):
+                            for block in msg.content:
+                                if isinstance(block, TextBlock):
+                                    response_parts.append(block.text)
+                        elif isinstance(msg, ResultMessage):
+                            if msg.total_cost_usd is not None:
+                                logger.debug(
+                                    f"Query completed: {msg.num_turns} turns, "
+                                    f"${msg.total_cost_usd:.4f}, "
+                                    f"{msg.duration_ms}ms"
+                                )
+                            if msg.is_error and retries < max_retries:
+                                retries += 1
+                                error_text = msg.result or "(empty)"
+                                recovery_msg = _build_error_recovery_message(
+                                    error_text
+                                )
+                                logger.warning(
+                                    f"Agent error (attempt {retries}/{max_retries}), "
+                                    f"feeding error back: {error_text}"
+                                )
+                                response_parts.clear()
+                                await client.query(recovery_msg)
+                                break  # Re-enter receive_response() loop
+                            elif msg.is_error:
+                                logger.error(
+                                    f"Agent error after {retries} retries: "
+                                    f"{msg.result}"
+                                )
+                    else:
+                        # async for completed without break — done
+                        break
 
         except Exception as e:
             logger.error(f"SDK query failed: {e}")
