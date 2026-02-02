@@ -158,10 +158,31 @@ def _write_full_output_file(text: str) -> Path:
     return Path(path)
 
 
+def _get_anthropic_api_key() -> str:
+    """Resolve Anthropic API key, reading .env directly if os.environ is empty."""
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if key:
+        return key
+    # os.environ may have been cleared; read directly from .env files
+    for env_path in [
+        Path(__file__).parent.parent / ".env",
+        Path.home() / "src" / ".env",
+    ]:
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                if line.startswith("ANTHROPIC_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip("'\"")
+    return ""
+
+
 async def _summarize_with_haiku(prompt: str) -> str | None:
     """Try summarization via Anthropic Haiku API."""
     try:
-        client = anthropic.AsyncAnthropic()
+        api_key = _get_anthropic_api_key()
+        if not api_key:
+            logger.warning("No Anthropic API key found for summarization")
+            return None
+        client = anthropic.AsyncAnthropic(api_key=api_key)
         response = await client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=512,
