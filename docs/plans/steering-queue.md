@@ -65,7 +65,7 @@ Use Redis lists via `popoto.redis_db.POPOTO_REDIS_DB` directly (not a Model — 
 Key:    steering:{session_id}
 Type:   Redis List (RPUSH to add, LPOP to consume)
 Values: JSON strings: {"text": "...", "sender": "...", "timestamp": ..., "is_abort": false}
-TTL:    1 hour (auto-cleanup for orphaned queues)
+TTL:    None (no expiry — messages persist until consumed or explicitly cleared)
 ```
 
 Why not a popoto Model: steering messages are ephemeral, consumed once, and don't need indexing or querying beyond FIFO consumption. A Redis list is the right primitive.
@@ -164,7 +164,7 @@ if client:
 
 - **On crash/reboot**: The dict is empty. The SDK subprocess (`claude` CLI) that was running is also dead. There is nothing to steer into — the session is gone.
 - **Recovery path**: On startup, `_recover_interrupted_jobs()` resets any `status="running"` RedisJobs back to `status="pending"`, and `_ensure_worker()` restarts them. The recovered job creates a **new** `ClaudeSDKClient` instance, which gets registered in `_active_clients` fresh. The `ClaudeAgentOptions.resume` field (set to the session_id) tells the SDK CLI to resume from its own persistent conversation history on disk (`~/.claude/`).
-- **Steering queue on crash**: Any messages in `steering:{session_id}` survive in Redis (TTL 1hr). When the job resumes after crash, the watchdog will find and inject them on the first tool call of the new session. No messages are lost.
+- **Steering queue on crash**: Any messages in `steering:{session_id}` survive in Redis (no TTL — they persist indefinitely). When the job resumes after crash, the watchdog will find and inject them on the first tool call of the new session. No messages are lost.
 - **No stale references**: The `finally` block in `ValorAgent.query()` guarantees cleanup even on exceptions. The only way to get a stale entry is if the process is killed (SIGKILL). On next startup, `_active_clients` is empty (fresh import), so there's zero risk of referencing a dead client.
 
 **What could go wrong with shared client references:**
@@ -197,7 +197,7 @@ def clear_steering_queue(session_id: str) -> int:
     """Clear all pending steering messages. Returns count cleared."""
 ```
 
-All use `POPOTO_REDIS_DB` directly with `RPUSH`, `LPOP`, and `DEL` on key `steering:{session_id}`. Set TTL of 1 hour on first push.
+All use `POPOTO_REDIS_DB` directly with `RPUSH`, `LPOP`, and `DEL` on key `steering:{session_id}`. No TTL — messages persist until consumed or explicitly cleared by session completion.
 
 ## Rabbit Holes & Risks
 
@@ -233,7 +233,7 @@ All use `POPOTO_REDIS_DB` directly with `RPUSH`, `LPOP`, and `DEL` on key `steer
 - [ ] Non-reply messages during a running session queue normally with a position ack
 - [ ] Reply to a completed session resumes it (existing behavior preserved)
 - [ ] Steering queue cleans up after session completes (no orphaned Redis keys)
-- [ ] No production Redis pollution (steering keys use TTL)
+- [ ] No production Redis pollution (steering keys cleaned up on session completion)
 - [ ] Tests cover: push/pop, abort signal, bridge routing, watchdog injection, cleanup
 
 ## Files to Modify
