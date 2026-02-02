@@ -449,6 +449,28 @@ async def _execute_job(job: Job) -> None:
         except Exception as e:
             logger.warning(f"Failed to set reaction: {e}")
 
+    # Auto-mark session as done after successful completion
+    # This prevents false "Unfinished work detected" revival notifications
+    if not task.error:
+        try:
+            from agent.branch_manager import mark_work_done
+
+            mark_work_done(working_dir, branch_name)
+            # Also delete the session branch to keep git clean
+            subprocess.run(
+                ["git", "branch", "-D", branch_name],
+                cwd=working_dir,
+                capture_output=True,
+                timeout=10,
+            )
+            logger.info(
+                f"[{job.project_key}] Auto-marked session done and cleaned up branch {branch_name}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[{job.project_key}] Failed to auto-mark session done: {e}"
+            )
+
 
 def _session_branch_name(session_id: str) -> str:
     """Convert session_id to a git branch name."""
