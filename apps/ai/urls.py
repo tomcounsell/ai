@@ -35,9 +35,13 @@ urlpatterns: list[URLPattern] = [
     path("test/", TestChatPageView.as_view(), name="test-page"),
     path("test-chat/", TestChatView.as_view(), name="test-chat"),
     # OAuth endpoints for MCP servers (auto-approve flow)
-    path("oauth/authorize", MCPOAuthAuthorizeView.as_view(), name="mcp-oauth-authorize"),
+    path(
+        "oauth/authorize", MCPOAuthAuthorizeView.as_view(), name="mcp-oauth-authorize"
+    ),
     path("oauth/token", MCPOAuthTokenView.as_view(), name="mcp-oauth-token"),
-    path("oauth/register", MCPOAuthRegistrationView.as_view(), name="mcp-oauth-register"),
+    path(
+        "oauth/register", MCPOAuthRegistrationView.as_view(), name="mcp-oauth-register"
+    ),
     # MCP server endpoints
     path(
         "creative-juices/",

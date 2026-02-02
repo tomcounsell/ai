@@ -22,14 +22,16 @@ class CreativeJuicesMCPServerView(View):
 
     def get(self, request):
         """Handle GET requests - return server info."""
-        return JsonResponse({
-            "name": "creative-juices",
-            "version": "1.0.0",
-            "description": "MCP server for creative thinking tools",
-            "protocol": "MCP",
-            "authentication": False,
-            "endpoint": request.build_absolute_uri()
-        })
+        return JsonResponse(
+            {
+                "name": "creative-juices",
+                "version": "1.0.0",
+                "description": "MCP server for creative thinking tools",
+                "protocol": "MCP",
+                "authentication": False,
+                "endpoint": request.build_absolute_uri(),
+            }
+        )
 
     def post(self, request):
         """Handle MCP JSON-RPC requests."""
@@ -190,20 +192,22 @@ class CTOToolsMCPServerView(View):
 
     def get(self, request):
         """Handle GET requests - return server info."""
-        return JsonResponse({
-            "name": "cto-tools",
-            "version": "1.1.0",
-            "description": "MCP server for CTO and engineering leadership tools",
-            "protocol": "MCP",
-            "authentication": True,
-            "endpoint": request.build_absolute_uri()
-        })
+        return JsonResponse(
+            {
+                "name": "cto-tools",
+                "version": "1.1.0",
+                "description": "MCP server for CTO and engineering leadership tools",
+                "protocol": "MCP",
+                "authentication": True,
+                "endpoint": request.build_absolute_uri(),
+            }
+        )
 
     def post(self, request):
         """Handle MCP JSON-RPC requests."""
         # Validate Bearer token (auto-approve OAuth - just check presence)
-        auth_header = request.META.get('HTTP_AUTHORIZATION', '')
-        if not auth_header.startswith('Bearer '):
+        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        if not auth_header.startswith("Bearer "):
             return JsonResponse(
                 {
                     "jsonrpc": "2.0",

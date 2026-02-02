@@ -31,8 +31,11 @@ class MCPOAuthAuthorizeView(View):
 
         if not redirect_uri:
             return JsonResponse(
-                {"error": "invalid_request", "error_description": "Missing redirect_uri"},
-                status=400
+                {
+                    "error": "invalid_request",
+                    "error_description": "Missing redirect_uri",
+                },
+                status=400,
             )
 
         # Generate a simple authorization code
@@ -59,14 +62,14 @@ class MCPOAuthTokenView(View):
     def post(self, request):
         """Handle token request."""
         # Parse form data or JSON
-        content_type = request.content_type or ''
-        if 'application/json' in content_type:
+        content_type = request.content_type or ""
+        if "application/json" in content_type:
             try:
                 data = json.loads(request.body)
             except json.JSONDecodeError:
                 return JsonResponse(
                     {"error": "invalid_request", "error_description": "Invalid JSON"},
-                    status=400
+                    status=400,
                 )
         else:
             # Handle form-encoded data - Django populates request.POST automatically
@@ -79,16 +82,13 @@ class MCPOAuthTokenView(View):
 
         # Validate grant_type
         if grant_type != "authorization_code":
-            return JsonResponse(
-                {"error": "unsupported_grant_type"},
-                status=400
-            )
+            return JsonResponse({"error": "unsupported_grant_type"}, status=400)
 
         # Validate code exists (we accept any code for auto-approve)
         if not code:
             return JsonResponse(
                 {"error": "invalid_request", "error_description": "Missing code"},
-                status=400
+                status=400,
             )
 
         # For auto-approve mode, we accept any code_verifier
@@ -98,12 +98,14 @@ class MCPOAuthTokenView(View):
         access_token = secrets.token_urlsafe(32)
 
         # Return token response
-        return JsonResponse({
-            "access_token": access_token,
-            "token_type": "Bearer",
-            "expires_in": 31536000,  # 1 year
-            "scope": "mcp:read mcp:write"
-        })
+        return JsonResponse(
+            {
+                "access_token": access_token,
+                "token_type": "Bearer",
+                "expires_in": 31536000,  # 1 year
+                "scope": "mcp:read mcp:write",
+            }
+        )
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -121,21 +123,23 @@ class MCPOAuthRegistrationView(View):
         except json.JSONDecodeError:
             return JsonResponse(
                 {"error": "invalid_request", "error_description": "Invalid JSON"},
-                status=400
+                status=400,
             )
 
         # Generate client credentials (no secret needed for public clients)
         client_id = secrets.token_urlsafe(32)
 
         # Return registration response
-        return JsonResponse({
-            "client_id": client_id,
-            "client_id_issued_at": int(time.time()),
-            "redirect_uris": data.get("redirect_uris", []),
-            "grant_types": ["authorization_code"],
-            "response_types": ["code"],
-            "token_endpoint_auth_method": "none"
-        })
+        return JsonResponse(
+            {
+                "client_id": client_id,
+                "client_id_issued_at": int(time.time()),
+                "redirect_uris": data.get("redirect_uris", []),
+                "grant_types": ["authorization_code"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",
+            }
+        )
 
 
 class MCPOAuthMetadataView(View):
@@ -147,7 +151,7 @@ class MCPOAuthMetadataView(View):
 
     def get(self, request):
         """Return OAuth server metadata."""
-        base_url = request.build_absolute_uri('/').rstrip('/')
+        base_url = request.build_absolute_uri("/").rstrip("/")
 
         metadata = {
             "issuer": base_url,
