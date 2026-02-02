@@ -207,6 +207,13 @@ class TestWatchdogSteering:
 
         assert result is not None
         assert result["continue_"] is True
+        # Verify interrupt+query were actually called
+        mock_client.interrupt.assert_awaited_once()
+        mock_client.query.assert_awaited_once()
+        # Verify the query contained the steering text
+        query_arg = mock_client.query.call_args[0][0]
+        assert "focus on OAuth" in query_arg
+        assert "STEERING MESSAGE" in query_arg
 
     @pytest.mark.asyncio
     async def test_watchdog_handles_missing_client(self):
@@ -226,3 +233,24 @@ class TestWatchdogSteering:
         msg = pop_steering_message(session_id)
         assert msg is not None
         assert msg["text"] == "focus on OAuth"
+
+    @pytest.mark.asyncio
+    async def test_watchdog_repushes_on_injection_failure(self):
+        """If interrupt succeeds but query throws, messages should be re-pushed."""
+        from agent.health_check import _handle_steering
+
+        session_id = "test_watchdog_inject_fail"
+        push_steering_message(session_id, "update the tests", "Tom")
+
+        mock_client = AsyncMock()
+        mock_client.query.side_effect = RuntimeError("connection lost")
+        with patch("agent.sdk_client.get_active_client", return_value=mock_client):
+            result = await _handle_steering(session_id)
+
+        assert result is not None
+        assert result["continue_"] is True
+
+        # Message should have been re-pushed after failure
+        msg = pop_steering_message(session_id)
+        assert msg is not None
+        assert msg["text"] == "update the tests"

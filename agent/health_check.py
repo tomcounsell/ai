@@ -130,6 +130,20 @@ async def _judge_health(activity: str) -> dict[str, Any]:
         return {"healthy": True, "reason": f"unparseable judge response: {text[:80]}"}
 
 
+def _repush_messages(session_id: str, messages: list[dict]) -> None:
+    """Re-push consumed messages back to the steering queue to prevent loss."""
+    from agent.steering import push_steering_message
+
+    for msg in messages:
+        push_steering_message(
+            session_id,
+            msg.get("text", ""),
+            msg.get("sender", "unknown"),
+            is_abort=msg.get("is_abort", False),
+        )
+    logger.info(f"[steering] Re-pushed {len(messages)} message(s) to {session_id}")
+
+
 async def _handle_steering(session_id: str) -> dict[str, Any] | None:
     """Check the steering queue and handle any pending messages.
 
@@ -179,21 +193,15 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
         else:
             logger.warning(
                 f"[steering] No active client for session {session_id}, "
-                f"messages will be re-consumed on next session"
+                f"re-pushing messages for next session"
             )
-            # Re-push so they're not lost (client might have just disconnected)
-            from agent.steering import push_steering_message
-
-            for msg in messages:
-                push_steering_message(
-                    session_id,
-                    msg.get("text", ""),
-                    msg.get("sender", "unknown"),
-                    is_abort=msg.get("is_abort", False),
-                )
+            _repush_messages(session_id, messages)
     except Exception as e:
-        logger.error(f"[steering] Failed to inject message: {e}")
-        # Don't block the agent due to steering failure
+        logger.error(
+            f"[steering] Failed to inject message: {e} — re-pushing to preserve"
+        )
+        # Re-push so messages aren't lost on injection failure
+        _repush_messages(session_id, messages)
 
     return {"continue_": True}
 

@@ -43,7 +43,13 @@ if USE_CLAUDE_SDK:
     from agent import get_agent_response_sdk, BossMessenger, BackgroundTask
 
 # Local tool imports for message and link storage
-from tools.telegram_history import store_message, store_link, get_recent_messages, get_link_by_url, register_chat
+from tools.telegram_history import (
+    store_message,
+    store_link,
+    get_recent_messages,
+    get_link_by_url,
+    register_chat,
+)
 from tools.link_analysis import (
     extract_urls,
     summarize_url_content,
@@ -82,7 +88,7 @@ SHUTTING_DOWN = False
 # =============================================================================
 
 # Explicit file marker: <<FILE:/path/to/file>>
-FILE_MARKER_PATTERN = re.compile(r'<<FILE:([^>]+)>>')
+FILE_MARKER_PATTERN = re.compile(r"<<FILE:([^>]+)>>")
 
 # =============================================================================
 # Response Filtering - Remove Tool Logs
@@ -91,28 +97,28 @@ FILE_MARKER_PATTERN = re.compile(r'<<FILE:([^>]+)>>')
 # Patterns for tool execution logs that should be filtered from responses
 # These are clawdbot internal logs that shouldn't be shown to users
 TOOL_LOG_PATTERNS = [
-    re.compile(r'^🛠️\s*exec:', re.IGNORECASE),      # Bash execution
-    re.compile(r'^📖\s*read:', re.IGNORECASE),       # File read
-    re.compile(r'^🔎\s*web_search:', re.IGNORECASE), # Web search
-    re.compile(r'^✏️\s*edit:', re.IGNORECASE),       # File edit
-    re.compile(r'^📝\s*write:', re.IGNORECASE),      # File write
-    re.compile(r'^✍️\s*write:', re.IGNORECASE),      # File write (alternate emoji)
-    re.compile(r'^🔍\s*search:', re.IGNORECASE),     # Search
-    re.compile(r'^📁\s*glob:', re.IGNORECASE),       # Glob
-    re.compile(r'^🌐\s*fetch:', re.IGNORECASE),      # Web fetch
-    re.compile(r'^🧰\s*process:', re.IGNORECASE),    # Process/task
-    re.compile(r'^🔧\s*tool:', re.IGNORECASE),       # Tool usage
-    re.compile(r'^⚙️\s*config:', re.IGNORECASE),     # Config
-    re.compile(r'^📂\s*list:', re.IGNORECASE),       # Directory listing
-    re.compile(r'^🗂️\s*file:', re.IGNORECASE),       # File operations
-    re.compile(r'^💻\s*run:', re.IGNORECASE),        # Run command
-    re.compile(r'^🖥️\s*shell:', re.IGNORECASE),      # Shell command
-    re.compile(r'^📋\s*task:', re.IGNORECASE),       # Task
-    re.compile(r'^🔄\s*sync:', re.IGNORECASE),       # Sync
-    re.compile(r'^📦\s*package:', re.IGNORECASE),    # Package operations
-    re.compile(r'^🗑️\s*delete:', re.IGNORECASE),     # Delete
-    re.compile(r'^➡️\s*move:', re.IGNORECASE),       # Move
-    re.compile(r'^📋\s*copy:', re.IGNORECASE),       # Copy
+    re.compile(r"^🛠️\s*exec:", re.IGNORECASE),  # Bash execution
+    re.compile(r"^📖\s*read:", re.IGNORECASE),  # File read
+    re.compile(r"^🔎\s*web_search:", re.IGNORECASE),  # Web search
+    re.compile(r"^✏️\s*edit:", re.IGNORECASE),  # File edit
+    re.compile(r"^📝\s*write:", re.IGNORECASE),  # File write
+    re.compile(r"^✍️\s*write:", re.IGNORECASE),  # File write (alternate emoji)
+    re.compile(r"^🔍\s*search:", re.IGNORECASE),  # Search
+    re.compile(r"^📁\s*glob:", re.IGNORECASE),  # Glob
+    re.compile(r"^🌐\s*fetch:", re.IGNORECASE),  # Web fetch
+    re.compile(r"^🧰\s*process:", re.IGNORECASE),  # Process/task
+    re.compile(r"^🔧\s*tool:", re.IGNORECASE),  # Tool usage
+    re.compile(r"^⚙️\s*config:", re.IGNORECASE),  # Config
+    re.compile(r"^📂\s*list:", re.IGNORECASE),  # Directory listing
+    re.compile(r"^🗂️\s*file:", re.IGNORECASE),  # File operations
+    re.compile(r"^💻\s*run:", re.IGNORECASE),  # Run command
+    re.compile(r"^🖥️\s*shell:", re.IGNORECASE),  # Shell command
+    re.compile(r"^📋\s*task:", re.IGNORECASE),  # Task
+    re.compile(r"^🔄\s*sync:", re.IGNORECASE),  # Sync
+    re.compile(r"^📦\s*package:", re.IGNORECASE),  # Package operations
+    re.compile(r"^🗑️\s*delete:", re.IGNORECASE),  # Delete
+    re.compile(r"^➡️\s*move:", re.IGNORECASE),  # Move
+    re.compile(r"^📋\s*copy:", re.IGNORECASE),  # Copy
 ]
 
 
@@ -129,11 +135,13 @@ def filter_tool_logs(response: str) -> str:
     if not response:
         return ""
 
-    lines = response.split('\n')
+    lines = response.split("\n")
     filtered = []
 
     # Generic pattern: emoji followed by word and colon (catches most tool logs)
-    generic_tool_pattern = re.compile(r'^[\U0001F300-\U0001F9FF\u2600-\u26FF\u2700-\u27BF]\s*\w+:', re.UNICODE)
+    generic_tool_pattern = re.compile(
+        r"^[\U0001F300-\U0001F9FF\u2600-\u26FF\u2700-\u27BF]\s*\w+:", re.UNICODE
+    )
 
     for line in lines:
         stripped = line.strip()
@@ -154,18 +162,31 @@ def filter_tool_logs(response: str) -> str:
             continue
 
         # Skip backtick-wrapped command lines (like `cd foo && ls`)
-        if stripped.startswith('`') and stripped.endswith('`') and len(stripped) > 2:
+        if stripped.startswith("`") and stripped.endswith("`") and len(stripped) > 2:
             inner = stripped[1:-1]
-            if any(cmd in inner.lower() for cmd in ['cd ', 'ls ', 'cat ', 'grep ', 'find ', 'mkdir ', 'rm ', 'mv ', 'cp ']):
+            if any(
+                cmd in inner.lower()
+                for cmd in [
+                    "cd ",
+                    "ls ",
+                    "cat ",
+                    "grep ",
+                    "find ",
+                    "mkdir ",
+                    "rm ",
+                    "mv ",
+                    "cp ",
+                ]
+            ):
                 continue
 
         filtered.append(line)
 
-    result = '\n'.join(filtered).strip()
+    result = "\n".join(filtered).strip()
 
     # Clean up multiple consecutive blank lines
-    while '\n\n\n' in result:
-        result = result.replace('\n\n\n', '\n\n')
+    while "\n\n\n" in result:
+        result = result.replace("\n\n\n", "\n\n")
 
     # If filtering removed everything meaningful, return empty
     # (response was just tool logs)
@@ -174,15 +195,16 @@ def filter_tool_logs(response: str) -> str:
 
     return result
 
+
 # Fallback: detect absolute paths to common file types
 # Matches paths like /Users/foo/bar.png or /tmp/output.pdf
 ABSOLUTE_PATH_PATTERN = re.compile(
     r'(/(?:Users|home|tmp|var)[^\s\'"<>|]*\.(?:png|jpg|jpeg|gif|webp|bmp|pdf|mp3|mp4|wav|ogg))',
-    re.IGNORECASE
+    re.IGNORECASE,
 )
 
 # Image extensions (for choosing send method)
-IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
 def extract_files_from_response(response: str) -> tuple[str, list[Path]]:
@@ -219,19 +241,21 @@ def extract_files_from_response(response: str) -> tuple[str, list[Path]]:
                 seen_paths.add(resolved)
 
     # Clean response: remove file markers
-    cleaned = FILE_MARKER_PATTERN.sub('', response)
+    cleaned = FILE_MARKER_PATTERN.sub("", response)
 
     # Optionally clean up lines that are just file paths (cosmetic)
-    lines = cleaned.split('\n')
+    lines = cleaned.split("\n")
     cleaned_lines = []
     for line in lines:
         stripped = line.strip()
         # Skip lines that are just a detected file path
-        if stripped and any(stripped == str(f) or stripped.endswith(str(f)) for f in files_to_send):
+        if stripped and any(
+            stripped == str(f) or stripped.endswith(str(f)) for f in files_to_send
+        ):
             continue
         cleaned_lines.append(line)
 
-    cleaned = '\n'.join(cleaned_lines).strip()
+    cleaned = "\n".join(cleaned_lines).strip()
 
     return cleaned, files_to_send
 
@@ -241,10 +265,10 @@ def extract_files_from_response(response: str) -> tuple[str, list[Path]]:
 # =============================================================================
 
 # Voice/audio extensions
-VOICE_EXTENSIONS = {'.ogg', '.oga', '.mp3', '.wav', '.m4a', '.opus'}
+VOICE_EXTENSIONS = {".ogg", ".oga", ".mp3", ".wav", ".m4a", ".opus"}
 
 # Supported image extensions for vision
-VISION_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
+VISION_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 # Magic bytes for file type validation
 FILE_MAGIC_BYTES = {
@@ -257,10 +281,36 @@ FILE_MAGIC_BYTES = {
 
 # Text-extractable document extensions
 TEXT_DOCUMENT_EXTENSIONS = {
-    '.txt', '.md', '.csv', '.json', '.xml', '.html', '.htm',
-    '.py', '.js', '.ts', '.jsx', '.tsx', '.css', '.yaml', '.yml',
-    '.toml', '.ini', '.cfg', '.conf', '.log', '.sh', '.bash',
-    '.sql', '.r', '.rb', '.go', '.rs', '.java', '.kt', '.swift',
+    ".txt",
+    ".md",
+    ".csv",
+    ".json",
+    ".xml",
+    ".html",
+    ".htm",
+    ".py",
+    ".js",
+    ".ts",
+    ".jsx",
+    ".tsx",
+    ".css",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".ini",
+    ".cfg",
+    ".conf",
+    ".log",
+    ".sh",
+    ".bash",
+    ".sql",
+    ".r",
+    ".rb",
+    ".go",
+    ".rs",
+    ".java",
+    ".kt",
+    ".swift",
 }
 
 
@@ -330,7 +380,10 @@ def extract_document_text(filepath: Path, max_chars: int = 5000) -> str | None:
         if ext in TEXT_DOCUMENT_EXTENSIONS:
             content = filepath.read_text(errors="replace")
             if len(content) > max_chars:
-                content = content[:max_chars] + f"\n\n[... truncated, {len(filepath.read_bytes())} bytes total]"
+                content = (
+                    content[:max_chars]
+                    + f"\n\n[... truncated, {len(filepath.read_bytes())} bytes total]"
+                )
             return content
 
         # PDF: try to extract text with stdlib
@@ -340,7 +393,9 @@ def extract_document_text(filepath: Path, max_chars: int = 5000) -> str | None:
         return None
 
     except Exception as e:
-        logging.getLogger(__name__).warning(f"Could not extract text from {filepath.name}: {e}")
+        logging.getLogger(__name__).warning(
+            f"Could not extract text from {filepath.name}: {e}"
+        )
         return None
 
 
@@ -358,7 +413,10 @@ def _extract_pdf_text_stdlib(filepath: Path, max_chars: int = 5000) -> str | Non
         # Decode raw text between stream/endstream markers
         text_parts = []
         import re as _re
-        for match in _re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", content, _re.DOTALL):
+
+        for match in _re.finditer(
+            rb"stream\r?\n(.*?)\r?\nendstream", content, _re.DOTALL
+        ):
             stream_data = match.group(1)
             # Try to extract text operators (Tj, TJ, ')
             for text_match in _re.finditer(rb"\(([^)]*)\)", stream_data):
@@ -411,7 +469,9 @@ def get_media_type(message) -> str | None:
     return None
 
 
-async def download_media(client: TelegramClient, message, prefix: str = "media") -> Path | None:
+async def download_media(
+    client: TelegramClient, message, prefix: str = "media"
+) -> Path | None:
     """
     Download media from a Telegram message.
 
@@ -502,7 +562,9 @@ async def describe_image(filepath: Path) -> str | None:
     try:
         import ollama
     except ImportError:
-        logging.getLogger(__name__).warning("ollama library not installed for image vision")
+        logging.getLogger(__name__).warning(
+            "ollama library not installed for image vision"
+        )
         return None
 
     try:
@@ -511,14 +573,16 @@ async def describe_image(filepath: Path) -> str | None:
 
         def _describe():
             response = ollama.chat(
-                model='llama3.2-vision:11b',
-                messages=[{
-                    'role': 'user',
-                    'content': 'Describe this image in detail. What do you see?',
-                    'images': [str(filepath)]
-                }]
+                model="llama3.2-vision:11b",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": "Describe this image in detail. What do you see?",
+                        "images": [str(filepath)],
+                    }
+                ],
             )
-            return response['message']['content']
+            return response["message"]["content"]
 
         description = await loop.run_in_executor(None, _describe)
         return description.strip() if description else None
@@ -528,7 +592,9 @@ async def describe_image(filepath: Path) -> str | None:
         return None
 
 
-async def process_incoming_media(client: TelegramClient, message) -> tuple[str, list[Path]]:
+async def process_incoming_media(
+    client: TelegramClient, message
+) -> tuple[str, list[Path]]:
     """
     Process media in an incoming message.
 
@@ -573,7 +639,7 @@ async def process_incoming_media(client: TelegramClient, message) -> tuple[str, 
         # Transcribe voice message
         transcription = await transcribe_voice(downloaded)
         if transcription:
-            description = f"[Voice message transcription: \"{transcription}\"]"
+            description = f'[Voice message transcription: "{transcription}"]'
         else:
             description = f"[User sent a voice message - saved to {downloaded.name}]"
 
@@ -581,7 +647,9 @@ async def process_incoming_media(client: TelegramClient, message) -> tuple[str, 
         # Use Ollama LLaVA to describe the image
         image_description = await describe_image(downloaded)
         if image_description:
-            description = f"[User sent an image]\nImage description: {image_description}"
+            description = (
+                f"[User sent an image]\nImage description: {image_description}"
+            )
         else:
             # Fallback if vision model is not available
             description = f"[User sent an image - saved to {downloaded.name}]"
@@ -590,7 +658,7 @@ async def process_incoming_media(client: TelegramClient, message) -> tuple[str, 
         # Try transcribing audio files too
         transcription = await transcribe_voice(downloaded)
         if transcription:
-            description = f"[Audio file transcription: \"{transcription}\"]"
+            description = f'[Audio file transcription: "{transcription}"]'
         else:
             description = f"[User sent an audio file - saved to {downloaded.name}]"
 
@@ -617,7 +685,11 @@ SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "valor_bridge")
 
 # Active projects on this machine (comma-separated)
 # Example: ACTIVE_PROJECTS=valor,popoto,django-project-template
-ACTIVE_PROJECTS = [p.strip().lower() for p in os.getenv("ACTIVE_PROJECTS", "valor").split(",") if p.strip()]
+ACTIVE_PROJECTS = [
+    p.strip().lower()
+    for p in os.getenv("ACTIVE_PROJECTS", "valor").split(",")
+    if p.strip()
+]
 
 # =============================================================================
 # Logging Configuration
@@ -696,7 +768,9 @@ def load_config() -> dict:
         if project_key not in projects:
             continue
         project = projects[project_key]
-        working_dir = project.get("working_directory") or defaults.get("working_directory")
+        working_dir = project.get("working_directory") or defaults.get(
+            "working_directory"
+        )
         if not working_dir:
             logger.error(
                 f"Project '{project_key}' has no working_directory and no default set. "
@@ -730,10 +804,14 @@ def build_group_to_project_map(config: dict) -> dict:
         for group in groups:
             group_lower = group.lower()
             if group_lower in group_map:
-                logger.warning(f"Group '{group}' is mapped to multiple projects, using first")
+                logger.warning(
+                    f"Group '{group}' is mapped to multiple projects, using first"
+                )
                 continue
             group_map[group_lower] = project
-            logger.info(f"Mapping group '{group}' -> project '{project.get('name', project_key)}'")
+            logger.info(
+                f"Mapping group '{group}' -> project '{project.get('name', project_key)}'"
+            )
 
     return group_map
 
@@ -749,7 +827,10 @@ ALL_MONITORED_GROUPS = list(GROUP_TO_PROJECT.keys())
 
 # DM settings - respond to DMs if any active project allows it
 RESPOND_TO_DMS = any(
-    CONFIG.get("projects", {}).get(p, {}).get("telegram", {}).get("respond_to_dms", True)
+    CONFIG.get("projects", {})
+    .get(p, {})
+    .get("telegram", {})
+    .get("respond_to_dms", True)
     for p in ACTIVE_PROJECTS
 )
 
@@ -771,15 +852,20 @@ if not DM_WHITELIST:
 
 # Link collectors - usernames whose links are automatically stored
 # When these users share a URL, it gets saved with metadata
-LINK_COLLECTORS = [name.strip().lower() for name in
-    os.getenv("TELEGRAM_LINK_COLLECTORS", "").split(",") if name.strip()]
+LINK_COLLECTORS = [
+    name.strip().lower()
+    for name in os.getenv("TELEGRAM_LINK_COLLECTORS", "").split(",")
+    if name.strip()
+]
 
 # Link summarization settings
 MAX_LINKS_PER_MESSAGE = 5  # Don't summarize more than 5 links per message
 LINK_SUMMARY_CACHE_HOURS = 24  # Don't re-summarize URLs within 24 hours
 
 # Default mention triggers
-DEFAULT_MENTIONS = DEFAULTS.get("telegram", {}).get("mention_triggers", ["@valor", "valor", "hey valor"])
+DEFAULT_MENTIONS = DEFAULTS.get("telegram", {}).get(
+    "mention_triggers", ["@valor", "valor", "hey valor"]
+)
 
 
 def find_project_for_chat(chat_title: str | None) -> dict | None:
@@ -796,7 +882,7 @@ def find_project_for_chat(chat_title: str | None) -> dict | None:
 
 
 # Pattern to detect @mentions in messages
-AT_MENTION_PATTERN = re.compile(r'@(\w+)')
+AT_MENTION_PATTERN = re.compile(r"@(\w+)")
 
 # Known Valor usernames for @mention detection
 VALOR_USERNAMES = {"valor", "valorengels"}
@@ -851,14 +937,41 @@ def classify_needs_response(text: str) -> bool:
 
     # Fast path: common acknowledgments (case-insensitive)
     acknowledgments = {
-        "thanks", "thank you", "thx", "ty",
-        "ok", "okay", "k", "kk",
-        "got it", "gotcha", "understood",
-        "nice", "great", "awesome", "perfect", "cool",
-        "yes", "yep", "yeah", "yup", "no", "nope",
-        "👍", "👌", "✅", "🙏", "❤️", "🔥",
-        "lol", "lmao", "haha", "heh",
-        "brb", "afk", "bbl",
+        "thanks",
+        "thank you",
+        "thx",
+        "ty",
+        "ok",
+        "okay",
+        "k",
+        "kk",
+        "got it",
+        "gotcha",
+        "understood",
+        "nice",
+        "great",
+        "awesome",
+        "perfect",
+        "cool",
+        "yes",
+        "yep",
+        "yeah",
+        "yup",
+        "no",
+        "nope",
+        "👍",
+        "👌",
+        "✅",
+        "🙏",
+        "❤️",
+        "🔥",
+        "lol",
+        "lmao",
+        "haha",
+        "heh",
+        "brb",
+        "afk",
+        "bbl",
     }
     text_lower = text.strip().lower().rstrip("!.,")
     if text_lower in acknowledgments:
@@ -867,25 +980,30 @@ def classify_needs_response(text: str) -> bool:
     # Use Ollama for more nuanced classification
     try:
         import ollama
+
         response = ollama.chat(
-            model='llama3.2:3b',
-            messages=[{
-                'role': 'user',
-                'content': f"""Classify this message. Reply with ONLY "work" or "ignore".
+            model="llama3.2:3b",
+            messages=[
+                {
+                    "role": "user",
+                    "content": f"""Classify this message. Reply with ONLY "work" or "ignore".
 
 - "work" = question, request, instruction, bug report, or anything needing action
 - "ignore" = acknowledgment, thanks, greeting, side chat, or social message
 
 Message: {text[:200]}
 
-Classification:"""
-            }],
-            options={'temperature': 0}
+Classification:""",
+                }
+            ],
+            options={"temperature": 0},
         )
-        result = response['message']['content'].strip().lower()
-        return 'work' in result
+        result = response["message"]["content"].strip().lower()
+        return "work" in result
     except Exception as e:
-        logging.getLogger(__name__).debug(f"Ollama classification failed, defaulting to respond: {e}")
+        logging.getLogger(__name__).debug(
+            f"Ollama classification failed, defaulting to respond: {e}"
+        )
         # Default to responding if Ollama fails
         return True
 
@@ -896,7 +1014,15 @@ async def classify_needs_response_async(text: str) -> bool:
     return await loop.run_in_executor(None, classify_needs_response, text)
 
 
-def should_respond_sync(text: str, is_dm: bool, chat_title: str | None, project: dict | None, sender_name: str | None = None, sender_username: str | None = None, sender_id: int | None = None) -> bool:
+def should_respond_sync(
+    text: str,
+    is_dm: bool,
+    chat_title: str | None,
+    project: dict | None,
+    sender_name: str | None = None,
+    sender_username: str | None = None,
+    sender_id: int | None = None,
+) -> bool:
     """
     Synchronous check for basic response conditions.
     Used for DMs and groups without respond_to_unaddressed.
@@ -956,7 +1082,18 @@ async def should_respond_async(
 
     # DMs: use sync logic
     if is_dm:
-        return should_respond_sync(text, is_dm, chat_title, project, sender_name, sender_username, sender_id), False
+        return (
+            should_respond_sync(
+                text,
+                is_dm,
+                chat_title,
+                project,
+                sender_name,
+                sender_username,
+                sender_id,
+            ),
+            False,
+        )
 
     # Must be in a monitored group
     if not project:
@@ -970,7 +1107,18 @@ async def should_respond_async(
 
     # For groups NOT using respond_to_unaddressed, use sync mention-based logic
     if not telegram_config.get("respond_to_unaddressed", False):
-        return should_respond_sync(text, is_dm, chat_title, project, sender_name, sender_username, sender_id), False
+        return (
+            should_respond_sync(
+                text,
+                is_dm,
+                chat_title,
+                project,
+                sender_name,
+                sender_username,
+                sender_id,
+            ),
+            False,
+        )
 
     # === respond_to_unaddressed logic (the 4 cases) ===
 
@@ -978,7 +1126,9 @@ async def should_respond_async(
     is_reply_to_valor = False
     if message.reply_to_msg_id:
         try:
-            replied_msg = await client.get_messages(event.chat_id, ids=message.reply_to_msg_id)
+            replied_msg = await client.get_messages(
+                event.chat_id, ids=message.reply_to_msg_id
+            )
             if replied_msg and replied_msg.out:  # .out means sent by us (Valor)
                 is_reply_to_valor = True
                 logger.debug(f"Case 2: Reply to Valor - responding")
@@ -1081,7 +1231,10 @@ def build_activity_context(working_dir: str | None = None) -> str:
     try:
         result = subprocess.run(
             ["git", "log", "--oneline", "--since=24 hours ago", "-5"],
-            capture_output=True, text=True, timeout=5, cwd=cwd
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=cwd,
         )
         if result.stdout.strip():
             context_parts.append(f"RECENT COMMITS (last 24h):\n{result.stdout.strip()}")
@@ -1092,17 +1245,23 @@ def build_activity_context(working_dir: str | None = None) -> str:
     try:
         branch_result = subprocess.run(
             ["git", "branch", "--show-current"],
-            capture_output=True, text=True, timeout=5, cwd=cwd
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=cwd,
         )
         if branch_result.stdout.strip():
             context_parts.append(f"CURRENT BRANCH: {branch_result.stdout.strip()}")
 
         status_result = subprocess.run(
             ["git", "status", "--short"],
-            capture_output=True, text=True, timeout=5, cwd=cwd
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=cwd,
         )
         if status_result.stdout.strip():
-            modified_files = status_result.stdout.strip().split('\n')[:5]
+            modified_files = status_result.stdout.strip().split("\n")[:5]
             context_parts.append(f"MODIFIED FILES:\n" + "\n".join(modified_files))
     except Exception as e:
         logger.debug(f"Could not get git status: {e}")
@@ -1112,9 +1271,7 @@ def build_activity_context(working_dir: str | None = None) -> str:
     if plans_dir.exists():
         try:
             recent_plans = sorted(
-                plans_dir.glob("*.md"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True
+                plans_dir.glob("*.md"), key=lambda p: p.stat().st_mtime, reverse=True
             )[:3]
             if recent_plans:
                 plan_names = [p.stem for p in recent_plans]
@@ -1223,12 +1380,14 @@ async def fetch_reply_chain(
             if msg.out:
                 sender_name = "Valor"
 
-            chain.append({
-                "sender": sender_name,
-                "content": msg.text or "[media]",
-                "message_id": msg.id,
-                "date": msg.date,
-            })
+            chain.append(
+                {
+                    "sender": sender_name,
+                    "content": msg.text or "[media]",
+                    "message_id": msg.id,
+                    "date": msg.date,
+                }
+            )
 
             # Move to parent message
             if msg.reply_to_msg_id:
@@ -1328,7 +1487,9 @@ async def get_link_summaries(
     # Rate limit: max 5 links per message
     urls = urls[:MAX_LINKS_PER_MESSAGE]
     if len(urls_result.get("urls", [])) > MAX_LINKS_PER_MESSAGE:
-        logger.info(f"Rate limiting: only processing {MAX_LINKS_PER_MESSAGE} of {len(urls_result.get('urls', []))} links")
+        logger.info(
+            f"Rate limiting: only processing {MAX_LINKS_PER_MESSAGE} of {len(urls_result.get('urls', []))} links"
+        )
 
     summaries = []
 
@@ -1340,12 +1501,14 @@ async def get_link_summaries(
             if existing and existing.get("ai_summary"):
                 # Use cached summary
                 logger.debug(f"Using cached summary for: {url[:50]}...")
-                summaries.append({
-                    "url": url,
-                    "summary": existing["ai_summary"],
-                    "title": existing.get("title"),
-                    "cached": True,
-                })
+                summaries.append(
+                    {
+                        "url": url,
+                        "summary": existing["ai_summary"],
+                        "title": existing.get("title"),
+                        "cached": True,
+                    }
+                )
                 continue
 
             # Need to fetch new summary
@@ -1374,12 +1537,14 @@ async def get_link_summaries(
             )
 
             if summary:
-                summaries.append({
-                    "url": url,
-                    "summary": summary,
-                    "title": title,
-                    "cached": False,
-                })
+                summaries.append(
+                    {
+                        "url": url,
+                        "summary": summary,
+                        "title": title,
+                        "cached": False,
+                    }
+                )
                 logger.info(f"Stored link with summary: {url[:50]}...")
             else:
                 logger.warning(f"No summary generated for: {url[:50]}...")
@@ -1426,23 +1591,23 @@ def format_link_summaries(summaries: list[dict]) -> str:
 # =============================================================================
 
 # Reaction emojis for different stages
-REACTION_RECEIVED = "👀"      # Message acknowledged
-REACTION_PROCESSING = "🤔"    # Default thinking emoji
-REACTION_SUCCESS = "👍"       # Completed successfully
-REACTION_ERROR = "❌"         # Something went wrong
+REACTION_RECEIVED = "👀"  # Message acknowledged
+REACTION_PROCESSING = "🤔"  # Default thinking emoji
+REACTION_SUCCESS = "👍"  # Completed successfully
+REACTION_ERROR = "❌"  # Something went wrong
 
 # Intent-specific processing emojis (classified by local Ollama)
 INTENT_REACTIONS = {
-    "search": "🤔",           # Searching the web
-    "code_execution": "💻",   # Running code
-    "image_generation": "🎨", # Creating an image
-    "image_analysis": "🤔",   # Analyzing an image
-    "file_operation": "🤔",   # File operations
-    "git_operation": "💻",    # Git work
-    "chat": "🤔",             # Thinking/conversation
-    "tool_use": "🤔",         # Using a tool
-    "system": "🤔",           # System task
-    "unknown": "🤔",          # Default thinking
+    "search": "🤔",  # Searching the web
+    "code_execution": "💻",  # Running code
+    "image_generation": "🎨",  # Creating an image
+    "image_analysis": "🤔",  # Analyzing an image
+    "file_operation": "🤔",  # File operations
+    "git_operation": "💻",  # Git work
+    "chat": "🤔",  # Thinking/conversation
+    "tool_use": "🤔",  # Using a tool
+    "system": "🤔",  # System task
+    "unknown": "🤔",  # Default thinking
 }
 
 
@@ -1459,6 +1624,7 @@ def get_processing_emoji(message: str) -> str:
     """
     try:
         from intent import classify_intent
+
         result = classify_intent(message, use_ollama=True)
         intent = result.get("intent", "unknown")
         return INTENT_REACTIONS.get(intent, REACTION_PROCESSING)
@@ -1476,7 +1642,9 @@ async def get_processing_emoji_async(message: str) -> str:
     return await loop.run_in_executor(None, get_processing_emoji, message)
 
 
-async def set_reaction(client: TelegramClient, chat_id: int, msg_id: int, emoji: str | None) -> bool:
+async def set_reaction(
+    client: TelegramClient, chat_id: int, msg_id: int, emoji: str | None
+) -> bool:
     """
     Set a reaction on a message.
 
@@ -1491,11 +1659,13 @@ async def set_reaction(client: TelegramClient, chat_id: int, msg_id: int, emoji:
     """
     try:
         reaction = [ReactionEmoji(emoticon=emoji)] if emoji else []
-        await client(SendReactionRequest(
-            peer=chat_id,
-            msg_id=msg_id,
-            reaction=reaction,
-        ))
+        await client(
+            SendReactionRequest(
+                peer=chat_id,
+                msg_id=msg_id,
+                reaction=reaction,
+            )
+        )
         return True
     except Exception as e:
         logger.debug(f"Could not set reaction '{emoji}': {e}")
@@ -1522,7 +1692,9 @@ async def send_response_with_files(
     """
     # Resolve chat_id and reply_to from event or explicit params
     _chat_id = chat_id or (event.chat_id if event else None)
-    _reply_to = reply_to or (event.message.id if event and hasattr(event, 'message') else None)
+    _reply_to = reply_to or (
+        event.message.id if event and hasattr(event, "message") else None
+    )
 
     if not _chat_id:
         logger.error("send_response_with_files: no chat_id available")
@@ -1541,12 +1713,15 @@ async def send_response_with_files(
     if text and len(text) > 500:
         try:
             from bridge.summarizer import summarize_response
+
             summarized = await summarize_response(text)
             text = summarized.text
             if summarized.full_output_file:
                 files.append(summarized.full_output_file)
             if summarized.was_summarized:
-                logger.info(f"Summarized response: {len(response)} -> {len(text)} chars")
+                logger.info(
+                    f"Summarized response: {len(response)} -> {len(text)} chars"
+                )
         except Exception as e:
             logger.warning(f"Summarization failed, using original: {e}")
 
@@ -1564,7 +1739,9 @@ async def send_response_with_files(
             logger.info(f"Sent file: {file_path}")
         except Exception as e:
             logger.error(f"Failed to send file {file_path}: {e}")
-            await client.send_message(_chat_id, f"Failed to send file: {file_path.name}")
+            await client.send_message(
+                _chat_id, f"Failed to send file: {file_path.name}"
+            )
 
     # Track if we sent anything
     sent_content = bool(files)
@@ -1585,6 +1762,7 @@ async def send_response_with_files(
             # Persist to dead-letter queue for later retry
             try:
                 from bridge.dead_letters import persist_failed_delivery
+
                 await persist_failed_delivery(
                     chat_id=_chat_id,
                     reply_to=_reply_to,
@@ -1596,22 +1774,34 @@ async def send_response_with_files(
     return sent_content
 
 
-async def get_agent_response_clawdbot(message: str, session_id: str, sender_name: str, chat_title: str | None, project: dict | None, chat_id: str | None = None) -> str:
+async def get_agent_response_clawdbot(
+    message: str,
+    session_id: str,
+    sender_name: str,
+    chat_title: str | None,
+    project: dict | None,
+    chat_id: str | None = None,
+) -> str:
     """Call clawdbot agent and get response (legacy implementation)."""
     import time
+
     start_time = time.time()
     request_id = f"{session_id}_{int(start_time)}"
 
     # CRITICAL: Determine working directory to prevent agent from wandering into wrong directories
     if project:
-        working_dir = project.get("working_directory", DEFAULTS.get("working_directory"))
+        working_dir = project.get(
+            "working_directory", DEFAULTS.get("working_directory")
+        )
     else:
         working_dir = DEFAULTS.get("working_directory")
 
     # Fallback to current directory if not configured (shouldn't happen)
     if not working_dir:
         working_dir = str(Path(__file__).parent.parent)
-        logger.warning(f"[{request_id}] No working_directory configured, using {working_dir}")
+        logger.warning(
+            f"[{request_id}] No working_directory configured, using {working_dir}"
+        )
 
     try:
         # Build context-enriched message
@@ -1626,7 +1816,9 @@ async def get_agent_response_clawdbot(message: str, session_id: str, sender_name
         activity_context = ""
         if is_status_question(message):
             activity_context = build_activity_context(working_dir)
-            logger.debug(f"[{request_id}] Status question detected, injecting activity context")
+            logger.debug(
+                f"[{request_id}] Status question detected, injecting activity context"
+            )
 
         enriched_message = context
         if activity_context:
@@ -1716,7 +1908,9 @@ async def get_agent_response_clawdbot(message: str, session_id: str, sender_name
 
         if process.returncode != 0:
             stderr_text = stderr.decode()
-            logger.error(f"[{request_id}] Clawdbot error (exit {process.returncode}) after {elapsed:.1f}s")
+            logger.error(
+                f"[{request_id}] Clawdbot error (exit {process.returncode}) after {elapsed:.1f}s"
+            )
             logger.error(f"[{request_id}] Stderr: {stderr_text[:500]}")
 
             log_event(
@@ -1747,10 +1941,14 @@ async def get_agent_response_clawdbot(message: str, session_id: str, sender_name
         except json.JSONDecodeError:
             # Fallback to raw output if not valid JSON (shouldn't happen with --json)
             response = raw_output
-            logger.warning(f"[{request_id}] Failed to parse JSON response, using raw output")
+            logger.warning(
+                f"[{request_id}] Failed to parse JSON response, using raw output"
+            )
 
         # Log success with timing
-        logger.info(f"[{request_id}] Agent responded in {elapsed:.1f}s ({len(response)} chars)")
+        logger.info(
+            f"[{request_id}] Agent responded in {elapsed:.1f}s ({len(response)} chars)"
+        )
         logger.debug(f"[{request_id}] Response preview: {response[:200]}...")
         if stderr_text:
             logger.debug(f"[{request_id}] Stderr: {stderr_text[:200]}")
@@ -1839,7 +2037,9 @@ async def attempt_self_healing(error: str, session_id: str) -> None:
     try:
         # Kill any stuck clawdbot processes
         kill_result = await asyncio.create_subprocess_exec(
-            "pkill", "-f", "clawdbot agent",
+            "pkill",
+            "-f",
+            "clawdbot agent",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -1859,7 +2059,12 @@ async def create_failure_plan(message: str, error: str, session_id: str) -> None
     Instead of showing errors to the user, we document them for later review.
     """
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    plan_path = Path(__file__).parent.parent / "docs" / "plans" / f"fix-bridge-failure-{timestamp}.md"
+    plan_path = (
+        Path(__file__).parent.parent
+        / "docs"
+        / "plans"
+        / f"fix-bridge-failure-{timestamp}.md"
+    )
 
     # Ensure plans directory exists
     plan_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1926,12 +2131,13 @@ async def get_agent_response_with_retry(
                 logger.info(f"Retry attempt {attempt + 1}/{MAX_RETRIES}")
 
             response = await get_agent_response(
-                message, session_id, sender_name,
-                chat_title, project, chat_id
+                message, session_id, sender_name, chat_title, project, chat_id
             )
 
             # Check if response looks like an error
-            if response.startswith("Error:") or response.startswith("Request timed out"):
+            if response.startswith("Error:") or response.startswith(
+                "Request timed out"
+            ):
                 last_error = response
                 if attempt < MAX_RETRIES - 1:
                     await attempt_self_healing(response, session_id)
@@ -1975,7 +2181,9 @@ async def main():
         sys.exit(1)
 
     logger.info(f"Starting Valor bridge")
-    logger.info(f"Agent backend: {'Claude Agent SDK' if USE_CLAUDE_SDK else 'Clawdbot (legacy)'}")
+    logger.info(
+        f"Agent backend: {'Claude Agent SDK' if USE_CLAUDE_SDK else 'Clawdbot (legacy)'}"
+    )
     logger.info(f"Active projects: {ACTIVE_PROJECTS}")
     logger.info(f"Monitored groups: {ALL_MONITORED_GROUPS}")
     logger.info(f"Respond to DMs: {RESPOND_TO_DMS}")
@@ -2028,7 +2236,9 @@ async def main():
                 sender=sender_name,
                 message_id=message.id,
                 timestamp=message.date,
-                message_type="text" if not message.media else get_media_type(message) or "media",
+                message_type=(
+                    "text" if not message.media else get_media_type(message) or "media"
+                ),
             )
             if store_result.get("stored"):
                 logger.debug(f"Stored message {message.id} from {sender_name}")
@@ -2066,16 +2276,28 @@ async def main():
 
         # Check if we should respond (async for Ollama classification on unaddressed messages)
         should_reply, is_reply_to_valor = await should_respond_async(
-            client, event, text, is_dm, chat_title, project, sender_name, sender_username, sender_id
+            client,
+            event,
+            text,
+            is_dm,
+            chat_title,
+            project,
+            sender_name,
+            sender_username,
+            sender_id,
         )
         if not should_reply:
             if is_dm and DM_WHITELIST:
-                logger.debug(f"Ignoring DM from {sender_name} (id={sender_id}) - not in whitelist")
+                logger.debug(
+                    f"Ignoring DM from {sender_name} (id={sender_id}) - not in whitelist"
+                )
             return
 
         project_name = project.get("name", "DM") if project else "DM"
         message_id = message.id
-        logger.info(f"[{project_name}] Message {message_id} from {sender_name} in {chat_title or 'DM'}: {text[:50]}...")
+        logger.info(
+            f"[{project_name}] Message {message_id} from {sender_name} in {chat_title or 'DM'}: {text[:50]}..."
+        )
         logger.debug(f"[{project_name}] Full message text: {text}")
 
         # Log incoming message event
@@ -2095,7 +2317,9 @@ async def main():
         media_description = ""
         media_files = []
         if message.media:
-            media_description, media_files = await process_incoming_media(client, message)
+            media_description, media_files = await process_incoming_media(
+                client, message
+            )
             if media_description:
                 logger.info(f"Processed media: {media_description[:100]}...")
 
@@ -2117,7 +2341,9 @@ async def main():
         if youtube_urls:
             logger.info(f"Found {len(youtube_urls)} YouTube URL(s), processing...")
             try:
-                enriched_text, youtube_results = await process_youtube_urls_in_text(text)
+                enriched_text, youtube_results = await process_youtube_urls_in_text(
+                    text
+                )
                 # Count successful transcriptions
                 successful = sum(1 for r in youtube_results if r.get("success"))
                 if successful > 0:
@@ -2125,12 +2351,16 @@ async def main():
                     clean_text = clean_message(enriched_text, project)
                     if media_description:
                         clean_text = f"{media_description}\n\n{clean_text}"
-                    logger.info(f"Successfully transcribed {successful}/{len(youtube_urls)} YouTube video(s)")
+                    logger.info(
+                        f"Successfully transcribed {successful}/{len(youtube_urls)} YouTube video(s)"
+                    )
                 else:
                     # Log errors but continue with original text
                     for r in youtube_results:
                         if r.get("error"):
-                            logger.warning(f"YouTube processing failed for {r.get('video_id')}: {r.get('error')}")
+                            logger.warning(
+                                f"YouTube processing failed for {r.get('video_id')}: {r.get('error')}"
+                            )
             except Exception as e:
                 logger.error(f"Error processing YouTube URLs: {e}")
                 # Continue with original text on error
@@ -2148,7 +2378,9 @@ async def main():
         # Append link summaries to the message for context
         if link_summary_text:
             clean_text = f"{clean_text}\n\n--- LINK SUMMARIES ---\n{link_summary_text}"
-            logger.info(f"Added {len(link_summaries)} link summaries to message context")
+            logger.info(
+                f"Added {len(link_summaries)} link summaries to message context"
+            )
 
         # Fetch reply chain context if this message is replying to something
         # This gives Valor full thread context when someone replies to an old message
@@ -2206,22 +2438,33 @@ async def main():
         if USE_CLAUDE_SDK:
             import re as _re
             from agent.job_queue import (
-                enqueue_job, check_revival,
-                record_revival_cooldown, queue_revival_job,
+                enqueue_job,
+                check_revival,
+                record_revival_cooldown,
+                queue_revival_job,
             )
             from agent.steering import push_steering_message
 
             # Check if this is a reply to a revival notification (stateless: read the replied-to message)
             if message.reply_to_msg_id:
                 try:
-                    replied_msg = await client.get_messages(event.chat_id, ids=message.reply_to_msg_id)
-                    if replied_msg and replied_msg.text and replied_msg.text.startswith("Unfinished work detected"):
-                        branch_match = _re.search(r'`([^`]+)`', replied_msg.text)
+                    replied_msg = await client.get_messages(
+                        event.chat_id, ids=message.reply_to_msg_id
+                    )
+                    if (
+                        replied_msg
+                        and replied_msg.text
+                        and replied_msg.text.startswith("Unfinished work detected")
+                    ):
+                        branch_match = _re.search(r"`([^`]+)`", replied_msg.text)
                         if branch_match:
                             revival_branch = branch_match.group(1)
                             working_dir_str = ""
                             if project:
-                                working_dir_str = project.get("working_directory", DEFAULTS.get("working_directory", ""))
+                                working_dir_str = project.get(
+                                    "working_directory",
+                                    DEFAULTS.get("working_directory", ""),
+                                )
                             if not working_dir_str:
                                 working_dir_str = str(Path(__file__).parent.parent)
                             revival_info = {
@@ -2230,14 +2473,18 @@ async def main():
                                 "session_id": session_id,
                                 "working_dir": working_dir_str,
                             }
-                            logger.info(f"[{project_name}] Reply to revival notification, queuing revival with context")
+                            logger.info(
+                                f"[{project_name}] Reply to revival notification, queuing revival with context"
+                            )
                             await queue_revival_job(
                                 revival_info=revival_info,
                                 chat_id=telegram_chat_id,
                                 message_id=message.id,
                                 additional_context=clean_text,
                             )
-                            await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
+                            await set_reaction(
+                                client, event.chat_id, message.id, REACTION_RECEIVED
+                            )
                             return
                 except Exception as e:
                     logger.debug(f"Revival reply check error: {e}")
@@ -2251,18 +2498,22 @@ async def main():
                         session_id=session_id, status="active"
                     )
                     if active_sessions:
-                        # Route to steering queue instead of job queue
-                        push_steering_message(
-                            session_id, clean_text, sender_name
-                        )
-                        # Determine abort vs steer for ack message
+                        # Route to steering queue instead of job queue.
+                        # push_steering_message auto-detects abort keywords.
                         from agent.steering import ABORT_KEYWORDS
 
                         is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
-                        if is_abort:
-                            ack_text = "Stopping current task."
-                        else:
-                            ack_text = "Adding to current task"
+                        push_steering_message(
+                            session_id,
+                            clean_text,
+                            sender_name,
+                            is_abort=is_abort,
+                        )
+                        ack_text = (
+                            "Stopping current task."
+                            if is_abort
+                            else "Adding to current task"
+                        )
                         await client.send_message(
                             event.chat_id, ack_text, reply_to=message.id
                         )
@@ -2279,28 +2530,39 @@ async def main():
             # Lightweight revival check (no SDK agent, just git state)
             working_dir_str = ""
             if project:
-                working_dir_str = project.get("working_directory", DEFAULTS.get("working_directory", ""))
+                working_dir_str = project.get(
+                    "working_directory", DEFAULTS.get("working_directory", "")
+                )
             if not working_dir_str:
                 working_dir_str = str(Path(__file__).parent.parent)
 
             revival_info = check_revival(project_key, working_dir_str, telegram_chat_id)
             if revival_info:
-                revival_msg = f"Unfinished work detected on branch `{revival_info['branch']}`"
+                revival_msg = (
+                    f"Unfinished work detected on branch `{revival_info['branch']}`"
+                )
                 if revival_info.get("plan_context"):
                     revival_msg += f"\n\n> {revival_info['plan_context']}"
                 revival_msg += "\n\nReply to this message to resume."
                 await client.send_message(event.chat_id, revival_msg)
                 record_revival_cooldown(telegram_chat_id)
-                logger.info(f"[{project_name}] Sent revival prompt for branch {revival_info['branch']}")
+                logger.info(
+                    f"[{project_name}] Sent revival prompt for branch {revival_info['branch']}"
+                )
 
                 # Mark the stale work as dormant so it doesn't re-trigger.
                 # A reply to the revival message will re-queue via branch name in the text.
                 try:
                     from agent.branch_manager import mark_work_done
+
                     mark_work_done(Path(working_dir_str), revival_info["branch"])
-                    logger.info(f"[{project_name}] Marked stale branch {revival_info['branch']} as dormant")
+                    logger.info(
+                        f"[{project_name}] Marked stale branch {revival_info['branch']} as dormant"
+                    )
                 except Exception as e:
-                    logger.warning(f"[{project_name}] Failed to mark stale work dormant: {e}")
+                    logger.warning(
+                        f"[{project_name}] Failed to mark stale work dormant: {e}"
+                    )
 
             # Build and enqueue the job (HIGH priority — top of FILO stack)
             depth = await enqueue_job(
@@ -2321,15 +2583,23 @@ async def main():
                     reply_to=message.id,
                 )
 
-            logger.info(f"[{project_name}] Queued job for {sender_name} (msg {message_id}, depth={depth})")
+            logger.info(
+                f"[{project_name}] Queued job for {sender_name} (msg {message_id}, depth={depth})"
+            )
 
         # === LEGACY MODE: Synchronous with retry ===
         else:
             try:
                 agent_task = asyncio.create_task(
                     get_agent_response_with_retry(
-                        clean_text, session_id, sender_name, chat_title, project,
-                        telegram_chat_id, client, message.id
+                        clean_text,
+                        session_id,
+                        sender_name,
+                        chat_title,
+                        project,
+                        telegram_chat_id,
+                        client,
+                        message.id,
                     )
                 )
 
@@ -2343,9 +2613,13 @@ async def main():
                 await set_reaction(client, event.chat_id, message.id, REACTION_SUCCESS)
 
                 if sent_response:
-                    logger.info(f"[{project_name}] Replied to {sender_name} (msg {message_id})")
+                    logger.info(
+                        f"[{project_name}] Replied to {sender_name} (msg {message_id})"
+                    )
                 else:
-                    logger.info(f"[{project_name}] Processed message from {sender_name} (msg {message_id}) - no response needed")
+                    logger.info(
+                        f"[{project_name}] Processed message from {sender_name} (msg {message_id}) - no response needed"
+                    )
 
                 # Store in history
                 try:
@@ -2373,7 +2647,9 @@ async def main():
             except Exception as e:
                 # ❌ Error = Something went wrong
                 await set_reaction(client, event.chat_id, message.id, REACTION_ERROR)
-                logger.error(f"[{project_name}] Error processing message from {sender_name}: {e}")
+                logger.error(
+                    f"[{project_name}] Error processing message from {sender_name}: {e}"
+                )
                 raise
 
     # Register signal handlers for graceful shutdown
@@ -2385,12 +2661,15 @@ async def main():
         logger.info(f"Received {sig_name}, shutting down gracefully...")
         SHUTTING_DOWN = True
         # Schedule client disconnect on the event loop
-        loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_graceful_shutdown(client)))
+        loop.call_soon_threadsafe(
+            lambda: asyncio.ensure_future(_graceful_shutdown(client))
+        )
 
     async def _graceful_shutdown(tg_client):
         """Reset in-flight jobs and disconnect."""
         if USE_CLAUDE_SDK:
             from agent.job_queue import _reset_running_jobs
+
             for _pkey in ACTIVE_PROJECTS:
                 try:
                     reset = await _reset_running_jobs(_pkey)
@@ -2416,6 +2695,7 @@ async def main():
     # Replay any dead-lettered messages from previous session
     try:
         from bridge.dead_letters import replay_dead_letters
+
         replayed = await replay_dead_letters(client)
         if replayed:
             logger.info(f"Replayed {replayed} dead-lettered message(s)")
@@ -2433,7 +2713,9 @@ async def main():
         for _pkey, _pconfig in CONFIG.get("projects", {}).items():
             # Register project config so job queue can read auto_merge etc.
             register_project_config(_pkey, _pconfig)
-            _wd = _pconfig.get("working_directory", DEFAULTS.get("working_directory", ""))
+            _wd = _pconfig.get(
+                "working_directory", DEFAULTS.get("working_directory", "")
+            )
             if not _wd:
                 continue
 
@@ -2443,7 +2725,13 @@ async def main():
                     try:
                         filtered = filter_tool_logs(text)
                         if filtered:
-                            sent = await send_response_with_files(_client, None, filtered, chat_id=int(chat_id), reply_to=reply_to_msg_id)
+                            sent = await send_response_with_files(
+                                _client,
+                                None,
+                                filtered,
+                                chat_id=int(chat_id),
+                                reply_to=reply_to_msg_id,
+                            )
                             if sent:
                                 try:
                                     store_message(
@@ -2465,11 +2753,13 @@ async def main():
                             f"Job queue _send callback failed for chat {chat_id}: {e}",
                             exc_info=True,
                         )
+
                 return _send
 
             async def _make_react_cb(_client=client):
                 async def _react(chat_id: str, msg_id: int, emoji: str | None) -> None:
                     await set_reaction(_client, int(chat_id), msg_id, emoji)
+
                 return _react
 
             register_queue_callbacks(
@@ -2499,15 +2789,16 @@ async def main():
             _get_pending_jobs_sync,
             _recover_interrupted_jobs,
         )
+
         for _pkey in ACTIVE_PROJECTS:
             recovered = _recover_interrupted_jobs(_pkey)
             if recovered:
-                logger.info(
-                    f"[{_pkey}] Recovered {recovered} interrupted job(s)"
-                )
+                logger.info(f"[{_pkey}] Recovered {recovered} interrupted job(s)")
             pending_jobs = _get_pending_jobs_sync(_pkey)
             if pending_jobs:
-                logger.info(f"[{_pkey}] Found {len(pending_jobs)} persisted job(s), restarting worker")
+                logger.info(
+                    f"[{_pkey}] Found {len(pending_jobs)} persisted job(s), restarting worker"
+                )
                 _ensure_worker(_pkey)
 
     # Keep running

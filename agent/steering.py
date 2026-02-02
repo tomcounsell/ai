@@ -73,7 +73,8 @@ def push_steering_message(
 def pop_all_steering_messages(session_id: str) -> list[dict]:
     """Pop ALL pending steering messages (FIFO order).
 
-    Drains the queue atomically to handle multiple rapid messages.
+    Drains the queue via sequential LPOPs. Not strictly atomic, but safe
+    because only one consumer exists per session (the watchdog hook).
     Returns empty list if no messages.
     """
     r = _get_redis()

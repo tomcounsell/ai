@@ -471,15 +471,19 @@ async def _execute_job(job: Job) -> None:
         except Exception as e:
             logger.debug(f"AgentSession update failed (non-fatal): {e}")
 
-    # Clean up steering queue (consume any leftover messages)
+    # Clean up steering queue — log content of any unconsumed messages
     try:
-        from agent.steering import clear_steering_queue
+        from agent.steering import pop_all_steering_messages
 
-        cleared = clear_steering_queue(job.session_id)
-        if cleared > 0:
-            logger.info(
-                f"[{job.project_key}] Cleared {cleared} unconsumed steering "
-                f"message(s) for session {job.session_id}"
+        leftover = pop_all_steering_messages(job.session_id)
+        if leftover:
+            texts = [
+                f"  [{m.get('sender', '?')}]: {m.get('text', '')[:120]}"
+                for m in leftover
+            ]
+            logger.warning(
+                f"[{job.project_key}] {len(leftover)} unconsumed steering "
+                f"message(s) dropped for session {job.session_id}:\n" + "\n".join(texts)
             )
     except Exception as e:
         logger.debug(f"Steering queue cleanup failed (non-fatal): {e}")
