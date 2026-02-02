@@ -1,9 +1,7 @@
 """Tests for remote update: shell script, bridge intercept, restart flag lifecycle."""
 
-import asyncio
 import os
 import subprocess
-import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -57,7 +55,9 @@ class TestRemoteUpdateScript:
         )
 
         if "Already up to date" in result.stdout:
-            assert not flag.exists(), "No restart flag should be written when up to date"
+            assert (
+                not flag.exists()
+            ), "No restart flag should be written when up to date"
 
     def test_lockfile_prevents_concurrent_runs(self):
         """Second invocation should skip if lock is held."""
@@ -103,9 +103,9 @@ class TestRemoteUpdateScript:
         )
         for line in result.stdout.strip().split("\n"):
             if line.strip():
-                assert line.startswith("[remote-update]"), (
-                    f"Line missing prefix: {line!r}"
-                )
+                assert line.startswith(
+                    "[remote-update]"
+                ), f"Line missing prefix: {line!r}"
 
 
 # =============================================================================
@@ -217,7 +217,9 @@ class TestWorkerRestartCheck:
 
         with (
             patch("agent.job_queue._pop_job", return_value=None),
-            patch("agent.job_queue._check_restart_flag", return_value=True) as mock_check,
+            patch(
+                "agent.job_queue._check_restart_flag", return_value=True
+            ) as mock_check,
             patch("agent.job_queue._trigger_restart") as mock_restart,
         ):
             from agent.job_queue import _worker_loop
@@ -247,7 +249,9 @@ class TestWorkerRestartCheck:
             patch("agent.job_queue._pop_job", side_effect=pop_side_effect),
             patch("agent.job_queue._execute_job", new_callable=AsyncMock),
             patch("agent.job_queue._complete_job", new_callable=AsyncMock),
-            patch("agent.job_queue._check_restart_flag", return_value=True) as mock_check,
+            patch(
+                "agent.job_queue._check_restart_flag", return_value=True
+            ) as mock_check,
             patch("agent.job_queue._trigger_restart") as mock_restart,
         ):
             from agent.job_queue import _worker_loop
@@ -282,12 +286,12 @@ class TestBridgeUpdateCommand:
         source = bridge_path.read_text()
 
         # Find positions
-        update_pos = source.find('/update')
-        store_pos = source.find('store_message(')
+        update_pos = source.find("/update")
+        store_pos = source.find("store_message(")
 
-        assert update_pos < store_pos, (
-            "/update intercept should come before store_message"
-        )
+        assert (
+            update_pos < store_pos
+        ), "/update intercept should come before store_message"
 
     def test_restart_flag_cleanup_in_startup(self):
         """Bridge startup should clear stale restart flags."""

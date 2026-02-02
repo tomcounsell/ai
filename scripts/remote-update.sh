@@ -27,30 +27,34 @@ trap cleanup_lock EXIT
 STASHED=false
 if [ -n "$(git status --porcelain)" ]; then
     echo "$LOG_PREFIX WARN: Dirty working tree detected."
-    echo "$LOG_PREFIX Files: $(git status --porcelain | head -5)"
+    git status --porcelain | head -5 | while read -r line; do
+        echo "$LOG_PREFIX   $line"
+    done
     echo "$LOG_PREFIX Attempting git stash before pull..."
     STASHED=true
-    git stash push -m "remote-update auto-stash $(date +%Y%m%d-%H%M%S)" 2>&1
+    git stash push -m "remote-update auto-stash $(date +%Y%m%d-%H%M%S)" >/dev/null 2>&1
+    echo "$LOG_PREFIX Stashed successfully."
 fi
 
 # ── Git pull ─────────────────────────────────────────────────────────
 BEFORE=$(git rev-parse HEAD)
-if ! git pull --ff-only 2>&1; then
+PULL_OUTPUT=$(git pull --ff-only 2>&1) || {
     echo "$LOG_PREFIX FAIL: git pull --ff-only failed (branches diverged?)"
     echo "$LOG_PREFIX Current HEAD: $(git rev-parse --short HEAD)"
     echo "$LOG_PREFIX Remote HEAD: $(git rev-parse --short origin/main 2>/dev/null || echo 'unknown')"
+    echo "$LOG_PREFIX Output: $PULL_OUTPUT"
     if [ "$STASHED" = true ]; then
         echo "$LOG_PREFIX Restoring stash..."
-        git stash pop 2>&1 || echo "$LOG_PREFIX WARN: stash pop failed, changes in git stash list"
+        git stash pop >/dev/null 2>&1 || echo "$LOG_PREFIX WARN: stash pop failed, changes in git stash list"
     fi
     exit 1
-fi
+}
 AFTER=$(git rev-parse HEAD)
 
 # ── Restore stash if we stashed ──────────────────────────────────────
 if [ "$STASHED" = true ]; then
     echo "$LOG_PREFIX Restoring stashed changes..."
-    git stash pop 2>&1 || echo "$LOG_PREFIX WARN: stash pop conflict, changes remain in git stash list"
+    git stash pop >/dev/null 2>&1 || echo "$LOG_PREFIX WARN: stash pop conflict, changes remain in git stash list"
 fi
 
 # ── Check if anything changed ────────────────────────────────────────
@@ -65,7 +69,7 @@ echo "$LOG_PREFIX Pulled $COMMIT_COUNT commit(s):"
 git log --oneline "$BEFORE..$AFTER" | while read -r line; do
     echo "$LOG_PREFIX   $line"
 done
-echo ""
+echo "$LOG_PREFIX"
 
 # ── Sync dependencies (only if pyproject.toml or uv.lock changed) ───
 CHANGED_FILES=$(git diff --name-only "$BEFORE..$AFTER")
@@ -94,6 +98,6 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $COMMIT_COUNT commit(s)" > "$RESTART_FLAG"
 echo "$LOG_PREFIX Restart queued (flag written to data/restart-requested)."
 echo "$LOG_PREFIX Bridge will restart after current work completes."
 
-echo ""
+echo "$LOG_PREFIX"
 echo "$LOG_PREFIX Update complete. $COMMIT_COUNT commit(s) pulled, restart queued."
 echo "$LOG_PREFIX HEAD: $(git rev-parse --short HEAD) — $(git log -1 --format='%s')"

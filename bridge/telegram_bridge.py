@@ -123,9 +123,7 @@ async def _handle_update_command(tg_client, event):
         # Truncate if too long for Telegram
         if len(output) > 4000:
             output = output[:4000] + "\n...(truncated)"
-        await tg_client.send_message(
-            event.chat_id, output, reply_to=event.message.id
-        )
+        await tg_client.send_message(event.chat_id, output, reply_to=event.message.id)
     except subprocess.TimeoutExpired:
         await tg_client.send_message(
             event.chat_id,

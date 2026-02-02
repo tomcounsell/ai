@@ -311,7 +311,9 @@ def _check_restart_flag() -> bool:
             return False
 
     flag_content = _RESTART_FLAG.read_text().strip()
-    logger.info(f"Restart flag found ({flag_content}), no running jobs — restarting bridge")
+    logger.info(
+        f"Restart flag found ({flag_content}), no running jobs — restarting bridge"
+    )
     return True
 
 
