@@ -35,17 +35,46 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - The model name can be overridden via `OLLAMA_SUMMARIZER_MODEL` in `.env`.
    - If Ollama is not installed, skip this step — the bridge will use Haiku only and fall back to truncation if Haiku fails.
 
-4. **Restart the bridge service**
+4. **Verify SDK subscription auth**
+
+   The SDK uses the Max subscription via OAuth instead of API credits. Verify it's set up:
+
+   ```bash
+   cd /Users/valorengels/src/ai
+
+   # Check claude login status
+   claude auth status 2>&1 || claude --version
+
+   # Ensure USE_API_BILLING is not set to true (subscription is preferred)
+   if grep -q 'USE_API_BILLING=true' .env 2>/dev/null; then
+     echo "WARNING: USE_API_BILLING=true is set in .env — SDK will use API credits instead of Max subscription"
+     echo "Remove or set to false unless subscription auth is broken"
+   else
+     echo "OK: SDK will use Max subscription auth (no API credits burned)"
+   fi
+
+   # Ensure claude login has been run on this machine
+   if [ ! -f ~/.claude/credentials.json ] && [ ! -f ~/.claude/.credentials.json ]; then
+     echo "FAIL: No claude credentials found. Run 'claude login' to authenticate with Max subscription"
+   else
+     echo "OK: Claude credentials found"
+   fi
+   ```
+
+   - If `claude login` hasn't been run on this machine, run it now (requires browser auth)
+   - If `USE_API_BILLING=true` is set, ask the user if they want to switch to subscription auth
+
+5. **Restart the bridge service**
    ```bash
    /Users/valorengels/src/ai/scripts/valor-service.sh restart
    ```
 
-5. **Verify the service is running**
+6. **Verify the service is running**
    ```bash
    sleep 2 && /Users/valorengels/src/ai/scripts/valor-service.sh status
    ```
 
-6. **Verify CLI tools are available**
+7. **Verify CLI tools are available**
 
    Run each check and report pass/fail. Group results by category.
 
@@ -87,7 +116,7 @@ Pull the latest changes from the remote repository and restart the bridge servic
      ```
    - Report which tools passed and which failed.
 
-7. **Verify Google Calendar integration**
+8. **Verify Google Calendar integration**
 
    Test OAuth connectivity and calendar config for time tracking:
 
@@ -162,7 +191,7 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - **Missing config**: No calendar_config.json or project not mapped
    - **Inaccessible**: Calendar configured but API returns error
 
-8. **Verify MCP servers**
+9. **Verify MCP servers**
 
    The Agent SDK inherits MCP servers from Claude Code's local/project settings via `setting_sources`. Check what's configured:
 
@@ -174,4 +203,4 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - If none are configured, note that the SDK agent will only have built-in tools (bash, file read/write, etc.)
    - MCP servers are managed via `claude mcp add/remove` — any changes take effect on next bridge restart
 
-9. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, whether the service restarted successfully, CLI tool health, calendar status, and MCP server status.
+10. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, whether the service restarted successfully, SDK auth mode, CLI tool health, calendar status, and MCP server status.
