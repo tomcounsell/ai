@@ -1,7 +1,7 @@
 from django.contrib import admin
 from unfold.admin import ModelAdmin
 
-from apps.drugs.models import Medication, UserMedication, UserMealSchedule
+from apps.drugs.models import Medication, UserMealSchedule, UserMedication
 
 
 @admin.register(Medication)

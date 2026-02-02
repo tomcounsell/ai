@@ -7,9 +7,10 @@ Generates simple daily medication schedules based on:
 - User's meal schedule
 """
 
-from typing import List, Dict
 from datetime import time
-from apps.drugs.models import UserMedication, UserMealSchedule
+from typing import Dict, List
+
+from apps.drugs.models import UserMealSchedule, UserMedication
 
 
 class MedicationScheduler:

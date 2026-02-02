@@ -5,7 +5,8 @@ Checks for drug-drug interactions based on stored interaction data.
 For MVP, uses hardcoded JSON data from medication records.
 """
 
-from typing import List, Dict
+from typing import Dict, List
+
 from apps.drugs.models import Medication, UserMedication
 
 

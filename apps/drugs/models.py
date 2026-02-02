@@ -1,8 +1,8 @@
-from django.db import models
 from django.conf import settings
+from django.db import models
 
-from apps.common.behaviors.timestampable import Timestampable
 from apps.common.behaviors.authorable import Authorable
+from apps.common.behaviors.timestampable import Timestampable
 
 
 class Medication(models.Model):

@@ -5,15 +5,15 @@ Single-page dashboard with HTMX modals for add/edit operations.
 """
 
 from django.contrib.auth.mixins import LoginRequiredMixin
-from django.shortcuts import get_object_or_404, redirect
-from django.views import View
 from django.http import HttpResponse
+from django.shortcuts import get_object_or_404, redirect
 from django.template.response import TemplateResponse
+from django.views import View
 
-from apps.public.views.helpers.main_content_view import MainContentView
-from apps.drugs.models import Medication, UserMedication, UserMealSchedule
+from apps.drugs.models import Medication, UserMealSchedule, UserMedication
 from apps.drugs.services.interactions import InteractionChecker
 from apps.drugs.services.scheduler import MedicationScheduler
+from apps.public.views.helpers.main_content_view import MainContentView
 
 
 class MedicationDashboardView(LoginRequiredMixin, MainContentView):

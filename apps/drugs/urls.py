@@ -3,6 +3,7 @@ URL configuration for medication tracker.
 """
 
 from django.urls import path
+
 from apps.drugs import views
 
 app_name = "drugs"

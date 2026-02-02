@@ -14,7 +14,6 @@ from apps.ai.mcp.cto_tools_server import (
     weekly_review,
 )
 
-
 # Weekly Review Tool Tests
 
 

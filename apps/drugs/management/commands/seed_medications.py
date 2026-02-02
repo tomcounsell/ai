@@ -6,6 +6,7 @@ In production, this would be replaced by API integration.
 """
 
 from django.core.management.base import BaseCommand
+
 from apps.drugs.models import Medication
 
 

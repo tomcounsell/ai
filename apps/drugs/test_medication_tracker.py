@@ -4,12 +4,13 @@ Tests for medication tracker MVP.
 Covers models, services, and basic view functionality.
 """
 
-import pytest
 from datetime import time
+
+import pytest
 from django.contrib.auth import get_user_model
 from django.urls import reverse
 
-from apps.drugs.models import Medication, UserMedication, UserMealSchedule
+from apps.drugs.models import Medication, UserMealSchedule, UserMedication
 from apps.drugs.services.interactions import InteractionChecker
 from apps.drugs.services.scheduler import MedicationScheduler
 

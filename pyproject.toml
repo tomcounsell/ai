@@ -59,6 +59,7 @@ dev = [
     "django-browser-reload",
     "Werkzeug",
     "black",
+    "isort",
     "flake8",
     "mypy",
     "django-stubs",
