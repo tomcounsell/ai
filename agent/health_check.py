@@ -115,7 +115,7 @@ def _summarize_input(tool_name: str, tool_input: dict[str, Any]) -> str:
 
 async def _judge_health(activity: str) -> dict[str, Any]:
     """Ask Haiku to judge whether the agent is healthy."""
-    import httpx
+    import anthropic
 
     api_key = _get_api_key()
     if not api_key:
@@ -124,28 +124,14 @@ async def _judge_health(activity: str) -> dict[str, Any]:
 
     prompt = JUDGE_PROMPT.format(count=CHECK_INTERVAL, activity=activity)
 
-    async with httpx.AsyncClient(timeout=15.0) as http:
-        resp = await http.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": "claude-haiku-4-5-20251001",
-                "max_tokens": 150,
-                "messages": [{"role": "user", "content": prompt}],
-            },
-        )
-        resp.raise_for_status()
-        data = resp.json()
+    client = anthropic.AsyncAnthropic(api_key=api_key)
+    response = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=150,
+        messages=[{"role": "user", "content": prompt}],
+    )
 
-    # Extract text from response
-    text = ""
-    for block in data.get("content", []):
-        if block.get("type") == "text":
-            text += block["text"]
+    text = response.content[0].text if response.content else ""
 
     # Parse JSON from response
     try:
