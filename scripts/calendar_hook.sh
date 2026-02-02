@@ -8,16 +8,25 @@ set -e
 LOCKDIR="$HOME/Desktop/claude_code"
 STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
 SESSIONFILE="$LOCKDIR/.calendar_hook_session"
+SLUGFILE="$LOCKDIR/.calendar_hook_slug"
 INTERVAL=600  # 10 minutes in seconds
 
 # Read stdin JSON from Claude Code hook
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
-# Resolve project name from projects.json (matches working_directory to name)
+# Reuse slug from prompt hook if available (keeps slug consistent within session)
+SAVED_SLUG=""
+if [ -f "$SLUGFILE" ]; then
+    SAVED_SLUG=$(cat "$SLUGFILE" 2>/dev/null || echo "")
+fi
+
+# Resolve project name from projects.json as fallback
 PROJECTS_JSON="$HOME/src/ai/config/projects.json"
 SLUG=$(basename "$PWD")
-if [ -f "$PROJECTS_JSON" ]; then
+if [ -n "$SAVED_SLUG" ]; then
+    SLUG="$SAVED_SLUG"
+elif [ -f "$PROJECTS_JSON" ]; then
     MATCH=$(jq -r --arg cwd "$PWD" '
         .projects | to_entries[]
         | select(.value.working_directory == $cwd)

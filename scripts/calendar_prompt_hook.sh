@@ -8,6 +8,7 @@ set -e
 LOCKDIR="$HOME/Desktop/claude_code"
 STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
 SESSIONFILE="$LOCKDIR/.calendar_hook_session"
+SLUGFILE="$LOCKDIR/.calendar_hook_slug"
 INTERVAL=600  # 10 minutes in seconds
 
 # Read stdin JSON from Claude Code hook (must happen before rate limit check)
@@ -31,6 +32,16 @@ if [ "$SAME_SESSION" = true ] && [ -f "$STAMPFILE" ]; then
     ELAPSED=$((NOW - LAST))
     if [ "$ELAPSED" -lt "$INTERVAL" ]; then
         exit 0
+    fi
+    # Same session past rate limit: reuse the previously generated slug
+    if [ -f "$SLUGFILE" ]; then
+        SLUG=$(cat "$SLUGFILE" 2>/dev/null || echo "")
+        if [ -n "$SLUG" ]; then
+            mkdir -p "$LOCKDIR"
+            date +%s > "$STAMPFILE"
+            export PATH="$HOME/Library/Python/3.12/bin:$PATH"
+            exec valor-calendar "$SLUG"
+        fi
     fi
 fi
 
@@ -91,9 +102,10 @@ else
     fi
 fi
 
-# Update stamp/session and fire calendar event
+# Update stamp/session/slug and fire calendar event
 mkdir -p "$LOCKDIR"
 date +%s > "$STAMPFILE"
 [ -n "$SESSION_ID" ] && echo "$SESSION_ID" > "$SESSIONFILE"
+echo "$SLUG" > "$SLUGFILE"
 export PATH="$HOME/Library/Python/3.12/bin:$PATH"
 exec valor-calendar "$SLUG"
