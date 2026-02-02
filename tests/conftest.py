@@ -5,6 +5,25 @@ Shared test fixtures for Valor AI tests.
 import pytest
 
 
+@pytest.fixture(autouse=False)
+def redis_test_db():
+    """Switch popoto to Redis db=1 for test isolation, flush before each test.
+
+    Uses SELECT on the existing connection so that popoto's module-level
+    POPOTO_REDIS_DB reference (used by Query, fields, etc.) points at the
+    test database without needing to replace the object.
+    """
+    from popoto.redis_db import POPOTO_REDIS_DB
+
+    # Switch to db=1 and flush before each test
+    POPOTO_REDIS_DB.select(1)
+    POPOTO_REDIS_DB.flushdb()
+    yield
+    # Flush test db and switch back to production db=0
+    POPOTO_REDIS_DB.flushdb()
+    POPOTO_REDIS_DB.select(0)
+
+
 @pytest.fixture
 def sample_config():
     """Sample project configuration matching config/projects.json structure."""

@@ -15,7 +15,7 @@ def format_timestamp(ts: float) -> str:
 
 def load_events(limit: int = 100) -> list[BridgeEvent]:
     """Load recent events from Redis, sorted by timestamp descending."""
-    events = BridgeEvent.query.filter()
+    events = BridgeEvent.query.all()
     if not events:
         return []
 
@@ -101,7 +101,7 @@ def show_timeouts():
 
 def show_stats():
     """Show statistics from events."""
-    events = BridgeEvent.query.filter()
+    events = BridgeEvent.query.all()
 
     if not events:
         print("No events to analyze.")

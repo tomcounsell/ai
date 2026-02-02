@@ -41,7 +41,7 @@ class BridgeEvent(Model):
     def cleanup_old(cls, max_age_seconds: float = 7 * 86400) -> int:
         """Delete events older than max_age (default 7 days). Returns count deleted."""
         cutoff = time.time() - max_age_seconds
-        all_events = cls.query.filter()
+        all_events = cls.query.all()
         deleted = 0
         for event in all_events:
             if event.timestamp and event.timestamp < cutoff:

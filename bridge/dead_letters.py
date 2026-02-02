@@ -32,7 +32,7 @@ async def persist_failed_delivery(
 
 async def replay_dead_letters(client) -> int:
     """Replay all pending dead letters. Returns count of successfully replayed."""
-    letters = await DeadLetter.query.async_filter()
+    letters = await DeadLetter.query.async_all()
     if not letters:
         return 0
 
