@@ -98,8 +98,10 @@ Pull the latest changes from the remote repository and restart the bridge servic
    sys.path.insert(0, '/Users/valorengels/src/ai')
    from pathlib import Path
 
-   config_path = Path.home() / 'Desktop/claude_code/calendar_config.json'
-   token_path = Path.home() / 'Desktop/claude_code/google_token.json'
+   base_dir = Path.home() / 'Desktop/claude_code'
+   config_path = base_dir / 'calendar_config.json'
+   tool_config_path = base_dir / 'calendar-tool-config.json'
+   token_path = base_dir / 'google_token.json'
 
    # Check token exists
    if not token_path.exists():
@@ -117,11 +119,21 @@ Pull the latest changes from the remote repository and restart the bridge servic
        print(f'FAIL: Calendar API auth failed: {e}')
        sys.exit(0)
 
-   # Check config
-   if not config_path.exists():
-       print('WARN: No calendar config at', config_path)
+   # Check both config file locations
+   configs_found = []
+   for path, label in [(config_path, 'calendar_config.json'), (tool_config_path, 'calendar-tool-config.json')]:
+       if path.exists():
+           print(f'OK: {label} exists at {path}')
+           configs_found.append(path)
+       else:
+           print(f'WARN: {label} not found at {path}')
+
+   if not configs_found:
+       print('FAIL: No calendar config found in either location')
        sys.exit(0)
-   config = json.loads(config_path.read_text())
+
+   # Load from primary config, fall back to tool config
+   config = json.loads(configs_found[0].read_text())
    calendars = config.get('calendars', {})
    print(f'OK: Calendar config has {len(calendars)} entries')
 

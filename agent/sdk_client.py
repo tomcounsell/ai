@@ -6,6 +6,19 @@ This module provides a wrapper around ClaudeSDKClient configured for Valor's use
 - Configures permission mode for autonomous operation
 - Handles session management
 - Extracts text response from message stream
+
+Authentication strategy (subscription-first):
+    The SDK spawns Claude Code CLI as a subprocess. By NOT passing
+    ANTHROPIC_API_KEY in the env, the CLI falls back to OAuth/subscription
+    auth from `claude login` — using the Max plan instead of API credits.
+
+    If Anthropic patches this fallback, known alternatives:
+    - CLIProxyAPI (github.com/luispater/CLIProxyAPI): HTTP proxy that swaps
+      API key headers for OAuth Bearer tokens. Any Anthropic-format client
+      can go through it to use subscription auth.
+    - Pi Coding Agent (github.com/badlogic/pi-mono): Independent coding agent
+      with native `pi /login` subscription auth and --mode rpc for headless
+      programmatic control. Fewer built-in tools but subscription-native.
 """
 
 import logging
@@ -89,20 +102,36 @@ class ValorAgent:
         self.permission_mode = permission_mode
 
     def _create_options(self, session_id: str | None = None) -> ClaudeAgentOptions:
-        """Create ClaudeAgentOptions configured for Valor with full permissions."""
+        """Create ClaudeAgentOptions configured for Valor with full permissions.
+
+        Auth: We intentionally omit ANTHROPIC_API_KEY from env so the CLI
+        subprocess falls back to OAuth/subscription auth (Max plan). If the
+        key is present in the process environment, we strip it to prevent
+        the SDK from using API billing. Set USE_API_BILLING=true in .env
+        to force API key auth as a fallback.
+        """
+        env: dict[str, str] = {}
+
+        if os.getenv("USE_API_BILLING", "").lower() == "true":
+            api_key = os.getenv("ANTHROPIC_API_KEY", "")
+            if api_key:
+                env["ANTHROPIC_API_KEY"] = api_key
+                logger.info("Auth: using API key billing (USE_API_BILLING=true)")
+            else:
+                logger.warning("Auth: USE_API_BILLING=true but no ANTHROPIC_API_KEY set")
+        else:
+            # Strip API key so CLI falls back to subscription/OAuth
+            env["ANTHROPIC_API_KEY"] = ""
+            logger.info("Auth: using Max subscription (OAuth fallback)")
+
         return ClaudeAgentOptions(
             system_prompt=self.system_prompt,
             cwd=str(self.working_dir),
             permission_mode=self.permission_mode,  # type: ignore[arg-type]
-            # Use continue_conversation for session continuity
             continue_conversation=session_id is not None,
             resume=session_id,
-            # Inherit MCP servers and settings from Claude Code's config
             setting_sources=["local", "project"],
-            # Environment variables for API access
-            env={
-                "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
-            },
+            env=env,
         )
 
     async def query(self, message: str, session_id: str | None = None, max_retries: int = 2) -> str:
