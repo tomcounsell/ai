@@ -3,7 +3,7 @@ status: Planning
 appetite: Medium: 3-5 days
 owner: Valor
 created: 2026-02-02
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/21
 ---
 
 # Unified Web Search & Fetch Tools
