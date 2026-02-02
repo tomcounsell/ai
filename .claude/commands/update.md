@@ -116,80 +116,115 @@ Pull the latest changes from the remote repository and restart the bridge servic
      ```
    - Report which tools passed and which failed.
 
-8. **Verify Google Calendar integration**
+8. **Generate Google Calendar config**
 
-   Test OAuth connectivity and calendar config for time tracking:
+   Auto-generate `~/Desktop/claude_code/calendar_config.json` by matching Google Calendar names to projects.
+
+   **Calendar mapping rules:**
+   - `"dm"` → `"primary"` (DMs go to the user's main calendar)
+   - `"default"` → calendar named **"Internal Projects"** (catch-all for Claude Code sessions and unmatched slugs)
+   - Project-specific: match each project's Telegram group name (minus the `"Dev: "` prefix) to a Google Calendar with the same name
 
    ```bash
    export PATH="$HOME/Library/Python/3.12/bin:$PATH"
    python3 -c "
-   import sys, json
+   import sys, json, os
    sys.path.insert(0, '/Users/valorengels/src/ai')
    from pathlib import Path
+   from dotenv import load_dotenv
 
    base_dir = Path.home() / 'Desktop/claude_code'
    config_path = base_dir / 'calendar_config.json'
-   tool_config_path = base_dir / 'calendar-tool-config.json'
    token_path = base_dir / 'google_token.json'
 
    # Check token exists
    if not token_path.exists():
        print('FAIL: No OAuth token at', token_path)
+       print('Run /setup to configure Google Calendar OAuth')
        sys.exit(0)
    print('OK: OAuth token exists')
 
-   # Test API connectivity
+   # Connect to Calendar API
    try:
        from tools.google_workspace.auth import get_service
        service = get_service('calendar', 'v3')
-       service.calendarList().list(maxResults=1).execute()
+       result = service.calendarList().list().execute()
        print('OK: Calendar API connected')
    except Exception as e:
        print(f'FAIL: Calendar API auth failed: {e}')
        sys.exit(0)
 
-   # Check both config file locations
-   configs_found = []
-   for path, label in [(config_path, 'calendar_config.json'), (tool_config_path, 'calendar-tool-config.json')]:
-       if path.exists():
-           print(f'OK: {label} exists at {path}')
-           configs_found.append(path)
-       else:
-           print(f'WARN: {label} not found at {path}')
+   # Build name->id map from all available Google Calendars
+   gcal_by_name = {}
+   for cal in result.get('items', []):
+       gcal_by_name[cal['summary']] = cal['id']
+       print(f'  Found calendar: {cal[\"summary\"]}')
 
-   if not configs_found:
-       print('FAIL: No calendar config found in either location')
-       sys.exit(0)
+   # Start building config
+   calendars = {'dm': 'primary'}
+   print()
+   print('Mapping dm -> primary (user main calendar)')
 
-   # Load from primary config, fall back to tool config
-   config = json.loads(configs_found[0].read_text())
-   calendars = config.get('calendars', {})
-   print(f'OK: Calendar config has {len(calendars)} entries')
+   # Map 'default' to 'Internal Projects' calendar
+   if 'Internal Projects' in gcal_by_name:
+       calendars['default'] = gcal_by_name['Internal Projects']
+       print(f'Mapping default -> Internal Projects')
+   else:
+       print('WARN: No calendar named \"Internal Projects\" found — default will fall back to primary')
 
-   # Check ACTIVE_PROJECTS have custom mappings
-   import os
-   from dotenv import load_dotenv
+   # Load projects config
+   projects_path = Path('/Users/valorengels/src/ai/config/projects.json')
+   if projects_path.exists():
+       projects = json.loads(projects_path.read_text()).get('projects', {})
+   else:
+       projects = {}
+       print('WARN: No projects.json found')
+
+   # Match each project to a calendar by Telegram group name (minus 'Dev: ' prefix)
    load_dotenv(Path('/Users/valorengels/src/ai/.env'))
    active = [p.strip() for p in os.getenv('ACTIVE_PROJECTS', '').split(',') if p.strip()]
-   for proj in active:
-       cal_id = calendars.get(proj, calendars.get('default', 'primary'))
+
+   for project_key in active:
+       project = projects.get(project_key, {})
+       groups = project.get('telegram', {}).get('groups', [])
+       matched = False
+       for group in groups:
+           # Strip 'Dev: ' prefix to get the calendar name
+           cal_name = group.replace('Dev: ', '')
+           if cal_name in gcal_by_name:
+               calendars[project_key] = gcal_by_name[cal_name]
+               print(f'Mapping {project_key} -> {cal_name}')
+               matched = True
+               break
+       if not matched:
+           print(f'WARN: No calendar match for project \"{project_key}\" (groups: {groups})')
+
+   # Write config
+   config = {'calendars': calendars}
+   config_path.parent.mkdir(parents=True, exist_ok=True)
+   config_path.write_text(json.dumps(config, indent=2) + '\n')
+   print()
+   print(f'Wrote {config_path} with {len(calendars)} entries')
+
+   # Verify all mapped calendars are accessible
+   print()
+   for slug, cal_id in calendars.items():
        if cal_id == 'primary':
-           print(f'WARN: Project \"{proj}\" uses primary calendar (no custom mapping)')
-       else:
-           # Verify calendar is accessible
-           try:
-               service.calendars().get(calendarId=cal_id).execute()
-               print(f'OK: Project \"{proj}\" -> calendar accessible')
-           except Exception:
-               print(f'FAIL: Project \"{proj}\" -> calendar inaccessible ({cal_id[:40]}...)')
+           print(f'OK: {slug} -> primary (always accessible)')
+           continue
+       try:
+           service.calendars().get(calendarId=cal_id).execute()
+           print(f'OK: {slug} -> accessible')
+       except Exception:
+           print(f'FAIL: {slug} -> inaccessible ({cal_id[:40]}...)')
    "
    ```
 
    Report status per project:
-   - **Connected**: Project has custom calendar and it's accessible
-   - **Auth failed**: OAuth token invalid or missing
-   - **Missing config**: No calendar_config.json or project not mapped
-   - **Inaccessible**: Calendar configured but API returns error
+   - **Mapped**: Project matched to a Google Calendar by name
+   - **Auth failed**: OAuth token invalid or missing — run `/setup`
+   - **No match**: No Google Calendar matches the Telegram group name (will use default)
+   - **Inaccessible**: Calendar mapped but API returns error
 
 9. **Verify MCP servers**
 
