@@ -55,34 +55,40 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - The model name can be overridden via `OLLAMA_SUMMARIZER_MODEL` in `.env`.
    - If Ollama is not installed, skip this step — the bridge will use Haiku only and fall back to truncation if Haiku fails.
 
-4. **Verify SDK subscription auth**
+4. **Verify SDK authentication**
 
-   The SDK uses the Max subscription via OAuth instead of API credits. Verify it's set up:
+   The SDK uses Max subscription OAuth via the Claude Desktop app. Verify authentication is configured:
 
    ```bash
    cd /Users/valorengels/src/ai
 
-   # Check claude login status
-   claude auth status 2>&1 || claude --version
-
-   # Ensure USE_API_BILLING is not set to true (subscription is preferred)
-   if grep -q 'USE_API_BILLING=true' .env 2>/dev/null; then
-     echo "WARNING: USE_API_BILLING=true is set in .env — SDK will use API credits instead of Max subscription"
-     echo "Remove or set to false unless subscription auth is broken"
+   # Check if Claude Desktop app is running (provides OAuth)
+   if pgrep -f "Claude.app" > /dev/null; then
+     echo "✅ Claude Desktop running (provides subscription auth)"
    else
-     echo "OK: SDK will use Max subscription auth (no API credits burned)"
+     echo "⚠️  Claude Desktop not running - will use API key fallback"
    fi
 
-   # Ensure claude login has been run on this machine
-   if [ ! -f ~/.claude/credentials.json ] && [ ! -f ~/.claude/.credentials.json ]; then
-     echo "FAIL: No claude credentials found. Run 'claude login' to authenticate with Max subscription"
+   # Check auth mode configuration
+   if grep -q 'USE_API_BILLING=true' .env 2>/dev/null; then
+     echo "Auth mode: API key billing (forced via USE_API_BILLING=true)"
    else
-     echo "OK: Claude credentials found"
+     echo "Auth mode: Subscription OAuth (via Claude Desktop) with API key fallback"
+   fi
+
+   # Verify API key exists as fallback
+   if grep -q 'ANTHROPIC_API_KEY=sk-ant-' .env 2>/dev/null; then
+     echo "✅ API key configured (fallback)"
+   else
+     echo "⚠️  No API key - bridge requires either Desktop app or API key"
    fi
    ```
 
-   - If `claude login` hasn't been run on this machine, run it now (requires browser auth)
-   - If `USE_API_BILLING=true` is set, ask the user if they want to switch to subscription auth
+   **Authentication hierarchy:**
+   1. Claude Desktop app (if running and `USE_API_BILLING` != true) → Subscription OAuth
+   2. API key from `.env` → API billing fallback
+
+   To force API billing, set `USE_API_BILLING=true` in `.env`
 
 5. **Restart the bridge service**
    ```bash
