@@ -753,10 +753,13 @@ RESPOND_TO_DMS = any(
     for p in ACTIVE_PROJECTS
 )
 
-# DM whitelist - only respond to DMs from these users (by username or first name)
+# DM whitelist - only respond to DMs from these Telegram user IDs
 # If empty, responds to all DMs (when RESPOND_TO_DMS is True)
-DM_WHITELIST = [name.strip().lower() for name in
-    os.getenv("TELEGRAM_DM_WHITELIST", "").split(",") if name.strip()]
+DM_WHITELIST: set[int] = set()
+for _id in os.getenv("TELEGRAM_DM_WHITELIST", "").split(","):
+    _id = _id.strip()
+    if _id.isdigit():
+        DM_WHITELIST.add(int(_id))
 
 # Link collectors - usernames whose links are automatically stored
 # When these users share a URL, it gets saved with metadata
@@ -885,7 +888,7 @@ async def classify_needs_response_async(text: str) -> bool:
     return await loop.run_in_executor(None, classify_needs_response, text)
 
 
-def should_respond_sync(text: str, is_dm: bool, chat_title: str | None, project: dict | None, sender_name: str | None = None, sender_username: str | None = None) -> bool:
+def should_respond_sync(text: str, is_dm: bool, chat_title: str | None, project: dict | None, sender_name: str | None = None, sender_username: str | None = None, sender_id: int | None = None) -> bool:
     """
     Synchronous check for basic response conditions.
     Used for DMs and groups without respond_to_unaddressed.
@@ -893,15 +896,9 @@ def should_respond_sync(text: str, is_dm: bool, chat_title: str | None, project:
     if is_dm:
         if not RESPOND_TO_DMS:
             return False
-        # Check whitelist if configured
+        # Check whitelist if configured (matches on immutable Telegram user ID)
         if DM_WHITELIST:
-            sender_lower = (sender_name or "").lower()
-            username_lower = (sender_username or "").lower()
-            if not any(
-                allowed in sender_lower or allowed in username_lower or
-                sender_lower == allowed or username_lower == allowed
-                for allowed in DM_WHITELIST
-            ):
+            if sender_id not in DM_WHITELIST:
                 return False
         return True
 
@@ -934,6 +931,7 @@ async def should_respond_async(
     project: dict | None,
     sender_name: str | None = None,
     sender_username: str | None = None,
+    sender_id: int | None = None,
 ) -> tuple[bool, bool]:
     """
     Async response decision with full context.
@@ -950,7 +948,7 @@ async def should_respond_async(
 
     # DMs: use sync logic
     if is_dm:
-        return should_respond_sync(text, is_dm, chat_title, project, sender_name, sender_username), False
+        return should_respond_sync(text, is_dm, chat_title, project, sender_name, sender_username, sender_id), False
 
     # Must be in a monitored group
     if not project:
@@ -964,7 +962,7 @@ async def should_respond_async(
 
     # For groups NOT using respond_to_unaddressed, use sync mention-based logic
     if not telegram_config.get("respond_to_unaddressed", False):
-        return should_respond_sync(text, is_dm, chat_title, project, sender_name, sender_username), False
+        return should_respond_sync(text, is_dm, chat_title, project, sender_name, sender_username, sender_id), False
 
     # === respond_to_unaddressed logic (the 4 cases) ===
 
@@ -1974,7 +1972,7 @@ async def main():
     logger.info(f"Monitored groups: {ALL_MONITORED_GROUPS}")
     logger.info(f"Respond to DMs: {RESPOND_TO_DMS}")
     if DM_WHITELIST:
-        logger.info(f"DM whitelist: {DM_WHITELIST}")
+        logger.info(f"DM whitelist (user IDs): {sorted(DM_WHITELIST)}")
     else:
         logger.info("DM whitelist: (none - responding to all DMs)")
     if LINK_COLLECTORS:
@@ -2010,8 +2008,9 @@ async def main():
         # Find which project this chat belongs to
         project = find_project_for_chat(chat_title) if chat_title else None
 
-        # Get sender username for whitelist check
+        # Get sender username and ID for whitelist check
         sender_username = getattr(sender, "username", None)
+        sender_id = getattr(sender, "id", None)
 
         # Store ALL incoming messages for history (regardless of whether we respond)
         try:
@@ -2059,11 +2058,11 @@ async def main():
 
         # Check if we should respond (async for Ollama classification on unaddressed messages)
         should_reply, is_reply_to_valor = await should_respond_async(
-            client, event, text, is_dm, chat_title, project, sender_name, sender_username
+            client, event, text, is_dm, chat_title, project, sender_name, sender_username, sender_id
         )
         if not should_reply:
             if is_dm and DM_WHITELIST:
-                logger.debug(f"Ignoring DM from {sender_name} (@{sender_username}) - not in whitelist")
+                logger.debug(f"Ignoring DM from {sender_name} (id={sender_id}) - not in whitelist")
             return
 
         project_name = project.get("name", "DM") if project else "DM"
