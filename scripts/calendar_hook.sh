@@ -9,8 +9,19 @@ LOCKDIR="$HOME/Desktop/claude_code"
 STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
 INTERVAL=1500  # 25 minutes in seconds
 
-# Derive slug from current working directory name
-SLUG="$(basename "$PWD")"
+# Resolve project name from projects.json (matches working_directory to name)
+PROJECTS_JSON="$HOME/src/ai/config/projects.json"
+SLUG=$(basename "$PWD")
+if [ -f "$PROJECTS_JSON" ]; then
+    MATCH=$(jq -r --arg cwd "$PWD" '
+        .projects | to_entries[]
+        | select(.value.working_directory == $cwd)
+        | .value.name // empty
+    ' "$PROJECTS_JSON" 2>/dev/null || true)
+    if [ -n "$MATCH" ]; then
+        SLUG="$MATCH"
+    fi
+fi
 
 # Rate limit: skip if called within the last INTERVAL seconds
 if [ -f "$STAMPFILE" ]; then

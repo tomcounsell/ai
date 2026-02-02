@@ -22,15 +22,37 @@ fi
 # Read stdin JSON from Claude Code hook
 INPUT=$(cat)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
-PROJECT=$(basename "$PWD")
 
-# Fallback to directory name if no prompt
+# Resolve project name from projects.json (matches working_directory to name)
+# Falls back to directory basename if no match found
+PROJECTS_JSON="$HOME/src/ai/config/projects.json"
+PROJECT=$(basename "$PWD")
+if [ -f "$PROJECTS_JSON" ]; then
+    MATCH=$(jq -r --arg cwd "$PWD" '
+        .projects | to_entries[]
+        | select(.value.working_directory == $cwd)
+        | .value.name // empty
+    ' "$PROJECTS_JSON" 2>/dev/null || true)
+    if [ -n "$MATCH" ]; then
+        PROJECT="$MATCH"
+    fi
+fi
+
+# Fallback to project name only if no prompt
 if [ -z "$PROMPT" ]; then
     SLUG="$PROJECT"
 else
     # Load API key
     if [ -f "$(pwd)/.env" ]; then
         ANTHROPIC_API_KEY=$(grep '^ANTHROPIC_API_KEY=' "$(pwd)/.env" | cut -d= -f2-)
+    fi
+    # Also check shared env
+    if [ -z "$ANTHROPIC_API_KEY" ] && [ -f "$HOME/src/.env" ]; then
+        ANTHROPIC_API_KEY=$(grep '^ANTHROPIC_API_KEY=' "$HOME/src/.env" | cut -d= -f2-)
+    fi
+    # Also check ai repo env as final fallback
+    if [ -z "$ANTHROPIC_API_KEY" ] && [ -f "$HOME/src/ai/.env" ]; then
+        ANTHROPIC_API_KEY=$(grep '^ANTHROPIC_API_KEY=' "$HOME/src/ai/.env" | cut -d= -f2-)
     fi
     if [ -z "$ANTHROPIC_API_KEY" ]; then
         SLUG="$PROJECT"
@@ -45,7 +67,7 @@ else
                 max_tokens: 30,
                 messages: [{
                     role: "user",
-                    content: ("Project: " + $project + "\nTask: " + $prompt + "\n\nGenerate a short kebab-case slug (2-4 words) for this task suitable for a calendar event and billing. Include the project name as prefix. Output ONLY the slug, nothing else. Example: myproject-auth-bugfix")
+                    content: ("Project: " + $project + "\nTask: " + $prompt + "\n\nGenerate a short kebab-case slug (2-4 words) for this calendar event, used for billing and time tracking. Just describe the task — do NOT include the project name as a prefix since the calendar already identifies the project. Output ONLY the slug, nothing else. Examples: auth-bugfix, dashboard-redesign, api-refactor")
                 }]
             }')") || true
 
