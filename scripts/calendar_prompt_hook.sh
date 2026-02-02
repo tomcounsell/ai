@@ -45,12 +45,13 @@ if [ "$SAME_SESSION" = true ] && [ -f "$STAMPFILE" ]; then
             mkdir -p "$LOCKDIR"
             date +%s > "$STAMPFILE"
             export PATH="$HOME/Library/Python/3.12/bin:$PATH"
-            exec valor-calendar "$SLUG"
+            PREV_PROJECT=$(cat "$LOCKDIR/.calendar_hook_project" 2>/dev/null || echo "")
+            exec valor-calendar --project "$PREV_PROJECT" "$SLUG"
         fi
     fi
 fi
 
-# Resolve project name from projects.json (matches working_directory to name)
+# Resolve project key from projects.json (matches working_directory to key)
 # Falls back to directory basename if no match found
 PROJECTS_JSON="$HOME/src/ai/config/projects.json"
 PROJECT=$(basename "$PWD")
@@ -58,7 +59,7 @@ if [ -f "$PROJECTS_JSON" ]; then
     MATCH=$(jq -r --arg cwd "$PWD" '
         .projects | to_entries[]
         | select(.value.working_directory == $cwd)
-        | .value.name // empty
+        | .key
     ' "$PROJECTS_JSON" 2>/dev/null || true)
     if [ -n "$MATCH" ]; then
         PROJECT="$MATCH"
@@ -107,10 +108,11 @@ else
     fi
 fi
 
-# Update stamp/session/slug and fire calendar event
+# Update stamp/session/slug/project and fire calendar event
 mkdir -p "$LOCKDIR"
 date +%s > "$STAMPFILE"
 [ -n "$SESSION_ID" ] && echo "$SESSION_ID" > "$SESSIONFILE"
 echo "$SLUG" > "$SLUGFILE"
+echo "$PROJECT" > "$LOCKDIR/.calendar_hook_project"
 export PATH="$HOME/Library/Python/3.12/bin:$PATH"
-exec valor-calendar "$SLUG"
+exec valor-calendar --project "$PROJECT" "$SLUG"

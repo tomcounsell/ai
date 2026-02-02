@@ -1,8 +1,10 @@
 """valor-calendar: Log work sessions as Google Calendar events.
 
-Usage: valor-calendar <session-slug>
+Usage: valor-calendar [--project PROJECT] <session-slug>
 
-Maps slugs to calendar IDs via ~/Desktop/claude_code/calendar_config.json.
+Routes to the correct Google Calendar by project name using
+~/Desktop/claude_code/calendar_config.json. Falls back to "default" calendar
+when no project is specified or no mapping exists.
 Creates or extends events using 30-minute segment rounding.
 Falls back to offline queue on auth failure.
 """
@@ -15,21 +17,25 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / "Desktop" / "claude_code"
-CALENDAR_CONFIG_PATH = CONFIG_DIR / "calendar-tool-config.json"
+CALENDAR_CONFIG_PATH = CONFIG_DIR / "calendar_config.json"
 QUEUE_PATH = CONFIG_DIR / "calendar_queue.jsonl"
 
 
 def load_calendar_config() -> dict:
-    """Load calendar slug-to-ID mapping from config file."""
+    """Load calendar project-to-ID mapping from config file."""
     if not CALENDAR_CONFIG_PATH.exists():
         return {"calendars": {"default": "primary"}}
     return json.loads(CALENDAR_CONFIG_PATH.read_text())
 
 
-def get_calendar_id(slug: str, config: dict) -> str:
-    """Resolve a session slug to a Google Calendar ID."""
+def get_calendar_id(project: str | None, config: dict) -> str:
+    """Resolve a project name to a Google Calendar ID."""
     calendars = config.get("calendars", {})
-    return calendars.get(slug, calendars.get("default", "primary"))
+    if project:
+        cal_id = calendars.get(project)
+        if cal_id:
+            return cal_id
+    return calendars.get("default", "primary")
 
 
 def round_down_30(dt: datetime) -> datetime:
@@ -116,11 +122,12 @@ def extend_event(service, calendar_id: str, event, new_end: datetime):
     )
 
 
-def queue_entry(slug: str, now: datetime) -> None:
+def queue_entry(slug: str, now: datetime, project: str | None = None) -> None:
     """Append a failed request to the offline queue."""
     entry = {
         "timestamp": now.isoformat(),
         "slug": slug,
+        "project": project,
     }
     QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with QUEUE_PATH.open("a") as f:
@@ -148,7 +155,8 @@ def replay_queue(service, config: dict, now: datetime) -> int:
             continue
 
         slug = entry["slug"]
-        calendar_id = get_calendar_id(slug, config)
+        project = entry.get("project")
+        calendar_id = get_calendar_id(project, config)
         process_calendar_event(service, calendar_id, slug, entry_time)
         replayed += 1
 
@@ -181,14 +189,24 @@ def process_calendar_event(service, calendar_id: str, slug: str, now: datetime) 
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        print("Usage: valor-calendar <session-slug>")
+    args = sys.argv[1:]
+    project = None
+
+    # Parse --project flag
+    if "--project" in args:
+        idx = args.index("--project")
+        if idx + 1 < len(args):
+            project = args[idx + 1].lower()
+            args = args[:idx] + args[idx + 2 :]
+
+    if not args:
+        print("Usage: valor-calendar [--project PROJECT] <session-slug>")
         sys.exit(1)
 
-    slug = sys.argv[1]
+    slug = args[0]
     now = datetime.now().astimezone()
     config = load_calendar_config()
-    calendar_id = get_calendar_id(slug, config)
+    calendar_id = get_calendar_id(project, config)
 
     try:
         from tools.google_workspace.auth import get_service
@@ -205,7 +223,7 @@ def main() -> None:
         print(result)
 
     except Exception as e:
-        queue_entry(slug, now)
+        queue_entry(slug, now, project)
         print(f"Queued locally (auth/network issue): {e}", file=sys.stderr)
 
 
