@@ -2238,6 +2238,15 @@ async def main():
                 record_revival_cooldown(telegram_chat_id)
                 logger.info(f"[{project_name}] Sent revival prompt for branch {revival_info['branch']}")
 
+                # Mark the stale work as dormant so it doesn't re-trigger.
+                # A reply to the revival message will re-queue via branch name in the text.
+                try:
+                    from agent.branch_manager import mark_work_done
+                    mark_work_done(Path(working_dir_str), revival_info["branch"])
+                    logger.info(f"[{project_name}] Marked stale branch {revival_info['branch']} as dormant")
+                except Exception as e:
+                    logger.warning(f"[{project_name}] Failed to mark stale work dormant: {e}")
+
             # Build and enqueue the job (HIGH priority — top of FILO stack)
             depth = await enqueue_job(
                 project_key=project_key,
