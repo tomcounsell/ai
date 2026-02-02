@@ -5,9 +5,13 @@ Shared test fixtures for Valor AI tests.
 import pytest
 
 
-@pytest.fixture(autouse=False)
+@pytest.fixture(autouse=True)
 def redis_test_db():
-    """Switch popoto to Redis db=1 for test isolation, flush before each test.
+    """Switch popoto to Redis db=1 for ALL tests, preventing production pollution.
+
+    autouse=True ensures this runs for every test, even those that don't
+    explicitly request the fixture. This prevents accidental writes to db=0
+    if a test imports a popoto model without requesting isolation.
 
     Uses SELECT on the existing connection so that popoto's module-level
     POPOTO_REDIS_DB reference (used by Query, fields, etc.) points at the
