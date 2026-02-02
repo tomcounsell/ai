@@ -78,32 +78,32 @@ class MedicationFormView(LoginRequiredMixin, View):
             user_med = None
             mode = "add"
 
-        # Get all medications for dropdown
-        medications = Medication.objects.all().order_by("name")
-
         context = {
             "user_medication": user_med,
-            "medications": medications,
             "mode": mode,
         }
         return TemplateResponse(request, "drugs/partials/medication_form.html", context)
 
     def post(self, request, pk=None):
         """Handle form submission."""
-        medication_id = request.POST.get("medication")
+        medication_name = request.POST.get("medication_name", "").strip()
         dosage = request.POST.get("dosage")
         frequency = request.POST.get("frequency")
         time_preference = request.POST.get("time_preference", "anytime")
         notes = request.POST.get("notes", "")
 
-        if not all([medication_id, dosage, frequency]):
+        if not all([medication_name, dosage, frequency]):
             # Return error message
             return HttpResponse(
                 '<div class="text-red-600">Please fill in all required fields</div>',
                 status=400,
             )
 
-        medication = get_object_or_404(Medication, pk=medication_id)
+        # Find existing medication by name (case-insensitive) or create a new one
+        medication, _created = Medication.objects.get_or_create(
+            name__iexact=medication_name,
+            defaults={"name": medication_name},
+        )
 
         if pk:
             # Update existing

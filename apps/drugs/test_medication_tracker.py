@@ -295,7 +295,7 @@ class TestMedicationViews:
         client.force_login(user)
         url = reverse("drugs:medication_add")
         data = {
-            "medication": aspirin.id,
+            "medication_name": "Aspirin",
             "dosage": "81mg",
             "frequency": "once daily",
             "time_preference": "morning",
@@ -304,8 +304,28 @@ class TestMedicationViews:
         response = client.post(url, data)
         assert response.status_code == 204  # Success, no content
 
-        # Verify medication was created
+        # Verify medication was created (should match existing aspirin)
         assert UserMedication.objects.filter(user=user, medication=aspirin).exists()
+
+    def test_medication_form_post_creates_new_medication(self, client, user):
+        """Test creating a medication with a name not in the database."""
+        client.force_login(user)
+        url = reverse("drugs:medication_add")
+        data = {
+            "medication_name": "Hydroxychloroquine",
+            "dosage": "200mg",
+            "frequency": "twice daily",
+            "time_preference": "anytime",
+        }
+        response = client.post(url, data)
+        assert response.status_code == 204
+
+        # Verify new Medication record was created
+        assert Medication.objects.filter(name="Hydroxychloroquine").exists()
+        # Verify UserMedication linked to it
+        user_med = UserMedication.objects.get(user=user)
+        assert user_med.medication.name == "Hydroxychloroquine"
+        assert user_med.dosage == "200mg"
 
     def test_meal_schedule_form_post(self, client, user):
         """Test saving meal schedule."""
