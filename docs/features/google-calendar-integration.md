@@ -35,7 +35,17 @@ Examples:
 
 On auth/network failure, entries are queued to `~/Desktop/claude_code/calendar_queue.jsonl`. On next successful call, queued entries are replayed (entries >24h old are skipped).
 
-## Bridge Integration
+## Automatic Heartbeats
+
+Time tracking runs automatically in two contexts:
+
+### Claude Code Hook (direct machine work)
+
+A Claude Code hook (`scripts/calendar_hook.sh`) fires on `SessionStart` and `Stop` events. It derives the slug from the working directory name (e.g., `ai`, `psyoptimal`). Rate-limited to one call per 25 minutes via a timestamp file to avoid excessive API calls.
+
+Configured in `.claude/settings.json` — committed to the repo, so it works on all machines.
+
+### Bridge Integration (Telegram sessions)
 
 The bridge job queue (`agent/job_queue.py`) automatically calls `valor-calendar` with the project key:
 - Once at job start (session begins)
@@ -51,6 +61,8 @@ Calls are fire-and-forget subprocesses — they never block agent work.
 | `tools/google_workspace/__init__.py` | Package init |
 | `tools/google_workspace/auth.py` | OAuth module (reusable for future Workspace tools) |
 | `agent/job_queue.py` | Bridge heartbeat integration |
+| `scripts/calendar_hook.sh` | Claude Code hook script (rate-limited) |
+| `.claude/settings.json` | Hook configuration (SessionStart + Stop) |
 
 ## Configuration
 
