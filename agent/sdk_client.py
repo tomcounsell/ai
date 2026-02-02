@@ -41,6 +41,9 @@ logger = logging.getLogger(__name__)
 # Path to SOUL.md system prompt
 SOUL_PATH = Path(__file__).parent.parent / "config" / "SOUL.md"
 
+# Log a warning when a single query's equivalent API cost exceeds this
+_COST_WARN_THRESHOLD = float(os.getenv("SDK_COST_WARN_THRESHOLD", "0.50"))
+
 
 def load_completion_criteria() -> str:
     """Load completion criteria from CLAUDE.md."""
@@ -174,11 +177,23 @@ class ValorAgent:
                                     response_parts.append(block.text)
                         elif isinstance(msg, ResultMessage):
                             if msg.total_cost_usd is not None:
-                                logger.debug(
-                                    f"Query completed: {msg.num_turns} turns, "
-                                    f"${msg.total_cost_usd:.4f}, "
-                                    f"{msg.duration_ms}ms"
+                                cost = msg.total_cost_usd
+                                turns = msg.num_turns
+                                duration = msg.duration_ms
+                                # Always log at debug; warn if equivalent
+                                # cost exceeds threshold (sanity check even
+                                # on subscription — tracks what we'd pay on API)
+                                summary = (
+                                    f"Query completed: {turns} turns, "
+                                    f"${cost:.4f} equivalent, "
+                                    f"{duration}ms"
                                 )
+                                if cost >= _COST_WARN_THRESHOLD:
+                                    logger.warning(
+                                        f"High cost query: {summary}"
+                                    )
+                                else:
+                                    logger.info(summary)
                             if msg.is_error and retries < max_retries:
                                 retries += 1
                                 error_text = msg.result or "(empty)"
