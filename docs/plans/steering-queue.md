@@ -127,13 +127,17 @@ The SDK's `PostToolUse` hook returns a dict that controls flow. The hook doesn't
 
 **Recommended: Option A.** It's explicit, doesn't depend on undocumented SDK features, and gives us full control over interrupt + re-query.
 
-#### 4. SDK Client Changes (`agent/sdk_client.py`)
+#### 4. SDK Client Registry (`agent/sdk_client.py`)
 
-Store the active client reference so the watchdog can access it:
+Store the active `ClaudeSDKClient` instance so the watchdog hook (and other subsystems) can access it:
 
 ```python
 # Module-level registry of active SDK clients
 _active_clients: dict[str, ClaudeSDKClient] = {}
+
+def get_active_client(session_id: str) -> ClaudeSDKClient | None:
+    """Get the live SDK client for a running session, if any."""
+    return _active_clients.get(session_id)
 
 class ValorAgent:
     async def query(self, message, session_id=None):
@@ -148,11 +152,37 @@ class ValorAgent:
 
 Watchdog hook steers by calling:
 ```python
-client = _active_clients.get(session_id)
+from agent.sdk_client import get_active_client
+
+client = get_active_client(session_id)
 if client:
     await client.interrupt()
     await client.query(steering_text)
 ```
+
+**Crash/reboot safety**: The `_active_clients` dict is in-process memory only. It is NOT persisted. This is intentional and correct:
+
+- **On crash/reboot**: The dict is empty. The SDK subprocess (`claude` CLI) that was running is also dead. There is nothing to steer into — the session is gone.
+- **Recovery path**: On startup, `_recover_interrupted_jobs()` resets any `status="running"` RedisJobs back to `status="pending"`, and `_ensure_worker()` restarts them. The recovered job creates a **new** `ClaudeSDKClient` instance, which gets registered in `_active_clients` fresh. The `ClaudeAgentOptions.resume` field (set to the session_id) tells the SDK CLI to resume from its own persistent conversation history on disk (`~/.claude/`).
+- **Steering queue on crash**: Any messages in `steering:{session_id}` survive in Redis (TTL 1hr). When the job resumes after crash, the watchdog will find and inject them on the first tool call of the new session. No messages are lost.
+- **No stale references**: The `finally` block in `ValorAgent.query()` guarantees cleanup even on exceptions. The only way to get a stale entry is if the process is killed (SIGKILL). On next startup, `_active_clients` is empty (fresh import), so there's zero risk of referencing a dead client.
+
+**What could go wrong with shared client references:**
+
+1. **Async context mismatch**: The SDK docs warn that `ClaudeSDKClient` cannot be used across different async runtime contexts (anyio task groups). The watchdog hook runs inside the SDK's own event loop (it's a PostToolUse callback), so it shares the same async context as the client. This is safe. However, calling `get_active_client()` from a *different* asyncio task (e.g., the bridge's Telethon event handler) would be unsafe. The bridge must only push to the Redis queue, never call the client directly.
+
+2. **Concurrent access**: Only one job runs per project (enforced by `_worker_loop`). The watchdog fires synchronously between tool calls (the agent is paused). There's no concurrent access to the client — the hook has exclusive access during its execution window.
+
+3. **Interrupt during tool execution**: `client.interrupt()` sends a signal to the CLI subprocess. If called while a tool is mid-execution (e.g., a long `git push`), the CLI should handle the interrupt gracefully. Need to verify this doesn't corrupt in-progress operations.
+
+**Additional benefits of the client registry:**
+
+The `_active_clients` registry opens up capabilities beyond steering:
+
+- **Direct health inspection**: Instead of reading transcript files and asking Haiku to judge health (current approach), we could inspect the client's state directly — checking message counts, elapsed time, or the last tool name. This makes the health check simpler and eliminates the Haiku API call for routine checks.
+- **Parallel session inspection**: A monitoring endpoint or diagnostic tool could list all running sessions with their client state (connected, message count, duration) without parsing log files.
+- **Cost tracking in real-time**: `ResultMessage.total_cost_usd` is available on the client's response stream. The registry makes it possible to query accumulated cost for a running session from outside (e.g., to enforce budget limits before the session completes).
+- **Graceful shutdown improvement**: `_graceful_shutdown()` currently resets jobs to pending via Redis. With the registry, it could call `client.interrupt()` on each active client first, giving the agent a chance to save state before the process exits.
 
 #### 5. Steering Queue Functions (new module: `agent/steering.py`)
 
@@ -172,8 +202,8 @@ All use `POPOTO_REDIS_DB` directly with `RPUSH`, `LPOP`, and `DEL` on key `steer
 ## Rabbit Holes & Risks
 
 ### Risk 1: SDK interrupt + re-query behavior
-**Impact:** If `client.interrupt()` followed by `client.query()` doesn't cleanly resume the session, the agent could lose context or crash.
-**Mitigation:** Test this flow in isolation first. If interrupt + query doesn't work cleanly, fall back to Option C (file-based signaling via system prompt instruction). The agent already reads files as part of its normal operation.
+**Impact:** `client.interrupt()` sends an `SDKControlInterruptRequest` to the CLI subprocess. If the agent is mid-tool-execution (e.g., halfway through a git push), the interrupt could leave the working directory in a dirty state. Additionally, calling `client.query(steering_text)` after interrupt needs the CLI to be in a state where it accepts new user input — if the interrupt didn't fully cancel the pending tool, the query might fail or be ignored.
+**Mitigation:** Test this flow in isolation first with a simple long-running task. If interrupt + query doesn't work cleanly, fall back to injecting the steering text as a **tool result** via the hook return value (the hook already returns a dict to the SDK). Worst case: fall back to Option C (file-based signaling). The agent already reads files.
 
 ### Risk 2: Race condition between watchdog and agent response
 **Impact:** The watchdog fires after a tool call. If the agent finishes between the steering push and the next tool call, the steering message is never consumed.
