@@ -9,15 +9,34 @@ Pull the latest changes from the remote repository and restart the bridge servic
    cd /Users/valorengels/src/ai && git pull --ff-only
    ```
    - If the pull fails due to local changes, stash them first with `git stash`, pull, then `git stash pop`.
-   - If the pull fails due to diverged branches, stop and inform the user. Do NOT force-pull.
+   - If the pull fails due to diverged branches, stop and inform the user. DO NOT force-pull.
 
-2. **Install any new dependencies**
+2. **Sync dependencies with uv**
+
+   Always use `uv` for package management (faster, more reliable than pip).
+
    ```bash
-   cd /Users/valorengels/src/ai && .venv/bin/python -m pip install -e . --quiet
+   cd /Users/valorengels/src/ai
+
+   # Ensure uv is installed
+   if ! command -v uv &> /dev/null; then
+     echo "Installing uv package manager..."
+     curl -LsSf https://astral.sh/uv/install.sh | sh
+     export PATH="$HOME/.local/bin:$PATH"
+   fi
+
+   # Sync all dependencies (only reinstalls if pyproject.toml or lock changed)
+   uv sync
+
+   # Install the package in editable mode
+   uv pip install -e .
    ```
-   - Only run this if `pyproject.toml` was modified in the pulled changes (check `git diff HEAD@{1} --name-only` for `pyproject.toml`).
-   - Also install dev dependencies if needed: `.venv/bin/python -m pip install -e ".[dev]" --quiet`
-   - If `python -m pip` fails with "No module named pip", bootstrap it first: `.venv/bin/python -m ensurepip`
+
+   This will:
+   - Create/update `.venv/` if needed
+   - Install all dependencies from `pyproject.toml`
+   - Install CLI tools (`valor-calendar`, `valor-history`)
+   - Be significantly faster than pip
 
 3. **Ensure Ollama summarizer model is available**
 
@@ -83,14 +102,19 @@ Pull the latest changes from the remote repository and restart the bridge servic
    claude --version          # Claude Code CLI
    gh --version              # GitHub CLI
    git --version             # Git
+   uv --version              # uv package manager
    ```
 
    **Python environment:**
    ```bash
    .venv/bin/python --version
-   .venv/bin/pytest --version
-   .venv/bin/ruff --version
-   .venv/bin/python -c "import telethon; import httpx; import dotenv; import anthropic; import ollama; print('Core Python deps OK')"
+   .venv/bin/python -c "import telethon; import httpx; import dotenv; import anthropic; import ollama; import google_auth_oauthlib; print('Core Python deps OK')"
+   ```
+
+   **Development tools (if dev dependencies installed):**
+   ```bash
+   .venv/bin/pytest --version 2>/dev/null || echo "pytest not installed (dev deps missing)"
+   .venv/bin/ruff --version 2>/dev/null || echo "ruff not installed (dev deps missing)"
    ```
 
    **Valor CLI tools:**
@@ -98,22 +122,15 @@ Pull the latest changes from the remote repository and restart the bridge servic
    # SMS reader - reads macOS Messages for 2FA codes etc.
    .venv/bin/python -m tools.sms_reader.cli recent --limit 1
 
-   # Browser automation - headless browser for web interaction
-   agent-browser --version
-
-   # Calendar time tracking
-   valor-calendar 2>&1 || true
+   # Calendar time tracking (check both venv and user bin locations)
+   .venv/bin/valor-calendar --version 2>/dev/null || \
+   "$HOME/Library/Python/3.12/bin/valor-calendar" --version 2>/dev/null || \
+   echo "FAIL: valor-calendar not found"
    ```
 
-   - If any tool is missing, attempt to install it (pip for Python packages, brew/npm for system tools).
-   - Ensure `~/Library/Python/3.12/bin` is on PATH (where pip installs script entry points):
-     ```bash
-     if ! grep -q 'Library/Python/3.12/bin' ~/.zshrc 2>/dev/null; then
-       echo 'export PATH="$HOME/Library/Python/3.12/bin:$PATH"' >> ~/.zshrc
-       echo "Added Python 3.12 bin to PATH in ~/.zshrc"
-     fi
-     export PATH="$HOME/Library/Python/3.12/bin:$PATH"
-     ```
+   - If any tool is missing, attempt to install it:
+     - Python packages: `uv pip install <package>`
+     - System tools: `brew install <tool>` (if on macOS)
    - Report which tools passed and which failed.
 
 8. **Generate Google Calendar config**
@@ -126,8 +143,7 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - Project-specific: match each project's Telegram group name (minus the `"Dev: "` prefix) to a Google Calendar with the same name
 
    ```bash
-   export PATH="$HOME/Library/Python/3.12/bin:$PATH"
-   python3 -c "
+   .venv/bin/python -c "
    import sys, json, os
    sys.path.insert(0, '/Users/valorengels/src/ai')
    from pathlib import Path
@@ -239,3 +255,24 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - MCP servers are managed via `claude mcp add/remove` — any changes take effect on next bridge restart
 
 10. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, whether the service restarted successfully, SDK auth mode, CLI tool health, calendar status, and MCP server status.
+
+## Troubleshooting
+
+### Virtual environment issues
+If `.venv/` is corrupted or broken:
+```bash
+rm -rf .venv
+uv venv
+uv sync
+```
+
+### Missing dependencies after update
+If imports fail after pulling changes:
+```bash
+uv sync --reinstall
+```
+
+### Calendar integration not working
+1. Check OAuth token exists: `ls ~/Desktop/claude_code/google_token.json`
+2. Re-run OAuth flow: `valor-calendar test` (opens browser)
+3. Verify dependencies: `.venv/bin/python -c "import google_auth_oauthlib; print('OK')"`
