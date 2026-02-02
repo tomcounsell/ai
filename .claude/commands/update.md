@@ -25,8 +25,8 @@ Pull the latest changes from the remote repository and restart the bridge servic
      export PATH="$HOME/.local/bin:$PATH"
    fi
 
-   # Sync all dependencies (only reinstalls if pyproject.toml or lock changed)
-   uv sync
+   # Sync all dependencies including dev tools (only reinstalls if changed)
+   uv sync --all-extras
 
    # Install the package in editable mode
    uv pip install -e .
@@ -35,6 +35,7 @@ Pull the latest changes from the remote repository and restart the bridge servic
    This will:
    - Create/update `.venv/` if needed
    - Install all dependencies from `pyproject.toml`
+   - Install dev tools (pytest, ruff, mypy)
    - Install CLI tools (`valor-calendar`, `valor-history`)
    - Be significantly faster than pip
 
@@ -111,10 +112,11 @@ Pull the latest changes from the remote repository and restart the bridge servic
    .venv/bin/python -c "import telethon; import httpx; import dotenv; import anthropic; import ollama; import google_auth_oauthlib; print('Core Python deps OK')"
    ```
 
-   **Development tools (if dev dependencies installed):**
+   **Development tools:**
    ```bash
-   .venv/bin/pytest --version 2>/dev/null || echo "pytest not installed (dev deps missing)"
-   .venv/bin/ruff --version 2>/dev/null || echo "ruff not installed (dev deps missing)"
+   .venv/bin/pytest --version
+   .venv/bin/ruff --version
+   .venv/bin/mypy --version
    ```
 
    **Valor CLI tools:**
@@ -139,8 +141,9 @@ Pull the latest changes from the remote repository and restart the bridge servic
 
    **Calendar mapping rules:**
    - `"dm"` → `"primary"` (DMs go to the user's main calendar)
-   - `"default"` → calendar named **"Internal Projects"** (catch-all for Claude Code sessions and unmatched slugs)
+   - `"default"` → calendar named **"Internal Projects"** (catch-all for Claude Code sessions and internal projects)
    - Project-specific: match each project's Telegram group name (minus the `"Dev: "` prefix) to a Google Calendar with the same name
+   - Projects without a matching calendar automatically use `"default"` (no separate calendar needed for internal projects)
 
    ```bash
    .venv/bin/python -c "
@@ -212,8 +215,8 @@ Pull the latest changes from the remote repository and restart the bridge servic
                print(f'Mapping {project_key} -> {cal_name}')
                matched = True
                break
-       if not matched:
-           print(f'WARN: No calendar match for project \"{project_key}\" (groups: {groups})')
+       if not matched and groups:
+           print(f'INFO: Project \"{project_key}\" will use default calendar (no dedicated calendar found)')
 
    # Write config
    config = {'calendars': calendars}
@@ -237,9 +240,9 @@ Pull the latest changes from the remote repository and restart the bridge servic
    ```
 
    Report status per project:
-   - **Mapped**: Project matched to a Google Calendar by name
+   - **Mapped**: Project has a dedicated Google Calendar
+   - **Using default**: Project uses "Internal Projects" calendar (standard for internal projects)
    - **Auth failed**: OAuth token invalid or missing — run `/setup`
-   - **No match**: No Google Calendar matches the Telegram group name (will use default)
    - **Inaccessible**: Calendar mapped but API returns error
 
 9. **Verify MCP servers**
@@ -263,13 +266,13 @@ If `.venv/` is corrupted or broken:
 ```bash
 rm -rf .venv
 uv venv
-uv sync
+uv sync --all-extras
 ```
 
 ### Missing dependencies after update
 If imports fail after pulling changes:
 ```bash
-uv sync --reinstall
+uv sync --all-extras --reinstall
 ```
 
 ### Calendar integration not working
