@@ -185,19 +185,56 @@ class ValorAgent:
                                 await client.query(recovery_msg)
                                 break  # Re-enter receive_response() loop
                             elif msg.is_error:
-                                logger.error(
-                                    f"Agent error after {retries} retries: "
-                                    f"{msg.result}"
-                                )
+                                result_text = msg.result or ""
+                                if _is_auth_error(result_text):
+                                    logger.error(
+                                        f"Auth failure after {retries} retries: {result_text}\n"
+                                        "Subscription fallback may be patched. "
+                                        "Set USE_API_BILLING=true in .env or see module docstring for alternatives."
+                                    )
+                                else:
+                                    logger.error(
+                                        f"Agent error after {retries} retries: "
+                                        f"{result_text}"
+                                    )
                     else:
                         # async for completed without break — done
                         break
 
         except Exception as e:
-            logger.error(f"SDK query failed: {e}")
+            error_str = str(e)
+            if _is_auth_error(error_str):
+                logger.error(
+                    f"SDK auth failure — subscription fallback may be patched: {e}\n"
+                    "FALLBACK OPTIONS:\n"
+                    "  1. Set USE_API_BILLING=true in .env to use API key billing\n"
+                    "  2. CLIProxyAPI (github.com/luispater/CLIProxyAPI): OAuth proxy\n"
+                    "  3. Pi Coding Agent (github.com/badlogic/pi-mono): native subscription auth via --mode rpc"
+                )
+            else:
+                logger.error(f"SDK query failed: {e}")
             raise
 
         return "\n".join(response_parts) if response_parts else ""
+
+
+# Patterns that indicate subscription/auth failures — if these appear,
+# the subscription fallback may have been patched by Anthropic.
+_AUTH_ERROR_PATTERNS = [
+    "credit balance is too low",
+    "authentication_failed",
+    "invalid api key",
+    "unauthorized",
+    "billing",
+    "quota exceeded",
+    "rate_limit",
+]
+
+
+def _is_auth_error(error_text: str) -> bool:
+    """Check if an error indicates subscription auth was rejected."""
+    error_lower = error_text.lower()
+    return any(pattern in error_lower for pattern in _AUTH_ERROR_PATTERNS)
 
 
 # Patterns that indicate file/media-related API errors
