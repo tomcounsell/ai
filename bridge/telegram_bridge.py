@@ -2400,6 +2400,14 @@ async def main():
             if cleaned:
                 logger.info(f"[{_pkey}] Cleaned {len(cleaned)} stale session branches")
 
+        # Register "dm" callback so DM responses actually get sent
+        register_queue_callbacks(
+            "dm",
+            await _make_send_cb(),
+            await _make_react_cb(),
+        )
+        logger.info("[dm] Registered job queue callbacks")
+
     # Recover interrupted jobs and restart workers for any persisted jobs
     if USE_CLAUDE_SDK:
         from agent.job_queue import (
