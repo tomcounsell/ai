@@ -29,9 +29,12 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     ResultMessage,
     TextBlock,
 )
+
+from agent.health_check import watchdog_hook
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +135,11 @@ class ValorAgent:
             resume=session_id,
             setting_sources=["local", "project"],
             env=env,
+            hooks={
+                "PostToolUse": [
+                    HookMatcher(matcher="", hooks=[watchdog_hook]),
+                ],
+            },
         )
 
     async def query(self, message: str, session_id: str | None = None, max_retries: int = 2) -> str:
