@@ -19,6 +19,7 @@ from pathlib import Path
 CONFIG_DIR = Path.home() / "Desktop" / "claude_code"
 CALENDAR_CONFIG_PATH = CONFIG_DIR / "calendar_config.json"
 QUEUE_PATH = CONFIG_DIR / "calendar_queue.jsonl"
+EVENT_ID_CACHE_PATH = CONFIG_DIR / "calendar_event_ids.json"
 
 
 def load_calendar_config() -> dict:
@@ -50,7 +51,7 @@ def round_up_30(dt: datetime) -> datetime:
         return dt.replace(second=0, microsecond=0)
     if dt.minute <= 30:
         return dt.replace(minute=30, second=0, microsecond=0)
-    return (dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1))
+    return dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
 
 
 def current_segment(now: datetime) -> tuple[datetime, datetime]:
@@ -60,8 +61,47 @@ def current_segment(now: datetime) -> tuple[datetime, datetime]:
     return start, end
 
 
+def _load_event_id_cache() -> dict:
+    """Load the slug -> event_id cache."""
+    if EVENT_ID_CACHE_PATH.exists():
+        try:
+            return json.loads(EVENT_ID_CACHE_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_event_id_cache(cache: dict) -> None:
+    """Persist the slug -> event_id cache."""
+    EVENT_ID_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    EVENT_ID_CACHE_PATH.write_text(json.dumps(cache, indent=2))
+
+
+def _cache_key(slug: str, now: datetime) -> str:
+    """Cache key scoped to slug + date."""
+    return f"{slug}:{now.strftime('%Y-%m-%d')}"
+
+
 def find_todays_event(service, calendar_id: str, slug: str, now: datetime):
-    """Find an existing event for today matching the slug summary."""
+    """Find an existing event for today, by cached event ID first, then summary."""
+    # Try cached event ID first (survives renames)
+    cache = _load_event_id_cache()
+    key = _cache_key(slug, now)
+    cached_id = cache.get(key)
+    if cached_id:
+        try:
+            event = (
+                service.events()
+                .get(calendarId=calendar_id, eventId=cached_id)
+                .execute()
+            )
+            if event and event.get("status") != "cancelled":
+                return event
+        except Exception:
+            # Event was deleted or ID is stale; fall through to search
+            pass
+
+    # Fallback: search by summary
     start_of_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     end_of_day = start_of_day + timedelta(days=1)
 
@@ -80,6 +120,9 @@ def find_todays_event(service, calendar_id: str, slug: str, now: datetime):
 
     for event in events_result.get("items", []):
         if event.get("summary") == slug:
+            # Update cache with found event ID
+            cache[key] = event["id"]
+            _save_event_id_cache(cache)
             return event
     return None
 
@@ -175,7 +218,12 @@ def process_calendar_event(service, calendar_id: str, slug: str, now: datetime) 
     event = find_todays_event(service, calendar_id, slug, now)
 
     if event is None:
-        create_event(service, calendar_id, slug, seg_start, seg_end)
+        new_event = create_event(service, calendar_id, slug, seg_start, seg_end)
+        # Cache the event ID for future lookups (survives renames)
+        if new_event and "id" in new_event:
+            cache = _load_event_id_cache()
+            cache[_cache_key(slug, now)] = new_event["id"]
+            _save_event_id_cache(cache)
         return f"Created event '{slug}' {seg_start.strftime('%H:%M')}-{seg_end.strftime('%H:%M')}"
 
     event_end = parse_event_time(event["end"]["dateTime"])

@@ -1571,8 +1571,24 @@ async def send_response_with_files(
         # Safety truncation at Telegram's limit (summarizer handles graceful shortening)
         if len(text) > 4096:
             text = text[:4093] + "..."
-        await client.send_message(_chat_id, text, reply_to=_reply_to)
-        sent_content = True
+        try:
+            await client.send_message(_chat_id, text, reply_to=_reply_to)
+            sent_content = True
+        except Exception as e:
+            logger.error(
+                f"Failed to send text message to chat {_chat_id} "
+                f"({len(text)} chars): {e}"
+            )
+            # Persist to dead-letter queue for later retry
+            try:
+                from bridge.dead_letters import persist_failed_delivery
+                await persist_failed_delivery(
+                    chat_id=_chat_id,
+                    reply_to=_reply_to,
+                    text=text,
+                )
+            except Exception as dl_err:
+                logger.error(f"Dead-letter persist also failed: {dl_err}")
 
     return sent_content
 
@@ -2358,6 +2374,15 @@ async def main():
     await client.start(phone=PHONE, password=PASSWORD)
     logger.info("Connected to Telegram")
 
+    # Replay any dead-lettered messages from previous session
+    try:
+        from bridge.dead_letters import replay_dead_letters
+        replayed = await replay_dead_letters(client)
+        if replayed:
+            logger.info(f"Replayed {replayed} dead-lettered message(s)")
+    except Exception as e:
+        logger.error(f"Dead letter replay failed: {e}")
+
     # Register job queue callbacks for each project
     if USE_CLAUDE_SDK:
         from agent.job_queue import register_callbacks as register_queue_callbacks
@@ -2376,20 +2401,31 @@ async def main():
             # Create send callback that uses the Telegram client
             async def _make_send_cb(_client=client):
                 async def _send(chat_id: str, text: str, reply_to_msg_id: int) -> None:
-                    filtered = filter_tool_logs(text)
-                    if filtered:
-                        sent = await send_response_with_files(_client, None, filtered, chat_id=int(chat_id), reply_to=reply_to_msg_id)
-                        if sent:
-                            try:
-                                store_message(
-                                    chat_id=chat_id,
-                                    content=filtered[:1000],
-                                    sender="Valor",
-                                    timestamp=datetime.now(),
-                                    message_type="response",
+                    try:
+                        filtered = filter_tool_logs(text)
+                        if filtered:
+                            sent = await send_response_with_files(_client, None, filtered, chat_id=int(chat_id), reply_to=reply_to_msg_id)
+                            if sent:
+                                try:
+                                    store_message(
+                                        chat_id=chat_id,
+                                        content=filtered[:1000],
+                                        sender="Valor",
+                                        timestamp=datetime.now(),
+                                        message_type="response",
+                                    )
+                                except Exception:
+                                    pass
+                            elif filtered:
+                                logger.error(
+                                    f"Job queue send returned False for chat {chat_id} "
+                                    f"({len(filtered)} chars)"
                                 )
-                            except Exception:
-                                pass
+                    except Exception as e:
+                        logger.error(
+                            f"Job queue _send callback failed for chat {chat_id}: {e}",
+                            exc_info=True,
+                        )
                 return _send
 
             async def _make_react_cb(_client=client):

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -38,19 +37,9 @@ Respond with ONLY a JSON object, no other text:
 
 def _get_api_key() -> str:
     """Resolve Anthropic API key from env or shared .env files."""
-    key = os.getenv("ANTHROPIC_API_KEY", "")
-    if key:
-        return key
-    # Fallback: read from shared env files
-    for env_path in [
-        Path.home() / "src" / ".env",
-        Path.home() / "src" / "ai" / ".env",
-    ]:
-        if env_path.exists():
-            for line in env_path.read_text().splitlines():
-                if line.startswith("ANTHROPIC_API_KEY="):
-                    return line.split("=", 1)[1].strip().strip("'\"")
-    return ""
+    from utils.api_keys import get_anthropic_api_key
+
+    return get_anthropic_api_key()
 
 
 def _read_recent_activity(transcript_path: str, max_entries: int = 30) -> str:
@@ -141,7 +130,9 @@ async def _judge_health(activity: str) -> dict[str, Any]:
         return {"healthy": True, "reason": f"unparseable judge response: {text[:80]}"}
 
 
-async def watchdog_hook(input_data: Any, tool_use_id: str | None, context: Any) -> dict[str, Any]:
+async def watchdog_hook(
+    input_data: Any, tool_use_id: str | None, context: Any
+) -> dict[str, Any]:
     """PostToolUse hook that runs a health check every CHECK_INTERVAL tool calls."""
     session_id = input_data.get("session_id", "unknown")
     transcript_path = input_data.get("transcript_path", "")
@@ -153,7 +144,9 @@ async def watchdog_hook(input_data: Any, tool_use_id: str | None, context: Any) 
     if count % CHECK_INTERVAL != 0:
         return {"continue_": True}
 
-    logger.info(f"[health_check] Running health check at tool call #{count} (session={session_id})")
+    logger.info(
+        f"[health_check] Running health check at tool call #{count} (session={session_id})"
+    )
 
     try:
         activity = _read_recent_activity(transcript_path)

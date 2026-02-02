@@ -51,12 +51,10 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
     artifacts: dict[str, list[str]] = {}
 
     # Git commit hashes (7-40 hex chars preceded by common keywords)
-    commit_pat = (
-        r'(?:commit|pushed|merged|created)\s+([a-f0-9]{7,40})'
-    )
+    commit_pat = r"(?:commit|pushed|merged|created)\s+([a-f0-9]{7,40})"
     commits = re.findall(commit_pat, text, re.IGNORECASE)
     # Also match standalone short hashes in common git output patterns
-    commits += re.findall(r'\b([a-f0-9]{7,12})\b(?=\s)', text)
+    commits += re.findall(r"\b([a-f0-9]{7,12})\b(?=\s)", text)
     if commits:
         # dedupe preserving order
         artifacts["commits"] = list(dict.fromkeys(commits))
@@ -67,31 +65,23 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
         artifacts["urls"] = list(dict.fromkeys(urls))
 
     # Files changed (common git diff output patterns)
-    file_pat = (
-        r'(?:modified|created|deleted|renamed|changed):\s*'
-        r'(.+?)(?:\n|$)'
-    )
+    file_pat = r"(?:modified|created|deleted|renamed|changed):\s*" r"(.+?)(?:\n|$)"
     files_changed = re.findall(file_pat, text, re.IGNORECASE)
-    files_changed += re.findall(
-        r'^\s*[MADR]\s+(\S+)', text, re.MULTILINE
-    )
+    files_changed += re.findall(r"^\s*[MADR]\s+(\S+)", text, re.MULTILINE)
     if files_changed:
         artifacts["files_changed"] = list(
             dict.fromkeys(f.strip() for f in files_changed)
         )
 
     # Test results
-    test_pat = (
-        r'(\d+\s+passed'
-        r'(?:,\s*\d+\s+(?:failed|error|warning|skipped))*)'
-    )
+    test_pat = r"(\d+\s+passed" r"(?:,\s*\d+\s+(?:failed|error|warning|skipped))*)"
     test_matches = re.findall(test_pat, text, re.IGNORECASE)
     if test_matches:
         artifacts["test_results"] = test_matches
 
     # Error indicators
     errors = re.findall(
-        r'(?:error|exception|failed|failure):\s*(.+?)(?:\n|$)',
+        r"(?:error|exception|failed|failure):\s*(.+?)(?:\n|$)",
         text,
         re.IGNORECASE,
     )
@@ -101,9 +91,7 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
     return artifacts
 
 
-def _build_summary_prompt(
-    text: str, artifacts: dict[str, list[str]]
-) -> str:
+def _build_summary_prompt(text: str, artifacts: dict[str, list[str]]) -> str:
     """Build the summarization prompt.
 
     Valor is a senior dev reporting to his project manager via
@@ -115,9 +103,8 @@ def _build_summary_prompt(
         parts = []
         for key, values in artifacts.items():
             parts.append(f"- {key}: {', '.join(values[:10])}")
-        artifact_section = (
-            "\n\nThese artifacts MUST appear verbatim:\n"
-            + "\n".join(parts)
+        artifact_section = "\n\nThese artifacts MUST appear verbatim:\n" + "\n".join(
+            parts
         )
 
     return f"""/no_think
@@ -150,35 +137,18 @@ Agent output to summarize:
 
 def _write_full_output_file(text: str) -> Path:
     """Write full agent output to a temp file for attachment."""
-    fd, path = tempfile.mkstemp(
-        suffix=".txt", prefix="valor_full_output_"
-    )
+    fd, path = tempfile.mkstemp(suffix=".txt", prefix="valor_full_output_")
     with os.fdopen(fd, "w") as f:
         f.write(text)
     return Path(path)
 
 
-def _get_anthropic_api_key() -> str:
-    """Resolve Anthropic API key, reading .env directly if os.environ is empty."""
-    key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if key:
-        return key
-    # os.environ may have been cleared; read directly from .env files
-    for env_path in [
-        Path(__file__).parent.parent / ".env",
-        Path.home() / "src" / ".env",
-    ]:
-        if env_path.exists():
-            for line in env_path.read_text().splitlines():
-                if line.startswith("ANTHROPIC_API_KEY="):
-                    return line.split("=", 1)[1].strip().strip("'\"")
-    return ""
-
-
 async def _summarize_with_haiku(prompt: str) -> str | None:
     """Try summarization via Anthropic Haiku API."""
     try:
-        api_key = _get_anthropic_api_key()
+        from utils.api_keys import get_anthropic_api_key
+
+        api_key = get_anthropic_api_key()
         if not api_key:
             logger.warning("No Anthropic API key found for summarization")
             return None
@@ -223,9 +193,7 @@ async def summarize_response(
     Falls back to safety truncation if all summarization fails.
     """
     if not raw_response or len(raw_response) <= SUMMARIZE_THRESHOLD:
-        return SummarizedResponse(
-            text=raw_response or "", was_summarized=False
-        )
+        return SummarizedResponse(text=raw_response or "", was_summarized=False)
 
     artifacts = extract_artifacts(raw_response)
 
@@ -249,13 +217,9 @@ async def summarize_response(
     if summary_text is not None:
         # Safety: if summary is somehow longer than original, truncate
         if len(summary_text) >= len(raw_response):
-            logger.warning(
-                "Summary longer than original, using truncated original"
-            )
+            logger.warning("Summary longer than original, using truncated original")
             if len(raw_response) > SAFETY_TRUNCATE:
-                summary_text = (
-                    raw_response[: SAFETY_TRUNCATE - 3] + "..."
-                )
+                summary_text = raw_response[: SAFETY_TRUNCATE - 3] + "..."
             else:
                 summary_text = raw_response
 
