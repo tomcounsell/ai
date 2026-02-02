@@ -7,6 +7,7 @@ Store and manage links shared in Telegram chats.
 
 import json
 import sqlite3
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
@@ -139,6 +140,24 @@ def store_message(
             (chat_id, message_id, sender, content, timestamp, message_type),
         )
         conn.commit()
+
+        # Mirror to Redis for fast recent-access queries
+        try:
+            from models.telegram import TelegramMessage
+
+            direction = "out" if sender and sender.lower() == "valor" else "in"
+            ts = timestamp.timestamp() if hasattr(timestamp, "timestamp") else time.time()
+            TelegramMessage.create(
+                chat_id=str(chat_id),
+                message_id=message_id,
+                direction=direction,
+                sender=sender or "unknown",
+                content=content[:20_000] if content else "",
+                timestamp=ts,
+                message_type=message_type,
+            )
+        except Exception:
+            pass  # Redis mirror is best-effort; SQLite is the source of truth
 
         return {
             "stored": True,

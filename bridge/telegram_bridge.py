@@ -647,17 +647,14 @@ logger.setLevel(logging.DEBUG)
 
 
 def log_event(event_type: str, **kwargs) -> None:
-    """Log a structured event for analysis."""
-    import time
-    event = {
-        "timestamp": time.time(),
-        "type": event_type,
-        **kwargs
-    }
-    # Write to events log as JSON lines
-    events_log = LOG_DIR / "bridge.events.jsonl"
-    with open(events_log, "a") as f:
-        f.write(json.dumps(event) + "\n")
+    """Log a structured event to Redis via BridgeEvent model."""
+    try:
+        from models.bridge_event import BridgeEvent
+
+        BridgeEvent.log(event_type, **kwargs)
+    except Exception:
+        # Fallback: don't let event logging break the bridge
+        pass
 
 
 def load_config() -> dict:

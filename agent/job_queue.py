@@ -396,6 +396,26 @@ async def _execute_job(job: Job) -> None:
         f"(session={job.session_id}, branch={branch_name}, cwd={working_dir})"
     )
 
+    # Track session in Redis
+    agent_session = None
+    try:
+        from models.sessions import AgentSession
+
+        agent_session = await AgentSession.async_create(
+            session_id=job.session_id,
+            project_key=job.project_key,
+            status="active",
+            chat_id=str(job.chat_id),
+            sender=job.sender_name,
+            started_at=time.time(),
+            last_activity=time.time(),
+            tool_call_count=0,
+            branch_name=branch_name,
+            message_text=job.message_text[:20_000] if job.message_text else None,
+        )
+    except Exception as e:
+        logger.debug(f"AgentSession create failed (non-fatal): {e}")
+
     # Calendar heartbeat at session start
     asyncio.create_task(_calendar_heartbeat(job.project_key))
 
@@ -440,6 +460,15 @@ async def _execute_job(job: Job) -> None:
         if time.time() - last_heartbeat >= CALENDAR_HEARTBEAT_INTERVAL:
             asyncio.create_task(_calendar_heartbeat(job.project_key))
             last_heartbeat = time.time()
+
+    # Update session status in Redis
+    if agent_session:
+        try:
+            agent_session.status = "completed" if not task.error else "failed"
+            agent_session.last_activity = time.time()
+            await agent_session.async_save()
+        except Exception as e:
+            logger.debug(f"AgentSession update failed (non-fatal): {e}")
 
     # Set reaction based on result
     if react_cb:

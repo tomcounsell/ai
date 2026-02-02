@@ -141,6 +141,21 @@ async def watchdog_hook(
     _tool_counts[session_id] = _tool_counts.get(session_id, 0) + 1
     count = _tool_counts[session_id]
 
+    # Update session tracking in Redis (best-effort, every call)
+    try:
+        import time
+
+        from models.sessions import AgentSession
+
+        sessions = AgentSession.query.filter(session_id=session_id)
+        if sessions:
+            s = sessions[0]
+            s.tool_call_count = count
+            s.last_activity = time.time()
+            s.save()
+    except Exception:
+        pass  # Non-fatal: don't let tracking break the agent
+
     if count % CHECK_INTERVAL != 0:
         return {"continue_": True}
 

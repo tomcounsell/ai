@@ -1,30 +1,11 @@
 #!/usr/bin/env python3
-"""Analyze bridge logs and events for debugging."""
+"""Analyze bridge events stored in Redis via BridgeEvent model."""
 
-import json
 import sys
 from collections import defaultdict
 from datetime import datetime
-from pathlib import Path
 
-LOG_DIR = Path(__file__).parent.parent / "logs"
-EVENTS_FILE = LOG_DIR / "bridge.events.jsonl"
-
-
-def load_events(limit: int = 100) -> list[dict]:
-    """Load recent events from the events log."""
-    if not EVENTS_FILE.exists():
-        return []
-
-    events = []
-    with open(EVENTS_FILE) as f:
-        for line in f:
-            try:
-                events.append(json.loads(line.strip()))
-            except json.JSONDecodeError:
-                continue
-
-    return events[-limit:]
+from models.bridge_event import BridgeEvent
 
 
 def format_timestamp(ts: float) -> str:
@@ -32,12 +13,22 @@ def format_timestamp(ts: float) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def load_events(limit: int = 100) -> list[BridgeEvent]:
+    """Load recent events from Redis, sorted by timestamp descending."""
+    events = BridgeEvent.query.filter()
+    if not events:
+        return []
+
+    events.sort(key=lambda e: e.timestamp or 0, reverse=True)
+    return events[:limit]
+
+
 def analyze_recent(limit: int = 20):
     """Show recent events with analysis."""
     events = load_events(limit)
 
     if not events:
-        print("No events found. Events will be logged after bridge restart.")
+        print("No events found.")
         return
 
     print(f"\n=== Last {len(events)} Events ===\n")
@@ -45,69 +36,72 @@ def analyze_recent(limit: int = 20):
     # Group by request_id for correlation
     requests = defaultdict(list)
     for event in events:
-        rid = event.get("request_id", event.get("message_id", "unknown"))
+        data = event.data or {}
+        rid = data.get("request_id", data.get("message_id", "unknown"))
         requests[rid].append(event)
 
     # Show each request flow
     for rid, req_events in requests.items():
         first = req_events[0]
-        ts = format_timestamp(first.get("timestamp", 0))
+        ts = format_timestamp(first.timestamp or 0)
 
-        # Summarize the request
-        if first["type"] == "message_received":
-            sender = first.get("sender", "?")
-            project = first.get("project", "?")
+        if first.event_type == "message_received":
+            data = first.data or {}
+            sender = data.get("sender", "?")
+            project = first.project_key or "?"
             print(f"[{ts}] Message from {sender} ({project})")
 
             for evt in req_events:
-                if evt["type"] == "agent_request":
-                    print(f"  → Agent called (session: {evt.get('session_id', '?')[:20]}...)")
-                elif evt["type"] == "agent_response":
-                    elapsed = evt.get("elapsed_seconds", 0)
-                    length = evt.get("response_length", 0)
-                    print(f"  ✓ Response in {elapsed:.1f}s ({length} chars)")
-                elif evt["type"] == "agent_timeout":
-                    elapsed = evt.get("elapsed_seconds", 0)
-                    print(f"  ✗ TIMEOUT after {elapsed:.1f}s")
-                elif evt["type"] == "agent_error":
-                    code = evt.get("exit_code", "?")
-                    print(f"  ✗ ERROR (exit {code}): {evt.get('stderr_preview', '')[:50]}")
-                elif evt["type"] == "reply_sent":
-                    print(f"  ✓ Reply sent ({evt.get('response_length', 0)} chars)")
+                evt_data = evt.data or {}
+                if evt.event_type == "agent_request":
+                    print(f"  -> Agent called (session: {evt_data.get('session_id', '?')[:20]}...)")
+                elif evt.event_type == "agent_response":
+                    elapsed = evt_data.get("elapsed_seconds", 0)
+                    length = evt_data.get("response_length", 0)
+                    print(f"  + Response in {elapsed:.1f}s ({length} chars)")
+                elif evt.event_type == "agent_timeout":
+                    elapsed = evt_data.get("elapsed_seconds", 0)
+                    print(f"  x TIMEOUT after {elapsed:.1f}s")
+                elif evt.event_type == "agent_error":
+                    code = evt_data.get("exit_code", "?")
+                    print(f"  x ERROR (exit {code}): {evt_data.get('stderr_preview', '')[:50]}")
+                elif evt.event_type == "reply_sent":
+                    print(f"  + Reply sent ({evt_data.get('response_length', 0)} chars)")
             print()
 
-        elif first["type"] == "agent_request":
-            # Orphaned agent request (no message_received)
-            print(f"[{ts}] Agent request {rid[:30]}...")
+        elif first.event_type == "agent_request":
+            print(f"[{ts}] Agent request {str(rid)[:30]}...")
             for evt in req_events:
-                if evt["type"] == "agent_response":
-                    elapsed = evt.get("elapsed_seconds", 0)
-                    print(f"  ✓ Response in {elapsed:.1f}s")
-                elif evt["type"] == "agent_timeout":
-                    print(f"  ✗ TIMEOUT")
+                evt_data = evt.data or {}
+                if evt.event_type == "agent_response":
+                    elapsed = evt_data.get("elapsed_seconds", 0)
+                    print(f"  + Response in {elapsed:.1f}s")
+                elif evt.event_type == "agent_timeout":
+                    print("  x TIMEOUT")
             print()
 
 
 def show_timeouts():
     """Show all timeout events."""
-    events = load_events(500)
-    timeouts = [e for e in events if e.get("type") == "agent_timeout"]
+    events = BridgeEvent.query.filter(event_type="agent_timeout")
 
-    if not timeouts:
+    if not events:
         print("No timeouts recorded.")
         return
 
-    print(f"\n=== {len(timeouts)} Timeout Events ===\n")
-    for evt in timeouts:
-        ts = format_timestamp(evt.get("timestamp", 0))
-        session = evt.get("session_id", "?")
-        elapsed = evt.get("elapsed_seconds", 0)
+    events.sort(key=lambda e: e.timestamp or 0)
+    print(f"\n=== {len(events)} Timeout Events ===\n")
+    for evt in events:
+        ts = format_timestamp(evt.timestamp or 0)
+        data = evt.data or {}
+        session = data.get("session_id", "?")
+        elapsed = data.get("elapsed_seconds", 0)
         print(f"[{ts}] Session {session[:30]}... - timed out after {elapsed:.1f}s")
 
 
 def show_stats():
     """Show statistics from events."""
-    events = load_events(1000)
+    events = BridgeEvent.query.filter()
 
     if not events:
         print("No events to analyze.")
@@ -118,9 +112,10 @@ def show_stats():
     response_times = []
 
     for evt in events:
-        type_counts[evt.get("type", "unknown")] += 1
-        if evt.get("type") == "agent_response":
-            response_times.append(evt.get("elapsed_seconds", 0))
+        type_counts[evt.event_type or "unknown"] += 1
+        if evt.event_type == "agent_response":
+            data = evt.data or {}
+            response_times.append(data.get("elapsed_seconds", 0))
 
     print("\n=== Event Statistics ===\n")
     for evt_type, count in sorted(type_counts.items()):
@@ -130,11 +125,17 @@ def show_stats():
         avg_time = sum(response_times) / len(response_times)
         max_time = max(response_times)
         min_time = min(response_times)
-        print(f"\n=== Response Times ===")
+        print("\n=== Response Times ===")
         print(f"  Average: {avg_time:.1f}s")
         print(f"  Min: {min_time:.1f}s")
         print(f"  Max: {max_time:.1f}s")
         print(f"  Samples: {len(response_times)}")
+
+
+def cleanup(days: int = 7):
+    """Delete events older than N days."""
+    deleted = BridgeEvent.cleanup_old(max_age_seconds=days * 86400)
+    print(f"Deleted {deleted} events older than {days} days.")
 
 
 def main():
@@ -148,8 +149,11 @@ def main():
         show_timeouts()
     elif cmd == "stats":
         show_stats()
+    elif cmd == "cleanup":
+        days = int(sys.argv[2]) if len(sys.argv) > 2 else 7
+        cleanup(days)
     else:
-        print("Usage: analyze_logs.py [recent|timeouts|stats] [limit]")
+        print("Usage: analyze_logs.py [recent|timeouts|stats|cleanup] [limit|days]")
 
 
 if __name__ == "__main__":
