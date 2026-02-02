@@ -256,6 +256,12 @@ def main() -> None:
     config = load_calendar_config()
     calendar_id = get_calendar_id(project, config)
 
+    # When using the default calendar, prepend project name so events are
+    # distinguishable across projects sharing the same calendar.
+    default_id = config.get("calendars", {}).get("default", "primary")
+    if project and calendar_id == default_id:
+        slug = f"{project}: {slug}"
+
     try:
         from tools.google_workspace.auth import get_service
 
