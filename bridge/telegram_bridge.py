@@ -754,12 +754,20 @@ RESPOND_TO_DMS = any(
 )
 
 # DM whitelist - only respond to DMs from these Telegram user IDs
-# If empty, responds to all DMs (when RESPOND_TO_DMS is True)
+# Loaded from ~/Desktop/claude_code/dm_whitelist.json, falls back to TELEGRAM_DM_WHITELIST env var
 DM_WHITELIST: set[int] = set()
-for _id in os.getenv("TELEGRAM_DM_WHITELIST", "").split(","):
-    _id = _id.strip()
-    if _id.isdigit():
-        DM_WHITELIST.add(int(_id))
+_dm_whitelist_path = Path.home() / "Desktop" / "claude_code" / "dm_whitelist.json"
+if _dm_whitelist_path.exists():
+    try:
+        _wl_config = json.loads(_dm_whitelist_path.read_text())
+        DM_WHITELIST = {int(uid) for uid in _wl_config.get("users", {})}
+    except (json.JSONDecodeError, ValueError, OSError) as e:
+        logger.warning(f"Failed to load DM whitelist from {_dm_whitelist_path}: {e}")
+if not DM_WHITELIST:
+    for _id in os.getenv("TELEGRAM_DM_WHITELIST", "").split(","):
+        _id = _id.strip()
+        if _id.isdigit():
+            DM_WHITELIST.add(int(_id))
 
 # Link collectors - usernames whose links are automatically stored
 # When these users share a URL, it gets saved with metadata
