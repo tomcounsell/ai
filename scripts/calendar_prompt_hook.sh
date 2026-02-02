@@ -7,10 +7,25 @@ set -e
 
 LOCKDIR="$HOME/Desktop/claude_code"
 STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
+SESSIONFILE="$LOCKDIR/.calendar_hook_session"
 INTERVAL=1500  # 25 minutes in seconds
 
-# Rate limit: skip if called within the last INTERVAL seconds
-if [ -f "$STAMPFILE" ]; then
+# Read stdin JSON from Claude Code hook (must happen before rate limit check)
+INPUT=$(cat)
+PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+
+# Rate limit: skip if same session and called within the last INTERVAL seconds
+# A new session always bypasses the rate limit
+SAME_SESSION=false
+if [ -n "$SESSION_ID" ] && [ -f "$SESSIONFILE" ]; then
+    PREV_SESSION=$(cat "$SESSIONFILE" 2>/dev/null || echo "")
+    if [ "$SESSION_ID" = "$PREV_SESSION" ]; then
+        SAME_SESSION=true
+    fi
+fi
+
+if [ "$SAME_SESSION" = true ] && [ -f "$STAMPFILE" ]; then
     LAST=$(cat "$STAMPFILE" 2>/dev/null || echo 0)
     NOW=$(date +%s)
     ELAPSED=$((NOW - LAST))
@@ -18,10 +33,6 @@ if [ -f "$STAMPFILE" ]; then
         exit 0
     fi
 fi
-
-# Read stdin JSON from Claude Code hook
-INPUT=$(cat)
-PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 
 # Resolve project name from projects.json (matches working_directory to name)
 # Falls back to directory basename if no match found
@@ -80,8 +91,9 @@ else
     fi
 fi
 
-# Update stamp and fire calendar event
+# Update stamp/session and fire calendar event
 mkdir -p "$LOCKDIR"
 date +%s > "$STAMPFILE"
+[ -n "$SESSION_ID" ] && echo "$SESSION_ID" > "$SESSIONFILE"
 export PATH="$HOME/Library/Python/3.12/bin:$PATH"
 exec valor-calendar "$SLUG"
