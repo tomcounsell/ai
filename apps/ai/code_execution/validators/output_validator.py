@@ -20,8 +20,8 @@ Use Cases:
 
 import re
 import sys
-from typing import List, Optional, Pattern
 from dataclasses import dataclass
+from typing import List, Optional, Pattern
 
 from ..exceptions import OutputValidationError
 

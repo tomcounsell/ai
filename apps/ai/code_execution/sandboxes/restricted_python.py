@@ -32,18 +32,18 @@ These patterns are still valuable as ADDITIONAL layers of defense even
 when using OS-level isolation.
 """
 
+import signal
 import sys
 import time
-import signal
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from typing import Any, Callable
-from contextlib import redirect_stdout, redirect_stderr
 
 from ..exceptions import (
-    SecurityViolationError,
-    TimeoutError as ExecutionTimeoutError,
     ResourceLimitError,
+    SecurityViolationError,
 )
+from ..exceptions import TimeoutError as ExecutionTimeoutError
 from .base import BaseSandbox, SandboxConfig, SandboxResult
 
 

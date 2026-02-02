@@ -16,9 +16,9 @@ Philosophy:
     to OS-level sandboxing, not as a replacement.
 """
 
-from .syntax_validator import SyntaxValidator
 from .ast_validator import ASTValidator, ASTViolation
 from .output_validator import OutputValidator
+from .syntax_validator import SyntaxValidator
 
 __all__ = [
     "SyntaxValidator",

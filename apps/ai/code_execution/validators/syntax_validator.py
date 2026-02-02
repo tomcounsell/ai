@@ -6,8 +6,8 @@ before attempting execution. This is the first line of defense.
 """
 
 import ast
-from typing import Optional
 from dataclasses import dataclass
+from typing import Optional
 
 from ..exceptions import ValidationError
 

@@ -9,9 +9,10 @@ They should only be run in isolated test environments.
 """
 
 import pytest
+
 from apps.ai.code_execution import CodeExecutor
-from apps.ai.code_execution.validators import ASTValidator
 from apps.ai.code_execution.sandboxes import RestrictedPythonSandbox, SandboxConfig
+from apps.ai.code_execution.validators import ASTValidator
 
 
 class TestImportRestrictions:

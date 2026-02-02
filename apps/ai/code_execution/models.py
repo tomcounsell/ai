@@ -11,9 +11,10 @@ Note: These are optional. You can use the code_execution module without
 persisting execution records to the database.
 """
 
-from django.db import models
 from django.contrib.auth import get_user_model
 from django.contrib.postgres.fields import ArrayField
+from django.db import models
+
 from apps.common.behaviors import Timestampable
 
 User = get_user_model()
@@ -390,8 +391,9 @@ class ExecutionQuota(models.Model):
 
     def reset_quota(self) -> None:
         """Reset quota counters (called at period_end)."""
-        from django.utils import timezone
         from datetime import timedelta
+
+        from django.utils import timezone
 
         self.executions_used = 0
         self.total_execution_seconds = 0.0
@@ -411,8 +413,9 @@ class ExecutionQuota(models.Model):
         Returns:
             ExecutionQuota instance
         """
-        from django.utils import timezone
         from datetime import timedelta
+
+        from django.utils import timezone
 
         quota, created = cls.objects.get_or_create(
             user=user,
