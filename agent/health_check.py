@@ -133,7 +133,7 @@ async def _judge_health(activity: str) -> dict[str, Any]:
                 "content-type": "application/json",
             },
             json={
-                "model": "claude-haiku-4-20250514",
+                "model": "claude-haiku-4-5-20251001",
                 "max_tokens": 150,
                 "messages": [{"role": "user", "content": prompt}],
             },
