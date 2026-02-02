@@ -1,6 +1,6 @@
 #!/bin/bash
 # Calendar heartbeat hook for Claude Code sessions.
-# Rate-limited: only calls valor-calendar if 25+ minutes since last call.
+# Rate-limited: only calls valor-calendar if 10+ minutes since last call.
 # Reads project slug from directory name of cwd passed via stdin JSON.
 
 set -e
@@ -8,7 +8,7 @@ set -e
 LOCKDIR="$HOME/Desktop/claude_code"
 STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
 SESSIONFILE="$LOCKDIR/.calendar_hook_session"
-INTERVAL=1500  # 25 minutes in seconds
+INTERVAL=600  # 10 minutes in seconds
 
 # Read stdin JSON from Claude Code hook
 INPUT=$(cat)

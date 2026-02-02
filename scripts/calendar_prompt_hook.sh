@@ -1,14 +1,14 @@
 #!/bin/bash
 # Calendar hook for UserPromptSubmit: derives a descriptive slug from the
 # user's first prompt via a quick Haiku call, then creates/extends a calendar event.
-# Rate-limited: only fires once per 25 minutes (first prompt wins).
+# Rate-limited: only fires once per 10 minutes (first prompt wins).
 
 set -e
 
 LOCKDIR="$HOME/Desktop/claude_code"
 STAMPFILE="$LOCKDIR/.calendar_hook_stamp"
 SESSIONFILE="$LOCKDIR/.calendar_hook_session"
-INTERVAL=1500  # 25 minutes in seconds
+INTERVAL=600  # 10 minutes in seconds
 
 # Read stdin JSON from Claude Code hook (must happen before rate limit check)
 INPUT=$(cat)
