@@ -16,6 +16,11 @@ INPUT=$(cat)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
+# Skip non-billable sessions (updates, setup, config)
+if echo "$PROMPT" | grep -qiE '^\s*/(update|setup|clear)|^(update|setup|config)'; then
+    exit 0
+fi
+
 # Rate limit: skip if same session and called within the last INTERVAL seconds
 # A new session always bypasses the rate limit
 SAME_SESSION=false
