@@ -65,12 +65,13 @@ Block Structure:
     {% component_css_dependencies %}
 
     <!-- JQUERY -->
-    <script src="https://code.jquery.com/jquery-3.7.1.slim.min.js"
-            integrity="sha256-kmHvs0B+OpCW5GVHUNjv9rOmY0IvSIRcf7zGUDTDQM8=" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jquery@4.0.0/dist/jquery.slim.min.js"
+            integrity="sha256-8DGpv13HIm+5iDNWw1XqxgFB4mj+yOKFNb+tHBZOowc="
+            crossorigin="anonymous"></script>
 
     <!--HTMX-->
-    <script src="https://unpkg.com/htmx.org@2.0.4"
-            integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+"
+    <script src="https://unpkg.com/htmx.org@2.0.8"
+            integrity="sha384-/TgkGk7p307TH7EXJDuUlgG3Ce1UVolAOFopFekQkkXihi5u/6OCvVKyz1W+idaz"
             crossorigin="anonymous"></script>
     {% django_htmx_script %}
     {% if debug %}
@@ -189,7 +190,7 @@ Block Structure:
 {% block extra_body %}{% endblock extra_body %}
 
 <!-- HyperScript (for declarative JavaScript) -->
-<script src="https://unpkg.com/hyperscript.org@0.9.12"></script>
+<script src="https://unpkg.com/hyperscript.org@0.9.14"></script>
 
 <!-- Page-specific JavaScript -->
 {% block scripts %}{% endblock %}
