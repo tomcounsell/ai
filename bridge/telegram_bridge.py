@@ -2209,6 +2209,7 @@ async def main():
                 enqueue_job, check_revival,
                 record_revival_cooldown, queue_revival_job,
             )
+            from agent.steering import push_steering_message
 
             # Check if this is a reply to a revival notification (stateless: read the replied-to message)
             if message.reply_to_msg_id:
@@ -2240,6 +2241,40 @@ async def main():
                             return
                 except Exception as e:
                     logger.debug(f"Revival reply check error: {e}")
+
+            # === STEERING CHECK: Reply to running session → inject, don't queue ===
+            if is_reply_to_valor and message.reply_to_msg_id:
+                try:
+                    from models.sessions import AgentSession
+
+                    active_sessions = AgentSession.query.filter(
+                        session_id=session_id, status="active"
+                    )
+                    if active_sessions:
+                        # Route to steering queue instead of job queue
+                        push_steering_message(
+                            session_id, clean_text, sender_name
+                        )
+                        # Determine abort vs steer for ack message
+                        from agent.steering import ABORT_KEYWORDS
+
+                        is_abort = clean_text.strip().lower() in ABORT_KEYWORDS
+                        if is_abort:
+                            ack_text = "Stopping current task."
+                        else:
+                            ack_text = "Adding to current task"
+                        await client.send_message(
+                            event.chat_id, ack_text, reply_to=message.id
+                        )
+                        logger.info(
+                            f"[{project_name}] Steered message into active session "
+                            f"{session_id} ({'abort' if is_abort else 'steer'})"
+                        )
+                        return
+                except Exception as e:
+                    logger.warning(
+                        f"[{project_name}] Steering check failed, falling through to queue: {e}"
+                    )
 
             # Lightweight revival check (no SDK agent, just git state)
             working_dir_str = ""

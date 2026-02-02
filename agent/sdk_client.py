@@ -38,6 +38,29 @@ from agent.health_check import watchdog_hook
 
 logger = logging.getLogger(__name__)
 
+# === Client Registry ===
+# Module-level registry of active SDK clients keyed by session_id.
+# In-memory only (intentionally not persisted). On crash/reboot, the dict
+# is empty and recovered jobs create fresh clients. See plan doc for
+# crash safety analysis.
+_active_clients: dict[str, "ClaudeSDKClient"] = {}
+
+
+def get_active_client(session_id: str) -> ClaudeSDKClient | None:
+    """Get the live SDK client for a running session, if any.
+
+    IMPORTANT: Only call from within the same async context as the client
+    (e.g., from a PostToolUse hook). Do NOT call from external async tasks
+    like the Telethon event handler — use the steering Redis queue instead.
+    """
+    return _active_clients.get(session_id)
+
+
+def get_all_active_sessions() -> dict[str, "ClaudeSDKClient"]:
+    """Get a snapshot of all active sessions. For monitoring/diagnostics."""
+    return dict(_active_clients)
+
+
 # Path to SOUL.md system prompt
 SOUL_PATH = Path(__file__).parent.parent / "config" / "SOUL.md"
 
@@ -52,11 +75,10 @@ def load_completion_criteria() -> str:
         return ""
 
     import re
+
     content = claude_md.read_text()
     match = re.search(
-        r'## Work Completion Criteria\n\n(.*?)(?=\n## |\Z)',
-        content,
-        re.DOTALL
+        r"## Work Completion Criteria\n\n(.*?)(?=\n## |\Z)", content, re.DOTALL
     )
     return match.group(0) if match else ""
 
@@ -103,7 +125,9 @@ class ValorAgent:
             system_prompt: Custom system prompt. Defaults to SOUL.md contents.
             permission_mode: Permission mode for tool use. Defaults to "bypassPermissions" (YOLO mode).
         """
-        self.working_dir = Path(working_dir) if working_dir else Path(__file__).parent.parent
+        self.working_dir = (
+            Path(working_dir) if working_dir else Path(__file__).parent.parent
+        )
         self.system_prompt = system_prompt or load_system_prompt()
         self.permission_mode = permission_mode
 
@@ -124,7 +148,9 @@ class ValorAgent:
                 env["ANTHROPIC_API_KEY"] = api_key
                 logger.info("Auth: using API key billing (USE_API_BILLING=true)")
             else:
-                logger.warning("Auth: USE_API_BILLING=true but no ANTHROPIC_API_KEY set")
+                logger.warning(
+                    "Auth: USE_API_BILLING=true but no ANTHROPIC_API_KEY set"
+                )
         else:
             # Strip API key so CLI falls back to subscription/OAuth
             env["ANTHROPIC_API_KEY"] = ""
@@ -145,7 +171,9 @@ class ValorAgent:
             },
         )
 
-    async def query(self, message: str, session_id: str | None = None, max_retries: int = 2) -> str:
+    async def query(
+        self, message: str, session_id: str | None = None, max_retries: int = 2
+    ) -> str:
         """
         Send a message and get a response. On error, feeds the error back
         to the agent so it can attempt a different approach.
@@ -167,6 +195,11 @@ class ValorAgent:
 
         try:
             async with ClaudeSDKClient(options) as client:
+                # Register client for steering access
+                if session_id:
+                    _active_clients[session_id] = client
+                    logger.debug(f"Registered active client for session {session_id}")
+
                 await client.query(message)
 
                 while True:
@@ -189,17 +222,13 @@ class ValorAgent:
                                     f"{duration}ms"
                                 )
                                 if cost >= _COST_WARN_THRESHOLD:
-                                    logger.warning(
-                                        f"High cost query: {summary}"
-                                    )
+                                    logger.warning(f"High cost query: {summary}")
                                 else:
                                     logger.info(summary)
                             if msg.is_error and retries < max_retries:
                                 retries += 1
                                 error_text = msg.result or "(empty)"
-                                recovery_msg = _build_error_recovery_message(
-                                    error_text
-                                )
+                                recovery_msg = _build_error_recovery_message(error_text)
                                 logger.warning(
                                     f"Agent error (attempt {retries}/{max_retries}), "
                                     f"feeding error back: {error_text}"
@@ -237,6 +266,11 @@ class ValorAgent:
             else:
                 logger.error(f"SDK query failed: {e}")
             raise
+        finally:
+            # Always unregister client from registry
+            if session_id:
+                _active_clients.pop(session_id, None)
+                logger.debug(f"Unregistered active client for session {session_id}")
 
         return "\n".join(response_parts) if response_parts else ""
 
@@ -351,7 +385,9 @@ async def get_agent_response_sdk(
         response = await agent.query(message, session_id=session_id)
 
         elapsed = time.time() - start_time
-        logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
+        logger.info(
+            f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)"
+        )
 
         return response
 
