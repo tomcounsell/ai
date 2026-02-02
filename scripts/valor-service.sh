@@ -10,6 +10,8 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 VENV="$PROJECT_DIR/.venv"
 PLIST_NAME="com.valor.bridge"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_NAME}.plist"
+UPDATE_PLIST_NAME="com.valor.update"
+UPDATE_PLIST_PATH="$HOME/Library/LaunchAgents/${UPDATE_PLIST_NAME}.plist"
 LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$PROJECT_DIR/data/bridge.pid"
 
@@ -241,24 +243,78 @@ EOF
     # Stop any running instance first
     stop_bridge
 
-    # Load the service
+    # Load the bridge service
     launchctl load "$PLIST_PATH"
 
-    echo "Service installed and started"
+    echo "Bridge service installed and started"
     echo "Bridge will auto-start on boot"
+
+    # Install update cron (runs remote-update.sh every 12 hours)
+    echo ""
+    echo "Installing update cron..."
+    cat > "$UPDATE_PLIST_PATH" << UPDATEEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${UPDATE_PLIST_NAME}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>${PROJECT_DIR}/scripts/remote-update.sh</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${PROJECT_DIR}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>6</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>18</integer>
+        </dict>
+    </array>
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/update.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/update.log</string>
+</dict>
+</plist>
+UPDATEEOF
+    launchctl load "$UPDATE_PLIST_PATH"
+    echo "Update cron installed (runs at 06:00 and 18:00)"
+
     sleep 2
     status_bridge
 }
 
 uninstall_service() {
-    echo "Uninstalling launchd service..."
+    echo "Uninstalling launchd services..."
 
     if [ -f "$PLIST_PATH" ]; then
         launchctl unload "$PLIST_PATH" 2>/dev/null || true
         rm -f "$PLIST_PATH"
-        echo "Service uninstalled"
+        echo "Bridge service uninstalled"
     else
-        echo "Service was not installed"
+        echo "Bridge service was not installed"
+    fi
+
+    if [ -f "$UPDATE_PLIST_PATH" ]; then
+        launchctl unload "$UPDATE_PLIST_PATH" 2>/dev/null || true
+        rm -f "$UPDATE_PLIST_PATH"
+        echo "Update cron uninstalled"
+    else
+        echo "Update cron was not installed"
     fi
 
     # Also stop any running process

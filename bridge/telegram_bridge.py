@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -81,6 +82,61 @@ MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Shutdown flag - set by signal handlers to stop accepting new messages
 SHUTTING_DOWN = False
+
+# Project directory (for running scripts, checking flags, etc.)
+_BRIDGE_PROJECT_DIR = Path(__file__).parent.parent
+
+
+async def _handle_update_command(tg_client, event):
+    """Run remote update script and reply with results.
+
+    The script pulls code and syncs deps but does NOT restart the bridge.
+    If code changed, it writes a restart flag that the job queue picks up
+    between jobs for a graceful restart when idle.
+    """
+    logger.info(f"[bridge] /update command received from chat {event.chat_id}")
+    try:
+        await set_reaction(tg_client, event.chat_id, event.message.id, "👀")
+    except Exception:
+        pass  # Reaction is nice-to-have
+
+    script_path = _BRIDGE_PROJECT_DIR / "scripts" / "remote-update.sh"
+    if not script_path.exists():
+        await tg_client.send_message(
+            event.chat_id,
+            "scripts/remote-update.sh not found.",
+            reply_to=event.message.id,
+        )
+        return
+
+    try:
+        result = subprocess.run(
+            ["bash", str(script_path)],
+            cwd=str(_BRIDGE_PROJECT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        output = result.stdout.strip() or result.stderr.strip() or "(no output)"
+        if result.returncode != 0 and result.stderr.strip():
+            output += f"\n\nSTDERR:\n{result.stderr.strip()}"
+        # Truncate if too long for Telegram
+        if len(output) > 4000:
+            output = output[:4000] + "\n...(truncated)"
+        await tg_client.send_message(
+            event.chat_id, output, reply_to=event.message.id
+        )
+    except subprocess.TimeoutExpired:
+        await tg_client.send_message(
+            event.chat_id,
+            "Update timed out after 120s",
+            reply_to=event.message.id,
+        )
+    except Exception as e:
+        logger.error(f"[bridge] /update command failed: {e}")
+        await tg_client.send_message(
+            event.chat_id, f"Update failed: {e}", reply_to=event.message.id
+        )
 
 
 # =============================================================================
@@ -2212,6 +2268,12 @@ async def main():
             logger.info("Ignoring message during shutdown")
             return
 
+        # === BRIDGE COMMANDS (bypass agent entirely) ===
+        _raw_text = (event.message.text or "").strip().lower()
+        if _raw_text == "/update":
+            await _handle_update_command(client, event)
+            return
+
         # Get message details
         message = event.message
         text = message.text or ""
@@ -2781,6 +2843,13 @@ async def main():
             await _make_react_cb(),
         )
         logger.info("[dm] Registered job queue callbacks")
+
+    # Clear stale restart flag from previous update (bridge has already restarted with new code)
+    if USE_CLAUDE_SDK:
+        from agent.job_queue import clear_restart_flag
+
+        if clear_restart_flag():
+            logger.info("Cleared stale restart flag from previous update")
 
     # Recover interrupted jobs and restart workers for any persisted jobs
     if USE_CLAUDE_SDK:

@@ -12,6 +12,8 @@ Architecture:
 
 import asyncio
 import logging
+import os
+import signal
 import subprocess
 import time
 from collections.abc import Awaitable, Callable
@@ -289,6 +291,50 @@ def _truncate_to_limit(text: str, label: str) -> str:
     return text
 
 
+# === Restart Flag (written by remote-update.sh) ===
+
+_RESTART_FLAG = Path(__file__).parent.parent / "data" / "restart-requested"
+
+
+def _check_restart_flag() -> bool:
+    """Check if a restart has been requested and no jobs are running across all projects."""
+    if not _RESTART_FLAG.exists():
+        return False
+
+    # Check all projects for running jobs
+    for pkey in list(_active_workers.keys()):
+        running = RedisJob.query.filter(project_key=pkey, status="running")
+        if running:
+            logger.info(
+                f"[{pkey}] Restart requested but {len(running)} job(s) still running — deferring"
+            )
+            return False
+
+    flag_content = _RESTART_FLAG.read_text().strip()
+    logger.info(f"Restart flag found ({flag_content}), no running jobs — restarting bridge")
+    return True
+
+
+def _trigger_restart() -> None:
+    """Trigger graceful bridge restart by sending SIGTERM to self.
+
+    SIGTERM is caught by the existing _shutdown_handler in the bridge which
+    sets SHUTTING_DOWN=True and calls _graceful_shutdown(). Launchd KeepAlive
+    restarts the process with new code.
+    """
+    _RESTART_FLAG.unlink(missing_ok=True)
+    logger.info("Triggering graceful restart via SIGTERM...")
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def clear_restart_flag() -> bool:
+    """Clear the restart flag on startup. Returns True if a flag was cleared."""
+    if _RESTART_FLAG.exists():
+        _RESTART_FLAG.unlink(missing_ok=True)
+        return True
+    return False
+
+
 async def enqueue_job(
     project_key: str,
     session_id: str,
@@ -342,12 +388,16 @@ async def _worker_loop(project_key: str) -> None:
     """
     Process jobs sequentially for one project.
     Runs until queue is empty, then exits (restarted on next enqueue).
+    After each job, checks for a restart flag written by remote-update.sh.
     """
     try:
         while True:
             job = await _pop_job(project_key)
             if job is None:
                 logger.info(f"[{project_key}] Queue empty, worker exiting")
+                # Good time to check restart flag — queue is empty
+                if _check_restart_flag():
+                    _trigger_restart()
                 break
 
             try:
@@ -356,6 +406,11 @@ async def _worker_loop(project_key: str) -> None:
                 logger.error(f"[{project_key}] Job {job.job_id} failed: {e}")
             finally:
                 await _complete_job(job)
+
+            # Check restart flag after each completed job
+            if _check_restart_flag():
+                _trigger_restart()
+                break
 
     finally:
         _active_workers.pop(project_key, None)
