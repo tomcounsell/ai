@@ -1,12 +1,12 @@
 {
   "hooks": {
-    "SessionStart": [
+    "UserPromptSubmit": [
       {
         "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "./scripts/calendar_hook.sh",
+            "command": "./scripts/calendar_prompt_hook.sh",
             "timeout": 15
           }
         ]
