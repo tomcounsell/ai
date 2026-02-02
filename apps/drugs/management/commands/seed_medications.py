@@ -25,8 +25,8 @@ class Command(BaseCommand):
                 "common_dosages": ["5mg tablet", "10mg tablet", "20mg tablet"],
                 "known_interactions": {
                     "medication_ids": [],  # Will populate with IDs after creation
-                    "warnings": []
-                }
+                    "warnings": [],
+                },
             },
             {
                 "name": "Metoprolol",
@@ -34,7 +34,7 @@ class Command(BaseCommand):
                 "medication_type": "drug",
                 "food_timing": "with_food",
                 "common_dosages": ["25mg tablet", "50mg tablet", "100mg tablet"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
             {
                 "name": "Warfarin",
@@ -42,9 +42,8 @@ class Command(BaseCommand):
                 "medication_type": "drug",
                 "food_timing": "anytime",
                 "common_dosages": ["1mg tablet", "2mg tablet", "5mg tablet"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
-
             # Pain / Anti-inflammatory
             {
                 "name": "Aspirin",
@@ -52,7 +51,7 @@ class Command(BaseCommand):
                 "medication_type": "otc",
                 "food_timing": "with_food",
                 "common_dosages": ["81mg tablet", "325mg tablet"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
             {
                 "name": "Ibuprofen",
@@ -60,19 +59,22 @@ class Command(BaseCommand):
                 "medication_type": "otc",
                 "food_timing": "with_food",
                 "common_dosages": ["200mg tablet", "400mg tablet", "600mg tablet"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
-
             # Thyroid
             {
                 "name": "Levothyroxine",
                 "generic_name": "levothyroxine",
                 "medication_type": "drug",
                 "food_timing": "empty_stomach",
-                "common_dosages": ["25mcg tablet", "50mcg tablet", "75mcg tablet", "100mcg tablet"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "common_dosages": [
+                    "25mcg tablet",
+                    "50mcg tablet",
+                    "75mcg tablet",
+                    "100mcg tablet",
+                ],
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
-
             # Diabetes
             {
                 "name": "Metformin",
@@ -80,19 +82,22 @@ class Command(BaseCommand):
                 "medication_type": "drug",
                 "food_timing": "with_food",
                 "common_dosages": ["500mg tablet", "850mg tablet", "1000mg tablet"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
-
             # Cholesterol
             {
                 "name": "Atorvastatin",
                 "generic_name": "atorvastatin",
                 "medication_type": "drug",
                 "food_timing": "anytime",
-                "common_dosages": ["10mg tablet", "20mg tablet", "40mg tablet", "80mg tablet"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "common_dosages": [
+                    "10mg tablet",
+                    "20mg tablet",
+                    "40mg tablet",
+                    "80mg tablet",
+                ],
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
-
             # Acid Reflux
             {
                 "name": "Omeprazole",
@@ -100,9 +105,8 @@ class Command(BaseCommand):
                 "medication_type": "otc",
                 "food_timing": "empty_stomach",
                 "common_dosages": ["20mg capsule", "40mg capsule"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
-
             # Vitamins & Supplements
             {
                 "name": "Vitamin D",
@@ -110,7 +114,7 @@ class Command(BaseCommand):
                 "medication_type": "supplement",
                 "food_timing": "with_food",
                 "common_dosages": ["1000 IU", "2000 IU", "5000 IU"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
             {
                 "name": "Calcium",
@@ -118,7 +122,7 @@ class Command(BaseCommand):
                 "medication_type": "supplement",
                 "food_timing": "with_food",
                 "common_dosages": ["500mg", "600mg", "1000mg"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
             {
                 "name": "Fish Oil",
@@ -126,7 +130,7 @@ class Command(BaseCommand):
                 "medication_type": "supplement",
                 "food_timing": "with_food",
                 "common_dosages": ["1000mg softgel", "1200mg softgel"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
             {
                 "name": "Magnesium",
@@ -134,9 +138,8 @@ class Command(BaseCommand):
                 "medication_type": "supplement",
                 "food_timing": "anytime",
                 "common_dosages": ["200mg", "400mg", "500mg"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
-
             # Mental Health
             {
                 "name": "Sertraline",
@@ -144,9 +147,8 @@ class Command(BaseCommand):
                 "medication_type": "drug",
                 "food_timing": "anytime",
                 "common_dosages": ["25mg tablet", "50mg tablet", "100mg tablet"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
-
             # Allergy
             {
                 "name": "Cetirizine",
@@ -154,9 +156,8 @@ class Command(BaseCommand):
                 "medication_type": "otc",
                 "food_timing": "anytime",
                 "common_dosages": ["10mg tablet"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
-
             # Antibiotics (example)
             {
                 "name": "Amoxicillin",
@@ -164,7 +165,7 @@ class Command(BaseCommand):
                 "medication_type": "drug",
                 "food_timing": "anytime",
                 "common_dosages": ["250mg capsule", "500mg capsule"],
-                "known_interactions": {"medication_ids": [], "warnings": []}
+                "known_interactions": {"medication_ids": [], "warnings": []},
             },
         ]
 
@@ -172,8 +173,7 @@ class Command(BaseCommand):
         created_meds = {}
         for med_data in medications_data:
             med, created = Medication.objects.get_or_create(
-                name=med_data["name"],
-                defaults=med_data
+                name=med_data["name"], defaults=med_data
             )
             created_meds[med.name] = med
             if created:
@@ -192,17 +192,19 @@ class Command(BaseCommand):
                 "medication_ids": [aspirin.id],
                 "warnings": [
                     "Warfarin and Aspirin: Increased risk of bleeding. Monitor closely and consult your doctor."
-                ]
+                ],
             }
             warfarin.save()
             aspirin.known_interactions = {
                 "medication_ids": [warfarin.id],
                 "warnings": [
                     "Aspirin and Warfarin: Increased risk of bleeding. Monitor closely and consult your doctor."
-                ]
+                ],
             }
             aspirin.save()
-            self.stdout.write(self.style.WARNING("  ⚠ Added Warfarin <-> Aspirin interaction"))
+            self.stdout.write(
+                self.style.WARNING("  ⚠ Added Warfarin <-> Aspirin interaction")
+            )
 
         # Warfarin + Ibuprofen = bleeding risk
         ibuprofen = created_meds.get("Ibuprofen")
@@ -219,10 +221,12 @@ class Command(BaseCommand):
                 "medication_ids": [warfarin.id],
                 "warnings": [
                     "Ibuprofen and Warfarin: Increased risk of bleeding. Avoid NSAIDs if possible."
-                ]
+                ],
             }
             ibuprofen.save()
-            self.stdout.write(self.style.WARNING("  ⚠ Added Warfarin <-> Ibuprofen interaction"))
+            self.stdout.write(
+                self.style.WARNING("  ⚠ Added Warfarin <-> Ibuprofen interaction")
+            )
 
         # Calcium + Levothyroxine = absorption issue (must space apart)
         calcium = created_meds.get("Calcium")
@@ -233,7 +237,7 @@ class Command(BaseCommand):
                 "warnings": [
                     "Calcium and Levothyroxine: Calcium can reduce thyroid medication absorption. "
                     "Take levothyroxine at least 4 hours before or after calcium."
-                ]
+                ],
             }
             calcium.save()
             levothyroxine.known_interactions = {
@@ -241,10 +245,12 @@ class Command(BaseCommand):
                 "warnings": [
                     "Levothyroxine and Calcium: Calcium can reduce thyroid medication absorption. "
                     "Take levothyroxine at least 4 hours before or after calcium."
-                ]
+                ],
             }
             levothyroxine.save()
-            self.stdout.write(self.style.WARNING("  ⚠ Added Calcium <-> Levothyroxine interaction"))
+            self.stdout.write(
+                self.style.WARNING("  ⚠ Added Calcium <-> Levothyroxine interaction")
+            )
 
         # Fish Oil + Warfarin = potential bleeding increase
         fish_oil = created_meds.get("Fish Oil")
@@ -261,10 +267,18 @@ class Command(BaseCommand):
                 "medication_ids": [warfarin.id],
                 "warnings": [
                     "Fish Oil and Warfarin: May increase bleeding risk. Discuss with your doctor."
-                ]
+                ],
             }
             fish_oil.save()
-            self.stdout.write(self.style.WARNING("  ⚠ Added Fish Oil <-> Warfarin interaction"))
+            self.stdout.write(
+                self.style.WARNING("  ⚠ Added Fish Oil <-> Warfarin interaction")
+            )
 
-        self.stdout.write(self.style.SUCCESS(f"\n✓ Seeded {len(created_meds)} medications with interaction data"))
-        self.stdout.write("Run this command again to refresh interaction data if models change.\n")
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"\n✓ Seeded {len(created_meds)} medications with interaction data"
+            )
+        )
+        self.stdout.write(
+            "Run this command again to refresh interaction data if models change.\n"
+        )

@@ -15,30 +15,27 @@ class Medication(models.Model):
     """
 
     MEDICATION_TYPES = [
-        ('drug', 'Prescription Drug'),
-        ('otc', 'OTC Medicine'),
-        ('supplement', 'Supplement/Vitamin'),
+        ("drug", "Prescription Drug"),
+        ("otc", "OTC Medicine"),
+        ("supplement", "Supplement/Vitamin"),
     ]
 
     FOOD_TIMING_CHOICES = [
-        ('with_food', 'Take with food'),
-        ('empty_stomach', 'Take on empty stomach'),
-        ('anytime', 'Any time'),
+        ("with_food", "Take with food"),
+        ("empty_stomach", "Take on empty stomach"),
+        ("anytime", "Any time"),
     ]
 
     name = models.CharField(
-        max_length=200,
-        help_text="Brand or common name of the medication"
+        max_length=200, help_text="Brand or common name of the medication"
     )
     generic_name = models.CharField(
         max_length=200,
         blank=True,
-        help_text="Generic/scientific name if different from brand name"
+        help_text="Generic/scientific name if different from brand name",
     )
     medication_type = models.CharField(
-        max_length=20,
-        choices=MEDICATION_TYPES,
-        default='drug'
+        max_length=20, choices=MEDICATION_TYPES, default="drug"
     )
 
     # Interaction data stored as JSON for MVP
@@ -46,28 +43,28 @@ class Medication(models.Model):
     known_interactions = models.JSONField(
         default=dict,
         blank=True,
-        help_text="Known drug-drug interactions (medication IDs and warnings)"
+        help_text="Known drug-drug interactions (medication IDs and warnings)",
     )
 
     food_timing = models.CharField(
         max_length=20,
         choices=FOOD_TIMING_CHOICES,
-        default='anytime',
-        help_text="When this medication should be taken relative to meals"
+        default="anytime",
+        help_text="When this medication should be taken relative to meals",
     )
 
     # Common dosage information (optional, for autocomplete suggestions)
     common_dosages = models.JSONField(
         default=list,
         blank=True,
-        help_text="Common dosage forms and strengths (e.g., ['10mg tablet', '20mg tablet'])"
+        help_text="Common dosage forms and strengths (e.g., ['10mg tablet', '20mg tablet'])",
     )
 
     class Meta:
-        ordering = ['name']
+        ordering = ["name"]
         indexes = [
-            models.Index(fields=['name']),
-            models.Index(fields=['medication_type']),
+            models.Index(fields=["name"]),
+            models.Index(fields=["medication_type"]),
         ]
 
     def __str__(self):
@@ -88,11 +85,11 @@ class Medication(models.Model):
         if not self.known_interactions:
             return []
 
-        interacting_ids = set(self.known_interactions.get('medication_ids', []))
+        interacting_ids = set(self.known_interactions.get("medication_ids", []))
         matching_ids = interacting_ids.intersection(set(medication_ids))
 
         if matching_ids:
-            return self.known_interactions.get('warnings', [])
+            return self.known_interactions.get("warnings", [])
 
         return []
 
@@ -106,50 +103,43 @@ class UserMedication(Timestampable, Authorable):
     """
 
     TIME_PREFERENCES = [
-        ('morning', 'Morning'),
-        ('evening', 'Evening'),
-        ('anytime', 'Any time'),
+        ("morning", "Morning"),
+        ("evening", "Evening"),
+        ("anytime", "Any time"),
     ]
 
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='medications'
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="medications"
     )
     medication = models.ForeignKey(
-        Medication,
-        on_delete=models.CASCADE,
-        related_name='user_medications'
+        Medication, on_delete=models.CASCADE, related_name="user_medications"
     )
 
     dosage = models.CharField(
-        max_length=100,
-        help_text="e.g., '10mg', '2 tablets', '1 capsule'"
+        max_length=100, help_text="e.g., '10mg', '2 tablets', '1 capsule'"
     )
     frequency = models.CharField(
-        max_length=100,
-        help_text="e.g., 'once daily', 'twice daily', 'as needed'"
+        max_length=100, help_text="e.g., 'once daily', 'twice daily', 'as needed'"
     )
     time_preference = models.CharField(
         max_length=20,
         choices=TIME_PREFERENCES,
-        default='anytime',
-        help_text="Preferred time of day to take this medication"
+        default="anytime",
+        help_text="Preferred time of day to take this medication",
     )
 
     is_active = models.BooleanField(
-        default=True,
-        help_text="Whether user is currently taking this medication"
+        default=True, help_text="Whether user is currently taking this medication"
     )
     notes = models.TextField(
         blank=True,
-        help_text="Personal notes about this medication (why taking it, prescribing doctor, etc.)"
+        help_text="Personal notes about this medication (why taking it, prescribing doctor, etc.)",
     )
 
     class Meta:
-        ordering = ['-is_active', 'medication__name']
+        ordering = ["-is_active", "medication__name"]
         indexes = [
-            models.Index(fields=['user', 'is_active']),
+            models.Index(fields=["user", "is_active"]),
         ]
         # User can have the same medication multiple times (different dosages/schedules)
         # but we'll display a warning in the UI if they do
@@ -168,25 +158,15 @@ class UserMealSchedule(Timestampable, Authorable):
     """
 
     user = models.OneToOneField(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.CASCADE,
-        related_name='meal_schedule'
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="meal_schedule"
     )
 
     breakfast_time = models.TimeField(
-        null=True,
-        blank=True,
-        help_text="Typical breakfast time"
+        null=True, blank=True, help_text="Typical breakfast time"
     )
-    lunch_time = models.TimeField(
-        null=True,
-        blank=True,
-        help_text="Typical lunch time"
-    )
+    lunch_time = models.TimeField(null=True, blank=True, help_text="Typical lunch time")
     dinner_time = models.TimeField(
-        null=True,
-        blank=True,
-        help_text="Typical dinner time"
+        null=True, blank=True, help_text="Typical dinner time"
     )
 
     class Meta:
@@ -205,9 +185,9 @@ class UserMealSchedule(Timestampable, Authorable):
         """
         meals = {}
         if self.breakfast_time:
-            meals['breakfast'] = self.breakfast_time
+            meals["breakfast"] = self.breakfast_time
         if self.lunch_time:
-            meals['lunch'] = self.lunch_time
+            meals["lunch"] = self.lunch_time
         if self.dinner_time:
-            meals['dinner'] = self.dinner_time
+            meals["dinner"] = self.dinner_time
         return meals

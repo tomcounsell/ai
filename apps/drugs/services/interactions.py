@@ -44,7 +44,9 @@ class InteractionChecker:
 
             if warnings:
                 # Find which specific medications triggered these warnings
-                interacting_med_ids = set(med.known_interactions.get('medication_ids', []))
+                interacting_med_ids = set(
+                    med.known_interactions.get("medication_ids", [])
+                )
                 user_med_ids = set(medication_ids)
                 matching_ids = interacting_med_ids.intersection(user_med_ids)
 
@@ -56,12 +58,14 @@ class InteractionChecker:
                     # For MVP, we just associate with first matching med
                     for other_med in interacting_meds:
                         if other_med.id != med.id:  # Don't self-reference
-                            interactions.append({
-                                'medication_a': med,
-                                'medication_b': other_med,
-                                'warning': warning_text,
-                                'severity': 'moderate',  # MVP: all same severity
-                            })
+                            interactions.append(
+                                {
+                                    "medication_a": med,
+                                    "medication_b": other_med,
+                                    "warning": warning_text,
+                                    "severity": "moderate",  # MVP: all same severity
+                                }
+                            )
                             break  # One warning per pair
 
         # Deduplicate (A-B and B-A are the same interaction)
@@ -69,8 +73,8 @@ class InteractionChecker:
         seen_pairs = set()
 
         for interaction in interactions:
-            med_a_id = interaction['medication_a'].id
-            med_b_id = interaction['medication_b'].id
+            med_a_id = interaction["medication_a"].id
+            med_b_id = interaction["medication_b"].id
             pair = tuple(sorted([med_a_id, med_b_id]))
 
             if pair not in seen_pairs:

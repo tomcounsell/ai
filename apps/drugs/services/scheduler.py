@@ -19,8 +19,7 @@ class MedicationScheduler:
 
     @staticmethod
     def generate_daily_schedule(
-        user_medications: List[UserMedication],
-        meal_schedule: UserMealSchedule = None
+        user_medications: List[UserMedication], meal_schedule: UserMealSchedule = None
     ) -> Dict:
         """
         Generate a simple daily medication schedule.
@@ -41,12 +40,12 @@ class MedicationScheduler:
             }
         """
         schedule = {
-            'morning_before_breakfast': [],
-            'morning_with_breakfast': [],
-            'afternoon_with_lunch': [],
-            'evening_with_dinner': [],
-            'evening': [],
-            'anytime': [],
+            "morning_before_breakfast": [],
+            "morning_with_breakfast": [],
+            "afternoon_with_lunch": [],
+            "evening_with_dinner": [],
+            "evening": [],
+            "anytime": [],
         }
 
         if not user_medications:
@@ -54,11 +53,13 @@ class MedicationScheduler:
 
         # Default meal times if not configured
         default_breakfast = time(8, 0)  # 8:00 AM
-        default_lunch = time(12, 0)     # 12:00 PM
-        default_dinner = time(18, 0)    # 6:00 PM
+        default_lunch = time(12, 0)  # 12:00 PM
+        default_dinner = time(18, 0)  # 6:00 PM
 
         # Use user's meal times if available
-        breakfast_time = meal_schedule.breakfast_time if meal_schedule else default_breakfast
+        breakfast_time = (
+            meal_schedule.breakfast_time if meal_schedule else default_breakfast
+        )
         lunch_time = meal_schedule.lunch_time if meal_schedule else default_lunch
         dinner_time = meal_schedule.dinner_time if meal_schedule else default_dinner
 
@@ -68,56 +69,72 @@ class MedicationScheduler:
             food_timing = med.food_timing
 
             # Determine placement based on time preference + food timing
-            if food_timing == 'empty_stomach':
+            if food_timing == "empty_stomach":
                 # Empty stomach meds go before breakfast (typically)
-                schedule['morning_before_breakfast'].append({
-                    'user_medication': user_med,
-                    'suggested_time': default_breakfast.replace(hour=default_breakfast.hour - 1),  # 1 hour before
-                    'note': 'Take on empty stomach, at least 1 hour before breakfast'
-                })
+                schedule["morning_before_breakfast"].append(
+                    {
+                        "user_medication": user_med,
+                        "suggested_time": default_breakfast.replace(
+                            hour=default_breakfast.hour - 1
+                        ),  # 1 hour before
+                        "note": "Take on empty stomach, at least 1 hour before breakfast",
+                    }
+                )
 
-            elif time_pref == 'morning':
-                if food_timing == 'with_food' and breakfast_time:
-                    schedule['morning_with_breakfast'].append({
-                        'user_medication': user_med,
-                        'suggested_time': breakfast_time,
-                        'note': 'Take with breakfast'
-                    })
+            elif time_pref == "morning":
+                if food_timing == "with_food" and breakfast_time:
+                    schedule["morning_with_breakfast"].append(
+                        {
+                            "user_medication": user_med,
+                            "suggested_time": breakfast_time,
+                            "note": "Take with breakfast",
+                        }
+                    )
                 else:
-                    schedule['morning_with_breakfast'].append({
-                        'user_medication': user_med,
-                        'suggested_time': breakfast_time or default_breakfast,
-                        'note': 'Take in the morning'
-                    })
+                    schedule["morning_with_breakfast"].append(
+                        {
+                            "user_medication": user_med,
+                            "suggested_time": breakfast_time or default_breakfast,
+                            "note": "Take in the morning",
+                        }
+                    )
 
-            elif time_pref == 'evening':
-                if food_timing == 'with_food' and dinner_time:
-                    schedule['evening_with_dinner'].append({
-                        'user_medication': user_med,
-                        'suggested_time': dinner_time,
-                        'note': 'Take with dinner'
-                    })
+            elif time_pref == "evening":
+                if food_timing == "with_food" and dinner_time:
+                    schedule["evening_with_dinner"].append(
+                        {
+                            "user_medication": user_med,
+                            "suggested_time": dinner_time,
+                            "note": "Take with dinner",
+                        }
+                    )
                 else:
-                    schedule['evening'].append({
-                        'user_medication': user_med,
-                        'suggested_time': dinner_time or default_dinner,
-                        'note': 'Take in the evening'
-                    })
+                    schedule["evening"].append(
+                        {
+                            "user_medication": user_med,
+                            "suggested_time": dinner_time or default_dinner,
+                            "note": "Take in the evening",
+                        }
+                    )
 
             else:  # time_pref == 'anytime'
-                if food_timing == 'with_food':
+                if food_timing == "with_food":
                     # Default to lunch for "anytime + with food" meds
-                    schedule['afternoon_with_lunch'].append({
-                        'user_medication': user_med,
-                        'suggested_time': lunch_time,
-                        'note': 'Take with a meal (lunch suggested)'
-                    })
+                    schedule["afternoon_with_lunch"].append(
+                        {
+                            "user_medication": user_med,
+                            "suggested_time": lunch_time,
+                            "note": "Take with a meal (lunch suggested)",
+                        }
+                    )
                 else:
-                    schedule['anytime'].append({
-                        'user_medication': user_med,
-                        'suggested_time': lunch_time or default_lunch,
-                        'note': 'Take any time of day'
-                    })
+                    schedule["anytime"].append(
+                        {
+                            "user_medication": user_med,
+                            "suggested_time": lunch_time or default_lunch,
+                            "note": "Take any time of day",
+                        }
+                    )
 
         return schedule
 
@@ -148,14 +165,18 @@ class MedicationScheduler:
         all_items = []
         for group_key, items in schedule.items():
             for item in items:
-                all_items.append({
-                    'group': group_key,
-                    'time': item['suggested_time'],
-                    'time_display': MedicationScheduler.get_display_time(item['suggested_time']),
-                    'medication': item['user_medication'],
-                    'note': item['note'],
-                })
+                all_items.append(
+                    {
+                        "group": group_key,
+                        "time": item["suggested_time"],
+                        "time_display": MedicationScheduler.get_display_time(
+                            item["suggested_time"]
+                        ),
+                        "medication": item["user_medication"],
+                        "note": item["note"],
+                    }
+                )
 
         # Sort by time
-        all_items.sort(key=lambda x: x['time'])
+        all_items.sort(key=lambda x: x["time"])
         return all_items

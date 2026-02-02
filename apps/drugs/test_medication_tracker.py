@@ -20,9 +20,7 @@ User = get_user_model()
 def user(db):
     """Create a test user."""
     return User.objects.create_user(
-        username='testuser',
-        email='test@example.com',
-        password='testpass123'
+        username="testuser", email="test@example.com", password="testpass123"
     )
 
 
@@ -36,8 +34,8 @@ def warfarin(db):
         food_timing="anytime",
         known_interactions={
             "medication_ids": [],  # Will be populated by test
-            "warnings": []
-        }
+            "warnings": [],
+        },
     )
 
 
@@ -65,6 +63,7 @@ def levothyroxine(db):
 
 # --- MODEL TESTS ---
 
+
 @pytest.mark.django_db
 class TestMedicationModel:
     """Tests for Medication model."""
@@ -72,9 +71,7 @@ class TestMedicationModel:
     def test_medication_creation(self):
         """Test creating a medication."""
         med = Medication.objects.create(
-            name="Test Med",
-            medication_type="drug",
-            food_timing="with_food"
+            name="Test Med", medication_type="drug", food_timing="with_food"
         )
         assert med.name == "Test Med"
         assert str(med) == "Test Med"
@@ -82,9 +79,7 @@ class TestMedicationModel:
     def test_medication_with_generic_name(self):
         """Test medication string representation with generic name."""
         med = Medication.objects.create(
-            name="Advil",
-            generic_name="ibuprofen",
-            medication_type="otc"
+            name="Advil", generic_name="ibuprofen", medication_type="otc"
         )
         assert str(med) == "Advil (ibuprofen)"
 
@@ -93,7 +88,7 @@ class TestMedicationModel:
         # Set up interaction
         warfarin.known_interactions = {
             "medication_ids": [aspirin.id],
-            "warnings": ["Warfarin + Aspirin: Bleeding risk"]
+            "warnings": ["Warfarin + Aspirin: Bleeding risk"],
         }
         warfarin.save()
 
@@ -118,7 +113,7 @@ class TestUserMedicationModel:
             medication=aspirin,
             dosage="81mg",
             frequency="once daily",
-            time_preference="morning"
+            time_preference="morning",
         )
         assert user_med.user == user
         assert user_med.medication == aspirin
@@ -127,10 +122,7 @@ class TestUserMedicationModel:
     def test_user_medication_string(self, user, aspirin):
         """Test string representation."""
         user_med = UserMedication.objects.create(
-            user=user,
-            medication=aspirin,
-            dosage="81mg",
-            frequency="once daily"
+            user=user, medication=aspirin, dosage="81mg", frequency="once daily"
         )
         str_repr = str(user_med)
         assert user.email in str_repr
@@ -147,7 +139,7 @@ class TestUserMealScheduleModel:
             user=user,
             breakfast_time=time(8, 0),
             lunch_time=time(12, 0),
-            dinner_time=time(18, 0)
+            dinner_time=time(18, 0),
         )
         assert schedule.breakfast_time == time(8, 0)
 
@@ -157,15 +149,16 @@ class TestUserMealScheduleModel:
             user=user,
             breakfast_time=time(8, 0),
             lunch_time=None,  # Not set
-            dinner_time=time(18, 0)
+            dinner_time=time(18, 0),
         )
         meals = schedule.get_meal_times()
-        assert 'breakfast' in meals
-        assert 'lunch' not in meals
-        assert 'dinner' in meals
+        assert "breakfast" in meals
+        assert "lunch" not in meals
+        assert "dinner" in meals
 
 
 # --- SERVICE TESTS ---
+
 
 @pytest.mark.django_db
 class TestInteractionChecker:
@@ -176,44 +169,36 @@ class TestInteractionChecker:
         # Set up interaction
         warfarin.known_interactions = {
             "medication_ids": [aspirin.id],
-            "warnings": ["Warfarin + Aspirin: Bleeding risk"]
+            "warnings": ["Warfarin + Aspirin: Bleeding risk"],
         }
         warfarin.save()
 
         # Create user medications
         user_med_1 = UserMedication.objects.create(
-            user=user,
-            medication=warfarin,
-            dosage="5mg",
-            frequency="once daily"
+            user=user, medication=warfarin, dosage="5mg", frequency="once daily"
         )
         user_med_2 = UserMedication.objects.create(
-            user=user,
-            medication=aspirin,
-            dosage="81mg",
-            frequency="once daily"
+            user=user, medication=aspirin, dosage="81mg", frequency="once daily"
         )
 
-        interactions = InteractionChecker.check_user_interactions([user_med_1, user_med_2])
+        interactions = InteractionChecker.check_user_interactions(
+            [user_med_1, user_med_2]
+        )
         assert len(interactions) == 1
-        assert "Bleeding risk" in interactions[0]['warning']
+        assert "Bleeding risk" in interactions[0]["warning"]
 
     def test_no_interactions_found(self, user, levothyroxine, aspirin):
         """Test when no interactions exist."""
         user_med_1 = UserMedication.objects.create(
-            user=user,
-            medication=levothyroxine,
-            dosage="50mcg",
-            frequency="once daily"
+            user=user, medication=levothyroxine, dosage="50mcg", frequency="once daily"
         )
         user_med_2 = UserMedication.objects.create(
-            user=user,
-            medication=aspirin,
-            dosage="81mg",
-            frequency="once daily"
+            user=user, medication=aspirin, dosage="81mg", frequency="once daily"
         )
 
-        interactions = InteractionChecker.check_user_interactions([user_med_1, user_med_2])
+        interactions = InteractionChecker.check_user_interactions(
+            [user_med_1, user_med_2]
+        )
         assert len(interactions) == 0
 
 
@@ -229,21 +214,23 @@ class TestMedicationScheduler:
             medication=aspirin,
             dosage="81mg",
             frequency="once daily",
-            time_preference="morning"
+            time_preference="morning",
         )
         user_med_empty = UserMedication.objects.create(
             user=user,
             medication=levothyroxine,
             dosage="50mcg",
             frequency="once daily",
-            time_preference="morning"
+            time_preference="morning",
         )
 
-        schedule = MedicationScheduler.generate_daily_schedule([user_med_morning, user_med_empty])
+        schedule = MedicationScheduler.generate_daily_schedule(
+            [user_med_morning, user_med_empty]
+        )
 
         # Should have meds in morning categories
-        assert len(schedule['morning_with_breakfast']) > 0
-        assert len(schedule['morning_before_breakfast']) > 0
+        assert len(schedule["morning_with_breakfast"]) > 0
+        assert len(schedule["morning_before_breakfast"]) > 0
 
     def test_schedule_with_meal_times(self, user, aspirin):
         """Test schedule generation with custom meal times."""
@@ -251,7 +238,7 @@ class TestMedicationScheduler:
             user=user,
             breakfast_time=time(7, 30),
             lunch_time=time(12, 30),
-            dinner_time=time(19, 0)
+            dinner_time=time(19, 0),
         )
 
         user_med = UserMedication.objects.create(
@@ -259,18 +246,21 @@ class TestMedicationScheduler:
             medication=aspirin,
             dosage="81mg",
             frequency="once daily",
-            time_preference="morning"
+            time_preference="morning",
         )
 
-        schedule = MedicationScheduler.generate_daily_schedule([user_med], meal_schedule)
+        schedule = MedicationScheduler.generate_daily_schedule(
+            [user_med], meal_schedule
+        )
         summary = MedicationScheduler.get_schedule_summary(schedule)
 
         # Should have at least one scheduled item
         assert len(summary) > 0
-        assert summary[0]['time'] is not None
+        assert summary[0]["time"] is not None
 
 
 # --- VIEW TESTS ---
+
 
 @pytest.mark.django_db
 class TestMedicationViews:
@@ -278,35 +268,37 @@ class TestMedicationViews:
 
     def test_dashboard_requires_login(self, client):
         """Test that dashboard redirects unauthenticated users."""
-        url = reverse('drugs:dashboard')
+        url = reverse("drugs:dashboard")
         response = client.get(url)
         assert response.status_code == 302  # Redirect to login
 
     def test_dashboard_loads_for_authenticated_user(self, client, user):
         """Test dashboard loads for logged-in user."""
         client.force_login(user)
-        url = reverse('drugs:dashboard')
+        url = reverse("drugs:dashboard")
         response = client.get(url)
         assert response.status_code == 200
 
     def test_medication_form_get(self, client, user):
         """Test loading medication form."""
         client.force_login(user)
-        url = reverse('drugs:medication_add')
+        url = reverse("drugs:medication_add")
         response = client.get(url)
         assert response.status_code == 200
-        assert b'Add Medication' in response.content or b'medication' in response.content
+        assert (
+            b"Add Medication" in response.content or b"medication" in response.content
+        )
 
     def test_medication_form_post(self, client, user, aspirin):
         """Test creating a medication via form."""
         client.force_login(user)
-        url = reverse('drugs:medication_add')
+        url = reverse("drugs:medication_add")
         data = {
-            'medication': aspirin.id,
-            'dosage': '81mg',
-            'frequency': 'once daily',
-            'time_preference': 'morning',
-            'notes': 'Test note'
+            "medication": aspirin.id,
+            "dosage": "81mg",
+            "frequency": "once daily",
+            "time_preference": "morning",
+            "notes": "Test note",
         }
         response = client.post(url, data)
         assert response.status_code == 204  # Success, no content
@@ -317,11 +309,11 @@ class TestMedicationViews:
     def test_meal_schedule_form_post(self, client, user):
         """Test saving meal schedule."""
         client.force_login(user)
-        url = reverse('drugs:meal_schedule')
+        url = reverse("drugs:meal_schedule")
         data = {
-            'breakfast_time': '08:00',
-            'lunch_time': '12:30',
-            'dinner_time': '18:00'
+            "breakfast_time": "08:00",
+            "lunch_time": "12:30",
+            "dinner_time": "18:00",
         }
         response = client.post(url, data)
         assert response.status_code == 204
