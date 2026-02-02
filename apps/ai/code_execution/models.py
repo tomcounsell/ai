@@ -71,9 +71,7 @@ class CodeExecution(Timestampable, models.Model):
         help_text="User who executed the code",
     )
 
-    code = models.TextField(
-        help_text="Python code that was executed"
-    )
+    code = models.TextField(help_text="Python code that was executed")
 
     code_hash = models.CharField(
         max_length=64,
@@ -303,6 +301,7 @@ class CodeExecutionManager(models.Manager):
     def by_code_hash(self, code: str):
         """Find executions of the same code (by hash)."""
         import hashlib
+
         code_hash = hashlib.sha256(code.encode()).hexdigest()
         return self.filter(code_hash=code_hash)
 

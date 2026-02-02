@@ -102,7 +102,7 @@ class Upload(Timestampable, models.Model):
         if self.mime_type:
             return self.mime_type
 
-        (mime_type, encoding) = guess_type(self.original)
+        mime_type, encoding = guess_type(self.original)
         return mime_type or self.meta_data.get("mime_type", "")
 
     @property

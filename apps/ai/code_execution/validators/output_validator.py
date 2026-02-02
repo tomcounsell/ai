@@ -85,9 +85,7 @@ class OutputValidator:
         ),
         SensitivePattern(
             name="Email Address",
-            pattern=re.compile(
-                r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"
-            ),
+            pattern=re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"),
             severity="low",
             should_redact=False,  # Often legitimate
         ),

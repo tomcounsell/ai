@@ -388,7 +388,9 @@ class TestValidationLayers:
 
         assert not result.success
         assert result.validation_violations
-        assert any("syntax" in v.get("type", "").lower() for v in result.validation_violations)
+        assert any(
+            "syntax" in v.get("type", "").lower() for v in result.validation_violations
+        )
 
     def test_ast_violation_details(self):
         """Should provide detailed AST violation information."""
@@ -412,8 +414,10 @@ class TestValidationLayers:
         # Should not have AST violations (validation disabled)
         # But should still fail during execution (import blocked at runtime)
         if not result.success:
-            assert not result.validation_violations or \
-                   all(v.get("type") != "forbidden_import" for v in result.validation_violations)
+            assert not result.validation_violations or all(
+                v.get("type") != "forbidden_import"
+                for v in result.validation_violations
+            )
 
 
 # Pytest fixtures for test setup

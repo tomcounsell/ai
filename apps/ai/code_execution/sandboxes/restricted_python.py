@@ -328,9 +328,7 @@ class RestrictedPythonSandbox(BaseSandbox):
 
         return restricted_globals
 
-    def _create_restricted_import(
-        self, allowed_imports: tuple[str, ...]
-    ) -> Callable:
+    def _create_restricted_import(self, allowed_imports: tuple[str, ...]) -> Callable:
         """
         Create a custom __import__ function that blocks dangerous modules.
 
@@ -417,7 +415,9 @@ class RestrictedPythonSandbox(BaseSandbox):
         """
         if len(output.encode("utf-8")) > max_bytes:
             # Calculate how many characters fit in max_bytes
-            truncated = output.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore")
+            truncated = output.encode("utf-8")[:max_bytes].decode(
+                "utf-8", errors="ignore"
+            )
             return f"{truncated}\n\n[OUTPUT TRUNCATED - exceeded {max_bytes} bytes]"
         return output
 

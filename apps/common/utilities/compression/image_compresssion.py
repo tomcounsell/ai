@@ -34,7 +34,7 @@ def zoom_and_crop(
     zoom_pixels_from_center = int((shorter_edge / np.exp(zoom * 4)) / 2)
     center_x, center_y = int(center_x), int(center_y)
 
-    (x1, y1, x2, y2) = (
+    x1, y1, x2, y2 = (
         center_x - zoom_pixels_from_center,
         center_y - zoom_pixels_from_center,
         center_x + zoom_pixels_from_center,
