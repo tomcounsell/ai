@@ -130,12 +130,99 @@ async def _judge_health(activity: str) -> dict[str, Any]:
         return {"healthy": True, "reason": f"unparseable judge response: {text[:80]}"}
 
 
+async def _handle_steering(session_id: str) -> dict[str, Any] | None:
+    """Check the steering queue and handle any pending messages.
+
+    Returns a hook result dict if steering action was taken, None otherwise.
+    This runs on EVERY tool call (lightweight Redis LPOP).
+    """
+    from agent.steering import pop_all_steering_messages
+
+    messages = pop_all_steering_messages(session_id)
+    if not messages:
+        return None
+
+    # Check for abort signal first
+    for msg in messages:
+        if msg.get("is_abort"):
+            sender = msg.get("sender", "supervisor")
+            logger.warning(f"[steering] ABORT from {sender} for session {session_id}")
+            return {
+                "decision": "block",
+                "continue_": False,
+                "stopReason": f"Aborted by {sender}: {msg.get('text', 'stop')}",
+            }
+
+    # Combine all steering messages into one injection
+    parts = []
+    for msg in messages:
+        sender = msg.get("sender", "supervisor")
+        text = msg.get("text", "")
+        parts.append(f"[{sender}]: {text}")
+
+    combined = "\n".join(parts)
+    logger.info(
+        f"[steering] Injecting {len(messages)} message(s) into session {session_id}"
+    )
+
+    # Get the active SDK client and inject the steering message
+    try:
+        from agent.sdk_client import get_active_client
+
+        client = get_active_client(session_id)
+        if client:
+            await client.interrupt()
+            await client.query(
+                f"STEERING MESSAGE FROM SUPERVISOR (mid-execution update):\n\n{combined}"
+            )
+            logger.info(f"[steering] Successfully injected into session {session_id}")
+        else:
+            logger.warning(
+                f"[steering] No active client for session {session_id}, "
+                f"messages will be re-consumed on next session"
+            )
+            # Re-push so they're not lost (client might have just disconnected)
+            from agent.steering import push_steering_message
+
+            for msg in messages:
+                push_steering_message(
+                    session_id,
+                    msg.get("text", ""),
+                    msg.get("sender", "unknown"),
+                    is_abort=msg.get("is_abort", False),
+                )
+    except Exception as e:
+        logger.error(f"[steering] Failed to inject message: {e}")
+        # Don't block the agent due to steering failure
+
+    return {"continue_": True}
+
+
 async def watchdog_hook(
     input_data: Any, tool_use_id: str | None, context: Any
 ) -> dict[str, Any]:
-    """PostToolUse hook that runs a health check every CHECK_INTERVAL tool calls."""
+    """PostToolUse hook — fires every tool call.
+
+    1. Check steering queue (every call — lightweight Redis LPOP)
+    2. Update session tracking in Redis (every call)
+    3. Run health check via Haiku judge (every CHECK_INTERVAL calls)
+    """
     session_id = input_data.get("session_id", "unknown")
     transcript_path = input_data.get("transcript_path", "")
+
+    # === STEERING CHECK (every tool call) ===
+    try:
+        steering_result = await _handle_steering(session_id)
+        if steering_result is not None:
+            # Steering took action — return its result
+            # (either abort or continue with injected message)
+            if not steering_result.get("continue_", True):
+                return steering_result
+            # If steering injected a message but wants to continue,
+            # still do the rest of the hook (tracking, health check)
+    except Exception as e:
+        logger.error(f"[steering] Error in steering check: {e}")
+        # Never block due to steering bug
 
     # Increment counter
     _tool_counts[session_id] = _tool_counts.get(session_id, 0) + 1

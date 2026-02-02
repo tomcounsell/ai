@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent input
 
+
 class RedisJob(Model):
     """A queued unit of work, persisted atomically in Redis via popoto."""
 
@@ -139,7 +140,9 @@ async def _pop_job(project_key: str) -> Job | None:
 
     Order: high priority first, then within same priority FILO (newest first).
     """
-    pending = await RedisJob.query.async_filter(project_key=project_key, status="pending")
+    pending = await RedisJob.query.async_filter(
+        project_key=project_key, status="pending"
+    )
     if not pending:
         return None
 
@@ -201,9 +204,7 @@ def _recover_interrupted_jobs(project_key: str) -> int:
         job.priority = "high"
         job.save()
 
-    logger.warning(
-        f"[{project_key}] Recovered {len(running_jobs)} interrupted job(s)"
-    )
+    logger.warning(f"[{project_key}] Recovered {len(running_jobs)} interrupted job(s)")
     return len(running_jobs)
 
 
@@ -280,7 +281,7 @@ def _truncate_to_limit(text: str, label: str) -> str:
     if len(text) <= MSG_MAX_CHARS:
         return text
     original_len = len(text)
-    text = "...[truncated]\n" + text[-(MSG_MAX_CHARS - 15):]
+    text = "...[truncated]\n" + text[-(MSG_MAX_CHARS - 15) :]
     logger.warning(
         f"Truncated {label}: {original_len} -> {len(text)} chars "
         f"(kept last {MSG_MAX_CHARS} chars)"
@@ -322,8 +323,7 @@ async def enqueue_job(
     )
     _ensure_worker(project_key)
     logger.info(
-        f"[{project_key}] Enqueued job "
-        f"(priority={priority}, depth={depth})"
+        f"[{project_key}] Enqueued job " f"(priority={priority}, depth={depth})"
     )
     return depth
 
@@ -365,7 +365,8 @@ async def _calendar_heartbeat(slug: str) -> None:
     """Fire-and-forget calendar heartbeat via subprocess."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "valor-calendar", slug,
+            "valor-calendar",
+            slug,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -470,6 +471,19 @@ async def _execute_job(job: Job) -> None:
         except Exception as e:
             logger.debug(f"AgentSession update failed (non-fatal): {e}")
 
+    # Clean up steering queue (consume any leftover messages)
+    try:
+        from agent.steering import clear_steering_queue
+
+        cleared = clear_steering_queue(job.session_id)
+        if cleared > 0:
+            logger.info(
+                f"[{job.project_key}] Cleared {cleared} unconsumed steering "
+                f"message(s) for session {job.session_id}"
+            )
+    except Exception as e:
+        logger.debug(f"Steering queue cleanup failed (non-fatal): {e}")
+
     # Set reaction based on result
     if react_cb:
         emoji = "\U0001f44d" if not task.error else "\u274c"
@@ -496,9 +510,7 @@ async def _execute_job(job: Job) -> None:
                 f"[{job.project_key}] Auto-marked session done and cleaned up branch {branch_name}"
             )
         except Exception as e:
-            logger.warning(
-                f"[{job.project_key}] Failed to auto-mark session done: {e}"
-            )
+            logger.warning(f"[{job.project_key}] Failed to auto-mark session done: {e}")
 
 
 def _session_branch_name(session_id: str) -> str:
@@ -582,9 +594,7 @@ async def queue_revival_job(
     """
     revival_text = f"Continue the unfinished work on branch `{revival_info['branch']}`."
     if additional_context:
-        revival_text += (
-            f"\n\nAsked user whether to resume and user responded with: {additional_context}"
-        )
+        revival_text += f"\n\nAsked user whether to resume and user responded with: {additional_context}"
 
     return await enqueue_job(
         project_key=revival_info["project_key"],
@@ -599,7 +609,9 @@ async def queue_revival_job(
     )
 
 
-async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) -> list[str]:
+async def cleanup_stale_branches(
+    working_dir: str, max_age_hours: float = 72
+) -> list[str]:
     """
     Clean up session branches older than max_age_hours.
     Returns list of cleaned branch names.
@@ -656,5 +668,3 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
         logger.error(f"Branch cleanup error: {e}")
 
     return cleaned
-
-
