@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 CONFIG_DIR = Path.home() / "Desktop" / "claude_code"
-CALENDAR_CONFIG_PATH = CONFIG_DIR / "calendar_config.json"
+CALENDAR_CONFIG_PATH = CONFIG_DIR / "calendar-tool-config.json"
 QUEUE_PATH = CONFIG_DIR / "calendar_queue.jsonl"
 
 
