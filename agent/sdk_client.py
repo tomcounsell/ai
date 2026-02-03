@@ -343,6 +343,7 @@ async def get_agent_response_sdk(
     chat_title: str | None,
     project: dict | None,
     chat_id: str | None = None,
+    sender_id: int | None = None,
 ) -> str:
     """
     Get agent response using Claude Agent SDK.
@@ -351,12 +352,13 @@ async def get_agent_response_sdk(
     in telegram_bridge.py to enable seamless switching via feature flag.
 
     Args:
-        message: The message to process (already enriched with context)
+        message: The message to process
         session_id: Session ID for conversation continuity
         sender_name: Name of the sender (for logging)
         chat_title: Chat title (for logging)
         project: Project configuration dict
         chat_id: Chat ID (unused, for compatibility)
+        sender_id: Telegram user ID (for permission checking)
 
     Returns:
         The assistant's response text
@@ -380,9 +382,19 @@ async def get_agent_response_sdk(
     logger.info(f"[{request_id}] SDK query for {project_name}")
     logger.debug(f"[{request_id}] Working directory: {working_dir}")
 
+    # Build context-enriched message (includes user permission restrictions)
+    from bridge.telegram_bridge import build_context_prefix
+
+    context = build_context_prefix(project, chat_title is None, sender_id)
+    enriched_message = context
+    enriched_message += f"\n\nFROM: {sender_name}"
+    if chat_title:
+        enriched_message += f" in {chat_title}"
+    enriched_message += f"\nMESSAGE: {message}"
+
     try:
         agent = ValorAgent(working_dir=working_dir)
-        response = await agent.query(message, session_id=session_id)
+        response = await agent.query(enriched_message, session_id=session_id)
 
         elapsed = time.time() - start_time
         logger.info(

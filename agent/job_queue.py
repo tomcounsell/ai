@@ -45,6 +45,7 @@ class RedisJob(Model):
     working_dir = Field()
     message_text = Field(max_length=MSG_MAX_CHARS)
     sender_name = Field()
+    sender_id = Field(type=int, null=True)  # Telegram user ID for permission checking
     chat_id = Field()
     message_id = Field(type=int)
     chat_title = Field(null=True)
@@ -82,6 +83,10 @@ class Job:
         return self._rj.sender_name
 
     @property
+    def sender_id(self) -> int | None:
+        return self._rj.sender_id
+
+    @property
     def chat_id(self) -> str:
         return self._rj.chat_id
 
@@ -117,6 +122,7 @@ async def _push_job(
     chat_title: str | None = None,
     priority: str = "high",
     revival_context: str | None = None,
+    sender_id: int | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project."""
     await RedisJob.async_create(
@@ -128,6 +134,7 @@ async def _push_job(
         working_dir=working_dir,
         message_text=message_text,
         sender_name=sender_name,
+        sender_id=sender_id,
         chat_id=chat_id,
         message_id=message_id,
         chat_title=chat_title,
@@ -348,6 +355,7 @@ async def enqueue_job(
     chat_title: str | None = None,
     priority: str = "high",
     revival_context: str | None = None,
+    sender_id: int | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -363,6 +371,7 @@ async def enqueue_job(
         working_dir=working_dir,
         message_text=message_text,
         sender_name=sender_name,
+        sender_id=sender_id,
         chat_id=chat_id,
         message_id=message_id,
         chat_title=chat_title,
@@ -509,6 +518,7 @@ async def _execute_job(job: Job) -> None:
             job.chat_title,
             project_config,
             job.chat_id,
+            job.sender_id,
         )
 
     task = BackgroundTask(messenger=messenger, acknowledgment_timeout=180.0)

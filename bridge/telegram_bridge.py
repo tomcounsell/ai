@@ -890,12 +890,22 @@ RESPOND_TO_DMS = any(
 
 # DM whitelist - only respond to DMs from these Telegram user IDs
 # Loaded from ~/Desktop/claude_code/dm_whitelist.json, falls back to TELEGRAM_DM_WHITELIST env var
+# Format: {"users": {"123456": {"name": "Name", "permissions": "full|qa_only"}}}
 DM_WHITELIST: set[int] = set()
+DM_WHITELIST_CONFIG: dict[int, dict] = {}  # Full config per user for permissions lookup
 _dm_whitelist_path = Path.home() / "Desktop" / "claude_code" / "dm_whitelist.json"
 if _dm_whitelist_path.exists():
     try:
         _wl_config = json.loads(_dm_whitelist_path.read_text())
-        DM_WHITELIST = {int(uid) for uid in _wl_config.get("users", {})}
+        _users = _wl_config.get("users", {})
+        for uid, user_info in _users.items():
+            uid_int = int(uid)
+            DM_WHITELIST.add(uid_int)
+            # Handle both old format (string name) and new format (dict with permissions)
+            if isinstance(user_info, str):
+                DM_WHITELIST_CONFIG[uid_int] = {"name": user_info, "permissions": "full"}
+            else:
+                DM_WHITELIST_CONFIG[uid_int] = user_info
     except (json.JSONDecodeError, ValueError, OSError) as e:
         logger.warning(f"Failed to load DM whitelist from {_dm_whitelist_path}: {e}")
 if not DM_WHITELIST:
@@ -903,6 +913,19 @@ if not DM_WHITELIST:
         _id = _id.strip()
         if _id.isdigit():
             DM_WHITELIST.add(int(_id))
+            DM_WHITELIST_CONFIG[int(_id)] = {"permissions": "full"}
+
+
+def get_user_permissions(sender_id: int | None) -> str:
+    """Get the permission level for a whitelisted user.
+
+    Returns:
+        "full" - Can do anything (default)
+        "qa_only" - Q&A only, no code changes allowed
+    """
+    if not sender_id or sender_id not in DM_WHITELIST_CONFIG:
+        return "full"
+    return DM_WHITELIST_CONFIG[sender_id].get("permissions", "full")
 
 # Link collectors - usernames whose links are automatically stored
 # When these users share a URL, it gets saved with metadata
@@ -1221,14 +1244,30 @@ def clean_message(text: str, project: dict | None) -> str:
     return result.strip()
 
 
-def build_context_prefix(project: dict | None, is_dm: bool) -> str:
+def build_context_prefix(
+    project: dict | None, is_dm: bool, sender_id: int | None = None
+) -> str:
     """Build project context to inject into agent prompt."""
+    context_parts = []
+
+    # Check user permissions and add restrictions if needed
+    permissions = get_user_permissions(sender_id)
+    if permissions == "qa_only":
+        context_parts.append(
+            "RESTRICTION: This user has Q&A-only access. "
+            "Do NOT make any code changes, file edits, git commits, or run destructive commands. "
+            "Answer questions, explain code, and provide guidance only. "
+            "If they ask you to make changes, politely explain you can only help with Q&A for them."
+        )
+
     if not project:
         if is_dm:
-            return "CONTEXT: Direct message to Valor (no specific project context)"
-        return ""
+            context_parts.append(
+                "CONTEXT: Direct message to Valor (no specific project context)"
+            )
+        return "\n".join(context_parts) if context_parts else ""
 
-    context_parts = [f"PROJECT: {project.get('name', project.get('_key', 'Unknown'))}"]
+    context_parts.append(f"PROJECT: {project.get('name', project.get('_key', 'Unknown'))}")
 
     project_context = project.get("context", {})
     if project_context.get("description"):
@@ -1835,6 +1874,7 @@ async def get_agent_response_clawdbot(
     chat_title: str | None,
     project: dict | None,
     chat_id: str | None = None,
+    sender_id: int | None = None,
 ) -> str:
     """Call clawdbot agent and get response (legacy implementation)."""
     import time
@@ -1858,8 +1898,8 @@ async def get_agent_response_clawdbot(
         )
 
     try:
-        # Build context-enriched message
-        context = build_context_prefix(project, chat_title is None)
+        # Build context-enriched message (includes user permission restrictions)
+        context = build_context_prefix(project, chat_title is None, sender_id)
 
         # Note: Recent conversation history is NOT injected by default.
         # The agent should use valor-history CLI to fetch relevant context
@@ -2042,6 +2082,7 @@ async def get_agent_response(
     chat_title: str | None,
     project: dict | None,
     chat_id: str | None = None,
+    sender_id: int | None = None,
 ) -> str:
     """
     Route to appropriate agent backend based on USE_CLAUDE_SDK flag.
@@ -2052,11 +2093,11 @@ async def get_agent_response(
     if USE_CLAUDE_SDK:
         logger.debug(f"Using Claude Agent SDK for session {session_id}")
         return await get_agent_response_sdk(
-            message, session_id, sender_name, chat_title, project, chat_id
+            message, session_id, sender_name, chat_title, project, chat_id, sender_id
         )
     else:
         return await get_agent_response_clawdbot(
-            message, session_id, sender_name, chat_title, project, chat_id
+            message, session_id, sender_name, chat_title, project, chat_id, sender_id
         )
 
 
@@ -2163,6 +2204,7 @@ async def get_agent_response_with_retry(
     chat_id: str | None = None,
     client: TelegramClient | None = None,
     msg_id: int | None = None,
+    sender_id: int | None = None,
 ) -> str:
     """
     Call agent with retry and self-healing on failure.
@@ -2185,7 +2227,7 @@ async def get_agent_response_with_retry(
                 logger.info(f"Retry attempt {attempt + 1}/{MAX_RETRIES}")
 
             response = await get_agent_response(
-                message, session_id, sender_name, chat_title, project, chat_id
+                message, session_id, sender_name, chat_title, project, chat_id, sender_id
             )
 
             # Check if response looks like an error
@@ -2635,6 +2677,7 @@ async def main():
                 message_id=message.id,
                 chat_title=chat_title,
                 priority="high",
+                sender_id=sender_id,
             )
             if depth > 1:
                 await client.send_message(
@@ -2660,6 +2703,7 @@ async def main():
                         telegram_chat_id,
                         client,
                         message.id,
+                        sender_id,
                     )
                 )
 
