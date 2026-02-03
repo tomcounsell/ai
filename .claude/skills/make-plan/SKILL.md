@@ -2,6 +2,24 @@
 name: make-plan
 description: Create or update feature plan documents using Shape Up principles. Use when the user wants to plan a new feature, flesh out a plan, update an existing plan, or needs a structured approach to scoping work. Outputs to docs/plans/{slug}.md with problem statement, appetite, solution, risks, and boundaries. Always work in a new branch when creating plans.
 allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion
+hooks:
+  Stop:
+    - hooks:
+        - type: command
+          command: >-
+            uv run $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_new_file.py
+            --directory docs/plans
+            --extension .md
+        - type: command
+          command: >-
+            uv run $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_file_contains.py
+            --directory docs/plans
+            --extension .md
+            --contains '## Problem'
+            --contains '## Appetite'
+            --contains '## Solution'
+            --contains '## Risks'
+            --contains '## Agent Assignments'
 ---
 
 # Make a Plan (Shape Up Methodology)
