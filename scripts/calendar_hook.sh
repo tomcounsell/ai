@@ -21,19 +21,27 @@ if [ -f "$SLUGFILE" ]; then
     SAVED_SLUG=$(cat "$SLUGFILE" 2>/dev/null || echo "")
 fi
 
-# Resolve project name from projects.json as fallback
+# Resolve project key and slug from projects.json
 PROJECTS_JSON="$HOME/src/ai/config/projects.json"
 SLUG=$(basename "$PWD")
+PROJECT=""
+
+# Reuse project from prompt hook if available (keeps project consistent within session)
+if [ -f "$LOCKDIR/.calendar_hook_project" ]; then
+    PROJECT=$(cat "$LOCKDIR/.calendar_hook_project" 2>/dev/null || echo "")
+fi
+
 if [ -n "$SAVED_SLUG" ]; then
     SLUG="$SAVED_SLUG"
 elif [ -f "$PROJECTS_JSON" ]; then
-    MATCH=$(jq -r --arg cwd "$PWD" '
+    MATCH_KEY=$(jq -r --arg cwd "$PWD" '
         .projects | to_entries[]
         | select(.value.working_directory == $cwd)
-        | .value.name // empty
+        | .key
     ' "$PROJECTS_JSON" 2>/dev/null || true)
-    if [ -n "$MATCH" ]; then
-        SLUG="$MATCH"
+    if [ -n "$MATCH_KEY" ]; then
+        SLUG="$MATCH_KEY"
+        [ -z "$PROJECT" ] && PROJECT="$MATCH_KEY"
     fi
 fi
 
@@ -61,4 +69,8 @@ mkdir -p "$LOCKDIR"
 date +%s > "$STAMPFILE"
 [ -n "$SESSION_ID" ] && echo "$SESSION_ID" > "$SESSIONFILE"
 export PATH="$HOME/Library/Python/3.12/bin:$PATH"
-exec valor-calendar "$SLUG"
+if [ -n "$PROJECT" ]; then
+    exec valor-calendar --project "$PROJECT" "$SLUG"
+else
+    exec valor-calendar "$SLUG"
+fi

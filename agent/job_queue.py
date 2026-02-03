@@ -418,12 +418,15 @@ async def _worker_loop(project_key: str) -> None:
         _active_workers.pop(project_key, None)
 
 
-async def _calendar_heartbeat(slug: str) -> None:
+async def _calendar_heartbeat(slug: str, project: str | None = None) -> None:
     """Fire-and-forget calendar heartbeat via subprocess."""
     try:
+        cmd = ["valor-calendar"]
+        if project:
+            cmd.extend(["--project", project])
+        cmd.append(slug)
         proc = await asyncio.create_subprocess_exec(
-            "valor-calendar",
-            slug,
+            *cmd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -475,7 +478,7 @@ async def _execute_job(job: Job) -> None:
         logger.debug(f"AgentSession create failed (non-fatal): {e}")
 
     # Calendar heartbeat at session start
-    asyncio.create_task(_calendar_heartbeat(job.project_key))
+    asyncio.create_task(_calendar_heartbeat(job.project_key, project=job.project_key))
 
     # Create messenger with bridge callbacks
     send_cb = _send_callbacks.get(job.project_key)
@@ -516,7 +519,7 @@ async def _execute_job(job: Job) -> None:
     while task.is_running:
         await asyncio.sleep(2)
         if time.time() - last_heartbeat >= CALENDAR_HEARTBEAT_INTERVAL:
-            asyncio.create_task(_calendar_heartbeat(job.project_key))
+            asyncio.create_task(_calendar_heartbeat(job.project_key, project=job.project_key))
             last_heartbeat = time.time()
 
     # Update session status in Redis
