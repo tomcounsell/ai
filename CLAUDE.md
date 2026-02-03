@@ -248,6 +248,26 @@ Individual operations that can be composed into larger workflows:
 - **Telegram History** (`tools.telegram_history`): Search stored message history
 - **Link Analysis** (`tools.link_analysis`): URL extraction and metadata
 
+**Browser Automation** (`agent-browser` - installed globally via npm)
+Headless browser automation for web testing, form filling, screenshots, and data extraction.
+
+Core workflow:
+1. `agent-browser open <url>` - Navigate to page
+2. `agent-browser snapshot -i` - Get interactive elements with refs (@e1, @e2)
+3. `agent-browser click @e1` / `fill @e2 "text"` - Interact using refs
+4. Re-snapshot after page changes
+
+Common commands:
+```bash
+agent-browser open https://example.com    # Open URL
+agent-browser snapshot -i                 # Interactive snapshot with element refs
+agent-browser click @e1                   # Click element by reference
+agent-browser fill @e2 "text"            # Fill input field
+agent-browser screenshot output.png       # Take screenshot
+agent-browser extract                     # Extract page content
+agent-browser --help                      # Full command list
+```
+
 **Workflows**
 Multi-step processes that combine tools for common tasks:
 - Code review workflow: fetch PR -> analyze changes -> check tests -> post review
