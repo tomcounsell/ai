@@ -38,13 +38,13 @@ This classification:
 
 ### Phase 2: Template Selection
 
-Based on classification, use the appropriate plan template:
+All classifications use the same base plan template. Classification adds one small targeted section:
 
-| Classification | Template | Key Sections |
-|---------------|----------|--------------|
-| bug | Bug Fix | Reproduction, Root Cause, Regression Tests |
-| feature | Feature | User Story, Phases, E2E Tests |
-| chore | Chore | Scope, Impact, Rollback Plan |
+| Classification | Added Section |
+|---------------|---------------|
+| bug | Reproduction steps |
+| feature | User story |
+| chore | Rollback plan |
 
 ### Phase 3: Label Lock on Approval
 
@@ -119,12 +119,9 @@ def classify_request(message: str, context: str = "") -> dict:
     ...
 ```
 
-### 2. Plan Templates (`.claude/commands/`)
+### 2. Plan Template (`.claude/commands/plan.md`)
 
-Create three template files:
-- `bug.md` - Bug fix template with reproduction steps, root cause analysis
-- `feature.md` - Feature template with user story, phases, E2E tests
-- `chore.md` - Chore template with scope, impact assessment, rollback
+Single base template with optional type-specific sections injected based on classification.
 
 ### 3. Label Lock Integration
 
@@ -153,115 +150,50 @@ tools/
   classifier.py          # NEW: Haiku/Ollama classifier
 
 .claude/commands/
-  bug.md                  # NEW: Bug fix template
-  feature.md              # NEW: Feature template
-  chore.md                # NEW: Chore template
+  plan.md                 # MODIFY: Add classification + type-specific hints
 
 bridge/
   telegram_bridge.py      # MODIFY: Add classification on intake
 ```
 
-## Plan Templates
+## Plan Template
 
-### Bug Template (`bug.md`)
+One base template for all work types. Classification adds minimal targeted sections only where it matters.
+
+### Base Template (all types use this)
 
 ```markdown
-# Bug Fix: {title}
+# {title}
 
 ## Classification
-Type: bug
+Type: {bug|feature|chore}
 Locked: {yes/no}
 Issue: {github_url}
 
-## Bug Description
-{what's broken}
-
-## Expected Behavior
-{what should happen}
-
-## Reproduction Steps
-1. {step}
-
-## Root Cause Analysis
-{findings after investigation}
-
-## Proposed Fix
-{solution approach}
-
-## Files to Modify
-{file list}
-
-## Regression Tests
-{tests to prevent recurrence}
-
-## Verification
-{how to confirm fix works}
-```
-
-### Feature Template (`feature.md`)
-
-```markdown
-# Feature: {title}
-
-## Classification
-Type: feature
-Locked: {yes/no}
-Issue: {github_url}
-
-## User Story
-As a {user type}
-I want to {action}
-So that {benefit}
-
-## Problem Statement
-{why this is needed}
+## Problem
+{what needs to change and why}
 
 ## Solution
 {proposed approach}
 
-## Implementation Phases
-### Phase 1: Foundation
-### Phase 2: Core Implementation
-### Phase 3: Integration
-
-## Testing Strategy
-- Unit tests: {coverage}
-- E2E tests: {scenarios}
-- Edge cases: {considerations}
-
-## Acceptance Criteria
-{measurable criteria for done}
-```
-
-### Chore Template (`chore.md`)
-
-```markdown
-# Chore: {title}
-
-## Classification
-Type: chore
-Locked: {yes/no}
-Issue: {github_url}
-Category: {refactor|docs|deps|config|cleanup}
-
-## Scope
-{what's included and excluded}
-
-## Motivation
-{why this maintenance is needed}
-
-## Impact Assessment
-{what could break, dependencies affected}
-
-## Implementation Steps
-1. {step}
-
-## Rollback Plan
-{how to revert if needed}
+## Implementation
+{steps to complete the work}
 
 ## Verification
-{how to confirm success}
+{how to confirm it's done correctly}
 ```
+
+### Type-Specific Additions
+
+Small sections added based on classification:
+
+| Type | Additional Section | Why |
+|------|-------------------|-----|
+| bug | **Reproduction**: steps to trigger the issue | Need to verify fix works |
+| feature | **User Story**: As a... I want... So that... | Keeps focus on user value |
+| chore | **Rollback**: how to revert if needed | Maintenance can break things |
+
+These additions are optional guidance, not rigid requirements. A bug that's obvious doesn't need reproduction steps. A tiny feature doesn't need a formal user story.
 
 ## Benefits
 
@@ -277,7 +209,6 @@ Category: {refactor|docs|deps|config|cleanup}
 |------|------------|
 | Misclassification by small model | Human can override during planning phase |
 | PM changes mind after approval | Requires explicit unlock (with reason logged) |
-| Templates too rigid | Templates are guidelines, can be adapted |
 
 ## Success Criteria
 
