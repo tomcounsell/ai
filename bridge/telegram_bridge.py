@@ -88,21 +88,32 @@ _BRIDGE_PROJECT_DIR = Path(__file__).parent.parent
 
 
 def _get_running_jobs_info() -> tuple[int, list[str]]:
-    """Check for running jobs across all projects. Returns (count, descriptions)."""
-    from agent.job_queue import RedisJob
+    """Check for running jobs across all projects. Returns (count, descriptions).
 
-    running_jobs = RedisJob.query.filter(status="running")
-    if not running_jobs:
+    Note: This is a point-in-time check for user visibility only. The actual
+    restart timing is handled by the job queue's restart flag system, which
+    checks between jobs. Sessions may finish before the restart actually occurs.
+    """
+    try:
+        from agent.job_queue import RedisJob
+
+        running_jobs = RedisJob.query.filter(status="running")
+        if not running_jobs:
+            return 0, []
+
+        descriptions = []
+        for job in running_jobs:
+            msg_preview = (job.message_text or "")[:50]
+            if len(job.message_text or "") > 50:
+                msg_preview += "..."
+            descriptions.append(f"  • [{job.project_key}] {msg_preview}")
+
+        return len(running_jobs), descriptions
+
+    except Exception as e:
+        # Redis unavailable or query failed - degrade gracefully
+        logging.getLogger(__name__).warning(f"Failed to check running jobs: {e}")
         return 0, []
-
-    descriptions = []
-    for job in running_jobs:
-        msg_preview = (job.message_text or "")[:50]
-        if len(job.message_text or "") > 50:
-            msg_preview += "..."
-        descriptions.append(f"  • [{job.project_key}] {msg_preview}")
-
-    return len(running_jobs), descriptions
 
 
 async def _handle_update_command(tg_client, event):
