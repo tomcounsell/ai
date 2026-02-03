@@ -422,3 +422,6 @@ telegram_session.session
 !config/*.example.json
 !config/mcp_library.json
 !tools/**/manifest.json
+
+# Telegram session files
+telegram_sessions/
