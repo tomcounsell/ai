@@ -127,14 +127,22 @@ Pull the latest changes from the remote repository and restart the bridge servic
 
    To force API billing, set `USE_API_BILLING=true` in `.env`
 
-7. **Restart the bridge service**
+7. **Install/restart the bridge service and update cron**
+
+   Use `install` instead of `restart` — it's idempotent and ensures both the bridge plist and the 12-hour update cron plist are present. This catches new machines or machines that were set up before the cron existed.
+
    ```bash
-   /Users/valorengels/src/ai/scripts/valor-service.sh restart
+   /Users/valorengels/src/ai/scripts/valor-service.sh install
    ```
 
 8. **Verify the service is running**
    ```bash
    sleep 2 && /Users/valorengels/src/ai/scripts/valor-service.sh status
+   ```
+
+   Also verify the update cron is loaded:
+   ```bash
+   launchctl list | grep com.valor.update && echo "✅ Update cron installed" || echo "⚠️ Update cron NOT installed"
    ```
 
 9. **Verify CLI tools are available**
