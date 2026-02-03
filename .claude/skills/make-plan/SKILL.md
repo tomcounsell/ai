@@ -2,6 +2,26 @@
 name: make-plan
 description: Create or update feature plan documents using Shape Up principles. Use when the user wants to plan a new feature, flesh out a plan, update an existing plan, or needs a structured approach to scoping work. Outputs to docs/plans/{slug}.md with problem statement, appetite, solution, risks, and boundaries. Always work in a new branch when creating plans.
 allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion
+hooks:
+  Stop:
+    - hooks:
+        - type: command
+          command: >-
+            uv run $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_new_file.py
+            --directory docs/plans
+            --extension .md
+        - type: command
+          command: >-
+            uv run $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_file_contains.py
+            --directory docs/plans
+            --extension .md
+            --contains '## Problem'
+            --contains '## Appetite'
+            --contains '## Solution'
+            --contains '## Risks'
+            --contains '## Team Orchestration'
+            --contains '## Step by Step Tasks'
+            --contains '## Success Criteria'
 ---
 
 # Make a Plan (Shape Up Methodology)
@@ -114,6 +134,90 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 - [ ] [Criterion 1]
 - [ ] [Criterion 2]
 - [ ] [Criterion 3]
+
+## Team Orchestration
+
+When this plan is executed, the lead agent orchestrates work using Task tools. The lead NEVER builds directly - they deploy team members and coordinate.
+
+### Team Members
+
+[List each team member needed. Name them uniquely so they can be referenced in tasks.]
+
+- **Builder ([component-name])**
+  - Name: [unique-name, e.g., "api-builder"]
+  - Role: [Single focused responsibility]
+  - Agent Type: [builder | designer | tool-developer | database-architect | etc.]
+  - Resume: true
+
+- **Validator ([component-name])**
+  - Name: [unique-name, e.g., "api-validator"]
+  - Role: [What they verify]
+  - Agent Type: validator
+  - Resume: true
+
+[Add more team members as needed. Pattern: builder + validator pairs for each major component.]
+
+### Available Agent Types
+
+**Builders:**
+- `builder` - General implementation (default for most work)
+- `designer` - UI/UX following design systems
+- `tool-developer` - High-quality tool creation
+- `database-architect` - Schema design, migrations
+- `agent-architect` - Agent systems, context management
+- `test-engineer` - Test implementation
+- `documentarian` - Documentation updates
+- `integration-specialist` - External service integration
+
+**Validators:**
+- `validator` - Read-only verification (no Write/Edit tools)
+- `code-reviewer` - Code review, security checks
+- `quality-auditor` - Standards compliance
+
+**Service Agents:**
+- `github`, `notion`, `linear`, `stripe`, `sentry`, `render`
+
+## Step by Step Tasks
+
+[Each task maps to a `TaskCreate` call. Execute top to bottom. Build tasks can run in parallel; validators wait for their builder.]
+
+### 1. [First Build Task]
+- **Task ID**: build-[component]
+- **Depends On**: none
+- **Assigned To**: [builder name from Team Members]
+- **Agent Type**: [agent type]
+- **Parallel**: true
+- [Specific action to complete]
+- [Specific action to complete]
+
+### 2. [Validation Task]
+- **Task ID**: validate-[component]
+- **Depends On**: build-[component]
+- **Assigned To**: [validator name from Team Members]
+- **Agent Type**: validator
+- **Parallel**: false
+- Verify implementation meets criteria
+- Run validation commands
+- Report pass/fail status
+
+[Continue pattern for each component...]
+
+### N. Final Validation
+- **Task ID**: validate-all
+- **Depends On**: [all previous task IDs, comma-separated]
+- **Assigned To**: [lead validator]
+- **Agent Type**: validator
+- **Parallel**: false
+- Run all validation commands
+- Verify all success criteria met
+- Generate final report
+
+## Validation Commands
+
+[Commands to verify the work is complete - used by validators]
+
+- `[command 1]` - [what it validates]
+- `[command 2]` - [what it validates]
 
 ---
 

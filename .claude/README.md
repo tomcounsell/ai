@@ -1,6 +1,23 @@
 # Claude Code Configuration
 
-This directory contains Claude Code configuration for the Valor AI System.
+This directory contains Claude Code configuration for Valor - agents, skills, hooks, and validators that work across ALL projects.
+
+## Global Toolbox Architecture
+
+**This repo is Valor's toolbox.** The contents of this `.claude/` directory are symlinked to `~/.claude/` so they're available when working in any repository.
+
+```bash
+# Symlinks (already configured)
+~/.claude/agents   -> ~/src/ai/.claude/agents
+~/.claude/commands -> ~/src/ai/.claude/commands
+~/.claude/skills   -> ~/src/ai/.claude/skills
+~/.claude/hooks    -> ~/src/ai/.claude/hooks
+```
+
+**Cross-repo usage:**
+- Working in `~/src/popoto/`? These agents and skills are available.
+- Working in `~/src/django-project-template/`? Same toolbox.
+- Project-specific agents can be added to each repo's local `.claude/agents/`.
 
 ## Core Philosophy
 
@@ -20,19 +37,20 @@ The system makes autonomous decisions about parallelization, validation loops, a
 .claude/
 ├── README.md              # This file
 ├── settings.local.json    # Local settings (not committed)
-├── agents/                # Subagent definitions
+├── agents/                # Subagent definitions (flat structure)
+│   ├── builder.md         # General implementation agent
+│   ├── validator.md       # Read-only verification agent
 │   ├── stripe.md          # Payment operations
-│   ├── sentry.md          # Error monitoring
-│   ├── render.md          # Infrastructure
 │   ├── github.md          # Code collaboration
-│   ├── notion.md          # Documentation
-│   ├── linear.md          # Project management
-│   └── support/           # Support specialists
-└── commands/              # Skills (slash commands)
-    ├── prime.md           # Codebase primer
-    ├── pthread.md         # Parallel thread execution
-    ├── sdlc.md            # AI Developer Workflow
-    └── audit-next-tool.md # Tool quality audits
+│   └── ...                # All agents at root level
+├── commands/              # Skills (slash commands)
+│   ├── prime.md           # Codebase primer
+│   ├── build.md           # Plan execution with agent teams
+│   └── ...
+├── skills/                # Complex multi-step skills
+│   └── make-plan/         # Shape Up planning methodology
+└── hooks/                 # Validation hooks
+    └── validators/        # File and content validators
 ```
 
 ## Skills
@@ -74,15 +92,36 @@ The system does not stop until all quality gates pass.
 
 ## Agent Definitions
 
-Agents in `.claude/agents/` are specialized subagents:
+Agents in `.claude/agents/` are specialized subagents (flat structure, no subdirectories):
 
-- **Domain agents**: stripe, sentry, render, github, notion, linear
-- **Support agents**: debugging, testing, documentation, security, etc.
+**Builder agents** - Create and modify code:
+- `builder` - General implementation
+- `tool-developer` - High-quality tool creation
+- `database-architect` - Schema design, migrations
+- `agent-architect` - Agent systems, context management
+- `designer` - UI/UX implementation
 
-Each agent:
-- Has focused context for its domain
-- Uses appropriate model (haiku for simple, opus for complex)
-- Can be invoked automatically based on task
+**Validator agents** - Verify without modifying:
+- `validator` - Read-only verification (no Write/Edit tools)
+- `code-reviewer` - Code review, security checks
+- `quality-auditor` - Standards compliance
+
+**Domain agents** - External service operations:
+- `stripe`, `sentry`, `render`, `github`, `notion`, `linear`
+
+**Support agents** - Specialized expertise:
+- `api-integration-specialist`, `security-reviewer`, `performance-optimizer`, etc.
+
+### Builder + Validator Pairing
+
+The standard workflow pairs builders with validators:
+
+1. **Builder** implements a component
+2. **Validator** verifies it (read-only, cannot fix issues)
+3. If validation fails, builder receives feedback and iterates
+4. Loop until validation passes
+
+This pairing is a **workflow practice**, not enforced by directory structure. The `/build` skill orchestrates this pattern automatically.
 
 ## Thread-Based Engineering
 
