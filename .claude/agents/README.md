@@ -54,6 +54,26 @@ This directory contains specialized sub-agents designed to handle specific aspec
 - Documentation review
 - Performance validation
 
+**[code-reviewer](./code-reviewer.md)**
+- Code correctness and logic review
+- Security vulnerability detection
+- Standards compliance checking
+- Constructive feedback
+
+### 🎨 Design & Documentation
+
+**[designer](./designer.md)**
+- UI/UX implementation
+- Design system adherence
+- Accessibility compliance
+- Component architecture
+
+**[documentarian](./documentarian.md)**
+- Documentation maintenance
+- API reference writing
+- Cross-referencing and discovery
+- Keeping docs in sync with code
+
 ### 🔄 Operations & Migration
 
 **[migration-specialist](./migration-specialist.md)**
@@ -102,10 +122,13 @@ When working on specific tasks, delegate to the appropriate specialist:
 - **API integrations** → `integration-specialist`
 - **Tool creation** → `tool-developer`
 - **Test implementation** → `test-engineer`
-- **Code review** → `quality-auditor`
+- **Code quality audit** → `quality-auditor`
+- **Code review (PR)** → `code-reviewer`
 - **Deployment setup** → `infrastructure-engineer`
 - **Data migration** → `migration-specialist`
 - **Agent design** → `agent-architect`
+- **UI/UX work** → `designer`
+- **Documentation** → `documentarian`
 
 ## Usage Examples
 

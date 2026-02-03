@@ -115,6 +115,40 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 - [ ] [Criterion 2]
 - [ ] [Criterion 3]
 
+## Agent Assignments
+
+[Assign specialized agents to each implementation phase. Pick from available agents based on the work needed.]
+
+| Phase | Agent | Responsibility |
+|-------|-------|----------------|
+| Build | [agent-name] | [What they'll implement] |
+| Test | [agent-name] | [What they'll verify] |
+| Review | [agent-name] | [What they'll check] |
+| Docs | [agent-name] | [What they'll document] |
+
+**Available agents for assignment:**
+
+*Core Development:*
+- `agent-architect` - Core architecture, PydanticAI, context management
+- `tool-developer` - High-quality tool creation
+- `database-architect` - Database design, SQLite, migrations
+- `test-engineer` - Testing strategies, real integrations, AI judges
+
+*Specialists:*
+- `designer` - UI/UX, design systems, accessibility
+- `code-reviewer` - Code quality, correctness, security review
+- `documentarian` - Documentation, ensuring nothing gets missed
+- `quality-auditor` - Standards compliance, architectural review
+
+*Integration & Infrastructure:*
+- `integration-specialist` - External services, API connections
+- `migration-specialist` - Data migration, service transitions
+- `infrastructure-engineer` - Monitoring, production deployment
+- `api-integration-specialist` - API patterns, auth, rate limiting
+
+*Service Agents:*
+- `github`, `notion`, `linear`, `stripe`, `sentry`, `render`
+
 ---
 
 ## Open Questions
