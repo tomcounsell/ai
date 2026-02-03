@@ -23,8 +23,10 @@ Authentication strategy (subscription-first):
 
 import logging
 import os
+import time
 from pathlib import Path
 
+import psutil
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
@@ -68,6 +70,67 @@ SOUL_PATH = Path(__file__).parent.parent / "config" / "SOUL.md"
 _COST_WARN_THRESHOLD = float(os.getenv("SDK_COST_WARN_THRESHOLD", "0.50"))
 
 
+def _log_system_resources(context: str = "") -> dict:
+    """Log current system resource usage for diagnostics.
+
+    Returns dict with metrics for comparison.
+    """
+    try:
+        cpu_percent = psutil.cpu_percent(interval=0.1)
+        memory = psutil.virtual_memory()
+
+        # Get process-specific info
+        process = psutil.Process()
+        proc_memory = process.memory_info()
+        proc_cpu = process.cpu_percent(interval=0.1)
+
+        # Check for other heavy processes
+        heavy_processes = []
+        for proc in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent"]):
+            try:
+                if proc.info["cpu_percent"] and proc.info["cpu_percent"] > 20:
+                    heavy_processes.append(
+                        f"{proc.info['name']}(pid={proc.info['pid']}, "
+                        f"cpu={proc.info['cpu_percent']:.1f}%)"
+                    )
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+
+        metrics = {
+            "system_cpu_percent": cpu_percent,
+            "system_memory_percent": memory.percent,
+            "system_memory_available_gb": memory.available / (1024**3),
+            "process_memory_mb": proc_memory.rss / (1024**2),
+            "process_cpu_percent": proc_cpu,
+            "heavy_processes": heavy_processes[:5],  # Top 5
+        }
+
+        prefix = f"[{context}] " if context else ""
+        logger.info(
+            f"{prefix}System resources: "
+            f"CPU={cpu_percent:.1f}%, "
+            f"RAM={memory.percent:.1f}% used ({memory.available / (1024**3):.1f}GB free), "
+            f"Process: {proc_memory.rss / (1024**2):.0f}MB RSS"
+        )
+
+        if heavy_processes:
+            logger.info(f"{prefix}Heavy processes: {', '.join(heavy_processes)}")
+
+        # Warn if resources are constrained
+        if cpu_percent > 80:
+            logger.warning(f"{prefix}High CPU load: {cpu_percent:.1f}%")
+        if memory.percent > 85:
+            logger.warning(f"{prefix}High memory usage: {memory.percent:.1f}%")
+        if memory.available < 1 * (1024**3):  # Less than 1GB free
+            logger.warning(f"{prefix}Low available memory: {memory.available / (1024**3):.2f}GB")
+
+        return metrics
+
+    except Exception as e:
+        logger.debug(f"Could not get system resources: {e}")
+        return {}
+
+
 def load_completion_criteria() -> str:
     """Load completion criteria from CLAUDE.md."""
     claude_md = Path(__file__).parent.parent / "CLAUDE.md"
@@ -77,9 +140,7 @@ def load_completion_criteria() -> str:
     import re
 
     content = claude_md.read_text()
-    match = re.search(
-        r"## Work Completion Criteria\n\n(.*?)(?=\n## |\Z)", content, re.DOTALL
-    )
+    match = re.search(r"## Work Completion Criteria\n\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
     return match.group(0) if match else ""
 
 
@@ -123,11 +184,9 @@ class ValorAgent:
         Args:
             working_dir: Working directory for the agent. Defaults to ai/ repo root.
             system_prompt: Custom system prompt. Defaults to SOUL.md contents.
-            permission_mode: Permission mode for tool use. Defaults to "bypassPermissions" (YOLO mode).
+            permission_mode: Permission mode for tool use. Default: "bypassPermissions".
         """
-        self.working_dir = (
-            Path(working_dir) if working_dir else Path(__file__).parent.parent
-        )
+        self.working_dir = Path(working_dir) if working_dir else Path(__file__).parent.parent
         self.system_prompt = system_prompt or load_system_prompt()
         self.permission_mode = permission_mode
 
@@ -148,9 +207,7 @@ class ValorAgent:
                 env["ANTHROPIC_API_KEY"] = api_key
                 logger.info("Auth: using API key billing (USE_API_BILLING=true)")
             else:
-                logger.warning(
-                    "Auth: USE_API_BILLING=true but no ANTHROPIC_API_KEY set"
-                )
+                logger.warning("Auth: USE_API_BILLING=true but no ANTHROPIC_API_KEY set")
         else:
             # Strip API key so CLI falls back to subscription/OAuth
             env["ANTHROPIC_API_KEY"] = ""
@@ -171,9 +228,7 @@ class ValorAgent:
             },
         )
 
-    async def query(
-        self, message: str, session_id: str | None = None, max_retries: int = 2
-    ) -> str:
+    async def query(self, message: str, session_id: str | None = None, max_retries: int = 2) -> str:
         """
         Send a message and get a response. On error, feeds the error back
         to the agent so it can attempt a different approach.
@@ -193,8 +248,17 @@ class ValorAgent:
         response_parts: list[str] = []
         retries = 0
 
+        # Log resources before SDK initialization
+        init_start = time.time()
+        logger.info(f"[SDK-init] Starting SDK initialization for session {session_id}")
+        _log_system_resources("SDK-init-pre")
+
         try:
             async with ClaudeSDKClient(options) as client:
+                # Log successful initialization
+                init_elapsed = time.time() - init_start
+                logger.info(f"[SDK-init] SDK initialized successfully in {init_elapsed:.2f}s")
+                _log_system_resources("SDK-init-post")
                 # Register client for steering access
                 if session_id:
                     _active_clients[session_id] = client
@@ -242,12 +306,11 @@ class ValorAgent:
                                     logger.error(
                                         f"Auth failure after {retries} retries: {result_text}\n"
                                         "Subscription fallback may be patched. "
-                                        "Set USE_API_BILLING=true in .env or see module docstring for alternatives."
+                                        "Set USE_API_BILLING=true or see module docstring."
                                     )
                                 else:
                                     logger.error(
-                                        f"Agent error after {retries} retries: "
-                                        f"{result_text}"
+                                        f"Agent error after {retries} retries: {result_text}"
                                     )
                     else:
                         # async for completed without break — done
@@ -255,16 +318,65 @@ class ValorAgent:
 
         except Exception as e:
             error_str = str(e)
-            if _is_auth_error(error_str):
+            init_elapsed = time.time() - init_start
+
+            # Check if this is an initialization timeout
+            is_init_timeout = "Control request timeout: initialize" in error_str
+
+            if is_init_timeout:
+                logger.error(
+                    f"[SDK-init] INITIALIZATION TIMEOUT after {init_elapsed:.2f}s\n"
+                    f"  Session: {session_id}\n"
+                    f"  Working dir: {self.working_dir}\n"
+                    f"  Error: {error_str}"
+                )
+                # Log current system state to help diagnose
+                logger.error("[SDK-init] System state at timeout:")
+                _log_system_resources("SDK-init-timeout")
+
+                # Check if Claude CLI process exists
+                try:
+                    claude_procs = []
+                    proc_attrs = ["pid", "name", "cmdline", "status", "create_time"]
+                    for proc in psutil.process_iter(proc_attrs):
+                        try:
+                            if proc.info["name"] and "claude" in proc.info["name"].lower():
+                                age = time.time() - proc.info["create_time"]
+                                claude_procs.append(
+                                    f"PID={proc.info['pid']} name={proc.info['name']} "
+                                    f"status={proc.info['status']} age={age:.1f}s"
+                                )
+                            elif proc.info["cmdline"]:
+                                cmdline = " ".join(proc.info["cmdline"] or [])
+                                if "claude" in cmdline.lower():
+                                    age = time.time() - proc.info["create_time"]
+                                    claude_procs.append(
+                                        f"PID={proc.info['pid']} cmd={cmdline[:80]} "
+                                        f"status={proc.info['status']} age={age:.1f}s"
+                                    )
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+
+                    if claude_procs:
+                        procs_str = "\n  ".join(claude_procs)
+                        logger.error(f"[SDK-init] Found Claude processes:\n  {procs_str}")
+                    else:
+                        logger.error(
+                            "[SDK-init] No Claude processes found - CLI may have failed to start"
+                        )
+                except Exception as proc_err:
+                    logger.debug(f"Could not check for Claude processes: {proc_err}")
+
+            elif _is_auth_error(error_str):
                 logger.error(
                     f"SDK auth failure — subscription fallback may be patched: {e}\n"
                     "FALLBACK OPTIONS:\n"
                     "  1. Set USE_API_BILLING=true in .env to use API key billing\n"
                     "  2. CLIProxyAPI (github.com/luispater/CLIProxyAPI): OAuth proxy\n"
-                    "  3. Pi Coding Agent (github.com/badlogic/pi-mono): native subscription auth via --mode rpc"
+                    "  3. Pi Coding Agent: native subscription auth via --mode rpc"
                 )
             else:
-                logger.error(f"SDK query failed: {e}")
+                logger.error(f"SDK query failed after {init_elapsed:.2f}s: {e}")
             raise
         finally:
             # Always unregister client from registry
@@ -397,13 +509,14 @@ async def get_agent_response_sdk(
         response = await agent.query(enriched_message, session_id=session_id)
 
         elapsed = time.time() - start_time
-        logger.info(
-            f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)"
-        )
+        logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
 
         return response
 
     except Exception as e:
         elapsed = time.time() - start_time
         logger.error(f"[{request_id}] SDK error after {elapsed:.1f}s: {e}")
-        return "Sorry, I ran into an issue and couldn't recover. The error has been logged for investigation."
+        return (
+            "Sorry, I ran into an issue and couldn't recover. "
+            "The error has been logged for investigation."
+        )

@@ -15,6 +15,7 @@ dependencies = [
     "google-auth-oauthlib>=1.2.0",  # Google OAuth for Workspace APIs
     "google-auth-httplib2>=0.2.0",  # Google Auth HTTP transport
     "google-api-python-client>=2.100.0",  # Google API client
+    "psutil>=5.9.0",  # System resource monitoring for SDK diagnostics
 ]
 
 [project.optional-dependencies]
