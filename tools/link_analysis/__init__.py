@@ -27,15 +27,18 @@ logger = logging.getLogger(__name__)
 
 # YouTube URL patterns - capture video ID
 YOUTUBE_PATTERNS = [
-    re.compile(r'(?:https?://)?(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})'),
-    re.compile(r'(?:https?://)?(?:www\.)?youtu\.be/([a-zA-Z0-9_-]{11})'),
-    re.compile(r'(?:https?://)?(?:www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]{11})'),
-    re.compile(r'(?:https?://)?(?:www\.)?youtube\.com/embed/([a-zA-Z0-9_-]{11})'),
-    re.compile(r'(?:https?://)?(?:www\.)?youtube\.com/v/([a-zA-Z0-9_-]{11})'),
+    re.compile(r"(?:https?://)?(?:www\.)?youtube\.com/watch\?v=([a-zA-Z0-9_-]{11})"),
+    re.compile(r"(?:https?://)?(?:www\.)?youtu\.be/([a-zA-Z0-9_-]{11})"),
+    re.compile(r"(?:https?://)?(?:www\.)?youtube\.com/shorts/([a-zA-Z0-9_-]{11})"),
+    re.compile(r"(?:https?://)?(?:www\.)?youtube\.com/embed/([a-zA-Z0-9_-]{11})"),
+    re.compile(r"(?:https?://)?(?:www\.)?youtube\.com/v/([a-zA-Z0-9_-]{11})"),
 ]
 
-# Maximum video duration in seconds (15 minutes = 900 seconds)
-MAX_VIDEO_DURATION = 900
+# Maximum video duration in seconds
+# Set via env var YOUTUBE_MAX_VIDEO_DURATION, default 4 hours (14400s)
+# Constraints: transcription time (~real-time), Whisper cost (~$0.006/min),
+# and context window (200k tokens ≈ 5-6 hour lecture max)
+MAX_VIDEO_DURATION = int(os.getenv("YOUTUBE_MAX_VIDEO_DURATION", "14400"))
 
 # Directory for downloaded YouTube audio
 YOUTUBE_MEDIA_DIR = Path(__file__).parent.parent.parent / "data" / "media" / "youtube"
@@ -177,11 +180,15 @@ def download_youtube_audio(video_id: str, output_dir: Path | None = None) -> Pat
 
         cmd = [
             "yt-dlp",
-            "--format", "bestaudio/best",
+            "--format",
+            "bestaudio/best",
             "--extract-audio",
-            "--audio-format", "mp3",
-            "--audio-quality", "192K",
-            "--output", output_template + ".%(ext)s",
+            "--audio-format",
+            "mp3",
+            "--audio-quality",
+            "192K",
+            "--output",
+            output_template + ".%(ext)s",
             "--no-warnings",
             "--quiet",
             url,
@@ -292,9 +299,7 @@ async def transcribe_audio_file(filepath: Path) -> str | None:
                     result = response.json()
                     return result.get("text", "").strip()
                 else:
-                    logger.error(
-                        f"Whisper API error: {response.status_code} - {response.text}"
-                    )
+                    logger.error(f"Whisper API error: {response.status_code} - {response.text}")
                     return None
 
     except Exception as e:
@@ -352,9 +357,7 @@ async def summarize_transcript(text: str, max_length: int = 500) -> str:
 
             if response.status_code == 200:
                 result = response.json()
-                summary = (
-                    result.get("choices", [{}])[0].get("message", {}).get("content", "")
-                )
+                summary = result.get("choices", [{}])[0].get("message", {}).get("content", "")
                 return summary.strip()
             else:
                 logger.error(f"OpenAI summarization error: {response.status_code}")
@@ -419,9 +422,7 @@ async def process_youtube_url(url: str) -> dict:
 
         # Check duration limit
         if duration > MAX_VIDEO_DURATION:
-            result["error"] = (
-                f"Video too long ({duration}s > {MAX_VIDEO_DURATION}s limit)"
-            )
+            result["error"] = f"Video too long ({duration}s > {MAX_VIDEO_DURATION}s limit)"
             result["context"] = (
                 f"[YouTube video too long to transcribe: {result['title']} "
                 f"({duration // 60}:{duration % 60:02d})]"
@@ -495,8 +496,7 @@ async def process_youtube_urls_in_text(text: str) -> tuple[str, list[dict]]:
 
 # URL regex pattern
 URL_PATTERN = re.compile(
-    r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w\-.~:/?#[\]@!$&\'()*+,;=%]*',
-    re.IGNORECASE
+    r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w\-.~:/?#[\]@!$&\'()*+,;=%]*", re.IGNORECASE
 )
 
 
@@ -595,7 +595,7 @@ def get_metadata(url: str, timeout: int = 10) -> dict:
         }
 
         # Extract title
-        title_match = re.search(r'<title[^>]*>([^<]+)</title>', content, re.IGNORECASE)
+        title_match = re.search(r"<title[^>]*>([^<]+)</title>", content, re.IGNORECASE)
         if title_match:
             metadata["title"] = title_match.group(1).strip()
 
@@ -603,13 +603,13 @@ def get_metadata(url: str, timeout: int = 10) -> dict:
         desc_match = re.search(
             r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']',
             content,
-            re.IGNORECASE
+            re.IGNORECASE,
         )
         if not desc_match:
             desc_match = re.search(
                 r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*name=["\']description["\']',
                 content,
-                re.IGNORECASE
+                re.IGNORECASE,
             )
         if desc_match:
             metadata["description"] = desc_match.group(1).strip()
@@ -809,7 +809,7 @@ if __name__ == "__main__":
         print(f"Analyzing URL: {arg}")
         result = analyze_url(arg)
     else:
-        print(f"Extracting URLs from text")
+        print("Extracting URLs from text")
         result = extract_urls(arg)
 
     import json
