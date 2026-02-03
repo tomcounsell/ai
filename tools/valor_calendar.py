@@ -237,6 +237,10 @@ def process_calendar_event(service, calendar_id: str, slug: str, now: datetime) 
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1] == "--version":
+        print("valor-calendar 0.1.0")
+        return
+
     args = sys.argv[1:]
     project = None
 
