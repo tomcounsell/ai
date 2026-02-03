@@ -11,7 +11,28 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - If the pull fails due to local changes, stash them first with `git stash`, pull, then `git stash pop`.
    - If the pull fails due to diverged branches, stop and inform the user. DO NOT force-pull.
 
-2. **Sync dependencies with uv**
+2. **Check for pending critical dependency upgrades**
+
+   The cron (`remote-update.sh`) defers critical dep upgrades to manual `/update` runs.
+   Critical deps are pinned with `==` in pyproject.toml: telethon, anthropic, claude-agent-sdk.
+
+   ```bash
+   cd /Users/valorengels/src/ai
+   if [ -f data/upgrade-pending ]; then
+       echo "Critical dependency upgrade pending since:"
+       cat data/upgrade-pending
+   fi
+   ```
+
+   If the flag exists:
+   - Show the user what critical deps changed: `git log --oneline -5 -- pyproject.toml`
+   - Inform the user which critical versions are changing before syncing
+   - After syncing (next step), verify the bridge starts and connects
+   - Run a quick health check: `sleep 3 && tail -5 logs/bridge.log` (look for "Connected to Telegram")
+   - If healthy: remove the flag (`rm data/upgrade-pending`)
+   - If unhealthy: warn user, do NOT remove flag, suggest rollback with `git revert`
+
+3. **Sync dependencies with uv**
 
    Always use `uv` for package management (faster, more reliable than pip).
 
@@ -39,7 +60,23 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - Install CLI tools (`valor-calendar`, `valor-history`)
    - Be significantly faster than pip
 
-3. **Ensure Ollama summarizer model is available**
+4. **Verify critical dependency versions**
+
+   Critical deps are pinned to exact versions in `pyproject.toml`. Verify installed versions match:
+
+   ```bash
+   cd /Users/valorengels/src/ai
+   .venv/bin/python -c "
+   import telethon, anthropic, claude_agent_sdk
+   print(f'telethon=={telethon.__version__}')
+   print(f'anthropic=={anthropic.__version__}')
+   print(f'claude-agent-sdk=={claude_agent_sdk.__version__}')
+   "
+   ```
+
+   Compare output against the `==` pins in `pyproject.toml`. If any version doesn't match, run `uv sync --all-extras --reinstall` and re-check. Report the versions to the user.
+
+5. **Ensure Ollama summarizer model is available**
 
    The bridge uses a local Ollama model as fallback for response summarization when Haiku is unavailable.
 
@@ -55,7 +92,7 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - The model name can be overridden via `OLLAMA_SUMMARIZER_MODEL` in `.env`.
    - If Ollama is not installed, skip this step — the bridge will use Haiku only and fall back to truncation if Haiku fails.
 
-4. **Verify SDK authentication**
+6. **Verify SDK authentication**
 
    The SDK uses Max subscription OAuth via the Claude Desktop app. Verify authentication is configured:
 
@@ -90,17 +127,17 @@ Pull the latest changes from the remote repository and restart the bridge servic
 
    To force API billing, set `USE_API_BILLING=true` in `.env`
 
-5. **Restart the bridge service**
+7. **Restart the bridge service**
    ```bash
    /Users/valorengels/src/ai/scripts/valor-service.sh restart
    ```
 
-6. **Verify the service is running**
+8. **Verify the service is running**
    ```bash
    sleep 2 && /Users/valorengels/src/ai/scripts/valor-service.sh status
    ```
 
-7. **Verify CLI tools are available**
+9. **Verify CLI tools are available**
 
    Run each check and report pass/fail. Group results by category.
 
@@ -141,7 +178,7 @@ Pull the latest changes from the remote repository and restart the bridge servic
      - System tools: `brew install <tool>` (if on macOS)
    - Report which tools passed and which failed.
 
-8. **Generate Google Calendar config**
+10. **Generate Google Calendar config**
 
    Auto-generate `~/Desktop/claude_code/calendar_config.json` by matching Google Calendar names to projects.
 
@@ -251,7 +288,7 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - **Auth failed**: OAuth token invalid or missing — run `/setup`
    - **Inaccessible**: Calendar mapped but API returns error
 
-9. **Verify MCP servers**
+11. **Verify MCP servers**
 
    The Agent SDK inherits MCP servers from Claude Code's local/project settings via `setting_sources`. Check what's configured:
 
@@ -263,7 +300,7 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - If none are configured, note that the SDK agent will only have built-in tools (bash, file read/write, etc.)
    - MCP servers are managed via `claude mcp add/remove` — any changes take effect on next bridge restart
 
-10. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, whether the service restarted successfully, SDK auth mode, CLI tool health, calendar status, and MCP server status.
+12. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, whether the service restarted successfully, SDK auth mode, CLI tool health, calendar status, and MCP server status.
 
 ## Troubleshooting
 

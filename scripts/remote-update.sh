@@ -74,16 +74,30 @@ echo "$LOG_PREFIX"
 # ── Sync dependencies (only if pyproject.toml or uv.lock changed) ───
 CHANGED_FILES=$(git diff --name-only "$BEFORE..$AFTER")
 if echo "$CHANGED_FILES" | grep -qE "^(pyproject\.toml|uv\.lock)$"; then
-    echo "$LOG_PREFIX pyproject.toml or uv.lock changed — syncing dependencies..."
-    if command -v uv &>/dev/null; then
-        uv sync --all-extras 2>&1
-        echo "$LOG_PREFIX Dependencies synced via uv."
-    elif [ -f "$PROJECT_DIR/.venv/bin/pip" ]; then
-        echo "$LOG_PREFIX uv not found, falling back to pip..."
-        "$PROJECT_DIR/.venv/bin/pip" install -e "$PROJECT_DIR" 2>&1
-        echo "$LOG_PREFIX Dependencies synced via pip."
+    # Check if critical deps changed (==X.Y.Z pins in pyproject.toml)
+    CRITICAL_CHANGED=$(git diff "$BEFORE..$AFTER" -- pyproject.toml | \
+        grep -E "^\+.*==(telethon|anthropic|claude-agent-sdk)" || true)
+
+    if [ -n "$CRITICAL_CHANGED" ]; then
+        echo "$LOG_PREFIX CRITICAL dependency upgrade detected:"
+        echo "$CRITICAL_CHANGED" | while read -r line; do
+            echo "$LOG_PREFIX   $line"
+        done
+        echo "$LOG_PREFIX Skipping auto-sync. Run /update manually to apply."
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) critical-dep-upgrade" \
+            > "$PROJECT_DIR/data/upgrade-pending"
     else
-        echo "$LOG_PREFIX WARN: Neither uv nor pip found. Dependencies NOT synced."
+        echo "$LOG_PREFIX Non-critical dependency changes — auto-syncing..."
+        if command -v uv &>/dev/null; then
+            uv sync --all-extras 2>&1
+            echo "$LOG_PREFIX Dependencies synced via uv."
+        elif [ -f "$PROJECT_DIR/.venv/bin/pip" ]; then
+            echo "$LOG_PREFIX uv not found, falling back to pip..."
+            "$PROJECT_DIR/.venv/bin/pip" install -e "$PROJECT_DIR" 2>&1
+            echo "$LOG_PREFIX Dependencies synced via pip."
+        else
+            echo "$LOG_PREFIX WARN: Neither uv nor pip found. Dependencies NOT synced."
+        fi
     fi
 else
     echo "$LOG_PREFIX No dependency file changes — skipping dep sync."

@@ -82,11 +82,25 @@ ensure_setup() {
 }
 
 start_bridge() {
+    # Atomic process lock (prevents concurrent starts)
+    local lock_dir="$PROJECT_DIR/data/bridge-start.lock"
+    if ! mkdir "$lock_dir" 2>/dev/null; then
+        echo "ERROR: Another bridge start/stop operation is in progress."
+        echo "If this persists, remove: $lock_dir"
+        return 1
+    fi
+
+    # Warn about pending critical dependency upgrades
+    if [ -f "$PROJECT_DIR/data/upgrade-pending" ]; then
+        echo "WARNING: Critical dependency upgrade pending. Run /update to apply."
+        cat "$PROJECT_DIR/data/upgrade-pending"
+    fi
+
     # Always stop any existing processes first to ensure clean state
     if is_running; then
         echo "Stopping existing bridge process..."
         stop_bridge
-        sleep 1
+        sleep 2
     fi
 
     echo "Starting Valor bridge..."
@@ -95,6 +109,7 @@ start_bridge() {
     cd "$PROJECT_DIR"
     if ! ensure_setup; then
         echo "Setup checks failed. Fix the issues above and try again."
+        rmdir "$lock_dir" 2>/dev/null || true
         return 1
     fi
 
@@ -108,6 +123,7 @@ start_bridge() {
 
     # Wait a moment and verify
     sleep 2
+    rmdir "$lock_dir" 2>/dev/null || true
     if is_running; then
         echo "Bridge started successfully (PID: $pid)"
         return 0
@@ -129,8 +145,8 @@ stop_bridge() {
     echo "Stopping bridge (PID: $pid)..."
     kill "$pid" 2>/dev/null || true
 
-    # Wait for graceful shutdown
-    for i in {1..10}; do
+    # Wait for graceful shutdown (15s to let Telethon close SQLite session)
+    for i in {1..15}; do
         if ! is_running; then
             echo "Bridge stopped"
             rm -f "$PID_FILE"

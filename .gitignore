@@ -380,7 +380,6 @@ Thumbs.db
 logs/*.log
 
 # UV package manager
-uv.lock
 .uv/
 
 # Temporary files
