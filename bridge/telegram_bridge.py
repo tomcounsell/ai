@@ -87,18 +87,52 @@ SHUTTING_DOWN = False
 _BRIDGE_PROJECT_DIR = Path(__file__).parent.parent
 
 
+def _get_running_jobs_info() -> tuple[int, list[str]]:
+    """Check for running jobs across all projects. Returns (count, descriptions)."""
+    from agent.job_queue import RedisJob
+
+    running_jobs = RedisJob.query.filter(status="running")
+    if not running_jobs:
+        return 0, []
+
+    descriptions = []
+    for job in running_jobs:
+        msg_preview = (job.message_text or "")[:50]
+        if len(job.message_text or "") > 50:
+            msg_preview += "..."
+        descriptions.append(f"  • [{job.project_key}] {msg_preview}")
+
+    return len(running_jobs), descriptions
+
+
 async def _handle_update_command(tg_client, event):
     """Run remote update script and reply with results.
 
     The script pulls code and syncs deps but does NOT restart the bridge.
     If code changed, it writes a restart flag that the job queue picks up
     between jobs for a graceful restart when idle.
+
+    If sessions are currently running, notifies the user that the restart
+    will be queued until all work completes.
     """
     logger.info(f"[bridge] /update command received from chat {event.chat_id}")
     try:
         await set_reaction(tg_client, event.chat_id, event.message.id, "👀")
     except Exception:
         pass  # Reaction is nice-to-have
+
+    # Check for running sessions before update
+    running_count, running_descriptions = _get_running_jobs_info()
+    sessions_notice = ""
+    if running_count > 0:
+        sessions_notice = (
+            f"\n\n⚠️ {running_count} session(s) currently running:\n"
+            + "\n".join(running_descriptions)
+            + "\n\nRestart will be queued until all sessions complete."
+        )
+        logger.info(
+            f"[bridge] /update: {running_count} session(s) running, restart will be queued"
+        )
 
     script_path = _BRIDGE_PROJECT_DIR / "scripts" / "remote-update.sh"
     if not script_path.exists():
@@ -120,6 +154,10 @@ async def _handle_update_command(tg_client, event):
         output = result.stdout.strip() or result.stderr.strip() or "(no output)"
         if result.returncode != 0 and result.stderr.strip():
             output += f"\n\nSTDERR:\n{result.stderr.strip()}"
+
+        # Append sessions notice if any were running
+        output += sessions_notice
+
         # Truncate if too long for Telegram
         if len(output) > 4000:
             output = output[:4000] + "\n...(truncated)"
@@ -903,7 +941,10 @@ if _dm_whitelist_path.exists():
             DM_WHITELIST.add(uid_int)
             # Handle both old format (string name) and new format (dict with permissions)
             if isinstance(user_info, str):
-                DM_WHITELIST_CONFIG[uid_int] = {"name": user_info, "permissions": "full"}
+                DM_WHITELIST_CONFIG[uid_int] = {
+                    "name": user_info,
+                    "permissions": "full",
+                }
             else:
                 DM_WHITELIST_CONFIG[uid_int] = user_info
     except (json.JSONDecodeError, ValueError, OSError) as e:
@@ -926,6 +967,7 @@ def get_user_permissions(sender_id: int | None) -> str:
     if not sender_id or sender_id not in DM_WHITELIST_CONFIG:
         return "full"
     return DM_WHITELIST_CONFIG[sender_id].get("permissions", "full")
+
 
 # Link collectors - usernames whose links are automatically stored
 # When these users share a URL, it gets saved with metadata
@@ -1267,7 +1309,9 @@ def build_context_prefix(
             )
         return "\n".join(context_parts) if context_parts else ""
 
-    context_parts.append(f"PROJECT: {project.get('name', project.get('_key', 'Unknown'))}")
+    context_parts.append(
+        f"PROJECT: {project.get('name', project.get('_key', 'Unknown'))}"
+    )
 
     project_context = project.get("context", {})
     if project_context.get("description"):
@@ -2227,7 +2271,13 @@ async def get_agent_response_with_retry(
                 logger.info(f"Retry attempt {attempt + 1}/{MAX_RETRIES}")
 
             response = await get_agent_response(
-                message, session_id, sender_name, chat_title, project, chat_id, sender_id
+                message,
+                session_id,
+                sender_name,
+                chat_title,
+                project,
+                chat_id,
+                sender_id,
             )
 
             # Check if response looks like an error
@@ -2799,7 +2849,9 @@ async def main():
             break
         except Exception as e:
             if "database is locked" in str(e) and _attempt < 3:
-                logger.warning(f"Session DB locked (attempt {_attempt}/3), retrying in {_attempt * 2}s...")
+                logger.warning(
+                    f"Session DB locked (attempt {_attempt}/3), retrying in {_attempt * 2}s..."
+                )
                 await asyncio.sleep(_attempt * 2)
             else:
                 raise
