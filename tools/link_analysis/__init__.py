@@ -35,10 +35,10 @@ YOUTUBE_PATTERNS = [
 ]
 
 # Maximum video duration in seconds
-# Set via env var YOUTUBE_MAX_VIDEO_DURATION, default 4 hours (14400s)
-# Constraints: transcription time (~real-time), Whisper cost (~$0.006/min),
-# and context window (200k tokens ≈ 5-6 hour lecture max)
-MAX_VIDEO_DURATION = int(os.getenv("YOUTUBE_MAX_VIDEO_DURATION", "14400"))
+# Set via env var YOUTUBE_MAX_VIDEO_DURATION, default 10 hours (36000s)
+# Practical limits: Whisper cost ~$0.006/min ($3.60/10hr), transcription ~real-time.
+# Context window (200k tokens) fits 10+ hour lectures easily. 10hr covers any realistic content.
+MAX_VIDEO_DURATION = int(os.getenv("YOUTUBE_MAX_VIDEO_DURATION", "36000"))
 
 # Directory for downloaded YouTube audio
 YOUTUBE_MEDIA_DIR = Path(__file__).parent.parent.parent / "data" / "media" / "youtube"
