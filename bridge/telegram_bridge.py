@@ -2747,9 +2747,18 @@ async def main():
     signal.signal(signal.SIGTERM, _shutdown_handler)
     signal.signal(signal.SIGINT, _shutdown_handler)
 
-    # Start the client
+    # Start the client (retry on SQLite session lock from prior process)
     logger.info("Starting Telegram bridge...")
-    await client.start(phone=PHONE, password=PASSWORD)
+    for _attempt in range(1, 4):
+        try:
+            await client.start(phone=PHONE, password=PASSWORD)
+            break
+        except Exception as e:
+            if "database is locked" in str(e) and _attempt < 3:
+                logger.warning(f"Session DB locked (attempt {_attempt}/3), retrying in {_attempt * 2}s...")
+                await asyncio.sleep(_attempt * 2)
+            else:
+                raise
     logger.info("Connected to Telegram")
 
     # Replay any dead-lettered messages from previous session

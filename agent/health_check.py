@@ -122,6 +122,14 @@ async def _judge_health(activity: str) -> dict[str, Any]:
 
     text = response.content[0].text if response.content else ""
 
+    # Strip markdown code fences (Haiku often wraps JSON in ```json ... ```)
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+    if text.endswith("```"):
+        text = text.rsplit("\n", 1)[0] if "\n" in text else text[:-3]
+    text = text.strip()
+
     # Parse JSON from response
     try:
         return json.loads(text)
