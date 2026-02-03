@@ -822,13 +822,14 @@ MONITORING_DASHBOARD_PORT=8080
 
 ```
 ai/
-|-- .claude/                  # Claude Code configuration
-|   |-- agents/               # Subagent definitions for Claude Code
-|   |   |-- support/          # Support specialist agents
-|   |   +-- *.md              # Domain agents (github, stripe, sentry, etc.)
-|   |-- commands/             # Skill definitions (/prime, /audit-next-tool, etc.)
+|-- .claude/                  # Claude Code configuration (symlinked to ~/.claude/ for global access)
+|   |-- agents/               # Subagent definitions (flat structure, all at root level)
+|   |   +-- *.md              # builder, validator, github, stripe, sentry, specialists, etc.
+|   |-- commands/             # Skill definitions (/prime, /build, /sdlc, etc.)
+|   |-- skills/               # Complex multi-step skills (make-plan, etc.)
+|   |-- hooks/                # Validation hooks
 |   |-- settings.local.json   # Local Claude Code settings
-|   +-- README.md             # Last updated: [timestamp of latest Claude Code/SDK changes]
+|   +-- README.md             # Architecture and cross-repo usage docs
 |-- agents/
 |   +-- valor/
 |       |-- agent.py          # Main ValorAgent
