@@ -427,21 +427,47 @@ async def _worker_loop(project_key: str) -> None:
         _active_workers.pop(project_key, None)
 
 
+def _find_valor_calendar() -> str:
+    """Find valor-calendar CLI, preferring venv installation."""
+    import shutil
+
+    # Check PATH first
+    found = shutil.which("valor-calendar")
+    if found:
+        return found
+
+    # Fall back to known locations
+    for path in [
+        Path(__file__).parent.parent / ".venv" / "bin" / "valor-calendar",
+        Path.home() / "Library" / "Python" / "3.12" / "bin" / "valor-calendar",
+        Path.home() / "src" / "ai" / ".venv" / "bin" / "valor-calendar",
+    ]:
+        if path.exists():
+            return str(path)
+
+    return "valor-calendar"  # Let it fail with clear error
+
+
 async def _calendar_heartbeat(slug: str, project: str | None = None) -> None:
     """Fire-and-forget calendar heartbeat via subprocess."""
     try:
-        cmd = ["valor-calendar"]
+        valor_calendar = _find_valor_calendar()
+        cmd = [valor_calendar]
         if project:
             cmd.extend(["--project", project])
         cmd.append(slug)
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        await asyncio.wait_for(proc.wait(), timeout=10)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10)
+        if proc.returncode == 0:
+            logger.info(f"Calendar heartbeat: {stdout.decode().strip()}")
+        else:
+            logger.warning(f"Calendar heartbeat failed: {stderr.decode().strip()}")
     except Exception as e:
-        logger.debug(f"Calendar heartbeat failed for '{slug}': {e}")
+        logger.warning(f"Calendar heartbeat failed for '{slug}': {e}")
 
 
 # Interval between calendar heartbeats during long-running jobs
