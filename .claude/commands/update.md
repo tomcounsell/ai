@@ -135,7 +135,46 @@ Pull the latest changes from the remote repository and restart the bridge servic
    /Users/valorengels/src/ai/scripts/valor-service.sh install
    ```
 
-8. **Verify the service is running**
+8. **Install caffeinate service (prevent sleep)**
+
+   The bridge runs SDK queries that can take several minutes. If the machine sleeps mid-query, the subprocess dies and the response is lost. Install a persistent caffeinate service to prevent this:
+
+   ```bash
+   PLIST_PATH="$HOME/Library/LaunchAgents/com.valor.caffeinate.plist"
+   if [ ! -f "$PLIST_PATH" ]; then
+       cat > "$PLIST_PATH" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.valor.caffeinate</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>-s</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>
+EOF
+       launchctl load "$PLIST_PATH"
+       echo "✅ Caffeinate service installed"
+   else
+       echo "✅ Caffeinate service already installed"
+   fi
+   ```
+
+   Verify it's running:
+   ```bash
+   launchctl list | grep com.valor.caffeinate && pgrep caffeinate > /dev/null && echo "✅ Caffeinate running" || echo "⚠️ Caffeinate NOT running"
+   ```
+
+9. **Verify the service is running**
    ```bash
    sleep 2 && /Users/valorengels/src/ai/scripts/valor-service.sh status
    ```
@@ -145,7 +184,7 @@ Pull the latest changes from the remote repository and restart the bridge servic
    launchctl list | grep com.valor.update && echo "✅ Update cron installed" || echo "⚠️ Update cron NOT installed"
    ```
 
-9. **Verify CLI tools are available**
+10. **Verify CLI tools are available**
 
    Run each check and report pass/fail. Group results by category.
 
@@ -186,7 +225,7 @@ Pull the latest changes from the remote repository and restart the bridge servic
      - System tools: `brew install <tool>` (if on macOS)
    - Report which tools passed and which failed.
 
-10. **Generate Google Calendar config**
+11. **Generate Google Calendar config**
 
    Auto-generate `~/Desktop/claude_code/calendar_config.json` by matching Google Calendar names to projects.
 
@@ -296,7 +335,7 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - **Auth failed**: OAuth token invalid or missing — run `/setup`
    - **Inaccessible**: Calendar mapped but API returns error
 
-11. **Verify MCP servers**
+12. **Verify MCP servers**
 
    The Agent SDK inherits MCP servers from Claude Code's local/project settings via `setting_sources`. Check what's configured:
 
@@ -308,7 +347,7 @@ Pull the latest changes from the remote repository and restart the bridge servic
    - If none are configured, note that the SDK agent will only have built-in tools (bash, file read/write, etc.)
    - MCP servers are managed via `claude mcp add/remove` — any changes take effect on next bridge restart
 
-12. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, whether the service restarted successfully, SDK auth mode, CLI tool health, calendar status, and MCP server status.
+13. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, whether the service restarted successfully, SDK auth mode, CLI tool health, calendar status, and MCP server status.
 
 ## Troubleshooting
 
