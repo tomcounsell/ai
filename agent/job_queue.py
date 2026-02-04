@@ -50,6 +50,7 @@ class RedisJob(Model):
     message_id = Field(type=int)
     chat_title = Field(null=True)
     revival_context = Field(null=True, max_length=MSG_MAX_CHARS)
+    workflow_id = Field(null=True)  # 8-char unique workflow identifier for tracked work
 
 
 class Job:
@@ -110,6 +111,10 @@ class Job:
     def created_at(self) -> float:
         return self._rj.created_at
 
+    @property
+    def workflow_id(self) -> str | None:
+        return self._rj.workflow_id
+
 
 async def _push_job(
     project_key: str,
@@ -123,6 +128,7 @@ async def _push_job(
     priority: str = "high",
     revival_context: str | None = None,
     sender_id: int | None = None,
+    workflow_id: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project."""
     await RedisJob.async_create(
@@ -139,6 +145,7 @@ async def _push_job(
         message_id=message_id,
         chat_title=chat_title,
         revival_context=revival_context,
+        workflow_id=workflow_id,
     )
     return await RedisJob.query.async_count(project_key=project_key, status="pending")
 
@@ -356,6 +363,7 @@ async def enqueue_job(
     priority: str = "high",
     revival_context: str | None = None,
     sender_id: int | None = None,
+    workflow_id: str | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -375,6 +383,7 @@ async def enqueue_job(
         chat_id=chat_id,
         message_id=message_id,
         chat_title=chat_title,
+        workflow_id=workflow_id,
         priority=priority,
         revival_context=revival_context,
     )
@@ -545,6 +554,7 @@ async def _execute_job(job: Job) -> None:
             project_config,
             job.chat_id,
             job.sender_id,
+            job.workflow_id,
         )
 
     task = BackgroundTask(messenger=messenger, acknowledgment_timeout=180.0)

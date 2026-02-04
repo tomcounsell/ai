@@ -2400,6 +2400,105 @@ async def get_agent_response_with_retry(
     return ""
 
 
+def detect_tracked_work(
+    message_text: str, working_dir: str
+) -> tuple[str | None, str | None]:
+    """
+    Detect if message references tracked work (plan file + tracking URL).
+
+    Workflows are only created for tracked work that has both:
+    - A plan document in docs/plans/*.md
+    - A tracking issue (GitHub) or task (Notion)
+
+    Args:
+        message_text: The message text to analyze
+        working_dir: Working directory to check for plan files
+
+    Returns:
+        Tuple of (plan_file, tracking_url) or (None, None) if not tracked work
+    """
+    plan_file = None
+    tracking_url = None
+
+    # Check for plan file mentions (docs/plans/*.md or just the plan name)
+    plan_pattern = r"(?:docs/plans/)?([a-z0-9-]+)\.md"
+    plan_match = re.search(plan_pattern, message_text.lower())
+    if plan_match:
+        plan_name = plan_match.group(1)
+        plan_path = Path(working_dir) / "docs" / "plans" / f"{plan_name}.md"
+        if plan_path.exists():
+            plan_file = f"docs/plans/{plan_name}.md"
+
+    # Check for tracking URLs (GitHub issues or Notion pages)
+    github_pattern = r"https://github\.com/[^/]+/[^/]+/issues/\d+"
+    notion_pattern = r"https://www\.notion\.so/[^\s]+"
+
+    github_match = re.search(github_pattern, message_text)
+    notion_match = re.search(notion_pattern, message_text)
+
+    if github_match:
+        tracking_url = github_match.group(0)
+    elif notion_match:
+        tracking_url = notion_match.group(0)
+
+    # Only return if we have BOTH plan file and tracking URL
+    if plan_file and tracking_url:
+        return plan_file, tracking_url
+
+    return None, None
+
+
+def create_workflow_for_tracked_work(
+    message_text: str,
+    working_dir: str,
+    chat_id: str | None,
+) -> str | None:
+    """
+    Create workflow state for tracked work if detected.
+
+    Args:
+        message_text: The message text to analyze
+        working_dir: Working directory to check for plan files
+        chat_id: Telegram chat ID for notifications
+
+    Returns:
+        workflow_id if workflow created, None otherwise
+    """
+    if not USE_CLAUDE_SDK:
+        return None
+
+    plan_file, tracking_url = detect_tracked_work(message_text, working_dir)
+
+    if not plan_file or not tracking_url:
+        return None
+
+    try:
+        from agent.workflow_state import WorkflowState, generate_workflow_id
+
+        workflow_id = generate_workflow_id()
+        workflow = WorkflowState(workflow_id)
+
+        # Initialize workflow state
+        workflow.update(
+            plan_file=plan_file,
+            tracking_url=tracking_url,
+            telegram_chat_id=int(chat_id) if chat_id else None,
+        )
+
+        # Save with initial phase
+        workflow.save(phase="plan")
+
+        logger.info(
+            f"Created workflow {workflow_id} for tracked work: {plan_file} -> {tracking_url}"
+        )
+
+        return workflow_id
+
+    except Exception as e:
+        logger.error(f"Failed to create workflow state: {e}")
+        return None
+
+
 async def main():
     """Main entry point."""
     if not API_ID or not API_HASH:
@@ -2797,6 +2896,11 @@ async def main():
                         f"[{project_name}] Failed to mark stale work dormant: {e}"
                     )
 
+            # Check if this is tracked work and create workflow if needed
+            workflow_id = create_workflow_for_tracked_work(
+                clean_text, working_dir_str, telegram_chat_id
+            )
+
             # Build and enqueue the job (HIGH priority — top of FILO stack)
             depth = await enqueue_job(
                 project_key=project_key,
@@ -2809,6 +2913,7 @@ async def main():
                 chat_title=chat_title,
                 priority="high",
                 sender_id=sender_id,
+                workflow_id=workflow_id,
             )
             if depth > 1:
                 await client.send_message(
