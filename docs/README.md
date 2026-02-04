@@ -42,6 +42,7 @@ Documentation for the Valor AI System - a unified conversational development env
 
 | Document | Description |
 |----------|-------------|
+| [Deployment](deployment.md) | Multi-instance deployment configuration |
 | [Monitoring](operations/monitoring.md) | System monitoring and health checks |
 | [Daydream System](operations/daydream-system.md) | Autonomous maintenance process |
 
@@ -52,6 +53,7 @@ Documentation for the Valor AI System - a unified conversational development env
 | [Quality Standards](tools/quality-standards.md) | Tool quality standards and patterns |
 | [Testing Strategy](testing/testing-strategy.md) | Real integration testing approach |
 | [Tool Architecture](tools/tool-architecture.md) | Tool design patterns |
+| [Tools Reference](tools-reference.md) | Complete tool documentation |
 
 ### Components
 
