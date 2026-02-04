@@ -481,7 +481,13 @@ Use snake_case for slugs:
 
 ## Status Tracking
 
-Status is tracked in the plan document's YAML frontmatter:
+Status and classification are tracked in the plan document's YAML frontmatter.
+
+**Required Frontmatter Fields:**
+- `status:` - Current state of the plan (see values below)
+- `type:` - Classification (bug, feature, or chore) - **MANDATORY**
+
+**Status Values:**
 - `status: Planning` - Initial draft being created
 - `status: Ready` - Finalized and ready for implementation
 - `status: In Progress` - Being implemented
