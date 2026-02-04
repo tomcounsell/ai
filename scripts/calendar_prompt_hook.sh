@@ -16,8 +16,9 @@ INPUT=$(cat)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
-# Skip slash commands - only real prompts should create calendar events
-if echo "$PROMPT" | grep -qE '^\s*/'; then
+# Skip bare slash commands (no extra prompt = no real work)
+# e.g. "/update" skips, but "/build implement auth" tracks
+if echo "$PROMPT" | grep -qE '^\s*/[a-zA-Z0-9_-]+\s*$'; then
     exit 0
 fi
 
