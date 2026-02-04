@@ -1,5 +1,6 @@
 ---
 status: Planning
+type: feature
 appetite: Medium: 3-5 days
 owner: Valor
 created: 2026-02-02
@@ -153,7 +154,7 @@ valor-fetch = "tools.web:cli_fetch"
 - `tools/link_analysis/` URL summarization delegates to `fetch()` internally
 - No breaking changes to existing callers
 
-## Rabbit Holes & Risks
+## Risks
 
 ### Risk 1: Provider API instability
 **Impact:** If Firecrawl or Tavily change their API, fetch/search breaks silently
@@ -190,6 +191,171 @@ valor-fetch = "tools.web:cli_fetch"
 - [ ] Integration tests pass with real API calls (skipped when keys missing)
 - [ ] Old `tools/search` import path still works (backward compat)
 - [ ] All providers that have API keys configured are tested and functional
+
+## Team Orchestration
+
+When this plan is executed, the lead agent orchestrates work using Task tools. The lead NEVER builds directly - they deploy team members and coordinate.
+
+### Team Members
+
+- **Builder (types-and-interfaces)**
+  - Name: types-builder
+  - Role: Create result dataclasses and provider protocols
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (providers)**
+  - Name: providers-builder
+  - Role: Implement all provider modules (perplexity, tavily, firecrawl, httpx_fallback)
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (providers)**
+  - Name: providers-validator
+  - Role: Verify each provider works with real API calls
+  - Agent Type: validator
+  - Resume: true
+
+- **Builder (search)**
+  - Name: search-builder
+  - Role: Implement web_search() with provider chain
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (fetch)**
+  - Name: fetch-builder
+  - Role: Implement fetch() with provider chain
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (core)**
+  - Name: core-validator
+  - Role: Verify search and fetch work with fallbacks
+  - Agent Type: validator
+  - Resume: true
+
+- **Builder (cli)**
+  - Name: cli-builder
+  - Role: Create CLI entry points and pyproject.toml scripts
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (migration)**
+  - Name: migration-builder
+  - Role: Update old tools/search and tools/link_analysis to use new module
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (final)**
+  - Name: final-validator
+  - Role: End-to-end validation of all success criteria
+  - Agent Type: validator
+  - Resume: true
+
+## Step by Step Tasks
+
+### 1. Build Types and Interfaces
+- **Task ID**: build-types
+- **Depends On**: none
+- **Assigned To**: types-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Create `tools/web/__init__.py` with exports
+- Create `tools/web/types.py` with SearchResult, FetchResult, Source dataclasses
+- Create provider Protocol classes (SearchProvider, FetchProvider)
+- Add html2text to pyproject.toml dependencies
+
+### 2. Build Providers
+- **Task ID**: build-providers
+- **Depends On**: build-types
+- **Assigned To**: providers-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Create `tools/web/providers/__init__.py`
+- Implement `tools/web/providers/perplexity.py` (search only)
+- Implement `tools/web/providers/tavily.py` (search and extract)
+- Implement `tools/web/providers/firecrawl.py` (fetch/scrape)
+- Implement `tools/web/providers/httpx_fallback.py` (httpx + html2text)
+
+### 3. Validate Providers
+- **Task ID**: validate-providers
+- **Depends On**: build-providers
+- **Assigned To**: providers-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Test each provider individually with real API calls
+- Verify API key detection works (unavailable when missing)
+- Check error handling and None return on failure
+
+### 4. Build Search Function
+- **Task ID**: build-search
+- **Depends On**: validate-providers
+- **Assigned To**: search-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `tools/web/search.py`
+- Implement `web_search(query)` with provider chain (Perplexity → Tavily)
+- Add sync wrapper for non-async callers
+
+### 5. Build Fetch Function
+- **Task ID**: build-fetch
+- **Depends On**: validate-providers
+- **Assigned To**: fetch-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `tools/web/fetch.py`
+- Implement `fetch(url)` with provider chain (Firecrawl → httpx+html2text → Tavily)
+- Add sync wrapper for non-async callers
+
+### 6. Validate Core Functions
+- **Task ID**: validate-core
+- **Depends On**: build-search, build-fetch
+- **Assigned To**: core-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Test web_search returns coherent results
+- Test fetch returns readable markdown
+- Test fallback chain by temporarily disabling primary provider
+
+### 7. Build CLI
+- **Task ID**: build-cli
+- **Depends On**: validate-core
+- **Assigned To**: cli-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Add cli_search and cli_fetch functions to `tools/web/__init__.py`
+- Add entry points to pyproject.toml
+- Run `uv sync` to install CLI commands
+
+### 8. Build Migration Layer
+- **Task ID**: build-migration
+- **Depends On**: build-cli
+- **Assigned To**: migration-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Update `tools/search/__init__.py` to import from `tools/web`
+- Update `tools/link_analysis/` URL fetching to use `fetch()`
+- Verify backward compatibility
+
+### 9. Final Validation
+- **Task ID**: validate-all
+- **Depends On**: build-migration
+- **Assigned To**: final-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Verify all success criteria are met
+- Run CLI commands: `valor-search`, `valor-fetch`
+- Test backward compat: `from tools.search import search`
+- Generate final report
+
+## Validation Commands
+
+- `python -c "from tools.web import web_search, fetch; print('imports OK')"` - verify module exports
+- `python -c "from tools.web.types import SearchResult, FetchResult; print('types OK')"` - verify types
+- `valor-search "test query"` - test search CLI
+- `valor-fetch "https://example.com"` - test fetch CLI
+- `python -c "from tools.search import search; print('backward compat OK')"` - verify migration
+- `pytest tools/web/tests/ -v` - run tests
 
 ---
 
