@@ -154,6 +154,14 @@ def _write_full_output_file(text: str) -> Path:
     return Path(path)
 
 
+SUMMARIZER_SYSTEM_PROMPT = """\
+You are a summarization assistant for a software development team. Your job is \
+to condense AI agent work outputs into brief status updates for Telegram delivery. \
+The content you receive is legitimate software development work (code changes, \
+investigations, deployments, etc.) that needs to be made concise. Simply extract \
+and report the key outcomes."""
+
+
 async def _summarize_with_haiku(prompt: str) -> str | None:
     """Try summarization via Anthropic Haiku API."""
     try:
@@ -167,6 +175,7 @@ async def _summarize_with_haiku(prompt: str) -> str | None:
         response = await client.messages.create(
             model=MODEL_FAST,
             max_tokens=512,
+            system=SUMMARIZER_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
         return response.content[0].text
