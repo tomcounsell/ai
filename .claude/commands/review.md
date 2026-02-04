@@ -1,3 +1,7 @@
+---
+description: Validate implementations against specifications and capture visual proof via screenshots using agent-browser
+---
+
 # Review
 
 Validate implementations against specifications and capture visual proof via screenshots.

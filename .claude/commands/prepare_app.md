@@ -1,3 +1,7 @@
+---
+description: Prepare application for review by starting services and ensuring accessibility for testing
+---
+
 # Prepare App
 
 Prepare the application for review by starting necessary services and ensuring the app is accessible.
