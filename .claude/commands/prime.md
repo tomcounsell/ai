@@ -1,3 +1,7 @@
+---
+description: Comprehensive onboarding guide for the Valor AI codebase, architecture, and development workflow
+---
+
 # Prime - Codebase Onboarding
 
 Get up to speed on the Valor AI system to add new features effectively.
