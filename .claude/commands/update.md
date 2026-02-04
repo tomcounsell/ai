@@ -1,5 +1,6 @@
 ---
 description: Pull latest changes, sync dependencies, verify environment, and restart the bridge service
+model: sonnet
 ---
 
 # Update & Restart
