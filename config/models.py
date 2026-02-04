@@ -35,13 +35,47 @@ OPUS = "claude-opus-4-5-20251101"
 # =============================================================================
 # OPENROUTER MODELS
 # Format: provider/model as used with OpenRouter API
+# Use OpenRouter for: experimenting with new models, non-Anthropic providers
 # =============================================================================
 
-# Vision-capable models for image analysis
-# Note: Use these when calling OpenRouter API for multimodal tasks
+# Anthropic models via OpenRouter (fallback when no direct API key)
 OPENROUTER_HAIKU = "anthropic/claude-haiku-4-5-20251001"
 OPENROUTER_SONNET = "anthropic/claude-sonnet-4-5-20250514"
 OPENROUTER_OPUS = "anthropic/claude-opus-4-5-20251101"
+
+# -----------------------------------------------------------------------------
+# VISION ANALYSIS ALTERNATIVES (via OpenRouter)
+# For image understanding, OCR, diagram interpretation
+# -----------------------------------------------------------------------------
+
+# Google Gemini - Best overall vision, 1M+ token context, video understanding
+OPENROUTER_GEMINI_VISION = "google/gemini-2.5-pro"
+
+# Qwen3-VL - Strong open-source alternative, good multimodal reasoning
+OPENROUTER_QWEN_VISION = "qwen/qwen3-vl-72b"
+
+# Pixtral - Handles multiple images, native resolution, 128K context
+OPENROUTER_PIXTRAL = "mistralai/pixtral-large"
+
+# -----------------------------------------------------------------------------
+# IMAGE GENERATION MODELS (via OpenRouter)
+# For creating images from text prompts (Nano Banana style)
+# -----------------------------------------------------------------------------
+
+# Gemini 3 Pro - Native image generation with aspect ratio control
+OPENROUTER_GEMINI_IMAGE_GEN = "google/gemini-3-pro-image-preview"
+
+# Image generation aspect ratios (width x height)
+IMAGE_ASPECT_RATIOS = {
+    "1:1": (1024, 1024),  # Square
+    "16:9": (1344, 768),  # Landscape wide
+    "9:16": (768, 1344),  # Portrait tall (stories/reels)
+    "4:3": (1184, 864),  # Classic landscape
+    "3:4": (864, 1184),  # Classic portrait
+    "3:2": (1248, 832),  # Photo landscape
+    "2:3": (832, 1248),  # Photo portrait
+    "21:9": (1536, 672),  # Ultrawide/cinematic
+}
 
 
 # =============================================================================
@@ -58,6 +92,12 @@ MODEL_REASONING = SONNET
 
 # Vision/multimodal tasks via OpenRouter (image analysis, tagging)
 MODEL_VISION = OPENROUTER_SONNET
+
+# Vision analysis alternatives (for experimentation)
+MODEL_VISION_ALT = OPENROUTER_GEMINI_VISION  # Best overall vision model
+
+# Image generation (Nano Banana style)
+MODEL_IMAGE_GEN = OPENROUTER_GEMINI_IMAGE_GEN
 
 # Highest quality tasks (rarely needed, expensive)
 MODEL_BEST = OPUS
