@@ -14,11 +14,36 @@ from utils.constants import (
     read_hook_input,
 )
 
+# File-specific reminders: when these files are modified, print a reminder
+FILE_REMINDERS = {
+    "SOUL.md": (
+        "REMINDER: SOUL.md was modified. Review bridge/summarizer.py to ensure "
+        "SUMMARIZER_SYSTEM_PROMPT still matches Valor's voice (senior dev → PM style)."
+    ),
+}
+
+
+def check_file_reminders(hook_input: dict) -> None:
+    """Print reminders when specific files are modified."""
+    tool_name = hook_input.get("tool_name", "")
+    if tool_name not in ("Edit", "Write"):
+        return
+
+    tool_input = hook_input.get("tool_input", {})
+    file_path = tool_input.get("file_path", "")
+
+    for filename, reminder in FILE_REMINDERS.items():
+        if filename in file_path:
+            print(reminder)
+
 
 def main():
     hook_input = read_hook_input()
     if not hook_input:
         return
+
+    # Check for file-specific reminders
+    check_file_reminders(hook_input)
 
     session_id = get_session_id(hook_input)
     session_dir = ensure_session_log_dir(session_id)
