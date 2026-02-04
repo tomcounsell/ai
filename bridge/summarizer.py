@@ -26,7 +26,9 @@ logger = logging.getLogger(__name__)
 # Thresholds
 SUMMARIZE_THRESHOLD = 500  # ~3 sentences; anything longer gets summarized
 FILE_ATTACH_THRESHOLD = 3000  # Attach full output as file above this
-MAX_SUMMARY_CHARS = 400  # Target: 3 concise sentences + links
+MIN_SUMMARY_CHARS = 200  # Minimum for simple tasks
+MAX_SUMMARY_CHARS = 800  # Maximum before URLs (complex tasks need more room)
+URL_ALLOWANCE = 400  # Extra chars for URLs (issues, PRs, docs can be long)
 SAFETY_TRUNCATE = 4096  # Telegram hard limit
 
 # Ollama config — model can be overridden via env var
@@ -109,26 +111,38 @@ def _build_summary_prompt(text: str, artifacts: dict[str, list[str]]) -> str:
         )
 
     return f"""/no_think
-Summarize this AI agent output into a brief status update for \
-delivery via Telegram.
+Summarize this AI agent output into a status update for Telegram.
+
+Length guidance:
+- Simple tasks (single fix, quick answer): {MIN_SUMMARY_CHARS}-300 chars
+- Medium tasks (feature, investigation): 300-500 chars
+- Complex tasks (multi-step, architecture): up to {MAX_SUMMARY_CHARS} chars
+- URLs don't count toward limits - always include relevant links
 
 Rules:
-- Maximum {MAX_SUMMARY_CHARS} characters total
-- Write 1-3 short sentences: what was done, outcome, any blockers
-- Include commit hashes and URLs so they can be clicked
-- If tests failed or errors occurred, lead with that
-- No play-by-play of steps taken, files read, or tools used
-- No preamble, no sign-off
-- Tone: direct, professional, like a Slack status update
+- Lead with the outcome or key finding
+- Include commit hashes, PR URLs, issue links, doc links
+- If tests failed or errors occurred, mention that prominently
+- No play-by-play of files read or tools used
+- No preamble or sign-off
 - Preserve the voice and perspective of the original text{artifact_section}
 
-Examples of good output:
-- "Fixed the payment webhook race condition. Tests passing. \
-`abc1234` https://github.com/org/repo/pull/42"
-- "Analyzed the image and generated a new proposal. Saved to \
-generated_images/new_photo.jpg"
-- "Investigated the auth timeout — root cause is session expiry. \
-Fix ready but need your call on TTL (currently 24h)."
+Examples:
+
+Simple: "Fixed the null check in user validation. Tests passing. \
+`abc1234`"
+
+Medium: "Refactored the payment module to use the new Stripe SDK. \
+Updated 4 files, added retry logic for webhooks. All tests green. \
+https://github.com/org/repo/pull/42"
+
+Complex: "Implemented the new job queue system with Redis persistence. \
+Added priority scheduling, retry logic, and dead-letter handling. \
+Created plan doc and migrated existing cron jobs. 12 files changed, \
+integration tests passing. Need your review on the retry backoff \
+strategy (currently exponential with 5 min cap). \
+Plan: https://github.com/org/repo/blob/main/docs/plans/job-queue.md \
+PR: https://github.com/org/repo/pull/87"
 
 Agent output to summarize:
 {text}"""
