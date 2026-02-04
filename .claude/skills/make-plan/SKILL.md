@@ -274,16 +274,31 @@ After writing the plan document, create a corresponding tracking issue. Determin
    - If neither → skip tracking, just use the plan doc
 
 **GitHub Issue (default for most projects):**
+
+Before creating the issue, extract the `type:` field from the plan's YAML frontmatter. This field is MANDATORY and must be one of: bug, feature, or chore.
+
 ```bash
+# Extract type from plan frontmatter
+TYPE=$(grep '^type:' docs/plans/{slug}.md | sed 's/type: *//' | tr -d ' ')
+
+# Validate type exists
+if [ -z "$TYPE" ]; then
+  echo "ERROR: Plan must have a 'type:' field in frontmatter (bug, feature, or chore)"
+  exit 1
+fi
+
+# Create issue with both plan and type labels
 gh issue create \
   --repo {org}/{repo} \
   --title "[Plan] {Feature Name}" \
   --label "plan" \
+  --label "$TYPE" \
   --body "$(cat <<'EOF'
 ## Plan Document
 
 See: docs/plans/{slug}.md (branch: plan/{slug})
 
+**Type:** {type}
 **Appetite:** {appetite}
 **Status:** Planning
 
@@ -294,10 +309,16 @@ EOF
 ```
 
 **Notion Task:**
+
+Before creating the task, extract the `type:` field from the plan's YAML frontmatter. This field is MANDATORY.
+
 Use the Notion MCP tools to create a page in the project's configured database with:
 - Title: `[Plan] {Feature Name}`
 - Status: Planning
+- Type: {type} (from plan frontmatter - must be set)
 - Link to the plan document in the page body
+
+Note: The "Type" property must exist in your Notion database schema. If it doesn't exist, create it first or skip setting this property.
 
 **After creating the tracking issue:**
 - Update the plan's YAML frontmatter `tracking:` field with the issue URL (e.g., `https://github.com/org/repo/issues/14`) or Notion page URL
