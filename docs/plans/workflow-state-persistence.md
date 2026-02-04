@@ -123,6 +123,135 @@ agents/
 5. Add workflow state to SDK session management
 6. Create `agents/` directory structure
 
+## Team Members
+
+### builder
+Implementation agent responsible for writing code, creating files, and making changes.
+
+- **Role**: Implementation
+- **Capabilities**: File creation, code writing, system modifications
+- **Restrictions**: None
+
+### validator
+Read-only verification agent that validates implementations without making changes.
+
+- **Role**: Validation
+- **Capabilities**: File reading, test execution, verification
+- **Restrictions**: No file modifications, read-only operations
+
+## Step by Step Tasks
+
+### 1. build-types
+**Agent**: builder
+**Parallel**: false
+**Depends On**: None
+
+**Actions**:
+- Create `agent/workflow_types.py` file
+- Implement `WorkflowStateData` Pydantic model with all fields (workflow_id, issue_number, branch_name, plan_file, phase, status, telegram_chat_id, created_at, updated_at)
+- Add proper type hints and Optional fields
+- Include docstrings for the model and fields
+- Ensure proper datetime handling with timezone awareness
+
+### 2. build-state
+**Agent**: builder
+**Parallel**: false
+**Depends On**: build-types
+
+**Actions**:
+- Create `agent/workflow_state.py` file
+- Implement `WorkflowState` class with all methods (\_\_init\_\_, update, save, load, from_stdin, to_stdout)
+- Implement `generate_workflow_id()` helper function to create 8-character unique IDs
+- Add proper error handling for file operations
+- Implement stdin/stdout piping functionality
+- Add directory creation logic for `agents/{workflow_id}/`
+- Include comprehensive docstrings
+
+### 3. validate-core
+**Agent**: validator
+**Parallel**: false
+**Depends On**: build-state
+
+**Actions**:
+- Read `agent/workflow_types.py` and verify Pydantic model structure
+- Read `agent/workflow_state.py` and verify class implementation
+- Verify `generate_workflow_id()` returns 8-character strings
+- Check that all required methods exist (update, save, load, from_stdin, to_stdout)
+- Verify error handling is present
+- Run unit tests if they exist
+- Report any issues or confirm validation success
+
+### 4. build-bridge-integration
+**Agent**: builder
+**Parallel**: false
+**Depends On**: validate-core
+
+**Actions**:
+- Read `bridge/telegram_bridge.py` to understand current structure
+- Import `WorkflowState` and `generate_workflow_id`
+- Add workflow creation when receiving new tasks
+- Update workflow state on task completion
+- Add workflow_id to message handling context
+- Ensure proper state persistence throughout workflow lifecycle
+- Add error handling for state operations
+
+### 5. build-sdk-integration
+**Agent**: builder
+**Parallel**: true
+**Depends On**: validate-core
+
+**Actions**:
+- Read `agent/sdk_client.py` to understand session management
+- Add workflow_id parameter to SDK session creation
+- Update session management to track workflow state
+- Ensure workflow_id is passed through conversation context
+- Add state persistence hooks in appropriate SDK lifecycle methods
+- Add error handling for workflow state operations
+
+### 6. validate-integration
+**Agent**: validator
+**Parallel**: false
+**Depends On**: build-bridge-integration, build-sdk-integration
+
+**Actions**:
+- Read updated `bridge/telegram_bridge.py` and verify workflow integration
+- Read updated `agent/sdk_client.py` and verify session management changes
+- Verify workflow_id flows correctly from bridge to SDK
+- Check that state is created, updated, and persisted correctly
+- Verify error handling exists at integration points
+- Run integration tests if available
+- Test end-to-end flow: create workflow -> track state -> persist
+- Report any issues or confirm validation success
+
+### 7. build-directory-setup
+**Agent**: builder
+**Parallel**: false
+**Depends On**: validate-integration
+
+**Actions**:
+- Create `agents/` directory at project root
+- Add `.gitkeep` or README to track directory in git
+- Create example workflow directory structure
+- Add `.gitignore` entries for `agents/*/state.json` and `agents/*/logs/`
+- Document directory structure in code comments or README
+- Verify directory permissions are correct
+
+### 8. validate-all
+**Agent**: validator
+**Parallel**: false
+**Depends On**: build-directory-setup
+
+**Actions**:
+- Verify `agents/` directory exists with proper structure
+- Read all modified files and verify complete implementation
+- Check that workflow state can be created, saved, loaded, and piped
+- Verify bridge creates workflows correctly
+- Verify SDK tracks workflow_id in sessions
+- Run full test suite (unit + integration if available)
+- Test complete workflow lifecycle end-to-end
+- Verify all acceptance criteria from the plan are met
+- Report final validation status
+
 ## Benefits
 
 - Track long-running tasks across sessions
