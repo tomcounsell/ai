@@ -1,3 +1,7 @@
+---
+description: Systematically audit new or modified tools for quality, architecture compliance, and integration patterns
+---
+
 # Tool Audit System
 
 Comprehensive tool audit system for validating and maintaining code quality across the tool ecosystem. All current tools have been audited, but this system remains ready for new tool additions.
