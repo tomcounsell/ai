@@ -1,3 +1,7 @@
+---
+description: Pull latest changes, sync dependencies, verify environment, and restart the bridge service
+---
+
 # Update & Restart
 
 Pull the latest changes from the remote repository, sync dependencies, and restart the bridge service.
