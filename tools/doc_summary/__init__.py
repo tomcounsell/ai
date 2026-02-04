@@ -10,9 +10,13 @@ from typing import Literal
 
 import requests
 
+from config.models import MODEL_FAST, OPENROUTER_HAIKU
+
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "claude-sonnet-4-20250514"  # Current Claude model
+# Summarization is a fast/cheap task - use Haiku
+DEFAULT_MODEL = MODEL_FAST
+DEFAULT_MODEL_OPENROUTER = OPENROUTER_HAIKU
 
 
 class DocSummaryError(Exception):
@@ -58,7 +62,7 @@ def summarize(
             return {"error": "ANTHROPIC_API_KEY or OPENROUTER_API_KEY required"}
 
     # If content looks like a file path, try to read it
-    if content and len(content) < 500 and not "\n" in content:
+    if content and len(content) < 500 and "\n" not in content:
         path = Path(content)
         if path.exists() and path.is_file():
             try:
@@ -80,7 +84,7 @@ def summarize(
     }
 
     prompt_parts = [
-        f"Summarize the following document.",
+        "Summarize the following document.",
         type_instructions.get(summary_type, type_instructions["standard"]),
     ]
 
@@ -93,22 +97,24 @@ def summarize(
     if preserve_quotes:
         prompt_parts.append("Preserve any important direct quotes.")
 
-    prompt_parts.extend([
-        "",
-        "Also extract 3-5 key points from the document.",
-        "",
-        "Document:",
-        content[:15000],  # Limit content length
-        "",
-        "Respond in this format:",
-        "SUMMARY:",
-        "[Your summary here]",
-        "",
-        "KEY POINTS:",
-        "- [Point 1]",
-        "- [Point 2]",
-        "- [etc]",
-    ])
+    prompt_parts.extend(
+        [
+            "",
+            "Also extract 3-5 key points from the document.",
+            "",
+            "Document:",
+            content[:15000],  # Limit content length
+            "",
+            "Respond in this format:",
+            "SUMMARY:",
+            "[Your summary here]",
+            "",
+            "KEY POINTS:",
+            "- [Point 1]",
+            "- [Point 2]",
+            "- [etc]",
+        ]
+    )
 
     prompt = "\n".join(prompt_parts)
 
@@ -136,7 +142,7 @@ def summarize(
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": f"anthropic/{DEFAULT_MODEL}",
+                    "model": DEFAULT_MODEL_OPENROUTER,
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 2048,
                 },
@@ -176,9 +182,7 @@ def summarize(
 
         summary_word_count = len(summary.split())
         compression_ratio = (
-            original_word_count / summary_word_count
-            if summary_word_count > 0
-            else 0
+            original_word_count / summary_word_count if summary_word_count > 0 else 0
         )
 
         return {
@@ -263,7 +267,7 @@ if __name__ == "__main__":
         sys.exit(1)
     else:
         print(f"\nSummary:\n{result['summary']}")
-        print(f"\nKey Points:")
+        print("\nKey Points:")
         for point in result.get("key_points", []):
             print(f"  - {point}")
         print(f"\nCompression ratio: {result['compression_ratio']}x")

@@ -19,6 +19,8 @@ from pathlib import Path
 import anthropic
 import ollama as ollama_pkg
 
+from config.models import MODEL_FAST
+
 logger = logging.getLogger(__name__)
 
 # Thresholds
@@ -154,7 +156,7 @@ async def _summarize_with_haiku(prompt: str) -> str | None:
             return None
         client = anthropic.AsyncAnthropic(api_key=api_key)
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=MODEL_FAST,
             max_tokens=512,
             messages=[{"role": "user", "content": prompt}],
         )

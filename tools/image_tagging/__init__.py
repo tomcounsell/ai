@@ -10,8 +10,11 @@ from pathlib import Path
 
 import requests
 
+from config.models import MODEL_VISION
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "anthropic/claude-3.5-sonnet"
+# Vision task - use vision-capable model via OpenRouter
+DEFAULT_MODEL = MODEL_VISION
 
 
 class ImageTaggingError(Exception):
@@ -104,19 +107,21 @@ def tag_image(
     if custom_taxonomy:
         prompt_parts.append(f"Preferred tags: {', '.join(custom_taxonomy)}")
 
-    prompt_parts.extend([
-        "",
-        "Also identify:",
-        "- Dominant colors (up to 5)",
-        "- Image type (photo, illustration, screenshot, diagram, etc.)",
-        "",
-        "Respond in this JSON format:",
-        "{",
-        '  "tags": [{"tag": "string", "category": "string", "confidence": 0.0-1.0}],',
-        '  "dominant_colors": ["color1", "color2"],',
-        '  "image_type": "string"',
-        "}",
-    ])
+    prompt_parts.extend(
+        [
+            "",
+            "Also identify:",
+            "- Dominant colors (up to 5)",
+            "- Image type (photo, illustration, screenshot, diagram, etc.)",
+            "",
+            "Respond in this JSON format:",
+            "{",
+            '  "tags": [{"tag": "string", "category": "string", "confidence": 0.0-1.0}],',
+            '  "dominant_colors": ["color1", "color2"],',
+            '  "image_type": "string"',
+            "}",
+        ]
+    )
 
     prompt = "\n".join(prompt_parts)
 
@@ -176,7 +181,8 @@ def tag_image(
 
             # Filter by confidence threshold
             tags = [
-                t for t in parsed.get("tags", [])
+                t
+                for t in parsed.get("tags", [])
                 if t.get("confidence", 0) >= confidence_threshold
             ]
 
@@ -190,7 +196,7 @@ def tag_image(
 
             return {
                 "image_source": image_source,
-                "tags": tags[:max_tags * len(tag_categories)],
+                "tags": tags[: max_tags * len(tag_categories)],
                 "categories": categories,
                 "dominant_colors": parsed.get("dominant_colors", []),
                 "image_type": parsed.get("image_type", "unknown"),

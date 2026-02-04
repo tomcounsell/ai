@@ -11,8 +11,11 @@ from typing import Literal
 
 import requests
 
+from config.models import MODEL_VISION
+
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "anthropic/claude-3.5-sonnet"
+# Vision task - use vision-capable model via OpenRouter
+DEFAULT_MODEL = MODEL_VISION
 
 
 class ImageAnalysisError(Exception):
@@ -67,8 +70,12 @@ def _load_image(image_source: str) -> tuple[str, str]:
 def analyze_image(
     image_source: str,
     analysis_types: list[str] | None = None,
-    detail_level: Literal["minimal", "standard", "detailed", "comprehensive"] = "standard",
-    output_format: Literal["structured", "narrative", "technical", "accessibility"] = "structured",
+    detail_level: Literal[
+        "minimal", "standard", "detailed", "comprehensive"
+    ] = "standard",
+    output_format: Literal[
+        "structured", "narrative", "technical", "accessibility"
+    ] = "structured",
     model: str = DEFAULT_MODEL,
 ) -> dict:
     """
@@ -121,13 +128,15 @@ def analyze_image(
 
     # Combine prompts
     analysis_prompts = [prompts.get(t, t) for t in analysis_types if t in prompts]
-    combined_prompt = "\n".join([
-        "Analyze this image:",
-        *analysis_prompts,
-        "",
-        detail_instructions.get(detail_level, detail_instructions["standard"]),
-        format_instructions.get(output_format, format_instructions["structured"]),
-    ])
+    combined_prompt = "\n".join(
+        [
+            "Analyze this image:",
+            *analysis_prompts,
+            "",
+            detail_instructions.get(detail_level, detail_instructions["standard"]),
+            format_instructions.get(output_format, format_instructions["structured"]),
+        ]
+    )
 
     try:
         # Load image
@@ -262,4 +271,6 @@ if __name__ == "__main__":
         print(f"Error: {result['error']}")
         sys.exit(1)
     else:
-        print(f"\nAnalysis:\n{result.get('raw_analysis', result.get('description', ''))}")
+        print(
+            f"\nAnalysis:\n{result.get('raw_analysis', result.get('description', ''))}"
+        )

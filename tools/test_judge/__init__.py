@@ -10,9 +10,12 @@ from typing import Literal
 
 import requests
 
+from config.models import MODEL_REASONING, OPENROUTER_SONNET
+
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "claude-sonnet-4-20250514"  # Current Claude model
+DEFAULT_MODEL = MODEL_REASONING
+DEFAULT_MODEL_OPENROUTER = OPENROUTER_SONNET
 
 
 @dataclass
@@ -133,7 +136,7 @@ Only output valid JSON, nothing else."""
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": f"anthropic/{DEFAULT_MODEL}",
+                    "model": DEFAULT_MODEL_OPENROUTER,
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 1024,
                 },
@@ -147,7 +150,9 @@ Only output valid JSON, nothing else."""
         if use_anthropic:
             content = result.get("content", [{}])[0].get("text", "")
         else:
-            content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            content = (
+                result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            )
 
         if not content:
             return {"error": "No response from AI"}
@@ -165,7 +170,9 @@ Only output valid JSON, nothing else."""
 
         try:
             judgment = json.loads(content)
-            judgment["test_output_preview"] = test_output[:200] + "..." if len(test_output) > 200 else test_output
+            judgment["test_output_preview"] = (
+                test_output[:200] + "..." if len(test_output) > 200 else test_output
+            )
             return judgment
         except json.JSONDecodeError:
             return {

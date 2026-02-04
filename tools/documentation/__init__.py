@@ -10,9 +10,13 @@ from typing import Literal
 
 import requests
 
+from config.models import MODEL_REASONING, OPENROUTER_SONNET
+
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "claude-3-5-sonnet-20241022"
+# Documentation generation needs reasoning capability
+DEFAULT_MODEL = MODEL_REASONING
+DEFAULT_MODEL_OPENROUTER = OPENROUTER_SONNET
 
 
 class DocumentationError(Exception):
@@ -56,7 +60,7 @@ def generate_docs(
             return {"error": "ANTHROPIC_API_KEY or OPENROUTER_API_KEY required"}
 
     # If source looks like a file path, try to read it
-    if source and len(source) < 500 and not "\n" in source:
+    if source and len(source) < 500 and "\n" not in source:
         path = Path(source)
         if path.exists() and path.is_file():
             try:
@@ -69,7 +73,9 @@ def generate_docs(
 
     # Build prompt based on doc type
     type_prompts = {
-        "docstring": _build_docstring_prompt(source, style, detail_level, include_examples),
+        "docstring": _build_docstring_prompt(
+            source, style, detail_level, include_examples
+        ),
         "readme": _build_readme_prompt(source, detail_level, include_examples),
         "api": _build_api_prompt(source, style, detail_level),
         "changelog": _build_changelog_prompt(source),
@@ -101,7 +107,7 @@ def generate_docs(
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": f"anthropic/{DEFAULT_MODEL}",
+                    "model": DEFAULT_MODEL_OPENROUTER,
                     "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 4096,
                 },
@@ -124,7 +130,9 @@ def generate_docs(
             "documentation": text.strip(),
             "doc_type": doc_type,
             "style": style,
-            "format": "markdown" if doc_type in ("readme", "api", "changelog") else style,
+            "format": (
+                "markdown" if doc_type in ("readme", "api", "changelog") else style
+            ),
         }
 
     except requests.exceptions.Timeout:
@@ -160,13 +168,15 @@ def _build_docstring_prompt(
     if include_examples:
         parts.append("Include a usage example in the docstring.")
 
-    parts.extend([
-        "",
-        "Code:",
-        source[:8000],
-        "",
-        "Output only the docstring, no explanation.",
-    ])
+    parts.extend(
+        [
+            "",
+            "Code:",
+            source[:8000],
+            "",
+            "Output only the docstring, no explanation.",
+        ]
+    )
 
     return "\n".join(parts)
 
@@ -186,21 +196,25 @@ def _build_readme_prompt(source: str, detail_level: str, include_examples: bool)
         parts.append("- API reference")
 
     if detail_level == "comprehensive":
-        parts.extend([
-            "- Configuration options",
-            "- Contributing guidelines",
-        ])
+        parts.extend(
+            [
+                "- Configuration options",
+                "- Contributing guidelines",
+            ]
+        )
 
     if include_examples:
         parts.append("- Usage examples")
 
-    parts.extend([
-        "",
-        "Code:",
-        source[:8000],
-        "",
-        "Output only the README content in Markdown format.",
-    ])
+    parts.extend(
+        [
+            "",
+            "Code:",
+            source[:8000],
+            "",
+            "Output only the README content in Markdown format.",
+        ]
+    )
 
     return "\n".join(parts)
 

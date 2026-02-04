@@ -12,6 +12,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from config.models import MODEL_FAST
+
 logger = logging.getLogger(__name__)
 
 # Health check fires every N tool uses
@@ -115,7 +117,7 @@ async def _judge_health(activity: str) -> dict[str, Any]:
 
     client = anthropic.AsyncAnthropic(api_key=api_key)
     response = await client.messages.create(
-        model="claude-haiku-4-5-20251001",
+        model=MODEL_FAST,
         max_tokens=150,
         messages=[{"role": "user", "content": prompt}],
     )
