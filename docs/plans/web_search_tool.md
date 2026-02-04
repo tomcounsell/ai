@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium: 3-5 days
 owner: Valor
@@ -70,8 +70,8 @@ Agent calls web_search("query")
 **fetch flow:**
 ```
 Agent calls fetch("https://example.com/page")
-    → Try Firecrawl scrape (best: returns clean markdown, handles JS-rendered pages)
-    → Fallback: httpx + html2text (fast, no JS, works for most static pages)
+    → Try httpx + html2text (free, fast, works for most static pages)
+    → Fallback: Firecrawl scrape (handles JS-rendered pages, has API credits)
     → Fallback: Tavily extract (can read page content as part of search)
     → Return: { content (markdown), title, url, provider_used }
 ```
@@ -304,7 +304,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `tools/web/fetch.py`
-- Implement `fetch(url)` with provider chain (Firecrawl → httpx+html2text → Tavily)
+- Implement `fetch(url)` with provider chain (httpx+html2text → Firecrawl → Tavily)
 - Add sync wrapper for non-async callers
 
 ### 6. Validate Core Functions
@@ -359,12 +359,38 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ---
 
-## Open Questions
+## Design Decisions
 
-1. **Provider priority for search**: I've defaulted to Perplexity first (best AI summaries) then Tavily (good structured results). Does that match your preference, or should Tavily be primary?
+1. **Provider priority for search**: Perplexity first (best AI summaries), then Tavily as fallback.
 
-2. **Firecrawl plan/tier**: What Firecrawl plan are we on? The free tier has low limits. This affects whether Firecrawl should be the primary fetch provider or a secondary behind httpx+html2text for cost reasons.
+2. **Provider priority for fetch**: httpx+html2text first (free, fast), Firecrawl as secondary (has API credits but not primary), Tavily as last resort.
 
-3. **Should fetch() handle PDFs?** Firecrawl can extract text from PDFs. Should we support `fetch("https://example.com/paper.pdf")` returning markdown text, or is that out of scope for v1?
+3. **PDF handling**: Out of scope for v1. The bridge already has `_extract_pdf_text_stdlib()` for PDF text extraction. If needed later, we can wrap it as a CLI.
 
-4. **Deprecation timeline for old tools**: Should `tools/search/` and `tools/link_analysis/` URL fetching be fully replaced (deleted) once `tools/web/` is stable, or keep them indefinitely as thin wrappers?
+4. **Deprecation strategy**: After verifying feature parity (confirmed below), `tools/search/` becomes a thin wrapper importing from `tools/web`. `tools/link_analysis/` URL fetching delegates to `fetch()`. YouTube processing and URL extraction/validation stay in `link_analysis` (different scope).
+
+## Feature Parity Verification
+
+**tools/search → tools/web.web_search():**
+| Feature | Old | New | Status |
+|---------|-----|-----|--------|
+| Perplexity search | ✅ | ✅ | Parity |
+| AI summaries | ✅ | ✅ | Parity |
+| Citations/sources | ✅ | ✅ | Parity |
+| Search types | ✅ | ✅ | Parity |
+| Time/domain filters | ✅ | ✅ | Parity |
+| Fallback chain | ❌ | ✅ | **Improved** |
+
+**tools/link_analysis URL fetching → tools/web.fetch():**
+| Feature | Old | New | Status |
+|---------|-----|-----|--------|
+| Page content fetch | ✅ (regex HTML) | ✅ (Firecrawl/html2text) | **Improved** |
+| Metadata (title) | ✅ | ✅ | Parity |
+| URL summarization | ✅ | ✅ | Parity |
+| Fallback chain | ❌ | ✅ | **Improved** |
+
+**Stays in link_analysis (not migrated):**
+- YouTube processing (download, transcribe, summarize)
+- URL extraction from text
+- URL validation
+- analyze_text_links()
