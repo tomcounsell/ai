@@ -1,3 +1,7 @@
+---
+description: Configure a new machine to run the Valor Telegram bridge with all dependencies, authentication, and service startup
+---
+
 # Setup - New Machine Configuration
 
 Configure this machine to run the Valor Telegram bridge. You do everything except the interactive Telegram login step.
