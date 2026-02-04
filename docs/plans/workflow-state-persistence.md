@@ -120,7 +120,7 @@ agents/
       test.log
 ```
 
-## Rabbit Holes & Risks
+## Risks
 
 ### Risk 1: Orphaned workflow states
 **Impact:** Disk fills with abandoned state files
