@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class MessageRecord:
     """Record of a sent message for tracking."""
+
     content: str
     timestamp: datetime
     message_type: str = "result"  # "result", "acknowledgment", "error"
@@ -94,7 +95,9 @@ class BossMessenger:
             True if sent, False if already acknowledged or error
         """
         if self.acknowledgment_sent or self.messages_sent:
-            logger.debug(f"[{self.session_id}] Skipping acknowledgment - already communicated")
+            logger.debug(
+                f"[{self.session_id}] Skipping acknowledgment - already communicated"
+            )
             return False
 
         self.acknowledgment_sent = True
@@ -176,8 +179,7 @@ class BackgroundTask:
 
             # Send error notification
             await self.messenger.send(
-                f"I encountered an error: {str(e)[:200]}",
-                message_type="error"
+                f"I encountered an error: {str(e)[:200]}", message_type="error"
             )
         finally:
             # Cancel watchdog if still running
@@ -195,7 +197,11 @@ class BackgroundTask:
             await asyncio.sleep(self.acknowledgment_timeout)
 
             # Check if we're still running and haven't communicated
-            if self._task and not self._task.done() and not self.messenger.has_communicated():
+            if (
+                self._task
+                and not self._task.done()
+                and not self.messenger.has_communicated()
+            ):
                 await self.messenger.send_acknowledgment(self.acknowledgment_message)
 
         except asyncio.CancelledError:

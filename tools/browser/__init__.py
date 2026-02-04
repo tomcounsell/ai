@@ -11,6 +11,7 @@ from typing import Literal
 # Check if playwright is available
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
@@ -28,7 +29,9 @@ class BrowserError(Exception):
 def _check_playwright():
     """Check if Playwright is available."""
     if not PLAYWRIGHT_AVAILABLE:
-        return {"error": "Playwright not installed. Run: pip install playwright && playwright install chromium"}
+        return {
+            "error": "Playwright not installed. Run: pip install playwright && playwright install chromium"
+        }
     return None
 
 
@@ -118,12 +121,14 @@ def screenshot(
             # Get dimensions from viewport or page
             if full_page:
                 # Get full page dimensions
-                dimensions = page.evaluate("""() => {
+                dimensions = page.evaluate(
+                    """() => {
                     return {
                         width: document.documentElement.scrollWidth,
                         height: document.documentElement.scrollHeight
                     }
-                }""")
+                }"""
+                )
             else:
                 dimensions = {"width": 1280, "height": 720}
 

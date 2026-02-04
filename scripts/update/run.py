@@ -27,6 +27,7 @@ from scripts.update import cal_integration, deps, git, service, verify  # noqa: 
 @dataclass
 class UpdateConfig:
     """Configuration for update run."""
+
     # What to run
     do_git_pull: bool = True
     do_dep_sync: bool = True
@@ -87,6 +88,7 @@ class UpdateConfig:
 @dataclass
 class UpdateResult:
     """Result of update run."""
+
     success: bool = True
     git_result: git.GitPullResult | None = None
     dep_result: deps.DepSyncResult | None = None
@@ -123,7 +125,9 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             return result
 
         if result.git_result.commit_count == 0:
-            log(f"Already up to date ({git.get_short_sha(project_dir)})", v, always=True)
+            log(
+                f"Already up to date ({git.get_short_sha(project_dir)})", v, always=True
+            )
         else:
             log(f"Pulled {result.git_result.commit_count} commit(s):", v, always=True)
             for commit in result.git_result.commits[:5]:
@@ -138,7 +142,9 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # Step 2: Check for pending critical upgrades
     pending = git.check_upgrade_pending(project_dir)
     if pending.pending:
-        log(f"WARNING: Critical dependency upgrade pending since {pending.timestamp}", v)
+        log(
+            f"WARNING: Critical dependency upgrade pending since {pending.timestamp}", v
+        )
         result.warnings.append(f"Critical upgrade pending: {pending.reason}")
 
     # Step 3: Dependency sync
@@ -165,7 +171,11 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                     log("CRITICAL dependency changes detected:", v, always=True)
                     for change in critical_changes:
                         log(f"  {change}", v, always=True)
-                    log("Skipping auto-sync. Run /update manually to apply.", v, always=True)
+                    log(
+                        "Skipping auto-sync. Run /update manually to apply.",
+                        v,
+                        always=True,
+                    )
                     git.set_upgrade_pending(project_dir, "critical-dep-upgrade")
                 else:
                     should_sync = True
@@ -175,7 +185,11 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             result.dep_result = deps.sync_dependencies(project_dir)
 
             if result.dep_result.success:
-                log(f"Dependencies synced via {result.dep_result.method}", v, always=True)
+                log(
+                    f"Dependencies synced via {result.dep_result.method}",
+                    v,
+                    always=True,
+                )
             else:
                 log(f"WARN: Dep sync failed: {result.dep_result.error}", v, always=True)
                 result.warnings.append(f"Dep sync failed: {result.dep_result.error}")
@@ -185,7 +199,10 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             mismatches = [vi for vi in result.version_info if not vi.matches]
             if mismatches:
                 for vi in mismatches:
-                    log(f"WARN: {vi.package} version mismatch: {vi.version} != {vi.expected}", v)
+                    log(
+                        f"WARN: {vi.package} version mismatch: {vi.version} != {vi.expected}",
+                        v,
+                    )
                     result.warnings.append(f"{vi.package} version mismatch")
         else:
             log("No dependency changes, skipping sync", v)
@@ -202,7 +219,9 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 if verify.pull_ollama_model(ollama_model):
                     log(f"Ollama model {ollama_model} pulled", v)
                 else:
-                    result.warnings.append(f"Failed to pull Ollama model {ollama_model}")
+                    result.warnings.append(
+                        f"Failed to pull Ollama model {ollama_model}"
+                    )
             else:
                 log("Ollama not installed, skipping", v)
 
@@ -227,6 +246,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
 
         # Wait and check status
         import time
+
         time.sleep(2)
         result.service_status = service.get_service_status(project_dir)
         result.caffeinate_status = service.get_caffeinate_status()

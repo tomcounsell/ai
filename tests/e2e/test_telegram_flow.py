@@ -22,6 +22,7 @@ from dataclasses import dataclass
 @dataclass
 class TestMessage:
     """Represents a test message for E2E testing."""
+
     text: str
     expected_contains: list[str]
     expected_tool: Optional[str] = None
@@ -35,11 +36,12 @@ class TestTelegramE2EFlow:
     def bridge_running(self) -> bool:
         """Check if the bridge service is running."""
         import subprocess
+
         result = subprocess.run(
             ["./scripts/valor-service.sh", "status"],
             capture_output=True,
             text=True,
-            cwd=Path(__file__).parent.parent.parent
+            cwd=Path(__file__).parent.parent.parent,
         )
         return "RUNNING" in result.stdout
 
@@ -77,7 +79,7 @@ class TestTelegramE2EFlow:
             text="Search for latest Python 3.12 features",
             expected_contains=["Python", "3.12"],
             expected_tool="search",
-            timeout_seconds=30
+            timeout_seconds=30,
         )
 
         # Verify message structure
@@ -121,16 +123,20 @@ class TestBridgeIntegration:
     def bridge_module(self):
         """Import the bridge module."""
         import sys
+
         sys.path.insert(0, str(Path(__file__).parent.parent.parent / "bridge"))
         try:
             from telegram_bridge import TelegramBridge
+
             return TelegramBridge
         except ImportError:
             pytest.skip("Bridge module not available")
 
     def test_bridge_module_exists(self):
         """Verify bridge module can be imported."""
-        bridge_path = Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py"
+        bridge_path = (
+            Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py"
+        )
         assert bridge_path.exists(), "Bridge module should exist"
 
     @pytest.mark.asyncio
@@ -148,10 +154,8 @@ class TestClawdbotIntegration:
     def clawdbot_available(self) -> bool:
         """Check if clawdbot is available."""
         import subprocess
-        result = subprocess.run(
-            ["which", "clawdbot"],
-            capture_output=True
-        )
+
+        result = subprocess.run(["which", "clawdbot"], capture_output=True)
         return result.returncode == 0
 
     def test_clawdbot_installed(self, clawdbot_available):
@@ -165,10 +169,9 @@ class TestClawdbotIntegration:
             pytest.skip("Clawdbot not installed")
 
         import subprocess
+
         result = subprocess.run(
-            ["clawdbot", "--version"],
-            capture_output=True,
-            text=True
+            ["clawdbot", "--version"], capture_output=True, text=True
         )
         assert result.returncode == 0
         # Version format: "2026.1.16-2" or "v1.2.3" or "clawdbot 1.2.3"
@@ -205,19 +208,15 @@ class TestMessageProcessing:
             {
                 "type": "text",
                 "content": "Hello, how are you?",
-                "expected_response_type": "text"
+                "expected_response_type": "text",
             },
-            {
-                "type": "command",
-                "content": "/status",
-                "expected_response_type": "text"
-            },
+            {"type": "command", "content": "/status", "expected_response_type": "text"},
             {
                 "type": "question",
                 "content": "What's the weather in Tokyo?",
                 "expected_response_type": "text",
-                "expected_tool": "search"
-            }
+                "expected_tool": "search",
+            },
         ]
 
     def test_message_classification(self, sample_messages):

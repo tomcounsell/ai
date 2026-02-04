@@ -12,12 +12,12 @@ import pytest
 
 
 # Re-implement the extraction logic for testing (matches bridge implementation)
-FILE_MARKER_PATTERN = re.compile(r'<<FILE:([^>]+)>>')
+FILE_MARKER_PATTERN = re.compile(r"<<FILE:([^>]+)>>")
 ABSOLUTE_PATH_PATTERN = re.compile(
     r'(/(?:Users|home|tmp|var)[^\s\'"<>|]*\.(?:png|jpg|jpeg|gif|webp|bmp|pdf|mp3|mp4|wav|ogg))',
-    re.IGNORECASE
+    re.IGNORECASE,
 )
-IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'}
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
 def extract_files_from_response(response: str) -> tuple[str, list[Path]]:
@@ -46,18 +46,20 @@ def extract_files_from_response(response: str) -> tuple[str, list[Path]]:
                 seen_paths.add(resolved)
 
     # Clean response: remove file markers
-    cleaned = FILE_MARKER_PATTERN.sub('', response)
+    cleaned = FILE_MARKER_PATTERN.sub("", response)
 
     # Clean up lines that are just file paths
-    lines = cleaned.split('\n')
+    lines = cleaned.split("\n")
     cleaned_lines = []
     for line in lines:
         stripped = line.strip()
-        if stripped and any(stripped == str(f) or stripped.endswith(str(f)) for f in files_to_send):
+        if stripped and any(
+            stripped == str(f) or stripped.endswith(str(f)) for f in files_to_send
+        ):
             continue
         cleaned_lines.append(line)
 
-    cleaned = '\n'.join(cleaned_lines).strip()
+    cleaned = "\n".join(cleaned_lines).strip()
     return cleaned, files_to_send
 
 
@@ -178,7 +180,7 @@ class TestFallbackPathDetection:
 
     def test_detects_multiple_extensions(self):
         """Various media extensions should be detected."""
-        extensions = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'pdf', 'mp3', 'mp4']
+        extensions = ["png", "jpg", "jpeg", "gif", "webp", "pdf", "mp3", "mp4"]
         for ext in extensions:
             response = f"/tmp/file.{ext}"
             matches = ABSOLUTE_PATH_PATTERN.findall(response)
@@ -197,7 +199,7 @@ class TestFallbackPathDetection:
         matches = ABSOLUTE_PATH_PATTERN.findall(response)
 
         # Should not match URL paths
-        assert all(not m.startswith('http') for m in matches)
+        assert all(not m.startswith("http") for m in matches)
 
 
 # ============================================================================

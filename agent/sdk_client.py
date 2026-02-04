@@ -86,7 +86,9 @@ def _log_system_resources(context: str = "") -> dict:
 
         # Check for other heavy processes
         heavy_processes = []
-        for proc in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent"]):
+        for proc in psutil.process_iter(
+            ["pid", "name", "cpu_percent", "memory_percent"]
+        ):
             try:
                 if proc.info["cpu_percent"] and proc.info["cpu_percent"] > 20:
                     heavy_processes.append(
@@ -122,7 +124,9 @@ def _log_system_resources(context: str = "") -> dict:
         if memory.percent > 85:
             logger.warning(f"{prefix}High memory usage: {memory.percent:.1f}%")
         if memory.available < 1 * (1024**3):  # Less than 1GB free
-            logger.warning(f"{prefix}Low available memory: {memory.available / (1024**3):.2f}GB")
+            logger.warning(
+                f"{prefix}Low available memory: {memory.available / (1024**3):.2f}GB"
+            )
 
         return metrics
 
@@ -140,7 +144,9 @@ def load_completion_criteria() -> str:
     import re
 
     content = claude_md.read_text()
-    match = re.search(r"## Work Completion Criteria\n\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
+    match = re.search(
+        r"## Work Completion Criteria\n\n(.*?)(?=\n## |\Z)", content, re.DOTALL
+    )
     return match.group(0) if match else ""
 
 
@@ -186,7 +192,9 @@ class ValorAgent:
             system_prompt: Custom system prompt. Defaults to SOUL.md contents.
             permission_mode: Permission mode for tool use. Default: "bypassPermissions".
         """
-        self.working_dir = Path(working_dir) if working_dir else Path(__file__).parent.parent
+        self.working_dir = (
+            Path(working_dir) if working_dir else Path(__file__).parent.parent
+        )
         self.system_prompt = system_prompt or load_system_prompt()
         self.permission_mode = permission_mode
 
@@ -207,7 +215,9 @@ class ValorAgent:
                 env["ANTHROPIC_API_KEY"] = api_key
                 logger.info("Auth: using API key billing (USE_API_BILLING=true)")
             else:
-                logger.warning("Auth: USE_API_BILLING=true but no ANTHROPIC_API_KEY set")
+                logger.warning(
+                    "Auth: USE_API_BILLING=true but no ANTHROPIC_API_KEY set"
+                )
         else:
             # Strip API key so CLI falls back to subscription/OAuth
             env["ANTHROPIC_API_KEY"] = ""
@@ -228,7 +238,9 @@ class ValorAgent:
             },
         )
 
-    async def query(self, message: str, session_id: str | None = None, max_retries: int = 2) -> str:
+    async def query(
+        self, message: str, session_id: str | None = None, max_retries: int = 2
+    ) -> str:
         """
         Send a message and get a response. On error, feeds the error back
         to the agent so it can attempt a different approach.
@@ -257,7 +269,9 @@ class ValorAgent:
             async with ClaudeSDKClient(options) as client:
                 # Log successful initialization
                 init_elapsed = time.time() - init_start
-                logger.info(f"[SDK-init] SDK initialized successfully in {init_elapsed:.2f}s")
+                logger.info(
+                    f"[SDK-init] SDK initialized successfully in {init_elapsed:.2f}s"
+                )
                 _log_system_resources("SDK-init-post")
                 # Register client for steering access
                 if session_id:
@@ -340,7 +354,10 @@ class ValorAgent:
                     proc_attrs = ["pid", "name", "cmdline", "status", "create_time"]
                     for proc in psutil.process_iter(proc_attrs):
                         try:
-                            if proc.info["name"] and "claude" in proc.info["name"].lower():
+                            if (
+                                proc.info["name"]
+                                and "claude" in proc.info["name"].lower()
+                            ):
                                 age = time.time() - proc.info["create_time"]
                                 claude_procs.append(
                                     f"PID={proc.info['pid']} name={proc.info['name']} "
@@ -359,7 +376,9 @@ class ValorAgent:
 
                     if claude_procs:
                         procs_str = "\n  ".join(claude_procs)
-                        logger.error(f"[SDK-init] Found Claude processes:\n  {procs_str}")
+                        logger.error(
+                            f"[SDK-init] Found Claude processes:\n  {procs_str}"
+                        )
                     else:
                         logger.error(
                             "[SDK-init] No Claude processes found - CLI may have failed to start"
@@ -509,7 +528,9 @@ async def get_agent_response_sdk(
         response = await agent.query(enriched_message, session_id=session_id)
 
         elapsed = time.time() - start_time
-        logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
+        logger.info(
+            f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)"
+        )
 
         return response
 

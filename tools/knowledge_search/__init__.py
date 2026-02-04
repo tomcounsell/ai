@@ -36,7 +36,8 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
 
     # Create tables if needed
-    conn.execute("""
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS documents (
             id TEXT PRIMARY KEY,
             path TEXT,
@@ -45,8 +46,10 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
             file_type TEXT,
             indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    """)
-    conn.execute("""
+    """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS chunks (
             id TEXT PRIMARY KEY,
             document_id TEXT,
@@ -55,7 +58,8 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
             chunk_index INTEGER,
             FOREIGN KEY (document_id) REFERENCES documents(id)
         )
-    """)
+    """
+    )
     conn.commit()
 
     return conn
@@ -231,13 +235,15 @@ def search_knowledge(
         )
 
         for row in cursor:
-            results.append({
-                "document_id": row["id"],
-                "path": row["path"],
-                "snippet": _extract_snippet(row["content"], query),
-                "file_type": row["file_type"],
-                "score": 1.0,
-            })
+            results.append(
+                {
+                    "document_id": row["id"],
+                    "path": row["path"],
+                    "snippet": _extract_snippet(row["content"], query),
+                    "file_type": row["file_type"],
+                    "score": 1.0,
+                }
+            )
 
     else:  # semantic or hybrid
         query_embedding = _compute_embedding(query, api_key)
@@ -260,13 +266,15 @@ def search_knowledge(
             similarity = _cosine_similarity(query_embedding, chunk_embedding)
 
             if similarity >= similarity_threshold:
-                scored_results.append({
-                    "document_id": row["document_id"],
-                    "path": row["path"],
-                    "snippet": row["content"][:500],
-                    "file_type": row["file_type"],
-                    "score": similarity,
-                })
+                scored_results.append(
+                    {
+                        "document_id": row["document_id"],
+                        "path": row["path"],
+                        "snippet": row["content"][:500],
+                        "file_type": row["file_type"],
+                        "score": similarity,
+                    }
+                )
 
         # Sort by score and deduplicate by document
         scored_results.sort(key=lambda x: x["score"], reverse=True)
@@ -293,7 +301,7 @@ def _extract_snippet(content: str, query: str, context_chars: int = 200) -> str:
 
     pos = lower_content.find(lower_query)
     if pos == -1:
-        return content[:context_chars * 2]
+        return content[: context_chars * 2]
 
     start = max(0, pos - context_chars)
     end = min(len(content), pos + len(query) + context_chars)

@@ -16,6 +16,7 @@ class TestSearchInstallation:
     def test_import(self):
         """Tool can be imported."""
         from tools.search import search
+
         assert callable(search)
 
     def test_api_key_required(self):
@@ -35,8 +36,7 @@ class TestSearchInstallation:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("PERPLEXITY_API_KEY"),
-    reason="PERPLEXITY_API_KEY not set"
+    not os.environ.get("PERPLEXITY_API_KEY"), reason="PERPLEXITY_API_KEY not set"
 )
 class TestSearchCore:
     """Test core search functionality."""
@@ -51,20 +51,14 @@ class TestSearchCore:
 
     def test_citations_search(self):
         """Citations search includes sources."""
-        result = search(
-            "Python programming language history",
-            search_type="citations"
-        )
+        result = search("Python programming language history", search_type="citations")
 
         assert "error" not in result, f"Search failed: {result.get('error')}"
         assert "summary" in result
 
     def test_factual_search(self):
         """Factual search returns precise information."""
-        result = search(
-            "Python 3.12 release date",
-            search_type="factual"
-        )
+        result = search("Python 3.12 release date", search_type="factual")
 
         assert "error" not in result, f"Search failed: {result.get('error')}"
         assert "summary" in result
@@ -85,8 +79,7 @@ class TestSearchValidation:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("PERPLEXITY_API_KEY"),
-    reason="PERPLEXITY_API_KEY not set"
+    not os.environ.get("PERPLEXITY_API_KEY"), reason="PERPLEXITY_API_KEY not set"
 )
 class TestSearchWithContext:
     """Test context-enhanced search."""
@@ -96,7 +89,7 @@ class TestSearchWithContext:
         result = search_with_context(
             query="best practices",
             context="I'm working on a Python web application using FastAPI",
-            search_type="conversational"
+            search_type="conversational",
         )
 
         assert "error" not in result, f"Search failed: {result.get('error')}"

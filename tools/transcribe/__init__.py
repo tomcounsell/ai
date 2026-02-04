@@ -69,9 +69,7 @@ def transcribe(
     # Check file size
     file_size = audio_path.stat().st_size
     if file_size > MAX_FILE_SIZE:
-        return {
-            "error": f"File too large: {file_size / 1024 / 1024:.1f}MB. Max: 25MB"
-        }
+        return {"error": f"File too large: {file_size / 1024 / 1024:.1f}MB. Max: 25MB"}
 
     # If timestamps requested, use verbose_json
     if timestamps:

@@ -15,7 +15,9 @@ from tools.knowledge_search import (
 class TestIndexDocument:
     """Test document indexing."""
 
-    def test_index_markdown_document(self, temp_markdown_file, tmp_path, openrouter_api_key):
+    def test_index_markdown_document(
+        self, temp_markdown_file, tmp_path, openrouter_api_key
+    ):
         """Test indexing a markdown document."""
         db_path = tmp_path / "test.db"
         result = index_document(str(temp_markdown_file), db_path=db_path)
@@ -26,7 +28,9 @@ class TestIndexDocument:
 
     def test_index_nonexistent_file(self, tmp_path):
         """Test indexing a non-existent file."""
-        result = index_document("/nonexistent/path/file.txt", db_path=tmp_path / "test.db")
+        result = index_document(
+            "/nonexistent/path/file.txt", db_path=tmp_path / "test.db"
+        )
         assert "error" in result
         assert "not found" in result["error"].lower()
 
@@ -34,7 +38,9 @@ class TestIndexDocument:
         """Test indexing without API key."""
         original_key = os.environ.pop("OPENROUTER_API_KEY", None)
         try:
-            result = index_document(str(temp_markdown_file), db_path=tmp_path / "test.db")
+            result = index_document(
+                str(temp_markdown_file), db_path=tmp_path / "test.db"
+            )
             assert "error" in result
             assert "OPENROUTER_API_KEY" in result["error"]
         finally:
@@ -60,9 +66,7 @@ class TestSearchKnowledge:
 
         # Search
         result = search_knowledge(
-            "Installation",
-            search_type="keyword",
-            db_path=db_path
+            "Installation", search_type="keyword", db_path=db_path
         )
 
         assert "error" not in result
@@ -74,9 +78,7 @@ class TestSearchKnowledge:
         original_key = os.environ.pop("OPENROUTER_API_KEY", None)
         try:
             result = search_knowledge(
-                "test query",
-                search_type="semantic",
-                db_path=tmp_path / "test.db"
+                "test query", search_type="semantic", db_path=tmp_path / "test.db"
             )
             assert "error" in result
             assert "OPENROUTER_API_KEY" in result["error"]
@@ -94,10 +96,7 @@ class TestSearchKnowledge:
 
         # Search with limit
         result = search_knowledge(
-            "configuration",
-            search_type="keyword",
-            max_results=2,
-            db_path=db_path
+            "configuration", search_type="keyword", max_results=2, db_path=db_path
         )
 
         assert "error" not in result
@@ -115,7 +114,9 @@ class TestListIndexedDocuments:
         assert "documents" in result
         assert result["total"] == 0
 
-    def test_list_after_indexing(self, temp_markdown_file, tmp_path, openrouter_api_key):
+    def test_list_after_indexing(
+        self, temp_markdown_file, tmp_path, openrouter_api_key
+    ):
         """Test listing after indexing documents."""
         db_path = tmp_path / "test.db"
 
@@ -125,7 +126,9 @@ class TestListIndexedDocuments:
 
         assert "documents" in result
         assert result["total"] >= 1
-        assert any(str(temp_markdown_file) in doc["path"] for doc in result["documents"])
+        assert any(
+            str(temp_markdown_file) in doc["path"] for doc in result["documents"]
+        )
 
 
 class TestSearchParameters:
@@ -137,10 +140,7 @@ class TestSearchParameters:
 
         # Should not error even with extreme values
         result = search_knowledge(
-            "test",
-            search_type="keyword",
-            max_results=1000,
-            db_path=db_path
+            "test", search_type="keyword", max_results=1000, db_path=db_path
         )
         # Either error for empty db or successful search
         assert "error" not in result or "empty" not in result.get("error", "")
@@ -153,10 +153,7 @@ class TestSearchParameters:
             index_document(str(doc_file), db_path=db_path)
 
         result = search_knowledge(
-            "api",
-            search_type="keyword",
-            file_types=[".md"],
-            db_path=db_path
+            "api", search_type="keyword", file_types=[".md"], db_path=db_path
         )
 
         assert "error" not in result

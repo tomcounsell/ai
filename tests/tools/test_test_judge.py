@@ -12,19 +12,13 @@ class TestJudgeValidation:
 
     def test_empty_test_output_returns_error(self):
         """Test that empty test output returns error."""
-        result = judge_test_result(
-            test_output="",
-            expected_criteria=["test passes"]
-        )
+        result = judge_test_result(test_output="", expected_criteria=["test passes"])
         assert "error" in result
         assert "empty" in result["error"].lower()
 
     def test_empty_criteria_returns_error(self):
         """Test that empty criteria returns error."""
-        result = judge_test_result(
-            test_output="test output",
-            expected_criteria=[]
-        )
+        result = judge_test_result(test_output="test output", expected_criteria=[])
         assert "error" in result
         assert "criteria" in result["error"].lower()
 
@@ -33,10 +27,7 @@ class TestJudgeValidation:
         original_anthropic = os.environ.pop("ANTHROPIC_API_KEY", None)
         original_openrouter = os.environ.pop("OPENROUTER_API_KEY", None)
         try:
-            result = judge_test_result(
-                test_output="test",
-                expected_criteria=["passes"]
-            )
+            result = judge_test_result(test_output="test", expected_criteria=["passes"])
             assert "error" in result
             assert "API_KEY" in result["error"]
         finally:
@@ -56,7 +47,7 @@ class TestJudgeExecution:
             expected_criteria=[
                 "All tests pass",
                 "No failures reported",
-            ]
+            ],
         )
         assert "error" not in result
         assert result.get("pass_fail") is True
@@ -69,7 +60,7 @@ class TestJudgeExecution:
             expected_criteria=[
                 "Successfully connects to database",
                 "Returns valid data",
-            ]
+            ],
         )
         assert "error" not in result
         assert result.get("pass_fail") is False
@@ -81,7 +72,7 @@ class TestJudgeExecution:
             expected_criteria=[
                 "Response time is under 200ms",
             ],
-            context="This is a performance test for the API endpoint"
+            context="This is a performance test for the API endpoint",
         )
         assert "error" not in result
         assert result.get("pass_fail") is True
@@ -93,7 +84,7 @@ class TestJudgeExecution:
             expected_criteria=[
                 "User is created",
                 "ID is returned",
-            ]
+            ],
         )
         assert "error" not in result
         assert "criteria_results" in result
@@ -108,7 +99,7 @@ class TestJudgeStrictness:
         result = judge_test_result(
             test_output="Result: approximately 100 (actual: 99)",
             expected_criteria=["Result is 100"],
-            strictness="lenient"
+            strictness="lenient",
         )
         assert "error" not in result
         # Lenient should pass approximate matches
@@ -119,7 +110,7 @@ class TestJudgeStrictness:
         result = judge_test_result(
             test_output="Result: approximately 100 (actual: 99)",
             expected_criteria=["Result is exactly 100"],
-            strictness="strict"
+            strictness="strict",
         )
         assert "error" not in result
         # Strict should fail approximate matches
@@ -169,9 +160,7 @@ class TestQualityGate:
     def test_create_quality_gate(self):
         """Test creating a quality gate."""
         gate = create_quality_gate(
-            criteria=["Tests pass", "No errors"],
-            min_pass_rate=0.9,
-            min_confidence=0.8
+            criteria=["Tests pass", "No errors"], min_pass_rate=0.9, min_confidence=0.8
         )
 
         assert gate["criteria"] == ["Tests pass", "No errors"]
@@ -192,8 +181,7 @@ class TestJudgeOutputFormat:
     def test_judgment_has_required_fields(self, anthropic_api_key):
         """Test that judgment has all required fields."""
         result = judge_test_result(
-            test_output="Test passed",
-            expected_criteria=["Test passes"]
+            test_output="Test passed", expected_criteria=["Test passes"]
         )
 
         assert "error" not in result
@@ -205,8 +193,7 @@ class TestJudgeOutputFormat:
     def test_confidence_in_valid_range(self, anthropic_api_key):
         """Test that confidence is in valid range."""
         result = judge_test_result(
-            test_output="Test passed successfully",
-            expected_criteria=["Test passes"]
+            test_output="Test passed successfully", expected_criteria=["Test passes"]
         )
 
         if "error" not in result:
@@ -217,7 +204,7 @@ class TestJudgeOutputFormat:
         """Test that suggestions are returned."""
         result = judge_test_result(
             test_output="Partial success: 3 of 5 tests passed",
-            expected_criteria=["All tests pass"]
+            expected_criteria=["All tests pass"],
         )
 
         assert "error" not in result

@@ -18,6 +18,7 @@ class TestDocSummaryInstallation:
     def test_import(self):
         """Tool can be imported."""
         from tools.doc_summary import summarize
+
         assert callable(summarize)
 
     def test_api_key_required(self):
@@ -55,8 +56,9 @@ class TestDocSummaryValidation:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
-    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set"
+    not os.environ.get("ANTHROPIC_API_KEY")
+    and not os.environ.get("OPENROUTER_API_KEY"),
+    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestDocSummaryCore:
     """Test core summarization functionality."""
@@ -114,8 +116,9 @@ class TestDocSummaryCore:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
-    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set"
+    not os.environ.get("ANTHROPIC_API_KEY")
+    and not os.environ.get("OPENROUTER_API_KEY"),
+    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestDocSummaryFile:
     """Test file summarization."""
@@ -134,8 +137,9 @@ class TestDocSummaryFile:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
-    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set"
+    not os.environ.get("ANTHROPIC_API_KEY")
+    and not os.environ.get("OPENROUTER_API_KEY"),
+    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestExtractKeyPoints:
     """Test key point extraction."""

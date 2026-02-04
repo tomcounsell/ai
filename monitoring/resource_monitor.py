@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 try:
     import psutil
+
     PSUTIL_AVAILABLE = True
 except ImportError:
     PSUTIL_AVAILABLE = False
@@ -20,6 +21,7 @@ except ImportError:
 @dataclass
 class ResourceSnapshot:
     """Snapshot of system resources at a point in time."""
+
     timestamp: datetime
     memory_mb: float
     cpu_percent: float
@@ -54,6 +56,7 @@ class ResourceSnapshot:
 @dataclass
 class ResourceLimits:
     """Resource limit thresholds for monitoring."""
+
     max_memory_mb: float = 500.0
     max_memory_per_session_mb: float = 50.0
     max_cpu_percent: float = 80.0
@@ -88,7 +91,7 @@ class ResourceMonitor:
         snapshot = ResourceSnapshot.capture(self._active_sessions)
         self._history.append(snapshot)
         if len(self._history) > self._max_history:
-            self._history = self._history[-self._max_history:]
+            self._history = self._history[-self._max_history :]
         return snapshot
 
     def calculate_health_score(self) -> float:
@@ -125,63 +128,84 @@ class ResourceMonitor:
 
         # Memory checks
         if snapshot.memory_mb >= self.limits.emergency_memory_mb:
-            alerts.append(Alert(
-                level=AlertLevel.EMERGENCY,
-                message=f"Emergency memory usage: {snapshot.memory_mb:.1f}MB",
-                metric="memory_mb",
-                current_value=snapshot.memory_mb,
-                threshold=self.limits.emergency_memory_mb,
-                recommendations=["Restart system immediately", "Kill non-essential processes"]
-            ))
+            alerts.append(
+                Alert(
+                    level=AlertLevel.EMERGENCY,
+                    message=f"Emergency memory usage: {snapshot.memory_mb:.1f}MB",
+                    metric="memory_mb",
+                    current_value=snapshot.memory_mb,
+                    threshold=self.limits.emergency_memory_mb,
+                    recommendations=[
+                        "Restart system immediately",
+                        "Kill non-essential processes",
+                    ],
+                )
+            )
         elif snapshot.memory_mb >= self.limits.max_memory_mb:
-            alerts.append(Alert(
-                level=AlertLevel.CRITICAL,
-                message=f"Critical memory usage: {snapshot.memory_mb:.1f}MB",
-                metric="memory_mb",
-                current_value=snapshot.memory_mb,
-                threshold=self.limits.max_memory_mb,
-                recommendations=["Trigger cleanup", "Close stale sessions"]
-            ))
+            alerts.append(
+                Alert(
+                    level=AlertLevel.CRITICAL,
+                    message=f"Critical memory usage: {snapshot.memory_mb:.1f}MB",
+                    metric="memory_mb",
+                    current_value=snapshot.memory_mb,
+                    threshold=self.limits.max_memory_mb,
+                    recommendations=["Trigger cleanup", "Close stale sessions"],
+                )
+            )
         elif snapshot.memory_mb >= self.limits.warning_memory_mb:
-            alerts.append(Alert(
-                level=AlertLevel.WARNING,
-                message=f"High memory usage: {snapshot.memory_mb:.1f}MB",
-                metric="memory_mb",
-                current_value=snapshot.memory_mb,
-                threshold=self.limits.warning_memory_mb,
-                recommendations=["Monitor closely", "Prepare for cleanup"]
-            ))
+            alerts.append(
+                Alert(
+                    level=AlertLevel.WARNING,
+                    message=f"High memory usage: {snapshot.memory_mb:.1f}MB",
+                    metric="memory_mb",
+                    current_value=snapshot.memory_mb,
+                    threshold=self.limits.warning_memory_mb,
+                    recommendations=["Monitor closely", "Prepare for cleanup"],
+                )
+            )
 
         # CPU checks
         if snapshot.cpu_percent >= self.limits.max_cpu_percent:
-            alerts.append(Alert(
-                level=AlertLevel.CRITICAL,
-                message=f"Critical CPU usage: {snapshot.cpu_percent:.1f}%",
-                metric="cpu_percent",
-                current_value=snapshot.cpu_percent,
-                threshold=self.limits.max_cpu_percent,
-                recommendations=["Reduce parallel operations", "Check for runaway processes"]
-            ))
+            alerts.append(
+                Alert(
+                    level=AlertLevel.CRITICAL,
+                    message=f"Critical CPU usage: {snapshot.cpu_percent:.1f}%",
+                    metric="cpu_percent",
+                    current_value=snapshot.cpu_percent,
+                    threshold=self.limits.max_cpu_percent,
+                    recommendations=[
+                        "Reduce parallel operations",
+                        "Check for runaway processes",
+                    ],
+                )
+            )
         elif snapshot.cpu_percent >= self.limits.warning_cpu_percent:
-            alerts.append(Alert(
-                level=AlertLevel.WARNING,
-                message=f"High CPU usage: {snapshot.cpu_percent:.1f}%",
-                metric="cpu_percent",
-                current_value=snapshot.cpu_percent,
-                threshold=self.limits.warning_cpu_percent,
-                recommendations=["Monitor for sustained high usage"]
-            ))
+            alerts.append(
+                Alert(
+                    level=AlertLevel.WARNING,
+                    message=f"High CPU usage: {snapshot.cpu_percent:.1f}%",
+                    metric="cpu_percent",
+                    current_value=snapshot.cpu_percent,
+                    threshold=self.limits.warning_cpu_percent,
+                    recommendations=["Monitor for sustained high usage"],
+                )
+            )
 
         # Disk checks
         if snapshot.disk_percent >= self.limits.max_disk_percent:
-            alerts.append(Alert(
-                level=AlertLevel.CRITICAL,
-                message=f"Critical disk usage: {snapshot.disk_percent:.1f}%",
-                metric="disk_percent",
-                current_value=snapshot.disk_percent,
-                threshold=self.limits.max_disk_percent,
-                recommendations=["Clean up logs and temp files", "Archive old data"]
-            ))
+            alerts.append(
+                Alert(
+                    level=AlertLevel.CRITICAL,
+                    message=f"Critical disk usage: {snapshot.disk_percent:.1f}%",
+                    metric="disk_percent",
+                    current_value=snapshot.disk_percent,
+                    threshold=self.limits.max_disk_percent,
+                    recommendations=[
+                        "Clean up logs and temp files",
+                        "Archive old data",
+                    ],
+                )
+            )
 
         return alerts
 
@@ -195,17 +219,23 @@ class ResourceMonitor:
         snapshot = self.get_current_snapshot()
 
         if snapshot.memory_mb > self.limits.warning_memory_mb:
-            recommendations.append(f"Memory at {snapshot.memory_mb:.1f}MB - consider cleanup")
+            recommendations.append(
+                f"Memory at {snapshot.memory_mb:.1f}MB - consider cleanup"
+            )
 
         if snapshot.cpu_percent > self.limits.warning_cpu_percent:
             recommendations.append(f"CPU at {snapshot.cpu_percent:.1f}% - reduce load")
 
         if self._active_sessions > self.limits.max_sessions * 0.8:
-            recommendations.append(f"Session load high ({self._active_sessions}) - cleanup stale sessions")
+            recommendations.append(
+                f"Session load high ({self._active_sessions}) - cleanup stale sessions"
+            )
 
         health_score = self.calculate_health_score()
         if health_score < 50:
-            recommendations.append("System health critical - immediate attention needed")
+            recommendations.append(
+                "System health critical - immediate attention needed"
+            )
         elif health_score < 70:
             recommendations.append("System health degraded - monitor closely")
 
@@ -219,9 +249,9 @@ class ResourceMonitor:
         """
         snapshot = self.get_current_snapshot()
         return (
-            snapshot.memory_mb > self.limits.warning_memory_mb or
-            self._active_sessions > self.limits.max_sessions * 0.8 or
-            self.calculate_health_score() < 70
+            snapshot.memory_mb > self.limits.warning_memory_mb
+            or self._active_sessions > self.limits.max_sessions * 0.8
+            or self.calculate_health_score() < 70
         )
 
     def should_restart(self) -> bool:

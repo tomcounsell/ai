@@ -54,7 +54,9 @@ def analyze_recent(limit: int = 20):
             for evt in req_events:
                 evt_data = evt.data or {}
                 if evt.event_type == "agent_request":
-                    print(f"  -> Agent called (session: {evt_data.get('session_id', '?')[:20]}...)")
+                    print(
+                        f"  -> Agent called (session: {evt_data.get('session_id', '?')[:20]}...)"
+                    )
                 elif evt.event_type == "agent_response":
                     elapsed = evt_data.get("elapsed_seconds", 0)
                     length = evt_data.get("response_length", 0)
@@ -64,9 +66,13 @@ def analyze_recent(limit: int = 20):
                     print(f"  x TIMEOUT after {elapsed:.1f}s")
                 elif evt.event_type == "agent_error":
                     code = evt_data.get("exit_code", "?")
-                    print(f"  x ERROR (exit {code}): {evt_data.get('stderr_preview', '')[:50]}")
+                    print(
+                        f"  x ERROR (exit {code}): {evt_data.get('stderr_preview', '')[:50]}"
+                    )
                 elif evt.event_type == "reply_sent":
-                    print(f"  + Reply sent ({evt_data.get('response_length', 0)} chars)")
+                    print(
+                        f"  + Reply sent ({evt_data.get('response_length', 0)} chars)"
+                    )
             print()
 
         elif first.event_type == "agent_request":

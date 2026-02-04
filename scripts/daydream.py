@@ -43,6 +43,7 @@ STATE_FILE = DAYDREAM_DIR / "state.json"
 @dataclass
 class DaydreamState:
     """Persisted state for resumability."""
+
     current_step: int = 1
     step_started_at: str | None = None
     step_progress: dict[str, Any] = field(default_factory=dict)
@@ -101,7 +102,9 @@ class DaydreamRunner:
 
         for step_num, step_name, step_func in self.steps:
             if step_num in self.state.completed_steps:
-                logger.info(f"Step {step_num} ({step_name}) already completed, skipping")
+                logger.info(
+                    f"Step {step_num} ({step_name}) already completed, skipping"
+                )
                 continue
 
             if step_num < self.state.current_step:
@@ -137,7 +140,9 @@ class DaydreamRunner:
                 # Count files
                 file_count = len(list(cache_dir.glob("*")))
                 if file_count > 0:
-                    findings.append(f"Found {file_count} cached files in {cache_dir.relative_to(PROJECT_ROOT)}")
+                    findings.append(
+                        f"Found {file_count} cached files in {cache_dir.relative_to(PROJECT_ROOT)}"
+                    )
 
         # Clean .pyc files
         pyc_files = list(PROJECT_ROOT.rglob("*.pyc"))
@@ -150,27 +155,35 @@ class DaydreamRunner:
                 ["grep", "-r", "TODO:", "--include=*.py", str(PROJECT_ROOT)],
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
             )
-            todo_count = len(result.stdout.strip().split("\n")) if result.stdout.strip() else 0
+            todo_count = (
+                len(result.stdout.strip().split("\n")) if result.stdout.strip() else 0
+            )
             if todo_count > 0:
                 findings.append(f"Found {todo_count} TODO comments to review")
         except Exception:
             pass
 
         # Check for deprecated imports
-        deprecated_patterns = ["from typing import Optional", "from typing import List", "from typing import Dict"]
+        deprecated_patterns = [
+            "from typing import Optional",
+            "from typing import List",
+            "from typing import Dict",
+        ]
         for pattern in deprecated_patterns:
             try:
                 result = subprocess.run(
                     ["grep", "-r", pattern, "--include=*.py", str(PROJECT_ROOT)],
                     capture_output=True,
                     text=True,
-                    timeout=30
+                    timeout=30,
                 )
                 if result.stdout.strip():
                     count = len(result.stdout.strip().split("\n"))
-                    findings.append(f"Found {count} instances of deprecated typing import: {pattern}")
+                    findings.append(
+                        f"Found {count} instances of deprecated typing import: {pattern}"
+                    )
             except Exception:
                 pass
 
@@ -201,19 +214,27 @@ class DaydreamRunner:
                 # Check file size
                 size_mb = log_file.stat().st_size / (1024 * 1024)
                 if size_mb > 10:
-                    findings.append(f"Log file {log_file.name} is {size_mb:.1f}MB - consider rotation")
+                    findings.append(
+                        f"Log file {log_file.name} is {size_mb:.1f}MB - consider rotation"
+                    )
 
                 # Look for errors in recent entries
                 with open(log_file) as f:
                     lines = f.readlines()[-1000:]  # Last 1000 lines
 
-                error_count = sum(1 for line in lines if "ERROR" in line or "CRITICAL" in line)
+                error_count = sum(
+                    1 for line in lines if "ERROR" in line or "CRITICAL" in line
+                )
                 warning_count = sum(1 for line in lines if "WARNING" in line)
 
                 if error_count > 0:
-                    findings.append(f"{log_file.name}: {error_count} errors in recent logs")
+                    findings.append(
+                        f"{log_file.name}: {error_count} errors in recent logs"
+                    )
                 if warning_count > 10:
-                    findings.append(f"{log_file.name}: {warning_count} warnings in recent logs")
+                    findings.append(
+                        f"{log_file.name}: {warning_count} warnings in recent logs"
+                    )
 
             except Exception as e:
                 findings.append(f"Could not analyze {log_file.name}: {str(e)}")
@@ -233,10 +254,17 @@ class DaydreamRunner:
         # Try to call clawdbot sentry skill
         try:
             result = subprocess.run(
-                ["clawdbot", "skill", "sentry", "list_issues", "--status=unresolved", "--limit=10"],
+                [
+                    "clawdbot",
+                    "skill",
+                    "sentry",
+                    "list_issues",
+                    "--status=unresolved",
+                    "--limit=10",
+                ],
                 capture_output=True,
                 text=True,
-                timeout=60
+                timeout=60,
             )
             if result.returncode == 0 and result.stdout.strip():
                 findings.append(f"Sentry issues found: {result.stdout.strip()[:500]}")
@@ -263,10 +291,17 @@ class DaydreamRunner:
         # Try to call clawdbot linear skill
         try:
             result = subprocess.run(
-                ["clawdbot", "skill", "linear", "list_issues", "--status=backlog", "--limit=20"],
+                [
+                    "clawdbot",
+                    "skill",
+                    "linear",
+                    "list_issues",
+                    "--status=backlog",
+                    "--limit=20",
+                ],
                 capture_output=True,
                 text=True,
-                timeout=60
+                timeout=60,
             )
             if result.returncode == 0 and result.stdout.strip():
                 findings.append(f"Linear backlog items: {result.stdout.strip()[:500]}")
@@ -276,14 +311,18 @@ class DaydreamRunner:
             findings.append(f"Linear check failed: {str(e)}")
 
         # Check local todo files
-        todo_files = list(PROJECT_ROOT.glob("**/TODO.md")) + list(PROJECT_ROOT.glob("**/todo.md"))
+        todo_files = list(PROJECT_ROOT.glob("**/TODO.md")) + list(
+            PROJECT_ROOT.glob("**/todo.md")
+        )
         for todo_file in todo_files:
             try:
                 content = todo_file.read_text()
                 unchecked = content.count("[ ]")
                 checked = content.count("[x]")
                 if unchecked > 0:
-                    findings.append(f"{todo_file.relative_to(PROJECT_ROOT)}: {unchecked} unchecked items")
+                    findings.append(
+                        f"{todo_file.relative_to(PROJECT_ROOT)}: {unchecked} unchecked items"
+                    )
             except Exception:
                 pass
 
@@ -308,7 +347,9 @@ class DaydreamRunner:
                     mtime = datetime.fromtimestamp(doc_file.stat().st_mtime)
                     age_days = (datetime.now() - mtime).days
                     if age_days > 30:
-                        findings.append(f"{doc_file.relative_to(PROJECT_ROOT)} hasn't been updated in {age_days} days")
+                        findings.append(
+                            f"{doc_file.relative_to(PROJECT_ROOT)} hasn't been updated in {age_days} days"
+                        )
                 except Exception:
                     pass
 
@@ -356,7 +397,9 @@ class DaydreamRunner:
         # Add progress details
         report_lines.append("## Step Progress")
         for key, value in self.state.step_progress.items():
-            report_lines.append(f"- **{key.replace('_', ' ').title()}**: {json.dumps(value)}")
+            report_lines.append(
+                f"- **{key.replace('_', ' ').title()}**: {json.dumps(value)}"
+            )
 
         report_lines.append("")
         report_lines.append("---")

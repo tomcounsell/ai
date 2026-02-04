@@ -18,6 +18,7 @@ class TestImageTaggingInstallation:
     def test_import(self):
         """Tool can be imported."""
         from tools.image_tagging import tag_image
+
         assert callable(tag_image)
 
     def test_api_key_required(self):
@@ -45,8 +46,7 @@ class TestImageTaggingValidation:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY"),
-    reason="OPENROUTER_API_KEY not set"
+    not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set"
 )
 class TestImageTaggingCore:
     """Test core tagging functionality."""
@@ -75,10 +75,7 @@ class TestImageTaggingCore:
 
     def test_custom_categories(self, test_image):
         """Custom categories work."""
-        result = tag_image(
-            test_image,
-            tag_categories=["objects", "colors"]
-        )
+        result = tag_image(test_image, tag_categories=["objects", "colors"])
 
         assert "error" not in result, f"Tagging failed: {result.get('error')}"
 
@@ -90,8 +87,7 @@ class TestImageTaggingCore:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY"),
-    reason="OPENROUTER_API_KEY not set"
+    not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set"
 )
 class TestBatchTagging:
     """Test batch tagging functionality."""

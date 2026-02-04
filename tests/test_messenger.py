@@ -112,6 +112,7 @@ class TestBossMessenger:
     @pytest.mark.asyncio
     async def test_has_communicated(self):
         """Test the has_communicated check."""
+
         async def mock_send(msg: str):
             pass
 
@@ -130,6 +131,7 @@ class TestBossMessenger:
     @pytest.mark.asyncio
     async def test_callback_error_handled(self):
         """Test that callback errors are handled gracefully."""
+
         async def failing_send(msg: str):
             raise Exception("Network error")
 
@@ -286,6 +288,7 @@ class TestBackgroundTask:
     @pytest.mark.asyncio
     async def test_is_running_property(self):
         """Test the is_running property."""
+
         async def mock_send(msg: str):
             pass
 

@@ -20,6 +20,7 @@ class TestCodeExecutionInstallation:
     def test_import(self):
         """Tool can be imported."""
         from tools.code_execution import execute_code
+
         assert callable(execute_code)
 
 
@@ -56,8 +57,7 @@ class TestPythonExecution:
     def test_with_input(self):
         """Code with input works."""
         result = execute_code(
-            "name = input(); print(f'Hello, {name}!')",
-            input_data="Claude"
+            "name = input(); print(f'Hello, {name}!')", input_data="Claude"
         )
 
         assert "error" not in result, f"Execution failed: {result.get('error')}"
@@ -96,10 +96,7 @@ class TestPythonExecution:
 
     def test_timeout(self):
         """Long-running code times out."""
-        result = execute_code(
-            "import time; time.sleep(10)",
-            timeout_seconds=1
-        )
+        result = execute_code("import time; time.sleep(10)", timeout_seconds=1)
 
         assert "error" in result
         assert "timed out" in result["error"].lower()

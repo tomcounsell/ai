@@ -31,7 +31,7 @@ PARAM_TEMPLATES = {
         "zero": [0, 0.0, -0],
         "small": [1, -1, 0.1, -0.1],
         "large": [10**6, 10**9, 10**15],
-        "negative": [-1, -100, -10**6],
+        "negative": [-1, -100, -(10**6)],
         "float": [0.5, 3.14159, 2.71828],
         "edge": [float("inf"), float("-inf")],
     },
@@ -72,23 +72,43 @@ PARAM_TEMPLATES = {
 TEST_TYPES = {
     "api": {
         "categories": ["input_validation", "edge_cases", "error_handling"],
-        "behaviors": ["returns correct response", "handles errors gracefully", "validates input"],
+        "behaviors": [
+            "returns correct response",
+            "handles errors gracefully",
+            "validates input",
+        ],
     },
     "ui": {
         "categories": ["user_input", "display", "interaction"],
-        "behaviors": ["renders correctly", "responds to user action", "shows appropriate feedback"],
+        "behaviors": [
+            "renders correctly",
+            "responds to user action",
+            "shows appropriate feedback",
+        ],
     },
     "performance": {
         "categories": ["load", "stress", "endurance"],
-        "behaviors": ["completes within threshold", "maintains stability", "scales appropriately"],
+        "behaviors": [
+            "completes within threshold",
+            "maintains stability",
+            "scales appropriately",
+        ],
     },
     "security": {
         "categories": ["injection", "authentication", "authorization"],
-        "behaviors": ["rejects malicious input", "enforces access control", "protects sensitive data"],
+        "behaviors": [
+            "rejects malicious input",
+            "enforces access control",
+            "protects sensitive data",
+        ],
     },
     "integration": {
         "categories": ["data_flow", "service_communication", "error_propagation"],
-        "behaviors": ["maintains data integrity", "handles service failures", "propagates errors correctly"],
+        "behaviors": [
+            "maintains data integrity",
+            "handles service failures",
+            "propagates errors correctly",
+        ],
     },
 }
 
@@ -158,16 +178,22 @@ def generate_params(
                 values = template.get(subset, [])
 
                 # Sample values up to num_variations
-                sampled = values[:num_variations] if len(values) <= num_variations else random.sample(values, num_variations)
+                sampled = (
+                    values[:num_variations]
+                    if len(values) <= num_variations
+                    else random.sample(values, num_variations)
+                )
 
                 for value in sampled:
-                    test_params.append({
-                        "category": category,
-                        "param_type": param_type,
-                        "subset": subset,
-                        "value": value,
-                        "complexity": complexity_level,
-                    })
+                    test_params.append(
+                        {
+                            "category": category,
+                            "param_type": param_type,
+                            "subset": subset,
+                            "value": value,
+                            "complexity": complexity_level,
+                        }
+                    )
 
     # Generate evaluation criteria
     evaluation_criteria = []
@@ -189,7 +215,7 @@ def generate_params(
         "test_type": test_type,
         "param_categories": param_categories,
         "complexity_level": complexity_level,
-        "test_params": test_params[:num_variations * len(param_categories) * 5],
+        "test_params": test_params[: num_variations * len(param_categories) * 5],
         "evaluation_criteria": evaluation_criteria,
         "expected_behaviors": expected_behaviors,
         "total_params": len(test_params),
@@ -220,11 +246,13 @@ def generate_edge_cases(
     edge_cases = []
     for subset, values in template.items():
         for value in values:
-            edge_cases.append({
-                "subset": subset,
-                "value": value,
-                "description": f"{param_type} {subset} case",
-            })
+            edge_cases.append(
+                {
+                    "subset": subset,
+                    "value": value,
+                    "description": f"{param_type} {subset} case",
+                }
+            )
 
     return {
         "param_type": param_type,
@@ -237,8 +265,7 @@ def get_param_types() -> dict:
     """Get available parameter types and their subsets."""
     return {
         "param_types": {
-            name: list(template.keys())
-            for name, template in PARAM_TEMPLATES.items()
+            name: list(template.keys()) for name, template in PARAM_TEMPLATES.items()
         },
         "test_types": list(TEST_TYPES.keys()),
     }

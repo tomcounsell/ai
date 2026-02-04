@@ -13,6 +13,7 @@ from typing import Any
 
 class HealthStatus(Enum):
     """Health check status."""
+
     HEALTHY = "healthy"
     DEGRADED = "degraded"
     UNHEALTHY = "unhealthy"
@@ -22,6 +23,7 @@ class HealthStatus(Enum):
 @dataclass
 class HealthCheckResult:
     """Result of a health check."""
+
     component: str
     status: HealthStatus
     message: str
@@ -42,6 +44,7 @@ class HealthCheckResult:
 @dataclass
 class OverallHealth:
     """Overall system health summary."""
+
     status: HealthStatus
     score: float
     checks: list[HealthCheckResult]
@@ -84,17 +87,18 @@ class HealthChecker:
                     component="database",
                     status=HealthStatus.HEALTHY,
                     message="Session files present",
-                    details={"session_count": len(session_files)}
+                    details={"session_count": len(session_files)},
                 )
             return HealthCheckResult(
                 component="database",
                 status=HealthStatus.DEGRADED,
                 message="No database or session files found",
-                details={"path": str(db_path)}
+                details={"path": str(db_path)},
             )
 
         try:
             import sqlite3
+
             conn = sqlite3.connect(str(db_path))
             cursor = conn.cursor()
             cursor.execute("SELECT 1")
@@ -103,14 +107,17 @@ class HealthChecker:
                 component="database",
                 status=HealthStatus.HEALTHY,
                 message="Database connected successfully",
-                details={"path": str(db_path), "size_mb": db_path.stat().st_size / (1024 * 1024)}
+                details={
+                    "path": str(db_path),
+                    "size_mb": db_path.stat().st_size / (1024 * 1024),
+                },
             )
         except Exception as e:
             return HealthCheckResult(
                 component="database",
                 status=HealthStatus.UNHEALTHY,
                 message=f"Database error: {str(e)}",
-                details={"error": str(e)}
+                details={"error": str(e)},
             )
 
     def check_telegram_connection(self) -> HealthCheckResult:
@@ -127,36 +134,35 @@ class HealthChecker:
                 component="telegram",
                 status=HealthStatus.DEGRADED,
                 message="No Telegram session file found",
-                details={"path": str(session_file)}
+                details={"path": str(session_file)},
             )
 
         # Check if bridge is running by looking for PID file or process
         try:
             import subprocess
+
             result = subprocess.run(
-                ["pgrep", "-f", "telegram_bridge"],
-                capture_output=True,
-                text=True
+                ["pgrep", "-f", "telegram_bridge"], capture_output=True, text=True
             )
             if result.returncode == 0:
                 return HealthCheckResult(
                     component="telegram",
                     status=HealthStatus.HEALTHY,
                     message="Telegram bridge running",
-                    details={"pids": result.stdout.strip().split("\n")}
+                    details={"pids": result.stdout.strip().split("\n")},
                 )
             return HealthCheckResult(
                 component="telegram",
                 status=HealthStatus.DEGRADED,
                 message="Telegram bridge not running",
-                details={"session_exists": True}
+                details={"session_exists": True},
             )
         except Exception as e:
             return HealthCheckResult(
                 component="telegram",
                 status=HealthStatus.UNKNOWN,
                 message=f"Could not check Telegram status: {str(e)}",
-                details={"error": str(e)}
+                details={"error": str(e)},
             )
 
     def check_api_keys(self) -> dict[str, HealthCheckResult]:
@@ -182,14 +188,14 @@ class HealthChecker:
                     component=f"api_key_{name}",
                     status=HealthStatus.HEALTHY,
                     message=f"{name} API key configured",
-                    details={"env_var": env_var, "length": len(value)}
+                    details={"env_var": env_var, "length": len(value)},
                 )
             else:
                 results[name] = HealthCheckResult(
                     component=f"api_key_{name}",
                     status=HealthStatus.DEGRADED,
                     message=f"{name} API key not set",
-                    details={"env_var": env_var}
+                    details={"env_var": env_var},
                 )
 
         return results
@@ -203,7 +209,7 @@ class HealthChecker:
         try:
             total, used, free = shutil.disk_usage("/")
             percent_used = (used / total) * 100
-            free_gb = free / (1024 ** 3)
+            free_gb = free / (1024**3)
 
             if percent_used > 95:
                 status = HealthStatus.UNHEALTHY
@@ -220,18 +226,18 @@ class HealthChecker:
                 status=status,
                 message=message,
                 details={
-                    "total_gb": total / (1024 ** 3),
-                    "used_gb": used / (1024 ** 3),
+                    "total_gb": total / (1024**3),
+                    "used_gb": used / (1024**3),
                     "free_gb": free_gb,
                     "percent_used": percent_used,
-                }
+                },
             )
         except Exception as e:
             return HealthCheckResult(
                 component="disk_space",
                 status=HealthStatus.UNKNOWN,
                 message=f"Could not check disk space: {str(e)}",
-                details={"error": str(e)}
+                details={"error": str(e)},
             )
 
     def check_clawdbot(self) -> HealthCheckResult:
@@ -242,17 +248,16 @@ class HealthChecker:
         """
         try:
             import subprocess
+
             result = subprocess.run(
-                ["which", "clawdbot"],
-                capture_output=True,
-                text=True
+                ["which", "clawdbot"], capture_output=True, text=True
             )
             if result.returncode == 0:
                 return HealthCheckResult(
                     component="clawdbot",
                     status=HealthStatus.HEALTHY,
                     message="Clawdbot installed",
-                    details={"path": result.stdout.strip()}
+                    details={"path": result.stdout.strip()},
                 )
             return HealthCheckResult(
                 component="clawdbot",
@@ -264,7 +269,7 @@ class HealthChecker:
                 component="clawdbot",
                 status=HealthStatus.UNKNOWN,
                 message=f"Could not check clawdbot: {str(e)}",
-                details={"error": str(e)}
+                details={"error": str(e)},
             )
 
     def get_overall_health(self) -> OverallHealth:

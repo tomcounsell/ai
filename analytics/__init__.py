@@ -28,7 +28,8 @@ class MetricsCollector:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS metrics (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -37,9 +38,12 @@ class MetricsCollector:
                 timestamp REAL NOT NULL,
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
-        """)
+        """
+        )
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_metrics_name ON metrics(name)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics(timestamp)")
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_metrics_timestamp ON metrics(timestamp)"
+        )
         conn.commit()
         conn.close()
 
@@ -171,9 +175,13 @@ class DashboardGenerator:
     def daily_summary(self) -> dict:
         """Generate daily summary report."""
         metrics = {
-            "tool_execution_time": self.collector.get_metrics("tool_execution_time", 24, "avg"),
+            "tool_execution_time": self.collector.get_metrics(
+                "tool_execution_time", 24, "avg"
+            ),
             "tool_success_rate": self.collector.get_metrics("tool_success", 24, "avg"),
-            "message_count": self.collector.get_metrics("message_processed", 24, "count"),
+            "message_count": self.collector.get_metrics(
+                "message_processed", 24, "count"
+            ),
             "error_count": self.collector.get_metrics("error", 24, "count"),
             "memory_usage_avg": self.collector.get_metrics("memory_usage", 24, "avg"),
             "memory_usage_max": self.collector.get_metrics("memory_usage", 24, "max"),
@@ -195,8 +203,10 @@ class DashboardGenerator:
 
             # This is a simplification - actual implementation would query each day
             day_metrics = {
-                "day": (datetime.now() - timedelta(days=6-i)).strftime("%Y-%m-%d"),
-                "tool_executions": self.collector.get_metrics("tool_execution_time", start_hours, "count"),
+                "day": (datetime.now() - timedelta(days=6 - i)).strftime("%Y-%m-%d"),
+                "tool_executions": self.collector.get_metrics(
+                    "tool_execution_time", start_hours, "count"
+                ),
                 "errors": self.collector.get_metrics("error", start_hours, "count"),
             }
             days.append(day_metrics)
@@ -222,7 +232,11 @@ class DashboardGenerator:
             for name, data in report["metrics"].items():
                 value = data.get("value", "N/A")
                 count = data.get("count", 0)
-                lines.append(f"  {name}: {value:.2f} ({count} samples)" if isinstance(value, (int, float)) else f"  {name}: {value}")
+                lines.append(
+                    f"  {name}: {value:.2f} ({count} samples)"
+                    if isinstance(value, (int, float))
+                    else f"  {name}: {value}"
+                )
 
         if "daily_breakdown" in report:
             lines.append("\nDaily Breakdown:")

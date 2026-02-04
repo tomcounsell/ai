@@ -12,6 +12,7 @@ from pathlib import Path
 @dataclass
 class ToolCheck:
     """Result of a single tool check."""
+
     name: str
     available: bool
     version: str | None = None
@@ -21,6 +22,7 @@ class ToolCheck:
 @dataclass
 class VerificationResult:
     """Result of environment verification."""
+
     system_tools: list[ToolCheck] = field(default_factory=list)
     python_deps: list[ToolCheck] = field(default_factory=list)
     dev_tools: list[ToolCheck] = field(default_factory=list)
@@ -140,15 +142,24 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
     if python_path.exists():
         try:
             result = run_cmd(
-                [str(python_path), "-m", "tools.sms_reader.cli", "recent", "--limit", "1"],
+                [
+                    str(python_path),
+                    "-m",
+                    "tools.sms_reader.cli",
+                    "recent",
+                    "--limit",
+                    "1",
+                ],
                 cwd=project_dir,
                 timeout=10,
             )
-            results.append(ToolCheck(
-                name="sms_reader",
-                available=result.returncode == 0,
-                error=result.stderr.strip() if result.returncode != 0 else None,
-            ))
+            results.append(
+                ToolCheck(
+                    name="sms_reader",
+                    available=result.returncode == 0,
+                    error=result.stderr.strip() if result.returncode != 0 else None,
+                )
+            )
         except Exception as e:
             results.append(ToolCheck(name="sms_reader", available=False, error=str(e)))
 
@@ -169,7 +180,9 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
 
     # Check user bin
     if not calendar_found:
-        user_calendar = Path.home() / "Library" / "Python" / "3.12" / "bin" / "valor-calendar"
+        user_calendar = (
+            Path.home() / "Library" / "Python" / "3.12" / "bin" / "valor-calendar"
+        )
         if user_calendar.exists():
             try:
                 result = run_cmd([str(user_calendar), "--version"], timeout=10)
@@ -179,11 +192,13 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
             except Exception:
                 pass
 
-    results.append(ToolCheck(
-        name="valor-calendar",
-        available=calendar_found,
-        version=calendar_version,
-    ))
+    results.append(
+        ToolCheck(
+            name="valor-calendar",
+            available=calendar_found,
+            version=calendar_version,
+        )
+    )
 
     return results
 
@@ -196,7 +211,9 @@ def check_ollama(model: str = "qwen3:4b") -> ToolCheck:
     try:
         result = run_cmd(["ollama", "list"], timeout=30)
         if result.returncode != 0:
-            return ToolCheck(name="ollama", available=False, error="Failed to list models")
+            return ToolCheck(
+                name="ollama", available=False, error="Failed to list models"
+            )
 
         has_model = model in result.stdout
         return ToolCheck(
@@ -266,7 +283,9 @@ def check_mcp_servers() -> list[str]:
         return []
 
 
-def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> VerificationResult:
+def verify_environment(
+    project_dir: Path, check_ollama_model: bool = True
+) -> VerificationResult:
     """Run all environment verification checks."""
     result = VerificationResult()
 

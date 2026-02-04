@@ -21,6 +21,7 @@ CompletionStatus = Literal["COMPLETE", "IN_PROGRESS", "BLOCKED"]
 @dataclass
 class CompletionCheck:
     """A single completion check result."""
+
     name: str
     passed: bool
     details: str = ""
@@ -29,6 +30,7 @@ class CompletionCheck:
 @dataclass
 class CompletionResult:
     """Result of completion verification."""
+
     status: CompletionStatus
     checks: list[CompletionCheck] = field(default_factory=list)
     artifacts: list[str] = field(default_factory=list)
@@ -45,7 +47,11 @@ class CompletionResult:
         lines = ["## Work Completion Summary", ""]
 
         # Status
-        status_emoji = "✅" if self.status == "COMPLETE" else "⏳" if self.status == "IN_PROGRESS" else "🚫"
+        status_emoji = (
+            "✅"
+            if self.status == "COMPLETE"
+            else "⏳" if self.status == "IN_PROGRESS" else "🚫"
+        )
         lines.append(f"**Status**: {status_emoji} {self.status}")
         lines.append("")
 
@@ -92,9 +98,7 @@ def load_completion_criteria() -> str:
 
     # Extract the "Work Completion Criteria" section
     match = re.search(
-        r'## Work Completion Criteria\n\n(.*?)(?=\n## |\Z)',
-        content,
-        re.DOTALL
+        r"## Work Completion Criteria\n\n(.*?)(?=\n## |\Z)", content, re.DOTALL
     )
 
     if not match:
@@ -113,7 +117,7 @@ def check_git_status(working_dir: Path) -> CompletionCheck:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
         )
 
         uncommitted = result.stdout.strip()
@@ -121,7 +125,7 @@ def check_git_status(working_dir: Path) -> CompletionCheck:
             return CompletionCheck(
                 name="Changes Committed",
                 passed=False,
-                details=f"Uncommitted changes found: {uncommitted[:100]}"
+                details=f"Uncommitted changes found: {uncommitted[:100]}",
             )
 
         # Check if pushed to remote
@@ -130,7 +134,7 @@ def check_git_status(working_dir: Path) -> CompletionCheck:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
         )
 
         status = result.stdout.strip()
@@ -138,7 +142,7 @@ def check_git_status(working_dir: Path) -> CompletionCheck:
             return CompletionCheck(
                 name="Changes Committed",
                 passed=False,
-                details="Local commits not pushed to remote"
+                details="Local commits not pushed to remote",
             )
 
         # Get last commit info
@@ -147,23 +151,19 @@ def check_git_status(working_dir: Path) -> CompletionCheck:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
         )
 
         last_commit = result.stdout.strip()
 
         return CompletionCheck(
-            name="Changes Committed",
-            passed=True,
-            details=f"Latest: {last_commit}"
+            name="Changes Committed", passed=True, details=f"Latest: {last_commit}"
         )
 
     except Exception as e:
         logger.error(f"Git status check failed: {e}")
         return CompletionCheck(
-            name="Changes Committed",
-            passed=False,
-            details=f"Git check error: {str(e)}"
+            name="Changes Committed", passed=False, details=f"Git check error: {str(e)}"
         )
 
 
@@ -176,9 +176,7 @@ def check_code_quality(working_dir: Path) -> CompletionCheck:
         python_files = list(working_dir.rglob("*.py"))
         if not python_files:
             return CompletionCheck(
-                name="Code Quality",
-                passed=True,
-                details="No Python files to check"
+                name="Code Quality", passed=True, details="No Python files to check"
             )
 
         # TODO: Actually run ruff/black and check results
@@ -186,7 +184,7 @@ def check_code_quality(working_dir: Path) -> CompletionCheck:
         return CompletionCheck(
             name="Code Quality",
             passed=True,
-            details=f"Python files present ({len(python_files)} files)"
+            details=f"Python files present ({len(python_files)} files)",
         )
 
     except Exception as e:
@@ -194,14 +192,12 @@ def check_code_quality(working_dir: Path) -> CompletionCheck:
         return CompletionCheck(
             name="Code Quality",
             passed=True,  # Don't block on this for now
-            details=f"Check skipped: {str(e)}"
+            details=f"Check skipped: {str(e)}",
         )
 
 
 def verify_completion(
-    working_dir: Path,
-    artifacts: list[str] | None = None,
-    summary: str = ""
+    working_dir: Path, artifacts: list[str] | None = None, summary: str = ""
 ) -> CompletionResult:
     """
     Verify if work meets completion criteria.
@@ -235,17 +231,21 @@ def verify_completion(
                 artifacts_exist.append(artifact)
 
         if len(artifacts_exist) == len(artifacts):
-            checks.append(CompletionCheck(
-                name="Artifacts Created",
-                passed=True,
-                details=f"{len(artifacts_exist)} artifact(s) verified"
-            ))
+            checks.append(
+                CompletionCheck(
+                    name="Artifacts Created",
+                    passed=True,
+                    details=f"{len(artifacts_exist)} artifact(s) verified",
+                )
+            )
         else:
-            checks.append(CompletionCheck(
-                name="Artifacts Created",
-                passed=False,
-                details=f"Only {len(artifacts_exist)}/{len(artifacts)} artifacts found"
-            ))
+            checks.append(
+                CompletionCheck(
+                    name="Artifacts Created",
+                    passed=False,
+                    details=f"Only {len(artifacts_exist)}/{len(artifacts)} artifacts found",
+                )
+            )
 
     # Determine overall status
     all_passed = all(check.passed for check in checks)

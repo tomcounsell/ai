@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 class AlertLevel(Enum):
     """Alert severity levels."""
+
     INFO = "info"
     WARNING = "warning"
     CRITICAL = "critical"
@@ -22,6 +23,7 @@ class AlertLevel(Enum):
 @dataclass
 class Alert:
     """Represents a monitoring alert."""
+
     level: AlertLevel
     message: str
     metric: str
@@ -90,7 +92,7 @@ class AlertManager:
         # Store alert
         self._alerts.append(alert)
         if len(self._alerts) > self._max_alerts:
-            self._alerts = self._alerts[-self._max_alerts:]
+            self._alerts = self._alerts[-self._max_alerts :]
 
         # Log the alert
         log_method = {

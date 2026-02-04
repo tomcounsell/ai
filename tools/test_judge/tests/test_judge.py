@@ -16,6 +16,7 @@ class TestJudgeInstallation:
     def test_import(self):
         """Tool can be imported."""
         from tools.test_judge import judge_test_result
+
         assert callable(judge_test_result)
 
     def test_api_key_required(self):
@@ -53,8 +54,9 @@ class TestJudgeValidation:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
-    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set"
+    not os.environ.get("ANTHROPIC_API_KEY")
+    and not os.environ.get("OPENROUTER_API_KEY"),
+    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestJudgeCore:
     """Test core judgment functionality."""
@@ -105,15 +107,11 @@ class TestJudgeCore:
         output = "The function mostly works but has some edge cases."
 
         lenient = judge_test_result(
-            output,
-            ["Function works correctly"],
-            strictness="lenient"
+            output, ["Function works correctly"], strictness="lenient"
         )
 
         strict = judge_test_result(
-            output,
-            ["Function works correctly"],
-            strictness="strict"
+            output, ["Function works correctly"], strictness="strict"
         )
 
         # Both should complete without error
@@ -122,8 +120,9 @@ class TestJudgeCore:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
-    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set"
+    not os.environ.get("ANTHROPIC_API_KEY")
+    and not os.environ.get("OPENROUTER_API_KEY"),
+    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestJudgeBatch:
     """Test batch judgment functionality."""

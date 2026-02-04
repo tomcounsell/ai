@@ -52,7 +52,9 @@ async def check_existing_session():
         if await client.is_user_authorized():
             me = await client.get_me()
             await client.disconnect()
-            print(f"✅ Session is valid! Logged in as: {me.first_name} (@{me.username})")
+            print(
+                f"✅ Session is valid! Logged in as: {me.first_name} (@{me.username})"
+            )
             return True
         else:
             await client.disconnect()
@@ -80,7 +82,9 @@ async def authorize_telegram_client():
             sent_code = await client.send_code_request(PHONE, force_sms=False)
             code_type = sent_code.type.__class__.__name__
             print(f"✅ Code sent via: {code_type}")
-            print(f"   Code length: {sent_code.type.length if hasattr(sent_code.type, 'length') else 'unknown'}")
+            print(
+                f"   Code length: {sent_code.type.length if hasattr(sent_code.type, 'length') else 'unknown'}"
+            )
 
             code = None  # Will be set below
 
@@ -177,7 +181,9 @@ async def main():
         print("The bridge can connect using the existing session.")
 
         while True:
-            choice = input("\nDo you want to re-authorize anyway? (y/n): ").lower().strip()
+            choice = (
+                input("\nDo you want to re-authorize anyway? (y/n): ").lower().strip()
+            )
             if choice in ["n", "no", ""]:
                 print("👍 Using existing session.")
                 return True

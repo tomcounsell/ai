@@ -104,8 +104,9 @@ class TestRemoteUpdateScript:
         for line in result.stdout.strip().split("\n"):
             if line.strip():
                 # Accept both [remote-update] (shell) and [update] (Python module) prefixes
-                assert line.startswith("[remote-update]") or line.startswith("[update]"), \
-                    f"Line missing prefix: {line!r}"
+                assert line.startswith("[remote-update]") or line.startswith(
+                    "[update]"
+                ), f"Line missing prefix: {line!r}"
 
 
 # =============================================================================

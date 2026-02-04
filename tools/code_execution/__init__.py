@@ -91,9 +91,7 @@ def execute_code(
 
 def _execute_python(code: str, timeout: int, input_data: str | None) -> dict:
     """Execute Python code."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
         f.write(code)
         f.flush()
         temp_path = f.name
@@ -123,11 +121,14 @@ def _execute_javascript(code: str, timeout: int, input_data: str | None) -> dict
     try:
         subprocess.run(["node", "--version"], capture_output=True, check=True)
     except (subprocess.SubprocessError, FileNotFoundError):
-        return {"error": "Node.js not installed", "exit_code": 1, "stdout": "", "stderr": ""}
+        return {
+            "error": "Node.js not installed",
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": "",
+        }
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".js", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".js", delete=False) as f:
         f.write(code)
         f.flush()
         temp_path = f.name
@@ -153,9 +154,7 @@ def _execute_javascript(code: str, timeout: int, input_data: str | None) -> dict
 
 def _execute_bash(code: str, timeout: int, input_data: str | None) -> dict:
     """Execute Bash code."""
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".sh", delete=False
-    ) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".sh", delete=False) as f:
         f.write(code)
         f.flush()
         temp_path = f.name
@@ -179,19 +178,34 @@ def _execute_bash(code: str, timeout: int, input_data: str | None) -> dict:
         Path(temp_path).unlink(missing_ok=True)
 
 
-def execute_python(code: str, timeout_seconds: int = 30, input_data: str | None = None) -> dict:
+def execute_python(
+    code: str, timeout_seconds: int = 30, input_data: str | None = None
+) -> dict:
     """Convenience function for Python execution."""
-    return execute_code(code, language="python", timeout_seconds=timeout_seconds, input_data=input_data)
+    return execute_code(
+        code, language="python", timeout_seconds=timeout_seconds, input_data=input_data
+    )
 
 
-def execute_javascript(code: str, timeout_seconds: int = 30, input_data: str | None = None) -> dict:
+def execute_javascript(
+    code: str, timeout_seconds: int = 30, input_data: str | None = None
+) -> dict:
     """Convenience function for JavaScript execution."""
-    return execute_code(code, language="javascript", timeout_seconds=timeout_seconds, input_data=input_data)
+    return execute_code(
+        code,
+        language="javascript",
+        timeout_seconds=timeout_seconds,
+        input_data=input_data,
+    )
 
 
-def execute_bash(code: str, timeout_seconds: int = 30, input_data: str | None = None) -> dict:
+def execute_bash(
+    code: str, timeout_seconds: int = 30, input_data: str | None = None
+) -> dict:
     """Convenience function for Bash execution."""
-    return execute_code(code, language="bash", timeout_seconds=timeout_seconds, input_data=input_data)
+    return execute_code(
+        code, language="bash", timeout_seconds=timeout_seconds, input_data=input_data
+    )
 
 
 if __name__ == "__main__":

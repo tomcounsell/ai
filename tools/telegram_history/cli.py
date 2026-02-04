@@ -52,7 +52,7 @@ def truncate(text: str, length: int = 100) -> str:
         return ""
     if len(text) <= length:
         return text
-    return text[:length - 3] + "..."
+    return text[: length - 3] + "..."
 
 
 def cmd_search(args: argparse.Namespace) -> int:
@@ -66,7 +66,9 @@ def cmd_search(args: argparse.Namespace) -> int:
                 chat_id = args.group
             else:
                 print(f"Error: Could not find group '{args.group}'", file=sys.stderr)
-                print("Use 'valor-history groups' to list known groups", file=sys.stderr)
+                print(
+                    "Use 'valor-history groups' to list known groups", file=sys.stderr
+                )
                 return 1
 
         result = search_history(
@@ -323,17 +325,20 @@ def main() -> int:
         help="Output as JSON",
     )
     search_parser.add_argument(
-        "--group", "-g",
+        "--group",
+        "-g",
         help="Group name or chat ID to search in (searches all if omitted)",
     )
     search_parser.add_argument(
-        "--days", "-d",
+        "--days",
+        "-d",
         type=int,
         default=30,
         help="Search within last N days (default: 30)",
     )
     search_parser.add_argument(
-        "--limit", "-n",
+        "--limit",
+        "-n",
         type=int,
         default=20,
         help="Maximum results (default: 20)",
@@ -345,12 +350,14 @@ def main() -> int:
         help="Show recent messages from a group",
     )
     recent_parser.add_argument(
-        "--group", "-g",
+        "--group",
+        "-g",
         required=True,
         help="Group name or chat ID",
     )
     recent_parser.add_argument(
-        "--limit", "-n",
+        "--limit",
+        "-n",
         type=int,
         default=20,
         help="Number of messages (default: 20)",
@@ -383,11 +390,13 @@ def main() -> int:
         help="Search query (optional)",
     )
     links_parser.add_argument(
-        "--domain", "-d",
+        "--domain",
+        "-d",
         help="Filter by domain",
     )
     links_parser.add_argument(
-        "--sender", "-s",
+        "--sender",
+        "-s",
         help="Filter by sender",
     )
     links_parser.add_argument(
@@ -396,7 +405,8 @@ def main() -> int:
         help="Filter by status",
     )
     links_parser.add_argument(
-        "--limit", "-n",
+        "--limit",
+        "-n",
         type=int,
         default=20,
         help="Maximum results (default: 20)",
@@ -413,7 +423,8 @@ def main() -> int:
         help="Show statistics",
     )
     stats_parser.add_argument(
-        "--group", "-g",
+        "--group",
+        "-g",
         help="Group name or chat ID (shows link stats if omitted)",
     )
     stats_parser.add_argument(

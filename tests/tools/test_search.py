@@ -77,7 +77,7 @@ class TestSearchWithContext:
         result = search_with_context(
             query="best practices",
             context="I am developing a Python REST API",
-            search_type="conversational"
+            search_type="conversational",
         )
         assert "error" not in result
         assert result.get("summary")

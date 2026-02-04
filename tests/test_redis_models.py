@@ -148,7 +148,10 @@ class TestBridgeEvent:
         from models.bridge_event import BridgeEvent
 
         be = BridgeEvent.log(
-            "message_received", chat_id=123, project="valor", sender="Tom",
+            "message_received",
+            chat_id=123,
+            project="valor",
+            sender="Tom",
         )
 
         assert be.event_id
@@ -263,16 +266,28 @@ class TestTelegramMessage:
 
         now = time.time()
         TelegramMessage.create(
-            chat_id="200", direction="in", sender="A",
-            content="msg1", timestamp=now, message_type="text",
+            chat_id="200",
+            direction="in",
+            sender="A",
+            content="msg1",
+            timestamp=now,
+            message_type="text",
         )
         TelegramMessage.create(
-            chat_id="200", direction="out", sender="Valor",
-            content="msg2", timestamp=now + 1, message_type="response",
+            chat_id="200",
+            direction="out",
+            sender="Valor",
+            content="msg2",
+            timestamp=now + 1,
+            message_type="response",
         )
         TelegramMessage.create(
-            chat_id="300", direction="in", sender="B",
-            content="msg3", timestamp=now, message_type="text",
+            chat_id="300",
+            direction="in",
+            sender="B",
+            content="msg3",
+            timestamp=now,
+            message_type="text",
         )
 
         chat_200 = TelegramMessage.query.filter(chat_id="200")
@@ -286,12 +301,20 @@ class TestTelegramMessage:
 
         now = time.time()
         TelegramMessage.create(
-            chat_id="400", direction="in", sender="User",
-            content="q", timestamp=now, message_type="text",
+            chat_id="400",
+            direction="in",
+            sender="User",
+            content="q",
+            timestamp=now,
+            message_type="text",
         )
         TelegramMessage.create(
-            chat_id="400", direction="out", sender="Valor",
-            content="a", timestamp=now + 1, message_type="response",
+            chat_id="400",
+            direction="out",
+            sender="Valor",
+            content="a",
+            timestamp=now + 1,
+            message_type="response",
         )
 
         incoming = TelegramMessage.query.filter(direction="in")
@@ -395,26 +418,42 @@ class TestAgentSession:
 
         now = time.time()
         AgentSession.create(
-            session_id="s1", project_key="valor", status="active",
-            chat_id="1", sender="A",
-            started_at=now, last_activity=now, tool_call_count=5,
+            session_id="s1",
+            project_key="valor",
+            status="active",
+            chat_id="1",
+            sender="A",
+            started_at=now,
+            last_activity=now,
+            tool_call_count=5,
         )
         AgentSession.create(
-            session_id="s2", project_key="valor", status="completed",
-            chat_id="2", sender="B",
-            started_at=now, last_activity=now, tool_call_count=10,
+            session_id="s2",
+            project_key="valor",
+            status="completed",
+            chat_id="2",
+            sender="B",
+            started_at=now,
+            last_activity=now,
+            tool_call_count=10,
         )
         AgentSession.create(
-            session_id="s3", project_key="popoto", status="active",
-            chat_id="3", sender="C",
-            started_at=now, last_activity=now, tool_call_count=2,
+            session_id="s3",
+            project_key="popoto",
+            status="active",
+            chat_id="3",
+            sender="C",
+            started_at=now,
+            last_activity=now,
+            tool_call_count=2,
         )
 
         active = AgentSession.query.filter(status="active")
         assert len(active) == 2
 
         valor_active = AgentSession.query.filter(
-            project_key="valor", status="active",
+            project_key="valor",
+            status="active",
         )
         assert len(valor_active) == 1
         assert valor_active[0].session_id == "s1"
@@ -424,14 +463,24 @@ class TestAgentSession:
 
         now = time.time()
         AgentSession.create(
-            session_id="p1", project_key="valor", status="active",
-            chat_id="1", sender="A",
-            started_at=now, last_activity=now, tool_call_count=0,
+            session_id="p1",
+            project_key="valor",
+            status="active",
+            chat_id="1",
+            sender="A",
+            started_at=now,
+            last_activity=now,
+            tool_call_count=0,
         )
         AgentSession.create(
-            session_id="p2", project_key="popoto", status="active",
-            chat_id="2", sender="B",
-            started_at=now, last_activity=now, tool_call_count=0,
+            session_id="p2",
+            project_key="popoto",
+            status="active",
+            chat_id="2",
+            sender="B",
+            started_at=now,
+            last_activity=now,
+            tool_call_count=0,
         )
 
         valor = AgentSession.query.filter(project_key="valor")
@@ -540,8 +589,10 @@ class TestIsolation:
         from models.dead_letter import DeadLetter
 
         DeadLetter.create(
-            chat_id="isolation_probe", text="x",
-            created_at=1.0, attempts=0,
+            chat_id="isolation_probe",
+            text="x",
+            created_at=1.0,
+            attempts=0,
         )
 
         # Verify it's NOT in db=0
@@ -557,8 +608,10 @@ class TestIsolation:
         assert len(found) == 0
 
         DeadLetter.create(
-            chat_id="leak_test", text="x",
-            created_at=1.0, attempts=0,
+            chat_id="leak_test",
+            text="x",
+            created_at=1.0,
+            attempts=0,
         )
 
     def test_previous_test_data_gone(self):

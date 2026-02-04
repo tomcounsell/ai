@@ -92,7 +92,11 @@ async def test_sdk_direct():
                     print(f"API Duration: {msg.duration_api_ms}ms")
                     print(f"Turns: {msg.num_turns}")
                     print(f"Session ID: {msg.session_id}")
-                    print(f"Cost: ${msg.total_cost_usd:.4f}" if msg.total_cost_usd else "Cost: N/A")
+                    print(
+                        f"Cost: ${msg.total_cost_usd:.4f}"
+                        if msg.total_cost_usd
+                        else "Cost: N/A"
+                    )
                     print(f"Is Error: {msg.is_error}")
                     print(f"Result: {msg.result}")
                     if msg.is_error:
@@ -105,6 +109,7 @@ async def test_sdk_direct():
     except Exception as e:
         print(f"\n!!! EXCEPTION: {type(e).__name__}: {e}")
         import traceback
+
         traceback.print_exc()
 
     print("\n=== Results ===")
@@ -129,6 +134,7 @@ async def test_sdk_with_stderr():
     print("\n=== Testing SDK with stderr capture ===")
 
     stderr_lines = []
+
     def stderr_callback(line: str):
         stderr_lines.append(line)
         print(f"[STDERR] {line}")
@@ -157,7 +163,9 @@ async def test_sdk_with_stderr():
                         if isinstance(block, TextBlock):
                             response_parts.append(block.text)
                 elif isinstance(msg, ResultMessage):
-                    print(f"\nResult: is_error={msg.is_error}, result={repr(msg.result)}")
+                    print(
+                        f"\nResult: is_error={msg.is_error}, result={repr(msg.result)}"
+                    )
 
     except Exception as e:
         print(f"\n!!! EXCEPTION: {type(e).__name__}: {e}")
@@ -184,13 +192,17 @@ async def test_sdk_via_agent():
     except Exception as e:
         print(f"\n!!! EXCEPTION: {type(e).__name__}: {e}")
         import traceback
+
         traceback.print_exc()
 
 
 if __name__ == "__main__":
     import argparse
+
     parser = argparse.ArgumentParser()
-    parser.add_argument("--test", choices=["direct", "stderr", "agent", "all"], default="all")
+    parser.add_argument(
+        "--test", choices=["direct", "stderr", "agent", "all"], default="all"
+    )
     args = parser.parse_args()
 
     if args.test in ("direct", "all"):

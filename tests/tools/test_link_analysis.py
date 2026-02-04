@@ -209,7 +209,9 @@ class TestSummarizeUrlContent:
     async def test_summarize_url_news_article(self, perplexity_api_key):
         """Test summarizing a news/content page."""
         # Using a well-known stable page
-        summary = await summarize_url_content("https://en.wikipedia.org/wiki/Python_(programming_language)")
+        summary = await summarize_url_content(
+            "https://en.wikipedia.org/wiki/Python_(programming_language)"
+        )
 
         assert summary is not None
         assert isinstance(summary, str)

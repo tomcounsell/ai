@@ -43,7 +43,9 @@ def build_group_to_project_map(config: dict, active_projects: list[str]) -> dict
     return group_map
 
 
-def find_project_for_chat(chat_title: str | None, group_to_project: dict) -> dict | None:
+def find_project_for_chat(
+    chat_title: str | None, group_to_project: dict
+) -> dict | None:
     """Find which project a chat belongs to."""
     if not chat_title:
         return None

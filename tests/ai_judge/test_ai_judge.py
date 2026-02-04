@@ -52,7 +52,7 @@ class TestJudgeConfig:
             model="llama3:8b",
             temperature=0.3,
             strict_mode=False,
-            custom_criteria=["custom1", "custom2"]
+            custom_criteria=["custom1", "custom2"],
         )
         assert config.model == "llama3:8b"
         assert config.temperature == 0.3
@@ -71,7 +71,7 @@ class TestJudgmentResult:
             criteria_scores={"criterion1": "good"},
             pass_fail=True,
             confidence=0.85,
-            reasoning="Test passed successfully"
+            reasoning="Test passed successfully",
         )
         assert result.test_id == "test_001"
         assert result.pass_fail is True
@@ -85,7 +85,7 @@ class TestJudgmentResult:
             criteria_scores={"accuracy": "excellent"},
             pass_fail=True,
             confidence=0.95,
-            reasoning="Excellent performance"
+            reasoning="Excellent performance",
         )
         d = result.to_dict()
         assert d["test_id"] == "test_002"
@@ -101,11 +101,8 @@ class TestHeuristicJudgment:
         """Test heuristic judgment for passing output."""
         result = _heuristic_judgment(
             test_output="The function returns accurate results with proper formatting",
-            expected_criteria=[
-                "Returns accurate results",
-                "Uses proper formatting"
-            ],
-            test_id="heuristic_test_1"
+            expected_criteria=["Returns accurate results", "Uses proper formatting"],
+            test_id="heuristic_test_1",
         )
         assert result.pass_fail is True
         assert result.model_used == "heuristic"
@@ -118,9 +115,9 @@ class TestHeuristicJudgment:
             expected_criteria=[
                 "Returns successful response",
                 "Contains user data",
-                "Properly formatted JSON"
+                "Properly formatted JSON",
             ],
-            test_id="heuristic_test_2"
+            test_id="heuristic_test_2",
         )
         # May pass or fail depending on keyword matching
         assert result.model_used == "heuristic"
@@ -132,13 +129,13 @@ class TestParseJudgmentResponse:
 
     def test_parse_json_response(self):
         """Test parsing valid JSON response."""
-        response = '''{
+        response = """{
             "overall_score": "good",
             "criteria_scores": {"accuracy": "excellent"},
             "pass_fail": true,
             "confidence": 0.88,
             "reasoning": "Test performed well"
-        }'''
+        }"""
         result = _parse_judgment_response(response, "parse_test_1")
         assert result.overall_score == JudgmentScore.GOOD
         assert result.pass_fail is True
@@ -168,9 +165,9 @@ class TestJudgeTestResult:
             test_output="The function correctly calculates the sum of two numbers",
             expected_criteria=[
                 "Performs calculation correctly",
-                "Handles numeric input"
+                "Handles numeric input",
             ],
-            config=JudgeConfig(fallback_to_heuristics=True)
+            config=JudgeConfig(fallback_to_heuristics=True),
         )
         assert isinstance(result, JudgmentResult)
         assert result.test_id is not None
@@ -180,12 +177,9 @@ class TestJudgeTestResult:
         """Test judgment with additional context."""
         result = judge_test_result(
             test_output="User authentication successful",
-            expected_criteria=[
-                "Authenticates user",
-                "Returns success status"
-            ],
+            expected_criteria=["Authenticates user", "Returns success status"],
             test_context={"test_type": "authentication", "user_type": "admin"},
-            config=JudgeConfig(fallback_to_heuristics=True)
+            config=JudgeConfig(fallback_to_heuristics=True),
         )
         assert isinstance(result, JudgmentResult)
 
@@ -195,7 +189,7 @@ class TestJudgeTestResult:
             test_output="Test output",
             expected_criteria=["Basic criterion"],
             test_id="custom_test_123",
-            config=JudgeConfig(fallback_to_heuristics=True)
+            config=JudgeConfig(fallback_to_heuristics=True),
         )
         assert result.test_id == "custom_test_123"
 
@@ -208,7 +202,7 @@ class TestJudgeResponseQuality:
         result = judge_response_quality(
             response="Here's how to implement a binary search: First, find the middle element...",
             prompt="How do I implement binary search?",
-            config=JudgeConfig(fallback_to_heuristics=True)
+            config=JudgeConfig(fallback_to_heuristics=True),
         )
         assert isinstance(result, JudgmentResult)
         assert "response_quality" in result.test_id
@@ -221,9 +215,9 @@ class TestJudgeResponseQuality:
             evaluation_criteria=[
                 "Mentions Tokyo",
                 "Provides temperature",
-                "Describes weather conditions"
+                "Describes weather conditions",
             ],
-            config=JudgeConfig(fallback_to_heuristics=True)
+            config=JudgeConfig(fallback_to_heuristics=True),
         )
         assert isinstance(result, JudgmentResult)
 
@@ -236,7 +230,7 @@ class TestJudgeToolSelection:
         result = judge_tool_selection(
             selected_tools=["search", "summarize"],
             user_intent="Find and summarize the latest Python news",
-            config=JudgeConfig(fallback_to_heuristics=True)
+            config=JudgeConfig(fallback_to_heuristics=True),
         )
         assert isinstance(result, JudgmentResult)
         assert "tool_selection" in result.test_id
@@ -247,7 +241,7 @@ class TestJudgeToolSelection:
             selected_tools=["image_analysis"],
             user_intent="What's in this image?",
             context={"has_image": True, "image_type": "photo"},
-            config=JudgeConfig(fallback_to_heuristics=True)
+            config=JudgeConfig(fallback_to_heuristics=True),
         )
         assert isinstance(result, JudgmentResult)
 
@@ -269,30 +263,22 @@ class TestAIJudgeTestRunner:
 
     def test_run_test(self):
         """Test running a single test."""
-        runner = AIJudgeTestRunner(
-            config=JudgeConfig(fallback_to_heuristics=True)
-        )
+        runner = AIJudgeTestRunner(config=JudgeConfig(fallback_to_heuristics=True))
         result = runner.run_test(
             test_name="runner_test_1",
             test_output="Function executed successfully",
-            criteria=["Executes without error"]
+            criteria=["Executes without error"],
         )
         assert result.test_id == "runner_test_1"
         assert len(runner.results) == 1
 
     def test_get_summary(self):
         """Test getting results summary."""
-        runner = AIJudgeTestRunner(
-            config=JudgeConfig(fallback_to_heuristics=True)
-        )
+        runner = AIJudgeTestRunner(config=JudgeConfig(fallback_to_heuristics=True))
 
         # Run multiple tests
-        runner.run_test(
-            "test_1", "Good output meeting criteria", ["Basic criterion"]
-        )
-        runner.run_test(
-            "test_2", "Another good output", ["Another criterion"]
-        )
+        runner.run_test("test_1", "Good output meeting criteria", ["Basic criterion"])
+        runner.run_test("test_2", "Another good output", ["Another criterion"])
 
         summary = runner.get_summary()
         assert summary["total"] == 2
@@ -308,9 +294,7 @@ class TestAIJudgeTestRunner:
 
     def test_save_results(self, tmp_path):
         """Test saving results to file."""
-        runner = AIJudgeTestRunner(
-            config=JudgeConfig(fallback_to_heuristics=True)
-        )
+        runner = AIJudgeTestRunner(config=JudgeConfig(fallback_to_heuristics=True))
         runner.run_test("save_test", "Test output", ["Criterion"])
 
         filepath = tmp_path / "results.json"
@@ -318,6 +302,7 @@ class TestAIJudgeTestRunner:
 
         assert filepath.exists()
         import json
+
         with open(filepath) as f:
             data = json.load(f)
         assert data["total"] == 1

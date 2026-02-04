@@ -23,6 +23,7 @@ class TestTelegramHistoryInstallation:
     def test_import(self):
         """Tool can be imported."""
         from tools.telegram_history import search_history
+
         assert callable(search_history)
 
 

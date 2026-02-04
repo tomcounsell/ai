@@ -11,6 +11,7 @@ from typing import Any
 @dataclass
 class Session:
     """Represents a user session."""
+
     session_id: str
     user_id: str
     chat_id: str
@@ -47,6 +48,7 @@ class Session:
 @dataclass
 class SessionMetrics:
     """Metrics about sessions."""
+
     total_sessions: int
     active_sessions: int
     average_duration_minutes: float
@@ -63,7 +65,9 @@ class SessionTracker:
         self._sessions: dict[str, Session] = {}
         self._peak_concurrent = 0
 
-    def create_session(self, user_id: str, chat_id: str, metadata: dict[str, Any] | None = None) -> Session:
+    def create_session(
+        self, user_id: str, chat_id: str, metadata: dict[str, Any] | None = None
+    ) -> Session:
         """Create a new session.
 
         Args:
@@ -176,7 +180,8 @@ class SessionTracker:
         """
         cutoff = datetime.now() - timedelta(hours=max_age_hours)
         stale_ids = [
-            sid for sid, session in self._sessions.items()
+            sid
+            for sid, session in self._sessions.items()
             if session.last_activity < cutoff
         ]
 
@@ -203,10 +208,7 @@ class SessionTracker:
             total_messages = 0
 
         hour_ago = datetime.now() - timedelta(hours=1)
-        sessions_last_hour = sum(
-            1 for s in all_sessions
-            if s.created_at >= hour_ago
-        )
+        sessions_last_hour = sum(1 for s in all_sessions if s.created_at >= hour_ago)
 
         return SessionMetrics(
             total_sessions=len(all_sessions),

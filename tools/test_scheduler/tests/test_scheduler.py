@@ -22,6 +22,7 @@ class TestSchedulerInstallation:
     def test_import(self):
         """Tool can be imported."""
         from tools.test_scheduler import schedule_tests
+
         assert callable(schedule_tests)
 
 

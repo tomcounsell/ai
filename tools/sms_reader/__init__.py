@@ -99,7 +99,7 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
         raise SMSReaderError(
             f"Messages database not found at {path}. "
             "Make sure Messages app has been used.",
-            category="not_found"
+            category="not_found",
         )
 
     try:
@@ -111,7 +111,7 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
             raise SMSReaderError(
                 f"Cannot open Messages database. Grant Full Disk Access to your terminal. "
                 f"System Preferences > Security & Privacy > Privacy > Full Disk Access",
-                category="permission_denied"
+                category="permission_denied",
             ) from e
         raise SMSReaderError(f"Database error: {e}", category="database") from e
 
@@ -289,41 +289,51 @@ def extract_codes_from_text(text: str) -> list[str]:
 
     # Keywords that should NOT be treated as codes
     keywords = {
-        'code', 'codes', 'pin', 'pins', 'otp', 'password', 'passcode',
-        'verification', 'security', 'login', 'access', 'your', 'the', 'is'
+        "code",
+        "codes",
+        "pin",
+        "pins",
+        "otp",
+        "password",
+        "passcode",
+        "verification",
+        "security",
+        "login",
+        "access",
+        "your",
+        "the",
+        "is",
     }
 
     # Pattern 1: Numeric codes (4-8 digits) - most common
     # Look for codes after keywords
     numeric_after_keyword = re.findall(
-        r'(?:code|pin|otp|password|passcode|verification)[:\s]+(?:is[:\s]+)?(\d{4,8})\b',
+        r"(?:code|pin|otp|password|passcode|verification)[:\s]+(?:is[:\s]+)?(\d{4,8})\b",
         text,
-        re.IGNORECASE
+        re.IGNORECASE,
     )
     codes.extend(numeric_after_keyword)
 
     # Pattern 2: Numeric codes before "is your code" etc
     numeric_before_keyword = re.findall(
-        r'\b(\d{4,8})\s+(?:is your|is the)\s+(?:code|pin|otp|verification)',
+        r"\b(\d{4,8})\s+(?:is your|is the)\s+(?:code|pin|otp|verification)",
         text,
-        re.IGNORECASE
+        re.IGNORECASE,
     )
     codes.extend(numeric_before_keyword)
 
     # Pattern 3: Standalone 4-8 digit numbers (fallback if no keywords matched)
     if not codes:
-        numeric_codes = re.findall(r'\b(\d{4,8})\b', text)
+        numeric_codes = re.findall(r"\b(\d{4,8})\b", text)
         for code in numeric_codes:
             # Exclude years (1900-2099)
-            if not (len(code) == 4 and code.startswith(('19', '20'))):
+            if not (len(code) == 4 and code.startswith(("19", "20"))):
                 codes.append(code)
 
     # Pattern 4: Alphanumeric codes (must contain at least one digit)
     # Only if explicitly after a code keyword
     alphanum_matches = re.findall(
-        r'(?:code|pin|otp)[:\s]+(?:is[:\s]+)?([A-Z0-9]{4,8})\b',
-        text,
-        re.IGNORECASE
+        r"(?:code|pin|otp)[:\s]+(?:is[:\s]+)?([A-Z0-9]{4,8})\b", text, re.IGNORECASE
     )
     for match in alphanum_matches:
         # Must contain at least one digit to be a code
@@ -445,14 +455,17 @@ def list_senders(
 
         senders = []
         for row in rows:
-            senders.append({
-                "sender": row["sender"],
-                "message_count": row["message_count"],
-                "last_message_date": (
-                    _apple_time_to_datetime(row["last_message_date"]).isoformat()
-                    if row["last_message_date"] else None
-                ),
-            })
+            senders.append(
+                {
+                    "sender": row["sender"],
+                    "message_count": row["message_count"],
+                    "last_message_date": (
+                        _apple_time_to_datetime(row["last_message_date"]).isoformat()
+                        if row["last_message_date"]
+                        else None
+                    ),
+                }
+            )
 
         return senders
 

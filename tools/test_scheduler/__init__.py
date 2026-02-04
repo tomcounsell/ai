@@ -43,30 +43,38 @@ def _parse_test_specification(spec: str) -> list[dict]:
 
     # Check for common test patterns
     if spec.startswith("pytest"):
-        tests.append({
-            "command": spec,
-            "type": "pytest",
-            "framework": "pytest",
-        })
+        tests.append(
+            {
+                "command": spec,
+                "type": "pytest",
+                "framework": "pytest",
+            }
+        )
     elif spec.startswith("python -m unittest"):
-        tests.append({
-            "command": spec,
-            "type": "unittest",
-            "framework": "unittest",
-        })
+        tests.append(
+            {
+                "command": spec,
+                "type": "unittest",
+                "framework": "unittest",
+            }
+        )
     elif spec.startswith("npm test") or spec.startswith("jest"):
-        tests.append({
-            "command": spec,
-            "type": "jest",
-            "framework": "jest",
-        })
+        tests.append(
+            {
+                "command": spec,
+                "type": "jest",
+                "framework": "jest",
+            }
+        )
     else:
         # Treat as generic command
-        tests.append({
-            "command": spec,
-            "type": "generic",
-            "framework": "unknown",
-        })
+        tests.append(
+            {
+                "command": spec,
+                "type": "generic",
+                "framework": "unknown",
+            }
+        )
 
     return tests
 
@@ -98,33 +106,39 @@ def _run_test_job(job_id: str, tests: list[dict], timeout_minutes: int):
                 timeout=timeout_seconds,
             )
 
-            results.append({
-                "command": test["command"],
-                "type": test["type"],
-                "exit_code": proc.returncode,
-                "stdout": proc.stdout,
-                "stderr": proc.stderr,
-                "duration_seconds": time.time() - start_time,
-                "passed": proc.returncode == 0,
-            })
+            results.append(
+                {
+                    "command": test["command"],
+                    "type": test["type"],
+                    "exit_code": proc.returncode,
+                    "stdout": proc.stdout,
+                    "stderr": proc.stderr,
+                    "duration_seconds": time.time() - start_time,
+                    "passed": proc.returncode == 0,
+                }
+            )
         except subprocess.TimeoutExpired:
-            results.append({
-                "command": test["command"],
-                "type": test["type"],
-                "exit_code": -1,
-                "error": "Test timed out",
-                "duration_seconds": timeout_seconds,
-                "passed": False,
-            })
+            results.append(
+                {
+                    "command": test["command"],
+                    "type": test["type"],
+                    "exit_code": -1,
+                    "error": "Test timed out",
+                    "duration_seconds": timeout_seconds,
+                    "passed": False,
+                }
+            )
         except Exception as e:
-            results.append({
-                "command": test["command"],
-                "type": test["type"],
-                "exit_code": -1,
-                "error": str(e),
-                "duration_seconds": time.time() - start_time,
-                "passed": False,
-            })
+            results.append(
+                {
+                    "command": test["command"],
+                    "type": test["type"],
+                    "exit_code": -1,
+                    "error": str(e),
+                    "duration_seconds": time.time() - start_time,
+                    "passed": False,
+                }
+            )
 
     # Update job status
     with _lock:

@@ -16,8 +16,7 @@ class TestExtractArtifacts:
 
     def test_extracts_commit_hashes(self):
         text = (
-            "Created commit abc1234 and pushed to remote.\n"
-            "Commit def5678901 merged."
+            "Created commit abc1234 and pushed to remote.\n" "Commit def5678901 merged."
         )
         artifacts = extract_artifacts(text)
         assert "commits" in artifacts
@@ -114,12 +113,8 @@ class TestSummarizeResponse:
         """Responses over threshold trigger Haiku summarization."""
         long_text = "Detailed work output. " * 200
 
-        mock_haiku = AsyncMock(
-            return_value="Summary: did the work. `abc1234`"
-        )
-        with patch(
-            "bridge.summarizer._summarize_with_haiku", mock_haiku
-        ):
+        mock_haiku = AsyncMock(return_value="Summary: did the work. `abc1234`")
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
             result = await summarize_response(long_text)
 
         assert result.was_summarized is True
@@ -132,13 +127,10 @@ class TestSummarizeResponse:
         long_text = "Detailed work output. " * 200
 
         mock_haiku = AsyncMock(return_value=None)
-        mock_ollama = AsyncMock(
-            return_value="Ollama summary of work."
-        )
-        with patch(
-            "bridge.summarizer._summarize_with_haiku", mock_haiku
-        ), patch(
-            "bridge.summarizer._summarize_with_ollama", mock_ollama
+        mock_ollama = AsyncMock(return_value="Ollama summary of work.")
+        with (
+            patch("bridge.summarizer._summarize_with_haiku", mock_haiku),
+            patch("bridge.summarizer._summarize_with_ollama", mock_ollama),
         ):
             result = await summarize_response(long_text)
 
@@ -154,10 +146,9 @@ class TestSummarizeResponse:
 
         mock_haiku = AsyncMock(return_value=None)
         mock_ollama = AsyncMock(return_value=None)
-        with patch(
-            "bridge.summarizer._summarize_with_haiku", mock_haiku
-        ), patch(
-            "bridge.summarizer._summarize_with_ollama", mock_ollama
+        with (
+            patch("bridge.summarizer._summarize_with_haiku", mock_haiku),
+            patch("bridge.summarizer._summarize_with_ollama", mock_ollama),
         ):
             result = await summarize_response(long_text)
 
@@ -171,9 +162,7 @@ class TestSummarizeResponse:
         long_text = "Output line.\n" * 500
 
         mock_haiku = AsyncMock(return_value="Summary of work.")
-        with patch(
-            "bridge.summarizer._summarize_with_haiku", mock_haiku
-        ):
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
             result = await summarize_response(long_text)
 
         assert result.full_output_file is not None
@@ -190,9 +179,7 @@ class TestSummarizeResponse:
         text = "x" * 2000  # Over 1500, under 3000
 
         mock_haiku = AsyncMock(return_value="Short summary.")
-        with patch(
-            "bridge.summarizer._summarize_with_haiku", mock_haiku
-        ):
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
             result = await summarize_response(text)
 
         assert result.full_output_file is None
@@ -209,43 +196,45 @@ class TestSummarizeResponseIntegration:
     )
     async def test_real_haiku_summarization(self):
         """Test actual Haiku produces a concise PM-style summary."""
-        agent_output = "\n\n".join([
-            "I've completed the requested changes to the response "
-            "summarization system. Here's a detailed breakdown:",
-            "First, I analyzed the existing codebase. I read through "
-            "bridge/telegram_bridge.py, paying special attention to "
-            "send_response_with_files() at line 1499. The current "
-            "flow hard-truncates at 4000 chars, losing commit "
-            "hashes, file lists, and test results.",
-            "I reviewed agent/sdk_client.py to understand how raw "
-            "responses are collected from the Claude Agent SDK. The "
-            "query() method concatenates all AssistantMessage text "
-            "blocks, producing very long outputs.",
-            "I examined agent/completion.py and its format_summary() "
-            "method. While useful, it's a separate concern.",
-            "I created bridge/summarizer.py with components:\n"
-            "1. extract_artifacts() - Regex extraction of commits, "
-            "URLs, file paths, test results, errors\n"
-            "2. summarize_response() - Async Haiku summarization\n"
-            "3. SummarizedResponse dataclass",
-            "The summarizer follows a tiered approach:\n"
-            "- Under 1500 chars: passed through unchanged\n"
-            "- 1500-3000 chars: summarized via Haiku\n"
-            "- Over 3000 chars: summarized + full output as file",
-            "Changes made:\nmodified: bridge/telegram_bridge.py\n"
-            "created: bridge/summarizer.py\n"
-            "created: tests/test_summarizer.py",
-            "Test suite results: 17 passed, 0 failed",
-            "Created commit a1b2c3d and pushed to origin/main.\n"
-            "PR: https://github.com/org/repo/pull/99",
-            "The implementation handles all edge cases including "
-            "API failures, empty responses, and concise responses.",
-            "I also verified the existing test suite still passes "
-            "after the changes. No regressions were introduced. "
-            "The bridge restart was tested manually and confirmed "
-            "working. Logs show the summarizer activating correctly "
-            "for responses exceeding the threshold.",
-        ])
+        agent_output = "\n\n".join(
+            [
+                "I've completed the requested changes to the response "
+                "summarization system. Here's a detailed breakdown:",
+                "First, I analyzed the existing codebase. I read through "
+                "bridge/telegram_bridge.py, paying special attention to "
+                "send_response_with_files() at line 1499. The current "
+                "flow hard-truncates at 4000 chars, losing commit "
+                "hashes, file lists, and test results.",
+                "I reviewed agent/sdk_client.py to understand how raw "
+                "responses are collected from the Claude Agent SDK. The "
+                "query() method concatenates all AssistantMessage text "
+                "blocks, producing very long outputs.",
+                "I examined agent/completion.py and its format_summary() "
+                "method. While useful, it's a separate concern.",
+                "I created bridge/summarizer.py with components:\n"
+                "1. extract_artifacts() - Regex extraction of commits, "
+                "URLs, file paths, test results, errors\n"
+                "2. summarize_response() - Async Haiku summarization\n"
+                "3. SummarizedResponse dataclass",
+                "The summarizer follows a tiered approach:\n"
+                "- Under 1500 chars: passed through unchanged\n"
+                "- 1500-3000 chars: summarized via Haiku\n"
+                "- Over 3000 chars: summarized + full output as file",
+                "Changes made:\nmodified: bridge/telegram_bridge.py\n"
+                "created: bridge/summarizer.py\n"
+                "created: tests/test_summarizer.py",
+                "Test suite results: 17 passed, 0 failed",
+                "Created commit a1b2c3d and pushed to origin/main.\n"
+                "PR: https://github.com/org/repo/pull/99",
+                "The implementation handles all edge cases including "
+                "API failures, empty responses, and concise responses.",
+                "I also verified the existing test suite still passes "
+                "after the changes. No regressions were introduced. "
+                "The bridge restart was tested manually and confirmed "
+                "working. Logs show the summarizer activating correctly "
+                "for responses exceeding the threshold.",
+            ]
+        )
 
         result = await summarize_response(agent_output)
 

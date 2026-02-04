@@ -29,7 +29,7 @@ class TestStoreMessage:
             chat_id="test_chat",
             content="Hello, world!",
             sender="user1",
-            db_path=db_path
+            db_path=db_path,
         )
 
         assert result.get("stored") is True
@@ -44,7 +44,7 @@ class TestStoreMessage:
             chat_id="test_chat",
             content="Test message",
             timestamp=timestamp,
-            db_path=db_path
+            db_path=db_path,
         )
 
         assert result.get("stored") is True
@@ -58,7 +58,7 @@ class TestStoreMessage:
                 chat_id="test_chat",
                 content=f"Content for {msg_type}",
                 message_type=msg_type,
-                db_path=db_path
+                db_path=db_path,
             )
             assert result.get("stored") is True
 
@@ -84,7 +84,9 @@ class TestSearchHistory:
         # Store some messages
         store_message(chat_id="chat1", content="Hello Python world", db_path=db_path)
         store_message(chat_id="chat1", content="JavaScript is great", db_path=db_path)
-        store_message(chat_id="chat1", content="Python for data science", db_path=db_path)
+        store_message(
+            chat_id="chat1", content="Python for data science", db_path=db_path
+        )
 
         result = search_history("Python", chat_id="chat1", db_path=db_path)
 
@@ -98,9 +100,13 @@ class TestSearchHistory:
 
         # Store many messages
         for i in range(10):
-            store_message(chat_id="chat1", content=f"Message {i} about Python", db_path=db_path)
+            store_message(
+                chat_id="chat1", content=f"Message {i} about Python", db_path=db_path
+            )
 
-        result = search_history("Python", chat_id="chat1", max_results=3, db_path=db_path)
+        result = search_history(
+            "Python", chat_id="chat1", max_results=3, db_path=db_path
+        )
 
         assert "error" not in result
         assert len(result["results"]) <= 3
@@ -145,19 +151,19 @@ class TestGetRecentMessages:
             chat_id="chat1",
             content="First message",
             timestamp=base_time - timedelta(hours=2),
-            db_path=db_path
+            db_path=db_path,
         )
         store_message(
             chat_id="chat1",
             content="Second message",
             timestamp=base_time - timedelta(hours=1),
-            db_path=db_path
+            db_path=db_path,
         )
         store_message(
             chat_id="chat1",
             content="Third message",
             timestamp=base_time,
-            db_path=db_path
+            db_path=db_path,
         )
 
         result = get_recent_messages("chat1", limit=3, db_path=db_path)
@@ -195,9 +201,15 @@ class TestGetChatStats:
         """Test stats with messages."""
         db_path = tmp_path / "test.db"
 
-        store_message(chat_id="chat1", content="Message 1", sender="user1", db_path=db_path)
-        store_message(chat_id="chat1", content="Message 2", sender="user2", db_path=db_path)
-        store_message(chat_id="chat1", content="Message 3", sender="user1", db_path=db_path)
+        store_message(
+            chat_id="chat1", content="Message 1", sender="user1", db_path=db_path
+        )
+        store_message(
+            chat_id="chat1", content="Message 2", sender="user2", db_path=db_path
+        )
+        store_message(
+            chat_id="chat1", content="Message 3", sender="user1", db_path=db_path
+        )
 
         result = get_chat_stats("chat1", db_path=db_path)
 
@@ -238,7 +250,7 @@ class TestStoreLink:
             url="https://example.com/article",
             sender="Tom",
             chat_id="chat1",
-            db_path=db_path
+            db_path=db_path,
         )
 
         assert result.get("stored") is True
@@ -253,7 +265,7 @@ class TestStoreLink:
             url="https://www.github.com/user/repo",
             sender="Tom",
             chat_id="chat1",
-            db_path=db_path
+            db_path=db_path,
         )
 
         assert result.get("domain") == "github.com"
@@ -268,7 +280,7 @@ class TestStoreLink:
             title="Test Article",
             description="A test article about testing",
             tags=["test", "article"],
-            db_path=db_path
+            db_path=db_path,
         )
 
         assert result.get("stored") is True
@@ -283,7 +295,7 @@ class TestStoreLink:
             sender="Tom",
             chat_id="chat1",
             message_id=100,
-            db_path=db_path
+            db_path=db_path,
         )
 
         # Store same link again with more metadata
@@ -293,7 +305,7 @@ class TestStoreLink:
             chat_id="chat1",
             message_id=100,
             title="Updated Title",
-            db_path=db_path
+            db_path=db_path,
         )
 
         # Should still only have one link
@@ -308,10 +320,20 @@ class TestSearchLinks:
         """Test searching links by text query."""
         db_path = tmp_path / "test.db"
 
-        store_link(url="https://python.org", sender="Tom", chat_id="chat1",
-                   title="Python Programming", db_path=db_path)
-        store_link(url="https://javascript.info", sender="Tom", chat_id="chat1",
-                   title="JavaScript Tutorial", db_path=db_path)
+        store_link(
+            url="https://python.org",
+            sender="Tom",
+            chat_id="chat1",
+            title="Python Programming",
+            db_path=db_path,
+        )
+        store_link(
+            url="https://javascript.info",
+            sender="Tom",
+            chat_id="chat1",
+            title="JavaScript Tutorial",
+            db_path=db_path,
+        )
 
         result = search_links(query="Python", db_path=db_path)
 
@@ -323,9 +345,24 @@ class TestSearchLinks:
         """Test filtering links by domain."""
         db_path = tmp_path / "test.db"
 
-        store_link(url="https://github.com/repo1", sender="Tom", chat_id="chat1", db_path=db_path)
-        store_link(url="https://github.com/repo2", sender="Tom", chat_id="chat1", db_path=db_path)
-        store_link(url="https://gitlab.com/repo", sender="Tom", chat_id="chat1", db_path=db_path)
+        store_link(
+            url="https://github.com/repo1",
+            sender="Tom",
+            chat_id="chat1",
+            db_path=db_path,
+        )
+        store_link(
+            url="https://github.com/repo2",
+            sender="Tom",
+            chat_id="chat1",
+            db_path=db_path,
+        )
+        store_link(
+            url="https://gitlab.com/repo",
+            sender="Tom",
+            chat_id="chat1",
+            db_path=db_path,
+        )
 
         result = search_links(domain="github.com", db_path=db_path)
 
@@ -337,8 +374,15 @@ class TestSearchLinks:
         """Test filtering links by sender."""
         db_path = tmp_path / "test.db"
 
-        store_link(url="https://example.com/1", sender="Tom", chat_id="chat1", db_path=db_path)
-        store_link(url="https://example.com/2", sender="Alice", chat_id="chat1", db_path=db_path)
+        store_link(
+            url="https://example.com/1", sender="Tom", chat_id="chat1", db_path=db_path
+        )
+        store_link(
+            url="https://example.com/2",
+            sender="Alice",
+            chat_id="chat1",
+            db_path=db_path,
+        )
 
         result = search_links(sender="Tom", db_path=db_path)
 
@@ -350,8 +394,12 @@ class TestSearchLinks:
         """Test filtering links by status."""
         db_path = tmp_path / "test.db"
 
-        store_link(url="https://example.com/1", sender="Tom", chat_id="chat1", db_path=db_path)
-        store_link(url="https://example.com/2", sender="Tom", chat_id="chat1", db_path=db_path)
+        store_link(
+            url="https://example.com/1", sender="Tom", chat_id="chat1", db_path=db_path
+        )
+        store_link(
+            url="https://example.com/2", sender="Tom", chat_id="chat1", db_path=db_path
+        )
 
         # Update one to read status
         links = list_links(db_path=db_path)
@@ -380,7 +428,12 @@ class TestListLinks:
         db_path = tmp_path / "test.db"
 
         for i in range(10):
-            store_link(url=f"https://example.com/{i}", sender="Tom", chat_id="chat1", db_path=db_path)
+            store_link(
+                url=f"https://example.com/{i}",
+                sender="Tom",
+                chat_id="chat1",
+                db_path=db_path,
+            )
 
         # First page
         result1 = list_links(limit=3, offset=0, db_path=db_path)
@@ -406,7 +459,9 @@ class TestUpdateLink:
         """Test updating link status."""
         db_path = tmp_path / "test.db"
 
-        store_link(url="https://example.com", sender="Tom", chat_id="chat1", db_path=db_path)
+        store_link(
+            url="https://example.com", sender="Tom", chat_id="chat1", db_path=db_path
+        )
         links = list_links(db_path=db_path)
         link_id = links["links"][0]["id"]
 
@@ -422,7 +477,9 @@ class TestUpdateLink:
         """Test updating link tags."""
         db_path = tmp_path / "test.db"
 
-        store_link(url="https://example.com", sender="Tom", chat_id="chat1", db_path=db_path)
+        store_link(
+            url="https://example.com", sender="Tom", chat_id="chat1", db_path=db_path
+        )
         links = list_links(db_path=db_path)
         link_id = links["links"][0]["id"]
 
@@ -437,11 +494,15 @@ class TestUpdateLink:
         """Test updating link notes."""
         db_path = tmp_path / "test.db"
 
-        store_link(url="https://example.com", sender="Tom", chat_id="chat1", db_path=db_path)
+        store_link(
+            url="https://example.com", sender="Tom", chat_id="chat1", db_path=db_path
+        )
         links = list_links(db_path=db_path)
         link_id = links["links"][0]["id"]
 
-        result = update_link(link_id, notes="Great article about testing", db_path=db_path)
+        result = update_link(
+            link_id, notes="Great article about testing", db_path=db_path
+        )
 
         assert result.get("updated") is True
 
@@ -469,9 +530,21 @@ class TestGetLinkStats:
         """Test stats with links."""
         db_path = tmp_path / "test.db"
 
-        store_link(url="https://github.com/repo1", sender="Tom", chat_id="chat1", db_path=db_path)
-        store_link(url="https://github.com/repo2", sender="Tom", chat_id="chat1", db_path=db_path)
-        store_link(url="https://python.org", sender="Alice", chat_id="chat1", db_path=db_path)
+        store_link(
+            url="https://github.com/repo1",
+            sender="Tom",
+            chat_id="chat1",
+            db_path=db_path,
+        )
+        store_link(
+            url="https://github.com/repo2",
+            sender="Tom",
+            chat_id="chat1",
+            db_path=db_path,
+        )
+        store_link(
+            url="https://python.org", sender="Alice", chat_id="chat1", db_path=db_path
+        )
 
         result = get_link_stats(db_path=db_path)
 
@@ -486,9 +559,19 @@ class TestGetLinkStats:
         db_path = tmp_path / "test.db"
 
         for i in range(5):
-            store_link(url=f"https://github.com/repo{i}", sender="Tom", chat_id="chat1", db_path=db_path)
+            store_link(
+                url=f"https://github.com/repo{i}",
+                sender="Tom",
+                chat_id="chat1",
+                db_path=db_path,
+            )
         for i in range(3):
-            store_link(url=f"https://python.org/page{i}", sender="Tom", chat_id="chat1", db_path=db_path)
+            store_link(
+                url=f"https://python.org/page{i}",
+                sender="Tom",
+                chat_id="chat1",
+                db_path=db_path,
+            )
 
         result = get_link_stats(db_path=db_path)
 
@@ -518,7 +601,7 @@ class TestGetLinkByUrl:
             url="https://example.com/article",
             sender="Tom",
             chat_id="chat1",
-            db_path=db_path
+            db_path=db_path,
         )
 
         result = get_link_by_url("https://example.com/article", db_path=db_path)
@@ -536,14 +619,16 @@ class TestGetLinkByUrl:
             sender="Tom",
             chat_id="chat1",
             ai_summary="This is a test article about Python programming.",
-            db_path=db_path
+            db_path=db_path,
         )
 
         result = get_link_by_url("https://example.com/article", db_path=db_path)
 
         assert result is not None
         assert result["url"] == "https://example.com/article"
-        assert result["ai_summary"] == "This is a test article about Python programming."
+        assert (
+            result["ai_summary"] == "This is a test article about Python programming."
+        )
 
     def test_get_link_by_url_respects_max_age(self, tmp_path):
         """Test that max_age_hours filter works."""
@@ -557,23 +642,18 @@ class TestGetLinkByUrl:
             chat_id="chat1",
             timestamp=old_time,
             ai_summary="Old summary",
-            db_path=db_path
+            db_path=db_path,
         )
 
         # With 24 hour max age, should not find the old link
         result = get_link_by_url(
-            "https://example.com/article",
-            max_age_hours=24,
-            db_path=db_path
+            "https://example.com/article", max_age_hours=24, db_path=db_path
         )
 
         assert result is None
 
         # Without max age, should find it
-        result_no_age = get_link_by_url(
-            "https://example.com/article",
-            db_path=db_path
-        )
+        result_no_age = get_link_by_url("https://example.com/article", db_path=db_path)
 
         assert result_no_age is not None
         assert result_no_age["ai_summary"] == "Old summary"
@@ -593,7 +673,7 @@ class TestGetLinkByUrl:
             message_id=100,
             timestamp=older_time,
             ai_summary="Older summary",
-            db_path=db_path
+            db_path=db_path,
         )
 
         store_link(
@@ -603,7 +683,7 @@ class TestGetLinkByUrl:
             message_id=200,  # Different message ID to allow storing
             timestamp=newer_time,
             ai_summary="Newer summary",
-            db_path=db_path
+            db_path=db_path,
         )
 
         result = get_link_by_url("https://example.com/article", db_path=db_path)

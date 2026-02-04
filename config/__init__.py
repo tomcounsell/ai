@@ -40,16 +40,13 @@ __all__ = [
     "WorkspaceSettings",
     "PerformanceSettings",
     "LogLevel",
-    
     # Global settings instance
     "settings",
-    
     # Configuration loader
     "ConfigLoader",
     "WorkspaceConfig",
     "ConfigurationError",
     "config_loader",
-    
     # Convenience functions
     "load_workspace_config",
     "validate_configuration",

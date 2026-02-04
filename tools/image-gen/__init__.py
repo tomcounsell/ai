@@ -53,7 +53,9 @@ def generate_image(
             },
             json={
                 "model": model,
-                "messages": [{"role": "user", "content": f"Generate an image: {prompt}"}],
+                "messages": [
+                    {"role": "user", "content": f"Generate an image: {prompt}"}
+                ],
             },
             timeout=120,
         )
@@ -122,9 +124,17 @@ def generate_image(
     except requests.exceptions.Timeout:
         return {"error": "Request timed out", "prompt": prompt, "model": model}
     except requests.exceptions.RequestException as e:
-        return {"error": f"API request failed: {str(e)}", "prompt": prompt, "model": model}
+        return {
+            "error": f"API request failed: {str(e)}",
+            "prompt": prompt,
+            "model": model,
+        }
     except Exception as e:
-        return {"error": f"Unexpected error: {str(e)}", "prompt": prompt, "model": model}
+        return {
+            "error": f"Unexpected error: {str(e)}",
+            "prompt": prompt,
+            "model": model,
+        }
 
 
 def generate_images(

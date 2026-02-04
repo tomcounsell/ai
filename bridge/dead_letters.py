@@ -50,9 +50,7 @@ async def replay_dead_letters(client) -> int:
         try:
             if len(text) > 4096:
                 text = text[:4093] + "..."
-            await client.send_message(
-                int(chat_id), text, reply_to=letter.reply_to
-            )
+            await client.send_message(int(chat_id), text, reply_to=letter.reply_to)
             await letter.async_delete()
             replayed += 1
             logger.info(f"Replayed dead letter to chat {chat_id}")

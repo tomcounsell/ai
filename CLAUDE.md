@@ -289,6 +289,12 @@ agent-browser --help                      # Full command list
 
 **Workflows**
 Multi-step processes that combine tools for common tasks:
+- **Review workflow** (`/review`): validate implementation -> capture screenshots -> classify issues -> generate report
+  - Uses `/prepare_app` to start services
+  - Uses `agent-browser` for UI screenshots
+  - Compares implementation against spec files
+  - Outputs structured JSON report with severity-classified issues
+  - Screenshots stored in `agents/{workflow_id}/review/review_img/`
 - Code review workflow: fetch PR -> analyze changes -> check tests -> post review
 - Incident response: check Sentry -> identify cause -> create fix -> deploy
 - Research workflow: search web -> summarize -> store in Notion
@@ -296,6 +302,8 @@ Multi-step processes that combine tools for common tasks:
 **Skills (via Clawdbot)**
 Higher-level capabilities with clear invocation patterns:
 - `/commit` - stage, commit, and push changes
+- `/review` - validate implementation against spec with screenshots
+- `/prepare_app` - start application services for testing/review
 - `/review-pr` - comprehensive PR review
 - `/search` - web search with context
 - `/prime` - unified conversational development environment
@@ -578,6 +586,126 @@ ai/                              # This repository (Valor's codebase)
 ## New Machine Setup
 
 Run `/setup` to configure a new machine. See `.claude/commands/setup.md` for the full flow.
+
+---
+
+## Review Workflow
+
+The `/review` command validates implementations against specifications and captures visual proof via screenshots.
+
+### When to Use
+
+Run `/review` at these key points:
+- After completing feature implementation
+- Before creating a pull request
+- When validating UI changes visually
+- To generate structured review reports with issue severity classification
+
+### How It Works
+
+**1. Context Gathering**
+- Detects current git branch and workflow ID
+- Analyzes git diff to identify changes
+- Locates matching spec file in `specs/*.md`
+
+**2. Spec Validation**
+- Reads specification requirements
+- Compares implementation against acceptance criteria
+- Checks for edge cases and error handling
+
+**3. Screenshot Capture** (for UI changes)
+- Uses `/prepare_app` to start application services
+- Uses `agent-browser` to navigate critical UI paths
+- Captures 1-5 screenshots with descriptive names
+- Stores in `agents/{workflow_id}/review/review_img/`
+
+**4. Issue Classification**
+- **blocker**: Must fix before release (breaks core functionality, security issues)
+- **tech_debt**: Should fix but doesn't block (code quality, missing tests)
+- **skippable**: Nice to have (UI polish, minor improvements)
+
+**5. Report Generation**
+- Creates structured JSON report at `agents/{workflow_id}/review/report.json`
+- Includes metrics, issue list, screenshot references
+- Provides console summary with actionable feedback
+
+### Screenshot Naming Convention
+
+```
+{nn}_{descriptive_name}.png
+
+Examples:
+01_main_dashboard.png
+02_user_profile.png
+03_error_state.png
+04_responsive_mobile.png
+05_final_state.png
+```
+
+### Review Report Schema
+
+```json
+{
+  "workflow_id": "feature-name",
+  "spec_file": "specs/feature-name.md",
+  "branch": "feature/feature-name",
+  "timestamp": "2026-02-04T15:00:00Z",
+  "success": true,
+  "review_summary": "Brief summary of review findings",
+  "review_issues": [
+    {
+      "issue_number": 1,
+      "screenshot_path": "path/to/screenshot.png",
+      "description": "Clear issue description",
+      "resolution": "How to fix",
+      "severity": "blocker|tech_debt|skippable"
+    }
+  ],
+  "screenshots": ["path1.png", "path2.png"],
+  "metrics": {
+    "total_issues": 2,
+    "blockers": 1,
+    "tech_debt": 1,
+    "skippable": 0,
+    "screenshots_captured": 3,
+    "acceptance_criteria_met": "4/5"
+  }
+}
+```
+
+### Usage Examples
+
+```bash
+# Auto-detect workflow from branch
+/review
+
+# Specify workflow ID
+/review my-feature
+
+# Specify both workflow and spec
+/review my-feature specs/my-feature.md
+```
+
+### Integration Points
+
+- **`/prepare_app`**: Ensures application is running before screenshot capture
+- **`agent-browser`**: Handles browser automation and screenshot capture
+- **Git workflow**: Uses branch context for workflow identification
+- **Spec files**: Located in `specs/*.md` directory
+
+### Best Practices
+
+1. **Run review before creating PR**: Catch issues early in the workflow
+2. **Keep screenshots focused**: Capture critical user flows, not every pixel
+3. **Be specific in issue descriptions**: Make resolution steps clear and actionable
+4. **Classify severity honestly**: Don't downgrade blockers to ship faster
+5. **Document edge cases**: If spec doesn't cover it, note as tech_debt
+
+### Output Artifacts
+
+- Review report: `agents/{workflow_id}/review/report.json`
+- Screenshots: `agents/{workflow_id}/review/review_img/*.png`
+- Console summary: Immediate feedback on review status
 
 ---
 

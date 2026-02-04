@@ -10,6 +10,7 @@ from pathlib import Path
 @dataclass
 class GitPullResult:
     """Result of a git pull operation."""
+
     success: bool
     before_sha: str
     after_sha: str
@@ -23,6 +24,7 @@ class GitPullResult:
 @dataclass
 class UpgradePendingInfo:
     """Info about pending critical dependency upgrades."""
+
     pending: bool
     timestamp: str | None = None
     reason: str | None = None
@@ -69,6 +71,7 @@ def get_dirty_files(project_dir: Path, limit: int = 5) -> list[str]:
 def stash_changes(project_dir: Path) -> bool:
     """Stash uncommitted changes. Returns True if stash was created."""
     import datetime
+
     timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     msg = f"remote-update auto-stash {timestamp}"
 
@@ -126,7 +129,9 @@ def check_critical_dep_changes(project_dir: Path, before: str, after: str) -> li
     for line in result.stdout.split("\n"):
         # Look for added lines with pinned critical deps
         if line.startswith("+") and "==" in line:
-            if any(dep in line for dep in ["telethon", "anthropic", "claude-agent-sdk"]):
+            if any(
+                dep in line for dep in ["telethon", "anthropic", "claude-agent-sdk"]
+            ):
                 changes.append(line.strip())
 
     return changes
@@ -229,6 +234,7 @@ def clear_upgrade_pending(project_dir: Path) -> None:
 def set_upgrade_pending(project_dir: Path, reason: str) -> None:
     """Set the upgrade-pending flag."""
     import datetime
+
     flag_file = project_dir / "data" / "upgrade-pending"
     flag_file.parent.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -238,6 +244,7 @@ def set_upgrade_pending(project_dir: Path, reason: str) -> None:
 def set_restart_requested(project_dir: Path, commit_count: int) -> None:
     """Set the restart-requested flag for graceful bridge restart."""
     import datetime
+
     flag_file = project_dir / "data" / "restart-requested"
     flag_file.parent.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

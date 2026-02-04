@@ -15,6 +15,7 @@ class TestParamsInstallation:
     def test_import(self):
         """Tool can be imported."""
         from tools.test_params import generate_params
+
         assert callable(generate_params)
 
 
@@ -53,20 +54,12 @@ class TestGenerateParams:
     def test_complexity_levels(self):
         """Different complexity levels work."""
         for level in ["simple", "medium", "complex"]:
-            result = generate_params(
-                "api",
-                ["edge_cases"],
-                complexity_level=level
-            )
+            result = generate_params("api", ["edge_cases"], complexity_level=level)
             assert "error" not in result
 
     def test_num_variations(self):
         """Number of variations is respected."""
-        result = generate_params(
-            "api",
-            ["edge_cases"],
-            num_variations=3
-        )
+        result = generate_params("api", ["edge_cases"], num_variations=3)
 
         assert "error" not in result
 

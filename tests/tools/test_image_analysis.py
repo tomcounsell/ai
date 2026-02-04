@@ -39,9 +39,7 @@ class TestAnalyzeImageFromUrl:
     def test_analyze_url_image(self, temp_image_url, openrouter_api_key):
         """Test analyzing image from URL."""
         result = analyze_image(
-            temp_image_url,
-            analysis_types=["description"],
-            detail_level="minimal"
+            temp_image_url, analysis_types=["description"], detail_level="minimal"
         )
 
         if "error" not in result:
@@ -53,7 +51,7 @@ class TestAnalyzeImageFromUrl:
         result = analyze_image(
             temp_image_url,
             analysis_types=["description", "objects", "tags"],
-            detail_level="standard"
+            detail_level="standard",
         )
 
         if "error" not in result:
@@ -65,20 +63,14 @@ class TestAnalyzeImageDetailLevels:
 
     def test_minimal_detail(self, temp_image_url, openrouter_api_key):
         """Test minimal detail level."""
-        result = analyze_image(
-            temp_image_url,
-            detail_level="minimal"
-        )
+        result = analyze_image(temp_image_url, detail_level="minimal")
 
         if "error" not in result:
             assert result.get("detail_level") == "minimal"
 
     def test_comprehensive_detail(self, temp_image_url, openrouter_api_key):
         """Test comprehensive detail level."""
-        result = analyze_image(
-            temp_image_url,
-            detail_level="comprehensive"
-        )
+        result = analyze_image(temp_image_url, detail_level="comprehensive")
 
         if "error" not in result:
             assert result.get("detail_level") == "comprehensive"
@@ -89,20 +81,14 @@ class TestAnalyzeImageOutputFormats:
 
     def test_structured_format(self, temp_image_url, openrouter_api_key):
         """Test structured output format."""
-        result = analyze_image(
-            temp_image_url,
-            output_format="structured"
-        )
+        result = analyze_image(temp_image_url, output_format="structured")
 
         if "error" not in result:
             assert "raw_analysis" in result
 
     def test_accessibility_format(self, temp_image_url, openrouter_api_key):
         """Test accessibility output format."""
-        result = analyze_image(
-            temp_image_url,
-            output_format="accessibility"
-        )
+        result = analyze_image(temp_image_url, output_format="accessibility")
 
         if "error" not in result:
             assert "raw_analysis" in result
@@ -143,22 +129,32 @@ class TestAnalyzeImageFromFile:
         def create_minimal_png(width=10, height=10):
             """Create a minimal valid PNG file."""
             # PNG signature
-            signature = b'\x89PNG\r\n\x1a\n'
+            signature = b"\x89PNG\r\n\x1a\n"
 
             # IHDR chunk
-            ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
-            ihdr_crc = zlib.crc32(b'IHDR' + ihdr_data) & 0xffffffff
-            ihdr = struct.pack('>I', 13) + b'IHDR' + ihdr_data + struct.pack('>I', ihdr_crc)
+            ihdr_data = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+            ihdr_crc = zlib.crc32(b"IHDR" + ihdr_data) & 0xFFFFFFFF
+            ihdr = (
+                struct.pack(">I", 13)
+                + b"IHDR"
+                + ihdr_data
+                + struct.pack(">I", ihdr_crc)
+            )
 
             # IDAT chunk (minimal image data)
-            raw_data = b'\x00' * (width * 3 + 1) * height
+            raw_data = b"\x00" * (width * 3 + 1) * height
             compressed = zlib.compress(raw_data)
-            idat_crc = zlib.crc32(b'IDAT' + compressed) & 0xffffffff
-            idat = struct.pack('>I', len(compressed)) + b'IDAT' + compressed + struct.pack('>I', idat_crc)
+            idat_crc = zlib.crc32(b"IDAT" + compressed) & 0xFFFFFFFF
+            idat = (
+                struct.pack(">I", len(compressed))
+                + b"IDAT"
+                + compressed
+                + struct.pack(">I", idat_crc)
+            )
 
             # IEND chunk
-            iend_crc = zlib.crc32(b'IEND') & 0xffffffff
-            iend = struct.pack('>I', 0) + b'IEND' + struct.pack('>I', iend_crc)
+            iend_crc = zlib.crc32(b"IEND") & 0xFFFFFFFF
+            iend = struct.pack(">I", 0) + b"IEND" + struct.pack(">I", iend_crc)
 
             return signature + ihdr + idat + iend
 
@@ -166,9 +162,7 @@ class TestAnalyzeImageFromFile:
         test_image.write_bytes(create_minimal_png())
 
         result = analyze_image(
-            str(test_image),
-            analysis_types=["description"],
-            detail_level="minimal"
+            str(test_image), analysis_types=["description"], detail_level="minimal"
         )
 
         assert result.get("image_source") == str(test_image)
@@ -177,7 +171,7 @@ class TestAnalyzeImageFromFile:
         """Test that JPG extension is recognized."""
         test_image = tmp_path / "test.jpg"
         # Create minimal JPEG (not valid but tests extension handling)
-        test_image.write_bytes(b'\xff\xd8\xff\xe0\x00\x10JFIF\x00')
+        test_image.write_bytes(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00")
 
         result = analyze_image(str(test_image))
 

@@ -11,6 +11,7 @@ from pathlib import Path
 @dataclass
 class DepSyncResult:
     """Result of dependency sync operation."""
+
     success: bool
     method: str  # "uv", "pip", or "skipped"
     output: str
@@ -20,6 +21,7 @@ class DepSyncResult:
 @dataclass
 class VersionInfo:
     """Installed version of a package."""
+
     package: str
     version: str | None
     expected: str | None = None
@@ -231,12 +233,14 @@ def verify_critical_versions(project_dir: Path) -> list[VersionInfo]:
         elif expected and not installed:
             matches = False
 
-        results.append(VersionInfo(
-            package=dep,
-            version=installed,
-            expected=expected,
-            matches=matches,
-        ))
+        results.append(
+            VersionInfo(
+                package=dep,
+                version=installed,
+                expected=expected,
+                matches=matches,
+            )
+        )
 
     return results
 

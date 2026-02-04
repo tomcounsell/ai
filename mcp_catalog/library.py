@@ -15,6 +15,7 @@ from typing import Any
 
 class AuthStatus(Enum):
     """Authentication status for MCP servers."""
+
     READY = "ready"
     NEEDS_SETUP = "needs_setup"
     ERROR = "error"
@@ -23,6 +24,7 @@ class AuthStatus(Enum):
 @dataclass
 class MCPServer:
     """Represents an MCP server in the catalog."""
+
     mcp_id: str
     name: str
     category: str
@@ -126,7 +128,8 @@ class MCPLibrary:
         """
         self._ensure_loaded()
         return [
-            server for server in self.servers.values()
+            server
+            for server in self.servers.values()
             if capability in server.capabilities
         ]
 
@@ -282,7 +285,8 @@ class MCPLibrary:
         """
         self._ensure_loaded()
         return [
-            server for server in self.servers.values()
+            server
+            for server in self.servers.values()
             if self.check_auth_status(server.mcp_id) != AuthStatus.READY
         ]
 

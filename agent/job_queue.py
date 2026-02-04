@@ -555,7 +555,9 @@ async def _execute_job(job: Job) -> None:
     while task.is_running:
         await asyncio.sleep(2)
         if time.time() - last_heartbeat >= CALENDAR_HEARTBEAT_INTERVAL:
-            asyncio.create_task(_calendar_heartbeat(job.project_key, project=job.project_key))
+            asyncio.create_task(
+                _calendar_heartbeat(job.project_key, project=job.project_key)
+            )
             last_heartbeat = time.time()
 
     # Update session status in Redis

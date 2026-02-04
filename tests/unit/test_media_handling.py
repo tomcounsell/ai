@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock, patch
 
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from bridge.telegram_bridge import (
@@ -126,18 +127,18 @@ class TestMediaExtensions:
 
     def test_voice_extensions_comprehensive(self):
         """Voice extensions include common audio formats."""
-        assert '.ogg' in VOICE_EXTENSIONS
-        assert '.mp3' in VOICE_EXTENSIONS
-        assert '.wav' in VOICE_EXTENSIONS
-        assert '.opus' in VOICE_EXTENSIONS
+        assert ".ogg" in VOICE_EXTENSIONS
+        assert ".mp3" in VOICE_EXTENSIONS
+        assert ".wav" in VOICE_EXTENSIONS
+        assert ".opus" in VOICE_EXTENSIONS
 
     def test_vision_extensions_comprehensive(self):
         """Vision extensions include common image formats."""
-        assert '.png' in VISION_EXTENSIONS
-        assert '.jpg' in VISION_EXTENSIONS
-        assert '.jpeg' in VISION_EXTENSIONS
-        assert '.gif' in VISION_EXTENSIONS
-        assert '.webp' in VISION_EXTENSIONS
+        assert ".png" in VISION_EXTENSIONS
+        assert ".jpg" in VISION_EXTENSIONS
+        assert ".jpeg" in VISION_EXTENSIONS
+        assert ".gif" in VISION_EXTENSIONS
+        assert ".webp" in VISION_EXTENSIONS
 
 
 class TestMediaDir:
@@ -149,8 +150,8 @@ class TestMediaDir:
 
     def test_media_dir_is_in_data(self):
         """Media directory should be under data/."""
-        assert 'data' in str(MEDIA_DIR)
-        assert 'media' in str(MEDIA_DIR)
+        assert "data" in str(MEDIA_DIR)
+        assert "media" in str(MEDIA_DIR)
 
 
 class TestTranscribeVoiceIntegration:
@@ -161,7 +162,7 @@ class TestTranscribeVoiceIntegration:
         """Transcription returns None when no API key is set."""
         from bridge.telegram_bridge import transcribe_voice
 
-        with patch.dict('os.environ', {'OPENAI_API_KEY': ''}):
+        with patch.dict("os.environ", {"OPENAI_API_KEY": ""}):
             # Reload to pick up env change
             result = await transcribe_voice(Path("/tmp/fake.ogg"))
             assert result is None
@@ -196,7 +197,7 @@ class TestProcessIncomingMedia:
         message.media = MagicMock(spec=MessageMediaPhoto)
         message.media.__class__ = MessageMediaPhoto
 
-        with patch('bridge.telegram_bridge.download_media', return_value=None):
+        with patch("bridge.telegram_bridge.download_media", return_value=None):
             description, files = await process_incoming_media(client, message)
             assert "download failed" in description.lower()
             assert files == []
@@ -214,6 +215,7 @@ class TestDescribeImage:
         """Check if Ollama is available with llama3.2-vision model."""
         try:
             import httpx
+
             response = httpx.get("http://localhost:11434/api/tags", timeout=5.0)
             if response.status_code != 200:
                 pytest.skip("Ollama not responding")
@@ -232,19 +234,29 @@ class TestDescribeImage:
 
         def create_minimal_png(width=100, height=100):
             """Create a minimal valid PNG file."""
-            signature = b'\x89PNG\r\n\x1a\n'
+            signature = b"\x89PNG\r\n\x1a\n"
 
-            ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
-            ihdr_crc = zlib.crc32(b'IHDR' + ihdr_data) & 0xffffffff
-            ihdr = struct.pack('>I', 13) + b'IHDR' + ihdr_data + struct.pack('>I', ihdr_crc)
+            ihdr_data = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+            ihdr_crc = zlib.crc32(b"IHDR" + ihdr_data) & 0xFFFFFFFF
+            ihdr = (
+                struct.pack(">I", 13)
+                + b"IHDR"
+                + ihdr_data
+                + struct.pack(">I", ihdr_crc)
+            )
 
-            raw_data = b'\x00' * (width * 3 + 1) * height
+            raw_data = b"\x00" * (width * 3 + 1) * height
             compressed = zlib.compress(raw_data)
-            idat_crc = zlib.crc32(b'IDAT' + compressed) & 0xffffffff
-            idat = struct.pack('>I', len(compressed)) + b'IDAT' + compressed + struct.pack('>I', idat_crc)
+            idat_crc = zlib.crc32(b"IDAT" + compressed) & 0xFFFFFFFF
+            idat = (
+                struct.pack(">I", len(compressed))
+                + b"IDAT"
+                + compressed
+                + struct.pack(">I", idat_crc)
+            )
 
-            iend_crc = zlib.crc32(b'IEND') & 0xffffffff
-            iend = struct.pack('>I', 0) + b'IEND' + struct.pack('>I', iend_crc)
+            iend_crc = zlib.crc32(b"IEND") & 0xFFFFFFFF
+            iend = struct.pack(">I", 0) + b"IEND" + struct.pack(">I", iend_crc)
 
             return signature + ihdr + idat + iend
 
@@ -261,21 +273,26 @@ class TestDescribeImage:
         width, height = 50, 50
 
         # Create a red square
-        signature = b'\x89PNG\r\n\x1a\n'
+        signature = b"\x89PNG\r\n\x1a\n"
 
-        ihdr_data = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
-        ihdr_crc = zlib.crc32(b'IHDR' + ihdr_data) & 0xffffffff
-        ihdr = struct.pack('>I', 13) + b'IHDR' + ihdr_data + struct.pack('>I', ihdr_crc)
+        ihdr_data = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+        ihdr_crc = zlib.crc32(b"IHDR" + ihdr_data) & 0xFFFFFFFF
+        ihdr = struct.pack(">I", 13) + b"IHDR" + ihdr_data + struct.pack(">I", ihdr_crc)
 
         # Red pixels (RGB)
-        row_data = b'\x00' + (b'\xff\x00\x00' * width)  # Filter byte + red pixels
+        row_data = b"\x00" + (b"\xff\x00\x00" * width)  # Filter byte + red pixels
         raw_data = row_data * height
         compressed = zlib.compress(raw_data)
-        idat_crc = zlib.crc32(b'IDAT' + compressed) & 0xffffffff
-        idat = struct.pack('>I', len(compressed)) + b'IDAT' + compressed + struct.pack('>I', idat_crc)
+        idat_crc = zlib.crc32(b"IDAT" + compressed) & 0xFFFFFFFF
+        idat = (
+            struct.pack(">I", len(compressed))
+            + b"IDAT"
+            + compressed
+            + struct.pack(">I", idat_crc)
+        )
 
-        iend_crc = zlib.crc32(b'IEND') & 0xffffffff
-        iend = struct.pack('>I', 0) + b'IEND' + struct.pack('>I', iend_crc)
+        iend_crc = zlib.crc32(b"IEND") & 0xFFFFFFFF
+        iend = struct.pack(">I", 0) + b"IEND" + struct.pack(">I", iend_crc)
 
         test_image = tmp_path / "red_square.png"
         test_image.write_bytes(signature + ihdr + idat + iend)

@@ -37,7 +37,9 @@ def build_group_to_project_map(config: dict, active_projects: list[str]) -> dict
     return group_map
 
 
-def find_project_for_chat(chat_title: str | None, group_to_project: dict) -> dict | None:
+def find_project_for_chat(
+    chat_title: str | None, group_to_project: dict
+) -> dict | None:
     """Find which project a chat belongs to."""
     if not chat_title:
         return None
@@ -327,24 +329,32 @@ class TestCleanMessage:
 
     def test_removes_at_mention(self, valor_project):
         """Should remove @valor mention."""
-        result = clean_message("@valor please help me", valor_project, self.DEFAULT_MENTIONS)
+        result = clean_message(
+            "@valor please help me", valor_project, self.DEFAULT_MENTIONS
+        )
         assert result == "please help me"
 
     def test_removes_hey_mention(self, valor_project):
         """Should remove 'hey valor' mention."""
-        result = clean_message("hey valor can you help?", valor_project, self.DEFAULT_MENTIONS)
+        result = clean_message(
+            "hey valor can you help?", valor_project, self.DEFAULT_MENTIONS
+        )
         # "valor" gets removed first, leaving "hey  can you help?"
         # This is expected - the important thing is "valor" is gone
         assert "valor" not in result.lower()
 
     def test_removes_plain_mention(self, valor_project):
         """Should remove plain 'valor' mention."""
-        result = clean_message("valor, what is this?", valor_project, self.DEFAULT_MENTIONS)
+        result = clean_message(
+            "valor, what is this?", valor_project, self.DEFAULT_MENTIONS
+        )
         assert result == ", what is this?"
 
     def test_case_insensitive_removal(self, valor_project):
         """Mention removal should be case-insensitive."""
-        result = clean_message("HEY VALOR can you help?", valor_project, self.DEFAULT_MENTIONS)
+        result = clean_message(
+            "HEY VALOR can you help?", valor_project, self.DEFAULT_MENTIONS
+        )
         # "VALOR" gets removed (case-insensitive), the important thing is it's gone
         assert "valor" not in result.lower()
 
@@ -357,7 +367,9 @@ class TestCleanMessage:
 
     def test_preserves_non_mention_text(self, valor_project):
         """Should preserve text that isn't a mention."""
-        result = clean_message("@valor fix the evaluation code", valor_project, self.DEFAULT_MENTIONS)
+        result = clean_message(
+            "@valor fix the evaluation code", valor_project, self.DEFAULT_MENTIONS
+        )
         assert "fix the evaluation code" in result
 
     def test_no_project_uses_defaults(self):
@@ -464,7 +476,9 @@ class TestMessageRouting:
 
     def test_django_group_any_message_responds(self, sample_config, django_project):
         """Any message in Django group (respond_to_all) should respond."""
-        group_map = build_group_to_project_map(sample_config, ["django-project-template"])
+        group_map = build_group_to_project_map(
+            sample_config, ["django-project-template"]
+        )
         project = find_project_for_chat("Dev: Django Template", group_map)
 
         assert project is not None

@@ -21,6 +21,7 @@ WorkStatus = Literal["CLEAN", "IN_PROGRESS", "BLOCKED"]
 @dataclass
 class BranchState:
     """Current state of the git repository."""
+
     current_branch: str
     is_main: bool
     has_uncommitted_changes: bool
@@ -37,7 +38,7 @@ def get_current_branch(working_dir: Path) -> str:
             capture_output=True,
             text=True,
             timeout=5,
-            check=True
+            check=True,
         )
         return result.stdout.strip()
     except Exception as e:
@@ -53,7 +54,7 @@ def has_uncommitted_changes(working_dir: Path) -> bool:
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=5
+            timeout=5,
         )
         return bool(result.stdout.strip())
     except Exception as e:
@@ -115,24 +116,22 @@ def sanitize_branch_name(description: str) -> str:
     name = description.lower()
 
     # Remove special characters, keep alphanumeric and spaces
-    name = re.sub(r'[^a-z0-9\s-]', '', name)
+    name = re.sub(r"[^a-z0-9\s-]", "", name)
 
     # Replace spaces with hyphens
-    name = re.sub(r'\s+', '-', name)
+    name = re.sub(r"\s+", "-", name)
 
     # Remove consecutive hyphens
-    name = re.sub(r'-+', '-', name)
+    name = re.sub(r"-+", "-", name)
 
     # Trim and limit length
-    name = name.strip('-')[:50]
+    name = name.strip("-")[:50]
 
     return name
 
 
 def create_work_branch(
-    working_dir: Path,
-    description: str,
-    base_branch: str = "main"
+    working_dir: Path, description: str, base_branch: str = "main"
 ) -> tuple[bool, str]:
     """
     Create a new feature branch for work.
@@ -157,7 +156,7 @@ def create_work_branch(
             cwd=working_dir,
             capture_output=True,
             timeout=10,
-            check=True
+            check=True,
         )
 
         # Create and checkout new branch
@@ -166,7 +165,7 @@ def create_work_branch(
             cwd=working_dir,
             capture_output=True,
             timeout=10,
-            check=True
+            check=True,
         )
 
         logger.info(f"Created feature branch: {branch_name}")
@@ -178,10 +177,7 @@ def create_work_branch(
 
 
 def create_plan_document(
-    working_dir: Path,
-    branch_name: str,
-    user_request: str,
-    success_criteria: str = ""
+    working_dir: Path, branch_name: str, user_request: str, success_criteria: str = ""
 ) -> Path:
     """
     Create initial plan document as first commit in feature branch.
@@ -207,9 +203,9 @@ def create_plan_document(
         if claude_md.exists():
             content = claude_md.read_text()
             match = re.search(
-                r'## Work Completion Criteria\n\n.*?### Required Completion Checks(.*?)(?=\n## |\n### Why|$)',
+                r"## Work Completion Criteria\n\n.*?### Required Completion Checks(.*?)(?=\n## |\n### Why|$)",
                 content,
-                re.DOTALL
+                re.DOTALL,
             )
             if match:
                 success_criteria = match.group(1).strip()
@@ -271,17 +267,19 @@ def commit_plan_document(working_dir: Path, plan_file: Path, branch_name: str) -
             cwd=working_dir,
             capture_output=True,
             timeout=5,
-            check=True
+            check=True,
         )
 
         # Commit
-        commit_message = f"Plan: {branch_name}\n\nInitial work plan and success criteria."
+        commit_message = (
+            f"Plan: {branch_name}\n\nInitial work plan and success criteria."
+        )
         subprocess.run(
             ["git", "commit", "-m", commit_message],
             cwd=working_dir,
             capture_output=True,
             timeout=10,
-            check=True
+            check=True,
         )
 
         logger.info(f"Committed plan document for {branch_name}")
@@ -310,13 +308,27 @@ def should_create_branch(user_request: str) -> bool:
 
     # Keywords indicating multi-step work
     multi_step_indicators = [
-        "update", "add", "create", "implement", "refactor",
-        "fix bug", "improve", "enhance", "build", "develop",
-        "and", "then", "also", "documentation", "tests"
+        "update",
+        "add",
+        "create",
+        "implement",
+        "refactor",
+        "fix bug",
+        "improve",
+        "enhance",
+        "build",
+        "develop",
+        "and",
+        "then",
+        "also",
+        "documentation",
+        "tests",
     ]
 
     # Count indicators
-    indicator_count = sum(1 for indicator in multi_step_indicators if indicator in request_lower)
+    indicator_count = sum(
+        1 for indicator in multi_step_indicators if indicator in request_lower
+    )
 
     # Branch if:
     # - Multiple indicators (suggests complexity)
@@ -325,9 +337,7 @@ def should_create_branch(user_request: str) -> bool:
 
 
 def initialize_work_branch(
-    working_dir: Path,
-    user_request: str,
-    force_branch: bool = False
+    working_dir: Path, user_request: str, force_branch: bool = False
 ) -> tuple[bool, str, Path | None]:
     """
     Set up work environment: create branch and plan doc if needed.
@@ -384,11 +394,15 @@ def mark_work_done(working_dir: Path, branch_name: str) -> bool:
 
         if active_plans:
             active_plan = active_plans[0]
-            completed_plan = plans_dir / active_plan.name.replace("ACTIVE-", "COMPLETED-")
+            completed_plan = plans_dir / active_plan.name.replace(
+                "ACTIVE-", "COMPLETED-"
+            )
 
             # Update status in plan file
             content = active_plan.read_text()
-            content = content.replace("**Status**: IN_PROGRESS", "**Status**: COMPLETED")
+            content = content.replace(
+                "**Status**: IN_PROGRESS", "**Status**: COMPLETED"
+            )
             completed_plan.write_text(content)
 
             # Remove active plan
@@ -400,7 +414,7 @@ def mark_work_done(working_dir: Path, branch_name: str) -> bool:
                 cwd=working_dir,
                 capture_output=True,
                 timeout=5,
-                check=True
+                check=True,
             )
 
             subprocess.run(
@@ -408,7 +422,7 @@ def mark_work_done(working_dir: Path, branch_name: str) -> bool:
                 cwd=working_dir,
                 capture_output=True,
                 timeout=10,
-                check=True
+                check=True,
             )
 
             logger.info(f"Marked work as done: {branch_name}")
@@ -436,7 +450,7 @@ def return_to_main(working_dir: Path) -> bool:
             cwd=working_dir,
             capture_output=True,
             timeout=10,
-            check=True
+            check=True,
         )
         logger.info("Switched to main branch")
         return True
@@ -449,7 +463,7 @@ def return_to_main(working_dir: Path) -> bool:
                 cwd=working_dir,
                 capture_output=True,
                 timeout=10,
-                check=True
+                check=True,
             )
             logger.info("Switched to master branch")
             return True
@@ -474,7 +488,9 @@ def get_plan_context(plan_file: Path) -> str:
         content = plan_file.read_text()
 
         # Extract original request
-        request_match = re.search(r'## Original Request\n\n(.*?)\n\n##', content, re.DOTALL)
+        request_match = re.search(
+            r"## Original Request\n\n(.*?)\n\n##", content, re.DOTALL
+        )
         if request_match:
             return request_match.group(1).strip()
 
@@ -520,7 +536,9 @@ def format_branch_state_message(state: BranchState, revival_mode: bool = False) 
                 msg += "- Reply 'continue' to resume this work\n"
                 msg += "- Send a new request to start fresh (will switch to main)\n"
             else:
-                msg += "\nNo active plan found. You may want to commit or stash changes."
+                msg += (
+                    "\nNo active plan found. You may want to commit or stash changes."
+                )
 
             return msg
 

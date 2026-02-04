@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 class JudgmentScore(Enum):
     """Score levels for AI judgments."""
+
     EXCELLENT = "excellent"
     GOOD = "good"
     ACCEPTABLE = "acceptable"
@@ -28,6 +29,7 @@ class JudgmentScore(Enum):
 @dataclass
 class JudgeConfig:
     """Configuration for AI judge."""
+
     model: str = "gemma2:3b"  # Local model for speed
     temperature: float = 0.1  # Low for consistency
     strict_mode: bool = True  # High quality standards
@@ -39,6 +41,7 @@ class JudgeConfig:
 @dataclass
 class JudgmentResult:
     """Result of an AI judgment."""
+
     test_id: str
     overall_score: JudgmentScore
     criteria_scores: Dict[str, str]
@@ -68,13 +71,16 @@ def _call_ollama(prompt: str, config: JudgeConfig) -> Optional[str]:
     try:
         result = subprocess.run(
             [
-                "ollama", "run", config.model,
-                "--format", "json",
+                "ollama",
+                "run",
+                config.model,
+                "--format",
+                "json",
             ],
             input=prompt,
             capture_output=True,
             text=True,
-            timeout=config.timeout_seconds
+            timeout=config.timeout_seconds,
         )
         if result.returncode == 0:
             return result.stdout.strip()
@@ -91,6 +97,7 @@ def _call_openrouter(prompt: str, config: JudgeConfig) -> Optional[str]:
 
     try:
         import httpx
+
         response = httpx.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
@@ -102,7 +109,7 @@ def _call_openrouter(prompt: str, config: JudgeConfig) -> Optional[str]:
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": config.temperature,
             },
-            timeout=config.timeout_seconds
+            timeout=config.timeout_seconds,
         )
         if response.status_code == 200:
             data = response.json()
@@ -124,7 +131,7 @@ def _parse_judgment_response(response: str, test_id: str) -> JudgmentResult:
             pass_fail=data.get("pass_fail", True),
             confidence=float(data.get("confidence", 0.7)),
             reasoning=data.get("reasoning", ""),
-            raw_response=response
+            raw_response=response,
         )
     except (json.JSONDecodeError, ValueError):
         pass
@@ -166,14 +173,12 @@ def _parse_judgment_response(response: str, test_id: str) -> JudgmentResult:
         pass_fail=pass_fail,
         confidence=confidence,
         reasoning=response[:500],
-        raw_response=response
+        raw_response=response,
     )
 
 
 def _heuristic_judgment(
-    test_output: str,
-    expected_criteria: List[str],
-    test_id: str
+    test_output: str, expected_criteria: List[str], test_id: str
 ) -> JudgmentResult:
     """Fallback heuristic-based judgment when LLM is unavailable."""
     output_lower = test_output.lower()
@@ -213,7 +218,7 @@ def _heuristic_judgment(
         pass_fail=pass_ratio > 0.5,
         confidence=0.5,  # Lower confidence for heuristic
         reasoning=f"Heuristic evaluation: {criteria_met}/{len(expected_criteria)} criteria met",
-        model_used="heuristic"
+        model_used="heuristic",
     )
 
 
@@ -222,7 +227,7 @@ def judge_test_result(
     expected_criteria: List[str],
     test_context: Optional[Dict[str, Any]] = None,
     config: Optional[JudgeConfig] = None,
-    test_id: Optional[str] = None
+    test_id: Optional[str] = None,
 ) -> JudgmentResult:
     """
     Judge test results using AI model.
@@ -291,7 +296,7 @@ JSON response:"""
         pass_fail=True,  # Assume pass if we can't evaluate
         confidence=0.3,
         reasoning="Unable to evaluate: LLM unavailable and heuristics disabled",
-        model_used="none"
+        model_used="none",
     )
 
 
@@ -299,7 +304,7 @@ def judge_response_quality(
     response: str,
     prompt: str,
     evaluation_criteria: Optional[List[str]] = None,
-    config: Optional[JudgeConfig] = None
+    config: Optional[JudgeConfig] = None,
 ) -> JudgmentResult:
     """
     Judge the quality of an AI response to a prompt.
@@ -318,20 +323,17 @@ def judge_response_quality(
             "Response addresses the user's query directly",
             "Information is accurate and helpful",
             "Tone is appropriate for the context",
-            "Response is concise without missing important details"
+            "Response is concise without missing important details",
         ]
 
-    context = {
-        "test_type": "response_quality",
-        "original_prompt": prompt[:500]
-    }
+    context = {"test_type": "response_quality", "original_prompt": prompt[:500]}
 
     return judge_test_result(
         test_output=response,
         expected_criteria=evaluation_criteria,
         test_context=context,
         config=config,
-        test_id=f"response_quality_{datetime.now().strftime('%H%M%S')}"
+        test_id=f"response_quality_{datetime.now().strftime('%H%M%S')}",
     )
 
 
@@ -339,7 +341,7 @@ def judge_tool_selection(
     selected_tools: List[str],
     user_intent: str,
     context: Optional[Dict[str, Any]] = None,
-    config: Optional[JudgeConfig] = None
+    config: Optional[JudgeConfig] = None,
 ) -> JudgmentResult:
     """
     Judge whether the right tools were selected for a task.
@@ -357,7 +359,7 @@ def judge_tool_selection(
         "Selected tools are appropriate for the user's request",
         "No unnecessary tools were selected",
         "All necessary tools were included",
-        "Tool selection is efficient for the task"
+        "Tool selection is efficient for the task",
     ]
 
     test_output = f"""
@@ -371,7 +373,7 @@ Context: {json.dumps(context) if context else 'None'}
         expected_criteria=criteria,
         test_context={"test_type": "tool_selection"},
         config=config,
-        test_id=f"tool_selection_{datetime.now().strftime('%H%M%S')}"
+        test_id=f"tool_selection_{datetime.now().strftime('%H%M%S')}",
     )
 
 
@@ -387,17 +389,14 @@ class AIJudgeTestRunner:
         self.results.append(result)
 
     def run_test(
-        self,
-        test_name: str,
-        test_output: str,
-        criteria: List[str]
+        self, test_name: str, test_output: str, criteria: List[str]
     ) -> JudgmentResult:
         """Run a single test and record the result."""
         result = judge_test_result(
             test_output=test_output,
             expected_criteria=criteria,
             config=self.config,
-            test_id=test_name
+            test_id=test_name,
         )
         self.add_result(result)
         return result
@@ -418,7 +417,7 @@ class AIJudgeTestRunner:
             "failed": total - passed,
             "pass_rate": passed / total,
             "average_confidence": avg_confidence,
-            "results": [r.to_dict() for r in self.results]
+            "results": [r.to_dict() for r in self.results],
         }
 
     def save_results(self, filepath: Path):

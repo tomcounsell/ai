@@ -8,6 +8,7 @@ import shutil
 
 # Direct import to avoid SDK dependency
 import sys
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from agent.branch_manager import (
     sanitize_branch_name,

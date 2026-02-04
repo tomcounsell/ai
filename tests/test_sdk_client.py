@@ -45,8 +45,7 @@ def test_valor_agent_custom_permission_mode():
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(
-    not os.getenv("ANTHROPIC_API_KEY"),
-    reason="ANTHROPIC_API_KEY not set"
+    not os.getenv("ANTHROPIC_API_KEY"), reason="ANTHROPIC_API_KEY not set"
 )
 async def test_sdk_query_simple():
     """Test a simple SDK query (requires API key)."""
@@ -58,8 +57,7 @@ async def test_sdk_query_simple():
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(
-    not os.getenv("ANTHROPIC_API_KEY"),
-    reason="ANTHROPIC_API_KEY not set"
+    not os.getenv("ANTHROPIC_API_KEY"), reason="ANTHROPIC_API_KEY not set"
 )
 async def test_get_agent_response_sdk():
     """Test the bridge-compatible function (requires API key)."""

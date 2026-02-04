@@ -134,8 +134,14 @@ class TestClaudeAgentOptionsValidity:
 
         # Check that we're not setting any invalid attributes
         # (This would have raised an error during creation, but let's be explicit)
-        our_params = {"system_prompt", "cwd", "permission_mode",
-                      "continue_conversation", "resume", "env"}
+        our_params = {
+            "system_prompt",
+            "cwd",
+            "permission_mode",
+            "continue_conversation",
+            "resume",
+            "env",
+        }
 
         for param in our_params:
             assert param in valid_params, f"Invalid parameter: {param}"

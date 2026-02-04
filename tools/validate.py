@@ -52,7 +52,9 @@ def validate_manifest(tool_path: Path) -> list[ValidationError]:
     # Check required fields
     for field in REQUIRED_FIELDS:
         if field not in manifest:
-            errors.append(ValidationError(str(manifest_path), f"Missing required field: {field}"))
+            errors.append(
+                ValidationError(str(manifest_path), f"Missing required field: {field}")
+            )
 
     # Validate type
     if "type" in manifest and manifest["type"] not in VALID_TYPES:
@@ -149,7 +151,10 @@ def validate_tool(tool_path: Path) -> list[ValidationError]:
         return errors
 
     # Skip if it's just a file (like STANDARD.md, validate.py)
-    if not (tool_path / "manifest.json").exists() and not (tool_path / "README.md").exists():
+    if (
+        not (tool_path / "manifest.json").exists()
+        and not (tool_path / "README.md").exists()
+    ):
         # Check if this looks like a tool directory at all
         if not any(tool_path.iterdir()):
             return errors

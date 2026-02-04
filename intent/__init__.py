@@ -98,6 +98,7 @@ Respond with JSON in this exact format:
 
         # Parse JSON response
         import json
+
         try:
             parsed = json.loads(response_text)
             # Validate response structure

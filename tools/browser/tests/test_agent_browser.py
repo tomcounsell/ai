@@ -266,7 +266,9 @@ class TestErrorHandling:
     def test_nonexistent_element(self, session_id):
         """Should handle missing element."""
         run_browser_cmd("open", "https://example.com", session=session_id)
-        result = run_browser_cmd("click", "@e999", session=session_id)  # Nonexistent ref
+        result = run_browser_cmd(
+            "click", "@e999", session=session_id
+        )  # Nonexistent ref
         # Should return error
         assert result.returncode != 0 or "error" in result.stderr.lower()
 

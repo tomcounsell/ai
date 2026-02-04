@@ -22,6 +22,7 @@ class TestKnowledgeSearchInstallation:
     def test_import(self):
         """Tool can be imported."""
         from tools.knowledge_search import search_knowledge
+
         assert callable(search_knowledge)
 
 
@@ -53,8 +54,12 @@ class TestKnowledgeSearchKeyword:
     def indexed_doc(self, test_db):
         """Create and index a test document."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            f.write("# Test Document\n\nThis is a test document about Python programming.\n")
-            f.write("Python is a great language for data science and web development.\n")
+            f.write(
+                "# Test Document\n\nThis is a test document about Python programming.\n"
+            )
+            f.write(
+                "Python is a great language for data science and web development.\n"
+            )
             f.flush()
 
             # Index with keyword-only (no API key needed)
@@ -93,8 +98,7 @@ class TestKnowledgeSearchKeyword:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY"),
-    reason="OPENROUTER_API_KEY not set"
+    not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set"
 )
 class TestKnowledgeSearchSemantic:
     """Test semantic search functionality."""

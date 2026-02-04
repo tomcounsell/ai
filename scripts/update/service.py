@@ -10,6 +10,7 @@ from pathlib import Path
 @dataclass
 class ServiceStatus:
     """Status of a service."""
+
     running: bool
     pid: int | None = None
     uptime: str | None = None
@@ -20,6 +21,7 @@ class ServiceStatus:
 @dataclass
 class CaffeinateStatus:
     """Status of caffeinate service."""
+
     installed: bool
     running: bool
 

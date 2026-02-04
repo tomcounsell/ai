@@ -18,6 +18,7 @@ class TestImageAnalysisInstallation:
     def test_import(self):
         """Tool can be imported."""
         from tools.image_analysis import analyze_image
+
         assert callable(analyze_image)
 
     def test_api_key_required(self):
@@ -45,8 +46,7 @@ class TestImageAnalysisValidation:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY"),
-    reason="OPENROUTER_API_KEY not set"
+    not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set"
 )
 class TestImageAnalysisCore:
     """Test core analysis functionality."""
@@ -74,10 +74,7 @@ class TestImageAnalysisCore:
 
     def test_analysis_types(self, test_image):
         """Different analysis types work."""
-        result = analyze_image(
-            test_image,
-            analysis_types=["description", "objects"]
-        )
+        result = analyze_image(test_image, analysis_types=["description", "objects"])
 
         assert "error" not in result, f"Analysis failed: {result.get('error')}"
 
@@ -89,8 +86,7 @@ class TestImageAnalysisCore:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY"),
-    reason="OPENROUTER_API_KEY not set"
+    not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set"
 )
 class TestImageAnalysisHelpers:
     """Test helper functions."""

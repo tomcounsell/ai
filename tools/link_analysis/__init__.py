@@ -133,7 +133,9 @@ def get_youtube_video_info(video_id: str) -> dict | None:
                 "duration": info.get("duration", 0),
                 "uploader": info.get("uploader", "Unknown"),
                 "view_count": info.get("view_count", 0),
-                "description": info.get("description", "")[:500],  # Truncate description
+                "description": info.get("description", "")[
+                    :500
+                ],  # Truncate description
                 "is_live": info.get("is_live", False),
             }
         else:
@@ -151,7 +153,9 @@ def get_youtube_video_info(video_id: str) -> dict | None:
         return None
 
 
-def download_youtube_audio(video_id: str, output_dir: Path | None = None) -> Path | None:
+def download_youtube_audio(
+    video_id: str, output_dir: Path | None = None
+) -> Path | None:
     """
     Download audio from YouTube video using yt-dlp.
 
@@ -299,7 +303,9 @@ async def transcribe_audio_file(filepath: Path) -> str | None:
                     result = response.json()
                     return result.get("text", "").strip()
                 else:
-                    logger.error(f"Whisper API error: {response.status_code} - {response.text}")
+                    logger.error(
+                        f"Whisper API error: {response.status_code} - {response.text}"
+                    )
                     return None
 
     except Exception as e:
@@ -357,7 +363,9 @@ async def summarize_transcript(text: str, max_length: int = 500) -> str:
 
             if response.status_code == 200:
                 result = response.json()
-                summary = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                summary = (
+                    result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                )
                 return summary.strip()
             else:
                 logger.error(f"OpenAI summarization error: {response.status_code}")
@@ -422,7 +430,9 @@ async def process_youtube_url(url: str) -> dict:
 
         # Check duration limit
         if duration > MAX_VIDEO_DURATION:
-            result["error"] = f"Video too long ({duration}s > {MAX_VIDEO_DURATION}s limit)"
+            result["error"] = (
+                f"Video too long ({duration}s > {MAX_VIDEO_DURATION}s limit)"
+            )
             result["context"] = (
                 f"[YouTube video too long to transcribe: {result['title']} "
                 f"({duration // 60}:{duration % 60:02d})]"
@@ -496,7 +506,8 @@ async def process_youtube_urls_in_text(text: str) -> tuple[str, list[dict]]:
 
 # URL regex pattern
 URL_PATTERN = re.compile(
-    r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w\-.~:/?#[\]@!$&\'()*+,;=%]*", re.IGNORECASE
+    r"https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w\-.~:/?#[\]@!$&\'()*+,;=%]*",
+    re.IGNORECASE,
 )
 
 
@@ -658,12 +669,16 @@ async def summarize_url_content(url: str, timeout: float = 30.0) -> str | None:
 
             if response.status_code == 200:
                 data = response.json()
-                summary = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                summary = (
+                    data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                )
                 if summary:
                     logger.info(f"Successfully summarized URL: {url[:50]}...")
                     return summary.strip()
             else:
-                logger.error(f"Perplexity API error {response.status_code}: {response.text[:200]}")
+                logger.error(
+                    f"Perplexity API error {response.status_code}: {response.text[:200]}"
+                )
 
     except httpx.TimeoutException:
         logger.warning(f"Timeout summarizing URL: {url[:50]}...")
@@ -800,7 +815,9 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python -m tools.link_analysis 'https://example.com' or 'text with urls'")
+        print(
+            "Usage: python -m tools.link_analysis 'https://example.com' or 'text with urls'"
+        )
         sys.exit(1)
 
     arg = " ".join(sys.argv[1:])

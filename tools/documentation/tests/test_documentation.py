@@ -20,6 +20,7 @@ class TestDocumentationInstallation:
     def test_import(self):
         """Tool can be imported."""
         from tools.documentation import generate_docs
+
         assert callable(generate_docs)
 
     def test_api_key_required(self):
@@ -57,8 +58,9 @@ class TestDocumentationValidation:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
-    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set"
+    not os.environ.get("ANTHROPIC_API_KEY")
+    and not os.environ.get("OPENROUTER_API_KEY"),
+    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestDocstringGeneration:
     """Test docstring generation."""
@@ -66,14 +68,14 @@ class TestDocstringGeneration:
     @pytest.fixture
     def sample_function(self):
         """Sample function for testing."""
-        return '''
+        return """
 def calculate_total(items, tax_rate=0.08, discount=None):
     total = sum(item["price"] * item["quantity"] for item in items)
     if discount:
         total -= discount
     total *= (1 + tax_rate)
     return round(total, 2)
-'''
+"""
 
     def test_google_style(self, sample_function):
         """Generate Google style docstring."""
@@ -81,7 +83,10 @@ def calculate_total(items, tax_rate=0.08, discount=None):
 
         assert "error" not in result, f"Generation failed: {result.get('error')}"
         assert "documentation" in result
-        assert "Args:" in result["documentation"] or "Parameters:" in result["documentation"]
+        assert (
+            "Args:" in result["documentation"]
+            or "Parameters:" in result["documentation"]
+        )
 
     def test_numpy_style(self, sample_function):
         """Generate NumPy style docstring."""
@@ -98,8 +103,9 @@ def calculate_total(items, tax_rate=0.08, discount=None):
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
-    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set"
+    not os.environ.get("ANTHROPIC_API_KEY")
+    and not os.environ.get("OPENROUTER_API_KEY"),
+    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestReadmeGeneration:
     """Test README generation."""
@@ -145,8 +151,9 @@ def divide(a, b):
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
-    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set"
+    not os.environ.get("ANTHROPIC_API_KEY")
+    and not os.environ.get("OPENROUTER_API_KEY"),
+    reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestApiDocGeneration:
     """Test API documentation generation."""

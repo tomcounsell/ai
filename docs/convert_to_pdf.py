@@ -11,8 +11,7 @@ md_content = md_path.read_text()
 
 # Convert markdown to HTML
 html_content = markdown.markdown(
-    md_content,
-    extensions=['tables', 'fenced_code', 'codehilite', 'toc']
+    md_content, extensions=["tables", "fenced_code", "codehilite", "toc"]
 )
 
 # Wrap in full HTML with styling
