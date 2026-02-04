@@ -2,19 +2,23 @@
 Image Tagging Tool
 
 Tag and categorize images with AI for organization and search.
+Tries Anthropic API first (direct), falls back to OpenRouter.
 """
 
 import base64
+import json
 import os
 from pathlib import Path
 
 import requests
 
-from config.models import MODEL_VISION
+from config.models import MODEL_VISION, SONNET
 
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-# Vision task - use vision-capable model via OpenRouter
-DEFAULT_MODEL = MODEL_VISION
+# Vision tasks - Anthropic API (primary), OpenRouter (fallback)
+DEFAULT_MODEL = SONNET
+DEFAULT_MODEL_OPENROUTER = MODEL_VISION
 
 
 class ImageTaggingError(Exception):
@@ -69,10 +73,12 @@ def tag_image(
     max_tags: int = 10,
     confidence_threshold: float = 0.5,
     custom_taxonomy: list[str] | None = None,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
 ) -> dict:
     """
     Generate tags for an image.
+
+    Tries Anthropic API first, falls back to OpenRouter if no Anthropic key.
 
     Args:
         image_source: File path, URL, or base64 encoded image
@@ -80,7 +86,7 @@ def tag_image(
         max_tags: Maximum tags per category (default: 10)
         confidence_threshold: Minimum confidence (0-1)
         custom_taxonomy: Custom tag vocabulary
-        model: OpenRouter model to use
+        model: Model to use (auto-selects based on available API keys)
 
     Returns:
         dict with:
@@ -89,9 +95,14 @@ def tag_image(
             - dominant_colors: Color palette
             - image_type: Photo, illustration, screenshot, etc.
     """
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        return {"error": "OPENROUTER_API_KEY environment variable not set"}
+    # Try Anthropic first, fall back to OpenRouter
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    use_anthropic = bool(api_key)
+
+    if not use_anthropic:
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            return {"error": "ANTHROPIC_API_KEY or OPENROUTER_API_KEY required"}
 
     if tag_categories is None:
         tag_categories = ["objects", "scene", "activity", "style", "mood"]
@@ -128,45 +139,81 @@ def tag_image(
     try:
         image_data, media_type = _load_image(image_source)
 
-        response = requests.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "http://localhost",
-                "X-Title": "Valor Image Tagging",
-            },
-            json={
-                "model": model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{media_type};base64,{image_data}"
+        if use_anthropic:
+            # Anthropic API (direct) - preferred
+            response = requests.post(
+                ANTHROPIC_URL,
+                headers={
+                    "x-api-key": api_key,
+                    "Content-Type": "application/json",
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": model or DEFAULT_MODEL,
+                    "max_tokens": 1024,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": image_data,
+                                    },
                                 },
-                            },
-                        ],
-                    }
-                ],
-                "max_tokens": 1024,
-            },
-            timeout=120,
-        )
+                                {"type": "text", "text": prompt},
+                            ],
+                        }
+                    ],
+                },
+                timeout=120,
+            )
+        else:
+            # OpenRouter fallback
+            response = requests.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "http://localhost",
+                    "X-Title": "Valor Image Tagging",
+                },
+                json={
+                    "model": model or DEFAULT_MODEL_OPENROUTER,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{media_type};base64,{image_data}"
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    "max_tokens": 1024,
+                },
+                timeout=120,
+            )
 
         response.raise_for_status()
         result = response.json()
 
-        if "choices" not in result or len(result["choices"]) == 0:
+        # Extract content based on API
+        if use_anthropic:
+            content = result.get("content", [{}])[0].get("text", "")
+        else:
+            if "choices" not in result or len(result["choices"]) == 0:
+                return {"error": "No response from model", "image_source": image_source}
+            content = result["choices"][0]["message"]["content"]
+
+        if not content:
             return {"error": "No response from model", "image_source": image_source}
-
-        content = result["choices"][0]["message"]["content"]
-
-        # Parse JSON response
-        import json
 
         # Clean up response
         content = content.strip()

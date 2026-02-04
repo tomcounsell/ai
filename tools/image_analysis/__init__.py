@@ -2,6 +2,7 @@
 Image Analysis Tool
 
 Multi-modal vision analysis using AI models.
+Tries Anthropic API first (direct), falls back to OpenRouter.
 """
 
 import base64
@@ -11,11 +12,13 @@ from typing import Literal
 
 import requests
 
-from config.models import MODEL_VISION
+from config.models import MODEL_VISION, SONNET
 
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-# Vision task - use vision-capable model via OpenRouter
-DEFAULT_MODEL = MODEL_VISION
+# Vision tasks - Anthropic API (primary), OpenRouter (fallback)
+DEFAULT_MODEL = SONNET
+DEFAULT_MODEL_OPENROUTER = MODEL_VISION
 
 
 class ImageAnalysisError(Exception):
@@ -76,17 +79,19 @@ def analyze_image(
     output_format: Literal[
         "structured", "narrative", "technical", "accessibility"
     ] = "structured",
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
 ) -> dict:
     """
     Analyze an image using AI vision models.
+
+    Tries Anthropic API first, falls back to OpenRouter if no Anthropic key.
 
     Args:
         image_source: File path, URL, or base64 encoded image
         analysis_types: Types of analysis (description, objects, text, tags, safety)
         detail_level: Level of detail in analysis
         output_format: Format of the output
-        model: OpenRouter model to use
+        model: Model to use (auto-selects based on available API keys)
 
     Returns:
         dict with analysis results:
@@ -96,9 +101,14 @@ def analyze_image(
             - tags: Relevant tags
             - safety_rating: Content safety assessment
     """
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        return {"error": "OPENROUTER_API_KEY environment variable not set"}
+    # Try Anthropic first, fall back to OpenRouter
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    use_anthropic = bool(api_key)
+
+    if not use_anthropic:
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            return {"error": "ANTHROPIC_API_KEY or OPENROUTER_API_KEY required"}
 
     if analysis_types is None:
         analysis_types = ["description", "objects", "text"]
@@ -142,42 +152,81 @@ def analyze_image(
         # Load image
         image_data, media_type = _load_image(image_source)
 
-        response = requests.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "http://localhost",
-                "X-Title": "Valor Image Analysis",
-            },
-            json={
-                "model": model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": combined_prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{media_type};base64,{image_data}"
+        if use_anthropic:
+            # Anthropic API (direct) - preferred
+            response = requests.post(
+                ANTHROPIC_URL,
+                headers={
+                    "x-api-key": api_key,
+                    "Content-Type": "application/json",
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": model or DEFAULT_MODEL,
+                    "max_tokens": 2048,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": media_type,
+                                        "data": image_data,
+                                    },
                                 },
-                            },
-                        ],
-                    }
-                ],
-                "max_tokens": 2048,
-            },
-            timeout=120,
-        )
+                                {"type": "text", "text": combined_prompt},
+                            ],
+                        }
+                    ],
+                },
+                timeout=120,
+            )
+        else:
+            # OpenRouter fallback
+            response = requests.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "http://localhost",
+                    "X-Title": "Valor Image Analysis",
+                },
+                json={
+                    "model": model or DEFAULT_MODEL_OPENROUTER,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": combined_prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{media_type};base64,{image_data}"
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    "max_tokens": 2048,
+                },
+                timeout=120,
+            )
 
         response.raise_for_status()
         result = response.json()
 
-        if "choices" not in result or len(result["choices"]) == 0:
-            return {"error": "No response from model", "image_source": image_source}
+        # Extract content based on API
+        if use_anthropic:
+            content = result.get("content", [{}])[0].get("text", "")
+        else:
+            if "choices" not in result or len(result["choices"]) == 0:
+                return {"error": "No response from model", "image_source": image_source}
+            content = result["choices"][0]["message"]["content"]
 
-        content = result["choices"][0]["message"]["content"]
+        if not content:
+            return {"error": "No response from model", "image_source": image_source}
 
         # Build response
         analysis_result = {
@@ -215,13 +264,13 @@ def analyze_image(
         return {"error": f"Unexpected error: {str(e)}", "image_source": image_source}
 
 
-def extract_text(image_source: str, model: str = DEFAULT_MODEL) -> dict:
+def extract_text(image_source: str, model: str | None = None) -> dict:
     """
     Extract text from an image (OCR).
 
     Args:
         image_source: File path, URL, or base64 encoded image
-        model: OpenRouter model to use
+        model: Model to use (optional)
 
     Returns:
         dict with extracted text
@@ -235,13 +284,13 @@ def extract_text(image_source: str, model: str = DEFAULT_MODEL) -> dict:
     )
 
 
-def generate_alt_text(image_source: str, model: str = DEFAULT_MODEL) -> dict:
+def generate_alt_text(image_source: str, model: str | None = None) -> dict:
     """
     Generate accessibility alt-text for an image.
 
     Args:
         image_source: File path, URL, or base64 encoded image
-        model: OpenRouter model to use
+        model: Model to use (optional)
 
     Returns:
         dict with alt-text
