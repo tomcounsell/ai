@@ -197,16 +197,21 @@ def _get_ratio_description(ratio: str) -> str:
     return descriptions.get(ratio, "")
 
 
-if __name__ == "__main__":
+def main():
+    """CLI entry point for image generation."""
     import sys
 
-    if len(sys.argv) < 2:
-        print("Usage: python -m tools.image_gen 'your prompt here' [aspect_ratio]")
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print("valor-image-gen - Generate images from text prompts")
+        print("\nUsage: valor-image-gen 'your prompt here' [aspect_ratio]")
         print("\nAvailable aspect ratios:")
         for ratio, info in list_aspect_ratios().items():
             dims = info["dimensions"]
             print(f"  {ratio}: {dims[0]}x{dims[1]} - {info['description']}")
-        sys.exit(1)
+        print("\nExamples:")
+        print("  valor-image-gen 'a cat in space'")
+        print("  valor-image-gen 'sunset over mountains' 16:9")
+        sys.exit(0 if sys.argv[1:] and sys.argv[1] in ("-h", "--help") else 1)
 
     prompt = sys.argv[1]
     aspect_ratio = sys.argv[2] if len(sys.argv) > 2 else "1:1"
@@ -225,3 +230,7 @@ if __name__ == "__main__":
             print(f"  - {path}")
         if result.get("text"):
             print(f"\nModel response: {result['text']}")
+
+
+if __name__ == "__main__":
+    main()

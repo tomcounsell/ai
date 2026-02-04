@@ -304,17 +304,28 @@ def generate_alt_text(image_source: str, model: str | None = None) -> dict:
     )
 
 
-if __name__ == "__main__":
+def main():
+    """CLI entry point for image analysis."""
     import sys
 
-    if len(sys.argv) < 2:
-        print("Usage: python -m tools.image_analysis 'path/to/image.jpg'")
-        sys.exit(1)
+    if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
+        print("valor-image-analyze - Analyze images using AI vision")
+        print("\nUsage: valor-image-analyze <image_path> [analysis_types...]")
+        print("\nAnalysis types: description, objects, text, tags, safety")
+        print("\nExamples:")
+        print("  valor-image-analyze photo.jpg")
+        print("  valor-image-analyze screenshot.png text")
+        print("  valor-image-analyze diagram.png description objects")
+        sys.exit(0 if sys.argv[1:] and sys.argv[1] in ("-h", "--help") else 1)
 
     image_path = sys.argv[1]
-    print(f"Analyzing: {image_path}")
+    analysis_types = sys.argv[2:] if len(sys.argv) > 2 else None
 
-    result = analyze_image(image_path)
+    print(f"Analyzing: {image_path}")
+    if analysis_types:
+        print(f"Analysis types: {', '.join(analysis_types)}")
+
+    result = analyze_image(image_path, analysis_types=analysis_types)
 
     if "error" in result:
         print(f"Error: {result['error']}")
@@ -323,3 +334,7 @@ if __name__ == "__main__":
         print(
             f"\nAnalysis:\n{result.get('raw_analysis', result.get('description', ''))}"
         )
+
+
+if __name__ == "__main__":
+    main()

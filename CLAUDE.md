@@ -248,6 +248,25 @@ Individual operations that can be composed into larger workflows:
 - **Telegram History** (`tools.telegram_history`): Search stored message history
 - **Link Analysis** (`tools.link_analysis`): URL extraction and metadata
 
+**Image Tools** (installed CLI commands via `pip install -e .`)
+- **Image Generation** (`valor-image-gen`): Generate images from text prompts
+  ```bash
+  valor-image-gen "a cat wearing a space helmet"           # Square 1:1
+  valor-image-gen "sunset over mountains" 16:9             # Landscape
+  valor-image-gen "mobile app mockup" 9:16                 # Portrait/stories
+  valor-image-gen --help                                   # Show all ratios
+  ```
+  Images are saved to `generated_images/` and automatically sent via Telegram.
+
+- **Image Analysis** (`valor-image-analyze`): Analyze images with AI vision
+  ```bash
+  valor-image-analyze photo.jpg                            # General analysis
+  valor-image-analyze screenshot.png text                  # OCR/text extraction
+  valor-image-analyze diagram.png description objects      # Multiple analyses
+  valor-image-analyze --help                               # Show options
+  ```
+  Analysis types: `description`, `objects`, `text`, `tags`, `safety`
+
 **Browser Automation** (`agent-browser` - installed globally via npm)
 Headless browser automation for web testing, form filling, screenshots, and data extraction.
 
