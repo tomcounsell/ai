@@ -100,9 +100,9 @@ class UpdateResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def log(msg: str, verbose: bool = True) -> None:
-    """Print log message."""
-    if verbose:
+def log(msg: str, verbose: bool = True, always: bool = False) -> None:
+    """Print log message. Use always=True for key status messages."""
+    if verbose or always:
         print(f"[update] {msg}")
 
 
@@ -123,11 +123,11 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             return result
 
         if result.git_result.commit_count == 0:
-            log(f"Already up to date ({git.get_short_sha(project_dir)})", v)
+            log(f"Already up to date ({git.get_short_sha(project_dir)})", v, always=True)
         else:
-            log(f"Pulled {result.git_result.commit_count} commit(s):", v)
+            log(f"Pulled {result.git_result.commit_count} commit(s):", v, always=True)
             for commit in result.git_result.commits[:5]:
-                log(f"  {commit}", v)
+                log(f"  {commit}", v, always=True)
 
         if result.git_result.stashed:
             if result.git_result.stash_restored:
@@ -162,22 +162,22 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 )
 
                 if critical_changes:
-                    log("CRITICAL dependency changes detected:", v)
+                    log("CRITICAL dependency changes detected:", v, always=True)
                     for change in critical_changes:
-                        log(f"  {change}", v)
-                    log("Skipping auto-sync. Run /update manually to apply.", v)
+                        log(f"  {change}", v, always=True)
+                    log("Skipping auto-sync. Run /update manually to apply.", v, always=True)
                     git.set_upgrade_pending(project_dir, "critical-dep-upgrade")
                 else:
                     should_sync = True
 
         if should_sync:
-            log("Syncing dependencies...", v)
+            log("Syncing dependencies...", v, always=True)
             result.dep_result = deps.sync_dependencies(project_dir)
 
             if result.dep_result.success:
-                log(f"Dependencies synced via {result.dep_result.method}", v)
+                log(f"Dependencies synced via {result.dep_result.method}", v, always=True)
             else:
-                log(f"WARN: Dep sync failed: {result.dep_result.error}", v)
+                log(f"WARN: Dep sync failed: {result.dep_result.error}", v, always=True)
                 result.warnings.append(f"Dep sync failed: {result.dep_result.error}")
 
             # Verify critical versions
@@ -245,7 +245,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
 
     elif result.git_result and result.git_result.commit_count > 0:
         # Cron mode: set restart flag instead of restarting
-        log("Setting restart flag for graceful restart...", v)
+        log("Setting restart flag for graceful restart...", v, always=True)
         git.set_restart_requested(project_dir, result.git_result.commit_count)
 
     # Step 6: Environment verification

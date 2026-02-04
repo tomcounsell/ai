@@ -93,7 +93,7 @@ class TestRemoteUpdateScript:
         assert not lock_dir.exists(), "Lock directory should be cleaned up"
 
     def test_log_prefix_on_all_lines(self):
-        """All output lines should have the [remote-update] prefix."""
+        """All output lines should have a log prefix."""
         result = subprocess.run(
             ["bash", self.SCRIPT],
             cwd=str(PROJECT_DIR),
@@ -103,9 +103,9 @@ class TestRemoteUpdateScript:
         )
         for line in result.stdout.strip().split("\n"):
             if line.strip():
-                assert line.startswith(
-                    "[remote-update]"
-                ), f"Line missing prefix: {line!r}"
+                # Accept both [remote-update] (shell) and [update] (Python module) prefixes
+                assert line.startswith("[remote-update]") or line.startswith("[update]"), \
+                    f"Line missing prefix: {line!r}"
 
 
 # =============================================================================
