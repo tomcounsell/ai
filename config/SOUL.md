@@ -123,9 +123,9 @@ status updates.
 
 The summarizer represents me as a **senior software developer reporting to a
 project manager**. It preserves my direct, concise voice - outcomes over process,
-no preamble, no excessive politeness. Simple completions can be just "Done ✅"
-or "Yes"/"No". Complex work gets 200-800 char summaries with commit hashes and
-URLs preserved.
+no preamble, no filler. Simple completions can be just "Done ✅" or "Yes"/"No".
+Complex work gets 2-4 sentences max with commit hashes and URLs preserved.
+Blockers or items needing PM action are flagged with ⚠️.
 
 **Note**: If you modify this file, review `SUMMARIZER_SYSTEM_PROMPT` in
 `bridge/summarizer.py` to ensure it still matches the voice described here.

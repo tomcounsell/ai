@@ -24,10 +24,8 @@ from config.models import MODEL_FAST
 logger = logging.getLogger(__name__)
 
 # Thresholds
-SUMMARIZE_THRESHOLD = 500  # ~3 sentences; anything longer gets summarized
+SUMMARIZE_THRESHOLD = 500  # Anything longer gets summarized
 FILE_ATTACH_THRESHOLD = 3000  # Attach full output as file above this
-MIN_SUMMARY_CHARS = 200  # Minimum for custom summaries
-MAX_SUMMARY_CHARS = 800  # Maximum before URLs
 SAFETY_TRUNCATE = 4096  # Telegram hard limit
 
 # Ollama config — model can be overridden via env var
@@ -97,52 +95,21 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
 def _build_summary_prompt(text: str, artifacts: dict[str, list[str]]) -> str:
     """Build the summarization prompt.
 
-    Creates a concise status update from agent output.
-    No roleplay framing - just straightforward summarization.
+    The system prompt handles format rules. This just provides the content
+    and any extracted artifacts that must be preserved.
     """
     artifact_section = ""
     if artifacts:
         parts = []
         for key, values in artifacts.items():
             parts.append(f"- {key}: {', '.join(values[:10])}")
-        artifact_section = "\n\nThese artifacts MUST appear verbatim:\n" + "\n".join(
-            parts
+        artifact_section = (
+            "\n\nPreserve these artifacts verbatim:\n" + "\n".join(parts) + "\n"
         )
 
     return f"""/no_think
-Summarize this AI agent output for Telegram. Choose the shortest \
-appropriate response:
+Summarize this developer session output:{artifact_section}
 
-1. "Done ✅" - task completed successfully, no details needed
-2. "Yes" or "No" - if answering a yes/no question
-3. Custom summary ({MIN_SUMMARY_CHARS}-{MAX_SUMMARY_CHARS} chars) - when context matters
-
-For custom summaries:
-- Lead with outcome or key finding
-- Include commit hashes, PR URLs, issue links, doc links
-- URLs don't count toward the char limit
-- If tests failed or there are blockers, mention prominently
-- No play-by-play of files read or tools used
-- Preserve the original voice and perspective{artifact_section}
-
-Examples:
-
-"Done ✅"
-
-"Yes"
-
-"Fixed the null check in user validation. Tests passing. `abc1234`"
-
-"Refactored the payment module to use the new Stripe SDK. \
-Updated 4 files, added retry logic. All tests green. \
-https://github.com/org/repo/pull/42"
-
-"Implemented the job queue with Redis persistence. Added priority \
-scheduling and retry logic. Need your review on backoff strategy. \
-Plan: https://github.com/org/repo/blob/main/docs/plans/job-queue.md \
-PR: https://github.com/org/repo/pull/87"
-
-Agent output to summarize:
 {text}"""
 
 
@@ -155,17 +122,19 @@ def _write_full_output_file(text: str) -> Path:
 
 
 SUMMARIZER_SYSTEM_PROMPT = """\
-You are summarizing work outputs from a senior software developer reporting to \
-their project manager via Telegram. The developer works autonomously on code \
-changes, investigations, deployments, and maintenance tasks.
+You summarize developer work outputs into Telegram status updates for a project manager.
 
-Communication style: direct and concise. State what was done, what was found, \
-or what's needed. No preamble, no excessive politeness, no play-by-play of \
-process. Outcomes matter, not steps taken.
+Input: raw output from an autonomous developer session - code changes, investigations, \
+deployments, debugging, maintenance. May include terminal output, commit messages, \
+file diffs, or free-form notes.
 
-Your job: condense detailed work output into a brief status update. Extract key \
-outcomes, preserve commit hashes and URLs, maintain the direct tone. The PM \
-should understand what happened and click through to details if needed."""
+Output rules:
+- For simple completions: respond with just "Done ✅" or "Yes" or "No"
+- For work needing context: 2-4 sentences max
+- Lead with the outcome, not the process
+- Preserve commit hashes and URLs inline (e.g., `abc1234`, https://github.com/org/repo/pull/42)
+- If there are blockers or items needing PM action, flag on a separate line with "⚠️"
+- Tone: direct, no preamble, no filler"""
 
 
 async def _summarize_with_haiku(prompt: str) -> str | None:
