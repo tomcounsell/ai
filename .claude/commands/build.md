@@ -1,6 +1,6 @@
 ---
 description: Execute a plan document using team orchestration. Deploys builder/validator agent pairs to complete tasks in order, with parallel execution where specified.
-argument-hint: <path-to-plan.md>
+argument-hint: <path-to-plan.md or #issue-number>
 model: sonnet
 disallowed-tools: Write, Edit, NotebookEdit
 ---
@@ -9,18 +9,56 @@ disallowed-tools: Write, Edit, NotebookEdit
 
 You are the **team lead** executing a plan document. You orchestrate work using Task tools - you NEVER build directly.
 
+## Invocation Methods
+
+The build skill supports two invocation methods:
+
+1. **By plan path**: `/build docs/plans/my-feature.md`
+2. **By issue number**: `/build #17` or `/build 17`
+
+When invoked with an issue number, the skill will:
+- Search all files in `docs/plans/*.md`
+- Find the plan with `tracking: https://github.com/{org}/{repo}/issues/{N}` in frontmatter
+- Use that plan for execution
+- Error if no match or multiple matches found
+
 ## Variables
 
-PLAN_PATH: $1
+PLAN_ARG: $1
+
+## Plan Resolution
+
+Before executing, resolve the plan path:
+
+**Step 1: Detect argument type**
+- If `PLAN_ARG` starts with `#` or is a pure number, treat as issue number
+- Otherwise, treat as file path
+
+**Step 2A: If issue number**
+1. Extract the number (strip `#` if present)
+2. Use Glob tool to find all plan files: `docs/plans/*.md`
+3. Read each plan and check frontmatter for `tracking:` field
+4. Match pattern: `/issues/{NUMBER}` where NUMBER equals the argument
+5. If exactly one match: use that plan path
+6. If no matches: Error - "No plan found tracking issue #{N}"
+7. If multiple matches: Error - "Multiple plans found tracking issue #{N}: [list paths]"
+
+**Step 2B: If file path**
+- Use `PLAN_ARG` directly as `PLAN_PATH`
+- Verify file exists (will error naturally if not)
+
+**Step 3: Set PLAN_PATH**
+- `PLAN_PATH` now contains the resolved absolute path to the plan document
 
 ## Instructions
 
-1. **Read the plan** at `PLAN_PATH`
-2. **Parse the Team Members** and Step by Step Tasks sections
-3. **Create all tasks** using `TaskCreate` before starting execution
-4. **Deploy agents** in order, respecting dependencies and parallel flags
-5. **Monitor progress** and handle any issues
-6. **Report completion** when all tasks are done
+1. **Resolve the plan path** using the Plan Resolution logic above
+2. **Read the plan** at `PLAN_PATH`
+3. **Parse the Team Members** and Step by Step Tasks sections
+4. **Create all tasks** using `TaskCreate` before starting execution
+5. **Deploy agents** in order, respecting dependencies and parallel flags
+6. **Monitor progress** and handle any issues
+7. **Report completion** when all tasks are done
 
 ## Critical Rules
 
@@ -95,6 +133,24 @@ When deploying an agent, include:
 2. Relevant file paths from the plan's "Relevant Files" section
 3. Success criteria from the plan
 4. Validation commands they should run (for validators)
+
+## Example Invocations
+
+**By file path:**
+```
+/build docs/plans/implement-auth.md
+```
+
+**By issue number:**
+```
+/build #42
+/build 42
+```
+
+Both methods will execute the same plan if the plan file has:
+```yaml
+tracking: https://github.com/valor-labs/ai/issues/42
+```
 
 ## Example Execution
 
