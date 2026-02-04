@@ -17,12 +17,11 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-
 # Add project root to path for imports
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.update import git, deps, verify, calendar, service
+from scripts.update import calendar, deps, git, service, verify  # noqa: E402
 
 
 @dataclass
@@ -293,7 +292,8 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log(f"Calendar config: {len(result.calendar_config.mappings)} mappings", v)
             for mapping in result.calendar_config.mappings:
                 status = "OK" if mapping.accessible else "INACCESSIBLE"
-                log(f"  {mapping.slug} -> {mapping.calendar_name or mapping.calendar_id} ({status})", v)
+                cal_name = mapping.calendar_name or mapping.calendar_id
+                log(f"  {mapping.slug} -> {cal_name} ({status})", v)
         else:
             log(f"WARN: Calendar config: {result.calendar_config.error}", v)
             result.warnings.append(f"Calendar config: {result.calendar_config.error}")

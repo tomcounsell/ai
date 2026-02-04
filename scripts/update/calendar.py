@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -49,7 +48,6 @@ def get_hook_script_path(project_dir: Path) -> Path:
 def verify_global_hook(project_dir: Path) -> CalendarHookResult:
     """Verify the global calendar hook is configured."""
     settings_path = get_global_settings_path()
-    hook_script = get_hook_script_path(project_dir)
 
     if not settings_path.exists():
         return CalendarHookResult(

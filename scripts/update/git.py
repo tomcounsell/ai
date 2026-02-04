@@ -28,7 +28,9 @@ class UpgradePendingInfo:
     reason: str | None = None
 
 
-def run_cmd(cmd: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess:
+def run_cmd(
+    cmd: list[str], cwd: Path | None = None, check: bool = True
+) -> subprocess.CompletedProcess:
     """Run a command and return result."""
     return subprocess.run(
         cmd,

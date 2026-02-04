@@ -199,12 +199,18 @@ def get_pinned_version(project_dir: Path, package: str) -> str | None:
     content = pyproject.read_text()
 
     # Simple parser for == pins
+    # Format: "telethon==1.40.0",  # CRITICAL — comment
     for line in content.split("\n"):
         if package in line and "==" in line:
-            # Extract version from line like: "telethon==1.36.0",
+            # Extract version from line
             parts = line.split("==")
             if len(parts) >= 2:
-                version = parts[1].strip().rstrip('",')
+                version_part = parts[1]
+                # Remove trailing comma, quotes, and comments
+                # First strip the quote and comma: 1.40.0",  # comment -> 1.40.0
+                if '"' in version_part:
+                    version_part = version_part.split('"')[0]
+                version = version_part.strip().rstrip(",")
                 return version
 
     return None

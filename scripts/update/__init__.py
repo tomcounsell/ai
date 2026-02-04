@@ -7,6 +7,6 @@ Modular update system for Valor. Can be called from:
 - Direct Python invocation for testing
 """
 
-from .run import run_update, UpdateConfig
+from .run import UpdateConfig, run_update
 
 __all__ = ["run_update", "UpdateConfig"]

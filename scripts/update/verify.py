@@ -64,7 +64,9 @@ def check_command(name: str, version_flag: str = "--version") -> ToolCheck:
         return ToolCheck(name=name, available=True, error=str(e))
 
 
-def check_python_import(project_dir: Path, module: str, display_name: str | None = None) -> ToolCheck:
+def check_python_import(
+    project_dir: Path, module: str, display_name: str | None = None
+) -> ToolCheck:
     """Check if a Python module can be imported."""
     python_path = project_dir / ".venv" / "bin" / "python"
     name = display_name or module
