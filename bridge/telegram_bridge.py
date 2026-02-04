@@ -301,13 +301,25 @@ def filter_tool_logs(response: str) -> str:
 
 # Fallback: detect absolute paths to common file types
 # Matches paths like /Users/foo/bar.png or /tmp/output.pdf
+# Includes: images, documents, audio, video, code, data files
 ABSOLUTE_PATH_PATTERN = re.compile(
-    r'(/(?:Users|home|tmp|var)[^\s\'"<>|]*\.(?:png|jpg|jpeg|gif|webp|bmp|pdf|mp3|mp4|wav|ogg))',
+    r"(/(?:Users|home|tmp|var|generated_images)[^\s'\"<>|]*\."
+    r"(?:png|jpg|jpeg|gif|webp|bmp|svg|ico"  # Images
+    r"|pdf|doc|docx|txt|md|rtf|csv|json|xml|yaml|yml"  # Documents
+    r"|mp3|mp4|wav|ogg|m4a|flac|aac|webm|mov|avi"  # Audio/Video
+    r"|py|js|ts|html|css|sh|sql|log"  # Code/logs
+    r"|zip|tar|gz|rar))",  # Archives
     re.IGNORECASE,
 )
 
-# Image extensions (for choosing send method)
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+# Image extensions (for choosing send method - images sent without caption)
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+
+# Video extensions (Telegram can preview these)
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm"}
+
+# Audio extensions (Telegram can play these)
+AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac"}
 
 
 def extract_files_from_response(response: str) -> tuple[str, list[Path]]:
@@ -1876,15 +1888,49 @@ async def send_response_with_files(
     # Send files first
     for file_path in files:
         try:
-            is_image = file_path.suffix.lower() in IMAGE_EXTENSIONS
-            await client.send_file(
-                _chat_id,
-                file_path,
-                reply_to=_reply_to,
-                # Images get no caption, other files get filename
-                caption=None if is_image else f"📎 {file_path.name}",
+            ext = file_path.suffix.lower()
+            is_image = ext in IMAGE_EXTENSIONS
+            is_video = ext in VIDEO_EXTENSIONS
+            is_audio = ext in AUDIO_EXTENSIONS
+
+            # Choose appropriate send options based on file type
+            if is_image:
+                # Images: send as photo (no caption, Telegram displays inline)
+                await client.send_file(
+                    _chat_id,
+                    file_path,
+                    reply_to=_reply_to,
+                    caption=None,
+                )
+            elif is_video:
+                # Videos: send as video (Telegram can preview/play)
+                await client.send_file(
+                    _chat_id,
+                    file_path,
+                    reply_to=_reply_to,
+                    caption=f"🎬 {file_path.name}",
+                    supports_streaming=True,
+                )
+            elif is_audio:
+                # Audio: send as audio (Telegram shows player)
+                await client.send_file(
+                    _chat_id,
+                    file_path,
+                    reply_to=_reply_to,
+                    caption=f"🎵 {file_path.name}",
+                )
+            else:
+                # Other files: send as document with filename caption
+                await client.send_file(
+                    _chat_id,
+                    file_path,
+                    reply_to=_reply_to,
+                    caption=f"📎 {file_path.name}",
+                    force_document=True,
+                )
+            logger.info(
+                f"Sent file: {file_path} (type: {'image' if is_image else 'video' if is_video else 'audio' if is_audio else 'document'})"
             )
-            logger.info(f"Sent file: {file_path}")
         except Exception as e:
             logger.error(f"Failed to send file {file_path}: {e}")
             await client.send_message(
