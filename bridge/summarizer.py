@@ -26,9 +26,8 @@ logger = logging.getLogger(__name__)
 # Thresholds
 SUMMARIZE_THRESHOLD = 500  # ~3 sentences; anything longer gets summarized
 FILE_ATTACH_THRESHOLD = 3000  # Attach full output as file above this
-MIN_SUMMARY_CHARS = 200  # Minimum for simple tasks
-MAX_SUMMARY_CHARS = 800  # Maximum before URLs (complex tasks need more room)
-URL_ALLOWANCE = 400  # Extra chars for URLs (issues, PRs, docs can be long)
+MIN_SUMMARY_CHARS = 200  # Minimum for custom summaries
+MAX_SUMMARY_CHARS = 800  # Maximum before URLs
 SAFETY_TRUNCATE = 4096  # Telegram hard limit
 
 # Ollama config — model can be overridden via env var
@@ -111,36 +110,35 @@ def _build_summary_prompt(text: str, artifacts: dict[str, list[str]]) -> str:
         )
 
     return f"""/no_think
-Summarize this AI agent output into a status update for Telegram.
+Summarize this AI agent output for Telegram. Choose the shortest \
+appropriate response:
 
-Length guidance:
-- Simple tasks (single fix, quick answer): {MIN_SUMMARY_CHARS}-300 chars
-- Medium tasks (feature, investigation): 300-500 chars
-- Complex tasks (multi-step, architecture): up to {MAX_SUMMARY_CHARS} chars
-- URLs don't count toward limits - always include relevant links
+1. "Done ✅" - task completed successfully, no details needed
+2. "Yes" or "No" - if answering a yes/no question
+3. Custom summary ({MIN_SUMMARY_CHARS}-{MAX_SUMMARY_CHARS} chars) - when context matters
 
-Rules:
-- Lead with the outcome or key finding
+For custom summaries:
+- Lead with outcome or key finding
 - Include commit hashes, PR URLs, issue links, doc links
-- If tests failed or errors occurred, mention that prominently
+- URLs don't count toward the char limit
+- If tests failed or there are blockers, mention prominently
 - No play-by-play of files read or tools used
-- No preamble or sign-off
-- Preserve the voice and perspective of the original text{artifact_section}
+- Preserve the original voice and perspective{artifact_section}
 
 Examples:
 
-Simple: "Fixed the null check in user validation. Tests passing. \
-`abc1234`"
+"Done ✅"
 
-Medium: "Refactored the payment module to use the new Stripe SDK. \
-Updated 4 files, added retry logic for webhooks. All tests green. \
+"Yes"
+
+"Fixed the null check in user validation. Tests passing. `abc1234`"
+
+"Refactored the payment module to use the new Stripe SDK. \
+Updated 4 files, added retry logic. All tests green. \
 https://github.com/org/repo/pull/42"
 
-Complex: "Implemented the new job queue system with Redis persistence. \
-Added priority scheduling, retry logic, and dead-letter handling. \
-Created plan doc and migrated existing cron jobs. 12 files changed, \
-integration tests passing. Need your review on the retry backoff \
-strategy (currently exponential with 5 min cap). \
+"Implemented the job queue with Redis persistence. Added priority \
+scheduling and retry logic. Need your review on backoff strategy. \
 Plan: https://github.com/org/repo/blob/main/docs/plans/job-queue.md \
 PR: https://github.com/org/repo/pull/87"
 
