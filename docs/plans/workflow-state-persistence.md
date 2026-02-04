@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Complete
 type: feature
 appetite: Medium: 3-5 days
 owner: Valor
@@ -145,13 +145,13 @@ agents/
 
 ## Success Criteria
 
-- [ ] `WorkflowState` class exists with all methods (update, save, load, from_stdin, to_stdout)
-- [ ] `generate_workflow_id()` creates 8-character unique IDs
-- [ ] State persists to `agents/{workflow_id}/state.json`
-- [ ] Bridge creates workflow on new Telegram tasks
-- [ ] SDK sessions track workflow_id
-- [ ] Workflows can be resumed by ID
-- [ ] Unit tests pass for core state operations
+- [x] `WorkflowState` class exists with all methods (update, save, load, from_stdin, to_stdout)
+- [x] `generate_workflow_id()` creates 8-character unique IDs
+- [x] State persists to `agents/{workflow_id}/state.json`
+- [x] Bridge creates workflow on new Telegram tasks
+- [x] SDK sessions track workflow_id
+- [x] Workflows can be resumed by ID
+- [x] Unit tests pass for core state operations
 
 ## Team Orchestration
 

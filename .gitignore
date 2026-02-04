@@ -430,7 +430,7 @@ telegram_session.session
 telegram_sessions/
 
 # Workflow state persistence - agents directory
-# Keep README.md but ignore all state files and logs
-agents/*
-!agents/README.md
-!agents/.gitkeep
+# Exclude state files, plans, and logs from version control
+agents/*/state.json
+agents/*/plan.md
+agents/*/logs/
