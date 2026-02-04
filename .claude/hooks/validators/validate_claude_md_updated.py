@@ -175,7 +175,14 @@ def main():
     tool_name = find_tool_name(args.tools_dir, args.tool_name, args.max_age)
     if not tool_name:
         # No tool to validate - this is not a failure, just nothing to check
-        print(json.dumps({"result": "continue", "message": "No tool changes detected, skipping validation"}))
+        print(
+            json.dumps(
+                {
+                    "result": "continue",
+                    "message": "No tool changes detected, skipping validation",
+                }
+            )
+        )
         sys.exit(0)
 
     success, message = validate_claude_md(tool_name, args.cli_name)

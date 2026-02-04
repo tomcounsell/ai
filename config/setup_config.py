@@ -7,23 +7,21 @@ the necessary files and validating the setup.
 """
 
 import os
-import sys
 import shutil
+import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
-from rich.prompt import Prompt, Confirm
+from rich.prompt import Confirm, Prompt
+from rich.table import Table
 
 # Add the project root to the path so we can import our config
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from config import settings, config_loader, validate_configuration, ConfigurationError
-
+from config import config_loader, validate_configuration
 
 console = Console()
 

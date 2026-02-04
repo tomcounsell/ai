@@ -272,8 +272,8 @@ def get_param_types() -> dict:
 
 
 if __name__ == "__main__":
-    import sys
     import json
+    import sys
 
     if len(sys.argv) < 3:
         print("Usage: python -m tools.test_params 'test_type' 'category1,category2'")

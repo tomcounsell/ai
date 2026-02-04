@@ -517,7 +517,7 @@ def format_branch_state_message(state: BranchState, revival_mode: bool = False) 
     elif state.work_status == "IN_PROGRESS":
         if revival_mode:
             # Background revival message - non-blocking, informative
-            msg = f"🔄 **Unfinished work detected - reviving in background**\n\n"
+            msg = "🔄 **Unfinished work detected - reviving in background**\n\n"
             msg += f"Branch: `{state.current_branch}`\n"
             if state.active_plan:
                 msg += f"Plan: `{state.active_plan.name}`\n\n"
@@ -527,7 +527,7 @@ def format_branch_state_message(state: BranchState, revival_mode: bool = False) 
             return msg
         else:
             # Legacy format (for direct replies or manual checks)
-            msg = f"⚠️ Work in progress detected:\n\n"
+            msg = "⚠️ Work in progress detected:\n\n"
             msg += f"**Branch**: `{state.current_branch}`\n"
 
             if state.active_plan:

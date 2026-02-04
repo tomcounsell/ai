@@ -263,7 +263,7 @@ if __name__ == "__main__":
     print(f"Ollama available: {check_ollama_available()}")
 
     result = classify_intent(message)
-    print(f"\nResult:")
+    print("\nResult:")
     print(f"  Intent: {result['intent']}")
     print(f"  Confidence: {result['confidence']:.2f}")
     print(f"  Entities: {result['entities']}")

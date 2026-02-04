@@ -1,12 +1,10 @@
 """Tests for the code execution tool."""
 
-import pytest
-
 from tools.code_execution import (
-    execute_code,
-    execute_python,
     execute_bash,
+    execute_code,
     execute_javascript,
+    execute_python,
 )
 
 

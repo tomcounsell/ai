@@ -9,8 +9,8 @@ from tools.sms_reader import (
     get_2fa,
     get_latest_2fa_code,
     get_recent_messages,
-    search_messages,
     list_senders,
+    search_messages,
 )
 
 

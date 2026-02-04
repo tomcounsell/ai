@@ -5,6 +5,7 @@ Run with: pytest tools/search/tests/ -v
 """
 
 import os
+
 import pytest
 
 from tools.search import search, search_with_context

@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Convert consolidated markdown documentation to PDF."""
 
-import markdown
-from weasyprint import HTML, CSS
 from pathlib import Path
+
+import markdown
+from weasyprint import HTML
 
 # Read markdown content
 md_path = Path(__file__).parent / "CONSOLIDATED_DOCUMENTATION.md"

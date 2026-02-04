@@ -10,14 +10,13 @@ Tests system performance against defined baselines:
 """
 
 import asyncio
-import os
 import sys
 import time
-import pytest
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+
+import pytest
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -117,10 +116,7 @@ class TestMemoryPerformance:
 
         # Import all tools
         try:
-            from tools import search
-            from tools import image_analysis
-            from tools import code_execution
-            from tools import test_judge
+            from tools import code_execution, image_analysis, search, test_judge
         except ImportError:
             pytest.skip("Tools not available")
 

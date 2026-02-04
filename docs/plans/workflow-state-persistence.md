@@ -1,5 +1,6 @@
 ---
 tracking: https://github.com/tomcounsell/ai/issues/16
+type: feature
 ---
 
 # Plan: Workflow State Persistence

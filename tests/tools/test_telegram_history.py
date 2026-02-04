@@ -1,21 +1,18 @@
 """Tests for the Telegram history tool."""
 
 from datetime import datetime, timedelta
-from pathlib import Path
-
-import pytest
 
 from tools.telegram_history import (
-    store_message,
-    search_history,
-    get_recent_messages,
     get_chat_stats,
-    store_link,
-    search_links,
-    list_links,
-    update_link,
-    get_link_stats,
     get_link_by_url,
+    get_link_stats,
+    get_recent_messages,
+    list_links,
+    search_history,
+    search_links,
+    store_link,
+    store_message,
+    update_link,
 )
 
 

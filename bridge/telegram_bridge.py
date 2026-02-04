@@ -19,7 +19,7 @@ import signal
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 # Ensure user site-packages is available for claude_agent_sdk
@@ -41,23 +41,9 @@ USE_CLAUDE_SDK = os.getenv("USE_CLAUDE_SDK", "false").lower() == "true"
 
 # Import SDK client and messenger if enabled (lazy import to avoid loading if not used)
 if USE_CLAUDE_SDK:
-    from agent import get_agent_response_sdk, BossMessenger, BackgroundTask
+    from agent import get_agent_response_sdk
 
 # Local tool imports for message and link storage
-from tools.telegram_history import (
-    store_message,
-    store_link,
-    get_recent_messages,
-    get_link_by_url,
-    register_chat,
-)
-from tools.link_analysis import (
-    extract_urls,
-    summarize_url_content,
-    get_metadata,
-    extract_youtube_urls,
-    process_youtube_urls_in_text,
-)
 from telethon import TelegramClient, events
 from telethon.tl.functions.messages import SendReactionRequest
 from telethon.tl.types import (
@@ -66,6 +52,21 @@ from telethon.tl.types import (
     MessageMediaDocument,
     MessageMediaPhoto,
     ReactionEmoji,
+)
+
+from tools.link_analysis import (
+    extract_urls,
+    extract_youtube_urls,
+    get_metadata,
+    process_youtube_urls_in_text,
+    summarize_url_content,
+)
+from tools.telegram_history import (
+    get_link_by_url,
+    get_recent_messages,
+    register_chat,
+    store_link,
+    store_message,
 )
 
 # =============================================================================
@@ -1305,23 +1306,23 @@ async def should_respond_async(
             )
             if replied_msg and replied_msg.out:  # .out means sent by us (Valor)
                 is_reply_to_valor = True
-                logger.debug(f"Case 2: Reply to Valor - responding")
+                logger.debug("Case 2: Reply to Valor - responding")
                 return True, True
         except Exception as e:
             logger.debug(f"Could not check replied message: {e}")
 
     # Case 3: @valor → always respond (no Ollama needed)
     if is_message_for_valor(text, project):
-        logger.debug(f"Case 3: @valor mentioned - responding")
+        logger.debug("Case 3: @valor mentioned - responding")
         return True, False
 
     # Case 4: @someoneelse → always ignore (no Ollama needed)
     if is_message_for_others(text, project):
-        logger.debug(f"Case 4: Message @directed to others - ignoring")
+        logger.debug("Case 4: Message @directed to others - ignoring")
         return False, False
 
     # Case 1: Unaddressed message → use Ollama to classify
-    logger.debug(f"Case 1: Unaddressed message - classifying with Ollama")
+    logger.debug("Case 1: Unaddressed message - classifying with Ollama")
     needs_response = await classify_needs_response_async(text)
     if not needs_response:
         logger.info(f"Ollama classified as ignore: {text[:50]}...")
@@ -1454,7 +1455,7 @@ def build_activity_context(working_dir: str | None = None) -> str:
         )
         if status_result.stdout.strip():
             modified_files = status_result.stdout.strip().split("\n")[:5]
-            context_parts.append(f"MODIFIED FILES:\n" + "\n".join(modified_files))
+            context_parts.append("MODIFIED FILES:\n" + "\n".join(modified_files))
     except Exception as e:
         logger.debug(f"Could not get git status: {e}")
 
@@ -2010,7 +2011,6 @@ async def get_agent_response_clawdbot(
     sender_id: int | None = None,
 ) -> str:
     """Call clawdbot agent and get response (legacy implementation)."""
-    import time
 
     start_time = time.time()
     request_id = f"{session_id}_{int(start_time)}"
@@ -2108,7 +2108,7 @@ async def get_agent_response_clawdbot(
                 process.communicate(),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Kill the process and try to capture partial output
             elapsed = time.time() - start_time
             logger.error(f"[{request_id}] Agent request timed out after {elapsed:.1f}s")
@@ -2117,7 +2117,7 @@ async def get_agent_response_clawdbot(
             process.terminate()
             try:
                 await asyncio.wait_for(process.wait(), timeout=5)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 process.kill()
 
             # Log structured timeout event
@@ -2390,7 +2390,7 @@ async def get_agent_response_with_retry(
 
             return response
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             last_error = "timeout"
             if attempt < MAX_RETRIES - 1:
                 await attempt_self_healing("timeout", session_id)
@@ -2415,7 +2415,7 @@ async def main():
         logger.error("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set")
         sys.exit(1)
 
-    logger.info(f"Starting Valor bridge")
+    logger.info("Starting Valor bridge")
     logger.info(
         f"Agent backend: {'Claude Agent SDK' if USE_CLAUDE_SDK else 'Clawdbot (legacy)'}"
     )
@@ -2678,11 +2678,12 @@ async def main():
         # === SDK MODE: Job queue with per-session branching ===
         if USE_CLAUDE_SDK:
             import re as _re
+
             from agent.job_queue import (
-                enqueue_job,
                 check_revival,
-                record_revival_cooldown,
+                enqueue_job,
                 queue_revival_job,
+                record_revival_cooldown,
             )
             from agent.steering import push_steering_message
 
@@ -2958,11 +2959,11 @@ async def main():
 
     # Register job queue callbacks for each project
     if USE_CLAUDE_SDK:
-        from agent.job_queue import register_callbacks as register_queue_callbacks
         from agent.job_queue import (
             cleanup_stale_branches,
             register_project_config,
         )
+        from agent.job_queue import register_callbacks as register_queue_callbacks
 
         for _pkey, _pconfig in CONFIG.get("projects", {}).items():
             # Register project config so job queue can read auto_merge etc.

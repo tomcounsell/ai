@@ -2,11 +2,10 @@
 
 import asyncio
 import importlib.util
-import pytest
-import sys
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 # Direct import of messenger module to avoid sdk_client dependency
 messenger_path = Path(__file__).parent.parent / "agent" / "messenger.py"

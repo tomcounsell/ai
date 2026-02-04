@@ -4,9 +4,7 @@ Integration tests for test-params tool.
 Run with: pytest tools/test-params/tests/ -v
 """
 
-import pytest
-
-from tools.test_params import generate_params, generate_edge_cases, get_param_types
+from tools.test_params import generate_edge_cases, generate_params, get_param_types
 
 
 class TestParamsInstallation:

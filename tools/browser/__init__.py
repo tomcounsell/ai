@@ -10,7 +10,8 @@ from typing import Literal
 
 # Check if playwright is available
 try:
-    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+    from playwright.sync_api import TimeoutError as PlaywrightTimeout
+    from playwright.sync_api import sync_playwright
 
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
@@ -235,7 +236,7 @@ def fill_form(
                 try:
                     page.fill(selector, value)
                     filled.append(selector)
-                except Exception as e:
+                except Exception:
                     pass  # Skip fields that can't be filled
 
             submitted = False

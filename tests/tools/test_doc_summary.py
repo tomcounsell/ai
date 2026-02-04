@@ -2,9 +2,7 @@
 
 import os
 
-import pytest
-
-from tools.doc_summary import summarize, summarize_file, extract_key_points
+from tools.doc_summary import extract_key_points, summarize, summarize_file
 
 
 class TestSummarizeValidation:

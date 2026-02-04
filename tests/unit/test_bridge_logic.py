@@ -4,9 +4,7 @@ Unit tests for Telegram bridge logic.
 Tests the core decision-making functions without requiring Telegram connectivity.
 """
 
-import pytest
 import re
-
 
 # Import the functions we're testing (we'll test them in isolation)
 # These are re-implemented here to test the logic without importing the module

@@ -1,9 +1,6 @@
 """Tests for the image analysis tool."""
 
 import os
-from pathlib import Path
-
-import pytest
 
 from tools.image_analysis import (
     analyze_image,

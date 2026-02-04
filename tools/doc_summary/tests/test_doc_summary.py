@@ -6,10 +6,11 @@ Run with: pytest tools/doc-summary/tests/ -v
 
 import os
 import tempfile
-import pytest
 from pathlib import Path
 
-from tools.doc_summary import summarize, summarize_file, extract_key_points
+import pytest
+
+from tools.doc_summary import extract_key_points, summarize, summarize_file
 
 
 class TestDocSummaryInstallation:

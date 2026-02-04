@@ -5,9 +5,10 @@ Run with: pytest tools/image-analysis/tests/ -v
 """
 
 import os
-import pytest
 import tempfile
 from pathlib import Path
+
+import pytest
 
 from tools.image_analysis import analyze_image, extract_text, generate_alt_text
 

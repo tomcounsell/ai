@@ -6,9 +6,9 @@ for environment-based configuration with validation and type safety.
 """
 
 import logging
-from pathlib import Path
-from typing import Optional, Dict, Any, List
 from enum import Enum
+from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -39,14 +39,14 @@ class DatabaseSettings(BaseModel):
 class APISettings(BaseModel):
     """API service configuration settings."""
 
-    claude_api_key: Optional[str] = Field(
+    claude_api_key: str | None = Field(
         default=None, description="Claude API key for AI services"
     )
-    openai_api_key: Optional[str] = Field(default=None, description="OpenAI API key")
-    perplexity_api_key: Optional[str] = Field(
+    openai_api_key: str | None = Field(default=None, description="OpenAI API key")
+    perplexity_api_key: str | None = Field(
         default=None, description="Perplexity API key for search"
     )
-    notion_api_key: Optional[str] = Field(
+    notion_api_key: str | None = Field(
         default=None, description="Notion API key for workspace integration"
     )
 
@@ -64,8 +64,8 @@ class APISettings(BaseModel):
 class TelegramSettings(BaseModel):
     """Telegram integration settings."""
 
-    api_id: Optional[int] = Field(default=None, description="Telegram API ID", ge=1)
-    api_hash: Optional[str] = Field(default=None, description="Telegram API hash")
+    api_id: int | None = Field(default=None, description="Telegram API ID", ge=1)
+    api_hash: str | None = Field(default=None, description="Telegram API hash")
     session_name: str = Field(
         default="ai_rebuild_session", description="Telegram session name"
     )
@@ -98,7 +98,7 @@ class SecuritySettings(BaseModel):
         description="Secret key for session management",
         min_length=32,
     )
-    allowed_hosts: List[str] = Field(
+    allowed_hosts: list[str] = Field(
         default=["localhost", "127.0.0.1"], description="Allowed hosts for CORS"
     )
     api_rate_limit: int = Field(
@@ -114,7 +114,7 @@ class LoggingSettings(BaseModel):
         default="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         description="Log message format",
     )
-    file_path: Optional[Path] = Field(
+    file_path: Path | None = Field(
         default=Path("logs/ai_rebuild.log"), description="Log file path"
     )
     max_file_size: int = Field(
@@ -249,7 +249,7 @@ class Settings(BaseSettings):
         """Check if running in development environment."""
         return self.environment == "development"
 
-    def get_api_config(self) -> Dict[str, Any]:
+    def get_api_config(self) -> dict[str, Any]:
         """Get API configuration for external services."""
         config = {}
 

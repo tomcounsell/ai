@@ -22,6 +22,10 @@ hooks:
             --contains '## Team Orchestration'
             --contains '## Step by Step Tasks'
             --contains '## Success Criteria'
+        - type: command
+          command: >-
+            uv run $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_plan_label.py
+            docs/plans
 ---
 
 # Make a Plan (Shape Up Methodology)
@@ -53,11 +57,40 @@ Creates structured feature plans in `docs/plans/` following Shape Up principles:
 
 ### Phase 2: Write Initial Plan
 
+**IMPORTANT: Classification is Mandatory**
+
+Every plan MUST include a `type:` field in the frontmatter. This classification is used for issue tracking and prioritization.
+
+**Classification Types:**
+- **bug** - Fixes broken functionality or resolves errors
+  - Something that should work but doesn't
+  - User-reported issues causing failures
+  - Incorrect behavior that needs correction
+
+- **feature** - Adds new capabilities or enhancements
+  - New functionality that didn't exist before
+  - Major improvements to existing features
+  - User-facing additions to the system
+
+- **chore** - Maintenance, refactoring, or infrastructure work
+  - Code cleanup without behavior changes
+  - Dependency updates
+  - Performance optimizations
+  - Documentation improvements
+  - Build/deploy process changes
+
+**During Planning Phase:**
+- Initial classification may be tentative
+- Can be reclassified based on discussion
+- Update the `type:` field in frontmatter if classification changes
+- Classification should be finalized before status changes to `Ready`
+
 Create `docs/plans/{slug}.md` with:
 
 ```markdown
 ---
 status: Planning
+type: [bug | feature | chore]
 appetite: [Small: 1-2 days | Medium: 3-5 days | Large: 1-2 weeks]
 owner: [Name]
 created: [YYYY-MM-DD]

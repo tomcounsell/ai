@@ -10,13 +10,11 @@ Tests the complete message flow through the system:
 These are REAL integration tests using actual Telegram API.
 """
 
-import asyncio
 import os
-import pytest
-from datetime import datetime
-from pathlib import Path
-from typing import Optional
 from dataclasses import dataclass
+from pathlib import Path
+
+import pytest
 
 
 @dataclass
@@ -25,7 +23,7 @@ class TestMessage:
 
     text: str
     expected_contains: list[str]
-    expected_tool: Optional[str] = None
+    expected_tool: str | None = None
     timeout_seconds: int = 30
 
 
@@ -46,7 +44,7 @@ class TestTelegramE2EFlow:
         return "RUNNING" in result.stdout
 
     @pytest.fixture
-    def test_chat_id(self) -> Optional[str]:
+    def test_chat_id(self) -> str | None:
         """Get test chat ID from environment."""
         return os.environ.get("TEST_TELEGRAM_CHAT_ID")
 
