@@ -388,6 +388,9 @@ temp/
 .tmp/
 .temp/
 
+# Generated images from AI image generation tool
+generated_images/
+
 # AI model files (often large)
 *.model
 *.pkl
