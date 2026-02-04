@@ -67,6 +67,7 @@ Before executing, resolve the plan path:
 - **Respect dependencies** - Don't start a task until its `Depends On` tasks are complete
 - **Run parallel tasks together** - Tasks with `Parallel: true` and no blocking dependencies can run simultaneously
 - **Validators wait for builders** - A `validate-*` task always waits for its corresponding `build-*` task
+- **No temporary files** - Agents must not create temporary documentation, test results, or scratch files in the repo. Use /tmp for any temporary work. Only create files that are part of the deliverable.
 
 ## Workflow
 
@@ -133,6 +134,7 @@ When deploying an agent, include:
 2. Relevant file paths from the plan's "Relevant Files" section
 3. Success criteria from the plan
 4. Validation commands they should run (for validators)
+5. Reminder: No temporary files in repo - use /tmp for scratch work, only commit deliverables
 
 ## Example Invocations
 
