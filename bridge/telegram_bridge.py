@@ -549,41 +549,32 @@ def extract_document_text(filepath: Path, max_chars: int = 5000) -> str | None:
 
 def _extract_pdf_text_stdlib(filepath: Path, max_chars: int = 5000) -> str | None:
     """
-    Best-effort PDF text extraction using only stdlib.
+    PDF text extraction using pypdf library.
 
-    Handles simple text PDFs by finding text stream objects.
-    Won't work for scanned/image PDFs, but catches most text-based ones.
+    Handles compressed streams, multiple pages, and most PDF formats.
+    Won't work for scanned/image-only PDFs (would need OCR).
     """
     try:
-        with open(filepath, "rb") as f:
-            content = f.read()
+        from pypdf import PdfReader
 
-        # Decode raw text between stream/endstream markers
+        reader = PdfReader(filepath)
         text_parts = []
-        import re as _re
 
-        for match in _re.finditer(
-            rb"stream\r?\n(.*?)\r?\nendstream", content, _re.DOTALL
-        ):
-            stream_data = match.group(1)
-            # Try to extract text operators (Tj, TJ, ')
-            for text_match in _re.finditer(rb"\(([^)]*)\)", stream_data):
-                try:
-                    decoded = text_match.group(1).decode("latin-1", errors="replace")
-                    if decoded.strip():
-                        text_parts.append(decoded)
-                except Exception:
-                    continue
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text_parts.append(page_text.strip())
 
         if text_parts:
-            extracted = " ".join(text_parts)
+            extracted = "\n\n".join(text_parts)
             if len(extracted) > max_chars:
                 extracted = extracted[:max_chars] + "..."
             return extracted
 
         return None
 
-    except Exception:
+    except Exception as e:
+        logging.getLogger(__name__).debug(f"PDF extraction failed: {e}")
         return None
 
 
