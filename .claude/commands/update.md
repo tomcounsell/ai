@@ -225,7 +225,103 @@ EOF
      - System tools: `brew install <tool>` (if on macOS)
    - Report which tools passed and which failed.
 
-11. **Generate Google Calendar config**
+11. **Verify global calendar hook**
+
+   The calendar hook must be in `~/.claude/settings.json` (global) so it fires for ALL Claude Code sessions, not just this repo.
+
+   ```bash
+   GLOBAL_SETTINGS="$HOME/.claude/settings.json"
+   HOOK_SCRIPT="/Users/valorengels/src/ai/scripts/calendar_prompt_hook.sh"
+
+   # Check if UserPromptSubmit hook is configured globally
+   if [ -f "$GLOBAL_SETTINGS" ]; then
+       if grep -q "UserPromptSubmit" "$GLOBAL_SETTINGS" && grep -q "calendar_prompt_hook.sh" "$GLOBAL_SETTINGS"; then
+           echo "✅ Global calendar hook configured"
+       else
+           echo "⚠️  Global calendar hook missing - adding..."
+           # Back up existing settings
+           cp "$GLOBAL_SETTINGS" "$GLOBAL_SETTINGS.bak"
+
+           # Use Python to safely merge the hook into existing settings
+           .venv/bin/python -c "
+   import json
+   from pathlib import Path
+
+   settings_path = Path('$GLOBAL_SETTINGS')
+   settings = json.loads(settings_path.read_text())
+
+   # Ensure hooks dict exists
+   if 'hooks' not in settings:
+       settings['hooks'] = {}
+
+   # Add UserPromptSubmit hook if missing
+   if 'UserPromptSubmit' not in settings['hooks']:
+       settings['hooks']['UserPromptSubmit'] = [{
+           'matcher': '',
+           'hooks': [{
+               'type': 'command',
+               'command': 'bash $HOOK_SCRIPT',
+               'timeout': 15
+           }]
+       }]
+       print('Added UserPromptSubmit hook')
+
+   # Add calendar hook to Stop if missing
+   stop_hooks = settings['hooks'].get('Stop', [])
+   has_calendar_stop = any('calendar_prompt_hook' in str(h) for h in stop_hooks)
+   if not has_calendar_stop:
+       if not stop_hooks:
+           stop_hooks = [{'matcher': '', 'hooks': []}]
+       # Insert at beginning of hooks list
+       stop_hooks[0]['hooks'].insert(0, {
+           'type': 'command',
+           'command': 'bash $HOOK_SCRIPT',
+           'timeout': 15
+       })
+       settings['hooks']['Stop'] = stop_hooks
+       print('Added calendar hook to Stop')
+
+   settings_path.write_text(json.dumps(settings, indent=2))
+   print('✅ Global calendar hook configured')
+   "
+       fi
+   else
+       echo "⚠️  No global settings file - creating with calendar hook..."
+       cat > "$GLOBAL_SETTINGS" << 'EOFSET'
+   {
+     "hooks": {
+       "UserPromptSubmit": [
+         {
+           "matcher": "",
+           "hooks": [
+             {
+               "type": "command",
+               "command": "bash /Users/valorengels/src/ai/scripts/calendar_prompt_hook.sh",
+               "timeout": 15
+             }
+           ]
+         }
+       ],
+       "Stop": [
+         {
+           "matcher": "",
+           "hooks": [
+             {
+               "type": "command",
+               "command": "bash /Users/valorengels/src/ai/scripts/calendar_prompt_hook.sh",
+               "timeout": 15
+             }
+           ]
+         }
+       ]
+     }
+   }
+   EOFSET
+       echo "✅ Created global settings with calendar hook"
+   fi
+   ```
+
+12. **Generate Google Calendar config**
 
    Auto-generate `~/Desktop/claude_code/calendar_config.json` by matching Google Calendar names to projects.
 
@@ -335,7 +431,7 @@ EOF
    - **Auth failed**: OAuth token invalid or missing — run `/setup`
    - **Inaccessible**: Calendar mapped but API returns error
 
-12. **Verify MCP servers**
+13. **Verify MCP servers**
 
    The Agent SDK inherits MCP servers from Claude Code's local/project settings via `setting_sources`. Check what's configured:
 
@@ -347,7 +443,7 @@ EOF
    - If none are configured, note that the SDK agent will only have built-in tools (bash, file read/write, etc.)
    - MCP servers are managed via `claude mcp add/remove` — any changes take effect on next bridge restart
 
-13. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, whether the service restarted successfully, SDK auth mode, CLI tool health, calendar status, and MCP server status.
+14. **Report results** to the user: what was pulled (summary of commits), whether dependencies were updated, whether the service restarted successfully, SDK auth mode, CLI tool health, global hook status, calendar status, and MCP server status.
 
 ## Troubleshooting
 
