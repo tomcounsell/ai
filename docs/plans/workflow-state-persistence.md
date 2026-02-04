@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium: 3-5 days
 owner: Valor
@@ -97,9 +97,10 @@ class WorkflowState:
 ```python
 class WorkflowStateData(BaseModel):
     workflow_id: str
-    issue_number: Optional[int] = None
+    plan_file: str  # Required - path to docs/plans/*.md
+    tracking_url: str  # Required - GitHub issue or Notion task URL
+    issue_number: Optional[int] = None  # GitHub issue number (if GitHub)
     branch_name: Optional[str] = None
-    plan_file: Optional[str] = None
     phase: Optional[str] = None  # plan, build, test, review, document
     status: Optional[str] = None  # pending, in_progress, completed, failed
     telegram_chat_id: Optional[int] = None
@@ -294,10 +295,8 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - `pytest tests/agent/test_workflow_state.py -v` - run unit tests (if created)
 - `ls -la agents/` - verify directory structure
 
----
+## Design Decisions
 
-## Open Questions
-
-1. Should workflow states auto-expire after a certain time, or require explicit cleanup?
-2. Should the bridge create workflows for ALL messages or only certain types (e.g., task-like messages)?
-3. Should workflow_id be visible to users in Telegram responses for reference?
+1. **Retention**: Keep the 12 most recent workflows resumable. Older workflows can be cleaned up.
+2. **Creation criteria**: Workflows are only created for tracked work - must have both a plan document (`docs/plans/*.md`) AND a tracking issue (GitHub) or task (Notion). Casual messages don't get workflows.
+3. **Visibility**: workflow_id is internal only, not exposed to users in Telegram.
