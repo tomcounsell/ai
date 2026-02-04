@@ -294,7 +294,7 @@ Multi-step processes that combine tools for common tasks:
   - Uses `agent-browser` for UI screenshots
   - Compares implementation against spec files
   - Outputs structured JSON report with severity-classified issues
-  - Screenshots stored in `agents/{workflow_id}/review/review_img/`
+  - Screenshots saved to `generated_images/{workflow_id}/` (auto-sent via bridge)
 - Code review workflow: fetch PR -> analyze changes -> check tests -> post review
 - Incident response: check Sentry -> identify cause -> create fix -> deploy
 - Research workflow: search web -> summarize -> store in Notion
@@ -617,7 +617,7 @@ Run `/review` at these key points:
 - Uses `/prepare_app` to start application services
 - Uses `agent-browser` to navigate critical UI paths
 - Captures 1-5 screenshots with descriptive names
-- Stores in `agents/{workflow_id}/review/review_img/`
+- Saves to `generated_images/{workflow_id}/` (auto-sent via Telegram bridge)
 
 **4. Issue Classification**
 - **blocker**: Must fix before release (breaks core functionality, security issues)
@@ -631,16 +631,21 @@ Run `/review` at these key points:
 
 ### Screenshot Naming Convention
 
+Screenshots saved to `generated_images/{workflow_id}/`:
+
 ```
-{nn}_{descriptive_name}.png
+generated_images/{workflow_id}/{nn}_{descriptive_name}.png
 
 Examples:
-01_main_dashboard.png
-02_user_profile.png
-03_error_state.png
-04_responsive_mobile.png
-05_final_state.png
+generated_images/review-auth/01_main_dashboard.png
+generated_images/review-auth/02_user_profile.png
+generated_images/review-auth/03_error_state.png
 ```
+
+**Bridge Integration:**
+- Files in `generated_images/` are auto-detected by the bridge
+- Automatically sent to Telegram when mentioned in response
+- Same behavior as `valor-image-gen` output
 
 ### Review Report Schema
 
@@ -704,7 +709,9 @@ Examples:
 ### Output Artifacts
 
 - Review report: `agents/{workflow_id}/review/report.json`
-- Screenshots: `agents/{workflow_id}/review/review_img/*.png`
+- Screenshots: `generated_images/{workflow_id}/*.png`
+  - Auto-sent via Telegram when paths mentioned in response
+  - Same detection pattern as valor-image-gen output
 - Console summary: Immediate feedback on review status
 
 ---

@@ -62,7 +62,7 @@ If no specs exist, ask user for requirements/acceptance criteria.
 
 **Prepare screenshot directory:**
 ```bash
-mkdir -p agents/{workflow_id}/review/review_img
+mkdir -p generated_images/{workflow_id}
 ```
 
 **Determine if screenshots needed:**
@@ -83,8 +83,8 @@ agent-browser open http://localhost:8000
 agent-browser snapshot -i
 
 # Navigate critical paths and capture screenshots
-# Name format: {nn}_{descriptive_name}.png
-agent-browser screenshot agents/{workflow_id}/review/review_img/01_main_view.png
+# Name format: {workflow_id}_{nn}_{descriptive_name}.png
+agent-browser screenshot generated_images/{workflow_id}/01_main_view.png
 
 # Continue for each critical UI path (1-5 screenshots typical)
 ```
@@ -161,7 +161,7 @@ For each requirement in the spec:
   "review_issues": [
     {
       "issue_number": 1,
-      "screenshot_path": "agents/review-workflow/review/review_img/02_error_state.png",
+      "screenshot_path": "generated_images/review-workflow/02_error_state.png",
       "description": "Error message not displayed when user submits invalid input",
       "resolution": "Add error state rendering in FormComponent.tsx line 45",
       "severity": "blocker"
@@ -175,9 +175,9 @@ For each requirement in the spec:
     }
   ],
   "screenshots": [
-    "agents/review-workflow/review/review_img/01_main_dashboard.png",
-    "agents/review-workflow/review/review_img/02_error_state.png",
-    "agents/review-workflow/review/review_img/03_success_flow.png"
+    "generated_images/review-workflow/01_main_dashboard.png",
+    "generated_images/review-workflow/02_error_state.png",
+    "generated_images/review-workflow/03_success_flow.png"
   ],
   "metrics": {
     "total_issues": 2,
@@ -219,7 +219,7 @@ EOF
   - Skippable: {skippable}
 
 📸 Screenshots: {screenshot_count} captured
-  → agents/{workflow_id}/review/review_img/
+  → generated_images/{workflow_id}/
 
 📝 Full report: agents/{workflow_id}/review/report.json
 ```
@@ -241,9 +241,10 @@ EOF
 - Spec files - Located in `specs/*.md`
 
 **Screenshot storage:**
-- Organized by workflow ID
-- Timestamped reports for history
-- Can be uploaded to cloud storage (R2/S3) in future
+- Saved to `generated_images/{workflow_id}/` directory
+- Automatically detected and sent via Telegram bridge (same as valor-image-gen)
+- Organized by workflow ID for easy tracking
+- Bridge uses RELATIVE_PATH_PATTERN to auto-detect generated_images/ files
 
 **Report schema:**
 - Machine-readable JSON
@@ -267,7 +268,9 @@ EOF
 ## Output Artifacts
 
 1. **Review report**: `agents/{workflow_id}/review/report.json`
-2. **Screenshots**: `agents/{workflow_id}/review/review_img/*.png`
+2. **Screenshots**: `generated_images/{workflow_id}/*.png`
+   - Auto-sent via Telegram when paths mentioned in response
+   - Same detection pattern as valor-image-gen output
 3. **Console summary**: Immediate feedback on review status
 
 ## Best Practices
