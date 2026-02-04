@@ -428,3 +428,9 @@ telegram_session.session
 
 # Telegram session files
 telegram_sessions/
+
+# Workflow state persistence - agents directory
+# Keep README.md but ignore all state files and logs
+agents/*
+!agents/README.md
+!agents/.gitkeep
