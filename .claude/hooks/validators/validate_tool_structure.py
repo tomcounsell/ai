@@ -180,13 +180,9 @@ def main():
 
     tool_name = find_tool_name(args.tools_dir, args.name, args.max_age)
     if not tool_name:
-        print(
-            "VALIDATION FAILED: No tool found to validate.\n\n"
-            f"No new or recently modified tool directories in {args.tools_dir}/.\n"
-            "Use --name to specify a tool explicitly.",
-            file=sys.stderr,
-        )
-        sys.exit(2)
+        # No tool to validate - this is not a failure, just nothing to check
+        print(json.dumps({"result": "continue", "message": "No tool changes detected, skipping validation"}))
+        sys.exit(0)
 
     success, message = validate_tool(args.tools_dir, tool_name, args.require_manifest)
 
