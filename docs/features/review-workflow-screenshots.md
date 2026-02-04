@@ -1,12 +1,20 @@
 ---
 tracking: https://github.com/tomcounsell/ai/issues/18
+status: Implemented
+implemented: 2026-02-04
 ---
 
-# Plan: Review Workflow with Screenshots
+# Feature: Review Workflow with Screenshots
 
 ## Overview
 
-Add a `/review` command that validates implementations against specifications and captures visual proof via screenshots.
+The `/review` command validates implementations against specifications and captures visual proof via screenshots.
+
+**Status:** ✅ Implemented
+**Implementation files:**
+- `.claude/commands/review.md` - Review workflow command
+- `.claude/commands/prepare_app.md` - App preparation command
+- `CLAUDE.md` - Documentation and integration
 
 ## Source Inspiration
 
