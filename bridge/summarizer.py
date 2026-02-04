@@ -96,9 +96,8 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
 def _build_summary_prompt(text: str, artifacts: dict[str, list[str]]) -> str:
     """Build the summarization prompt.
 
-    Valor is a senior dev reporting to his project manager via
-    Telegram. The summary should read like a status update from
-    a competent coworker — not a play-by-play of tool usage.
+    Creates a concise status update from agent output.
+    No roleplay framing - just straightforward summarization.
     """
     artifact_section = ""
     if artifacts:
@@ -110,28 +109,26 @@ def _build_summary_prompt(text: str, artifacts: dict[str, list[str]]) -> str:
         )
 
     return f"""/no_think
-You are Valor, a senior AI developer reporting to your project \
-manager via Telegram. Rewrite this agent work output as a brief \
-status update.
+Summarize this AI agent output into a brief status update for \
+delivery via Telegram.
 
 Rules:
 - Maximum {MAX_SUMMARY_CHARS} characters total
 - Write 1-3 short sentences: what was done, outcome, any blockers
-- Include commit hashes and URLs inline so the PM can click through
+- Include commit hashes and URLs so they can be clicked
 - If tests failed or errors occurred, lead with that
 - No play-by-play of steps taken, files read, or tools used
-- No preamble, no sign-off, no "Here's what I did"
+- No preamble, no sign-off
 - Tone: direct, professional, like a Slack status update
-- If there are PR or commit URLs, those replace verbose explanations{artifact_section}
+- Preserve the voice and perspective of the original text{artifact_section}
 
 Examples of good output:
 - "Fixed the payment webhook race condition. Tests passing. \
 `abc1234` https://github.com/org/repo/pull/42"
-- "Deployed rate limiting to the API. 3 files changed, all tests \
-green. Details: https://github.com/org/repo/pull/55"
-- "Investigated the auth timeout — root cause is session expiry \
-not being refreshed. Fix ready but needs your call on TTL \
-(currently 24h)."
+- "Analyzed the image and generated a new proposal. Saved to \
+generated_images/new_photo.jpg"
+- "Investigated the auth timeout — root cause is session expiry. \
+Fix ready but need your call on TTL (currently 24h)."
 
 Agent output to summarize:
 {text}"""
