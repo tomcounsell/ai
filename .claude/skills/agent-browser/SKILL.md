@@ -6,6 +6,18 @@ allowed-tools: Bash(agent-browser:*)
 
 # Browser Automation with agent-browser
 
+## When to Use
+
+- User needs to navigate websites or interact with web pages
+- Filling out web forms or clicking buttons on web pages
+- Taking screenshots of web pages or saving pages as PDFs
+- Extracting data or information from websites
+- Testing web applications or verifying web functionality
+- Recording video demonstrations of web interactions
+- User mentions "browser", "webpage", "website", "screenshot", "web form", or "web scraping"
+- User asks to "open a URL", "click on something", "fill out a form", or "get data from a site"
+- Automating repetitive web tasks or workflows
+
 ## Quick start
 
 ```bash
