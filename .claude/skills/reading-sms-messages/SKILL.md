@@ -1,6 +1,7 @@
 ---
 name: reading-sms-messages
 description: Read SMS and iMessage from macOS Messages app. Use when getting 2FA codes, checking recent texts, or searching message history.
+allowed-tools: Read, Bash
 ---
 
 # SMS Reader
