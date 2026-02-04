@@ -1,3 +1,7 @@
+---
+description: Scale compute by spawning multiple agents in parallel for independent tasks
+---
+
 # Parallel Thread Execution (P-Thread)
 
 Scale compute by spawning multiple agents in parallel. This skill enables autonomous horizontal scaling for independent work.
