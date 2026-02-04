@@ -1667,6 +1667,7 @@ dependencies = [
     { name = "popoto" },
     { name = "psutil" },
     { name = "python-dotenv" },
+    { name = "requests" },
     { name = "telethon" },
     { name = "yt-dlp" },
 ]
@@ -1694,6 +1695,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "requests", specifier = ">=2.31.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
     { name = "telethon", specifier = "==1.40.0" },
     { name = "yt-dlp", specifier = ">=2024.1.0" },

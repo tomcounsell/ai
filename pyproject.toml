@@ -9,6 +9,7 @@ dependencies = [
     "claude-agent-sdk==0.1.27",  # CRITICAL — pin exact, upgrade via /update only
     "python-dotenv>=1.0.0",
     "httpx>=0.27.0",
+    "requests>=2.31.0",  # Required for Google API requests transport
     "ollama>=0.3.0",  # Local LLM fallback for summarization
     "yt-dlp>=2024.1.0",  # YouTube audio download for transcription
     "popoto>=0.9.0",  # Redis ORM for job queue persistence (async support)

@@ -21,7 +21,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.update import calendar, deps, git, service, verify  # noqa: E402
+from scripts.update import cal_integration, deps, git, service, verify  # noqa: E402
 
 
 @dataclass
@@ -92,8 +92,8 @@ class UpdateResult:
     dep_result: deps.DepSyncResult | None = None
     version_info: list[deps.VersionInfo] | None = None
     verification: verify.VerificationResult | None = None
-    calendar_hook: calendar.CalendarHookResult | None = None
-    calendar_config: calendar.CalendarConfigResult | None = None
+    calendar_hook: cal_integration.CalendarHookResult | None = None
+    calendar_config: cal_integration.CalendarConfigResult | None = None
     service_status: service.ServiceStatus | None = None
     caffeinate_status: service.CaffeinateStatus | None = None
     errors: list[str] = field(default_factory=list)
@@ -276,7 +276,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         log("Checking calendar integration...", v)
 
         # Global hook
-        result.calendar_hook = calendar.ensure_global_hook(project_dir)
+        result.calendar_hook = cal_integration.ensure_global_hook(project_dir)
         if result.calendar_hook.configured:
             if result.calendar_hook.created:
                 log("Calendar hook installed", v)
@@ -287,7 +287,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             result.warnings.append(f"Calendar hook: {result.calendar_hook.error}")
 
         # Calendar config
-        result.calendar_config = calendar.generate_calendar_config(project_dir)
+        result.calendar_config = cal_integration.generate_calendar_config(project_dir)
         if result.calendar_config.success:
             log(f"Calendar config: {len(result.calendar_config.mappings)} mappings", v)
             for mapping in result.calendar_config.mappings:
