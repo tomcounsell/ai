@@ -74,6 +74,14 @@ This directory contains specialized sub-agents designed to handle specific aspec
 - Cross-referencing and discovery
 - Keeping docs in sync with code
 
+### 📋 Planning & Orchestration
+
+**[plan-maker](./plan-maker.md)**
+- Shape Up plan document creation
+- Team orchestration design
+- Task dependency mapping
+- Agent type assignment for execution
+
 ### 🔄 Operations & Migration
 
 **[migration-specialist](./migration-specialist.md)**
@@ -129,6 +137,7 @@ When working on specific tasks, delegate to the appropriate specialist:
 - **Agent design** → `agent-architect`
 - **UI/UX work** → `designer`
 - **Documentation** → `documentarian`
+- **Plan creation** → `plan-maker` (NOT built-in `Plan` agent)
 
 ## Usage Examples
 
