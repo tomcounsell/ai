@@ -1,6 +1,7 @@
 ---
 name: searching-message-history
 description: Search Telegram conversation history and stored links. Use when finding past messages, what someone said, or links shared in chats.
+allowed-tools: Read, Grep, Glob, Bash
 ---
 
 # Message History
