@@ -303,12 +303,25 @@ def filter_tool_logs(response: str) -> str:
 # Matches paths like /Users/foo/bar.png or /tmp/output.pdf
 # Includes: images, documents, audio, video, code, data files
 ABSOLUTE_PATH_PATTERN = re.compile(
-    r"(/(?:Users|home|tmp|var|generated_images)[^\s'\"<>|]*\."
+    r"(/(?:Users|home|tmp|var)[^\s'\"<>|]*\."
     r"(?:png|jpg|jpeg|gif|webp|bmp|svg|ico"  # Images
     r"|pdf|doc|docx|txt|md|rtf|csv|json|xml|yaml|yml"  # Documents
     r"|mp3|mp4|wav|ogg|m4a|flac|aac|webm|mov|avi"  # Audio/Video
     r"|py|js|ts|html|css|sh|sql|log"  # Code/logs
     r"|zip|tar|gz|rar))",  # Archives
+    re.IGNORECASE,
+)
+
+# Relative paths in known output directories (resolved to absolute before sending)
+# Matches: generated_images/foo.png, data/output.json, etc.
+RELATIVE_PATH_PATTERN = re.compile(
+    r"(?:^|[\s`'\"])("
+    r"(?:generated_images|data|output|tmp)[^\s'\"<>|]*\."
+    r"(?:png|jpg|jpeg|gif|webp|bmp|svg|ico"
+    r"|pdf|doc|docx|txt|md|rtf|csv|json|xml|yaml|yml"
+    r"|mp3|mp4|wav|ogg|m4a|flac|aac|webm|mov|avi"
+    r"|py|js|ts|html|css|sh|sql|log"
+    r"|zip|tar|gz|rar))",
     re.IGNORECASE,
 )
 
@@ -322,7 +335,9 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm"}
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac"}
 
 
-def extract_files_from_response(response: str) -> tuple[str, list[Path]]:
+def extract_files_from_response(
+    response: str, working_dir: Path | None = None
+) -> tuple[str, list[Path]]:
     """
     Extract files to send from response text.
 
@@ -330,10 +345,15 @@ def extract_files_from_response(response: str) -> tuple[str, list[Path]]:
 
     Detection methods:
     1. Explicit markers: <<FILE:/path/to/file>>
-    2. Fallback: Absolute paths to existing media files
+    2. Absolute paths to existing media files
+    3. Relative paths in known directories (generated_images/, data/, etc.)
     """
     files_to_send: list[Path] = []
     seen_paths: set[str] = set()  # Use resolved paths to avoid duplicates from symlinks
+
+    # Default working directory for resolving relative paths
+    if working_dir is None:
+        working_dir = Path(__file__).parent.parent  # ai/ repo root
 
     # Method 1: Explicit file markers (highest priority)
     for match in FILE_MARKER_PATTERN.finditer(response):
@@ -345,7 +365,7 @@ def extract_files_from_response(response: str) -> tuple[str, list[Path]]:
                 files_to_send.append(path)
                 seen_paths.add(resolved)
 
-    # Method 2: Fallback - detect absolute paths to media files
+    # Method 2: Absolute paths to media files
     for match in ABSOLUTE_PATH_PATTERN.finditer(response):
         path_str = match.group(1).strip()
         path = Path(path_str)
@@ -354,6 +374,18 @@ def extract_files_from_response(response: str) -> tuple[str, list[Path]]:
             if resolved not in seen_paths:
                 files_to_send.append(path)
                 seen_paths.add(resolved)
+
+    # Method 3: Relative paths in known directories (resolve to absolute)
+    for match in RELATIVE_PATH_PATTERN.finditer(response):
+        path_str = match.group(1).strip()
+        # Try resolving relative to working directory
+        path = working_dir / path_str
+        if path.exists() and path.is_file():
+            resolved = str(path.resolve())
+            if resolved not in seen_paths:
+                files_to_send.append(path)
+                seen_paths.add(resolved)
+                logger.debug(f"Resolved relative path: {path_str} -> {path}")
 
     # Clean response: remove file markers
     cleaned = FILE_MARKER_PATTERN.sub("", response)
