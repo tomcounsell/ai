@@ -16,8 +16,8 @@ INPUT=$(cat)
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
-# Skip non-billable sessions (updates, setup, config)
-if echo "$PROMPT" | grep -qiE '^\s*/(update|setup|clear)|^(update|setup|config)'; then
+# Skip slash commands - only real prompts should create calendar events
+if echo "$PROMPT" | grep -qE '^\s*/'; then
     exit 0
 fi
 
