@@ -1,43 +1,61 @@
 ---
-tracking: https://github.com/tomcounsell/ai/issues/16
+status: Planning
 type: feature
+appetite: Medium: 3-5 days
+owner: Valor
+created: 2024-01-15
+tracking: https://github.com/tomcounsell/ai/issues/16
 ---
 
-# Plan: Workflow State Persistence
+# Workflow State Persistence
 
-## Overview
+## Problem
 
-Add a state management system for tracking multi-phase workflows that may span multiple sessions or be delegated via Telegram.
+Multi-phase workflows (plan → build → test → review) have no persistent state. When Telegram-delegated work spans multiple sessions, context is lost.
 
-## Source Inspiration
+**Current behavior:**
+- Each session starts fresh with no memory of previous work
+- Workflow phase (plan/build/test) not tracked
+- No unique identifiers for correlating related work
+- Can't resume interrupted workflows
+
+**Desired outcome:**
+- Workflows have unique 8-character IDs
+- State persists to `agents/{workflow_id}/state.json`
+- Workflows can be resumed across sessions
+- State can be piped between chained operations
+
+## Appetite
+
+**Time budget:** Medium: 3-5 days
+
+**Team size:** Solo
+
+## Solution
+
+### Key Elements
+
+- **WorkflowState class**: Container for state with file persistence, stdin/stdout piping
+- **Pydantic models**: Type-safe state data with validation
+- **ID generation**: 8-character unique workflow identifiers
+- **Bridge integration**: Create/track workflows from Telegram messages
+- **SDK integration**: Pass workflow_id through conversation context
+
+### Flow
+
+**Telegram message** → Create workflow (ID: abc12345) → **WorkflowState saved** → SDK session with workflow_id → **Phase updates** → State persisted → **Resume later** → Load workflow state → Continue work
+
+### Technical Approach
+
+- Pydantic models for type-safe state validation
+- JSON file persistence in `agents/{workflow_id}/state.json`
+- Stdin/stdout piping for shell workflow chaining
+- Integration with existing bridge message handling
+- Pass workflow_id through SDK session context
+
+### Source Inspiration
 
 From `indydan/tac-6/adws/adw_modules/state.py` - the `ADWState` class.
-
-## Problem Statement
-
-Currently, Valor lacks:
-- Persistent state for multi-phase tasks (plan -> build -> test -> review)
-- Unique workflow identifiers for tracking
-- Ability to resume workflows across sessions
-- State passing between chained operations
-
-This is especially problematic for Telegram-delegated work that might need multiple interactions.
-
-## Proposed Solution
-
-Create a `WorkflowState` class that:
-- Assigns unique 8-character IDs to workflows
-- Persists state to `agents/{workflow_id}/state.json`
-- Supports stdin/stdout piping for chaining
-- Integrates with the completion tracking already in CLAUDE.md
-
-### New Files to Create
-
-```
-agent/
-  workflow_state.py     # Core state management class
-  workflow_types.py     # Pydantic models for state data
-```
 
 ### WorkflowState Class Design
 
@@ -53,13 +71,7 @@ class WorkflowState:
 
     def update(self, **kwargs):
         """Update state with new key-value pairs."""
-        core_fields = {
-            "workflow_id", "issue_number", "branch_name",
-            "plan_file", "phase", "status", "telegram_chat_id"
-        }
-        for key, value in kwargs.items():
-            if key in core_fields:
-                self.data[key] = value
+        ...
 
     def save(self, phase: Optional[str] = None) -> None:
         """Save state to agents/{workflow_id}/state.json."""
@@ -108,168 +120,184 @@ agents/
       test.log
 ```
 
-## Integration Points
+## Rabbit Holes & Risks
 
-1. **Telegram Bridge**: Create workflow state when receiving task, update on completion
-2. **SDK Client**: Pass workflow_id to track conversations
-3. **Completion Tracking**: Link to existing `mark_complete` criteria in CLAUDE.md
+### Risk 1: Orphaned workflow states
+**Impact:** Disk fills with abandoned state files
+**Mitigation:** Add cleanup for states older than 30 days, or on explicit completion
 
-## Implementation Steps
+### Risk 2: State file corruption
+**Impact:** Workflow can't be resumed, data loss
+**Mitigation:** Write to temp file first, atomic rename; add recovery/rebuild logic
 
-1. Create `agent/workflow_types.py` with Pydantic models
-2. Create `agent/workflow_state.py` with `WorkflowState` class
-3. Add helper function `generate_workflow_id()` for 8-char IDs
-4. Update `bridge/telegram_bridge.py` to create/track workflows
-5. Add workflow state to SDK session management
-6. Create `agents/` directory structure
+### Risk 3: Integration with existing completion tracking
+**Impact:** Duplicate state management, inconsistent behavior
+**Mitigation:** Ensure WorkflowState complements (not replaces) existing `mark_complete` patterns
 
-## Team Members
+## No-Gos (Out of Scope)
 
-### builder
-Implementation agent responsible for writing code, creating files, and making changes.
+- Database-backed state storage (file-based only for now)
+- Multi-user workflow sharing
+- Workflow history/versioning beyond current state
+- Complex workflow branching/merging
+- State encryption
 
-- **Role**: Implementation
-- **Capabilities**: File creation, code writing, system modifications
-- **Restrictions**: None
+## Success Criteria
 
-### validator
-Read-only verification agent that validates implementations without making changes.
+- [ ] `WorkflowState` class exists with all methods (update, save, load, from_stdin, to_stdout)
+- [ ] `generate_workflow_id()` creates 8-character unique IDs
+- [ ] State persists to `agents/{workflow_id}/state.json`
+- [ ] Bridge creates workflow on new Telegram tasks
+- [ ] SDK sessions track workflow_id
+- [ ] Workflows can be resumed by ID
+- [ ] Unit tests pass for core state operations
 
-- **Role**: Validation
-- **Capabilities**: File reading, test execution, verification
-- **Restrictions**: No file modifications, read-only operations
+## Team Orchestration
+
+When this plan is executed, the lead agent orchestrates work using Task tools. The lead NEVER builds directly - they deploy team members and coordinate.
+
+### Team Members
+
+- **Builder (core-modules)**
+  - Name: core-builder
+  - Role: Implement workflow_types.py and workflow_state.py
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (core-modules)**
+  - Name: core-validator
+  - Role: Verify core modules work correctly
+  - Agent Type: validator
+  - Resume: true
+
+- **Builder (bridge-integration)**
+  - Name: bridge-builder
+  - Role: Integrate workflow state with Telegram bridge
+  - Agent Type: builder
+  - Resume: true
+
+- **Builder (sdk-integration)**
+  - Name: sdk-builder
+  - Role: Integrate workflow state with SDK client
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (integration)**
+  - Name: integration-validator
+  - Role: Verify bridge and SDK integrations work together
+  - Agent Type: validator
+  - Resume: true
+
+- **Builder (directory-setup)**
+  - Name: setup-builder
+  - Role: Create agents/ directory structure
+  - Agent Type: builder
+  - Resume: true
+
+- **Validator (final)**
+  - Name: final-validator
+  - Role: Complete end-to-end validation
+  - Agent Type: validator
+  - Resume: true
 
 ## Step by Step Tasks
 
-### 1. build-types
-**Agent**: builder
-**Parallel**: false
-**Depends On**: None
+### 1. Build Workflow Types
+- **Task ID**: build-types
+- **Depends On**: none
+- **Assigned To**: core-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Create `agent/workflow_types.py`
+- Implement `WorkflowStateData` Pydantic model with all fields
+- Add proper type hints, Optional fields, and datetime handling
+- Include docstrings
 
-**Actions**:
-- Create `agent/workflow_types.py` file
-- Implement `WorkflowStateData` Pydantic model with all fields (workflow_id, issue_number, branch_name, plan_file, phase, status, telegram_chat_id, created_at, updated_at)
-- Add proper type hints and Optional fields
-- Include docstrings for the model and fields
-- Ensure proper datetime handling with timezone awareness
+### 2. Build Workflow State
+- **Task ID**: build-state
+- **Depends On**: build-types
+- **Assigned To**: core-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Create `agent/workflow_state.py`
+- Implement `WorkflowState` class with all methods
+- Implement `generate_workflow_id()` for 8-char IDs
+- Add error handling and directory creation logic
 
-### 2. build-state
-**Agent**: builder
-**Parallel**: false
-**Depends On**: build-types
+### 3. Validate Core Modules
+- **Task ID**: validate-core
+- **Depends On**: build-state
+- **Assigned To**: core-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Verify Pydantic model structure
+- Verify WorkflowState class implementation
+- Test generate_workflow_id() returns 8-char strings
+- Check all required methods exist
 
-**Actions**:
-- Create `agent/workflow_state.py` file
-- Implement `WorkflowState` class with all methods (\_\_init\_\_, update, save, load, from_stdin, to_stdout)
-- Implement `generate_workflow_id()` helper function to create 8-character unique IDs
-- Add proper error handling for file operations
-- Implement stdin/stdout piping functionality
-- Add directory creation logic for `agents/{workflow_id}/`
-- Include comprehensive docstrings
-
-### 3. validate-core
-**Agent**: validator
-**Parallel**: false
-**Depends On**: build-state
-
-**Actions**:
-- Read `agent/workflow_types.py` and verify Pydantic model structure
-- Read `agent/workflow_state.py` and verify class implementation
-- Verify `generate_workflow_id()` returns 8-character strings
-- Check that all required methods exist (update, save, load, from_stdin, to_stdout)
-- Verify error handling is present
-- Run unit tests if they exist
-- Report any issues or confirm validation success
-
-### 4. build-bridge-integration
-**Agent**: builder
-**Parallel**: false
-**Depends On**: validate-core
-
-**Actions**:
-- Read `bridge/telegram_bridge.py` to understand current structure
-- Import `WorkflowState` and `generate_workflow_id`
-- Add workflow creation when receiving new tasks
-- Update workflow state on task completion
+### 4. Build Bridge Integration
+- **Task ID**: build-bridge
+- **Depends On**: validate-core
+- **Assigned To**: bridge-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Import WorkflowState in bridge/telegram_bridge.py
+- Create workflow on new task receipt
+- Update workflow state on completion
 - Add workflow_id to message handling context
-- Ensure proper state persistence throughout workflow lifecycle
-- Add error handling for state operations
 
-### 5. build-sdk-integration
-**Agent**: builder
-**Parallel**: true
-**Depends On**: validate-core
-
-**Actions**:
-- Read `agent/sdk_client.py` to understand session management
+### 5. Build SDK Integration
+- **Task ID**: build-sdk
+- **Depends On**: validate-core
+- **Assigned To**: sdk-builder
+- **Agent Type**: builder
+- **Parallel**: true
 - Add workflow_id parameter to SDK session creation
-- Update session management to track workflow state
-- Ensure workflow_id is passed through conversation context
-- Add state persistence hooks in appropriate SDK lifecycle methods
-- Add error handling for workflow state operations
+- Track workflow state in session management
+- Pass workflow_id through conversation context
 
-### 6. validate-integration
-**Agent**: validator
-**Parallel**: false
-**Depends On**: build-bridge-integration, build-sdk-integration
+### 6. Validate Integrations
+- **Task ID**: validate-integration
+- **Depends On**: build-bridge, build-sdk
+- **Assigned To**: integration-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Verify workflow_id flows from bridge to SDK
+- Check state creation, update, and persistence
+- Verify error handling at integration points
 
-**Actions**:
-- Read updated `bridge/telegram_bridge.py` and verify workflow integration
-- Read updated `agent/sdk_client.py` and verify session management changes
-- Verify workflow_id flows correctly from bridge to SDK
-- Check that state is created, updated, and persisted correctly
-- Verify error handling exists at integration points
-- Run integration tests if available
-- Test end-to-end flow: create workflow -> track state -> persist
-- Report any issues or confirm validation success
+### 7. Setup Directory Structure
+- **Task ID**: build-directory
+- **Depends On**: validate-integration
+- **Assigned To**: setup-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Create `agents/` directory with README
+- Add .gitignore entries for state files and logs
+- Document directory structure
 
-### 7. build-directory-setup
-**Agent**: builder
-**Parallel**: false
-**Depends On**: validate-integration
+### 8. Final Validation
+- **Task ID**: validate-all
+- **Depends On**: build-directory
+- **Assigned To**: final-validator
+- **Agent Type**: validator
+- **Parallel**: false
+- Verify complete implementation
+- Test workflow lifecycle end-to-end
+- Confirm all success criteria met
+- Generate final report
 
-**Actions**:
-- Create `agents/` directory at project root
-- Add `.gitkeep` or README to track directory in git
-- Create example workflow directory structure
-- Add `.gitignore` entries for `agents/*/state.json` and `agents/*/logs/`
-- Document directory structure in code comments or README
-- Verify directory permissions are correct
+## Validation Commands
 
-### 8. validate-all
-**Agent**: validator
-**Parallel**: false
-**Depends On**: build-directory-setup
+- `python -c "from agent.workflow_types import WorkflowStateData; print('types OK')"` - verify types import
+- `python -c "from agent.workflow_state import WorkflowState, generate_workflow_id; print(generate_workflow_id())"` - verify state module
+- `pytest tests/agent/test_workflow_state.py -v` - run unit tests (if created)
+- `ls -la agents/` - verify directory structure
 
-**Actions**:
-- Verify `agents/` directory exists with proper structure
-- Read all modified files and verify complete implementation
-- Check that workflow state can be created, saved, loaded, and piped
-- Verify bridge creates workflows correctly
-- Verify SDK tracks workflow_id in sessions
-- Run full test suite (unit + integration if available)
-- Test complete workflow lifecycle end-to-end
-- Verify all acceptance criteria from the plan are met
-- Report final validation status
+---
 
-## Benefits
+## Open Questions
 
-- Track long-running tasks across sessions
-- Enable workflow chaining (plan | build | test)
-- Resume interrupted workflows
-- Better visibility into Telegram-delegated work
-- Foundation for SDLC automation
-
-## Estimated Effort
-
-Medium-High - Core infrastructure change
-
-## Dependencies
-
-- Pydantic (already installed)
-
-## Risks
-
-- Need to handle orphaned workflow states
-- State file corruption recovery
-- Integration with existing completion tracking
+1. Should workflow states auto-expire after a certain time, or require explicit cleanup?
+2. Should the bridge create workflows for ALL messages or only certain types (e.g., task-like messages)?
+3. Should workflow_id be visible to users in Telegram responses for reference?
