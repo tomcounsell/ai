@@ -21,6 +21,23 @@ if echo "$PROMPT" | grep -qiE '^\s*/(update|setup|clear)|^(update|setup|config)'
     exit 0
 fi
 
+# Skip excluded projects (too noisy for calendar tracking)
+EXCLUDED_PROJECTS="valor"
+PROJECTS_JSON="$HOME/src/ai/config/projects.json"
+CURRENT_PROJECT=""
+if [ -f "$PROJECTS_JSON" ]; then
+    CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" '
+        .projects | to_entries[]
+        | select(.value.working_directory == $cwd)
+        | .key
+    ' "$PROJECTS_JSON" 2>/dev/null || true)
+fi
+for excluded in $EXCLUDED_PROJECTS; do
+    if [ "$CURRENT_PROJECT" = "$excluded" ]; then
+        exit 0
+    fi
+done
+
 # Rate limit: skip if same session and called within the last INTERVAL seconds
 # A new session always bypasses the rate limit
 SAME_SESSION=false

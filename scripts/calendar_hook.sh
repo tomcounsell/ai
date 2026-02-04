@@ -15,6 +15,22 @@ INTERVAL=600  # 10 minutes in seconds
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
+# Skip excluded projects (too noisy for calendar tracking)
+EXCLUDED_PROJECTS="valor"
+PROJECTS_JSON_CHECK="$HOME/src/ai/config/projects.json"
+if [ -f "$PROJECTS_JSON_CHECK" ]; then
+    CURRENT_PROJECT=$(jq -r --arg cwd "$PWD" '
+        .projects | to_entries[]
+        | select(.value.working_directory == $cwd)
+        | .key
+    ' "$PROJECTS_JSON_CHECK" 2>/dev/null || true)
+    for excluded in $EXCLUDED_PROJECTS; do
+        if [ "$CURRENT_PROJECT" = "$excluded" ]; then
+            exit 0
+        fi
+    done
+fi
+
 # Reuse slug from prompt hook if available (keeps slug consistent within session)
 SAVED_SLUG=""
 if [ -f "$SLUGFILE" ]; then
