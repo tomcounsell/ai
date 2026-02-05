@@ -1,10 +1,10 @@
 ---
-status: Planning
+status: In Progress
 type: chore
 appetite: "Medium: 3-5 days"
 owner: Valor
 created: 2026-02-05
-tracking: https://github.com/tomcounsell/ai/issues/59
+tracking: https://github.com/tomcounsell/ai/issues/25
 ---
 
 # Refactor telegram_bridge.py into Testable Modules
