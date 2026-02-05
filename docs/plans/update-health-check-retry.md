@@ -94,6 +94,10 @@ The 2-second poll interval keeps reporting responsive — we detect the bridge w
 
 This change is self-contained within the update system itself. After git pull, the new `run.py` is used automatically on the next update. No additional migration or propagation steps needed.
 
+## Agent Integration
+
+No agent integration required — this is an update script change. The agent's tools and MCP servers are unaffected.
+
 ## Documentation
 
 ### Inline Documentation

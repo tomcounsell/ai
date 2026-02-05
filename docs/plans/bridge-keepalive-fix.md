@@ -83,6 +83,10 @@ Bridge self-SIGTERMs → exits with code 0 → launchd restarts (KeepAlive: true
 
 The update system generates the plist via `valor-service.sh install`. After this fix, any machine running `/update` will get the new plist template via git pull, and the next `valor-service.sh install` call will apply it. No additional migration steps needed — the fix propagates naturally through the existing update flow.
 
+## Agent Integration
+
+No agent integration required — this is a launchd plist change to bridge process management. The agent's tools and MCP servers are unaffected.
+
 ## Documentation
 
 ### Inline Documentation

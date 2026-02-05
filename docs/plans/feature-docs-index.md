@@ -98,6 +98,10 @@ Plan ships → documentarian creates `docs/features/{name}.md` → adds row to `
 
 No update system changes required. This is purely documentation within the repository. Changes propagate via normal git pull during updates.
 
+## Agent Integration
+
+No agent integration required — this is pure documentation with no code or tool changes.
+
 ## Documentation
 
 ### Feature Documentation

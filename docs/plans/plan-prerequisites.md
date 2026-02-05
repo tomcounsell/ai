@@ -122,6 +122,10 @@ Add `## Prerequisites` to the required sections check in the SKILL.md hooks conf
 
 No update system changes required. The new script is a standalone Python file in `scripts/`. It will be available on all machines after git pull. No new dependencies beyond Python stdlib (uses `subprocess`, `re`, `sys`).
 
+## Agent Integration
+
+No agent integration required — the prerequisite checker is a developer workflow tool invoked by the `/build` skill, not an agent-facing capability.
+
 ## Documentation
 
 ### Feature Documentation
