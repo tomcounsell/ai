@@ -162,3 +162,4 @@ This ensures new capabilities are wired into the system the user actually intera
 | `docs/deployment.md` | Multi-instance deployment |
 | `docs/tools-reference.md` | Complete tool documentation |
 | `config/SOUL.md` | Valor persona and philosophy |
+| `docs/features/README.md` | Feature index — look up how things work |

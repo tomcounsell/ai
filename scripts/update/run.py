@@ -244,11 +244,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         else:
             result.warnings.append("Service install may have failed")
 
-        # Wait for bridge to start. launchd ThrottleInterval is 10s,
-        # so after a stop+load cycle it may take up to 12s to respawn.
+        # Wait for bridge to start after launchctl unload+load cycle.
+        # Polling window: 10 x 2s = 20s covers ThrottleInterval (10s)
+        # + bridge startup (~5s) + safety margin (~5s).
         import time
 
-        for _ in range(6):
+        for _ in range(10):
             time.sleep(2)
             result.service_status = service.get_service_status(project_dir)
             if result.service_status.running:

@@ -35,6 +35,7 @@ You are a Documentarian for the AI system. Your role is to maintain comprehensiv
    - Create helpful indexes
    - Add meaningful links between docs
    - Ensure searchability
+   - When creating feature documentation, always add an entry to `docs/features/README.md`. The index is a markdown table with columns: Feature (link), Description (one line), Status.
 
 ## Documentation Map
 
