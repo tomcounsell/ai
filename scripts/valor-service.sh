@@ -241,11 +241,10 @@ install_service() {
     </dict>
     <key>RunAtLoad</key>
     <true/>
+    <!-- KeepAlive unconditional: restart on ANY exit (SIGTERM, crash, etc).
+         ThrottleInterval below prevents rapid restart loops. -->
     <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-    </dict>
+    <true/>
     <key>StandardOutPath</key>
     <string>${LOG_DIR}/bridge.log</string>
     <key>StandardErrorPath</key>

@@ -54,13 +54,14 @@ Before executing, resolve the plan path:
 
 1. **Resolve the plan path** using the Plan Resolution logic above
 2. **Read the plan** at `PLAN_PATH`
-3. **Create a feature branch** - `git checkout -b build/{slug}` (derive slug from the plan filename)
-4. **Parse the Team Members** and Step by Step Tasks sections
-5. **Create all tasks** using `TaskCreate` before starting execution
-6. **Deploy agents** in order, respecting dependencies and parallel flags
-7. **Monitor progress** and handle any issues
-8. **Push and open a PR** - `git push -u origin build/{slug}` then `gh pr create`
-9. **Report completion** with PR URL when all tasks are done
+3. **Run prerequisite validation** - `python scripts/check_prerequisites.py {PLAN_PATH}`. If any check fails, report the failures and stop. Do not proceed to task execution. If no Prerequisites section exists, this passes automatically.
+4. **Create a feature branch** - `git checkout -b build/{slug}` (derive slug from the plan filename)
+5. **Parse the Team Members** and Step by Step Tasks sections
+6. **Create all tasks** using `TaskCreate` before starting execution
+7. **Deploy agents** in order, respecting dependencies and parallel flags
+8. **Monitor progress** and handle any issues
+9. **Push and open a PR** - `git push -u origin build/{slug}` then `gh pr create`
+10. **Report completion** with PR URL when all tasks are done
 
 ## Critical Rules
 

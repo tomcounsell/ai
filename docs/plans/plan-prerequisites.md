@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: In Progress
 type: feature
 appetite: Small: 1-2 days
 owner: Valor

@@ -25,6 +25,7 @@ hooks:
             --contains '## Team Orchestration'
             --contains '## Step by Step Tasks'
             --contains '## Success Criteria'
+            --contains '## Prerequisites'
             --contains '## Update System'
             --contains '## Agent Integration'
         - type: command
@@ -119,6 +120,16 @@ tracking: [GitHub Issue URL or Notion page URL - added automatically]
 
 **Team size:** [Solo | Pair | Small team]
 
+## Prerequisites
+
+[Environment requirements that must be satisfied before building. Each requirement has a programmatic check command. If no prerequisites are needed, write "No prerequisites — this work has no external dependencies."]
+
+| Requirement | Check Command | Purpose |
+|-------------|---------------|---------|
+| Example: `EXAMPLE_API_KEY` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env').get('EXAMPLE_API_KEY')"` | Example service access |
+
+Run all checks: `python scripts/check_prerequisites.py docs/plans/{slug}.md`
+
 ## Solution
 
 ### Key Elements
@@ -195,7 +206,7 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 
 ### Feature Documentation
 - [ ] Create/update `docs/features/[feature-name].md` describing the feature
-- [ ] Add entry to documentation index
+- [ ] Add entry to `docs/features/README.md` index table
 
 ### External Documentation Site
 [If the repo uses Sphinx, Read the Docs, MkDocs, or similar:]

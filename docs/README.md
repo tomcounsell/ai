@@ -46,6 +46,12 @@ Documentation for the Valor AI System - a unified conversational development env
 | [Monitoring](operations/monitoring.md) | System monitoring and health checks |
 | [Daydream System](operations/daydream-system.md) | Autonomous maintenance process |
 
+### Features
+
+| Document | Description |
+|----------|-------------|
+| [Feature Index](features/README.md) | All implemented features with documentation |
+
 ### Quality & Testing
 
 | Document | Description |
