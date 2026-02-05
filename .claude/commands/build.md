@@ -54,11 +54,13 @@ Before executing, resolve the plan path:
 
 1. **Resolve the plan path** using the Plan Resolution logic above
 2. **Read the plan** at `PLAN_PATH`
-3. **Parse the Team Members** and Step by Step Tasks sections
-4. **Create all tasks** using `TaskCreate` before starting execution
-5. **Deploy agents** in order, respecting dependencies and parallel flags
-6. **Monitor progress** and handle any issues
-7. **Report completion** when all tasks are done
+3. **Create a feature branch** - `git checkout -b build/{slug}` (derive slug from the plan filename)
+4. **Parse the Team Members** and Step by Step Tasks sections
+5. **Create all tasks** using `TaskCreate` before starting execution
+6. **Deploy agents** in order, respecting dependencies and parallel flags
+7. **Monitor progress** and handle any issues
+8. **Push and open a PR** - `git push -u origin build/{slug}` then `gh pr create`
+9. **Report completion** with PR URL when all tasks are done
 
 ## Critical Rules
 
@@ -181,8 +183,8 @@ After all tasks complete:
 ## Plan Execution Complete
 
 **Plan**: [plan name]
+**Pull Request**: [PR URL]
 **Total Tasks**: [count]
-**Duration**: [time]
 
 ### Task Summary
 | Task | Agent | Status | Notes |
@@ -198,7 +200,8 @@ After all tasks complete:
 - [list of files created/modified]
 
 ### Next Steps
-[Any follow-up items or manual steps needed]
+- Review and merge PR: [PR URL]
+- [Any follow-up items or manual steps needed]
 ```
 
 ## Error Handling
