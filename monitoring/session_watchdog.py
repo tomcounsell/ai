@@ -328,13 +328,13 @@ async def send_health_alert(
     """Send a health alert for a problematic session.
 
     Args:
-        telegram_client: Telegram client for sending alerts (unused for now)
+        telegram_client: Telegram client for sending alerts
         session: The session with health issues
         issues: List of issue descriptions
         severity: "warning" or "critical"
 
-    Currently just logs the alert. Will be implemented with actual
-    Telegram messaging in Task #5.
+    Sends alert via Telegram if client is available, with formatted message
+    including session details and issue list. Falls back to logging only.
 
     Respects cooldown period to avoid alert spam.
     """
@@ -351,7 +351,34 @@ async def send_health_alert(
     # Update cooldown
     _alert_cooldowns[session.session_id] = now
 
-    # Log the alert (stub - will implement Telegram messaging later)
+    # Format the alert message
+    severity_emoji = "🚨" if severity == "critical" else "⚠️"
+    session_id_short = session.session_id[:8]
+
+    # Calculate duration in human-readable format
+    duration_seconds = now - session.started_at
+    hours = int(duration_seconds // 3600)
+    minutes = int((duration_seconds % 3600) // 60)
+
+    if hours > 0:
+        duration_str = f"{hours}h {minutes}m"
+    else:
+        duration_str = f"{minutes}m"
+
+    # Format issues as bulleted list
+    issues_formatted = "\n".join(f"• {issue}" for issue in issues)
+
+    message = f"""{severity_emoji} Session Health Alert
+
+Session: {session_id_short}
+Project: {session.project_key}
+Duration: {duration_str}
+Tool calls: {session.tool_call_count}
+
+Issues:
+{issues_formatted}"""
+
+    # Log the alert
     logger.warning(
         "[watchdog] ALERT [%s] Session %s (chat_id=%s): %s",
         severity.upper(),
@@ -359,3 +386,21 @@ async def send_health_alert(
         session.chat_id,
         ", ".join(issues),
     )
+
+    # Send via Telegram if client available
+    if telegram_client and session.chat_id:
+        try:
+            chat_id = int(session.chat_id)
+            await telegram_client.send_message(chat_id, message)
+            logger.info(
+                "[watchdog] Sent alert to chat %s for session %s",
+                chat_id,
+                session.session_id,
+            )
+        except Exception as e:
+            logger.error(
+                "[watchdog] Failed to send Telegram alert for session %s: %s",
+                session.session_id,
+                e,
+                exc_info=True,
+            )
