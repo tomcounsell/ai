@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Complete
 type: bug
 appetite: Small: 1-2 days
 owner: Valor

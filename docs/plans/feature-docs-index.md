@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Complete
 type: chore
 appetite: Small: 1-2 days
 owner: Valor
