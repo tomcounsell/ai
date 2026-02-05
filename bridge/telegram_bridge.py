@@ -3318,6 +3318,15 @@ async def main():
                 )
                 _ensure_worker(_pkey)
 
+    # Start session watchdog
+    try:
+        from monitoring.session_watchdog import watchdog_loop
+
+        asyncio.create_task(watchdog_loop(telegram_client=client))
+        logger.info("Session watchdog started")
+    except Exception as e:
+        logger.error(f"Failed to start session watchdog: {e}")
+
     # Keep running
     await client.run_until_disconnected()
 
