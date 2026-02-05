@@ -1,9 +1,7 @@
 """Unified web search and fetch tools."""
 
-# Public API exports - implementations will be added in later tasks
-__all__ = ["web_search", "fetch"]
+from tools.web.fetch import fetch, fetch_sync
+from tools.web.search import web_search, web_search_sync
 
-# These will be implemented in search.py and fetch.py
-# For now, create placeholder references
-web_search = None  # type: ignore
-fetch = None  # type: ignore
+# Public API exports
+__all__ = ["web_search", "web_search_sync", "fetch", "fetch_sync"]
