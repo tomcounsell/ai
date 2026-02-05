@@ -18,6 +18,7 @@ dependencies = [
     "google-api-python-client>=2.100.0", # Google API client
     "psutil>=5.9.0", # System resource monitoring for SDK diagnostics
     "pypdf>=6.6.2",
+    "html2text>=2024.2.26", # HTML to markdown conversion for web fetch
 ]
 
 [project.optional-dependencies]
