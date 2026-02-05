@@ -119,8 +119,9 @@ class TestClaudeAgentOptionsValidity:
     def test_all_options_are_valid_parameters(self):
         """Test that all options we set are valid ClaudeAgentOptions parameters."""
         try:
-            from claude_agent_sdk import ClaudeAgentOptions
             import inspect
+
+            from claude_agent_sdk import ClaudeAgentOptions
         except ImportError:
             pytest.skip("claude_agent_sdk not available")
 

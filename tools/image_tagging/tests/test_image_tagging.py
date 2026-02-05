@@ -5,11 +5,12 @@ Run with: pytest tools/image-tagging/tests/ -v
 """
 
 import os
-import pytest
 import tempfile
 from pathlib import Path
 
-from tools.image_tagging import tag_image, batch_tag_images
+import pytest
+
+from tools.image_tagging import batch_tag_images, tag_image
 
 
 class TestImageTaggingInstallation:

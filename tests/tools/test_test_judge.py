@@ -2,9 +2,7 @@
 
 import os
 
-import pytest
-
-from tools.test_judge import judge_test_result, judge_batch, create_quality_gate
+from tools.test_judge import create_quality_gate, judge_batch, judge_test_result
 
 
 class TestJudgeValidation:

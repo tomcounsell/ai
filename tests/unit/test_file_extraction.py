@@ -8,9 +8,6 @@ import re
 import tempfile
 from pathlib import Path
 
-import pytest
-
-
 # Re-implement the extraction logic for testing (matches bridge implementation)
 FILE_MARKER_PATTERN = re.compile(r"<<FILE:([^>]+)>>")
 ABSOLUTE_PATH_PATTERN = re.compile(

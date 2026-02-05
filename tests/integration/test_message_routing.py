@@ -12,9 +12,6 @@ similar to the unit tests but focusing on end-to-end scenarios.
 
 import re
 
-import pytest
-
-
 # Re-implement bridge functions for testable integration tests
 # This matches the actual bridge logic but allows parameter injection
 

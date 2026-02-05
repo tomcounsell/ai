@@ -2,8 +2,6 @@
 
 import os
 
-import pytest
-
 from tools.search import search, search_with_context
 
 

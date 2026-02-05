@@ -5,14 +5,13 @@ Run with: pytest tools/test-scheduler/tests/ -v
 """
 
 import time
-import pytest
 
 from tools.test_scheduler import (
-    schedule_tests,
-    get_job_status,
-    list_jobs,
     cancel_job,
     get_job_results,
+    get_job_status,
+    list_jobs,
+    schedule_tests,
 )
 
 

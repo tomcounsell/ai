@@ -6,13 +6,14 @@ Run with: pytest tools/knowledge-search/tests/ -v
 
 import os
 import tempfile
-import pytest
 from pathlib import Path
 
+import pytest
+
 from tools.knowledge_search import (
-    search_knowledge,
     index_document,
     list_indexed_documents,
+    search_knowledge,
 )
 
 

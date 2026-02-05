@@ -1,14 +1,11 @@
 """Tests for the knowledge search tool."""
 
 import os
-from pathlib import Path
-
-import pytest
 
 from tools.knowledge_search import (
     index_document,
-    search_knowledge,
     list_indexed_documents,
+    search_knowledge,
 )
 
 

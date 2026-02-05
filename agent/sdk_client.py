@@ -37,6 +37,8 @@ from claude_agent_sdk import (
 )
 
 from agent.health_check import watchdog_hook
+from agent.workflow_state import WorkflowState
+from agent.workflow_types import WorkflowStateData
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +185,7 @@ class ValorAgent:
         working_dir: str | Path | None = None,
         system_prompt: str | None = None,
         permission_mode: str = "bypassPermissions",
+        workflow_id: str | None = None,
     ):
         """
         Initialize ValorAgent.
@@ -191,12 +194,110 @@ class ValorAgent:
             working_dir: Working directory for the agent. Defaults to ai/ repo root.
             system_prompt: Custom system prompt. Defaults to SOUL.md contents.
             permission_mode: Permission mode for tool use. Default: "bypassPermissions".
+            workflow_id: Optional workflow ID for multi-phase workflow tracking.
         """
         self.working_dir = (
             Path(working_dir) if working_dir else Path(__file__).parent.parent
         )
         self.system_prompt = system_prompt or load_system_prompt()
         self.permission_mode = permission_mode
+        self.workflow_id = workflow_id
+        self.workflow_state: WorkflowState | None = None
+
+        # Load workflow state if workflow_id provided
+        if self.workflow_id:
+            try:
+                self.workflow_state = WorkflowState.load(self.workflow_id)
+                phase = (
+                    self.workflow_state.data.phase if self.workflow_state.data else None
+                )
+                logger.info(
+                    f"Loaded workflow state: {self.workflow_id} (phase={phase})"
+                )
+            except FileNotFoundError:
+                logger.warning(
+                    f"Workflow ID {self.workflow_id} provided but no state file found. "
+                    "Continuing without workflow state."
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to load workflow state for {self.workflow_id}: {e}"
+                )
+                # Continue without workflow state rather than failing initialization
+
+    def _build_workflow_context(self) -> str:
+        """Build workflow context string for system prompt.
+
+        Returns:
+            Formatted workflow context including ID, phase, status, and plan file.
+        """
+        if not self.workflow_state or not self.workflow_state.data:
+            return ""
+
+        data = self.workflow_state.data
+        context_parts = [
+            "---",
+            "WORKFLOW CONTEXT:",
+            f"- Workflow ID: {data.workflow_id}",
+            f"- Plan: {data.plan_file}",
+        ]
+
+        if data.phase:
+            context_parts.append(f"- Current Phase: {data.phase}")
+        if data.status:
+            context_parts.append(f"- Status: {data.status}")
+        if data.branch_name:
+            context_parts.append(f"- Branch: {data.branch_name}")
+        if data.tracking_url:
+            context_parts.append(f"- Tracking: {data.tracking_url}")
+
+        context_parts.append("---")
+        return "\n".join(context_parts)
+
+    def update_workflow_state(
+        self, phase: str | None = None, status: str | None = None, **kwargs
+    ) -> None:
+        """Update workflow state and persist to disk.
+
+        Args:
+            phase: Optional workflow phase to update
+            status: Optional workflow status to update
+            **kwargs: Additional state fields to update
+
+        Raises:
+            ValueError: If no workflow_state is loaded
+        """
+        if not self.workflow_state:
+            raise ValueError(
+                "Cannot update workflow state - no workflow_id provided at initialization"
+            )
+
+        # Build update dict
+        update_dict = {}
+        if phase is not None:
+            update_dict["phase"] = phase
+        if status is not None:
+            update_dict["status"] = status
+        update_dict.update(kwargs)
+
+        # Update and save
+        self.workflow_state.update(**update_dict)
+        self.workflow_state.save()
+        logger.info(
+            f"Updated workflow state: {self.workflow_id} "
+            f"(phase={self.workflow_state.data.phase if self.workflow_state.data else None}, "
+            f"status={self.workflow_state.data.status if self.workflow_state.data else None})"
+        )
+
+    def get_workflow_data(self) -> WorkflowStateData | None:
+        """Get current workflow state data.
+
+        Returns:
+            WorkflowStateData if workflow state is loaded, None otherwise
+        """
+        if self.workflow_state:
+            return self.workflow_state.data
+        return None
 
     def _create_options(self, session_id: str | None = None) -> ClaudeAgentOptions:
         """Create ClaudeAgentOptions configured for Valor with full permissions.
@@ -223,8 +324,17 @@ class ValorAgent:
             env["ANTHROPIC_API_KEY"] = ""
             logger.info("Auth: using Max subscription (OAuth fallback)")
 
+        # Build system prompt with workflow context if workflow_id is present
+        system_prompt = self.system_prompt
+        if self.workflow_id and self.workflow_state and self.workflow_state.data:
+            workflow_context = self._build_workflow_context()
+            system_prompt += f"\n\n{workflow_context}"
+            logger.debug(
+                f"Including workflow context in system prompt: {self.workflow_id}"
+            )
+
         return ClaudeAgentOptions(
-            system_prompt=self.system_prompt,
+            system_prompt=system_prompt,
             cwd=str(self.working_dir),
             permission_mode=self.permission_mode,  # type: ignore[arg-type]
             continue_conversation=session_id is not None,
@@ -475,6 +585,7 @@ async def get_agent_response_sdk(
     project: dict | None,
     chat_id: str | None = None,
     sender_id: int | None = None,
+    workflow_id: str | None = None,
 ) -> str:
     """
     Get agent response using Claude Agent SDK.
@@ -490,6 +601,7 @@ async def get_agent_response_sdk(
         project: Project configuration dict
         chat_id: Chat ID (unused, for compatibility)
         sender_id: Telegram user ID (for permission checking)
+        workflow_id: Optional 8-char workflow identifier for tracked work
 
     Returns:
         The assistant's response text
@@ -521,10 +633,12 @@ async def get_agent_response_sdk(
     enriched_message += f"\n\nFROM: {sender_name}"
     if chat_title:
         enriched_message += f" in {chat_title}"
+    if workflow_id:
+        enriched_message += f"\nWORKFLOW_ID: {workflow_id}"
     enriched_message += f"\nMESSAGE: {message}"
 
     try:
-        agent = ValorAgent(working_dir=working_dir)
+        agent = ValorAgent(working_dir=working_dir, workflow_id=workflow_id)
         response = await agent.query(enriched_message, session_id=session_id)
 
         elapsed = time.time() - start_time

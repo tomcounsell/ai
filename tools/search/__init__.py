@@ -182,6 +182,6 @@ if __name__ == "__main__":
     else:
         print(f"\nSummary:\n{result['summary']}")
         if result.get("citations"):
-            print(f"\nSources:")
+            print("\nSources:")
             for c in result["citations"]:
                 print(f"  - {c}")

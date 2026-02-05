@@ -7,10 +7,9 @@ Run with: pytest tools/code-execution/tests/ -v
 import pytest
 
 from tools.code_execution import (
+    execute_bash,
     execute_code,
     execute_python,
-    execute_javascript,
-    execute_bash,
 )
 
 

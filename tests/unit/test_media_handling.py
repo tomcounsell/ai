@@ -2,19 +2,19 @@
 Tests for media receiving and processing functions.
 """
 
-import pytest
-from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock, patch
-
 import sys
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from bridge.telegram_bridge import (
-    get_media_type,
-    VOICE_EXTENSIONS,
-    VISION_EXTENSIONS,
     MEDIA_DIR,
+    VISION_EXTENSIONS,
+    VOICE_EXTENSIONS,
+    get_media_type,
 )
 
 
@@ -40,8 +40,8 @@ class TestGetMediaType:
     def test_voice_message_returns_voice(self):
         """Voice message returns 'voice'."""
         from telethon.tl.types import (
-            MessageMediaDocument,
             DocumentAttributeAudio,
+            MessageMediaDocument,
         )
 
         audio_attr = MagicMock(spec=DocumentAttributeAudio)
@@ -61,8 +61,8 @@ class TestGetMediaType:
     def test_audio_file_returns_audio(self):
         """Regular audio file (not voice) returns 'audio'."""
         from telethon.tl.types import (
-            MessageMediaDocument,
             DocumentAttributeAudio,
+            MessageMediaDocument,
         )
 
         audio_attr = MagicMock(spec=DocumentAttributeAudio)
@@ -82,8 +82,8 @@ class TestGetMediaType:
     def test_image_document_returns_image(self):
         """Document with image extension returns 'image'."""
         from telethon.tl.types import (
-            MessageMediaDocument,
             DocumentAttributeFilename,
+            MessageMediaDocument,
         )
 
         filename_attr = MagicMock(spec=DocumentAttributeFilename)
@@ -103,8 +103,8 @@ class TestGetMediaType:
     def test_generic_document_returns_document(self):
         """Generic document returns 'document'."""
         from telethon.tl.types import (
-            MessageMediaDocument,
             DocumentAttributeFilename,
+            MessageMediaDocument,
         )
 
         filename_attr = MagicMock(spec=DocumentAttributeFilename)
@@ -187,8 +187,9 @@ class TestProcessIncomingMedia:
     @pytest.mark.asyncio
     async def test_download_failure_returns_error_description(self):
         """Failed download returns error description."""
-        from bridge.telegram_bridge import process_incoming_media
         from telethon.tl.types import MessageMediaPhoto
+
+        from bridge.telegram_bridge import process_incoming_media
 
         client = AsyncMock()
         client.download_media = AsyncMock(return_value=None)

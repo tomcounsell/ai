@@ -5,6 +5,7 @@ Run with: pytest tools/documentation/tests/ -v
 """
 
 import os
+
 import pytest
 
 from tools.documentation import (

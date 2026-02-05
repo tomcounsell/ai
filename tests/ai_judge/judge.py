@@ -7,13 +7,12 @@ Supports local LLMs (Ollama) for cost-effective evaluation.
 
 import json
 import os
-import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 class JudgmentScore(Enum):
@@ -33,7 +32,7 @@ class JudgeConfig:
     model: str = "gemma2:3b"  # Local model for speed
     temperature: float = 0.1  # Low for consistency
     strict_mode: bool = True  # High quality standards
-    custom_criteria: Optional[List[str]] = None
+    custom_criteria: list[str] | None = None
     timeout_seconds: int = 30
     fallback_to_heuristics: bool = True
 
@@ -44,7 +43,7 @@ class JudgmentResult:
 
     test_id: str
     overall_score: JudgmentScore
-    criteria_scores: Dict[str, str]
+    criteria_scores: dict[str, str]
     pass_fail: bool
     confidence: float
     reasoning: str
@@ -52,7 +51,7 @@ class JudgmentResult:
     model_used: str = ""
     raw_response: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for serialization."""
         return {
             "test_id": self.test_id,
@@ -66,7 +65,7 @@ class JudgmentResult:
         }
 
 
-def _call_ollama(prompt: str, config: JudgeConfig) -> Optional[str]:
+def _call_ollama(prompt: str, config: JudgeConfig) -> str | None:
     """Call Ollama for local LLM inference."""
     try:
         result = subprocess.run(
@@ -89,7 +88,7 @@ def _call_ollama(prompt: str, config: JudgeConfig) -> Optional[str]:
         return None
 
 
-def _call_openrouter(prompt: str, config: JudgeConfig) -> Optional[str]:
+def _call_openrouter(prompt: str, config: JudgeConfig) -> str | None:
     """Call OpenRouter API for cloud LLM inference."""
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
@@ -178,7 +177,7 @@ def _parse_judgment_response(response: str, test_id: str) -> JudgmentResult:
 
 
 def _heuristic_judgment(
-    test_output: str, expected_criteria: List[str], test_id: str
+    test_output: str, expected_criteria: list[str], test_id: str
 ) -> JudgmentResult:
     """Fallback heuristic-based judgment when LLM is unavailable."""
     output_lower = test_output.lower()
@@ -224,10 +223,10 @@ def _heuristic_judgment(
 
 def judge_test_result(
     test_output: str,
-    expected_criteria: List[str],
-    test_context: Optional[Dict[str, Any]] = None,
-    config: Optional[JudgeConfig] = None,
-    test_id: Optional[str] = None,
+    expected_criteria: list[str],
+    test_context: dict[str, Any] | None = None,
+    config: JudgeConfig | None = None,
+    test_id: str | None = None,
 ) -> JudgmentResult:
     """
     Judge test results using AI model.
@@ -303,8 +302,8 @@ JSON response:"""
 def judge_response_quality(
     response: str,
     prompt: str,
-    evaluation_criteria: Optional[List[str]] = None,
-    config: Optional[JudgeConfig] = None,
+    evaluation_criteria: list[str] | None = None,
+    config: JudgeConfig | None = None,
 ) -> JudgmentResult:
     """
     Judge the quality of an AI response to a prompt.
@@ -338,10 +337,10 @@ def judge_response_quality(
 
 
 def judge_tool_selection(
-    selected_tools: List[str],
+    selected_tools: list[str],
     user_intent: str,
-    context: Optional[Dict[str, Any]] = None,
-    config: Optional[JudgeConfig] = None,
+    context: dict[str, Any] | None = None,
+    config: JudgeConfig | None = None,
 ) -> JudgmentResult:
     """
     Judge whether the right tools were selected for a task.
@@ -380,16 +379,16 @@ Context: {json.dumps(context) if context else 'None'}
 class AIJudgeTestRunner:
     """Runner for AI-judged tests."""
 
-    def __init__(self, config: Optional[JudgeConfig] = None):
+    def __init__(self, config: JudgeConfig | None = None):
         self.config = config or JudgeConfig()
-        self.results: List[JudgmentResult] = []
+        self.results: list[JudgmentResult] = []
 
     def add_result(self, result: JudgmentResult):
         """Add a judgment result."""
         self.results.append(result)
 
     def run_test(
-        self, test_name: str, test_output: str, criteria: List[str]
+        self, test_name: str, test_output: str, criteria: list[str]
     ) -> JudgmentResult:
         """Run a single test and record the result."""
         result = judge_test_result(
@@ -401,7 +400,7 @@ class AIJudgeTestRunner:
         self.add_result(result)
         return result
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """Get summary of all test results."""
         if not self.results:
             return {"total": 0, "passed": 0, "failed": 0, "pass_rate": 0.0}

@@ -5,14 +5,15 @@ Run with: pytest tools/link-analysis/tests/ -v
 """
 
 import os
+
 import pytest
 
 from tools.link_analysis import (
-    extract_urls,
-    validate_url,
-    get_metadata,
-    analyze_url,
     analyze_text_links,
+    analyze_url,
+    extract_urls,
+    get_metadata,
+    validate_url,
 )
 
 

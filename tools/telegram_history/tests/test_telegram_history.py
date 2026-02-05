@@ -5,15 +5,16 @@ Run with: pytest tools/telegram-history/tests/ -v
 """
 
 import tempfile
-import pytest
-from pathlib import Path
 from datetime import datetime, timedelta
+from pathlib import Path
+
+import pytest
 
 from tools.telegram_history import (
+    get_chat_stats,
+    get_recent_messages,
     search_history,
     store_message,
-    get_recent_messages,
-    get_chat_stats,
 )
 
 

@@ -428,3 +428,9 @@ telegram_session.session
 
 # Telegram session files
 telegram_sessions/
+
+# Workflow state persistence - agents directory
+# Exclude state files, plans, and logs from version control
+agents/*/state.json
+agents/*/plan.md
+agents/*/logs/

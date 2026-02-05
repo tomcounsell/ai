@@ -7,8 +7,6 @@ Run with: pytest tools/TOOL_NAME/tests/ -v
 
 import subprocess
 
-import pytest
-
 
 def run_cmd(*args: str, timeout: int = 30) -> subprocess.CompletedProcess:
     """Run a TOOL_NAME command and return the result."""

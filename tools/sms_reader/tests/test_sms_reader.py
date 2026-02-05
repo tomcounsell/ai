@@ -1,10 +1,10 @@
 """Tests for SMS reader tool."""
 
-import pytest
-from pathlib import Path
-
 # Import directly to avoid __init__.py chain issues
 import importlib.util
+from pathlib import Path
+
+import pytest
 
 sms_reader_path = Path(__file__).parent.parent / "__init__.py"
 spec = importlib.util.spec_from_file_location("sms_reader", sms_reader_path)
@@ -78,7 +78,6 @@ class TestAppleTimeConversion:
 
     def test_apple_to_datetime_conversion(self):
         """Test converting Apple time to datetime."""
-        from datetime import datetime
 
         # Known timestamp: 2024-01-01 00:00:00 UTC
         # Unix: 1704067200

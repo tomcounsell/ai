@@ -109,8 +109,8 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
     except sqlite3.OperationalError as e:
         if "unable to open" in str(e).lower():
             raise SMSReaderError(
-                f"Cannot open Messages database. Grant Full Disk Access to your terminal. "
-                f"System Preferences > Security & Privacy > Privacy > Full Disk Access",
+                "Cannot open Messages database. Grant Full Disk Access to your terminal. "
+                "System Preferences > Security & Privacy > Privacy > Full Disk Access",
                 category="permission_denied",
             ) from e
         raise SMSReaderError(f"Database error: {e}", category="database") from e

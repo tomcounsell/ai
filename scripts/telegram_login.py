@@ -119,7 +119,7 @@ async def authorize_telegram_client():
                 raise
 
         me = await client.get_me()
-        print(f"\n✅ Authorization successful!")
+        print("\n✅ Authorization successful!")
         print(f"👤 Logged in as: {me.first_name} {me.last_name or ''}")
         print(f"📱 Username: @{me.username}")
         print(f"🆔 User ID: {me.id}")
