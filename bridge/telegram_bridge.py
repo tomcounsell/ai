@@ -1788,7 +1788,7 @@ def format_link_summaries(summaries: list[dict]) -> str:
 # - "Saved Messages" requires Premium; test in real DMs/groups
 # =============================================================================
 
-# Validated 44 emojis on 2026-02-05 via scripts/test_emoji_reactions.py
+# Validated 73 emojis on 2026-02-05 via scripts/test_emoji_reactions.py
 # fmt: off
 VALIDATED_REACTIONS = [
     # Hearts/love
@@ -1802,17 +1802,15 @@ VALIDATED_REACTIONS = [
     # Neutral/other faces
     "🤔", "🥱", "🥴", "😴", "😐", "🤨", "🤪",
     # Characters
-    "🤡", "👻", "👾", "😈", "💩",
-]
-# fmt: on
-
-# These emojis were rate-limited during testing but work in production
-# (confirmed via bridge logs). Re-test if issues arise.
-# fmt: off
-LIKELY_VALID_REACTIONS = [
-    "👨‍💻", "👀", "🔥", "⚡", "💯", "🏆", "🎉", "🎃", "🎄", "🎅",
-    "🕊", "🐳", "🦄", "🙈", "🙉", "🙊", "🌚", "🌭", "🍌", "🍓",
-    "🍾", "💅", "🤪", "🗿", "🆒", "💊", "🤷", "☃",
+    "🤡", "👻", "👾", "😈", "💩", "🎅", "👨‍💻",
+    # Animals/nature
+    "🕊", "🐳", "🦄", "🙈", "🙉", "🙊",
+    # Objects/symbols
+    "🔥", "⚡", "💯", "🏆", "🎉", "🎃", "🎄", "☃", "🗿", "💊", "🆒",
+    # Food
+    "🍌", "🍓", "🌭", "🍾",
+    # Other
+    "🌚", "💅", "👀", "🤷", "🤷‍♂", "🤷‍♀",
 ]
 # fmt: on
 
@@ -1835,24 +1833,25 @@ INVALID_REACTIONS = [
 ]
 # fmt: on
 
-# Reaction emojis for different stages (all validated)
-REACTION_RECEIVED = "👀"  # Message acknowledged (in LIKELY_VALID, works in prod)
-REACTION_PROCESSING = "🤔"  # Default thinking emoji (VALIDATED)
-REACTION_SUCCESS = "👍"  # Completed successfully (VALIDATED)
-REACTION_ERROR = "😱"  # Something went wrong (VALIDATED)
+# Reaction emojis for different stages (all validated 2026-02-05)
+REACTION_RECEIVED = "👀"  # Message acknowledged
+REACTION_PROCESSING = "🤔"  # Default thinking emoji
+REACTION_SUCCESS = "👍"  # Completed successfully
+REACTION_ERROR = "😱"  # Something went wrong
 
 # Intent-specific processing emojis (classified by local Ollama)
+# All emojis validated 2026-02-05 via scripts/test_emoji_reactions.py
 INTENT_REACTIONS = {
-    "search": "🤔",  # Searching the web (VALIDATED)
-    "code_execution": "👨‍💻",  # Running code (LIKELY_VALID, works in prod)
-    "image_generation": "🤩",  # Creating an image (VALIDATED)
-    "image_analysis": "🤔",  # Analyzing an image (VALIDATED)
-    "file_operation": "🤔",  # File operations (VALIDATED)
-    "git_operation": "👨‍💻",  # Git work (LIKELY_VALID, works in prod)
-    "chat": "🤔",  # Thinking/conversation (VALIDATED)
-    "tool_use": "🤔",  # Using a tool (VALIDATED)
-    "system": "🤔",  # System task (VALIDATED)
-    "unknown": "🤔",  # Default thinking (VALIDATED)
+    "search": "👀",  # Searching/looking
+    "code_execution": "👨‍💻",  # Running code
+    "image_generation": "🤩",  # Creating an image
+    "image_analysis": "🤓",  # Analyzing an image
+    "file_operation": "✍",  # File operations/writing
+    "git_operation": "👨‍💻",  # Git work
+    "chat": "😎",  # Casual conversation
+    "tool_use": "🫡",  # Executing command
+    "system": "👾",  # System task
+    "unknown": "🤔",  # Default thinking
 }
 
 
