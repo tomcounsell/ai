@@ -154,7 +154,7 @@ valor-fetch = "tools.web:cli_fetch"
 - `tools/link_analysis/` URL summarization delegates to `fetch()` internally
 - No breaking changes to existing callers
 
-## Risks
+## Rabbit Holes & Risks
 
 ### Risk 1: Provider API instability
 **Impact:** If Firecrawl or Tavily change their API, fetch/search breaks silently
@@ -181,6 +181,23 @@ valor-fetch = "tools.web:cli_fetch"
 - **YouTube/media processing** — stays in `link_analysis`, not part of this tool
 - **Replacing Claude Code's WebSearch/WebFetch** — these tools complement them for use in the Telegram bridge agent path; Claude Code sessions keep their built-in tools
 
+## Update System
+
+No update system changes required. This feature adds new Python tools within the existing `tools/` directory. The new `html2text` dependency will be picked up by `uv sync` during normal updates. No new config files, service restarts, symlinks, or migration steps are needed beyond what `scripts/remote-update.sh` already handles.
+
+## Documentation
+
+### Feature Documentation
+- [ ] Create `docs/features/web_tools.md` describing web_search() and fetch() usage, provider chain, and configuration
+- [ ] Add entry to documentation index
+
+### Inline Documentation
+- [ ] Docstrings on `web_search()` and `fetch()` public APIs with usage examples
+- [ ] Provider interface documented with expected return types
+
+### External Documentation Site
+No external docs site in use — not applicable.
+
 ## Success Criteria
 
 - [ ] `web_search("Python 3.13 features")` returns a coherent answer with source URLs
@@ -191,6 +208,7 @@ valor-fetch = "tools.web:cli_fetch"
 - [ ] Integration tests pass with real API calls (skipped when keys missing)
 - [ ] Old `tools/search` import path still works (backward compat)
 - [ ] All providers that have API keys configured are tested and functional
+- [ ] Documentation updated and indexed
 
 ## Team Orchestration
 
@@ -244,6 +262,12 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
   - Name: migration-builder
   - Role: Update old tools/search and tools/link_analysis to use new module
   - Agent Type: builder
+  - Resume: true
+
+- **Documentarian (web-tools)**
+  - Name: docs-writer
+  - Role: Create feature docs and update documentation index
+  - Agent Type: documentarian
   - Resume: true
 
 - **Validator (final)**
@@ -337,13 +361,23 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - Update `tools/link_analysis/` URL fetching to use `fetch()`
 - Verify backward compatibility
 
-### 9. Final Validation
-- **Task ID**: validate-all
+### 9. Documentation
+- **Task ID**: document-feature
 - **Depends On**: build-migration
+- **Assigned To**: docs-writer
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Create `docs/features/web_tools.md` with usage guide, provider chain docs, and configuration
+- Add entry to documentation index
+- Add docstrings to `web_search()` and `fetch()` public APIs
+
+### 10. Final Validation
+- **Task ID**: validate-all
+- **Depends On**: document-feature
 - **Assigned To**: final-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify all success criteria are met
+- Verify all success criteria are met (including documentation)
 - Run CLI commands: `valor-search`, `valor-fetch`
 - Test backward compat: `from tools.search import search`
 - Generate final report
