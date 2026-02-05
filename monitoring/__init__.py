@@ -27,6 +27,7 @@ from monitoring.resource_monitor import (
     ResourceSnapshot,
 )
 from monitoring.session_tracker import Session, SessionTracker
+from monitoring.session_watchdog import watchdog_loop
 
 __all__ = [
     "ResourceMonitor",
@@ -39,4 +40,5 @@ __all__ = [
     "HealthStatus",
     "SessionTracker",
     "Session",
+    "watchdog_loop",
 ]
