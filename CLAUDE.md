@@ -139,6 +139,17 @@ The **## Update System** section should cover:
 
 This ensures update impact is considered during planning rather than discovered after deployment.
 
+When creating plans that add new tools, capabilities, or external integrations, always include an **## Agent Integration** section after **## Update System**. The agent receives Telegram messages via the bridge (`bridge/telegram_bridge.py`) and can only use tools exposed through MCP servers registered in `.mcp.json`. New Python functions in `tools/` are invisible to the agent unless wrapped.
+
+The **## Agent Integration** section should cover:
+- Whether a new or existing MCP server needs to expose the functionality
+- Changes to `.mcp.json` or `mcp_servers/` directory
+- Whether the bridge itself needs to import/call the new code directly
+- Integration tests that verify the agent can actually invoke the new tools
+- If no agent integration is needed, state that explicitly (e.g., "No agent integration required — this is a bridge-internal change")
+
+This ensures new capabilities are wired into the system the user actually interacts with, not just built as standalone libraries.
+
 ## See Also
 
 | Resource | Purpose |
