@@ -2414,6 +2414,104 @@ async def get_agent_response_with_retry(
     return ""
 
 
+def _get_github_repo_url(working_dir: str) -> str | None:
+    """Get GitHub repo URL from git remote."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=working_dir,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            url = result.stdout.strip()
+            # Convert git@github.com:user/repo.git to https://github.com/user/repo
+            if url.startswith("git@github.com:"):
+                url = url.replace("git@github.com:", "https://github.com/")
+            # Remove .git suffix
+            if url.endswith(".git"):
+                url = url[:-4]
+            return url
+    except Exception:
+        pass
+    return None
+
+
+def _match_plan_by_name(message_text: str, working_dir: str) -> str | None:
+    """
+    Match plan files by natural language name.
+
+    Examples:
+        "workflow state persistence plan" -> docs/plans/workflow-state-persistence.md
+        "the auth system plan" -> docs/plans/auth-system.md
+        "issue classification" -> docs/plans/issue-classification-commands.md
+    """
+    plans_dir = Path(working_dir) / "docs" / "plans"
+    if not plans_dir.exists():
+        return None
+
+    plan_files = list(plans_dir.glob("*.md"))
+    if not plan_files:
+        return None
+
+    message_lower = message_text.lower()
+
+    # First try exact .md filename match
+    plan_pattern = r"(?:docs/plans/)?([a-z0-9-]+)\.md"
+    plan_match = re.search(plan_pattern, message_lower)
+    if plan_match:
+        plan_name = plan_match.group(1)
+        plan_path = plans_dir / f"{plan_name}.md"
+        if plan_path.exists():
+            return f"docs/plans/{plan_name}.md"
+
+    # Try natural language matching
+    best_match = None
+    best_score = 0
+
+    for plan_file in plan_files:
+        # Convert filename to words: "workflow-state-persistence.md" -> ["workflow", "state", "persistence"]
+        plan_name = plan_file.stem  # without .md
+        plan_words = plan_name.replace("-", " ").split()
+
+        # Count how many plan words appear in the message
+        matches = sum(1 for word in plan_words if word in message_lower)
+
+        # Require at least 2 matching words (or all words if plan name is short)
+        min_required = min(2, len(plan_words))
+        if matches >= min_required and matches > best_score:
+            best_score = matches
+            best_match = f"docs/plans/{plan_name}.md"
+
+    return best_match
+
+
+def _detect_issue_number(message_text: str, working_dir: str) -> str | None:
+    """
+    Detect issue number references and convert to full GitHub URL.
+
+    Matches: #55, issue 55, issue #55, issue-55, issue55
+    """
+    # Patterns for issue references
+    patterns = [
+        r"#(\d+)",  # #55
+        r"issue\s*#?(\d+)",  # issue 55, issue #55, issue55
+        r"issue-(\d+)",  # issue-55
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, message_text.lower())
+        if match:
+            issue_num = match.group(1)
+            repo_url = _get_github_repo_url(working_dir)
+            if repo_url:
+                return f"{repo_url}/issues/{issue_num}"
+
+    return None
+
+
 def detect_tracked_work(
     message_text: str, working_dir: str
 ) -> tuple[str | None, str | None]:
@@ -2424,6 +2522,10 @@ def detect_tracked_work(
     - A plan document in docs/plans/*.md
     - A tracking issue (GitHub) or task (Notion)
 
+    Detection is smart about natural language:
+    - "issue 55" or "#55" -> expands to full GitHub URL
+    - "workflow state plan" -> matches docs/plans/workflow-state-persistence.md
+
     Args:
         message_text: The message text to analyze
         working_dir: Working directory to check for plan files
@@ -2431,19 +2533,13 @@ def detect_tracked_work(
     Returns:
         Tuple of (plan_file, tracking_url) or (None, None) if not tracked work
     """
-    plan_file = None
+    # Detect plan file (supports natural language matching)
+    plan_file = _match_plan_by_name(message_text, working_dir)
+
+    # Detect tracking URL
     tracking_url = None
 
-    # Check for plan file mentions (docs/plans/*.md or just the plan name)
-    plan_pattern = r"(?:docs/plans/)?([a-z0-9-]+)\.md"
-    plan_match = re.search(plan_pattern, message_text.lower())
-    if plan_match:
-        plan_name = plan_match.group(1)
-        plan_path = Path(working_dir) / "docs" / "plans" / f"{plan_name}.md"
-        if plan_path.exists():
-            plan_file = f"docs/plans/{plan_name}.md"
-
-    # Check for tracking URLs (GitHub issues or Notion pages)
+    # First try full URLs
     github_pattern = r"https://github\.com/[^/]+/[^/]+/issues/\d+"
     notion_pattern = r"https://www\.notion\.so/[^\s]+"
 
@@ -2454,6 +2550,9 @@ def detect_tracked_work(
         tracking_url = github_match.group(0)
     elif notion_match:
         tracking_url = notion_match.group(0)
+    else:
+        # Try issue number shorthand (#55, issue 55, etc.)
+        tracking_url = _detect_issue_number(message_text, working_dir)
 
     # Only return if we have BOTH plan file and tracking URL
     if plan_file and tracking_url:
