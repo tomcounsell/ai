@@ -92,6 +92,15 @@ Agent sessions can become unhealthy without being detected or terminated. The cu
 - Changing existing PostToolUse health check behavior
 - Integration with external monitoring systems (Sentry, etc.)
 
+## Update System
+
+No update system changes required — this feature is purely internal to the bridge process.
+
+- **Dependencies**: No new pip dependencies. Uses only standard library modules (`asyncio`, `json`, `logging`, `time`, `pathlib`) plus the existing `models.sessions.AgentSession` model.
+- **Config files**: No new configuration files. Thresholds are module-level constants in `monitoring/session_watchdog.py`.
+- **Service restarts**: The watchdog starts automatically as an `asyncio.create_task()` when the bridge boots. The existing update system already restarts the bridge via `scripts/update/service.py`, so the watchdog starts on the next restart with no additional changes.
+- **Migration**: No database changes, no new environment variables, no symlinks. Existing installations pick up the watchdog on their next `git pull` + bridge restart.
+
 ## Success Criteria
 
 - [ ] Watchdog runs every 5 minutes when bridge is active
