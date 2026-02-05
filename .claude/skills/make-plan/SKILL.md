@@ -25,6 +25,8 @@ hooks:
             --contains '## Team Orchestration'
             --contains '## Step by Step Tasks'
             --contains '## Success Criteria'
+            --contains '## Update System'
+            --contains '## Agent Integration'
         - type: command
           command: >-
             uv run $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_plan_label.py
@@ -167,6 +169,25 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 - [Feature deferred to later]
 - [Edge case we'll handle in v2]
 - [Related but separate concern]
+
+## Update System
+
+[This system is deployed across multiple machines via the `/update` skill. Consider whether the update process needs changes.]
+
+- Whether the update script or update skill needs changes
+- New dependencies or config files that must be propagated
+- Migration steps for existing installations
+- If no update changes are needed, state that explicitly (e.g., "No update system changes required — this feature is purely internal")
+
+## Agent Integration
+
+[The agent receives Telegram messages via the bridge and can only use tools exposed through MCP servers registered in `.mcp.json`. New Python functions in `tools/` are invisible to the agent unless wrapped.]
+
+- Whether a new or existing MCP server in `mcp_servers/` needs to expose this functionality
+- Changes to `.mcp.json` registration
+- Whether the bridge itself (`bridge/telegram_bridge.py`) needs to import/call the new code directly
+- Integration tests that verify the agent can actually invoke the new capability
+- If no agent integration is needed, state that explicitly (e.g., "No agent integration required — this is a bridge-internal change")
 
 ## Documentation
 
