@@ -66,7 +66,7 @@ Agent sessions can become unhealthy without being detected or terminated. The cu
 3. **Error cascade**: >N errors in last M calls
 4. **Runaway duration**: Session running longer than appetite threshold
 
-## Rabbit Holes & Risks
+## Risks
 
 ### Risk 1: False positives overwhelming supervisor
 **Impact:** Alert fatigue, supervisor ignores real problems
