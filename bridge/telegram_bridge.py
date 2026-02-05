@@ -1774,20 +1774,34 @@ def format_link_summaries(summaries: list[dict]) -> str:
 # Reaction Status Workflow
 # =============================================================================
 
+# Valid Telegram reactions (free tier, no Premium required)
+# fmt: off
+VALID_TELEGRAM_REACTIONS = [
+    "👍", "👎", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", "🤩",
+    "🤮", "💩", "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳", "🌚", "🌭", "💯",
+    "🤣", "⚡", "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴",
+    "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨", "🤝", "🤗", "🫡", "🎅",
+    "🎄", "💅", "🤪", "🗿", "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾",
+    "🤷", "😡", "😂", "❤", "❤‍🔥", "✍", "☃", "🤷‍♂", "🤷‍♀",
+]
+# fmt: on
+# Note: Emojis with variation selectors (U+FE0F) are invalid - use base forms above
+
 # Reaction emojis for different stages
 REACTION_RECEIVED = "👀"  # Message acknowledged
 REACTION_PROCESSING = "🤔"  # Default thinking emoji
 REACTION_SUCCESS = "👍"  # Completed successfully
-REACTION_ERROR = "❌"  # Something went wrong
+REACTION_ERROR = "😱"  # Something went wrong (❌ is not a valid Telegram reaction)
 
 # Intent-specific processing emojis (classified by local Ollama)
+# Note: 💻 and 🎨 are NOT valid Telegram reactions
 INTENT_REACTIONS = {
     "search": "🤔",  # Searching the web
-    "code_execution": "💻",  # Running code
-    "image_generation": "🎨",  # Creating an image
+    "code_execution": "👨‍💻",  # Running code (technologist emoji)
+    "image_generation": "🤩",  # Creating an image (star-struck)
     "image_analysis": "🤔",  # Analyzing an image
     "file_operation": "🤔",  # File operations
-    "git_operation": "💻",  # Git work
+    "git_operation": "👨‍💻",  # Git work (technologist emoji)
     "chat": "🤔",  # Thinking/conversation
     "tool_use": "🤔",  # Using a tool
     "system": "🤔",  # System task
