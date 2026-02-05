@@ -1774,38 +1774,85 @@ def format_link_summaries(summaries: list[dict]) -> str:
 # Reaction Status Workflow
 # =============================================================================
 
-# Valid Telegram reactions (free tier, no Premium required)
+# =============================================================================
+# TELEGRAM REACTIONS - VALIDATED BY ACTUAL TESTING
+# =============================================================================
+# IMPORTANT: Do NOT trust Telegram's GetAvailableReactionsRequest API - it lies!
+# These were validated on 2026-02-05 by actually setting each as a reaction.
+# Re-validate periodically with: python scripts/test_emoji_reactions.py
+#
+# Key findings from testing:
+# - Emojis with U+FE0F variation selector fail (use base forms: ❤ not ❤️)
+# - 😂 (tears of joy) is NOT a valid reaction despite being common
+# - 💻 🎨 ❌ ✅ 🔄 ⏳ 🚀 💡 📝 🔍 are NOT valid reactions
+# - "Saved Messages" requires Premium; test in real DMs/groups
+# =============================================================================
+
+# Validated 44 emojis on 2026-02-05 via scripts/test_emoji_reactions.py
 # fmt: off
-VALID_TELEGRAM_REACTIONS = [
-    "👍", "👎", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", "🤩",
-    "🤮", "💩", "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳", "🌚", "🌭", "💯",
-    "🤣", "⚡", "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴",
-    "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨", "🤝", "🤗", "🫡", "🎅",
-    "🎄", "💅", "🤪", "🗿", "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾",
-    "🤷", "😡", "😂", "❤", "❤‍🔥", "✍", "☃", "🤷‍♂", "🤷‍♀",
+VALIDATED_REACTIONS = [
+    # Hearts/love
+    "❤", "❤‍🔥", "💔", "💘", "😍", "🥰", "😘", "💋",
+    # Hands
+    "👍", "👎", "👏", "🙏", "👌", "🤝", "✍", "🖕",
+    # Positive faces
+    "😁", "🤣", "🤩", "😇", "😎", "🤓", "🤗", "🫡",
+    # Negative faces
+    "😱", "🤯", "🤬", "😢", "😭", "🤮", "😨", "😡",
+    # Neutral/other faces
+    "🤔", "🥱", "🥴", "😴", "😐", "🤨", "🤪",
+    # Characters
+    "🤡", "👻", "👾", "😈", "💩",
 ]
 # fmt: on
-# Note: Emojis with variation selectors (U+FE0F) are invalid - use base forms above
 
-# Reaction emojis for different stages
-REACTION_RECEIVED = "👀"  # Message acknowledged
-REACTION_PROCESSING = "🤔"  # Default thinking emoji
-REACTION_SUCCESS = "👍"  # Completed successfully
-REACTION_ERROR = "😱"  # Something went wrong (❌ is not a valid Telegram reaction)
+# These emojis were rate-limited during testing but work in production
+# (confirmed via bridge logs). Re-test if issues arise.
+# fmt: off
+LIKELY_VALID_REACTIONS = [
+    "👨‍💻", "👀", "🔥", "⚡", "💯", "🏆", "🎉", "🎃", "🎄", "🎅",
+    "🕊", "🐳", "🦄", "🙈", "🙉", "🙊", "🌚", "🌭", "🍌", "🍓",
+    "🍾", "💅", "🤪", "🗿", "🆒", "💊", "🤷", "☃",
+]
+# fmt: on
+
+# Known INVALID reactions - do not use these
+# fmt: off
+INVALID_REACTIONS = [
+    "😂",  # ReactionInvalidError - tears of joy not allowed!
+    "💻",  # Laptop - not a reaction
+    "🎨",  # Art palette - not a reaction
+    "❌",  # Cross mark - not a reaction
+    "✅",  # Check mark - not a reaction
+    "🔄",  # Refresh - not a reaction
+    "⏳",  # Hourglass - not a reaction
+    "🚀",  # Rocket - not a reaction
+    "💡",  # Light bulb - not a reaction
+    "📝",  # Memo - not a reaction
+    "🔍",  # Magnifying glass - not a reaction
+    # Emojis with U+FE0F variation selector (use base forms instead):
+    "❤️", "❤️‍🔥", "✍️", "☃️", "🤷‍♂️", "🤷‍♀️",
+]
+# fmt: on
+
+# Reaction emojis for different stages (all validated)
+REACTION_RECEIVED = "👀"  # Message acknowledged (in LIKELY_VALID, works in prod)
+REACTION_PROCESSING = "🤔"  # Default thinking emoji (VALIDATED)
+REACTION_SUCCESS = "👍"  # Completed successfully (VALIDATED)
+REACTION_ERROR = "😱"  # Something went wrong (VALIDATED)
 
 # Intent-specific processing emojis (classified by local Ollama)
-# Note: 💻 and 🎨 are NOT valid Telegram reactions
 INTENT_REACTIONS = {
-    "search": "🤔",  # Searching the web
-    "code_execution": "👨‍💻",  # Running code (technologist emoji)
-    "image_generation": "🤩",  # Creating an image (star-struck)
-    "image_analysis": "🤔",  # Analyzing an image
-    "file_operation": "🤔",  # File operations
-    "git_operation": "👨‍💻",  # Git work (technologist emoji)
-    "chat": "🤔",  # Thinking/conversation
-    "tool_use": "🤔",  # Using a tool
-    "system": "🤔",  # System task
-    "unknown": "🤔",  # Default thinking
+    "search": "🤔",  # Searching the web (VALIDATED)
+    "code_execution": "👨‍💻",  # Running code (LIKELY_VALID, works in prod)
+    "image_generation": "🤩",  # Creating an image (VALIDATED)
+    "image_analysis": "🤔",  # Analyzing an image (VALIDATED)
+    "file_operation": "🤔",  # File operations (VALIDATED)
+    "git_operation": "👨‍💻",  # Git work (LIKELY_VALID, works in prod)
+    "chat": "🤔",  # Thinking/conversation (VALIDATED)
+    "tool_use": "🤔",  # Using a tool (VALIDATED)
+    "system": "🤔",  # System task (VALIDATED)
+    "unknown": "🤔",  # Default thinking (VALIDATED)
 }
 
 
