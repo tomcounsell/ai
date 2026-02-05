@@ -4,7 +4,7 @@ type: feature
 appetite: Medium: 3-5 days
 owner: Valor
 created: 2026-02-05
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/44
 ---
 
 # Background Session Watchdog
