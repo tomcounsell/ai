@@ -1,16 +1,18 @@
 """
-Web Search Tool
+Web Search Tool (Legacy Wrapper)
 
-Web search using Perplexity API with intelligent result ranking and summarization.
+DEPRECATED: This module is maintained for backward compatibility only.
+New code should use tools.web instead.
+
+This wrapper delegates to the unified tools.web module which provides:
+- Multi-provider fallback (Perplexity → Tavily)
+- Unified interface for search and fetch
+- Better error handling and resilience
 """
 
-import os
 from typing import Literal
 
-import requests
-
-PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
-DEFAULT_MODEL = "sonar"  # Current Perplexity model
+from tools.web import web_search_sync
 
 
 class SearchError(Exception):
@@ -31,7 +33,9 @@ def search(
     language: str = "en",
 ) -> dict:
     """
-    Search the web using Perplexity API.
+    Search the web (legacy interface).
+
+    This function delegates to tools.web.web_search_sync() for backward compatibility.
 
     Args:
         query: Search query
@@ -39,7 +43,7 @@ def search(
         max_results: Maximum number of results (1-50)
         time_filter: Filter by time period
         domain_filter: List of domains to include
-        language: ISO 639-1 language code
+        language: ISO 639-1 language code (currently ignored)
 
     Returns:
         dict with keys:
@@ -48,100 +52,57 @@ def search(
             - citations: Source citations (if search_type='citations')
             - error: Error message (if failed)
     """
-    api_key = os.environ.get("PERPLEXITY_API_KEY")
-    if not api_key:
-        return {"error": "PERPLEXITY_API_KEY environment variable not set"}
+    import os
 
-    # Validate parameters
+    # Validate input
     if not query or not query.strip():
         return {"error": "Query cannot be empty"}
 
-    max_results = max(1, min(50, max_results))
+    # For backward compatibility, check for API keys and return specific error
+    # The legacy implementation expected specific API key errors
+    api_key = os.environ.get("PERPLEXITY_API_KEY")
+    tavily_key = os.environ.get("TAVILY_API_KEY")
 
-    # Build system prompt based on search type
-    system_prompts = {
-        "conversational": "Be precise and concise. Provide a helpful summary of the search results.",
-        "factual": "Provide factual, verifiable information. Be precise and cite specific data points.",
-        "citations": "Always cite your sources. Include URLs for verification. Format citations clearly.",
-    }
-    system_prompt = system_prompts.get(search_type, system_prompts["conversational"])
+    if not api_key and not tavily_key:
+        return {"error": "PERPLEXITY_API_KEY environment variable not set"}
 
-    # Add domain filter to query if specified
-    search_query = query
-    if domain_filter:
-        domain_str = " OR ".join(f"site:{d}" for d in domain_filter)
-        search_query = f"{query} ({domain_str})"
-
-    # Add time filter context
-    if time_filter:
-        time_contexts = {
-            "day": "Focus on results from the last 24 hours.",
-            "week": "Focus on results from the last week.",
-            "month": "Focus on results from the last month.",
-            "year": "Focus on results from the last year.",
-        }
-        if time_filter in time_contexts:
-            system_prompt += f" {time_contexts[time_filter]}"
-
+    # Call the new unified web_search_sync
     try:
-        response = requests.post(
-            PERPLEXITY_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": DEFAULT_MODEL,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": search_query},
-                ],
-                "max_tokens": 1024,
-                "return_citations": search_type == "citations",
-                "return_related_questions": True,
-            },
-            timeout=60,
+        result = web_search_sync(
+            query,
+            search_type=search_type,
+            max_results=max_results,
+            time_filter=time_filter,
+            domain_filter=domain_filter,
         )
 
-        response.raise_for_status()
-        result = response.json()
+        if result is None:
+            # Return legacy-compatible error message
+            if not api_key:
+                return {
+                    "error": "PERPLEXITY_API_KEY environment variable not set",
+                    "query": query,
+                }
+            return {"error": "All search providers failed", "query": query}
 
-        if "choices" not in result or len(result["choices"]) == 0:
-            return {"error": "No response from Perplexity API", "query": query}
-
-        message = result["choices"][0].get("message", {})
-        content = message.get("content", "")
-
-        # Build response
-        search_result = {
-            "query": query,
+        # Convert new format to legacy format
+        legacy_result = {
+            "query": result.query,
             "search_type": search_type,
-            "summary": content,
-            "results": [],
+            "summary": result.answer,
+            "results": [
+                {"url": source.url, "title": source.title or source.url.split("/")[-1]}
+                for source in result.sources[:max_results]
+            ],
         }
 
-        # Extract citations if available
-        citations = result.get("citations", [])
-        if citations:
-            search_result["citations"] = citations
-            search_result["results"] = [
-                {"url": c, "title": c.split("/")[-1] or c}
-                for c in citations[:max_results]
-            ]
+        if result.citations:
+            legacy_result["citations"] = result.citations
 
-        # Add related questions if available
-        related = result.get("related_questions", [])
-        if related:
-            search_result["suggested_refinements"] = related
+        return legacy_result
 
-        return search_result
-
-    except requests.exceptions.Timeout:
-        return {"error": "Search request timed out", "query": query}
-    except requests.exceptions.RequestException as e:
-        return {"error": f"API request failed: {str(e)}", "query": query}
     except Exception as e:
-        return {"error": f"Unexpected error: {str(e)}", "query": query}
+        return {"error": f"Search failed: {str(e)}", "query": query}
 
 
 def search_with_context(

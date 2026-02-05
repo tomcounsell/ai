@@ -34,6 +34,8 @@ valor-history = "tools.telegram_history.cli:main"
 valor-calendar = "tools.valor_calendar:main"
 valor-image-gen = "tools.image_gen:main"
 valor-image-analyze = "tools.image_analysis:main"
+valor-search = "tools.web:cli_search"
+valor-fetch = "tools.web:cli_fetch"
 
 [build-system]
 requires = ["hatchling"]
