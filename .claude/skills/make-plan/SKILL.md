@@ -18,7 +18,9 @@ hooks:
             --contains '## Problem'
             --contains '## Appetite'
             --contains '## Solution'
+            --contains '## Rabbit Holes'
             --contains '## Risks'
+            --contains '## No-Gos'
             --contains '## Team Orchestration'
             --contains '## Step by Step Tasks'
             --contains '## Success Criteria'
@@ -140,7 +142,15 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 - [Key decision 2]
 - [Integration points]
 
-## Rabbit Holes & Risks
+## Rabbit Holes
+
+[Areas that look tempting but will swallow disproportionate time. Call these out so the team deliberately avoids them.]
+
+- [Tempting but wasteful avenue to avoid]
+- [Complexity trap that seems important but isn't worth it]
+- [Tangent that should be a separate project]
+
+## Risks
 
 ### Risk 1: [Description]
 **Impact:** [What breaks if this goes wrong]
@@ -149,8 +159,6 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 ### Risk 2: [Description]
 **Impact:** [What breaks if this goes wrong]
 **Mitigation:** [How we'll handle it]
-
-[Add more risks as needed]
 
 ## No-Gos (Out of Scope)
 
@@ -403,18 +411,24 @@ Validate the flow step by step:
 - What can go wrong?
 
 ### 5. Surface Rabbit Holes
-Call out risks explicitly:
+Call out tempting but wasteful avenues:
+- "Don't try to support every auth provider — just Google and GitHub"
+- "Don't build a custom date picker — use the browser native one"
+- "Offline sync looks important but will triple the scope"
+
+### 6. Identify Technical Risks
+Call out things that could fail:
 - "Third-party API might be rate-limited"
 - "Database migration could fail on large datasets"
 - "Browser compatibility unknowns"
 
-### 6. Define Boundaries
+### 7. Define Boundaries
 State what we're NOT doing:
 - "Not building a full calendar - just a day picker"
 - "Not handling offline mode in this iteration"
 - "Not supporting bulk operations yet"
 
-### 7. Good is Relative
+### 8. Good is Relative
 Success is relative to appetite:
 - Small appetite → simple solution
 - Large appetite → more sophistication
