@@ -14,7 +14,6 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
-import requests
 
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 DEFAULT_MODEL = "sonar"  # Current Perplexity model
@@ -566,20 +565,37 @@ def validate_url(url: str, timeout: int = 10) -> dict:
     except Exception as e:
         return {"url": url, "valid": False, "error": str(e)}
 
-    # Check accessibility
-    try:
-        response = requests.head(url, timeout=timeout, allow_redirects=True)
+    # Try using the new fetch module first (better for content pages)
+    from tools.web import fetch_sync
+
+    result = fetch_sync(url, timeout=timeout)
+    if result:
         return {
             "url": url,
             "valid": True,
-            "status_code": response.status_code,
-            "final_url": response.url,
-            "redirected": response.url != url,
+            "status_code": 200,  # If fetch succeeded, it's accessible
+            "final_url": result.url,
+            "redirected": result.url != url,
         }
-    except requests.exceptions.Timeout:
+
+    # If fetch fails, fall back to simple HEAD request
+    # This handles edge cases like status-only endpoints (httpbin/status/200)
+    try:
+        import httpx
+
+        with httpx.Client(timeout=timeout) as client:
+            response = client.head(url, follow_redirects=True)
+            return {
+                "url": url,
+                "valid": True,
+                "status_code": response.status_code,
+                "final_url": str(response.url),
+                "redirected": str(response.url) != url,
+            }
+    except httpx.TimeoutException:
         return {"url": url, "valid": False, "error": "Request timed out"}
-    except requests.exceptions.RequestException as e:
-        return {"url": url, "valid": False, "error": str(e)}
+    except Exception as e:
+        return {"url": url, "valid": False, "error": f"URL not accessible: {str(e)}"}
 
 
 def get_metadata(url: str, timeout: int = 10) -> dict:
@@ -593,41 +609,23 @@ def get_metadata(url: str, timeout: int = 10) -> dict:
     Returns:
         dict with metadata
     """
+    # Use the new fetch module which handles HTML parsing better
+    from tools.web import fetch_sync
+
     try:
-        response = requests.get(url, timeout=timeout)
-        response.raise_for_status()
-        content = response.text
+        result = fetch_sync(url, timeout=timeout)
+        if result:
+            metadata = {
+                "url": result.url,
+                "title": result.title,
+                "description": None,  # fetch doesn't extract description yet
+                "content_type": "text/html",  # fetch returns markdown
+            }
+            return metadata
+        else:
+            return {"url": url, "error": "Failed to fetch URL"}
 
-        metadata = {
-            "url": url,
-            "title": None,
-            "description": None,
-            "content_type": response.headers.get("content-type"),
-        }
-
-        # Extract title
-        title_match = re.search(r"<title[^>]*>([^<]+)</title>", content, re.IGNORECASE)
-        if title_match:
-            metadata["title"] = title_match.group(1).strip()
-
-        # Extract meta description
-        desc_match = re.search(
-            r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']',
-            content,
-            re.IGNORECASE,
-        )
-        if not desc_match:
-            desc_match = re.search(
-                r'<meta[^>]*content=["\']([^"\']+)["\'][^>]*name=["\']description["\']',
-                content,
-                re.IGNORECASE,
-            )
-        if desc_match:
-            metadata["description"] = desc_match.group(1).strip()
-
-        return metadata
-
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         return {"url": url, "error": str(e)}
 
 
