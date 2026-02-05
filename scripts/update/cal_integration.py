@@ -205,7 +205,20 @@ def generate_calendar_config(project_dir: Path) -> CalendarConfigResult:
         gcal_by_name[cal["summary"]] = cal["id"]
 
     mappings: list[CalendarMapping] = []
-    calendars: dict[str, str] = {}
+
+    # Load existing config to preserve entries from other machines.
+    # This file is shared via iCloud across multiple machines — each
+    # machine should only add its own mappings, never remove others.
+    existing_calendars: dict[str, str] = {}
+    if config_path.exists():
+        try:
+            existing_calendars = json.loads(config_path.read_text()).get(
+                "calendars", {}
+            )
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    calendars: dict[str, str] = dict(existing_calendars)
 
     # Map 'dm' to primary
     calendars["dm"] = "primary"
