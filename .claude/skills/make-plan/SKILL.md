@@ -21,7 +21,6 @@ hooks:
             --contains '## Rabbit Holes'
             --contains '## Risks'
             --contains '## No-Gos'
-            --contains '## Documentation'
             --contains '## Team Orchestration'
             --contains '## Step by Step Tasks'
             --contains '## Success Criteria'
@@ -169,25 +168,6 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 - [Edge case we'll handle in v2]
 - [Related but separate concern]
 
-## Documentation
-
-[What documentation needs to be created or updated when this work ships. Use the `documentarian` agent type for these tasks.]
-
-### Feature Documentation
-- [ ] Create/update `docs/features/[feature-name].md` describing the feature
-- [ ] Add entry to documentation index
-
-### External Documentation Site
-[If the repo uses Sphinx, Read the Docs, MkDocs, or similar:]
-- [ ] Update relevant pages in the documentation site
-- [ ] Verify docs build passes
-
-### Inline Documentation
-- [ ] Code comments on non-obvious logic
-- [ ] Updated docstrings for public APIs
-
-[If no documentation changes are needed, state that explicitly and explain why.]
-
 ## Success Criteria
 
 [Measurable outcomes tied to the appetite. What does "done" look like?]
@@ -195,7 +175,6 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 - [ ] [Criterion 1]
 - [ ] [Criterion 2]
 - [ ] [Criterion 3]
-- [ ] Documentation updated and indexed
 
 ## Team Orchestration
 
@@ -264,24 +243,14 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 [Continue pattern for each component...]
 
-### N-1. Documentation
-- **Task ID**: document-feature
-- **Depends On**: [final build/validate task IDs]
-- **Assigned To**: [documentarian name from Team Members]
-- **Agent Type**: documentarian
-- **Parallel**: false
-- Create/update feature docs in `docs/features/`
-- Add entry to documentation index
-- Update external docs site if applicable
-
 ### N. Final Validation
 - **Task ID**: validate-all
-- **Depends On**: [all previous task IDs including document-feature]
+- **Depends On**: [all previous task IDs, comma-separated]
 - **Assigned To**: [lead validator]
 - **Agent Type**: validator
 - **Parallel**: false
 - Run all validation commands
-- Verify all success criteria met (including documentation)
+- Verify all success criteria met
 - Generate final report
 
 ## Validation Commands
