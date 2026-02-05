@@ -101,6 +101,18 @@ No update system changes required — this feature is purely internal to the bri
 - **Service restarts**: The watchdog starts automatically as an `asyncio.create_task()` when the bridge boots. The existing update system already restarts the bridge via `scripts/update/service.py`, so the watchdog starts on the next restart with no additional changes.
 - **Migration**: No database changes, no new environment variables, no symlinks. Existing installations pick up the watchdog on their next `git pull` + bridge restart.
 
+## Documentation
+
+### Feature Documentation
+- [ ] Create `docs/features/session-watchdog.md` describing the watchdog system, thresholds, alert behavior, and how to tune constants
+- [ ] Add entry to documentation index
+
+### Inline Documentation
+- [ ] Module docstring in `monitoring/session_watchdog.py` covering purpose, detection heuristics, and configuration
+- [ ] Code comments on non-obvious logic (loop detection algorithm, alert cooldown)
+
+No external documentation site changes needed — this repo does not use Sphinx/Read the Docs.
+
 ## Success Criteria
 
 - [ ] Watchdog runs every 5 minutes when bridge is active
@@ -110,6 +122,7 @@ No update system changes required — this feature is purely internal to the bri
 - [ ] Supervisor receives Telegram alert for unhealthy sessions
 - [ ] No impact on normal session execution (read-only monitoring)
 - [ ] Graceful handling of missing/corrupted log files
+- [ ] Documentation updated and indexed
 
 ## Team Orchestration
 
@@ -139,6 +152,12 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
   - Name: test-writer
   - Role: Write unit tests for pattern detection functions
   - Agent Type: test-engineer
+  - Resume: true
+
+- **Documentarian**
+  - Name: watchdog-docs
+  - Role: Create feature documentation and verify inline docs
+  - Agent Type: documentarian
   - Resume: true
 
 ## Step by Step Tasks
@@ -199,9 +218,19 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - Verify logs show health check results
 - Run unit tests and confirm passing
 
-### 6. Final Validation
-- **Task ID**: validate-all
+### 6. Documentation
+- **Task ID**: document-feature
 - **Depends On**: validate-watchdog
+- **Assigned To**: watchdog-docs
+- **Agent Type**: documentarian
+- **Parallel**: false
+- Create `docs/features/session-watchdog.md` covering purpose, thresholds, alert behavior, tuning
+- Add entry to documentation index
+- Verify inline docs in `monitoring/session_watchdog.py` are complete
+
+### 7. Final Validation
+- **Task ID**: validate-all
+- **Depends On**: validate-watchdog, document-feature
 - **Assigned To**: watchdog-validator
 - **Agent Type**: validator
 - **Parallel**: false
