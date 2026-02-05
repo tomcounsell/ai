@@ -377,7 +377,7 @@ After writing the initial plan:
 ```
 Plan draft created: docs/plans/{slug}.md
 
-GitHub URL: https://github.com/{org}/{repo}/blob/{branch}/docs/plans/{slug}.md
+Pull Request: {PR URL}
 Tracking: {GitHub issue URL or Notion page URL}
 
 I've made the following key assumptions:
@@ -400,7 +400,7 @@ After receiving answers:
 ```
 Plan finalized: docs/plans/{slug}.md
 
-GitHub URL: https://github.com/tomcounsell/ai/blob/{branch}/docs/plans/{slug}.md
+Pull Request: {PR URL}
 
 When you're ready to implement, use this prompt:
 
@@ -539,11 +539,12 @@ Use snake_case for slugs:
 
 ## Branch Workflow
 
-**Always create plans in a new branch:**
+**Always create plans in a new branch and open a PR:**
 1. Create branch: `git checkout -b plan/{slug}`
 2. Write plan document
 3. Commit and push plan
-4. Provide GitHub URL to the plan in the branch
+4. Open a pull request: `gh pr create --title "[Plan] {Feature Name}" --body "Plan document for review."`
+5. Include the PR URL in the final report to the user
 
 ## Status Tracking
 
