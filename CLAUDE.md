@@ -127,6 +127,18 @@ Work is DONE when:
 - `config/projects.json` - Multi-project configuration
 - `.claude/settings.local.json` - Claude Code settings
 
+## Plan Requirements (This Repo Only)
+
+When creating plans with `/make-plan` for this repository, always include an **## Update System** section after **## No-Gos**. This system is deployed across multiple machines via the `/update` skill (`scripts/remote-update.sh`, `.claude/skills/update/`). New features frequently require complementary changes to the update process — new dependencies, config migrations, service restarts, symlink changes, etc.
+
+The **## Update System** section should cover:
+- Whether the update script or update skill needs changes
+- New dependencies or config files that must be propagated
+- Migration steps for existing installations
+- If no update changes are needed, state that explicitly (e.g., "No update system changes required — this feature is purely internal")
+
+This ensures update impact is considered during planning rather than discovered after deployment.
+
 ## See Also
 
 | Resource | Purpose |
