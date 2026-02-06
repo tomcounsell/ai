@@ -48,20 +48,32 @@ async def scan_for_missed_messages(
 
     # Get all dialogs to find monitored groups
     dialogs = await client.get_dialogs()
+    logger.info(f"[catchup] Got {len(dialogs)} total dialogs")
 
+    matched_groups = []
     for dialog in dialogs:
         chat_title = getattr(dialog.entity, "title", None)
-        if not chat_title or chat_title not in monitored_groups:
+        if not chat_title:
             continue
+
+        # Note: monitored_groups contains lowercase group names, but Telegram
+        # group titles may have capitals. Compare case-insensitively.
+        if chat_title.lower() not in monitored_groups:
+            logger.debug(f"[catchup] Skipping non-monitored group: {chat_title}")
+            continue
+
+        logger.info(f"[catchup] Found monitored group: {chat_title}")
+        matched_groups.append(chat_title)
 
         project = find_project_fn(chat_title)
         if not project:
+            logger.warning(f"[catchup] No project config for {chat_title}")
             continue
 
         project_key = project.get("_key", "unknown")
         working_dir = project.get("working_directory", "")
 
-        logger.debug(f"[catchup] Scanning {chat_title} for missed messages...")
+        logger.info(f"[catchup] Scanning {chat_title} for missed messages...")
 
         try:
             # Fetch recent messages
@@ -70,18 +82,33 @@ async def scan_for_missed_messages(
                 limit=MAX_MESSAGES_PER_CHAT,
             )
 
+            logger.info(
+                f"[catchup] {chat_title}: Fetched {len(messages)} messages, "
+                f"scanning for messages after {cutoff.isoformat()}"
+            )
+
             for message in messages:
                 # Skip if too old
                 if message.date < cutoff:
+                    logger.debug(
+                        f"[catchup] {chat_title}: msg {message.id} too old "
+                        f"({message.date.isoformat()}) - stopping scan"
+                    )
                     break
 
                 # Skip outgoing messages (our own)
                 if message.out:
+                    logger.debug(
+                        f"[catchup] {chat_title}: msg {message.id} is outgoing - skip"
+                    )
                     continue
 
                 # Skip messages without text
                 text = message.text or ""
                 if not text.strip():
+                    logger.debug(
+                        f"[catchup] {chat_title}: msg {message.id} has no text - skip"
+                    )
                     continue
 
                 # Get sender info
@@ -90,11 +117,19 @@ async def scan_for_missed_messages(
                 sender_username = getattr(sender, "username", None)
                 sender_id = getattr(sender, "id", None)
 
+                logger.info(
+                    f"[catchup] {chat_title}: msg {message.id} from {sender_name} "
+                    f"at {message.date.isoformat()}: '{text[:50]}...'"
+                )
+
                 # Check if we already responded (look for our reply)
                 already_handled = await _check_if_handled(
                     client, dialog.entity, message
                 )
                 if already_handled:
+                    logger.info(
+                        f"[catchup] {chat_title}: msg {message.id} already handled - skip"
+                    )
                     continue
 
                 # Check if we should respond to this message
@@ -120,6 +155,10 @@ async def scan_for_missed_messages(
                 )
 
                 if not should_respond:
+                    logger.info(
+                        f"[catchup] {chat_title}: msg {message.id} - "
+                        f"should_respond=False (reply_to_valor={is_reply_to_valor}) - skip"
+                    )
                     continue
 
                 # Queue this message for processing
@@ -150,7 +189,16 @@ async def scan_for_missed_messages(
             logger.error(f"[catchup] Error scanning {chat_title}: {e}")
             continue
 
-    logger.info(f"[catchup] Scan complete: queued {queued} missed message(s)")
+    logger.info(
+        f"[catchup] Scan complete: matched {len(matched_groups)} groups, "
+        f"queued {queued} missed message(s)"
+    )
+    if matched_groups:
+        logger.info(f"[catchup] Groups scanned: {', '.join(matched_groups)}")
+    else:
+        logger.warning(
+            f"[catchup] No groups matched! Looking for: {monitored_groups}"
+        )
     return queued
 
 
