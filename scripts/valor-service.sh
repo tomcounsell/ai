@@ -12,6 +12,8 @@ PLIST_NAME="com.valor.bridge"
 PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_NAME}.plist"
 UPDATE_PLIST_NAME="com.valor.update"
 UPDATE_PLIST_PATH="$HOME/Library/LaunchAgents/${UPDATE_PLIST_NAME}.plist"
+WATCHDOG_PLIST_NAME="com.valor.bridge-watchdog"
+WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/${WATCHDOG_PLIST_NAME}.plist"
 LOG_DIR="$PROJECT_DIR/logs"
 PID_FILE="$PROJECT_DIR/data/bridge.pid"
 
@@ -309,6 +311,42 @@ UPDATEEOF
     launchctl load "$UPDATE_PLIST_PATH"
     echo "Update cron installed (runs at 06:00 and 18:00)"
 
+    # Install bridge watchdog (runs every 60 seconds)
+    echo ""
+    echo "Installing bridge watchdog..."
+    cat > "$WATCHDOG_PLIST_PATH" << WATCHDOGEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${WATCHDOG_PLIST_NAME}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${PROJECT_DIR}/.venv/bin/python</string>
+        <string>${PROJECT_DIR}/monitoring/bridge_watchdog.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${PROJECT_DIR}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>${HOME}</string>
+    </dict>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>${LOG_DIR}/watchdog.log</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG_DIR}/watchdog.log</string>
+</dict>
+</plist>
+WATCHDOGEOF
+    launchctl load "$WATCHDOG_PLIST_PATH"
+    echo "Bridge watchdog installed (runs every 60 seconds)"
+
     sleep 2
     status_bridge
 }
@@ -330,6 +368,14 @@ uninstall_service() {
         echo "Update cron uninstalled"
     else
         echo "Update cron was not installed"
+    fi
+
+    if [ -f "$WATCHDOG_PLIST_PATH" ]; then
+        launchctl unload "$WATCHDOG_PLIST_PATH" 2>/dev/null || true
+        rm -f "$WATCHDOG_PLIST_PATH"
+        echo "Bridge watchdog uninstalled"
+    else
+        echo "Bridge watchdog was not installed"
     fi
 
     # Also stop any running process

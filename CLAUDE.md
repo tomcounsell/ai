@@ -121,6 +121,19 @@ Work is DONE when:
 - **Telegram Auth**: `python scripts/telegram_login.py`
 - **SDK Issues**: Check `USE_CLAUDE_SDK=true` in `.env`
 
+### Self-Healing System
+
+The bridge includes automatic crash recovery (see `docs/features/bridge-self-healing.md`):
+
+- **Session lock cleanup**: Kills stale processes holding SQLite locks on startup
+- **Bridge watchdog**: Separate launchd service (`com.valor.bridge-watchdog`) monitors health every 60s
+- **Crash tracker**: Logs start/crash events to `data/crash_history.jsonl` with git commit correlation
+- **5-level escalation**: restart → kill stale → clear locks → revert commit → alert human
+
+**Check watchdog**: `python monitoring/bridge_watchdog.py --check-only`
+**View crashes**: `cat data/crash_history.jsonl`
+**Enable auto-revert**: `touch data/auto-revert-enabled` (disabled by default)
+
 ### Configuration Files
 
 - `.env` - Environment variables and API keys

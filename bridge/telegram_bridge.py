@@ -117,6 +117,107 @@ def _get_running_jobs_info() -> tuple[int, list[str]]:
         return 0, []
 
 
+def _cleanup_session_locks() -> int:
+    """Kill stale processes holding the Telegram session file.
+
+    Uses lsof to find processes holding *.session files in the data directory,
+    then kills any that are older than 60 seconds (to avoid killing active bridge).
+
+    Returns the number of processes killed.
+    """
+    import random
+
+    logger = logging.getLogger(__name__)
+    data_dir = _BRIDGE_PROJECT_DIR / "data"
+    killed = 0
+
+    # Find session files
+    session_files = list(data_dir.glob("*.session"))
+    if not session_files:
+        return 0
+
+    for session_file in session_files:
+        try:
+            # Use lsof to find processes holding this file
+            result = subprocess.run(
+                ["lsof", "-t", str(session_file)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+
+            if result.returncode != 0 or not result.stdout.strip():
+                continue
+
+            pids = result.stdout.strip().split("\n")
+            current_pid = os.getpid()
+
+            for pid_str in pids:
+                try:
+                    pid = int(pid_str.strip())
+
+                    # Don't kill ourselves
+                    if pid == current_pid:
+                        continue
+
+                    # Check process age (only kill if > 60s old)
+                    try:
+                        stat_result = subprocess.run(
+                            ["ps", "-o", "etime=", "-p", str(pid)],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                        )
+                        if stat_result.returncode == 0:
+                            etime = stat_result.stdout.strip()
+                            # Parse etime format: [[DD-]HH:]MM:SS
+                            # If it has a dash or colon-colon, it's old enough
+                            if "-" in etime or etime.count(":") >= 2:
+                                # Definitely old (days or hours)
+                                pass
+                            else:
+                                # MM:SS format - check if > 1 minute
+                                parts = etime.split(":")
+                                if len(parts) == 2:
+                                    minutes = int(parts[0])
+                                    if minutes < 1:
+                                        logger.debug(
+                                            f"Skipping young process {pid} (age: {etime})"
+                                        )
+                                        continue
+                    except (subprocess.TimeoutExpired, ValueError):
+                        # Can't determine age, skip to be safe
+                        continue
+
+                    logger.warning(f"Killing stale process {pid} holding {session_file}")
+                    os.kill(pid, 9)  # SIGKILL
+                    killed += 1
+
+                except (ValueError, ProcessLookupError, PermissionError) as e:
+                    logger.debug(f"Could not kill PID {pid_str}: {e}")
+
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Timeout checking locks on {session_file}")
+        except Exception as e:
+            logger.debug(f"Error checking {session_file}: {e}")
+
+    # Also clean up journal/wal files that indicate incomplete transactions
+    for suffix in ["-journal", "-wal", "-shm"]:
+        for leftover in data_dir.glob(f"*{suffix}"):
+            try:
+                leftover.unlink()
+                logger.info(f"Removed stale {leftover.name}")
+            except Exception as e:
+                logger.debug(f"Could not remove {leftover}: {e}")
+
+    # Add jitter to prevent thundering herd on restart
+    if killed > 0:
+        jitter = random.uniform(0.5, 2.0)
+        time.sleep(jitter)
+
+    return killed
+
+
 async def _handle_update_command(tg_client, event):
     """Run remote update script and reply with results.
 
@@ -3186,18 +3287,28 @@ async def main():
     signal.signal(signal.SIGTERM, _shutdown_handler)
     signal.signal(signal.SIGINT, _shutdown_handler)
 
-    # Start the client (retry on SQLite session lock from prior process)
+    # Clean up stale session locks before attempting to connect
+    killed = _cleanup_session_locks()
+    if killed:
+        logger.info(f"Cleaned up {killed} stale process(es) holding session locks")
+
+    # Start the client (retry on SQLite session lock with exponential backoff)
+    # Backoff: 2s, 5s, 10s (with jitter added by cleanup function)
     logger.info("Starting Telegram bridge...")
+    backoff_times = [2, 5, 10]
     for _attempt in range(1, 4):
         try:
             await client.start(phone=PHONE, password=PASSWORD)
             break
         except Exception as e:
             if "database is locked" in str(e) and _attempt < 3:
+                # Try cleanup again before retry
+                _cleanup_session_locks()
+                wait_time = backoff_times[_attempt - 1]
                 logger.warning(
-                    f"Session DB locked (attempt {_attempt}/3), retrying in {_attempt * 2}s..."
+                    f"Session DB locked (attempt {_attempt}/3), retrying in {wait_time}s..."
                 )
-                await asyncio.sleep(_attempt * 2)
+                await asyncio.sleep(wait_time)
             else:
                 raise
     logger.info("Connected to Telegram")
