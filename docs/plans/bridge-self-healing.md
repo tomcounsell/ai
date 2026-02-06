@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium: 3-5 days
 owner: Valor
@@ -88,10 +88,15 @@ No prerequisites — this work has no external dependencies beyond the existing 
 
 ## Rabbit Holes
 
-- **Complex process management**: Don't build a full supervisor system. Keep it simple: kill, clean, restart.
-- **Distributed locking**: SQLite locks are local. Don't over-engineer with Redis/file locks.
-- **Git history analysis**: Only look at HEAD~1. Don't analyze commit history depth.
-- **Monitoring dashboards**: Alerts via Telegram are sufficient. No web UI needed.
+- **Complex process management**: Don't build a full supervisor system (systemd, supervisord, etc.). Keep it simple: kill, clean, restart. No process pools or worker management.
+- **Distributed locking**: SQLite locks are local. Don't over-engineer with Redis, file locks, or lock servers. Just use `lsof` and `kill`.
+- **Git history analysis**: Only look at HEAD~1. Don't analyze commit history depth, bisect for bad commits, or build a "known good" commit database.
+- **Monitoring dashboards**: Alerts via Telegram are sufficient. No web UI, Prometheus metrics, Grafana dashboards, or health check endpoints.
+- **Retry sophistication**: Simple exponential backoff is enough. No circuit breakers, retry budgets, or adaptive algorithms.
+- **State machines**: Don't model recovery as a formal state machine. Simple if/else escalation is fine.
+- **Configuration complexity**: Hardcode sensible defaults. Don't add config files, environment variables, or runtime configuration for recovery parameters.
+- **Log analysis**: Don't parse logs for error patterns beyond simple string matching. No log aggregation, structured logging pipelines, or ML-based anomaly detection.
+- **Health check protocols**: Don't implement HTTP health endpoints, gRPC health checks, or standardized health check formats. Just check if process exists and logs are recent.
 
 ## Risks
 
@@ -110,10 +115,21 @@ No prerequisites — this work has no external dependencies beyond the existing 
 ## No-Gos (Out of Scope)
 
 - Multi-machine coordination (this is single-machine self-healing)
-- Complex rollback strategies (only HEAD~1 revert)
-- Performance monitoring (focus on crash recovery only)
-- Database corruption recovery (only lock issues)
+- Complex rollback strategies (only HEAD~1 revert, no cherry-picks or selective reverts)
+- Performance monitoring (focus on crash recovery only, not latency/throughput)
+- Database corruption recovery (only lock issues, not data integrity)
 - Agent session healing (existing watchdog handles that)
+- Automatic dependency updates or pip install during recovery
+- Remote restart capabilities or SSH-based recovery
+- Slack/Discord/email alerting (Telegram only)
+- Crash dump analysis or core file inspection
+- Memory leak detection or resource usage trending
+- Scheduled maintenance windows or planned downtime handling
+- Blue-green deployments or canary releases
+- Backup/restore mechanisms for session data
+- Integration with external monitoring services (Datadog, New Relic, etc.)
+- Custom logging frameworks or structured log formats
+- Retry queues for failed operations beyond immediate restart
 
 ## Update System
 
@@ -276,12 +292,8 @@ No agent integration required — this is infrastructure-level self-healing that
 - `ls data/crash_history.jsonl` - Crash history file exists
 - `cat docs/features/bridge-self-healing.md` - Documentation exists
 
----
+## Decisions
 
-## Open Questions
-
-1. **Auto-revert scope**: Should auto-revert be enabled by default, or require explicit opt-in via config? (Recommendation: opt-in initially, with clear alerts)
-
-2. **Alert destination**: Should recovery alerts go to DM only, or also to a specific monitoring group? (Recommendation: DM to supervisor only)
-
-3. **Watchdog frequency**: 60 seconds feels right, but should it be configurable? (Recommendation: hardcode 60s, keep it simple)
+- **Auto-revert**: Opt-in via config, disabled by default. Clear alerts when triggered.
+- **Alert destination**: DM to supervisor only.
+- **Watchdog frequency**: Hardcoded 60 seconds. No configuration.
