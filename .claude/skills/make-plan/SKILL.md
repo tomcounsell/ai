@@ -333,17 +333,42 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 3. [Question about technical constraint]
 ```
 
-### Phase 2.5: Create Tracking Issue
+### Phase 2.5: Link or Create Tracking Issue
 
-After writing the plan document, create a corresponding tracking issue. Determine which tracker to use by checking the project configuration:
+After writing the plan document, link it to an existing issue OR create a new tracking issue.
+
+**IMPORTANT: Check for existing issue first!**
+
+If the plan was created in response to an existing GitHub issue or Notion task (e.g., user said "make a plan for issue #42" or shared a link to an issue), do NOT create a new issue. Instead:
+
+1. **Link to the existing issue** - Add the "plan" label and update the issue body
+2. **Update the plan frontmatter** - Set `tracking:` to the existing issue URL
+
+```bash
+# If existing issue triggered this plan (e.g., issue #42):
+EXISTING_ISSUE=42  # Set this if plan was created from an existing issue
+
+# Add plan label and update the issue
+gh issue edit $EXISTING_ISSUE --add-label "plan"
+gh issue comment $EXISTING_ISSUE --body "Plan document created: docs/plans/{slug}.md"
+
+# Use this URL in the plan's tracking: field
+echo "https://github.com/{org}/{repo}/issues/$EXISTING_ISSUE"
+```
+
+**Only create a NEW issue if:**
+- The plan was initiated from scratch (not from an existing issue)
+- User explicitly requested a new feature/idea without referencing existing issues
+
+---
+
+**Creating a new GitHub Issue (only when no existing issue):**
 
 1. **Check `config/projects.json`** for the current project (match by `working_directory` or git remote)
 2. **Determine tracker** based on project config keys:
    - If `notion` key exists → create a Notion task (use the Notion MCP tools)
    - If only `github` key exists → create a GitHub issue (use `gh` CLI)
    - If neither → skip tracking, just use the plan doc
-
-**GitHub Issue (default for most projects):**
 
 Before creating the issue, extract the `type:` field from the plan's YAML frontmatter. This field is MANDATORY and must be one of: bug, feature, or chore.
 
@@ -378,7 +403,7 @@ EOF
 )"
 ```
 
-**Notion Task:**
+**Creating a new Notion Task (only when no existing task):**
 
 Before creating the task, extract the `type:` field from the plan's YAML frontmatter. This field is MANDATORY.
 
@@ -390,7 +415,7 @@ Use the Notion MCP tools to create a page in the project's configured database w
 
 Note: The "Type" property must exist in your Notion database schema. If it doesn't exist, create it first or skip setting this property.
 
-**After creating the tracking issue:**
+**After linking or creating the tracking issue:**
 - Update the plan's YAML frontmatter `tracking:` field with the issue URL (e.g., `https://github.com/org/repo/issues/14`) or Notion page URL
 - Commit the updated plan
 
