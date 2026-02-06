@@ -3320,6 +3320,7 @@ async def main():
 
     # Scan for missed messages during downtime (catchup)
     if USE_CLAUDE_SDK:
+        logger.info("Starting catchup scan for missed messages...")
         try:
             from agent.job_queue import enqueue_job as _enqueue_job
             from bridge.catchup import scan_for_missed_messages
@@ -3332,10 +3333,9 @@ async def main():
                 enqueue_job_fn=_enqueue_job,
                 find_project_fn=find_project_for_chat,
             )
-            if caught_up:
-                logger.info(f"Catchup: queued {caught_up} missed message(s)")
+            logger.info(f"Catchup scan complete: {caught_up} message(s) queued")
         except Exception as e:
-            logger.error(f"Catchup scan failed: {e}")
+            logger.error(f"Catchup scan failed: {e}", exc_info=True)
 
     # Start session watchdog
     try:
