@@ -236,6 +236,77 @@ agent-browser --session test2 open site-b.com
 agent-browser session list
 ```
 
+## Using Your Chrome Session (CDP)
+
+Connect to your running Chrome browser to use existing sessions, cookies, and extensions.
+
+### Option 1: Connect via CDP (recommended)
+
+```bash
+# 1. Start Chrome with remote debugging enabled
+"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
+
+# 2. Connect agent-browser to the running Chrome
+agent-browser connect 9222
+
+# 3. Run commands - you're now using your logged-in session
+agent-browser snapshot -i
+agent-browser open https://your-already-logged-in-site.com
+```
+
+**Security note:** CDP exposes full browser access on that port. Keep it on localhost (the default) and you're fine.
+
+### Option 2: Use Chrome with persistent profile
+
+Use your Chrome binary with a dedicated profile that persists logins:
+
+```bash
+# Set environment variables
+export AGENT_BROWSER_EXECUTABLE_PATH="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+export AGENT_BROWSER_PROFILE=~/.agent-browser-profile
+
+# First run: log in manually in headed mode
+agent-browser --headed open https://github.com
+# ...authenticate in the browser window...
+
+# Subsequent runs: sessions are persisted
+agent-browser open https://github.com/settings
+```
+
+### Option 3: Save and restore session state
+
+Export cookies and localStorage for portable authentication:
+
+```bash
+# Log in manually
+agent-browser --headed open https://myapp.com/login
+# ...do your login flow...
+
+# Save the state
+agent-browser state save auth.json
+
+# Later, restore it in any session
+agent-browser state load auth.json
+agent-browser open https://myapp.com/dashboard
+```
+
+### CDP Quick Reference
+
+```bash
+# Connect to local Chrome on port 9222
+agent-browser connect 9222
+
+# Connect using WebSocket URL from /json/version endpoint
+agent-browser connect "ws://localhost:9222/devtools/browser/abc123"
+
+# Connect to remote browser service
+agent-browser connect "wss://browser-service.example.com/cdp?token=xyz"
+
+# Use --cdp flag directly with other commands
+agent-browser --cdp 9222 snapshot -i
+agent-browser --cdp 9222 click @e1
+```
+
 ## JSON output (for parsing)
 
 Add `--json` for machine-readable output:

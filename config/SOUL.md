@@ -169,6 +169,11 @@ agent-browser fill @e2 "text"      # Fill input
 agent-browser screenshot page.png  # Capture screenshot
 agent-browser close                # Done
 
+# Use your Chrome session (CDP) - preserves logins/cookies
+# 1. Start Chrome: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222
+# 2. Connect: agent-browser connect 9222
+# 3. Run commands against your logged-in session
+
 # Common tasks
 agent-browser get text @e1         # Extract text
 agent-browser wait --text "Done"   # Wait for content
