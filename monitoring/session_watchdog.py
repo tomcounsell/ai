@@ -1,4 +1,4 @@
-"""Session watchdog - detect stuck, looping, or failing agent sessions.
+"""Session watchdog - detect and fix stuck agent sessions.
 
 Monitors active agent sessions for signs of distress:
 - Silent sessions (no activity for extended period)
@@ -6,8 +6,11 @@ Monitors active agent sessions for signs of distress:
 - Error cascades (high error rate in recent activity)
 - Excessively long sessions
 
-This is a pattern-matching heuristic system that runs periodically
-and generates alerts without modifying session state.
+When issues are detected, the watchdog FIXES them automatically:
+- Marks stuck sessions as abandoned
+- Creates GitHub issues for problems that can't be auto-fixed
+
+NO ALERTS ARE SENT TO USERS. Either fix it or create an issue.
 """
 
 import asyncio
@@ -28,17 +31,14 @@ LOOP_THRESHOLD = 5  # identical tool calls to trigger
 ERROR_CASCADE_THRESHOLD = 5  # errors in last 20 calls
 ERROR_CASCADE_WINDOW = 20
 DURATION_THRESHOLD = 7200  # 2 hours
-ALERT_COOLDOWN = 1800  # 30 minutes between alerts for same session
-
-# Module-level state for alert cooldowns
-_alert_cooldowns: dict[str, float] = {}
+ABANDON_THRESHOLD = 1800  # 30 minutes silent = auto-abandon
 
 
 async def watchdog_loop(telegram_client=None) -> None:
     """Run the watchdog monitoring loop indefinitely.
 
     Args:
-        telegram_client: Optional Telegram client for sending alerts
+        telegram_client: Telegram client (kept for API compatibility, not used for alerts)
 
     This function never returns - it runs forever checking sessions
     at regular intervals. All exceptions are caught and logged to
@@ -48,21 +48,21 @@ async def watchdog_loop(telegram_client=None) -> None:
 
     while True:
         try:
-            await check_all_sessions(telegram_client)
+            await check_all_sessions()
         except Exception as e:
             logger.error("[watchdog] Error in watchdog loop: %s", e, exc_info=True)
 
         await asyncio.sleep(WATCHDOG_INTERVAL)
 
 
-async def check_all_sessions(telegram_client=None) -> None:
-    """Check all active sessions for health issues.
+async def check_all_sessions() -> None:
+    """Check all active sessions for health issues and fix them.
 
-    Args:
-        telegram_client: Optional Telegram client for sending alerts
+    Queries all active sessions, assesses their health, and takes action:
+    - Stuck/silent sessions: marked as abandoned
+    - Unfixable issues: GitHub issue created
 
-    Queries all active sessions and assesses their health, sending
-    alerts for any sessions showing signs of distress.
+    NO ALERTS ARE SENT. Either fix it or create an issue.
     """
     try:
         active_sessions = list(AgentSession.query.filter(status="active"))
@@ -71,7 +71,7 @@ async def check_all_sessions(telegram_client=None) -> None:
         return
 
     healthy_count = 0
-    issue_count = 0
+    fixed_count = 0
 
     for session in active_sessions:
         try:
@@ -80,33 +80,35 @@ async def check_all_sessions(telegram_client=None) -> None:
             if assessment["healthy"]:
                 healthy_count += 1
             else:
-                issue_count += 1
-                logger.warning(
-                    "[watchdog] Session %s has issues: %s (severity: %s)",
-                    session.session_id,
-                    ", ".join(assessment["issues"]),
-                    assessment["severity"],
-                )
-                await send_health_alert(
-                    telegram_client,
-                    session,
-                    assessment["issues"],
-                    assessment["severity"],
-                )
+                # Fix the problem instead of alerting
+                fixed = await fix_unhealthy_session(session, assessment)
+                if fixed:
+                    fixed_count += 1
+                    logger.info(
+                        "[watchdog] Fixed session %s: %s",
+                        session.session_id,
+                        ", ".join(assessment["issues"]),
+                    )
         except Exception as e:
             logger.error(
-                "[watchdog] Error assessing session %s: %s",
+                "[watchdog] Error handling session %s: %s",
                 session.session_id,
                 e,
                 exc_info=True,
             )
 
-    logger.info(
-        "[watchdog] Checked %d active sessions: %d healthy, %d with issues",
-        len(active_sessions),
-        healthy_count,
-        issue_count,
-    )
+    if fixed_count > 0:
+        logger.info(
+            "[watchdog] Checked %d active sessions: %d healthy, %d fixed",
+            len(active_sessions),
+            healthy_count,
+            fixed_count,
+        )
+    else:
+        logger.debug(
+            "[watchdog] Checked %d active sessions: all healthy",
+            len(active_sessions),
+        )
 
 
 def assess_session_health(session: AgentSession) -> dict[str, Any]:
@@ -322,85 +324,122 @@ def detect_error_cascade(
     return (is_cascading, error_count)
 
 
-async def send_health_alert(
-    telegram_client, session: AgentSession, issues: list[str], severity: str
-) -> None:
-    """Send a health alert for a problematic session.
+async def fix_unhealthy_session(
+    session: AgentSession, assessment: dict[str, Any]
+) -> bool:
+    """Fix an unhealthy session. Either resolve it or create an issue.
 
     Args:
-        telegram_client: Telegram client for sending alerts
         session: The session with health issues
-        issues: List of issue descriptions
-        severity: "warning" or "critical"
+        assessment: Health assessment dict with issues and severity
 
-    Sends alert via Telegram if client is available, with formatted message
-    including session details and issue list. Falls back to logging only.
+    Returns:
+        True if the session was fixed, False if an issue was created
 
-    Respects cooldown period to avoid alert spam.
+    Strategy:
+    - Silent sessions (>30 min): mark as abandoned
+    - Long-running sessions (>2 hours): mark as abandoned
+    - Looping/error cascades: mark as abandoned, create issue if critical
     """
-    # Check cooldown
+    issues = assessment["issues"]
+    severity = assessment["severity"]
     now = time.time()
-    last_alert = _alert_cooldowns.get(session.session_id, 0)
 
-    if now - last_alert < ALERT_COOLDOWN:
-        logger.debug(
-            "[watchdog] Suppressing alert for %s (cooldown active)", session.session_id
+    # Calculate silence duration
+    silence_duration = now - session.last_activity
+
+    # Most common case: session is stuck/silent - just abandon it
+    if silence_duration > ABANDON_THRESHOLD:
+        session.status = "abandoned"
+        session.save()
+        logger.info(
+            "[watchdog] Abandoned stuck session %s (silent for %d min)",
+            session.session_id,
+            int(silence_duration / 60),
         )
-        return
+        return True
 
-    # Update cooldown
-    _alert_cooldowns[session.session_id] = now
+    # Long-running session - abandon it
+    session_duration = now - session.started_at
+    if session_duration > DURATION_THRESHOLD:
+        session.status = "abandoned"
+        session.save()
+        logger.info(
+            "[watchdog] Abandoned long session %s (running for %d hours)",
+            session.session_id,
+            int(session_duration / 3600),
+        )
+        return True
 
-    # Format the alert message
-    severity_emoji = "🚨" if severity == "critical" else "⚠️"
-    session_id_short = session.session_id[:8]
+    # Critical issues (looping, error cascades) - abandon and maybe create issue
+    if severity == "critical":
+        session.status = "abandoned"
+        session.save()
 
-    # Calculate duration in human-readable format
-    duration_seconds = now - session.started_at
-    hours = int(duration_seconds // 3600)
-    minutes = int((duration_seconds % 3600) // 60)
-
-    if hours > 0:
-        duration_str = f"{hours}h {minutes}m"
-    else:
-        duration_str = f"{minutes}m"
-
-    # Format issues as bulleted list
-    issues_formatted = "\n".join(f"• {issue}" for issue in issues)
-
-    message = f"""{severity_emoji} Session Health Alert
-
-Session: {session_id_short}
-Project: {session.project_key}
-Duration: {duration_str}
-Tool calls: {session.tool_call_count}
-
-Issues:
-{issues_formatted}"""
-
-    # Log the alert
-    logger.warning(
-        "[watchdog] ALERT [%s] Session %s (chat_id=%s): %s",
-        severity.upper(),
-        session.session_id,
-        session.chat_id,
-        ", ".join(issues),
-    )
-
-    # Send via Telegram if client available
-    if telegram_client and session.chat_id:
+        # Create GitHub issue for investigation
         try:
-            chat_id = int(session.chat_id)
-            await telegram_client.send_message(chat_id, message)
-            logger.info(
-                "[watchdog] Sent alert to chat %s for session %s",
-                chat_id,
-                session.session_id,
-            )
+            await create_session_issue(session, issues)
         except Exception as e:
-            logger.error(
-                "[watchdog] Failed to send Telegram alert for session %s: %s",
-                session.session_id,
-                e,
-                exc_info=True,
-            )
+            logger.error("[watchdog] Failed to create issue: %s", e)
+
+        return True
+
+    # Warning-level issues - just abandon for now
+    session.status = "abandoned"
+    session.save()
+    return True
+
+
+async def create_session_issue(session: AgentSession, issues: list[str]) -> None:
+    """Create a GitHub issue for a session that couldn't be auto-fixed.
+
+    Args:
+        session: The problematic session
+        issues: List of issue descriptions
+    """
+    import subprocess
+
+    project_dir = Path(__file__).parent.parent
+    issues_formatted = "\n".join(f"- {issue}" for issue in issues)
+
+    title = f"[Watchdog] Session {session.session_id[:8]} had critical issues"
+    body = f"""## Session Details
+
+- **Session ID**: `{session.session_id}`
+- **Project**: {session.project_key}
+- **Chat ID**: {session.chat_id}
+- **Tool calls**: {session.tool_call_count}
+
+## Issues Detected
+
+{issues_formatted}
+
+## Action Taken
+
+Session was automatically marked as abandoned by the watchdog.
+
+---
+*Auto-generated by session watchdog*
+"""
+
+    try:
+        result = subprocess.run(
+            [
+                "gh", "issue", "create",
+                "--repo", "tomcounsell/ai",
+                "--title", title,
+                "--body", body,
+                "--label", "bug",
+                "--label", "watchdog",
+            ],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            logger.info("[watchdog] Created issue: %s", result.stdout.strip())
+        else:
+            logger.error("[watchdog] Failed to create issue: %s", result.stderr)
+    except Exception as e:
+        logger.error("[watchdog] Error creating issue: %s", e)
