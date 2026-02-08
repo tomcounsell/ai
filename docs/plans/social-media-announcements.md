@@ -11,10 +11,10 @@ tracking: https://github.com/tomcounsell/ai/issues/65
 
 ## Problem
 
-We need the ability to announce releases and post milestone updates to social media platforms. Currently there's no workflow for:
-- Posting announcements to X (Twitter)
-- Posting product updates to ProductHunt
-- Coordinating release announcements across platforms
+We need general-purpose tools for posting announcements to social media platforms. Currently there's no programmatic way to:
+- Post to X (Twitter)
+- Post product updates to ProductHunt
+- Coordinate multi-platform announcements
 
 **Current behavior:**
 - No programmatic access to social platforms
@@ -22,17 +22,10 @@ We need the ability to announce releases and post milestone updates to social me
 - No consistent format or workflow
 
 **Desired outcome:**
-- `/announce-x` skill posts to X via Tweepy
-- `/announce-producthunt` skill posts to ProductHunt
-- `/release-announce` orchestrates multi-platform announcements
-- Human approval via plan process (plan = permission)
-
-## First Use Case
-
-Popoto 1.0.0 release announcement:
-- **Library**: https://pypi.org/project/popoto/
-- **Current version**: 1.0.0b1 (beta)
-- **Description**: Redis ORM with Django-like syntax
+- `tools/x_client.py` — Thin Tweepy wrapper for posting tweets/threads
+- `tools/producthunt_client.py` — Thin client for posting PH updates
+- Skills that use these tools for announcement workflows
+- Human approval via existing plan process (plan = permission)
 
 ## Appetite
 
@@ -62,10 +55,10 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/social-media-a
 ### Flow
 
 **Single Platform:**
-User: "Announce Popoto 1.0 on X" → Agent drafts tweet → Plan created → User approves → `/build` executes → Tweet posted → URL returned
+User: "Post this to X: [content]" → Agent uses `/announce-x` → Tweet posted → URL returned
 
 **Multi-Platform Release:**
-User: "Announce Popoto 1.0 release" → Agent drafts copy for each platform → Plan includes all posts → User approves → `/build` executes sequentially → All URLs returned
+User: "Announce [product] release" → Agent drafts copy for each platform → Plan created with exact content → User approves → `/build` executes → All URLs returned
 
 ### Technical Approach
 
@@ -237,7 +230,6 @@ No update script changes needed — standard `uv sync` handles new dependency.
 - [ ] `/release-announce` orchestrates both platforms
 - [ ] X API credentials documented in `.env.example`
 - [ ] Tweepy added to dependencies
-- [ ] Popoto 1.0.0 successfully announced (first real use)
 - [ ] Documentation updated and indexed
 
 ## Team Orchestration
@@ -370,7 +362,6 @@ No update script changes needed — standard `uv sync` handles new dependency.
 - **Parallel**: false
 - Run all validation commands
 - Verify all success criteria met
-- Confirm ready for Popoto 1.0.0 announcement
 
 ## Validation Commands
 
@@ -384,6 +375,5 @@ No update script changes needed — standard `uv sync` handles new dependency.
 
 ## Open Questions
 
-1. **X account handle**: What's the X account we're posting from? Need to configure credentials.
-2. **ProductHunt product slug**: What's the Popoto product slug on PH? (e.g., `popoto-redis-orm`)
-3. **First tweet content**: Should we draft the Popoto 1.0.0 announcement copy now as part of this plan?
+1. **X API tier**: Which X API tier do we have access to? (Free: 1,500 tweets/month, Basic: $100/month for more)
+2. **ProductHunt auth**: Do we have a ProductHunt maker account with posting privileges?
