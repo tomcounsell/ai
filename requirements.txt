@@ -463,7 +463,7 @@ pydantic==2.12.5
     #   pydantic-graph
     #   pydantic-settings
     #   xai-sdk
-pydantic-ai==1.51.0
+pydantic-ai==1.56.0
     # via cuttlefish
 pydantic-ai-slim==1.51.0
     # via
