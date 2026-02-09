@@ -102,10 +102,20 @@ class UpdateResult:
     warnings: list[str] = field(default_factory=list)
 
 
+# Log buffer for telegram mode (writes to file instead of stdout)
+_log_buffer: list[str] = []
+_log_to_buffer: bool = False
+
+
 def log(msg: str, verbose: bool = True, always: bool = False) -> None:
-    """Print log message. Use always=True for key status messages."""
-    if verbose or always:
-        print(f"[update] {msg}")
+    """Print log message or capture to buffer for telegram mode."""
+    if not (verbose or always):
+        return
+    line = f"[update] {msg}"
+    if _log_to_buffer:
+        _log_buffer.append(line)
+    else:
+        print(line)
 
 
 def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
@@ -356,10 +366,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
 
 def main() -> int:
     """Main entry point."""
+    global _log_to_buffer, _log_buffer
+
     parser = argparse.ArgumentParser(description="Valor update system")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--full", action="store_true", help="Full update (all checks)")
-    mode.add_argument("--cron", action="store_true", help="Cron update (minimal)")
+    mode.add_argument("--cron", action="store_true", help="Telegram /update (summary + log file)")
     mode.add_argument("--verify", action="store_true", help="Verify only (no changes)")
 
     parser.add_argument("--json", action="store_true", help="Output JSON")
@@ -378,6 +390,9 @@ def main() -> int:
         config = UpdateConfig.full()
     elif args.cron:
         config = UpdateConfig.cron()
+        # Telegram mode: capture logs to buffer, output summary + file
+        _log_to_buffer = True
+        _log_buffer = []
     else:
         config = UpdateConfig.verify_only()
 
@@ -390,9 +405,35 @@ def main() -> int:
     # Run update
     result = run_update(args.project_dir, config)
 
-    # Output
+    # Output for telegram mode: clean summary + log file
+    if args.cron and _log_buffer:
+        log_file = args.project_dir / "data" / "update.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_file.write_text("\n".join(_log_buffer) + "\n")
+
+        # Build summary
+        sha = git.get_short_sha(args.project_dir) if result.git_result else "unknown"
+        commits = result.git_result.commit_count if result.git_result else 0
+
+        if not result.success:
+            status = f"Update failed at {sha}"
+            for err in result.errors:
+                status += f"\n  - {err}"
+        elif commits > 0:
+            status = f"Updated to {sha} ({commits} commit{'s' if commits != 1 else ''})"
+            if result.warnings:
+                status += f" with {len(result.warnings)} warning{'s' if len(result.warnings) != 1 else ''}"
+        else:
+            status = f"Already up to date at {sha}"
+            if result.warnings:
+                status += f" ({len(result.warnings)} warning{'s' if len(result.warnings) != 1 else ''})"
+
+        print(status)
+        print(f"<<FILE:{log_file}>>")
+        return 0 if result.success else 1
+
+    # Output for JSON mode
     if args.json:
-        # Convert to JSON-serializable dict
         output = {
             "success": result.success,
             "errors": result.errors,
