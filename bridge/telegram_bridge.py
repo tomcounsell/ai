@@ -189,7 +189,9 @@ def _cleanup_session_locks() -> int:
                         # Can't determine age, skip to be safe
                         continue
 
-                    logger.warning(f"Killing stale process {pid} holding {session_file}")
+                    logger.warning(
+                        f"Killing stale process {pid} holding {session_file}"
+                    )
                     os.kill(pid, 9)  # SIGKILL
                     killed += 1
 
@@ -2757,6 +2759,93 @@ def create_workflow_for_tracked_work(
         return None
 
 
+async def check_message_query_request(client: TelegramClient) -> None:
+    """Check for and process message query requests via file-based IPC.
+
+    Monitors data/message_query_request.json for CLI requests to fetch messages.
+    When found, executes the query using Telegram client and writes results to
+    data/message_query_result.json.
+
+    Args:
+        client: Active TelegramClient instance
+    """
+    request_file = _BRIDGE_PROJECT_DIR / "data" / "message_query_request.json"
+    result_file = _BRIDGE_PROJECT_DIR / "data" / "message_query_result.json"
+
+    # Check if request file exists
+    if not request_file.exists():
+        return
+
+    try:
+        # Read request
+        with open(request_file) as f:
+            request = json.load(f)
+
+        user_id = request.get("user_id")
+        username = request.get("username")
+        limit = request.get("limit", 100)
+
+        logger.info(
+            f"Processing message query request: user_id={user_id}, "
+            f"username={username}, limit={limit}"
+        )
+
+        # Execute query using Telegram client
+        messages = await client.get_messages(user_id, limit=limit)
+
+        # Format messages for response
+        formatted_messages = []
+        for msg in messages:
+            sender = await msg.get_sender()
+            sender_name = (
+                getattr(sender, "first_name", "Unknown") if sender else "Unknown"
+            )
+
+            formatted_messages.append(
+                {
+                    "date": msg.date.isoformat() if msg.date else None,
+                    "sender": sender_name,
+                    "text": msg.text or "",
+                }
+            )
+
+        # Build result
+        result = {
+            "success": True,
+            "user_id": user_id,
+            "username": username,
+            "messages": formatted_messages,
+            "completed_at": datetime.now().isoformat(),
+        }
+
+        # Write result
+        with open(result_file, "w") as f:
+            json.dump(result, f, indent=2)
+
+        logger.info(
+            f"Message query completed: fetched {len(formatted_messages)} messages"
+        )
+
+    except Exception as e:
+        # Write error result
+        error_result = {
+            "success": False,
+            "error": str(e),
+            "completed_at": datetime.now().isoformat(),
+        }
+        with open(result_file, "w") as f:
+            json.dump(error_result, f, indent=2)
+
+        logger.error(f"Message query failed: {e}", exc_info=True)
+
+    finally:
+        # Always delete request file after processing
+        try:
+            request_file.unlink()
+        except Exception as e:
+            logger.warning(f"Failed to delete request file: {e}")
+
+
 async def main():
     """Main entry point."""
     if not API_ID or not API_HASH:
@@ -3454,6 +3543,19 @@ async def main():
         logger.info("Session watchdog started")
     except Exception as e:
         logger.error(f"Failed to start session watchdog: {e}")
+
+    # Start message query polling loop
+    async def message_query_loop():
+        """Poll for message query requests every second."""
+        while True:
+            try:
+                await check_message_query_request(client)
+            except Exception as e:
+                logger.error(f"Message query check failed: {e}", exc_info=True)
+            await asyncio.sleep(1)
+
+    asyncio.create_task(message_query_loop())
+    logger.info("Message query polling started")
 
     # Keep running
     await client.run_until_disconnected()
