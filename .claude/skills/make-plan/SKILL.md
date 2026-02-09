@@ -32,6 +32,9 @@ hooks:
           command: >-
             uv run $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_plan_label.py
             docs/plans
+        - type: command
+          command: >-
+            uv run $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_documentation_section.py
 ---
 
 # Make a Plan (Shape Up Methodology)
