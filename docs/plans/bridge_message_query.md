@@ -23,7 +23,7 @@ To see recent messages, must either:
 2. Stop the bridge, run a query script, restart (disruptive)
 
 **Desired outcome:**
-Query real-time messages from Telegram API while the bridge is running, via an internal tool that leverages the bridge's active Telethon client.
+A CLI tool `get-telegram-message-history` that queries real-time messages from Telegram API via the running bridge.
 
 ## Appetite
 
@@ -39,47 +39,104 @@ No prerequisites — the bridge already has the Telethon client connected.
 
 ### Key Elements
 
-- **Query function**: Internal async function `query_messages(chat_id, limit)` using `client.get_messages()`
-- **Bridge command**: Handle `/messages` or similar command in Telegram to trigger query
-- **Formatted response**: Return messages in a readable format
+- **CLI tool**: `get-telegram-message-history <username> [count]`
+- **IPC mechanism**: File-based request/response between CLI and bridge
+- **User lookup**: Resolve username to Telegram user ID from whitelist config
+- **Help output**: `--help` shows available usernames from config
 
 ### Flow
 
-**User sends `/messages 5`** → Bridge intercepts → Calls `client.get_messages(chat_id, limit=5)` → Formats results → Replies with message list
-
-Alternative flow for CLI/tool access:
-**Tool request** → Bridge exposes via internal API → Query executes → Returns JSON
+```
+User runs: get-telegram-message-history Tom 5
+    ↓
+CLI writes request to data/message_query_request.json
+    ↓
+Bridge detects request file (polling or file watcher)
+    ↓
+Bridge calls client.get_messages(user_id, limit=5)
+    ↓
+Bridge writes results to data/message_query_result.json
+    ↓
+CLI reads result, formats output, deletes request file
+```
 
 ### Technical Approach
 
-1. Add `async def query_recent_messages(client, chat_id, limit)` to bridge
-2. Register `/messages` command handler (similar to `/update`)
-3. Format output: timestamp, sender, preview of content
-4. Optional: expose via Unix socket or HTTP for external tool access (future)
+**1. Whitelist loader utility** (`tools/telegram_users.py`):
+```python
+def get_whitelisted_users() -> dict[str, int]:
+    """Return {username: user_id} from dm_whitelist.json"""
+
+def resolve_username(name: str) -> int | None:
+    """Resolve username (case-insensitive) to user ID"""
+```
+
+**2. Bridge query handler** (in `bridge/telegram_bridge.py`):
+- Check for `data/message_query_request.json` in main loop (every 1s)
+- Execute query via `client.get_messages()`
+- Write result to `data/message_query_result.json`
+- Delete request file
+
+**3. CLI tool** (`scripts/get-telegram-message-history`):
+```bash
+get-telegram-message-history --help     # Show available users
+get-telegram-message-history Tom        # Last 5 messages (default)
+get-telegram-message-history Tom 10     # Last 10 messages
+```
+
+### Request/Response Format
+
+**Request** (`data/message_query_request.json`):
+```json
+{
+  "user_id": 179144806,
+  "username": "Tom",
+  "limit": 5,
+  "requested_at": "2026-02-09T15:00:00"
+}
+```
+
+**Response** (`data/message_query_result.json`):
+```json
+{
+  "success": true,
+  "user_id": 179144806,
+  "username": "Tom",
+  "messages": [
+    {
+      "date": "2026-02-09 14:55",
+      "sender": "Tom",
+      "text": "Message content here..."
+    }
+  ],
+  "completed_at": "2026-02-09T15:00:01"
+}
+```
 
 ## Rabbit Holes
 
-- **External API exposure**: Don't build HTTP server or Unix socket now - just the Telegram command
-- **Message caching**: Don't try to sync with SQLite database on query - keep it simple
-- **Rich formatting**: Don't render media, reactions, or reply chains - just text content
+- **Real-time file watching**: Don't use inotify/fsevents - simple polling is fine
+- **HTTP/socket server**: Don't build a server - file IPC is simpler and sufficient
+- **Message caching**: Don't try to sync results back to SQLite
+- **Media handling**: Don't download or display media - text only
 
 ## Risks
 
-### Risk 1: Rate limiting
-**Impact:** Telegram might rate limit frequent queries
-**Mitigation:** Add simple cooldown (e.g., 30s between queries)
+### Risk 1: Bridge not running
+**Impact:** Query hangs waiting for response
+**Mitigation:** CLI timeout (10s default), clear error message
 
-### Risk 2: Large message content
-**Impact:** Long messages could exceed Telegram's message length limit
-**Mitigation:** Truncate content preview to ~100 chars per message
+### Risk 2: Race condition on request file
+**Impact:** Request could be overwritten
+**Mitigation:** Use atomic write, check for existing request
 
 ## No-Gos (Out of Scope)
 
-- No HTTP/Unix socket API (future enhancement)
-- No SQLite sync on query
-- No media content display
+- No HTTP/socket server (file IPC only)
+- No SQLite sync of query results
+- No media content in results
+- No group chat queries (DM only for now)
 - No message search (just recent fetch)
-- No cross-chat queries in single command
 
 ## Update System
 
@@ -87,89 +144,102 @@ No update system changes required — this is a bridge-internal feature.
 
 ## Agent Integration
 
-No agent integration required — this is a direct Telegram command, not exposed to the Claude agent. The agent already has access to the SQLite history via `tools/telegram_history/` for historical queries.
+No agent integration required initially. This is a CLI tool for human use. Future enhancement could expose to agent via MCP.
 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/bridge-message-query.md` describing the command
+- [ ] Create `docs/features/bridge-message-query.md` describing the tool
 - [ ] Add entry to `docs/features/README.md` index table
 
 ### Inline Documentation
-- [ ] Docstring on `query_recent_messages` function
-- [ ] Comment explaining command format
+- [ ] Docstring on query handler function
+- [ ] --help text with examples
 
 ## Success Criteria
 
-- [ ] `/messages` or `/messages 5` command works in any chat
-- [ ] Returns last N messages (default 5, max 20)
-- [ ] Shows: timestamp, sender name, content preview
-- [ ] Handles errors gracefully (invalid chat, rate limit)
+- [ ] `get-telegram-message-history --help` shows available usernames
+- [ ] `get-telegram-message-history Tom 5` returns last 5 messages
+- [ ] Output shows: date, sender, message text
+- [ ] Timeout with clear error if bridge not running
+- [ ] Handles unknown username gracefully
 - [ ] Documentation updated and indexed
 
 ## Team Orchestration
 
 ### Team Members
 
-- **Builder (bridge-query)**
-  - Name: bridge-query-builder
-  - Role: Implement the query function and command handler
+- **Builder (query-tool)**
+  - Name: query-tool-builder
+  - Role: Implement CLI tool and bridge handler
   - Agent Type: builder
   - Resume: true
 
-- **Validator (bridge-query)**
-  - Name: bridge-query-validator
+- **Validator (query-tool)**
+  - Name: query-tool-validator
   - Role: Verify implementation works correctly
   - Agent Type: validator
   - Resume: true
 
 ## Step by Step Tasks
 
-### 1. Implement query function
-- **Task ID**: build-query-function
+### 1. Create user lookup utility
+- **Task ID**: build-user-lookup
 - **Depends On**: none
-- **Assigned To**: bridge-query-builder
+- **Assigned To**: query-tool-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `async def query_recent_messages(client, chat_id, limit=5)` to `bridge/telegram_bridge.py`
-- Use `client.get_messages(chat_id, limit=limit)`
-- Format results as list of dicts with timestamp, sender, content preview
-- Handle errors (invalid chat, etc.)
+- Create `tools/telegram_users.py`
+- Implement `get_whitelisted_users()` - returns {name: id} dict
+- Implement `resolve_username(name)` - case-insensitive lookup
+- Load from `~/Desktop/claude_code/dm_whitelist.json`
 
-### 2. Add command handler
-- **Task ID**: build-command-handler
-- **Depends On**: build-query-function
-- **Assigned To**: bridge-query-builder
+### 2. Add bridge query handler
+- **Task ID**: build-bridge-handler
+- **Depends On**: none
+- **Assigned To**: query-tool-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Add `check_message_query_request()` function to bridge
+- Call it in main loop (every 1s)
+- Execute `client.get_messages()` when request found
+- Write result JSON, delete request file
+
+### 3. Create CLI tool
+- **Task ID**: build-cli-tool
+- **Depends On**: build-user-lookup
+- **Assigned To**: query-tool-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Add handler for `/messages` command (similar to existing `/update` handler)
-- Parse optional limit argument from command text
-- Call query function and format response
-- Reply with formatted message list
+- Create `scripts/get-telegram-message-history`
+- Parse args: username, count (default 5), --help
+- Write request JSON, poll for result (timeout 10s)
+- Format and print output
 
-### 3. Validate implementation
+### 4. Validate implementation
 - **Task ID**: validate-implementation
-- **Depends On**: build-command-handler
-- **Assigned To**: bridge-query-validator
+- **Depends On**: build-bridge-handler, build-cli-tool
+- **Assigned To**: query-tool-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify `/messages` command is handled in code
-- Check error handling for edge cases
-- Verify output formatting is readable
+- Verify --help shows usernames from config
+- Check request/response JSON format
+- Verify timeout handling
+- Check error messages for edge cases
 
-### 4. Documentation
+### 5. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-implementation
-- **Assigned To**: bridge-query-builder
+- **Assigned To**: query-tool-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `docs/features/bridge-message-query.md`
 - Add entry to `docs/features/README.md`
 
-### 5. Final Validation
+### 6. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
-- **Assigned To**: bridge-query-validator
+- **Assigned To**: query-tool-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Verify all success criteria met
@@ -177,15 +247,8 @@ No agent integration required — this is a direct Telegram command, not exposed
 
 ## Validation Commands
 
-- `grep -n "def query_recent_messages" bridge/telegram_bridge.py` - Function exists
-- `grep -n "/messages" bridge/telegram_bridge.py` - Command handler exists
+- `test -f tools/telegram_users.py` - User lookup module exists
+- `test -f scripts/get-telegram-message-history` - CLI tool exists
+- `grep -n "check_message_query" bridge/telegram_bridge.py` - Handler exists
+- `scripts/get-telegram-message-history --help` - Help works
 - `test -f docs/features/bridge-message-query.md` - Feature doc exists
-- `grep -q "message-query" docs/features/README.md` - Indexed in README
-
----
-
-## Open Questions
-
-1. **Command name**: `/messages` or `/recent` or `/fetch`? (Suggesting `/messages` as most intuitive)
-2. **Default chat**: Should it default to current chat, or require explicit chat specification for cross-chat queries?
-3. **Output format**: Plain text list, or structured with separators/headers?
