@@ -187,13 +187,21 @@ def restart_bridge() -> bool:
     try:
         # Unload then load to force restart
         subprocess.run(
-            ["launchctl", "unload", f"{Path.home()}/Library/LaunchAgents/com.valor.bridge.plist"],
+            [
+                "launchctl",
+                "unload",
+                f"{Path.home()}/Library/LaunchAgents/com.valor.bridge.plist",
+            ],
             capture_output=True,
             timeout=30,
         )
         time.sleep(2)
         result = subprocess.run(
-            ["launchctl", "load", f"{Path.home()}/Library/LaunchAgents/com.valor.bridge.plist"],
+            [
+                "launchctl",
+                "load",
+                f"{Path.home()}/Library/LaunchAgents/com.valor.bridge.plist",
+            ],
             capture_output=True,
             timeout=30,
         )
@@ -268,11 +276,15 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
 
     # Create recovery lock
     RECOVERY_LOCK.parent.mkdir(parents=True, exist_ok=True)
-    RECOVERY_LOCK.write_text(json.dumps({
-        "level": level,
-        "started": datetime.now().isoformat(),
-        "issues": issues,
-    }))
+    RECOVERY_LOCK.write_text(
+        json.dumps(
+            {
+                "level": level,
+                "started": datetime.now().isoformat(),
+                "issues": issues,
+            }
+        )
+    )
 
     try:
         if level == 1:
@@ -315,10 +327,10 @@ def execute_recovery(level: int, issues: list[str]) -> bool:
         elif level == 5:
             # Alert human
             diagnostic = (
-                f"🚨 Bridge Recovery Failed\n\n"
-                f"Issues:\n" + "\n".join(f"• {i}" for i in issues) + "\n\n"
-                f"Recovery levels 1-4 exhausted.\n"
-                f"Manual intervention required."
+                "🚨 Bridge Recovery Failed\n\n"
+                "Issues:\n" + "\n".join(f"• {i}" for i in issues) + "\n\n"
+                "Recovery levels 1-4 exhausted.\n"
+                "Manual intervention required."
             )
             send_telegram_alert(diagnostic)
             log_crash("Recovery exhausted - alerting human")

@@ -146,7 +146,9 @@ def get_recent_events(window_seconds: float = CRASH_WINDOW_SECONDS) -> list[Cras
     return events
 
 
-def get_recent_crashes(window_seconds: float = CRASH_WINDOW_SECONDS) -> list[CrashEvent]:
+def get_recent_crashes(
+    window_seconds: float = CRASH_WINDOW_SECONDS,
+) -> list[CrashEvent]:
     """Get crash events from the last N seconds."""
     return [e for e in get_recent_events(window_seconds) if e.event_type == "crash"]
 

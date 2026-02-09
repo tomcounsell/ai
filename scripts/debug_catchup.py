@@ -55,7 +55,7 @@ async def main():
     cutoff = datetime.now(UTC) - timedelta(hours=24)
     messages = await client.get_messages(target_group, limit=100)
 
-    logger.info(f"\nMessages in last 24 hours (showing last 100):")
+    logger.info("\nMessages in last 24 hours (showing last 100):")
     logger.info("=" * 80)
 
     me = await client.get_me()

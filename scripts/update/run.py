@@ -371,7 +371,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Valor update system")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--full", action="store_true", help="Full update (all checks)")
-    mode.add_argument("--cron", action="store_true", help="Telegram /update (summary + log file)")
+    mode.add_argument(
+        "--cron", action="store_true", help="Telegram /update (summary + log file)"
+    )
     mode.add_argument("--verify", action="store_true", help="Verify only (no changes)")
 
     parser.add_argument("--json", action="store_true", help="Output JSON")
