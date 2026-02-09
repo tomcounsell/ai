@@ -132,7 +132,7 @@ django==5.2.10 ; python_full_version < '3.12'
     #   django-widget-tweaks
     #   djangorestframework
     #   drf-yasg
-django==6.0.1 ; python_full_version >= '3.12'
+django==5.2.11 ; python_full_version >= '3.12'
     # via
     #   cuttlefish
     #   dj-database-url
