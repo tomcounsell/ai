@@ -465,7 +465,7 @@ pydantic==2.12.5
     #   xai-sdk
 pydantic-ai==1.56.0
     # via cuttlefish
-pydantic-ai-slim==1.51.0
+pydantic-ai-slim==1.56.0
     # via
     #   pydantic-ai
     #   pydantic-evals
