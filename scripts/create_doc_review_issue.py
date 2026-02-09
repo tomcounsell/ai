@@ -13,7 +13,8 @@ Usage:
     python scripts/create_doc_review_issue.py --scan-output scan.json
 
     # With custom title
-    python scripts/create_doc_review_issue.py --scan-output scan.json --title "Review docs after feature X"
+    python scripts/create_doc_review_issue.py --scan-output scan.json \
+        --title "Review docs after feature X"
 
 Exit codes:
     0 - Success (issue created or no actionable items)
