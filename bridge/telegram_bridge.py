@@ -271,10 +271,8 @@ async def _handle_update_command(tg_client, event):
         # Append sessions notice if any were running
         output += sessions_notice
 
-        # Truncate if too long for Telegram
-        if len(output) > 4000:
-            output = output[:4000] + "\n...(truncated)"
-        await tg_client.send_message(event.chat_id, output, reply_to=event.message.id)
+        # Use send_response_with_files to handle file markers and attachments
+        await send_response_with_files(tg_client, event, output)
     except subprocess.TimeoutExpired:
         await tg_client.send_message(
             event.chat_id,

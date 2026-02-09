@@ -10,7 +10,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LOCK_DIR="$PROJECT_DIR/data/update.lock"
-LOG_PREFIX="[remote-update]"
 
 cd "$PROJECT_DIR"
 
@@ -20,7 +19,7 @@ mkdir -p "$PROJECT_DIR/data"
 # ── Lockfile (mkdir is atomic on POSIX) ──────────────────────────────
 cleanup_lock() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    echo "$LOG_PREFIX Another update is already running. Skipping."
+    echo "Another update is already running. Skipping."
     exit 0
 fi
 trap cleanup_lock EXIT
@@ -28,13 +27,11 @@ trap cleanup_lock EXIT
 # ── Check for Python venv ────────────────────────────────────────────
 PYTHON="$PROJECT_DIR/.venv/bin/python"
 if [ ! -x "$PYTHON" ]; then
-    echo "$LOG_PREFIX ERROR: No Python venv at $PYTHON"
-    echo "$LOG_PREFIX Run: uv venv && uv sync --all-extras"
+    echo "ERROR: No Python venv at $PYTHON"
+    echo "Run: uv venv && uv sync --all-extras"
     exit 1
 fi
 
 # ── Run update in cron mode ──────────────────────────────────────────
-echo "$LOG_PREFIX Starting cron update..."
+# Output goes directly to Telegram - keep it clean for PM-style summary
 "$PYTHON" "$PROJECT_DIR/scripts/update/run.py" --cron
-
-echo "$LOG_PREFIX Done."
