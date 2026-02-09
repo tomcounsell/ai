@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""
+CLI tool to query Telegram message history via the running bridge.
+
+Usage:
+    get-telegram-message-history USERNAME [COUNT]
+    get-telegram-message-history --help
+
+Arguments:
+    USERNAME    Username to query (case-insensitive)
+    COUNT       Number of messages to retrieve (default: 5)
+
+Examples:
+    get-telegram-message-history tom
+    get-telegram-message-history kevin 10
+    get-telegram-message-history --help
+"""
+
+import argparse
+import json
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from tools.telegram_users import get_whitelisted_users, resolve_username
+
+
+def format_message(msg: dict) -> str:
+    """Format a message for display."""
+    date_str = msg.get("date", "Unknown date")
+    if date_str and date_str != "Unknown date":
+        # Parse ISO format and format nicely
+        try:
+            dt = datetime.fromisoformat(date_str)
+            date_str = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+
+    sender = msg.get("sender", "Unknown")
+    text = msg.get("text", "")
+
+    return f"[{date_str}] {sender}: {text}"
+
+
+def show_help_with_usernames():
+    """Show help message with available usernames."""
+    print(__doc__)
+    print("\nAvailable usernames:")
+
+    try:
+        users = get_whitelisted_users()
+        if users:
+            for username in sorted(users.keys()):
+                print(f"  - {username}")
+        else:
+            print("  (No users found in whitelist)")
+    except FileNotFoundError:
+        print("  (Error: Whitelist config file not found)")
+    except Exception as e:
+        print(f"  (Error loading whitelist: {e})")
+
+    sys.exit(0)
+
+
+def main():
+    """Main CLI entry point."""
+    # Parse arguments
+    parser = argparse.ArgumentParser(
+        description="Query Telegram message history via the running bridge",
+        add_help=False,  # We'll handle --help manually
+    )
+    parser.add_argument(
+        "username",
+        nargs="?",
+        help="Username to query (case-insensitive)",
+    )
+    parser.add_argument(
+        "count",
+        type=int,
+        nargs="?",
+        default=5,
+        help="Number of messages to retrieve (default: 5)",
+    )
+    parser.add_argument(
+        "--help",
+        action="store_true",
+        help="Show this help message with available usernames",
+    )
+
+    args = parser.parse_args()
+
+    # Handle --help
+    if args.help or not args.username:
+        show_help_with_usernames()
+
+    username = args.username
+    count = args.count
+
+    # Validate count
+    if count < 1:
+        print("Error: Count must be at least 1", file=sys.stderr)
+        sys.exit(1)
+
+    # Resolve username to user ID
+    try:
+        user_id = resolve_username(username)
+        if user_id is None:
+            print(f"Error: Unknown username '{username}'", file=sys.stderr)
+            print("\nAvailable usernames:", file=sys.stderr)
+            users = get_whitelisted_users()
+            for uname in sorted(users.keys()):
+                print(f"  - {uname}", file=sys.stderr)
+            sys.exit(1)
+    except FileNotFoundError:
+        print("Error: Whitelist config file not found", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Error loading whitelist: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Setup file paths
+    project_dir = Path(__file__).parent.parent
+    request_file = project_dir / "data" / "message_query_request.json"
+    result_file = project_dir / "data" / "message_query_result.json"
+
+    # Clean up any existing result file
+    if result_file.exists():
+        result_file.unlink()
+
+    # Write request
+    request = {
+        "user_id": user_id,
+        "username": username,
+        "limit": count,
+        "requested_at": datetime.now().isoformat(),
+    }
+
+    try:
+        with open(request_file, "w") as f:
+            json.dump(request, f, indent=2)
+    except Exception as e:
+        print(f"Error writing request file: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    # Poll for result (check every 0.5s, 10s timeout)
+    timeout = 10.0
+    poll_interval = 0.5
+    elapsed = 0.0
+
+    print(f"Querying {count} messages for {username}...", file=sys.stderr)
+
+    while elapsed < timeout:
+        if result_file.exists():
+            # Result is ready
+            try:
+                with open(result_file) as f:
+                    result = json.load(f)
+
+                # Clean up request file
+                if request_file.exists():
+                    request_file.unlink()
+
+                # Check if successful
+                if result.get("success"):
+                    messages = result.get("messages", [])
+                    if messages:
+                        print(f"\nFound {len(messages)} messages:\n")
+                        for msg in messages:
+                            print(format_message(msg))
+                    else:
+                        print("\nNo messages found.")
+                else:
+                    error = result.get("error", "Unknown error")
+                    print(f"Error: {error}", file=sys.stderr)
+                    sys.exit(1)
+
+                # Clean up result file
+                result_file.unlink()
+                sys.exit(0)
+
+            except Exception as e:
+                print(f"Error reading result file: {e}", file=sys.stderr)
+                # Clean up files
+                if request_file.exists():
+                    request_file.unlink()
+                if result_file.exists():
+                    result_file.unlink()
+                sys.exit(1)
+
+        time.sleep(poll_interval)
+        elapsed += poll_interval
+
+    # Timeout reached
+    print("\nError: Bridge not responding - is it running?", file=sys.stderr)
+    print("Check bridge status: ./scripts/valor-service.sh status", file=sys.stderr)
+
+    # Clean up request file
+    if request_file.exists():
+        request_file.unlink()
+
+    sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

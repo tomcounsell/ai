@@ -196,9 +196,7 @@ async def scan_for_missed_messages(
     if matched_groups:
         logger.info(f"[catchup] Groups scanned: {', '.join(matched_groups)}")
     else:
-        logger.warning(
-            f"[catchup] No groups matched! Looking for: {monitored_groups}"
-        )
+        logger.warning(f"[catchup] No groups matched! Looking for: {monitored_groups}")
     return queued
 
 
