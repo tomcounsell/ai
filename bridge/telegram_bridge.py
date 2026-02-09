@@ -268,11 +268,29 @@ async def _handle_update_command(tg_client, event):
         if result.returncode != 0 and result.stderr.strip():
             output += f"\n\nSTDERR:\n{result.stderr.strip()}"
 
-        # Append sessions notice if any were running
-        output += sessions_notice
+        # Extract file marker and clean text
+        file_match = FILE_MARKER_PATTERN.search(output)
+        log_file = Path(file_match.group(1).strip()) if file_match else None
+        status_text = FILE_MARKER_PATTERN.sub("", output).strip()
 
-        # Use send_response_with_files to handle file markers and attachments
-        await send_response_with_files(tg_client, event, output)
+        # Add sessions notice to status
+        if sessions_notice:
+            status_text += sessions_notice
+
+        # Send as single message: file with status as caption
+        if log_file and log_file.exists():
+            await tg_client.send_file(
+                event.chat_id,
+                log_file,
+                caption=status_text,
+                reply_to=event.message.id,
+                force_document=True,
+            )
+        else:
+            # No log file, just send text
+            await tg_client.send_message(
+                event.chat_id, status_text, reply_to=event.message.id
+            )
     except subprocess.TimeoutExpired:
         await tg_client.send_message(
             event.chat_id,
