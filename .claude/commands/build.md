@@ -60,8 +60,10 @@ Before executing, resolve the plan path:
 6. **Create all tasks** using `TaskCreate` before starting execution
 7. **Deploy agents** in order, respecting dependencies and parallel flags
 8. **Monitor progress** and handle any issues
-9. **Push and open a PR** - `git push -u origin build/{slug}` then `gh pr create`
-10. **Report completion** with PR URL when all tasks are done
+9. **Run documentation gate** - Validate docs changed, scan related docs, create review issues
+10. **Push and open a PR** - `git push -u origin build/{slug}` then `gh pr create`
+11. **Migrate completed plan** - Delete plan file and close tracking issue
+12. **Report completion** with PR URL when all tasks are done
 
 ## Critical Rules
 
@@ -128,7 +130,64 @@ When complete, update your task status.`,
 
 ### Step 5: Final Validation
 
-When the final `validate-all` task completes, generate the completion report.
+When the final `validate-all` task completes, proceed to documentation gate checks.
+
+### Step 6: Documentation Gate
+
+After all validation tasks pass, run the documentation lifecycle checks:
+
+**6.1 Validate Documentation Changes**
+
+Run the doc validation script to verify documentation was created/updated:
+
+```bash
+python scripts/validate_docs_changed.py {PLAN_PATH}
+```
+
+- **Exit 0**: Documentation requirements met, proceed to next step
+- **Exit 1**: Documentation missing or insufficient, **STOP and report failure**
+- This check BLOCKS PR creation if it fails
+- The script checks that documentation matching the plan was created in `docs/features/` or `docs/`
+
+**6.2 Scan for Related Documentation**
+
+Collect all changed files from git and scan for related docs:
+
+```bash
+CHANGED_FILES=$(git diff --name-only main...HEAD | tr '\n' ' ')
+python scripts/scan_related_docs.py --json $CHANGED_FILES > /tmp/related_docs.json
+```
+
+This identifies existing documentation that may need updates based on code changes.
+
+**6.3 Create Review Issues for Discrepancies**
+
+Pipe the scan results to create GitHub issues for HIGH/MED-HIGH confidence matches:
+
+```bash
+cat /tmp/related_docs.json | python scripts/create_doc_review_issue.py
+```
+
+This creates tracking issues for documentation that should be reviewed for updates.
+
+### Step 7: Create Pull Request
+
+After documentation gate passes, push and create the PR:
+
+```bash
+git push -u origin build/{slug}
+gh pr create --title "[plan title]" --body "..."
+```
+
+### Step 8: Plan Migration
+
+After PR is successfully created, clean up the completed plan:
+
+```bash
+python scripts/migrate_completed_plan.py {PLAN_PATH}
+```
+
+This deletes the plan document and closes the tracking issue, completing the lifecycle.
 
 ## Agent Deployment Context
 
