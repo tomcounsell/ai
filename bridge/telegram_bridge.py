@@ -2816,6 +2816,13 @@ async def main():
         # === BRIDGE COMMANDS (bypass agent entirely) ===
         _raw_text = (event.message.text or "").strip().lower()
         if _raw_text == "/update":
+            # Only respond to /update if DMs are enabled or sender is whitelisted
+            if event.is_private:
+                sender = await event.get_sender()
+                sender_id = getattr(sender, "id", None)
+                if not RESPOND_TO_DMS and sender_id not in DM_WHITELIST:
+                    logger.debug(f"Ignoring /update from DM - DMs disabled on this instance")
+                    return
             await _handle_update_command(client, event)
             return
 
