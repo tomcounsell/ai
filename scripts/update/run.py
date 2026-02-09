@@ -58,16 +58,16 @@ class UpdateConfig:
 
     @classmethod
     def cron(cls) -> UpdateConfig:
-        """Config for cron update (minimal, unattended)."""
+        """Config for cron update (user-triggered via Telegram /update)."""
         return cls(
             do_git_pull=True,
             do_dep_sync=True,
-            do_service_restart=False,  # Use restart flag instead
-            do_verify=False,
-            do_calendar=False,
-            do_ollama=False,
-            do_mcp=False,
-            verbose=False,
+            do_service_restart=False,  # Use restart flag for graceful restart
+            do_verify=True,
+            do_calendar=True,
+            do_ollama=True,
+            do_mcp=True,
+            verbose=True,
         )
 
     @classmethod
