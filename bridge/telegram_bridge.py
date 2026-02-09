@@ -221,12 +221,10 @@ def _cleanup_session_locks() -> int:
 async def _handle_update_command(tg_client, event):
     """Run remote update script and reply with results.
 
-    The script pulls code and syncs deps but does NOT restart the bridge.
-    If code changed, it writes a restart flag that the job queue picks up
-    between jobs for a graceful restart when idle.
-
-    If sessions are currently running, notifies the user that the restart
-    will be queued until all work completes.
+    Sends a single message with log file attached. Caption is simple:
+    - "✓ {machine}: updated, restart queued"
+    - "⚠ {machine}: update failed"
+    All details go in the log file.
     """
     logger.info(f"[bridge] /update command received from chat {event.chat_id}")
     try:
@@ -234,24 +232,23 @@ async def _handle_update_command(tg_client, event):
     except Exception:
         pass  # Reaction is nice-to-have
 
-    # Check for running sessions before update
+    # Get machine name for labeling
+    try:
+        machine_name = subprocess.run(
+            ["scutil", "--get", "ComputerName"],
+            capture_output=True, text=True, timeout=5
+        ).stdout.strip() or "unknown"
+    except Exception:
+        machine_name = "unknown"
+
+    # Check for running sessions
     running_count, running_descriptions = _get_running_jobs_info()
-    sessions_notice = ""
-    if running_count > 0:
-        sessions_notice = (
-            f"\n\n⚠️ {running_count} session(s) currently running:\n"
-            + "\n".join(running_descriptions)
-            + "\n\nRestart will be queued until all sessions complete."
-        )
-        logger.info(
-            f"[bridge] /update: {running_count} session(s) running, restart will be queued"
-        )
 
     script_path = _BRIDGE_PROJECT_DIR / "scripts" / "remote-update.sh"
     if not script_path.exists():
         await tg_client.send_message(
             event.chat_id,
-            "scripts/remote-update.sh not found.",
+            f"⚠ {machine_name}: scripts/remote-update.sh not found",
             reply_to=event.message.id,
         )
         return
@@ -264,37 +261,45 @@ async def _handle_update_command(tg_client, event):
             text=True,
             timeout=120,
         )
-        output = result.stdout.strip() or result.stderr.strip() or "(no output)"
-        if result.returncode != 0 and result.stderr.strip():
-            output += f"\n\nSTDERR:\n{result.stderr.strip()}"
+        success = result.returncode == 0
 
-        # Extract file marker and clean text
-        file_match = FILE_MARKER_PATTERN.search(output)
+        # Extract log file path from output
+        file_match = FILE_MARKER_PATTERN.search(result.stdout or "")
         log_file = Path(file_match.group(1).strip()) if file_match else None
-        status_text = FILE_MARKER_PATTERN.sub("", output).strip()
 
-        # Add sessions notice to status
-        if sessions_notice:
-            status_text += sessions_notice
+        # Append session info to log file if sessions are running
+        if log_file and log_file.exists() and running_count > 0:
+            with open(log_file, "a") as f:
+                f.write(f"\n[bridge] {running_count} session(s) running:\n")
+                for desc in running_descriptions:
+                    f.write(f"  {desc}\n")
+                f.write("[bridge] Restart queued until sessions complete.\n")
 
-        # Send as single message: file with status as caption
+        # Simple caption: status + machine name
+        if success:
+            caption = f"✓ {machine_name}: updated, restart queued"
+        else:
+            caption = f"⚠ {machine_name}: update failed"
+
+        # Send log file with simple caption
         if log_file and log_file.exists():
             await tg_client.send_file(
                 event.chat_id,
                 log_file,
-                caption=status_text,
+                caption=caption,
                 reply_to=event.message.id,
                 force_document=True,
             )
         else:
-            # No log file, just send text
+            # No log file, send text with more detail
+            output = result.stdout.strip() or result.stderr.strip() or "(no output)"
             await tg_client.send_message(
-                event.chat_id, status_text, reply_to=event.message.id
+                event.chat_id, f"{caption}\n\n{output}", reply_to=event.message.id
             )
     except subprocess.TimeoutExpired:
         await tg_client.send_message(
             event.chat_id,
-            "Update timed out after 120s",
+            f"⚠ {machine_name}: update timed out",
             reply_to=event.message.id,
         )
     except Exception as e:
