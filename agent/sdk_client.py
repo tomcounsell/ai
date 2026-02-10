@@ -186,6 +186,7 @@ class ValorAgent:
         system_prompt: str | None = None,
         permission_mode: str = "bypassPermissions",
         workflow_id: str | None = None,
+        task_list_id: str | None = None,
     ):
         """
         Initialize ValorAgent.
@@ -195,6 +196,8 @@ class ValorAgent:
             system_prompt: Custom system prompt. Defaults to SOUL.md contents.
             permission_mode: Permission mode for tool use. Default: "bypassPermissions".
             workflow_id: Optional workflow ID for multi-phase workflow tracking.
+            task_list_id: Optional task list ID to scope sub-agent Task storage
+                via CLAUDE_CODE_TASK_LIST_ID environment variable.
         """
         self.working_dir = (
             Path(working_dir) if working_dir else Path(__file__).parent.parent
@@ -202,6 +205,7 @@ class ValorAgent:
         self.system_prompt = system_prompt or load_system_prompt()
         self.permission_mode = permission_mode
         self.workflow_id = workflow_id
+        self.task_list_id = task_list_id
         self.workflow_state: WorkflowState | None = None
 
         # Load workflow state if workflow_id provided
@@ -323,6 +327,10 @@ class ValorAgent:
             # Strip API key so CLI falls back to subscription/OAuth
             env["ANTHROPIC_API_KEY"] = ""
             logger.info("Auth: using Max subscription (OAuth fallback)")
+
+        # Task list isolation: scope sub-agent tasks by session/work-item
+        if self.task_list_id:
+            env["CLAUDE_CODE_TASK_LIST_ID"] = self.task_list_id
 
         # Build system prompt with workflow context if workflow_id is present
         system_prompt = self.system_prompt
@@ -586,6 +594,7 @@ async def get_agent_response_sdk(
     chat_id: str | None = None,
     sender_id: int | None = None,
     workflow_id: str | None = None,
+    task_list_id: str | None = None,
 ) -> str:
     """
     Get agent response using Claude Agent SDK.
@@ -602,6 +611,7 @@ async def get_agent_response_sdk(
         chat_id: Chat ID (unused, for compatibility)
         sender_id: Telegram user ID (for permission checking)
         workflow_id: Optional 8-char workflow identifier for tracked work
+        task_list_id: Optional task list ID to scope sub-agent Task storage
 
     Returns:
         The assistant's response text
@@ -638,7 +648,9 @@ async def get_agent_response_sdk(
     enriched_message += f"\nMESSAGE: {message}"
 
     try:
-        agent = ValorAgent(working_dir=working_dir, workflow_id=workflow_id)
+        agent = ValorAgent(
+            working_dir=working_dir, workflow_id=workflow_id, task_list_id=task_list_id
+        )
         response = await agent.query(enriched_message, session_id=session_id)
 
         elapsed = time.time() - start_time

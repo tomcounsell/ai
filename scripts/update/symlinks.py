@@ -42,7 +42,9 @@ def sync_claude_dirs(project_dir: Path) -> SymlinkSyncResult:
     _sync_skills(project_dir / ".claude" / "skills", user_claude / "skills", result)
 
     # Sync commands: each is a .md file
-    _sync_commands(project_dir / ".claude" / "commands", user_claude / "commands", result)
+    _sync_commands(
+        project_dir / ".claude" / "commands", user_claude / "commands", result
+    )
 
     if result.errors > 0:
         result.success = False

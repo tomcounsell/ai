@@ -434,3 +434,6 @@ telegram_sessions/
 agents/*/state.json
 agents/*/plan.md
 agents/*/logs/
+
+# Git worktrees for session isolation
+.worktrees/

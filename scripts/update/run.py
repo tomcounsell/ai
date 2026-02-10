@@ -21,7 +21,14 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.update import cal_integration, deps, git, service, symlinks, verify  # noqa: E402
+from scripts.update import (
+    cal_integration,
+    deps,
+    git,
+    service,
+    symlinks,
+    verify,
+)  # noqa: E402
 
 
 @dataclass

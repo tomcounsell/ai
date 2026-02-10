@@ -51,6 +51,8 @@ class RedisJob(Model):
     chat_title = Field(null=True)
     revival_context = Field(null=True, max_length=MSG_MAX_CHARS)
     workflow_id = Field(null=True)  # 8-char unique workflow identifier for tracked work
+    work_item_slug = Field(null=True)  # Named work item slug (tier 2)
+    task_list_id = Field(null=True)  # Computed CLAUDE_CODE_TASK_LIST_ID value
 
 
 class Job:
@@ -115,6 +117,14 @@ class Job:
     def workflow_id(self) -> str | None:
         return self._rj.workflow_id
 
+    @property
+    def work_item_slug(self) -> str | None:
+        return self._rj.work_item_slug
+
+    @property
+    def task_list_id(self) -> str | None:
+        return self._rj.task_list_id
+
 
 async def _push_job(
     project_key: str,
@@ -129,6 +139,8 @@ async def _push_job(
     revival_context: str | None = None,
     sender_id: int | None = None,
     workflow_id: str | None = None,
+    work_item_slug: str | None = None,
+    task_list_id: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project."""
     await RedisJob.async_create(
@@ -146,6 +158,8 @@ async def _push_job(
         chat_title=chat_title,
         revival_context=revival_context,
         workflow_id=workflow_id,
+        work_item_slug=work_item_slug,
+        task_list_id=task_list_id,
     )
     return await RedisJob.query.async_count(project_key=project_key, status="pending")
 
@@ -364,6 +378,8 @@ async def enqueue_job(
     revival_context: str | None = None,
     sender_id: int | None = None,
     workflow_id: str | None = None,
+    work_item_slug: str | None = None,
+    task_list_id: str | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -386,6 +402,8 @@ async def enqueue_job(
         workflow_id=workflow_id,
         priority=priority,
         revival_context=revival_context,
+        work_item_slug=work_item_slug,
+        task_list_id=task_list_id,
     )
     _ensure_worker(project_key)
     logger.info(
@@ -496,6 +514,19 @@ async def _execute_job(job: Job) -> None:
     working_dir = Path(job.working_dir)
     branch_name = _session_branch_name(job.session_id)
 
+    # Compute task list ID for sub-agent task isolation
+    # Tier 2: planned work uses the slug directly
+    # Tier 1: ad-hoc sessions use thread-{chat_id}-{root_msg_id}
+    if job.work_item_slug:
+        task_list_id = job.work_item_slug
+    elif job.task_list_id:
+        task_list_id = job.task_list_id
+    else:
+        # Derive from session_id which encodes chat_id and root message
+        parts = job.session_id.split("_")
+        root_id = parts[-1] if "_" in job.session_id else job.message_id
+        task_list_id = f"thread-{job.chat_id}-{root_id}"
+
     logger.info(
         f"[{job.project_key}] Executing job {job.job_id} "
         f"(session={job.session_id}, branch={branch_name}, cwd={working_dir})"
@@ -516,6 +547,7 @@ async def _execute_job(job: Job) -> None:
             last_activity=time.time(),
             tool_call_count=0,
             branch_name=branch_name,
+            work_item_slug=job.work_item_slug,
             message_text=job.message_text[:20_000] if job.message_text else None,
         )
     except Exception as e:
@@ -555,6 +587,7 @@ async def _execute_job(job: Job) -> None:
             job.chat_id,
             job.sender_id,
             job.workflow_id,
+            task_list_id,
         )
 
     task = BackgroundTask(messenger=messenger, acknowledgment_timeout=180.0)
