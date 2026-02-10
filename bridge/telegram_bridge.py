@@ -2898,7 +2898,13 @@ async def main():
 
     # Create client
     session_path = Path(__file__).parent.parent / "data" / SESSION_NAME
-    client = TelegramClient(str(session_path), API_ID, API_HASH)
+    client = TelegramClient(
+        str(session_path),
+        API_ID,
+        API_HASH,
+        sequential_updates=False,
+        flood_sleep_threshold=10,
+    )
 
     @client.on(events.NewMessage)
     async def handler(event):
