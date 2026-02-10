@@ -1200,6 +1200,18 @@ async def main():
     asyncio.create_task(message_query_loop())
     logger.info("Message query polling started")
 
+    # Heartbeat: log periodically so the external watchdog sees fresh logs
+    # (watchdog kills the bridge if logs are stale for 5 minutes)
+    _bridge_start_time = time.time()
+
+    async def heartbeat_loop():
+        while True:
+            await asyncio.sleep(120)
+            uptime_min = int((time.time() - _bridge_start_time) / 60)
+            logger.info(f"[heartbeat] Bridge alive (uptime={uptime_min}m)")
+
+    asyncio.create_task(heartbeat_loop())
+
     # Keep running
     await client.run_until_disconnected()
 
