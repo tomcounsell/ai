@@ -21,4 +21,5 @@ class AgentSession(Model):
     last_activity = SortedField(type=float)
     tool_call_count = IntField(default=0)
     branch_name = Field(null=True)
+    work_item_slug = Field(null=True)  # Slug for tier 2 named work items
     message_text = Field(max_length=MSG_MAX_CHARS, null=True)

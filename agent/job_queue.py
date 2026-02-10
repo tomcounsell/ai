@@ -51,6 +51,8 @@ class RedisJob(Model):
     chat_title = Field(null=True)
     revival_context = Field(null=True, max_length=MSG_MAX_CHARS)
     workflow_id = Field(null=True)  # 8-char unique workflow identifier for tracked work
+    work_item_slug = Field(null=True)  # Named work item slug (tier 2)
+    task_list_id = Field(null=True)  # Computed CLAUDE_CODE_TASK_LIST_ID value
 
 
 class Job:
@@ -115,6 +117,14 @@ class Job:
     def workflow_id(self) -> str | None:
         return self._rj.workflow_id
 
+    @property
+    def work_item_slug(self) -> str | None:
+        return self._rj.work_item_slug
+
+    @property
+    def task_list_id(self) -> str | None:
+        return self._rj.task_list_id
+
 
 async def _push_job(
     project_key: str,
@@ -129,6 +139,8 @@ async def _push_job(
     revival_context: str | None = None,
     sender_id: int | None = None,
     workflow_id: str | None = None,
+    work_item_slug: str | None = None,
+    task_list_id: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project."""
     await RedisJob.async_create(
@@ -146,6 +158,8 @@ async def _push_job(
         chat_title=chat_title,
         revival_context=revival_context,
         workflow_id=workflow_id,
+        work_item_slug=work_item_slug,
+        task_list_id=task_list_id,
     )
     return await RedisJob.query.async_count(project_key=project_key, status="pending")
 
@@ -364,6 +378,8 @@ async def enqueue_job(
     revival_context: str | None = None,
     sender_id: int | None = None,
     workflow_id: str | None = None,
+    work_item_slug: str | None = None,
+    task_list_id: str | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -386,6 +402,8 @@ async def enqueue_job(
         workflow_id=workflow_id,
         priority=priority,
         revival_context=revival_context,
+        work_item_slug=work_item_slug,
+        task_list_id=task_list_id,
     )
     _ensure_worker(project_key)
     logger.info(
