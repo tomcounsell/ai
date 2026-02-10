@@ -83,26 +83,15 @@ ensure_setup() {
     return 0
 }
 
-start_bridge() {
-    # Atomic process lock (prevents concurrent starts)
-    local lock_dir="$PROJECT_DIR/data/bridge-start.lock"
-    if ! mkdir "$lock_dir" 2>/dev/null; then
-        echo "ERROR: Another bridge start/stop operation is in progress."
-        echo "If this persists, remove: $lock_dir"
-        return 1
-    fi
+is_launchd_loaded() {
+    launchctl list "$PLIST_NAME" &>/dev/null
+}
 
+start_bridge() {
     # Warn about pending critical dependency upgrades
     if [ -f "$PROJECT_DIR/data/upgrade-pending" ]; then
         echo "WARNING: Critical dependency upgrade pending. Run /update to apply."
         cat "$PROJECT_DIR/data/upgrade-pending"
-    fi
-
-    # Always stop any existing processes first to ensure clean state
-    if is_running; then
-        echo "Stopping existing bridge process..."
-        stop_bridge
-        sleep 2
     fi
 
     echo "Starting Valor bridge..."
@@ -111,22 +100,28 @@ start_bridge() {
     cd "$PROJECT_DIR"
     if ! ensure_setup; then
         echo "Setup checks failed. Fix the issues above and try again."
-        rmdir "$lock_dir" 2>/dev/null || true
         return 1
     fi
 
-    # Start with nohup so it survives terminal close (explicit venv python)
-    nohup "$VENV/bin/python" bridge/telegram_bridge.py \
-        >> "$LOG_DIR/bridge.log" \
-        2>> "$LOG_DIR/bridge.error.log" &
-
-    local pid=$!
-    echo $pid > "$PID_FILE"
+    # Prefer launchd if plist exists (it handles KeepAlive, logging, etc.)
+    if [ -f "$PLIST_PATH" ]; then
+        if ! is_launchd_loaded; then
+            launchctl load "$PLIST_PATH"
+        else
+            launchctl kickstart "gui/$(id -u)/$PLIST_NAME"
+        fi
+    else
+        # Fallback: manual start (no launchd service installed)
+        nohup "$VENV/bin/python" bridge/telegram_bridge.py \
+            >> "$LOG_DIR/bridge.log" \
+            2>> "$LOG_DIR/bridge.error.log" &
+        echo $! > "$PID_FILE"
+    fi
 
     # Wait a moment and verify
     sleep 2
-    rmdir "$lock_dir" 2>/dev/null || true
     if is_running; then
+        local pid=$(get_pid)
         echo "Bridge started successfully (PID: $pid)"
         return 0
     else
@@ -145,6 +140,20 @@ stop_bridge() {
     fi
 
     echo "Stopping bridge (PID: $pid)..."
+
+    # If launchd manages the bridge, unload to prevent auto-respawn
+    if is_launchd_loaded; then
+        launchctl unload "$PLIST_PATH" 2>/dev/null || true
+        # launchctl unload sends SIGTERM and waits for exit
+        sleep 2
+        if ! is_running; then
+            echo "Bridge stopped (via launchd)"
+            rm -f "$PID_FILE"
+            return 0
+        fi
+    fi
+
+    # Fallback: manual kill
     kill "$pid" 2>/dev/null || true
 
     # Wait for graceful shutdown (15s to let Telethon close SQLite session)
@@ -166,6 +175,22 @@ stop_bridge() {
 
 restart_bridge() {
     echo "Restarting Valor bridge..."
+
+    # If launchd manages the bridge, use kickstart -k for atomic kill+restart
+    if is_launchd_loaded; then
+        launchctl kickstart -k "gui/$(id -u)/$PLIST_NAME"
+        sleep 2
+        if is_running; then
+            local pid=$(get_pid)
+            echo "Bridge restarted (PID: $pid)"
+            return 0
+        else
+            echo "Restart failed. Check logs: $LOG_DIR/bridge.error.log"
+            return 1
+        fi
+    fi
+
+    # Fallback: manual stop/start
     stop_bridge
     sleep 1
     start_bridge

@@ -183,25 +183,11 @@ def clear_lock_files() -> int:
 
 
 def restart_bridge() -> bool:
-    """Restart the bridge via launchctl. Returns success."""
+    """Restart the bridge via launchctl kickstart. Returns success."""
     try:
-        # Unload then load to force restart
-        subprocess.run(
-            [
-                "launchctl",
-                "unload",
-                f"{Path.home()}/Library/LaunchAgents/com.valor.bridge.plist",
-            ],
-            capture_output=True,
-            timeout=30,
-        )
-        time.sleep(2)
+        uid = os.getuid()
         result = subprocess.run(
-            [
-                "launchctl",
-                "load",
-                f"{Path.home()}/Library/LaunchAgents/com.valor.bridge.plist",
-            ],
+            ["launchctl", "kickstart", "-k", f"gui/{uid}/com.valor.bridge"],
             capture_output=True,
             timeout=30,
         )
