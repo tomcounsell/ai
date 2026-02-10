@@ -140,7 +140,7 @@ def _cleanup_session_locks() -> int:
         try:
             # Use lsof to find processes holding this file
             result = subprocess.run(
-                ["lsof", "-t", str(session_file)],
+                ["/usr/sbin/lsof", "-t", str(session_file)],
                 capture_output=True,
                 text=True,
                 timeout=10,
@@ -236,10 +236,15 @@ async def _handle_update_command(tg_client, event):
 
     # Get machine name for labeling
     try:
-        machine_name = subprocess.run(
-            ["scutil", "--get", "ComputerName"],
-            capture_output=True, text=True, timeout=5
-        ).stdout.strip() or "unknown"
+        machine_name = (
+            subprocess.run(
+                ["scutil", "--get", "ComputerName"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+            or "unknown"
+        )
     except Exception:
         machine_name = "unknown"
 
@@ -2915,7 +2920,9 @@ async def main():
                 sender = await event.get_sender()
                 sender_id = getattr(sender, "id", None)
                 if not RESPOND_TO_DMS and sender_id not in DM_WHITELIST:
-                    logger.debug(f"Ignoring /update from DM - DMs disabled on this instance")
+                    logger.debug(
+                        "Ignoring /update from DM - DMs disabled on this instance"
+                    )
                     return
             await _handle_update_command(client, event)
             return
