@@ -34,7 +34,7 @@ user_site = Path.home() / "Library/Python/3.12/lib/python/site-packages"
 if user_site.exists() and str(user_site) not in sys.path:
     sys.path.append(str(user_site))
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
 
 # Load environment variables FIRST before any env checks
 env_path = Path(__file__).parent.parent / ".env"
@@ -49,9 +49,9 @@ if USE_CLAUDE_SDK:
     from agent import get_agent_response_sdk  # noqa: F401
 
 # Local tool imports for message and link storage
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events  # noqa: E402
 
-from bridge.context import (
+from bridge.context import (  # noqa: E402
     build_activity_context,  # noqa: F401
     build_context_prefix,  # noqa: F401
     build_conversation_history,  # noqa: F401
@@ -61,7 +61,7 @@ from bridge.context import (
     get_link_summaries,
     is_status_question,  # noqa: F401
 )
-from bridge.media import (
+from bridge.media import (  # noqa: E402
     MEDIA_DIR,  # noqa: F401
     VISION_EXTENSIONS,  # noqa: F401
     VOICE_EXTENSIONS,  # noqa: F401
@@ -73,7 +73,7 @@ from bridge.media import (
     transcribe_voice,  # noqa: F401
     validate_media_file,  # noqa: F401
 )
-from bridge.response import (
+from bridge.response import (  # noqa: E402
     FILE_MARKER_PATTERN,  # noqa: F401
     REACTION_ERROR,
     REACTION_RECEIVED,
@@ -86,7 +86,7 @@ from bridge.response import (
     send_response_with_files,
     set_reaction,
 )
-from bridge.routing import (
+from bridge.routing import (  # noqa: E402
     build_group_to_project_map,
     classify_needs_response,  # noqa: F401
     classify_needs_response_async,  # noqa: F401
@@ -100,12 +100,12 @@ from bridge.routing import (
     should_respond_async,
     should_respond_sync,  # noqa: F401
 )
-from tools.link_analysis import (
+from tools.link_analysis import (  # noqa: E402
     extract_urls,
     extract_youtube_urls,
     process_youtube_urls_in_text,
 )
-from tools.telegram_history import (
+from tools.telegram_history import (  # noqa: E402
     register_chat,
     store_link,
     store_message,
@@ -611,7 +611,8 @@ async def main():
         project_name = project.get("name", "DM") if project else "DM"
         message_id = message.id
         logger.info(
-            f"[{project_name}] Message {message_id} from {sender_name} in {chat_title or 'DM'}: {text[:50]}..."
+            f"[{project_name}] Message {message_id} from "
+            f"{sender_name} in {chat_title or 'DM'}: {text[:50]}..."
         )
         logger.debug(f"[{project_name}] Full message text: {text}")
 
@@ -667,14 +668,16 @@ async def main():
                     if media_description:
                         clean_text = f"{media_description}\n\n{clean_text}"
                     logger.info(
-                        f"Successfully transcribed {successful}/{len(youtube_urls)} YouTube video(s)"
+                        f"Successfully transcribed {successful}/"
+                        f"{len(youtube_urls)} YouTube video(s)"
                     )
                 else:
                     # Log errors but continue with original text
                     for r in youtube_results:
                         if r.get("error"):
                             logger.warning(
-                                f"YouTube processing failed for {r.get('video_id')}: {r.get('error')}"
+                                f"YouTube processing failed for "
+                                f"{r.get('video_id')}: {r.get('error')}"
                             )
             except Exception as e:
                 logger.error(f"Error processing YouTube URLs: {e}")
@@ -761,7 +764,8 @@ async def main():
             )
             from agent.steering import push_steering_message
 
-            # Check if this is a reply to a revival notification (stateless: read the replied-to message)
+            # Check if this is a reply to a revival notification
+            # (stateless: read the replied-to message)
             if message.reply_to_msg_id:
                 try:
                     replied_msg = await client.get_messages(
@@ -790,7 +794,8 @@ async def main():
                                 "working_dir": working_dir_str,
                             }
                             logger.info(
-                                f"[{project_name}] Reply to revival notification, queuing revival with context"
+                                f"[{project_name}] Reply to revival "
+                                "notification, queuing revival with context"
                             )
                             await queue_revival_job(
                                 revival_info=revival_info,
@@ -942,7 +947,8 @@ async def main():
                     )
                 else:
                     logger.info(
-                        f"[{project_name}] Processed message from {sender_name} (msg {message_id}) - no response needed"
+                        f"[{project_name}] Processed message from "
+                        f"{sender_name} (msg {message_id}) - no response needed"
                     )
 
                 # Store in history

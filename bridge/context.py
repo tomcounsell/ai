@@ -464,7 +464,8 @@ async def get_link_summaries(
     urls = urls[:MAX_LINKS_PER_MESSAGE]
     if len(urls_result.get("urls", [])) > MAX_LINKS_PER_MESSAGE:
         logger.info(
-            f"Rate limiting: only processing {MAX_LINKS_PER_MESSAGE} of {len(urls_result.get('urls', []))} links"
+            f"Rate limiting: only processing {MAX_LINKS_PER_MESSAGE} "
+            f"of {len(urls_result.get('urls', []))} links"
         )
 
     summaries = []

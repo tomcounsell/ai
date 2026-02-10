@@ -622,7 +622,8 @@ def _match_plan_by_name(message_text: str, working_dir: str) -> str | None:
     best_score = 0
 
     for plan_file in plan_files:
-        # Convert filename to words: "workflow-state-persistence.md" -> ["workflow", "state", "persistence"]
+        # Convert filename to words:
+        # "workflow-state-persistence.md" -> ["workflow", "state", "persistence"]
         plan_name = plan_file.stem  # without .md
         plan_words = plan_name.replace("-", " ").split()
 
