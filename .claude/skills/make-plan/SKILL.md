@@ -357,9 +357,13 @@ If the plan was created in response to an existing GitHub issue or Notion task (
 # If existing issue triggered this plan (e.g., issue #42):
 EXISTING_ISSUE=42  # Set this if plan was created from an existing issue
 
-# Add plan label and update the issue
+# Add plan label and prepend plan link to the top of the issue body
 gh issue edit $EXISTING_ISSUE --add-label "plan"
-gh issue comment $EXISTING_ISSUE --body "Plan document created: docs/plans/{slug}.md"
+EXISTING_BODY=$(gh issue view $EXISTING_ISSUE --json body -q .body)
+PLAN_LINK="https://github.com/{org}/{repo}/blob/session/{slug}/docs/plans/{slug}.md"
+gh issue edit $EXISTING_ISSUE --body "**Plan:** ${PLAN_LINK}
+
+${EXISTING_BODY}"
 
 # Use this URL in the plan's tracking: field
 echo "https://github.com/{org}/{repo}/issues/$EXISTING_ISSUE"
@@ -397,17 +401,13 @@ gh issue create \
   --title "[Plan] {Feature Name}" \
   --label "plan" \
   --label "$TYPE" \
-  --body "$(cat <<'EOF'
-## Plan Document
+  --body "$(cat <<EOF
+**Plan:** https://github.com/{org}/{repo}/blob/session/{slug}/docs/plans/{slug}.md
 
-See: docs/plans/{slug}.md (branch: plan/{slug})
-
-**Type:** {type}
-**Appetite:** {appetite}
-**Status:** Planning
+**Type:** {type} | **Appetite:** {appetite} | **Status:** Planning
 
 ---
-This issue tracks the plan at `docs/plans/{slug}.md`. Update the plan document for details; this issue is for tracking and discussion.
+This issue is for tracking and discussion. The plan document is the source of truth.
 EOF
 )"
 ```
