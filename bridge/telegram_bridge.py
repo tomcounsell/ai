@@ -55,10 +55,6 @@ from bridge.context import (  # noqa: E402
     build_activity_context,  # noqa: F401
     build_context_prefix,  # noqa: F401
     build_conversation_history,  # noqa: F401
-    fetch_reply_chain,
-    format_link_summaries,
-    format_reply_chain,
-    get_link_summaries,
     is_status_question,  # noqa: F401
 )
 from bridge.media import (  # noqa: E402
@@ -69,7 +65,6 @@ from bridge.media import (  # noqa: E402
     download_media,  # noqa: F401
     extract_document_text,  # noqa: F401
     get_media_type,
-    process_incoming_media,
     transcribe_voice,  # noqa: F401
     validate_media_file,  # noqa: F401
 )
@@ -103,7 +98,6 @@ from bridge.routing import (  # noqa: E402
 from tools.link_analysis import (  # noqa: E402
     extract_urls,
     extract_youtube_urls,
-    process_youtube_urls_in_text,
 )
 from tools.telegram_history import (  # noqa: E402
     register_chat,
@@ -194,10 +188,24 @@ def _cleanup_session_locks() -> int:
                         # Can't determine age, skip to be safe
                         continue
 
+                    # Graceful shutdown: SIGTERM first, then SIGKILL if still alive
                     logger.warning(
-                        f"Killing stale process {pid} holding {session_file}"
+                        f"Sending SIGTERM to stale process {pid} holding {session_file}"
                     )
-                    os.kill(pid, 9)  # SIGKILL
+                    os.kill(pid, signal.SIGTERM)
+                    # Wait up to 5 seconds for graceful exit
+                    for _ in range(10):
+                        time.sleep(0.5)
+                        try:
+                            os.kill(pid, 0)  # Check if still alive
+                        except ProcessLookupError:
+                            break  # Process exited
+                    else:
+                        # Still alive after 5s, force kill
+                        logger.warning(
+                            f"Process {pid} did not exit after SIGTERM, sending SIGKILL"
+                        )
+                        os.kill(pid, signal.SIGKILL)
                     killed += 1
 
                 except (ValueError, ProcessLookupError, PermissionError) as e:
@@ -498,7 +506,13 @@ async def main():
         API_HASH,
         sequential_updates=False,
         flood_sleep_threshold=10,
+        catch_up=True,
     )
+
+    # Register client for deferred enrichment (media, reply chains)
+    from bridge.enrichment import set_telegram_client
+
+    set_telegram_client(client)
 
     @client.on(events.NewMessage)
     async def handler(event):
@@ -510,6 +524,15 @@ async def main():
         # Reject new messages during shutdown
         if SHUTTING_DOWN:
             logger.info("Ignoring message during shutdown")
+            return
+
+        # Dedup: skip if we've already processed this message (catch_up replay)
+        from bridge.dedup import is_duplicate_message
+
+        if await is_duplicate_message(event.chat_id, event.message.id):
+            logger.debug(
+                f"Skipping duplicate message {event.message.id} (catch_up replay)"
+            )
             return
 
         # === BRIDGE COMMANDS (bypass agent entirely) ===
@@ -629,97 +652,22 @@ async def main():
             has_media=bool(message.media),
         )
 
-        # Process any incoming media (images, voice, documents)
-        media_description = ""
-        media_files = []
-        if message.media:
-            media_description, media_files = await process_incoming_media(
-                client, message
-            )
-            if media_description:
-                logger.info(f"Processed media: {media_description[:100]}...")
+        # --- Lightweight metadata extraction (enrichment deferred to worker) ---
+        has_media = bool(message.media)
+        media_type = get_media_type(message) if has_media else None
 
-        # Clean the message
+        # Clean the message text (no media/YouTube/link enrichment here)
         clean_text = clean_message(text, project)
-
-        # Combine text with media description
-        if media_description:
-            if clean_text:
-                clean_text = f"{media_description}\n\n{clean_text}"
-            else:
-                clean_text = media_description
-
         if not clean_text:
             clean_text = "Hello"
 
-        # Process YouTube URLs in the message (transcribe videos)
+        # Extract YouTube URLs (lightweight -- no transcription yet)
         youtube_urls = extract_youtube_urls(text)
-        if youtube_urls:
-            logger.info(f"Found {len(youtube_urls)} YouTube URL(s), processing...")
-            try:
-                enriched_text, youtube_results = await process_youtube_urls_in_text(
-                    text
-                )
-                # Count successful transcriptions
-                successful = sum(1 for r in youtube_results if r.get("success"))
-                if successful > 0:
-                    # Replace clean_text with enriched version that includes transcripts
-                    clean_text = clean_message(enriched_text, project)
-                    if media_description:
-                        clean_text = f"{media_description}\n\n{clean_text}"
-                    logger.info(
-                        f"Successfully transcribed {successful}/"
-                        f"{len(youtube_urls)} YouTube video(s)"
-                    )
-                else:
-                    # Log errors but continue with original text
-                    for r in youtube_results:
-                        if r.get("error"):
-                            logger.warning(
-                                f"YouTube processing failed for "
-                                f"{r.get('video_id')}: {r.get('error')}"
-                            )
-            except Exception as e:
-                logger.error(f"Error processing YouTube URLs: {e}")
-                # Continue with original text on error
 
-        # Get link summaries for any non-YouTube URLs in the message
-        link_summaries = await get_link_summaries(
-            text=text,
-            sender=sender_name,
-            chat_id=str(event.chat_id),
-            message_id=message.id,
-            timestamp=message.date,
-        )
-        link_summary_text = format_link_summaries(link_summaries)
-
-        # Append link summaries to the message for context
-        if link_summary_text:
-            clean_text = f"{clean_text}\n\n--- LINK SUMMARIES ---\n{link_summary_text}"
-            logger.info(
-                f"Added {len(link_summaries)} link summaries to message context"
-            )
-
-        # Fetch reply chain context if this message is replying to something
-        # This gives Valor full thread context when someone replies to an old message
-        reply_chain_context = ""
-        if message.reply_to_msg_id:
-            try:
-                reply_chain = await fetch_reply_chain(
-                    client,
-                    event.chat_id,
-                    message.reply_to_msg_id,
-                    max_depth=20,
-                )
-                if reply_chain:
-                    reply_chain_context = format_reply_chain(reply_chain)
-                    logger.info(f"Fetched reply chain with {len(reply_chain)} messages")
-            except Exception as e:
-                logger.warning(f"Could not fetch reply chain: {e}")
-
-        # Prepend reply chain context if available (gives thread history)
-        if reply_chain_context:
-            clean_text = f"{reply_chain_context}\n\nCURRENT MESSAGE:\n{clean_text}"
+        # Extract non-YouTube URLs for deferred link summarization
+        all_urls = extract_urls(text).get("urls", [])
+        youtube_url_set = {u for u, _vid in youtube_urls} if youtube_urls else set()
+        non_youtube_urls = [u for u in all_urls if u not in youtube_url_set]
 
         # Build session ID with reply-based continuity
         # - Reply to Valor's message → continue that session
@@ -890,6 +838,12 @@ async def main():
                 clean_text, working_dir_str, telegram_chat_id
             )
 
+            # Serialize enrichment metadata for the job worker
+            yt_urls_json = json.dumps(youtube_urls) if youtube_urls else None
+            non_yt_urls_json = (
+                json.dumps(non_youtube_urls) if non_youtube_urls else None
+            )
+
             # Build and enqueue the job (HIGH priority — top of FILO stack)
             depth = await enqueue_job(
                 project_key=project_key,
@@ -903,6 +857,12 @@ async def main():
                 priority="high",
                 sender_id=sender_id,
                 workflow_id=workflow_id,
+                has_media=has_media,
+                media_type=media_type,
+                youtube_urls=yt_urls_json,
+                non_youtube_urls=non_yt_urls_json,
+                reply_to_msg_id=message.reply_to_msg_id,
+                chat_id_for_enrichment=telegram_chat_id,
             )
             if depth > 1:
                 await client.send_message(
@@ -914,6 +874,11 @@ async def main():
             logger.info(
                 f"[{project_name}] Queued job for {sender_name} (msg {message_id}, depth={depth})"
             )
+
+            # Record message as processed (dedup for catch_up replays)
+            from bridge.dedup import record_message_processed
+
+            await record_message_processed(event.chat_id, message.id)
 
         # === LEGACY MODE: Synchronous with retry ===
         else:
@@ -1159,24 +1124,28 @@ async def main():
                 )
                 _ensure_worker(_pkey)
 
-    # Scan for missed messages during downtime (catchup)
+    # Scan for missed messages during downtime (catchup) -- run concurrently
     if USE_CLAUDE_SDK:
-        logger.info("Starting catchup scan for missed messages...")
-        try:
-            from agent.job_queue import enqueue_job as _enqueue_job
-            from bridge.catchup import scan_for_missed_messages
 
-            caught_up = await scan_for_missed_messages(
-                client=client,
-                monitored_groups=ALL_MONITORED_GROUPS,
-                projects_config=CONFIG,
-                should_respond_fn=should_respond_async,
-                enqueue_job_fn=_enqueue_job,
-                find_project_fn=find_project_for_chat,
-            )
-            logger.info(f"Catchup scan complete: {caught_up} message(s) queued")
-        except Exception as e:
-            logger.error(f"Catchup scan failed: {e}", exc_info=True)
+        async def _run_catchup():
+            logger.info("Starting catchup scan for missed messages...")
+            try:
+                from agent.job_queue import enqueue_job as _enqueue_job
+                from bridge.catchup import scan_for_missed_messages
+
+                caught_up = await scan_for_missed_messages(
+                    client=client,
+                    monitored_groups=ALL_MONITORED_GROUPS,
+                    projects_config=CONFIG,
+                    should_respond_fn=should_respond_async,
+                    enqueue_job_fn=_enqueue_job,
+                    find_project_fn=find_project_for_chat,
+                )
+                logger.info(f"Catchup scan complete: {caught_up} message(s) queued")
+            except Exception as e:
+                logger.error(f"Catchup scan failed: {e}", exc_info=True)
+
+        asyncio.create_task(_run_catchup())
 
     # Start session watchdog
     try:
