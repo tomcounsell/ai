@@ -514,6 +514,19 @@ async def _execute_job(job: Job) -> None:
     working_dir = Path(job.working_dir)
     branch_name = _session_branch_name(job.session_id)
 
+    # Compute task list ID for sub-agent task isolation
+    # Tier 2: planned work uses the slug directly
+    # Tier 1: ad-hoc sessions use thread-{chat_id}-{root_msg_id}
+    if job.work_item_slug:
+        task_list_id = job.work_item_slug
+    elif job.task_list_id:
+        task_list_id = job.task_list_id
+    else:
+        # Derive from session_id which encodes chat_id and root message
+        parts = job.session_id.split("_")
+        root_id = parts[-1] if "_" in job.session_id else job.message_id
+        task_list_id = f"thread-{job.chat_id}-{root_id}"
+
     logger.info(
         f"[{job.project_key}] Executing job {job.job_id} "
         f"(session={job.session_id}, branch={branch_name}, cwd={working_dir})"
@@ -534,6 +547,7 @@ async def _execute_job(job: Job) -> None:
             last_activity=time.time(),
             tool_call_count=0,
             branch_name=branch_name,
+            work_item_slug=job.work_item_slug,
             message_text=job.message_text[:20_000] if job.message_text else None,
         )
     except Exception as e:
@@ -573,6 +587,7 @@ async def _execute_job(job: Job) -> None:
             job.chat_id,
             job.sender_id,
             job.workflow_id,
+            task_list_id,
         )
 
     task = BackgroundTask(messenger=messenger, acknowledgment_timeout=180.0)
