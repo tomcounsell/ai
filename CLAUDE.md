@@ -142,7 +142,29 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 
 ## Plan Requirements (This Repo Only)
 
-When creating plans with `/make-plan` for this repository, always include an **## Update System** section after **## No-Gos**. This system is deployed across multiple machines via the `/update` skill (`scripts/remote-update.sh`, `.claude/skills/update/`). New features frequently require complementary changes to the update process — new dependencies, config migrations, service restarts, symlink changes, etc.
+Plans created with `/make-plan` must include three required sections. These are enforced by hooks that block plan creation if sections are missing or empty.
+
+### ## Documentation (Required)
+
+Every plan must include a **## Documentation** section with actionable tasks specifying which docs to create or update. This is enforced by `.claude/hooks/validators/validate_documentation_section.py`.
+
+The **## Documentation** section must contain:
+- At least one checkbox task (`- [ ]`)
+- A target documentation path (e.g., `docs/features/my-feature.md`)
+- If genuinely no docs needed, explicitly state "No documentation changes needed" with justification
+
+Example:
+```markdown
+## Documentation
+- [ ] Create `docs/features/my-feature.md` describing the new capability
+- [ ] Add entry to `docs/features/README.md` index table
+```
+
+The `/build` workflow validates that these docs were actually created before allowing PR merge.
+
+### ## Update System (Required)
+
+Include an **## Update System** section after **## No-Gos**. This system is deployed across multiple machines via the `/update` skill (`scripts/remote-update.sh`, `.claude/skills/update/`). New features frequently require complementary changes to the update process.
 
 The **## Update System** section should cover:
 - Whether the update script or update skill needs changes
@@ -150,9 +172,9 @@ The **## Update System** section should cover:
 - Migration steps for existing installations
 - If no update changes are needed, state that explicitly (e.g., "No update system changes required — this feature is purely internal")
 
-This ensures update impact is considered during planning rather than discovered after deployment.
+### ## Agent Integration (Required)
 
-When creating plans that add new tools, capabilities, or external integrations, always include an **## Agent Integration** section after **## Update System**. The agent receives Telegram messages via the bridge (`bridge/telegram_bridge.py`) and can only use tools exposed through MCP servers registered in `.mcp.json`. New Python functions in `tools/` are invisible to the agent unless wrapped.
+Include an **## Agent Integration** section after **## Update System**. The agent receives Telegram messages via the bridge (`bridge/telegram_bridge.py`) and can only use tools exposed through MCP servers registered in `.mcp.json`. New Python functions in `tools/` are invisible to the agent unless wrapped.
 
 The **## Agent Integration** section should cover:
 - Whether a new or existing MCP server needs to expose the functionality
@@ -160,8 +182,6 @@ The **## Agent Integration** section should cover:
 - Whether the bridge itself needs to import/call the new code directly
 - Integration tests that verify the agent can actually invoke the new tools
 - If no agent integration is needed, state that explicitly (e.g., "No agent integration required — this is a bridge-internal change")
-
-This ensures new capabilities are wired into the system the user actually interacts with, not just built as standalone libraries.
 
 ## See Also
 

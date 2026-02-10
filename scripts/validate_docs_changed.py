@@ -83,27 +83,46 @@ def extract_doc_paths_from_section(section_content: str) -> list[str]:
     return paths
 
 
-def get_changed_docs() -> list[str]:
-    """Get list of documentation files changed in git (staged + unstaged).
+def get_changed_docs(base_branch: str = "main") -> list[str]:
+    """Get list of documentation files changed in git.
+
+    Compares current branch against base_branch to find all changed docs,
+    including both committed changes on the branch and uncommitted local changes.
 
     Returns list of changed .md file paths, or empty list on error.
     """
+    changed_files = []
+
     try:
-        # Get both staged and unstaged changes
+        # First: get all files changed on this branch vs base branch (committed)
         result = subprocess.run(
+            ["git", "diff", "--name-only", f"{base_branch}...HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode == 0:
+            branch_files = [
+                f.strip() for f in result.stdout.strip().split("\n") if f.strip()
+            ]
+            changed_files.extend(branch_files)
+
+        # Second: get uncommitted changes (staged + unstaged)
+        result_uncommitted = subprocess.run(
             ["git", "diff", "--name-only", "HEAD"],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        if result.returncode != 0:
-            return []
+        if result_uncommitted.returncode == 0:
+            uncommitted_files = [
+                f.strip()
+                for f in result_uncommitted.stdout.strip().split("\n")
+                if f.strip()
+            ]
+            changed_files.extend(uncommitted_files)
 
-        changed_files = [
-            f.strip() for f in result.stdout.strip().split("\n") if f.strip()
-        ]
-
-        # Also get untracked files
+        # Third: get untracked files (new files not yet added)
         result_untracked = subprocess.run(
             ["git", "ls-files", "--others", "--exclude-standard"],
             capture_output=True,
