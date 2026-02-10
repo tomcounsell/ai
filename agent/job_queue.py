@@ -54,6 +54,14 @@ class RedisJob(Model):
     work_item_slug = Field(null=True)  # Named work item slug (tier 2)
     task_list_id = Field(null=True)  # Computed CLAUDE_CODE_TASK_LIST_ID value
 
+    # Deferred enrichment fields (added for fast enqueue)
+    has_media = Field(type=bool, default=False)
+    media_type = Field(null=True)  # "photo", "voice", "document", etc.
+    youtube_urls = Field(null=True)  # JSON string of [(url, video_id), ...]
+    non_youtube_urls = Field(null=True)  # JSON string of [url, ...]
+    reply_to_msg_id = Field(type=int, null=True)
+    chat_id_for_enrichment = Field(null=True)  # Telegram chat ID for API calls
+
 
 class Job:
     """Convenience wrapper around RedisJob for the worker interface."""
@@ -125,6 +133,30 @@ class Job:
     def task_list_id(self) -> str | None:
         return self._rj.task_list_id
 
+    @property
+    def has_media(self) -> bool:
+        return bool(self._rj.has_media)
+
+    @property
+    def media_type(self) -> str | None:
+        return self._rj.media_type
+
+    @property
+    def youtube_urls(self) -> str | None:
+        return self._rj.youtube_urls
+
+    @property
+    def non_youtube_urls(self) -> str | None:
+        return self._rj.non_youtube_urls
+
+    @property
+    def reply_to_msg_id(self) -> int | None:
+        return self._rj.reply_to_msg_id
+
+    @property
+    def chat_id_for_enrichment(self) -> str | None:
+        return self._rj.chat_id_for_enrichment
+
 
 async def _push_job(
     project_key: str,
@@ -141,6 +173,12 @@ async def _push_job(
     workflow_id: str | None = None,
     work_item_slug: str | None = None,
     task_list_id: str | None = None,
+    has_media: bool = False,
+    media_type: str | None = None,
+    youtube_urls: str | None = None,
+    non_youtube_urls: str | None = None,
+    reply_to_msg_id: int | None = None,
+    chat_id_for_enrichment: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project."""
     await RedisJob.async_create(
@@ -160,6 +198,12 @@ async def _push_job(
         workflow_id=workflow_id,
         work_item_slug=work_item_slug,
         task_list_id=task_list_id,
+        has_media=has_media,
+        media_type=media_type,
+        youtube_urls=youtube_urls,
+        non_youtube_urls=non_youtube_urls,
+        reply_to_msg_id=reply_to_msg_id,
+        chat_id_for_enrichment=chat_id_for_enrichment,
     )
     return await RedisJob.query.async_count(project_key=project_key, status="pending")
 
@@ -380,6 +424,12 @@ async def enqueue_job(
     workflow_id: str | None = None,
     work_item_slug: str | None = None,
     task_list_id: str | None = None,
+    has_media: bool = False,
+    media_type: str | None = None,
+    youtube_urls: str | None = None,
+    non_youtube_urls: str | None = None,
+    reply_to_msg_id: int | None = None,
+    chat_id_for_enrichment: str | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -404,6 +454,12 @@ async def enqueue_job(
         revival_context=revival_context,
         work_item_slug=work_item_slug,
         task_list_id=task_list_id,
+        has_media=has_media,
+        media_type=media_type,
+        youtube_urls=youtube_urls,
+        non_youtube_urls=non_youtube_urls,
+        reply_to_msg_id=reply_to_msg_id,
+        chat_id_for_enrichment=chat_id_for_enrichment,
     )
     _ensure_worker(project_key)
     logger.info(
@@ -570,6 +626,31 @@ async def _execute_job(job: Job) -> None:
         session_id=job.session_id,
     )
 
+    # Deferred enrichment: process media, YouTube, links, reply chain
+    enriched_text = job.message_text
+    if job.has_media or job.youtube_urls or job.non_youtube_urls or job.reply_to_msg_id:
+        try:
+            from bridge.enrichment import enrich_message, get_telegram_client
+
+            tg_client = get_telegram_client()
+            enriched_text = await enrich_message(
+                telegram_client=tg_client,
+                message_text=job.message_text,
+                has_media=job.has_media,
+                media_type=job.media_type,
+                raw_media_message_id=job.message_id,
+                youtube_urls=job.youtube_urls,
+                non_youtube_urls=job.non_youtube_urls,
+                reply_to_msg_id=job.reply_to_msg_id,
+                chat_id=job.chat_id_for_enrichment or job.chat_id,
+                sender_name=job.sender_name,
+                message_id=job.message_id,
+            )
+        except Exception as e:
+            logger.warning(
+                f"[{job.project_key}] Enrichment failed, using raw text: {e}"
+            )
+
     # Run agent work directly in the project working directory
     project_config = {
         "_key": job.project_key,
@@ -579,7 +660,7 @@ async def _execute_job(job: Job) -> None:
 
     async def do_work() -> str:
         return await get_agent_response_sdk(
-            job.message_text,
+            enriched_text,
             job.session_id,
             job.sender_name,
             job.chat_title,
@@ -739,7 +820,10 @@ async def queue_revival_job(
     """
     revival_text = f"Continue the unfinished work on branch `{revival_info['branch']}`."
     if additional_context:
-        revival_text += f"\n\nAsked user whether to resume and user responded with: {additional_context}"
+        revival_text += (
+            "\n\nAsked user whether to resume and user "
+            f"responded with: {additional_context}"
+        )
 
     return await enqueue_job(
         project_key=revival_info["project_key"],

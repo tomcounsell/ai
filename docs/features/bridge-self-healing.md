@@ -12,7 +12,11 @@ The bridge includes a multi-layered self-healing system to recover from crashes 
 
 **Solution**: Before attempting to connect, the bridge:
 1. Uses `lsof` to find processes holding `*.session` files
-2. Kills stale processes (>60 seconds old) that aren't the current process
+2. Terminates stale processes (>60 seconds old) that aren't the current process using SIGTERM/SIGKILL escalation:
+   - Sends SIGTERM first to request graceful shutdown
+   - Waits up to 5 seconds for the process to exit
+   - Falls back to SIGKILL only if the process is still alive
+   - This prevents SQLite corruption from abrupt termination of processes mid-write
 3. Clears orphaned `-journal`, `-wal`, `-shm` files
 4. Adds jitter to prevent thundering herd on restart
 
@@ -133,3 +137,7 @@ Per the plan (docs/plans/bridge-self-healing.md):
 - **No monitoring dashboards** - Telegram alerts only
 - **No configuration** - Hardcoded 60s watchdog, sensible defaults
 - **No external services** - Self-contained recovery
+
+## Related
+
+- [Message Pipeline](message-pipeline.md) — deferred enrichment and zero-loss restart mechanisms
