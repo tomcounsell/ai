@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
@@ -17,13 +17,11 @@ After running `/update`, the bridge takes ~5 minutes before it sees and handles 
 - Heavy pre-processing (media/Ollama, YouTube transcription, Perplexity link summaries, reply chain fetching) runs synchronously inside the `@client.on(events.NewMessage)` handler before the job is enqueued
 - With `sequential_updates=False` already shipped, concurrent handlers can still bottleneck on shared resources (Ollama model loading, Perplexity API)
 - Restart scripts leave a 3-16 second gap where no process listens for messages, and `catch_up=False` means those messages are permanently lost
-- Acknowledgment timeout is 180 seconds — users wait 3 minutes with no feedback
 - Session lock cleanup uses SIGKILL directly, risking SQLite corruption
 
 **Desired outcome:**
 - Messages are enqueued within milliseconds of arrival; heavy enrichment happens later
 - Zero messages lost during restarts
-- Users get acknowledgment within 30 seconds
 - Lock cleanup degrades gracefully (SIGTERM → wait → SIGKILL)
 
 ## Appetite
@@ -52,7 +50,7 @@ No prerequisites — this work uses existing dependencies and infrastructure.
 
 - **Deferred enrichment pipeline**: Move YouTube, Perplexity, media, and reply chain processing out of the event handler and into the job's execution phase
 - **Catch-up on restart**: Enable Telethon's `catch_up=True` so messages sent during downtime are replayed
-- **Fast acknowledgment**: Drop timeout from 180s to 30s
+- **Per-chat message dedup**: Redis/Popoto-backed dedup to prevent duplicate processing from catch_up replays
 - **Graceful lock cleanup**: SIGTERM first, wait, then SIGKILL as fallback
 
 ### Flow
@@ -76,6 +74,8 @@ The handler should only: extract raw text, determine routing, set 👀 reaction,
 
 This means the job payload needs new fields: `raw_media` (media reference for deferred processing), `youtube_urls` (list of URLs to transcribe), `non_youtube_urls` (list for Perplexity), `reply_to_msg_id` (for deferred chain fetch). The worker enriches the message text before passing it to the agent.
 
+Enrichment logic lives in a new `bridge/enrichment.py` module (not `bridge/context.py`) since this will grow as new skills add more enrichment types.
+
 #### Fix 3: Catchup hold-off
 
 Catchup already runs after handler registration (confirmed at line 1162-1179). However, catchup-queued messages use `priority="low"` which is correct but the catchup scan itself (`get_dialogs()` + iterating messages) still blocks the startup sequence. Wrap the catchup scan in `asyncio.create_task()` so it runs concurrently with real-time message processing.
@@ -86,7 +86,7 @@ Two options (pick one):
 - **Option A**: Set `catch_up=True` on the TelegramClient so Telethon replays missed updates after reconnection. Simple, leverages Telethon's built-in mechanism. Risk: may replay already-handled messages, but the catchup module's `_check_if_handled` provides deduplication.
 - **Option B**: Overlap processes — start new bridge, wait for connection, then kill old. More complex, risk of dual-processing.
 
-**Recommendation: Option A** — simpler and sufficient.
+**Recommendation: Option A** — simpler and sufficient. Dedup via Redis/Popoto (per-chat, ~50 message IDs) prevents double-processing.
 
 #### Fix 5: Graceful lock cleanup
 
@@ -97,9 +97,7 @@ In `_cleanup_session_locks()` (line 200), replace `os.kill(pid, 9)` with:
 
 Also replace the synchronous `time.sleep(jitter)` (line 223) with a comment noting this only runs at startup where blocking is acceptable.
 
-#### Fix 6: Acknowledgment timeout
-
-Change `ACKNOWLEDGMENT_TIMEOUT_SECONDS` in `bridge/agents.py:393` from 180 to 45. Change the default in `agent/messenger.py:130` from 180.0 to 45.0.
+**Note:** Fix 6 (acknowledgment timeout) is dropped from scope. Emoji reactions already acknowledge receipt and processing status. The "working on this" message at 180s is acceptable — the system communicates via reactions, and PMs don't need play-by-play updates.
 
 ## Rabbit Holes
 
@@ -112,15 +110,11 @@ Change `ACKNOWLEDGMENT_TIMEOUT_SECONDS` in `bridge/agents.py:393` from 180 to 45
 
 ### Risk 1: Deferred enrichment changes job payload contract
 **Impact:** Existing queued jobs (from before the change) may lack new fields, causing worker crashes.
-**Mitigation:** Use `.get()` with defaults for all new job payload fields. Old jobs without enrichment fields just skip enrichment (same as a plain text message).
+**Mitigation:** Not a real risk — `/update` waits for the queue to drain before restarting, so no old-format jobs will exist when the new code starts. Still use `.get()` with defaults as defensive coding.
 
 ### Risk 2: catch_up=True replays already-handled messages
 **Impact:** Duplicate responses to users after restart.
-**Mitigation:** The catchup module's `_check_if_handled` deduplication check runs on replayed messages too. Also, the routing decision (`should_respond_async`) already filters most messages. Add a lightweight in-memory set of recently-processed message IDs (last 1000) as a fast dedup layer.
-
-### Risk 3: Enrichment in job worker changes timing of reactions
-**Impact:** The 👀 reaction fires immediately, but the processing emoji (from intent classification) may set before enrichment completes, creating a confusing reaction sequence.
-**Mitigation:** Intent classification already runs as a fire-and-forget task (line 753). Keep this behavior — it classifies on raw text which is available immediately.
+**Mitigation:** Per-chat message dedup via Redis/Popoto (~50 message IDs per chat). This follows the existing pattern of caching message history to local Redis. The catchup module's `_check_if_handled` and `should_respond_async` routing provide additional layers.
 
 ## No-Gos (Out of Scope)
 
@@ -148,10 +142,9 @@ No agent integration required — these are bridge-internal changes to the messa
 
 - [ ] Event handler enqueues messages in < 100ms (no network calls before enqueue)
 - [ ] Messages sent during bridge restart are processed after reconnection
-- [ ] Acknowledgment message appears within 45 seconds (down from 180)
+- [ ] Per-chat Redis dedup prevents duplicate responses from catch_up replay
 - [ ] Lock cleanup uses SIGTERM→SIGKILL escalation (no direct SIGKILL)
 - [ ] Catchup scan runs concurrently with real-time message processing
-- [ ] No duplicate responses from catch_up replay (verified with test)
 - [ ] Documentation updated and indexed
 
 ## Team Orchestration
@@ -166,7 +159,7 @@ No agent integration required — these are bridge-internal changes to the messa
 
 - **Builder (restart)**
   - Name: restart-builder
-  - Role: Enable catch_up=True, fix SIGKILL→SIGTERM escalation, reduce ack timeout
+  - Role: Enable catch_up=True, implement Redis/Popoto per-chat dedup, fix SIGKILL→SIGTERM escalation
   - Agent Type: builder
   - Resume: true
 
@@ -198,7 +191,7 @@ No agent integration required — these are bridge-internal changes to the messa
 - **Parallel**: true
 - Extract media references, YouTube URLs, non-YouTube URLs, and reply_to_msg_id in the handler without processing them
 - Add new fields to job payload: `raw_media`, `youtube_urls`, `non_youtube_urls`, `reply_to_msg_id`, `chat_id_for_enrichment`
-- Create an `enrich_message()` function (in `bridge/context.py` or new `bridge/enrichment.py`) that the job worker calls before passing text to the agent
+- Create an `enrich_message()` function in new `bridge/enrichment.py` that the job worker calls before passing text to the agent
 - Update job worker in `agent/job_queue.py` to call enrichment before agent invocation
 - Ensure backward compatibility: old jobs without enrichment fields just skip enrichment
 
@@ -209,10 +202,8 @@ No agent integration required — these are bridge-internal changes to the messa
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `catch_up=True` to `TelegramClient()` constructor in `bridge/telegram_bridge.py:495`
-- Add lightweight in-memory message ID dedup set (last 1000 IDs) checked in event handler
-- Fix `_cleanup_session_locks()` to use SIGTERM→wait→SIGKILL escalation
-- Reduce `ACKNOWLEDGMENT_TIMEOUT_SECONDS` from 180 to 45 in `bridge/agents.py:393`
-- Reduce default `acknowledgment_timeout` from 180.0 to 45.0 in `agent/messenger.py:130`
+- Implement per-chat message dedup using Redis/Popoto (~50 message IDs per chat, following existing message cache pattern). Check dedup in event handler before processing.
+- Fix `_cleanup_session_locks()` to use SIGTERM→wait(5s)→SIGKILL escalation
 - Wrap catchup scan in `asyncio.create_task()` at line 1169 so it doesn't block startup
 
 ### 3. Validate pipeline restructure
@@ -234,9 +225,8 @@ No agent integration required — these are bridge-internal changes to the messa
 - **Agent Type**: validator
 - **Parallel**: false
 - Verify `catch_up=True` is set on TelegramClient
-- Verify message ID dedup set exists and is checked in handler
+- Verify per-chat Redis dedup exists and is checked in handler
 - Verify `_cleanup_session_locks` uses SIGTERM before SIGKILL
-- Verify acknowledgment timeout is 45 seconds in both locations
 - Verify catchup runs as `asyncio.create_task()`, not blocking
 - Run `pytest tests/` to check for regressions
 
@@ -266,14 +256,6 @@ No agent integration required — these are bridge-internal changes to the messa
 - `black --check . && ruff check .` — Code formatting and linting
 - `pytest tests/` — All tests pass
 - `grep -n "sequential_updates\|flood_sleep_threshold\|catch_up" bridge/telegram_bridge.py` — Verify Telethon client config
-- `grep -n "ACKNOWLEDGMENT_TIMEOUT" bridge/agents.py agent/messenger.py` — Verify timeout values
 - `grep -n "SIGTERM\|signal.SIGTERM" bridge/telegram_bridge.py` — Verify graceful kill
 - `grep -n "process_incoming_media\|process_youtube_urls\|get_link_summaries\|fetch_reply_chain" bridge/telegram_bridge.py` — Verify these are NOT called in handler
 
-## Open Questions
-
-1. **Enrichment location**: Should deferred enrichment live in a new `bridge/enrichment.py` module, or be added to the existing `bridge/context.py`? Context.py already handles reply chains and conversation history, so it's a natural fit — but it's already 18KB.
-
-2. **Dedup window size**: The proposed in-memory dedup set holds 1000 message IDs. Is this sufficient for your message volume, or should it be configurable / time-based (e.g., last 30 minutes)?
-
-3. **Ack timeout value**: Proposed 45 seconds. The issue suggested 30-60s. Any preference on the exact value? Lower = more responsive but more noise on quick responses.
