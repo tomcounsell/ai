@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
 """
-Telegram-Clawdbot Bridge
+Telegram Bridge - Main Entry Point and Coordinator
 
-Connects a Telegram user account to Clawdbot for AI-powered responses.
-Uses Telethon for Telegram and subprocess for Clawdbot agent calls.
+This module is the main entry point for the Telegram bridge. It initializes the
+Telegram client, registers event handlers, and coordinates message processing.
 
-Multi-project support: Set ACTIVE_PROJECTS env var to configure which projects
-this machine monitors. When a message comes in, the bridge identifies which
-project's group it belongs to and injects appropriate context.
+Domain-specific logic has been extracted into sub-modules:
+  - bridge.media: Media detection, download, transcription, image description
+  - bridge.routing: Message routing, project config, mention/response classification
+  - bridge.context: Context building, conversation history, reply chains
+  - bridge.response: Message formatting, reactions, file extraction, sending
+  - bridge.agents: Agent invocation, retry logic, self-healing
+
+Backward-compatible imports are maintained here so existing code that imports
+from bridge.telegram_bridge continues to work, but new code should import
+directly from the appropriate sub-module.
 """
 
 import asyncio
