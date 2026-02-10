@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Pre-commit hook: scan staged files for leaked secrets
+# Install: git config core.hooksPath .githooks
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+SCRIPT="$REPO_ROOT/scripts/scan_secrets.py"
+
+if [ ! -f "$SCRIPT" ]; then
+    echo "Warning: scan_secrets.py not found, skipping secret scan"
+    exit 0
+fi
+
+python3 "$SCRIPT" --staged
+if [ $? -ne 0 ]; then
+    echo ""
+    echo "COMMIT BLOCKED: Secrets detected in staged files."
+    echo "Remove the secrets and try again."
+    echo ""
+    exit 1
+fi
