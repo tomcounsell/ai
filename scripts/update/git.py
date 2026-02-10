@@ -147,6 +147,11 @@ def git_pull(project_dir: Path) -> GitPullResult:
     stashed = False
     stash_restored = False
 
+    # Ensure pre-commit secret scanning hook is active
+    run_cmd(
+        ["git", "config", "core.hooksPath", ".githooks"], cwd=project_dir, check=False
+    )
+
     # Check for dirty working tree
     if is_dirty(project_dir):
         stashed = True
