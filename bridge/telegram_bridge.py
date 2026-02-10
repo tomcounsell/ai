@@ -140,7 +140,7 @@ def _cleanup_session_locks() -> int:
         try:
             # Use lsof to find processes holding this file
             result = subprocess.run(
-                ["lsof", "-t", str(session_file)],
+                ["/usr/sbin/lsof", "-t", str(session_file)],
                 capture_output=True,
                 text=True,
                 timeout=10,
