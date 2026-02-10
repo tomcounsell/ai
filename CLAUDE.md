@@ -145,6 +145,16 @@ Work is DONE when:
 - Sessions only pause for **genuine open questions** — not status updates
 - Each session gets an isolated task list automatically (see issue #62 for two-tier scoping)
 
+### Task List Isolation
+
+Sessions get automatic task list isolation via the `CLAUDE_CODE_TASK_LIST_ID` environment variable, injected by the SDK client when spawning Claude Code.
+
+- **Tier 1 (thread-scoped):** Ad-hoc conversations get ephemeral, disposable task lists keyed by `thread-{chat_id}-{root_message_id}`. No configuration needed -- the bridge derives the ID from the Telegram thread automatically.
+- **Tier 2 (slug-scoped):** Planned work items (created via `/make-plan {slug}`) get durable, named task lists keyed by the slug. The slug ties together the task list, branch, worktree, plan doc, and GitHub issue.
+- **Git worktrees:** Filesystem isolation is available for tier 2 work via `agent/worktree_manager.py`. Each work item gets its own worktree under `.worktrees/{slug}/` with branch `session/{slug}`.
+
+See `docs/features/session-isolation.md` for the full technical design.
+
 ## Quick Reference
 
 ### Critical Thresholds
