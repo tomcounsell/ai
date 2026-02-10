@@ -257,8 +257,6 @@ async def download_media(
     try:
         # Generate unique filename with timestamp
         timestamp = message.date.strftime("%Y%m%d_%H%M%S")
-        media_type = get_media_type(message)
-
         # Determine extension
         ext = ".bin"
         if isinstance(message.media, MessageMediaPhoto):

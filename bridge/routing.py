@@ -403,14 +403,12 @@ async def should_respond_async(
     # === respond_to_unaddressed logic (the 4 cases) ===
 
     # Case 2: Reply to Valor's message → always respond (no Ollama needed)
-    is_reply_to_valor = False
     if message.reply_to_msg_id:
         try:
             replied_msg = await client.get_messages(
                 event.chat_id, ids=message.reply_to_msg_id
             )
             if replied_msg and replied_msg.out:  # .out means sent by us (Valor)
-                is_reply_to_valor = True
                 logger.debug("Case 2: Reply to Valor - responding")
                 return True, True
         except Exception as e:

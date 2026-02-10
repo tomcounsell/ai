@@ -636,7 +636,7 @@ async def get_agent_response_sdk(
     logger.debug(f"[{request_id}] Working directory: {working_dir}")
 
     # Build context-enriched message (includes user permission restrictions)
-    from bridge.telegram_bridge import build_context_prefix
+    from bridge.context import build_context_prefix
 
     context = build_context_prefix(project, chat_title is None, sender_id)
     enriched_message = context

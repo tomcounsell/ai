@@ -10,7 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from bridge.telegram_bridge import (
+from bridge.media import (
     MEDIA_DIR,
     VISION_EXTENSIONS,
     VOICE_EXTENSIONS,
@@ -160,7 +160,7 @@ class TestTranscribeVoiceIntegration:
     @pytest.mark.asyncio
     async def test_transcribe_voice_no_api_key(self):
         """Transcription returns None when no API key is set."""
-        from bridge.telegram_bridge import transcribe_voice
+        from bridge.media import transcribe_voice
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": ""}):
             # Reload to pick up env change
@@ -174,7 +174,7 @@ class TestProcessIncomingMedia:
     @pytest.mark.asyncio
     async def test_no_media_returns_empty(self):
         """Message without media returns empty description and files."""
-        from bridge.telegram_bridge import process_incoming_media
+        from bridge.media import process_incoming_media
 
         client = AsyncMock()
         message = MagicMock()
@@ -189,7 +189,7 @@ class TestProcessIncomingMedia:
         """Failed download returns error description."""
         from telethon.tl.types import MessageMediaPhoto
 
-        from bridge.telegram_bridge import process_incoming_media
+        from bridge.media import process_incoming_media
 
         client = AsyncMock()
         client.download_media = AsyncMock(return_value=None)
@@ -198,7 +198,7 @@ class TestProcessIncomingMedia:
         message.media = MagicMock(spec=MessageMediaPhoto)
         message.media.__class__ = MessageMediaPhoto
 
-        with patch("bridge.telegram_bridge.download_media", return_value=None):
+        with patch("bridge.media.download_media", return_value=None):
             description, files = await process_incoming_media(client, message)
             assert "download failed" in description.lower()
             assert files == []
@@ -302,7 +302,7 @@ class TestDescribeImage:
     @pytest.mark.asyncio
     async def test_describe_image_returns_description(self, sample_image):
         """describe_image returns a meaningful text description."""
-        from bridge.telegram_bridge import describe_image
+        from bridge.media import describe_image
 
         result = await describe_image(sample_image)
 
@@ -313,7 +313,7 @@ class TestDescribeImage:
     @pytest.mark.asyncio
     async def test_describe_image_no_leading_trailing_whitespace(self, sample_image):
         """Description should not have leading or trailing whitespace."""
-        from bridge.telegram_bridge import describe_image
+        from bridge.media import describe_image
 
         result = await describe_image(sample_image)
 
@@ -323,7 +323,7 @@ class TestDescribeImage:
     @pytest.mark.asyncio
     async def test_describe_colored_image(self, colored_image):
         """Vision model can describe a colored image."""
-        from bridge.telegram_bridge import describe_image
+        from bridge.media import describe_image
 
         result = await describe_image(colored_image)
 
@@ -335,7 +335,7 @@ class TestDescribeImage:
     @pytest.mark.asyncio
     async def test_describe_nonexistent_image(self):
         """Returns None for non-existent image file."""
-        from bridge.telegram_bridge import describe_image
+        from bridge.media import describe_image
 
         result = await describe_image(Path("/nonexistent/path/image.jpg"))
 

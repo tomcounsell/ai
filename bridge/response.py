@@ -1,4 +1,5 @@
-"""Message cleaning, tool log filtering, file extraction, response sending, and reaction management."""
+"""Message cleaning, tool log filtering, file extraction,
+response sending, and reaction management."""
 
 import asyncio
 import logging
@@ -409,9 +410,12 @@ async def send_response_with_files(
                     caption=f"📎 {file_path.name}",
                     force_document=True,
                 )
-            logger.info(
-                f"Sent file: {file_path} (type: {'image' if is_image else 'video' if is_video else 'audio' if is_audio else 'document'})"
+            file_type = (
+                "image"
+                if is_image
+                else "video" if is_video else "audio" if is_audio else "document"
             )
+            logger.info(f"Sent file: {file_path} (type: {file_type})")
         except Exception as e:
             logger.error(f"Failed to send file {file_path}: {e}")
             await client.send_message(

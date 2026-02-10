@@ -77,7 +77,7 @@ async def _handle_update_command(tg_client, event):
     will be queued until all work completes.
     """
     # Import here to avoid circular dependency
-    from bridge.telegram_bridge import set_reaction
+    from bridge.response import set_reaction
 
     logger.info(f"[bridge] /update command received from chat {event.chat_id}")
     try:
@@ -155,12 +155,12 @@ async def get_agent_response_clawdbot(
 ) -> str:
     """Call clawdbot agent and get response (legacy implementation)."""
     # Import here to avoid circular dependency
-    from bridge.telegram_bridge import (
+    from bridge.context import (
         build_activity_context,
         build_context_prefix,
         is_status_question,
-        log_event,
     )
+    from bridge.telegram_bridge import log_event
 
     start_time = time.time()
     request_id = f"{session_id}_{int(start_time)}"
@@ -499,7 +499,7 @@ async def get_agent_response_with_retry(
     If all retries fail, create a plan doc instead of showing error to user.
     """
     # Import here to avoid circular dependency
-    from bridge.telegram_bridge import filter_tool_logs, set_reaction
+    from bridge.response import filter_tool_logs, set_reaction
 
     last_error = None
 
@@ -622,7 +622,8 @@ def _match_plan_by_name(message_text: str, working_dir: str) -> str | None:
     best_score = 0
 
     for plan_file in plan_files:
-        # Convert filename to words: "workflow-state-persistence.md" -> ["workflow", "state", "persistence"]
+        # Convert filename to words:
+        # "workflow-state-persistence.md" -> ["workflow", "state", "persistence"]
         plan_name = plan_file.stem  # without .md
         plan_words = plan_name.replace("-", " ").split()
 
