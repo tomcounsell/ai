@@ -1,7 +1,7 @@
 ---
 status: Planning
 type: feature
-appetite: Medium: 3-5 days
+appetite: Medium
 owner: Valor
 created: 2026-02-10
 tracking: https://github.com/tomcounsell/ai/issues/62
@@ -28,9 +28,13 @@ When handling multiple coding sessions (parallel or back-to-back), task lists co
 
 ## Appetite
 
-**Time budget:** Medium: 3-5 days
+**Size:** Medium
 
-**Team size:** Solo
+**Team:** Solo dev, PM
+
+**Interactions:**
+- PM check-ins: 1-2 (scope alignment on tier model, worktree experiment results)
+- Review rounds: 1 (code review before merge)
 
 ## Prerequisites
 

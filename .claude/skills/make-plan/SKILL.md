@@ -57,10 +57,10 @@ Creates structured feature plans in `docs/plans/` following Shape Up principles:
 2. **Narrow the problem** - Challenge vague requests:
    - Not: "redesign the auth system"
    - Yes: "login fails when users have 2FA enabled on certain providers"
-3. **Set appetite** - Based on scope:
-   - **Small**: 1-2 days (bug fixes, small enhancements)
-   - **Medium**: 3-5 days (feature additions, moderate refactors)
-   - **Large**: 1-2 weeks (new subsystems, major features)
+3. **Set appetite** - Based on communication overhead, not dev time (solo coding is fast; alignment is the bottleneck):
+   - **Small**: Solo dev, no review. Ship it.
+   - **Medium**: Solo dev + PM. 1-2 check-ins to align on scope, 1 review round.
+   - **Large**: Solo dev + PM + reviewer(s). 2-3 PM check-ins, 2+ review rounds.
 4. **Rough out solution** - Key components and flow, stay abstract
 
 ### Phase 2: Write Initial Plan
@@ -99,7 +99,7 @@ Create `docs/plans/{slug}.md` with:
 ---
 status: Planning
 type: [bug | feature | chore]
-appetite: [Small: 1-2 days | Medium: 3-5 days | Large: 1-2 weeks]
+appetite: [Small | Medium | Large]
 owner: [Name]
 created: [YYYY-MM-DD]
 tracking: [GitHub Issue URL or Notion page URL - added automatically]
@@ -119,9 +119,15 @@ tracking: [GitHub Issue URL or Notion page URL - added automatically]
 
 ## Appetite
 
-**Time budget:** [Small: 1-2 days | Medium: 3-5 days | Large: 1-2 weeks]
+**Size:** [Small | Medium | Large]
 
-**Team size:** [Solo | Pair | Small team]
+**Team:** [list roles involved, e.g., "Solo dev" or "Solo dev, PM" or "Solo dev, PM, code reviewer"]
+
+**Interactions:**
+- PM check-ins: [0 | 1-2 | 2-3] (scope alignment, requirement clarification)
+- Review rounds: [0 | 1 | 2+] (code review, design review, QA)
+
+Solo dev work is fast — the bottleneck is alignment and review. Appetite measures communication overhead, not coding time.
 
 ## Prerequisites
 
@@ -485,10 +491,11 @@ Push back on vague requests. Ask:
 Multiple unrelated features = multiple plans.
 
 ### 3. Set Appetite First
-Time drives scope, not the other way around.
+Communication budget drives scope, not the other way around.
 
-Fixed time → variable scope = shipping
-Fixed scope → variable time = never shipping
+Solo dev work is a rounding error — alignment is the real cost.
+Fixed interactions → variable scope = shipping
+Fixed scope → variable interactions = never shipping
 
 ### 4. Walk Through Use Cases
 Validate the flow step by step:
@@ -517,10 +524,11 @@ State what we're NOT doing:
 
 ### 8. Good is Relative
 Success is relative to appetite:
-- Small appetite → simple solution
-- Large appetite → more sophistication
+- Small appetite → ship without discussion
+- Medium appetite → align once, review once
+- Large appetite → iterate on alignment, multiple review rounds
 
-Don't pursue perfection beyond the time budget.
+Don't pursue perfection beyond the communication budget.
 
 ## Examples
 
@@ -564,7 +572,7 @@ Which one is most urgent? Or is there a single pain point driving all of these?
 ```
 Great - this is specific. I'll create a plan for async meeting rescheduling.
 
-Starting with Medium appetite (3-5 days) since it involves workflow changes and possibly notifications.
+Starting with Medium appetite — solo dev + PM. One check-in to align on notification behavior, one review round before shipping.
 ```
 
 ## Tips
@@ -578,7 +586,7 @@ Starting with Medium appetite (3-5 days) since it involves workflow changes and 
 ## Anti-Patterns to Avoid
 
 ❌ **Over-specifying** - Don't write implementation details in the plan
-❌ **Estimation-first** - Don't start with "how long will this take?"
+❌ **Estimation-first** - Don't start with "how long will this take?" — ask "how many people need to weigh in?"
 ❌ **Kitchen sink** - Don't add "nice to haves" beyond the appetite
 ❌ **Perfect solutions** - Don't design for every edge case
 ❌ **Skipping risks** - Don't ignore technical unknowns
