@@ -5,6 +5,7 @@ Each work item gets its own worktree under .worktrees/{slug}/.
 """
 
 import logging
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -12,6 +13,31 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 WORKTREES_DIR = ".worktrees"
+VALID_SLUG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
+
+
+def _validate_slug(slug: str) -> None:
+    """Validate slug to prevent path traversal and invalid directory names.
+
+    Raises:
+        ValueError: If the slug is invalid.
+    """
+    if not slug or not VALID_SLUG_RE.match(slug) or ".." in slug:
+        raise ValueError(
+            f"Invalid slug: {slug!r}. "
+            "Slugs must be alphanumeric (with .-_ allowed) and cannot contain '..'."
+        )
+
+
+def _branch_exists(repo_root: Path, branch_name: str) -> bool:
+    """Check if a git branch exists locally."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", branch_name],
+        cwd=repo_root,
+        capture_output=True,
+        timeout=10,
+    )
+    return result.returncode == 0
 
 
 def create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Path:
@@ -26,8 +52,11 @@ def create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Pa
         Path to the created worktree directory
 
     Raises:
+        ValueError: If slug contains path traversal or invalid characters
         subprocess.CalledProcessError: If git worktree creation fails
     """
+    _validate_slug(slug)
+
     worktree_dir = repo_root / WORKTREES_DIR / slug
     branch_name = f"session/{slug}"
 
@@ -38,9 +67,22 @@ def create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Pa
     # Ensure .worktrees/ parent exists
     (repo_root / WORKTREES_DIR).mkdir(exist_ok=True)
 
-    # Create worktree with new branch based on base_branch
+    # If the branch already exists (e.g., from a previous session), reuse it
+    if _branch_exists(repo_root, branch_name):
+        cmd = ["git", "worktree", "add", str(worktree_dir), branch_name]
+    else:
+        cmd = [
+            "git",
+            "worktree",
+            "add",
+            str(worktree_dir),
+            "-b",
+            branch_name,
+            base_branch,
+        ]
+
     subprocess.run(
-        ["git", "worktree", "add", str(worktree_dir), "-b", branch_name, base_branch],
+        cmd,
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -69,7 +111,11 @@ def remove_worktree(repo_root: Path, slug: str, delete_branch: bool = True) -> b
 
     Returns:
         True if successfully removed, False otherwise
+
+    Raises:
+        ValueError: If slug contains path traversal or invalid characters
     """
+    _validate_slug(slug)
     worktree_dir = repo_root / WORKTREES_DIR / slug
     branch_name = f"session/{slug}"
 

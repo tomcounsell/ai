@@ -18,7 +18,13 @@ The bridge injects `CLAUDE_CODE_TASK_LIST_ID` into the environment when spawning
 - **Tier 1**: `CLAUDE_CODE_TASK_LIST_ID=thread-{chat_id}-{root_message_id}` for Telegram sessions, or `session-{session_id}` for local Claude Code sessions.
 - **Tier 2**: `CLAUDE_CODE_TASK_LIST_ID={slug}` when a work item slug is assigned via `/make-plan`.
 
-The env var is set in `ValorAgent._create_options()` and passed through `get_agent_response_sdk()`. Claude Code's built-in `TaskCreate`/`TaskList`/`TaskUpdate` tools automatically scope to this ID -- no MCP server changes needed.
+The env var is set in `ValorAgent._create_options()` and passed through `get_agent_response_sdk()`.
+
+**Important distinction:** `CLAUDE_CODE_TASK_LIST_ID` scopes **sub-agent Task storage** (`~/.claude/tasks/{id}/`) used by `TaskCreate`/`TaskList`/`TaskUpdate` when spawned via the `Task` tool. It does **not** affect `TodoWrite`, which is scoped by Claude Code's internal session ID automatically. In practice, this means:
+
+- Sub-agent tasks (spawned during `/build`) are isolated by the env var
+- In-session todos (TodoWrite) are isolated by session ID -- no env var needed
+- For cross-session persistence, use `--session-id` with a deterministic ID derived from the thread
 
 ### Model Fields
 
@@ -47,8 +53,8 @@ The worktree manager provides four operations: `create_worktree()`, `remove_work
 
 Experiments validated the approach before implementation:
 
-1. **Worktree + SDK compatibility**: The Claude Code SDK works in worktree directories when `settings.local.json` is copied into the worktree's `.claude/` directory. Symlinks also work but copying is more reliable.
-2. **`CLAUDE_CODE_TASK_LIST_ID` scoping**: The env var correctly isolates task lists between sessions. Tasks created in one session are invisible to another session with a different ID.
+1. **Worktree + SDK compatibility**: The Claude Code SDK v2.1.38 works in bare worktree directories with no modifications. Even with `.claude/` completely absent, the SDK no longer crashes. `settings.local.json` is copied for convenience (local settings), not for crash prevention.
+2. **`CLAUDE_CODE_TASK_LIST_ID` scoping**: The env var scopes sub-agent Task storage (`~/.claude/tasks/{id}/`) but does **not** affect TodoWrite, which is always scoped by session ID. See `docs/experiments/task-list-isolation.md` for detailed findings.
 3. **Thread ID uniqueness**: Using `chat_id` + `root_message_id` provides per-conversation isolation within group chats, not just per-chat isolation.
 
 ## Relevant Files
@@ -59,7 +65,8 @@ Experiments validated the approach before implementation:
 | `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment |
 | `agent/job_queue.py` | Computes task list ID in `_execute_job()` and passes to SDK |
 | `models/sessions.py` | `AgentSession` model with `work_item_slug` field |
-| `docs/plans/session-isolation.md` | Original plan document with full design rationale |
+| `docs/experiments/task-list-isolation.md` | Experiment results for CLAUDE_CODE_TASK_LIST_ID behavior |
+| `docs/experiments/worktree-sdk-compatibility.md` | Experiment results for SDK + worktree compatibility |
 
 ## See Also
 
