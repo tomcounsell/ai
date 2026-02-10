@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor
@@ -85,7 +85,7 @@ class OutputType(Enum):
     ERROR = "error"             # Something failed
 ```
 
-Use Haiku for classification (fast, cheap). Prompt should detect:
+Use Haiku for classification (fast, cheap) with 80% confidence threshold — below that, default to pausing (conservative). Prompt should detect:
 - Direct questions ("Should I...?", "Which do you prefer?", "Do you want...?")
 - Open-ended asks ("Let me know if...", "Any feedback on...?")
 - vs. status reports ("Done", "Fixed X", "Pushed commit abc123")
@@ -99,21 +99,11 @@ After classifying output as STATUS_UPDATE, instead of sending to chat and waitin
 
 The summarizer already has the logic to decide whether to send; extend it to auto-continue.
 
-#### 3. 👍 Reaction Handler (bridge/telegram_bridge.py)
+#### 3. 👍 Reaction Semantics
 
-Add a `NewMessageReaction` event handler (or extend the existing message handler) to catch when user reacts with 👍:
+**Note:** Telethon cannot receive emoji reaction events — this is a Telegram API limitation for user accounts (only bots can receive reaction callbacks). The 👍 reaction serves as a **human-to-human communication signal** in the group chat indicating "this task is handled and complete." It's documentation of completion status for the team, not a programmatic trigger.
 
-```python
-@client.on(events.MessageEdited)  # Reactions show as edits
-async def reaction_handler(event):
-    if not event.reactions:
-        return
-    for reaction in event.reactions:
-        if reaction.emoticon == "👍":
-            session = lookup_session_for_message(event.message_id)
-            if session:
-                mark_work_done(working_dir, session.branch_name)
-```
+The `mark_work_done()` function is already called automatically at job completion in `agent/job_queue.py`. No additional reaction handler needed.
 
 #### 4. Session Log Snapshots (bridge/ or agent/)
 
@@ -141,7 +131,7 @@ The skill definitions in `.claude/skills/` already do this — verify the links 
 - **Over-complex classification** — Start with simple heuristics (question mark, specific keywords). Only add LLM if heuristics fail.
 - **Real-time reaction streaming** — Telethon reaction events can be tricky. Don't try to handle all edge cases; focus on 👍 specifically.
 - **Session log verbosity** — Don't log everything. Capture only what's needed for debugging breakpoint issues.
-- **Auto-continue loops** — Risk of agent talking to itself indefinitely. Add a max auto-continue count per session.
+- **Auto-continue loops** — Risk of agent talking to itself indefinitely. Max 3 auto-continues per session (resets on human reply).
 
 ## Risks
 
@@ -149,14 +139,14 @@ The skill definitions in `.claude/skills/` already do this — verify the links 
 **Impact:** Agent continues working when it should have asked for clarification, wasting time on wrong path.
 **Mitigation:** Conservative classification — when in doubt, treat as question. Log all auto-continues for audit. Add escape hatch (e.g., "⚠️" prefix forces pause).
 
-### Risk 2: 👍 reaction on wrong message triggers completion
-**Impact:** Session marked done prematurely.
-**Mitigation:** Only act on 👍 for messages within the last N minutes (e.g., 30). Require the message to be from Valor (not human).
+### Risk 2: Classification model unavailable
+**Impact:** Auto-continue can't run, agent pauses on every output.
+**Mitigation:** Fall back to keyword heuristics (question marks, specific phrases). Log when LLM classification fails.
 
 ## No-Gos (Out of Scope)
 
 - Not implementing full session replay/debugging UI — just log snapshots
-- Not adding reaction support for all emoji — only 👍 for completion
+- Not adding reaction event handlers — Telethon can't receive them for user accounts
 - Not changing how sessions resume from reply-to — that already works
 - Not modifying task list scoping — already handled by #62/session-isolation
 
@@ -179,7 +169,7 @@ No new MCP server needed. Changes are internal to the bridge/summarizer. The aut
 
 - [ ] Agent output classified correctly (questions vs status updates) at 95%+ accuracy
 - [ ] Status updates trigger auto-continue, no human wait
-- [ ] 👍 reaction on Valor's message triggers `mark_work_done()`
+- [ ] `mark_work_done()` called automatically on job completion (already works)
 - [ ] Session logs saved at pause/resume/complete transitions
 - [ ] `/make-plan` delivers issue + plan URLs to chat automatically
 - [ ] `/build` delivers PR URL to chat automatically
@@ -192,12 +182,6 @@ No new MCP server needed. Changes are internal to the bridge/summarizer. The aut
 - **Builder (classifier)**
   - Name: classifier-builder
   - Role: Implement output classification logic in summarizer
-  - Agent Type: builder
-  - Resume: true
-
-- **Builder (reaction)**
-  - Name: reaction-builder
-  - Role: Implement 👍 reaction handler and mark_work_done integration
   - Agent Type: builder
   - Resume: true
 
@@ -240,21 +224,10 @@ No new MCP server needed. Changes are internal to the bridge/summarizer. The aut
 - **Parallel**: false
 - Modify `summarize_response()` to call classifier
 - When STATUS_UPDATE: inject "continue" via steering queue
-- Add max auto-continue counter (default: 5)
+- Add max auto-continue counter (default: 3, resets on human reply)
 - Log all auto-continues
 
-### 3. Implement 👍 reaction handler
-- **Task ID**: build-reaction
-- **Depends On**: none
-- **Assigned To**: reaction-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- Add reaction event handler in `bridge/telegram_bridge.py`
-- Lookup session from message metadata
-- Call `mark_work_done()` on 👍
-- Log completion signal
-
-### 4. Implement session log snapshots
+### 3. Implement session log snapshots
 - **Task ID**: build-session-logs
 - **Depends On**: none
 - **Assigned To**: session-logs-builder
@@ -265,19 +238,19 @@ No new MCP server needed. Changes are internal to the bridge/summarizer. The aut
 - Include session context, messages, tasks, git state
 - Call from pause/resume/complete transitions
 
-### 5. Validate workflow integration
+### 4. Validate workflow integration
 - **Task ID**: validate-workflow
-- **Depends On**: build-autocontinue, build-reaction, build-session-logs
+- **Depends On**: build-autocontinue, build-session-logs
 - **Assigned To**: workflow-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Verify classification accuracy on sample outputs
 - Verify auto-continue triggers correctly
-- Verify 👍 reaction marks work done
+- Verify mark_work_done() is called on job completion
 - Verify session logs are created
 - Run `black . && ruff check .`
 
-### 6. Documentation
+### 5. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-workflow
 - **Assigned To**: docs-writer
@@ -287,7 +260,7 @@ No new MCP server needed. Changes are internal to the bridge/summarizer. The aut
 - Update CLAUDE.md auto-continue section if needed
 - Add inline code comments
 
-### 7. Final Validation
+### 6. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: workflow-validator
@@ -303,13 +276,6 @@ No new MCP server needed. Changes are internal to the bridge/summarizer. The aut
 - `black --check . && ruff check .` — Code formatting and linting
 - `pytest tests/` — All tests pass
 - `grep -n "classify_output\|OutputType" bridge/summarizer.py` — Classifier exists
-- `grep -n "reaction.*👍\|mark_work_done" bridge/telegram_bridge.py` — Reaction handler exists
+- `grep -n "mark_work_done" agent/job_queue.py` — Completion marking exists
 - `ls logs/sessions/` — Session log directory exists
 
-## Open Questions
-
-1. **Classification accuracy threshold** — How confident should we be before auto-continuing? 80%? 90%? Should low-confidence cases default to pausing?
-
-2. **Max auto-continues** — What's a reasonable limit before forcing a pause? 5? 10? Should this reset on human reply?
-
-3. **👍 scope** — Should we only act on 👍 from the supervisor (Tom), or any chat participant? Should we require the reacted message to be from Valor specifically?
