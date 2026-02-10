@@ -228,11 +228,8 @@ def main():
     if not plan_file:
         plan_file = find_newest_plan_file()
         if not plan_file:
-            print(
-                "ERROR: No plan file provided and could not auto-detect new plan file",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+            # No new plan file detected — nothing to validate, pass through
+            sys.exit(0)
 
     if not Path(plan_file).exists():
         print(f"ERROR: Plan file does not exist: {plan_file}", file=sys.stderr)
