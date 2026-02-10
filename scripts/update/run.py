@@ -21,7 +21,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.update import cal_integration, deps, git, service, verify  # noqa: E402
+from scripts.update import cal_integration, deps, git, service, symlinks, verify  # noqa: E402
 
 
 @dataclass
@@ -98,6 +98,7 @@ class UpdateResult:
     calendar_config: cal_integration.CalendarConfigResult | None = None
     service_status: service.ServiceStatus | None = None
     caffeinate_status: service.CaffeinateStatus | None = None
+    symlink_result: symlinks.SymlinkSyncResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -148,6 +149,20 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 log("Stashed and restored local changes", v)
             else:
                 result.warnings.append("Local changes stashed but failed to restore")
+
+    # Step 1.5: Sync .claude hardlinks (skills + commands to ~/.claude/)
+    log("Syncing .claude hardlinks...", v)
+    result.symlink_result = symlinks.sync_claude_dirs(project_dir)
+    if result.symlink_result.created > 0:
+        log(f"Created {result.symlink_result.created} new hardlink(s)", v, always=True)
+        for action in result.symlink_result.actions:
+            if action.action == "created":
+                log(f"  {action.dst}", v, always=True)
+    if result.symlink_result.errors > 0:
+        for action in result.symlink_result.actions:
+            if action.action == "error":
+                log(f"WARN: Failed to link {action.dst}: {action.error}", v)
+                result.warnings.append(f"Hardlink failed: {action.dst}")
 
     # Step 2: Check for pending critical upgrades
     pending = git.check_upgrade_pending(project_dir)
