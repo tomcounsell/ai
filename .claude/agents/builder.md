@@ -1,7 +1,6 @@
 ---
 name: builder
 description: Implementation agent that executes ONE task at a time. Use when work needs to be done - writing code, creating files, implementing features.
-model: sonnet
 color: cyan
 hooks:
   PostToolUse:
