@@ -46,25 +46,62 @@ Guidance for Claude Code when working with this repository.
 - Start with minimal tools, expand only if needed
 
 ### 7. DEFINITION OF DONE
-- **Built**: Code is implemented and working
-- **Tested**: Unit tests passing, manual verification complete
-- **Documented**: Code comments, API docs as appropriate
-- **Plans migrated**: `docs/plans/` → `docs/features/`
+- Enforced by the `/build` command and builder agent — see `.claude/commands/build.md`
+- Not complete until: tests pass, docs created, PR opened, plan migrated
 
 ### 8. PARALLEL EXECUTION (P-Thread Pattern)
 - When facing independent tasks, spawn parallel sub-agents using Task tool
 - Do NOT parallelize sequential/dependent work
 - Always aggregate results before reporting
 
-### 9. SDLC PATTERN FOR CODE CHANGES
-- All code changes MUST follow: Plan → Build → Test → Review → Ship
-- If tests fail: loop back to Build, fix, re-test (up to 5 iterations)
-- Do NOT skip phases. Do NOT ship without tests passing.
+### 9. SDLC IS AUTONOMOUS
+- The `/build` command owns the full cycle: Build → Test → Review → Ship
+- Builder agents loop on test failures automatically (up to 5 iterations)
+- Do NOT manually orchestrate SDLC steps — invoke `/build` and let it run
 
 ### 10. ALWAYS RESTART RUNNING SERVICES
 - If bridge is running and you modify bridge/agent code, restart immediately after committing
 - Restart: `./scripts/valor-service.sh restart`
 - Verify: `tail -5 logs/bridge.log` shows "Connected to Telegram"
+
+## Development Workflow
+
+The standard flow from conversation to shipped feature:
+
+### Phase 1: Conversation
+- Chat arrives via Telegram (or local Claude Code session)
+- Could be Q&A, exploring an idea, or raising an issue
+- No branch, no task list, no slug yet — just conversation
+- If there's an obvious quick fix: push a hotfix directly to `main`
+- If it's a real piece of work: create a GitHub issue
+
+### Phase 2: Planning
+- Invoke `/make-plan {slug}` referencing the issue
+- Agent creates a feature branch (`session/{slug}`) and writes `docs/plans/{slug}.md`
+- A link to the plan doc is added to the top of the issue description
+- Two links sent back to chat: issue URL + plan doc URL (on its branch in GitHub)
+- Iterate on the plan via conversation as needed
+
+### Phase 3: Building
+- Invoke `/build docs/plans/{slug}.md` (or `/build #{issue-number}`)
+- The build command autonomously executes: Build → Test → loop until passing → PR
+- When complete, a PR link is sent back to the Telegram chat
+- Plan doc is migrated and tracking issue is closed
+
+### Phase 4: Review & Merge
+- Valor may or may not be asked to merge the PR after human review
+- Thumbs-up emoji reaction (👍) signals "done for now" / final completion
+
+### Auto-Continue Rules
+- The agent should only pause if there is a **legitimate open question** requiring human input
+- If there is no question — just a status update — the summarizer auto-sends "continue"
+- Status updates without questions or signs of completion are NOT stopping points
+- The agent keeps working until the phase is complete or it's genuinely blocked
+
+### Session Continuity
+- Full session logs are saved at all breakpoints for later analysis
+- Telegram chat history is cached in local SQLite for fast review anytime
+- Reply-to messages in Telegram resume the original session context
 
 ## System Architecture
 
@@ -99,12 +136,14 @@ Work is DONE when:
 | State | Description |
 |-------|-------------|
 | **Active** | Currently processing message |
-| **Dormant** | Work paused, waiting for reply |
+| **Dormant** | Paused on a legitimate open question, waiting for human reply |
 | **Abandoned** | Unfinished work, auto-revived |
+| **Complete** | Work done, signaled by 👍 reaction or `mark_work_done()` |
 
-- Fresh messages create new sessions
-- Reply-to messages resume original session
-- Mark complete with `mark_work_done()` when finished
+- Fresh messages create new sessions (scoped by Telegram thread ID or local session ID)
+- Reply-to messages resume the original session and its context
+- Sessions only pause for **genuine open questions** — not status updates
+- Each session gets an isolated task list automatically (see issue #62 for two-tier scoping)
 
 ## Quick Reference
 
