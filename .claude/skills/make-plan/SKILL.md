@@ -34,6 +34,10 @@ hooks:
             docs/plans
         - type: command
           command: >-
+            $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_type_immutability.py
+            docs/plans
+        - type: command
+          command: >-
             $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_documentation_section.py
 ---
 
@@ -93,12 +97,20 @@ Every plan MUST include a `type:` field in the frontmatter. This classification 
 - Update the `type:` field in frontmatter if classification changes
 - Classification should be finalized before status changes to `Ready`
 
+**Auto-Classification Pre-Population:**
+- When a message arrives via Telegram, the bridge automatically classifies it as bug/feature/chore using the Haiku model
+- This classification is stored in session metadata (`classification_type` field on AgentSession and RedisJob)
+- When creating a plan, check if `classification_type` is available from the session context
+- If available, use it as the default `type:` value in the frontmatter template
+- The user can always override the auto-classification during drafting
+- If auto-classification is not available (e.g., local session, classification failed), fall back to manual classification
+
 Create `docs/plans/{slug}.md` with:
 
 ```markdown
 ---
 status: Planning
-type: [bug | feature | chore]
+type: [bug | feature | chore]  # May be pre-populated from auto-classification
 appetite: [Small | Medium | Large]
 owner: [Name]
 created: [YYYY-MM-DD]

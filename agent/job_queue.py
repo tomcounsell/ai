@@ -63,6 +63,7 @@ class RedisJob(Model):
     non_youtube_urls = Field(null=True)  # JSON string of [url, ...]
     reply_to_msg_id = Field(type=int, null=True)
     chat_id_for_enrichment = Field(null=True)  # Telegram chat ID for API calls
+    classification_type = Field(null=True)  # Auto-classified type (bug/feature/chore)
 
 
 class Job:
@@ -159,6 +160,10 @@ class Job:
     def chat_id_for_enrichment(self) -> str | None:
         return self._rj.chat_id_for_enrichment
 
+    @property
+    def classification_type(self) -> str | None:
+        return self._rj.classification_type
+
 
 async def _push_job(
     project_key: str,
@@ -181,6 +186,7 @@ async def _push_job(
     non_youtube_urls: str | None = None,
     reply_to_msg_id: int | None = None,
     chat_id_for_enrichment: str | None = None,
+    classification_type: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project."""
     await RedisJob.async_create(
@@ -206,6 +212,7 @@ async def _push_job(
         non_youtube_urls=non_youtube_urls,
         reply_to_msg_id=reply_to_msg_id,
         chat_id_for_enrichment=chat_id_for_enrichment,
+        classification_type=classification_type,
     )
     return await RedisJob.query.async_count(project_key=project_key, status="pending")
 
@@ -432,6 +439,7 @@ async def enqueue_job(
     non_youtube_urls: str | None = None,
     reply_to_msg_id: int | None = None,
     chat_id_for_enrichment: str | None = None,
+    classification_type: str | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -462,6 +470,7 @@ async def enqueue_job(
         non_youtube_urls=non_youtube_urls,
         reply_to_msg_id=reply_to_msg_id,
         chat_id_for_enrichment=chat_id_for_enrichment,
+        classification_type=classification_type,
     )
     _ensure_worker(project_key)
     logger.info(
@@ -622,6 +631,7 @@ async def _execute_job(job: Job) -> None:
             branch_name=branch_name,
             work_item_slug=job.work_item_slug,
             message_text=job.message_text[:20_000] if job.message_text else None,
+            classification_type=job.classification_type,
         )
     except Exception as e:
         logger.debug(f"AgentSession create failed (non-fatal): {e}")

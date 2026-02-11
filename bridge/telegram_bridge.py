@@ -719,11 +719,26 @@ async def main():
         await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
 
         # Classify intent with Ollama (fast, for reaction emoji)
+        classification_result = {}  # Mutable container for async classification result
+
         async def classify_and_update_reaction():
             """Classify intent with Ollama and update reaction emoji."""
             emoji = await get_processing_emoji_async(clean_text)
             await set_reaction(client, event.chat_id, message.id, emoji)
             logger.debug(f"Intent classified, reaction set to {emoji}")
+            # Also classify work type (non-blocking, result stored for enqueue)
+            try:
+                from tools.classifier import classify_request_async
+
+                result = await classify_request_async(clean_text)
+                classification_result["type"] = result.get("type")
+                classification_result["confidence"] = result.get("confidence")
+                logger.debug(
+                    f"Work classified as {result.get('type')} "
+                    f"(confidence: {result.get('confidence')})"
+                )
+            except Exception as e:
+                logger.debug(f"Work classification failed (non-fatal): {e}")
 
         # Start intent classification (don't await)
         asyncio.create_task(classify_and_update_reaction())
@@ -891,6 +906,7 @@ async def main():
                 non_youtube_urls=non_yt_urls_json,
                 reply_to_msg_id=message.reply_to_msg_id,
                 chat_id_for_enrichment=telegram_chat_id,
+                classification_type=classification_result.get("type"),
             )
             if depth > 1:
                 await client.send_message(
