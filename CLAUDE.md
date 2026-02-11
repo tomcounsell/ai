@@ -252,6 +252,62 @@ QUICKBOOKS_CLIENT_SECRET=your_client_secret
 QUICKBOOKS_WEBHOOK_TOKEN=webhook_token
 QUICKBOOKS_SANDBOX_MODE=True
 ```
+## Podcast Production System
+
+The podcast production system uses a **12-phase workflow** defined in `.claude/skills/new-podcast-episode.md`. Episodes are created using NotebookLM for two-host AI audio generation.
+
+### Slash Commands
+- `/podcast-episode` — Start a new episode (`.claude/commands/podcast-episode.md`)
+- `/podcast-series` — **DEPRECATED** — Series replaced by multi-feed model
+
+### Key Skills
+| Skill | Purpose |
+|-------|---------|
+| `new-podcast-episode.md` | Complete 12-phase episode workflow |
+| `podcast-episode-planner/` | Episode planner v4.0 with structural design |
+| `notebooklm-enterprise-api/` | NotebookLM Enterprise API integration |
+| `notebooklm-audio/` | NotebookLM audio generation |
+| `podcast-audio-processing/` | Audio processing and handling |
+| `podcast-feed-validator/` | RSS feed validation |
+| `podcast-quality-scorecard/` | 10-dimension quality assessment |
+| `podcast-cover-art/` | AI cover art generation |
+| `perplexity-deep-research/` | Academic/peer-reviewed research |
+| `gemini-deep-research/` | Policy/regulatory research |
+| `gpt-researcher/` | GPT-based deep research |
+| `chatgpt-deep-research/` | ChatGPT deep research |
+
+### Python Tools (`apps/podcast/tools/`)
+| Script | Purpose |
+|--------|---------|
+| `notebooklm_api.py` | NotebookLM Enterprise API with episodeFocus |
+| `notebooklm_prompt.py` | Generate episodeFocus prompts |
+| `transcribe_only.py` | Local Whisper transcription |
+| `generate_chapters.py` | AI-powered chapter generation |
+| `update_feed.py` | Update feed.xml with structured HTML show notes |
+| `generate_companion_resources.py` | Create summary, checklist, frameworks |
+| `generate_landing_page.py` | Generate HTML episode page |
+| `cover_art.py` | AI cover art and branding |
+| `setup_episode.py` | Set up episode directory structure |
+| `perplexity_deep_research.py` | Perplexity research integration |
+| `gemini_deep_research.py` | Gemini research integration |
+| `gpt_researcher_run.py` | GPT Researcher integration |
+
+### Episode Working Directory
+All in-progress episode work happens in `apps/podcast/pending-episodes/{feed-slug}-{episode-slug}/`. This directory is **gitignored**. Once an episode is complete, files are imported into the Django database.
+
+### Templates
+- `docs/templates/podcast/p3-briefing-enhanced.md` — Research briefing
+- `docs/templates/podcast/content_plan-enhanced.md` — Episode planning
+- `docs/templates/podcast/metadata-enhanced.md` — Publishing metadata
+
+### Podcast Environment Variables
+Add to `.env.local` for podcast tools:
+```
+ANTHROPIC_API_KEY=your_key
+OPENAI_API_KEY=your_key
+OPENROUTER_API_KEY=your_key
+```
+
 ## Render Infrastructure
 
 - **Workspace**: Yudame (`tea-cldfmjeg1b2c73f6rrug`)

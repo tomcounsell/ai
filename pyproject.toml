@@ -75,12 +75,25 @@ test = [
     "pytest",
     "pytest-cov",
     "pytest-django",
+    "pytest-mock>=3.15.1",
     "factory-boy",
 ]
 e2e = [
     "browser-use>=0.1.40",
     "playwright>=1.40.0",
     "pytest-asyncio>=0.23.0",
+]
+
+podcast = [
+    "anthropic>=0.75.0",
+    "openai-whisper>=20250625",
+    "pillow>=12.0.0",
+    "gpt-researcher>=0.12.0",
+    "langchain-openai>=0.3.0",
+    "google-genai>=0.5.0",
+    "pydub>=0.25.1",
+    "numpy>=2.0.0",
+    "scipy>=1.14.0",
 ]
 
 [project.urls]

@@ -160,3 +160,6 @@ test_reports/
 reports/
 .repo_map_structure.json
 .django_tailwind_cli/tailwindcss-macos-arm64-*
+
+# Podcast episode working directory
+apps/podcast/pending-episodes/

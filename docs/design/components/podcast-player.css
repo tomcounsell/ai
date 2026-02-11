@@ -1,0 +1,247 @@
+/**
+ * Podcast Player Component
+ * Based on locked design specification
+ */
+
+/* === EPISODE CARD === */
+
+.episode {
+  background-color: var(--color-white);
+  border: 1px solid var(--color-gray-200);
+  border-radius: var(--radius-lg);
+  padding: var(--card-padding-desktop);
+  margin-bottom: var(--space-4);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow var(--transition-base);
+}
+
+.episode:hover {
+  box-shadow: var(--shadow-md);
+}
+
+/* === EPISODE TOP (cover + content side by side) === */
+
+.episode-top {
+  display: flex;
+  gap: var(--space-4);
+}
+
+/* === EPISODE COVER === */
+
+.episode-cover {
+  flex-shrink: 0;
+  width: 120px;
+  height: 120px;
+}
+
+.episode-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-gray-200);
+}
+
+.episode-content {
+  flex: 1;
+  min-width: 0;
+}
+
+/* === EPISODE HEADER === */
+
+.episode-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.episode-number {
+  display: inline-block;
+  background-color: var(--color-salmon);
+  color: var(--color-black);
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  padding: 4px 12px;
+  border-radius: var(--radius-full);
+  flex-shrink: 0;
+}
+
+.episode-title {
+  font-family: var(--font-serif);
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  color: var(--color-black);
+  flex: 1;
+  min-width: 200px;
+}
+
+.episode-duration {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--color-gray-600);
+  flex-shrink: 0;
+}
+
+.episode-links-inline {
+  display: flex;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.episode-links-inline a {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  color: var(--color-black);
+  text-decoration: underline;
+  transition: color var(--transition-base);
+}
+
+.episode-links-inline a:hover {
+  color: var(--color-salmon);
+  text-decoration: underline;
+}
+
+/* === EPISODE SUMMARY === */
+
+.episode-summary {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
+  color: var(--color-gray-700);
+  margin-top: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+/* === EPISODE DETAILS (EXPANDABLE) === */
+
+.episode-details {
+  margin-bottom: 0;
+}
+
+.episode-details summary {
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--color-black);
+  cursor: pointer;
+  list-style: none;
+  padding: 0;
+  transition: color var(--transition-base);
+  user-select: none;
+}
+
+.episode-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.episode-details summary::before {
+  content: '+ ';
+  display: inline-block;
+  color: var(--color-salmon);
+  font-weight: var(--weight-semibold);
+  margin-right: 4px;
+}
+
+.episode-details[open] summary::before {
+  content: '− ';
+}
+
+.episode-details summary:hover {
+  color: var(--color-salmon);
+}
+
+.episode-full-description {
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-relaxed);
+  color: var(--color-gray-700);
+  padding: var(--space-2) 0;
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--color-salmon);
+  margin-top: var(--space-1);
+}
+
+/* === AUDIO PLAYER === */
+
+.episode audio {
+  width: 100%;
+  height: 48px;
+  border-radius: var(--radius-md);
+  outline: none;
+  margin-top: var(--space-2);
+}
+
+.episode audio:focus {
+  outline: 2px solid var(--color-salmon);
+  outline-offset: 2px;
+}
+
+/* Attempt to style native controls (limited browser support) */
+.episode audio::-webkit-media-controls-panel {
+  background-color: var(--color-gray-100);
+}
+
+.episode audio::-webkit-media-controls-play-button,
+.episode audio::-webkit-media-controls-mute-button {
+  background-color: var(--color-salmon);
+  border-radius: var(--radius-full);
+}
+
+/* === EPISODE LIST === */
+
+.episode-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.episode-list-header {
+  font-family: var(--font-serif);
+  font-size: var(--text-3xl);
+  font-weight: var(--weight-semibold);
+  color: var(--color-black);
+  margin-bottom: var(--space-4);
+}
+
+/* === MOBILE ADJUSTMENTS === */
+
+@media (max-width: 768px) {
+  .episode {
+    padding: var(--card-padding-mobile);
+  }
+
+  .episode-top {
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .episode-cover {
+    width: 80px;
+    height: 80px;
+  }
+
+  .episode-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-1);
+  }
+
+  .episode-title {
+    font-size: var(--text-base);
+    min-width: auto;
+    width: 100%;
+  }
+
+  .episode-duration {
+    order: -1;
+    align-self: flex-end;
+  }
+
+  .episode-links-inline {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}

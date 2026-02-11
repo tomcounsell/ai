@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Podcast Player - Yudame Research Components</title>
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Playfair+Display:wght@600;700&family=IBM+Plex+Mono:wght@400&display=swap" rel="stylesheet">
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="foundation.css">
+  <link rel="stylesheet" href="podcast-player.css">
+
+  <style>
+    /* Page-specific styles */
+    body {
+      padding: var(--space-6) var(--space-4);
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    .page-header {
+      margin-bottom: var(--space-6);
+    }
+
+    .page-title {
+      font-family: var(--font-serif);
+      font-size: var(--text-4xl);
+      font-weight: var(--weight-semibold);
+      color: var(--color-black);
+      margin-bottom: var(--space-2);
+    }
+
+    .page-description {
+      font-family: var(--font-sans);
+      font-size: var(--text-lg);
+      color: var(--color-gray-700);
+      line-height: var(--leading-relaxed);
+    }
+  </style>
+</head>
+<body>
+  <div class="page-header">
+    <h1 class="page-title">Podcast Episodes</h1>
+    <p class="page-description">Listen to our research-based discussions on early childhood education and learning science.</p>
+  </div>
+
+  <div class="episode-list">
+    <!-- Episode 1 -->
+    <div class="episode">
+      <div class="episode-header">
+        <span class="episode-number">Ep 1</span>
+        <span class="episode-title">Lifestyle Foundations</span>
+        <span class="episode-duration">43:57</span>
+        <span class="episode-links-inline">
+          <a href="ep1-lifestyle/report.html">Report</a>
+          <a href="ep1-lifestyle/transcript.html">Transcript</a>
+        </span>
+      </div>
+      <div class="episode-summary">How VO2 max and HRV predict longevity better than traditional risk factors, plus the lifestyle framework to optimize both.</div>
+      <details class="episode-details">
+        <summary>More details</summary>
+        <div class="episode-full-description">Discover how VO2 max and heart rate variability (HRV) predict longevity better than traditional risk factors, and learn the foundational lifestyle framework to optimize both. Each 1-MET improvement in VO2 max reduces all-cause mortality by 11-17%, while optimal sleep and the Mediterranean diet create synergistic effects that can prevent over 80% of cardiovascular events.</div>
+      </details>
+      <audio controls preload="metadata">
+        <source src="ep1-lifestyle/2025-11-21-cardiovascular-health-episode-1-lifestyle.mp3" type="audio/mpeg">
+        Your browser does not support the audio element.
+      </audio>
+    </div>
+
+    <!-- Episode 2 (Example) -->
+    <div class="episode">
+      <div class="episode-header">
+        <span class="episode-number">Ep 2</span>
+        <span class="episode-title">Active Recovery Techniques</span>
+        <span class="episode-duration">38:24</span>
+        <span class="episode-links-inline">
+          <a href="ep2-recovery/report.html">Report</a>
+          <a href="ep2-recovery/transcript.html">Transcript</a>
+        </span>
+      </div>
+      <div class="episode-summary">Research-backed strategies for optimizing learning retention through active recovery and spaced repetition.</div>
+      <details class="episode-details">
+        <summary>More details</summary>
+        <div class="episode-full-description">Explore the neuroscience behind active recovery in learning contexts. We examine how strategic rest intervals, retrieval practice, and interleaved learning create stronger memory consolidation than traditional study methods. Studies show active recovery techniques can improve long-term retention by up to 50% compared to passive review.</div>
+      </details>
+      <audio controls preload="metadata">
+        <source src="#" type="audio/mpeg">
+        Your browser does not support the audio element.
+      </audio>
+    </div>
+
+    <!-- Episode 3 (Example) -->
+    <div class="episode">
+      <div class="episode-header">
+        <span class="episode-number">Ep 3</span>
+        <span class="episode-title">Montessori and Modern Neuroscience</span>
+        <span class="episode-duration">51:12</span>
+        <span class="episode-links-inline">
+          <a href="ep3-montessori/report.html">Report</a>
+          <a href="ep3-montessori/transcript.html">Transcript</a>
+        </span>
+      </div>
+      <div class="episode-summary">How 100-year-old Montessori principles align with contemporary brain development research.</div>
+      <details class="episode-details">
+        <summary>More details</summary>
+        <div class="episode-full-description">Maria Montessori's observations about child development, made over a century ago, are remarkably consistent with modern neuroscience findings. We explore how self-directed learning, sensitive periods, and the prepared environment align with what we now know about executive function development, neuroplasticity, and intrinsic motivation. Recent meta-analyses show Montessori students outperform traditional education peers in executive function tasks and creative problem-solving.</div>
+      </details>
+      <audio controls preload="metadata">
+        <source src="#" type="audio/mpeg">
+        Your browser does not support the audio element.
+      </audio>
+    </div>
+  </div>
+
+  <script>
+    // Add scroll shadow to episodes on scroll (optional enhancement)
+    const episodes = document.querySelectorAll('.episode');
+
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.style.opacity = '1';
+          entry.target.style.transform = 'translateY(0)';
+        }
+      });
+    }, {
+      threshold: 0.1
+    });
+
+    episodes.forEach(episode => {
+      episode.style.opacity = '0';
+      episode.style.transform = 'translateY(20px)';
+      episode.style.transition = 'opacity 0.4s ease, transform 0.4s ease';
+      observer.observe(episode);
+    });
+  </script>
+</body>
+</html>

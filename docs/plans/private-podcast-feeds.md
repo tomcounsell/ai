@@ -62,8 +62,7 @@ Episode
 ├── title (CharField)
 ├── description (TextField) - plain text summary
 ├── content (TextField) - HTML show notes
-├── episode_number (PositiveIntegerField, nullable)
-├── season_number (PositiveIntegerField, nullable)
+├── episode_number (PositiveIntegerField) - sequential per podcast, starting at 1
 ├── episode_type (CharField: full, trailer, bonus)
 ├── audio_file (FK to Upload)
 ├── duration_seconds (PositiveIntegerField)
@@ -184,7 +183,6 @@ path("feed/<str:access_token>/episode/<uuid:guid>/audio", EpisodeAudioView.as_vi
       <itunes:duration>3600</itunes:duration>
       <itunes:episodeType>full</itunes:episodeType>
       <itunes:episode>1</itunes:episode>
-      <itunes:season>1</itunes:season>
     </item>
   </channel>
 </rss>
@@ -248,7 +246,7 @@ All templates in `apps/public/templates/podcast/`
 5. Episode Form (/podcasts/{slug}/episodes/create/ or /edit/)
    - Title, description, show notes (rich text)
    - Audio file upload with progress
-   - Episode number, season, type
+   - Episode number, type
    - Publish immediately or save as draft
 
 6. Subscriber List (/podcasts/{slug}/subscribers/)
