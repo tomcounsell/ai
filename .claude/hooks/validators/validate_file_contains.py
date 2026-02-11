@@ -39,7 +39,7 @@ from pathlib import Path
 
 DEFAULT_DIRECTORY = "docs/plans"
 DEFAULT_EXTENSION = ".md"
-DEFAULT_MAX_AGE_MINUTES = 10
+DEFAULT_MAX_AGE_MINUTES = 480
 
 NO_FILE_ERROR = (
     "VALIDATION FAILED: No file found matching {pattern}.\n\n"
