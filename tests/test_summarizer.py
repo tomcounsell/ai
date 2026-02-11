@@ -1,11 +1,17 @@
-"""Tests for bridge.summarizer — response summarization for Telegram."""
+"""Tests for bridge.summarizer — response summarization and classification."""
 
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from bridge.summarizer import (
+    CLASSIFICATION_CONFIDENCE_THRESHOLD,
     SUMMARIZE_THRESHOLD,
+    ClassificationResult,
+    OutputType,
+    _classify_with_heuristics,
+    _parse_classification_response,
+    classify_output,
     extract_artifacts,
     summarize_response,
 )
@@ -242,3 +248,370 @@ class TestSummarizeResponseIntegration:
         assert len(result.text) < len(agent_output)
         # Summary should be concise — a few sentences, not a wall
         assert len(result.text) <= 800
+
+
+class TestOutputType:
+    """Tests for the OutputType enum."""
+
+    def test_enum_values(self):
+        assert OutputType.QUESTION.value == "question"
+        assert OutputType.STATUS_UPDATE.value == "status"
+        assert OutputType.COMPLETION.value == "completion"
+        assert OutputType.BLOCKER.value == "blocker"
+        assert OutputType.ERROR.value == "error"
+
+    def test_all_types_exist(self):
+        """Verify all expected types are defined."""
+        assert len(OutputType) == 5
+
+
+class TestClassificationResult:
+    """Tests for the ClassificationResult dataclass."""
+
+    def test_creation(self):
+        result = ClassificationResult(
+            output_type=OutputType.QUESTION,
+            confidence=0.95,
+            reason="Direct question detected",
+        )
+        assert result.output_type == OutputType.QUESTION
+        assert result.confidence == 0.95
+        assert result.reason == "Direct question detected"
+
+    def test_confidence_range(self):
+        """Confidence is a float between 0.0 and 1.0."""
+        result = ClassificationResult(
+            output_type=OutputType.STATUS_UPDATE,
+            confidence=0.0,
+            reason="Test",
+        )
+        assert result.confidence == 0.0
+
+        result2 = ClassificationResult(
+            output_type=OutputType.COMPLETION,
+            confidence=1.0,
+            reason="Test",
+        )
+        assert result2.confidence == 1.0
+
+
+class TestParseClassificationResponse:
+    """Tests for _parse_classification_response."""
+
+    def test_valid_json(self):
+        raw = '{"type": "question", "confidence": 0.95, "reason": "asks user"}'
+        result = _parse_classification_response(raw)
+        assert result is not None
+        assert result.output_type == OutputType.QUESTION
+        assert result.confidence == 0.95
+        assert result.reason == "asks user"
+
+    def test_all_types(self):
+        """Every valid type string parses correctly."""
+        for type_str, expected in [
+            ("question", OutputType.QUESTION),
+            ("status", OutputType.STATUS_UPDATE),
+            ("completion", OutputType.COMPLETION),
+            ("blocker", OutputType.BLOCKER),
+            ("error", OutputType.ERROR),
+        ]:
+            raw = f'{{"type": "{type_str}", "confidence": 0.9, "reason": "test"}}'
+            result = _parse_classification_response(raw)
+            assert result is not None
+            assert result.output_type == expected
+
+    def test_markdown_code_fences(self):
+        """Handles JSON wrapped in markdown code fences."""
+        raw = (
+            "```json\n"
+            '{"type": "completion", "confidence": 0.88, "reason": "done"}\n'
+            "```"
+        )
+        result = _parse_classification_response(raw)
+        assert result is not None
+        assert result.output_type == OutputType.COMPLETION
+
+    def test_code_fences_no_language(self):
+        """Handles code fences without language tag."""
+        raw = (
+            "```\n"
+            '{"type": "status", "confidence": 0.75, "reason": "in progress"}\n'
+            "```"
+        )
+        result = _parse_classification_response(raw)
+        assert result is not None
+        assert result.output_type == OutputType.STATUS_UPDATE
+
+    def test_invalid_json(self):
+        assert _parse_classification_response("not json at all") is None
+
+    def test_invalid_type(self):
+        raw = '{"type": "unknown", "confidence": 0.9, "reason": "test"}'
+        assert _parse_classification_response(raw) is None
+
+    def test_missing_type(self):
+        raw = '{"confidence": 0.9, "reason": "test"}'
+        assert _parse_classification_response(raw) is None
+
+    def test_confidence_clamped_high(self):
+        raw = '{"type": "error", "confidence": 1.5, "reason": "test"}'
+        result = _parse_classification_response(raw)
+        assert result is not None
+        assert result.confidence == 1.0
+
+    def test_confidence_clamped_low(self):
+        raw = '{"type": "error", "confidence": -0.5, "reason": "test"}'
+        result = _parse_classification_response(raw)
+        assert result is not None
+        assert result.confidence == 0.0
+
+    def test_non_numeric_confidence(self):
+        raw = '{"type": "error", "confidence": "high", "reason": "test"}'
+        result = _parse_classification_response(raw)
+        assert result is not None
+        assert result.confidence == 0.5
+
+    def test_not_a_dict(self):
+        assert _parse_classification_response("[1, 2, 3]") is None
+
+    def test_empty_string(self):
+        assert _parse_classification_response("") is None
+
+
+class TestClassifyWithHeuristics:
+    """Tests for the keyword-based heuristic fallback classifier."""
+
+    def test_question_should_i(self):
+        result = _classify_with_heuristics("Should I proceed with the refactor?")
+        assert result.output_type == OutputType.QUESTION
+        assert result.confidence >= 0.80
+
+    def test_question_do_you_want(self):
+        result = _classify_with_heuristics("Do you want me to fix the failing test?")
+        assert result.output_type == OutputType.QUESTION
+
+    def test_question_would_you_like(self):
+        result = _classify_with_heuristics("Would you like me to push these changes?")
+        assert result.output_type == OutputType.QUESTION
+
+    def test_question_what_should(self):
+        result = _classify_with_heuristics("What should I do about the deprecated API?")
+        assert result.output_type == OutputType.QUESTION
+
+    def test_question_please_confirm(self):
+        result = _classify_with_heuristics("Please confirm this is the right approach.")
+        assert result.output_type == OutputType.QUESTION
+
+    def test_error_pattern(self):
+        result = _classify_with_heuristics(
+            "Error: ModuleNotFoundError: No module named 'foo'"
+        )
+        assert result.output_type == OutputType.ERROR
+        assert result.confidence >= 0.80
+
+    def test_error_failed(self):
+        result = _classify_with_heuristics("Failed: connection timeout")
+        assert result.output_type == OutputType.ERROR
+
+    def test_error_exit_code(self):
+        result = _classify_with_heuristics("Build failed with exit code 1")
+        assert result.output_type == OutputType.ERROR
+
+    def test_blocker_blocked(self):
+        result = _classify_with_heuristics("Blocked on waiting for API access")
+        assert result.output_type == OutputType.BLOCKER
+        assert result.confidence >= 0.80
+
+    def test_blocker_permission(self):
+        result = _classify_with_heuristics(
+            "Permission denied when accessing the deployment config"
+        )
+        assert result.output_type == OutputType.BLOCKER
+
+    def test_blocker_cannot_proceed(self):
+        result = _classify_with_heuristics(
+            "Cannot proceed without database credentials"
+        )
+        assert result.output_type == OutputType.BLOCKER
+
+    def test_completion_done(self):
+        result = _classify_with_heuristics("Done. All changes committed.")
+        assert result.output_type == OutputType.COMPLETION
+        assert result.confidence >= 0.80
+
+    def test_completion_pr_url(self):
+        result = _classify_with_heuristics(
+            "PR created: https://github.com/org/repo/pull/42"
+        )
+        assert result.output_type == OutputType.COMPLETION
+
+    def test_completion_pushed(self):
+        result = _classify_with_heuristics("Pushed changes to origin/main")
+        assert result.output_type == OutputType.COMPLETION
+
+    def test_completion_finished(self):
+        result = _classify_with_heuristics("Finished the implementation.")
+        assert result.output_type == OutputType.COMPLETION
+
+    def test_status_default(self):
+        """Unrecognized patterns default to STATUS_UPDATE."""
+        result = _classify_with_heuristics("Analyzing the codebase structure now")
+        assert result.output_type == OutputType.STATUS_UPDATE
+        assert result.confidence < 0.80
+
+    def test_status_running_tests(self):
+        result = _classify_with_heuristics("Running tests now...")
+        assert result.output_type == OutputType.STATUS_UPDATE
+
+    def test_empty_text(self):
+        """Empty text still returns a valid classification."""
+        result = _classify_with_heuristics("")
+        assert result.output_type == OutputType.STATUS_UPDATE
+
+
+class TestClassifyOutput:
+    """Tests for the main classify_output async function."""
+
+    @pytest.mark.asyncio
+    async def test_empty_text(self):
+        result = await classify_output("")
+        assert result.output_type == OutputType.STATUS_UPDATE
+        assert result.confidence == 1.0
+        assert result.reason == "Empty output"
+
+    @pytest.mark.asyncio
+    async def test_none_text(self):
+        result = await classify_output(None)
+        assert result.output_type == OutputType.STATUS_UPDATE
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only(self):
+        result = await classify_output("   \n\t  ")
+        assert result.output_type == OutputType.STATUS_UPDATE
+        assert result.confidence == 1.0
+
+    @pytest.mark.asyncio
+    async def test_llm_success(self):
+        """When LLM returns valid JSON, classification is used."""
+        mock_response = AsyncMock()
+        mock_response.content = [
+            AsyncMock(
+                text='{"type": "question", "confidence": 0.95, '
+                '"reason": "asks about approach"}'
+            )
+        ]
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
+        ):
+            result = await classify_output("Should I use approach A or B?")
+
+        assert result.output_type == OutputType.QUESTION
+        assert result.confidence == 0.95
+
+    @pytest.mark.asyncio
+    async def test_llm_low_confidence_defaults_to_question(self):
+        """Below confidence threshold, defaults to QUESTION."""
+        mock_response = AsyncMock()
+        mock_response.content = [
+            AsyncMock(
+                text='{"type": "status", "confidence": 0.5, ' '"reason": "unclear"}'
+            )
+        ]
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
+        ):
+            result = await classify_output("Some ambiguous output")
+
+        assert result.output_type == OutputType.QUESTION
+        assert result.confidence == 0.5
+        assert "Low confidence" in result.reason
+
+    @pytest.mark.asyncio
+    async def test_llm_failure_falls_back_to_heuristics(self):
+        """When LLM call fails, heuristics are used."""
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic",
+                side_effect=Exception("API error"),
+            ),
+        ):
+            result = await classify_output("Should I proceed?")
+
+        # Heuristics should still detect the question
+        assert result.output_type == OutputType.QUESTION
+
+    @pytest.mark.asyncio
+    async def test_no_api_key_falls_back_to_heuristics(self):
+        """When no API key, heuristics are used."""
+        with patch("utils.api_keys.get_anthropic_api_key", return_value=""):
+            result = await classify_output(
+                "Error: ModuleNotFoundError: No module named 'foo'"
+            )
+
+        assert result.output_type == OutputType.ERROR
+
+    @pytest.mark.asyncio
+    async def test_unparseable_llm_response_falls_back(self):
+        """When LLM returns garbage, falls back to heuristics."""
+        mock_response = AsyncMock()
+        mock_response.content = [AsyncMock(text="I think this is a question")]
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
+        ):
+            result = await classify_output("Done. Committed abc1234.")
+
+        # Heuristics should detect completion
+        assert result.output_type == OutputType.COMPLETION
+
+    @pytest.mark.asyncio
+    async def test_long_text_truncated_for_classification(self):
+        """Very long text is truncated before sending to LLM."""
+        long_text = "x" * 5000
+        mock_response = AsyncMock()
+        mock_response.content = [
+            AsyncMock(
+                text='{"type": "status", "confidence": 0.90, '
+                '"reason": "progress report"}'
+            )
+        ]
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
+        ):
+            result = await classify_output(long_text)
+
+        # Verify the text sent to LLM was truncated
+        call_args = mock_client.messages.create.call_args
+        user_msg = call_args.kwargs["messages"][0]["content"]
+        assert len(user_msg) < len(long_text)
+        assert "[...truncated...]" in user_msg
+        assert result.output_type == OutputType.STATUS_UPDATE
+
+    @pytest.mark.asyncio
+    async def test_confidence_threshold_constant(self):
+        """Verify the confidence threshold is set correctly."""
+        assert CLASSIFICATION_CONFIDENCE_THRESHOLD == 0.80

@@ -7,13 +7,18 @@ using Haiku (primary) or local Ollama (fallback). Key artifacts
 
 For very long responses, the full output is saved as a .txt file
 for attachment.
+
+Output classification determines whether agent output needs human
+input (question/blocker) or can auto-continue (status/completion).
 """
 
+import json
 import logging
 import os
 import re
 import tempfile
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 
 import anthropic
@@ -30,6 +35,39 @@ SAFETY_TRUNCATE = 4096  # Telegram hard limit
 
 # Ollama config — model can be overridden via env var
 OLLAMA_MODEL = os.environ.get("OLLAMA_SUMMARIZER_MODEL", "qwen3:4b")
+
+# Classification confidence threshold — below this, default to QUESTION
+# (conservative: pauses for human input rather than auto-continuing)
+CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.80
+
+
+class OutputType(Enum):
+    """Classification of agent output for routing decisions.
+
+    Used by the bridge to determine whether to pause for human input
+    or auto-continue the agent session.
+    """
+
+    QUESTION = "question"  # Needs human input
+    STATUS_UPDATE = "status"  # Progress report, no input needed
+    COMPLETION = "completion"  # Work finished
+    BLOCKER = "blocker"  # Stuck, needs help
+    ERROR = "error"  # Something failed
+
+
+@dataclass
+class ClassificationResult:
+    """Result of classifying agent output.
+
+    Attributes:
+        output_type: The classified type of the output.
+        confidence: How confident the classifier is (0.0-1.0).
+        reason: Brief explanation of the classification decision.
+    """
+
+    output_type: OutputType
+    confidence: float  # 0.0-1.0
+    reason: str  # Brief explanation
 
 
 @dataclass
@@ -90,6 +128,260 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
         artifacts["errors"] = errors[:5]  # Cap at 5
 
     return artifacts
+
+
+CLASSIFIER_SYSTEM_PROMPT = """\
+You classify developer agent output to determine if human input is needed.
+
+Respond with ONLY a JSON object — no markdown, no explanation, no extra text:
+{"type": "question|status|completion|blocker|error", \
+"confidence": 0.95, "reason": "brief explanation"}
+
+Classification rules:
+
+QUESTION — The agent is directly asking the human for a decision or input.
+  Examples: "Should I proceed?", "Which approach do you prefer?", "Do you want me to...?"
+  Key signals: direct question marks aimed at the user, "should I", "would you like", "which do you"
+
+STATUS_UPDATE — Progress report with no question. The agent is still working.
+  Examples: "Running tests...", "Found 3 issues, fixing now", "Analyzing the codebase"
+  Key signals: present tense activity, no question directed at human, intermediate progress
+
+COMPLETION — The work is done. Final summary or deliverable.
+  Examples: "Done. Committed abc1234", "PR created: https://...", \
+"All tests passing, pushed to main"
+  Key signals: past tense, "done", "complete", "finished", commit hashes, PR URLs, final summaries
+
+BLOCKER — The agent is stuck and needs human help to proceed.
+  Examples: "I don't have access to...", "This requires permissions I don't have", "Blocked on..."
+  Key signals: inability to proceed, missing access/permissions, explicit "blocked"
+
+ERROR — Something failed or broke.
+  Examples: "Error: ModuleNotFoundError", "Build failed with exit code 1", "Tests failing: 3 errors"
+  Key signals: "error:", "failed:", exception names, non-zero exit codes"""
+
+
+def _classify_with_heuristics(text: str) -> ClassificationResult:
+    """Fallback keyword-based classification when LLM is unavailable.
+
+    Uses pattern matching to make a best-effort classification.
+    Conservative: defaults to QUESTION when uncertain, so the bridge
+    pauses for human review rather than auto-continuing incorrectly.
+    """
+    text_lower = text.lower().strip()
+
+    # Check for direct questions aimed at the user
+    question_patterns = [
+        r"\bshould i\b.*\?",
+        r"\bdo you want\b.*\?",
+        r"\bwould you like\b.*\?",
+        r"\bwhich\b.*\bdo you prefer\b",
+        r"\bwhich\b.*\bshould\b.*\?",
+        r"\bwhat\b.*\bshould\b.*\?",
+        r"\bcan you\b.*\?",
+        r"\bplease\s+(?:confirm|choose|decide|let me know)\b",
+        r"\bwhat do you think\b",
+        r"\bhow would you like\b",
+    ]
+    for pattern in question_patterns:
+        if re.search(pattern, text_lower):
+            return ClassificationResult(
+                output_type=OutputType.QUESTION,
+                confidence=0.85,
+                reason="Detected direct question pattern",
+            )
+
+    # Check for error indicators
+    error_patterns = [
+        r"\berror:\s",
+        r"\bfailed:\s",
+        r"\bexception:\s",
+        r"\btraceback\b.*\bcall\b",
+        r"\bexit code [1-9]",
+        r"\bfailed with\b",
+        r"\bcrash\b",
+        r"\bpanic\b",
+    ]
+    for pattern in error_patterns:
+        if re.search(pattern, text_lower):
+            return ClassificationResult(
+                output_type=OutputType.ERROR,
+                confidence=0.85,
+                reason="Detected error/failure pattern",
+            )
+
+    # Check for blocker indicators
+    blocker_patterns = [
+        r"\bblocked\b",
+        r"\bblocking\b",
+        r"\bdon'?t have access\b",
+        r"\bpermission denied\b",
+        r"\bcannot proceed\b",
+        r"\bunable to continue\b",
+        r"\bneed.{0,20}permission\b",
+    ]
+    for pattern in blocker_patterns:
+        if re.search(pattern, text_lower):
+            return ClassificationResult(
+                output_type=OutputType.BLOCKER,
+                confidence=0.80,
+                reason="Detected blocker/access pattern",
+            )
+
+    # Check for completion indicators
+    completion_patterns = [
+        r"\bdone\b",
+        r"\bcomplete[d]?\b",
+        r"\bfinished\b",
+        r"\bpushed\b.*\b(?:to|origin|main|master)\b",
+        r"\bcommitted\b",
+        r"\bmerged\b",
+        r"\bpr created\b",
+        r"\bpull request\b.*\bcreated\b",
+        r"https?://github\.com/.+/pull/\d+",
+    ]
+    for pattern in completion_patterns:
+        if re.search(pattern, text_lower):
+            return ClassificationResult(
+                output_type=OutputType.COMPLETION,
+                confidence=0.80,
+                reason="Detected completion pattern",
+            )
+
+    # Default: STATUS_UPDATE (conservative for auto-continue)
+    return ClassificationResult(
+        output_type=OutputType.STATUS_UPDATE,
+        confidence=0.60,
+        reason="No strong signal detected, defaulting to status update",
+    )
+
+
+async def classify_output(text: str) -> ClassificationResult:
+    """Classify agent output to determine if human input is needed.
+
+    Uses Haiku (MODEL_FAST) for intelligent classification with a
+    keyword heuristic fallback. If the LLM confidence is below
+    CLASSIFICATION_CONFIDENCE_THRESHOLD, defaults to QUESTION to
+    conservatively pause for human review.
+
+    Args:
+        text: The agent output text to classify.
+
+    Returns:
+        ClassificationResult with the output type, confidence, and reason.
+    """
+    if not text or not text.strip():
+        return ClassificationResult(
+            output_type=OutputType.STATUS_UPDATE,
+            confidence=1.0,
+            reason="Empty output",
+        )
+
+    # Try LLM-based classification first
+    try:
+        from utils.api_keys import get_anthropic_api_key
+
+        api_key = get_anthropic_api_key()
+        if not api_key:
+            logger.warning("No API key for classification, using heuristics")
+            return _classify_with_heuristics(text)
+
+        client = anthropic.AsyncAnthropic(api_key=api_key)
+
+        # Truncate very long text to save tokens — classification
+        # only needs the beginning and end of the output
+        classify_text = text
+        if len(text) > 2000:
+            classify_text = text[:1000] + "\n\n[...truncated...]\n\n" + text[-1000:]
+
+        response = await client.messages.create(
+            model=MODEL_FAST,
+            max_tokens=256,
+            system=CLASSIFIER_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": classify_text}],
+        )
+
+        raw_response = response.content[0].text.strip()
+        result = _parse_classification_response(raw_response)
+        if result is not None:
+            # If confidence is below threshold, default to QUESTION
+            if result.confidence < CLASSIFICATION_CONFIDENCE_THRESHOLD:
+                logger.info(
+                    f"Classification confidence {result.confidence:.2f} below "
+                    f"threshold {CLASSIFICATION_CONFIDENCE_THRESHOLD}, "
+                    f"defaulting to QUESTION"
+                )
+                return ClassificationResult(
+                    output_type=OutputType.QUESTION,
+                    confidence=result.confidence,
+                    reason=f"Low confidence ({result.confidence:.2f}): {result.reason}",
+                )
+            return result
+
+        # LLM returned unparseable response — fall through to heuristics
+        logger.warning(f"Could not parse classification response: {raw_response[:200]}")
+
+    except Exception as e:
+        logger.warning(f"LLM classification failed: {e}")
+
+    # Fallback to heuristic classification
+    return _classify_with_heuristics(text)
+
+
+def _parse_classification_response(raw: str) -> ClassificationResult | None:
+    """Parse the LLM's JSON classification response.
+
+    Handles common issues like markdown code fences around JSON,
+    extra whitespace, and invalid type values.
+
+    Returns None if the response cannot be parsed.
+    """
+    # Strip markdown code fences if present
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        # Remove opening fence (with optional language tag)
+        cleaned = re.sub(r"^```\w*\n?", "", cleaned)
+        cleaned = re.sub(r"\n?```$", "", cleaned)
+        cleaned = cleaned.strip()
+
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError:
+        return None
+
+    # Validate required fields
+    if not isinstance(data, dict):
+        return None
+
+    type_str = data.get("type", "")
+    confidence = data.get("confidence", 0.0)
+    reason = data.get("reason", "")
+
+    # Map type string to OutputType enum
+    type_map = {
+        "question": OutputType.QUESTION,
+        "status": OutputType.STATUS_UPDATE,
+        "completion": OutputType.COMPLETION,
+        "blocker": OutputType.BLOCKER,
+        "error": OutputType.ERROR,
+    }
+
+    output_type = type_map.get(type_str)
+    if output_type is None:
+        return None
+
+    # Clamp confidence to valid range
+    try:
+        confidence = float(confidence)
+        confidence = max(0.0, min(1.0, confidence))
+    except (TypeError, ValueError):
+        confidence = 0.5
+
+    return ClassificationResult(
+        output_type=output_type,
+        confidence=confidence,
+        reason=str(reason),
+    )
 
 
 def _build_summary_prompt(text: str, artifacts: dict[str, list[str]]) -> str:
