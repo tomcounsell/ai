@@ -21,8 +21,9 @@ class TestSearchValidation:
 
     def test_missing_api_key_returns_error(self):
         """Test that missing API key returns error."""
-        # Temporarily remove API key
+        # Temporarily remove API keys (both Perplexity and Tavily)
         original_key = os.environ.pop("PERPLEXITY_API_KEY", None)
+        original_tavily = os.environ.pop("TAVILY_API_KEY", None)
         try:
             result = search("test query")
             assert "error" in result
@@ -30,6 +31,8 @@ class TestSearchValidation:
         finally:
             if original_key:
                 os.environ["PERPLEXITY_API_KEY"] = original_key
+            if original_tavily:
+                os.environ["TAVILY_API_KEY"] = original_tavily
 
 
 class TestSearchExecution:

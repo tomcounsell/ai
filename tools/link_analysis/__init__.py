@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import httpx
+import requests
 
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 DEFAULT_MODEL = "sonar"  # Current Perplexity model

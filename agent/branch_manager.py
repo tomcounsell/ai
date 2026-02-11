@@ -323,6 +323,11 @@ def should_create_branch(user_request: str) -> bool:
         "also",
         "documentation",
         "tests",
+        "new",
+        "endpoint",
+        "api",
+        "module",
+        "feature",
     ]
 
     # Count indicators

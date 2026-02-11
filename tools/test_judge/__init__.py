@@ -8,11 +8,11 @@ import os
 from dataclasses import dataclass
 from typing import Literal
 
+import anthropic
 import requests
 
 from config.models import MODEL_REASONING, OPENROUTER_SONNET
 
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = MODEL_REASONING
 DEFAULT_MODEL_OPENROUTER = OPENROUTER_SONNET
@@ -114,22 +114,15 @@ Only output valid JSON, nothing else."""
 
     try:
         if use_anthropic:
-            response = requests.post(
-                ANTHROPIC_URL,
-                headers={
-                    "x-api-key": api_key,
-                    "Content-Type": "application/json",
-                    "anthropic-version": "2023-06-01",
-                },
-                json={
-                    "model": DEFAULT_MODEL,
-                    "max_tokens": 1024,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-                timeout=60,
+            client = anthropic.Anthropic(api_key=api_key)
+            response = client.messages.create(
+                model=DEFAULT_MODEL,
+                max_tokens=1024,
+                messages=[{"role": "user", "content": prompt}],
             )
+            content = response.content[0].text if response.content else ""
         else:
-            response = requests.post(
+            raw_response = requests.post(
                 OPENROUTER_URL,
                 headers={
                     "Authorization": f"Bearer {api_key}",
@@ -142,14 +135,8 @@ Only output valid JSON, nothing else."""
                 },
                 timeout=60,
             )
-
-        response.raise_for_status()
-        result = response.json()
-
-        # Extract content based on API
-        if use_anthropic:
-            content = result.get("content", [{}])[0].get("text", "")
-        else:
+            raw_response.raise_for_status()
+            result = raw_response.json()
             content = (
                 result.get("choices", [{}])[0].get("message", {}).get("content", "")
             )
@@ -180,6 +167,10 @@ Only output valid JSON, nothing else."""
                 "raw_response": content,
             }
 
+    except anthropic.APITimeoutError:
+        return {"error": "Judgment request timed out"}
+    except anthropic.APIError as e:
+        return {"error": f"API request failed: {str(e)}"}
     except requests.exceptions.Timeout:
         return {"error": "Judgment request timed out"}
     except requests.exceptions.RequestException as e:

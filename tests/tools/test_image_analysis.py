@@ -14,14 +14,21 @@ class TestAnalyzeImageValidation:
 
     def test_missing_api_key(self, tmp_path):
         """Test analysis without API key."""
-        original_key = os.environ.pop("OPENROUTER_API_KEY", None)
+        # Create a real temp file so the file-existence check passes
+        test_image = tmp_path / "test.jpg"
+        test_image.write_bytes(b"\xff\xd8\xff\xe0\x00\x10JFIF\x00")
+        # Remove both API keys (tool tries Anthropic first, then OpenRouter)
+        original_anthropic = os.environ.pop("ANTHROPIC_API_KEY", None)
+        original_openrouter = os.environ.pop("OPENROUTER_API_KEY", None)
         try:
-            result = analyze_image("test.jpg")
+            result = analyze_image(str(test_image))
             assert "error" in result
-            assert "OPENROUTER_API_KEY" in result["error"]
+            assert "API_KEY" in result["error"]
         finally:
-            if original_key:
-                os.environ["OPENROUTER_API_KEY"] = original_key
+            if original_anthropic:
+                os.environ["ANTHROPIC_API_KEY"] = original_anthropic
+            if original_openrouter:
+                os.environ["OPENROUTER_API_KEY"] = original_openrouter
 
     def test_nonexistent_file(self, openrouter_api_key):
         """Test analysis of non-existent file."""
