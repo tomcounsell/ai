@@ -1,9 +1,9 @@
 name: Production Health Check
+# Automated monitoring is handled by Render's built-in health checks on /health/
+# This workflow is kept for manual deep-check debugging only
 
 on:
-  schedule:
-    - cron: '0 */12 * * *'  # Every 12 hours
-  workflow_dispatch:  # Allow manual trigger
+  workflow_dispatch:  # Manual trigger only
 
 jobs:
   health-check:
