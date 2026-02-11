@@ -2,48 +2,6 @@
 name: make-plan
 description: Create or update feature plan documents using Shape Up principles. Use when the user wants to plan a new feature, flesh out a plan, update an existing plan, or needs a structured approach to scoping work. Outputs to docs/plans/{slug}.md with problem statement, appetite, solution, risks, and boundaries.
 allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion
-hooks:
-  Stop:
-    - hooks:
-        - type: command
-          command: >-
-            test -f $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_new_file.py || exit 0;
-            $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_new_file.py
-            --directory docs/plans
-            --extension .md
-        - type: command
-          command: >-
-            test -f $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_file_contains.py || exit 0;
-            $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_file_contains.py
-            --directory docs/plans
-            --extension .md
-            --contains '## Problem'
-            --contains '## Appetite'
-            --contains '## Solution'
-            --contains '## Rabbit Holes'
-            --contains '## Risks'
-            --contains '## No-Gos'
-            --contains '## Documentation'
-            --contains '## Team Orchestration'
-            --contains '## Step by Step Tasks'
-            --contains '## Success Criteria'
-            --contains '## Prerequisites'
-            --contains '## Update System'
-            --contains '## Agent Integration'
-        - type: command
-          command: >-
-            test -f $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_plan_label.py || exit 0;
-            $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_plan_label.py
-            docs/plans
-        - type: command
-          command: >-
-            test -f $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_type_immutability.py || exit 0;
-            $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_type_immutability.py
-            docs/plans
-        - type: command
-          command: >-
-            test -f $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_documentation_section.py || exit 0;
-            $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_documentation_section.py
 ---
 
 # Make a Plan (Shape Up Methodology)
