@@ -550,3 +550,36 @@ For research/exploration:
 *"First you want better agents, then you want more agents."*
 
 *"If you don't measure it, you will not be able to improve it."*
+
+---
+
+## Escape Hatch for Genuine Uncertainty
+
+When truly blocked and unable to proceed without human guidance, use `request_human_input()`:
+
+```python
+from bridge.escape_hatch import request_human_input
+
+# Simple question
+request_human_input("I found conflicting requirements. Should I prioritize performance or compatibility?")
+
+# With options
+request_human_input(
+    "Which authentication method should I implement?",
+    options=["OAuth 2.0", "API Keys", "JWT tokens"]
+)
+```
+
+**DO use it for:**
+- Missing credentials you cannot obtain
+- Ambiguous requirements after checking all context
+- Scope decisions with significant business impact
+- Conflicting instructions where priority is unclear
+
+**DO NOT use it for:**
+- Questions you can answer by reading the codebase
+- Decisions you can make with reasonable confidence
+- Progress updates or status reports
+- Problems you can solve with available tools
+
+This escape hatch bypasses auto-continue logic. Use sparingly — every invocation signals potential system design improvement needed
