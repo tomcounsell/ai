@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
@@ -52,12 +52,12 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/build_session_
 
 - **Logging fix**: Add the file handler to the root logger so all modules (including `agent.job_queue`) inherit it
 - **Commit-on-exit for builders**: Add instructions to the builder agent definition to commit partial work before exiting on turn/context limits
-- **Worktree isolation in /build**: Update the build skill to create a git worktree and pass the worktree path to spawned agents
+- **Worktree isolation in /build**: Update the build skill to create a git worktree with `session/{slug}` branch and pass the worktree path to spawned agents
 - **Sub-agent health monitoring**: Add a polling loop to the build orchestrator that detects dead/silent agents and reports to chat
 
 ### Flow
 
-**Build invoked** → Create worktree (`.worktrees/{slug}/`) → Spawn builders with worktree CWD → Builders work on feature branch → Health monitor polls agent status → On agent exit: commit partial work → On completion: merge worktree, open PR
+**Build invoked** → Create worktree (`.worktrees/{slug}/`, branch `session/{slug}`) → Spawn builders with worktree CWD → Builders work on session branch → Health monitor polls agent status → On agent exit: commit partial work → On completion: push from worktree, open PR
 
 ### Technical Approach
 
@@ -72,7 +72,7 @@ root_logger = logging.getLogger()
 root_logger.addHandler(file_handler)
 ```
 
-Also set the root logger's level to DEBUG so child loggers' debug messages propagate. Keep the module logger for bridge-specific messages.
+Use a level-based filter instead of a strict allowlist: internal packages (`bridge.*`, `agent.*`, `tools.*`, `monitoring.*`, `models.*`) pass at DEBUG level; everything else passes at INFO+ only. This captures external library warnings/errors (useful for debugging Telethon, httpx, etc.) while filtering out their DEBUG spam. No list to maintain for new external deps.
 
 #### Bug 2: Builder commit-on-exit
 
@@ -86,11 +86,11 @@ Add to the builder's workflow section:
 #### Bug 3: Worktree isolation in /build
 
 Update `.claude/skills/build/SKILL.md` step 4 to:
-1. Create a worktree using `agent/worktree_manager.py` conventions: `.worktrees/{slug}/` with branch `build/{slug}`
+1. Create a worktree using `agent/worktree_manager.py` conventions: `.worktrees/{slug}/` with branch `session/{slug}`
 2. Pass the worktree path in each builder's prompt so they `cd` into it before working
 3. After all tasks complete, push from the worktree, open PR, then clean up worktree
 
-This leverages the existing `worktree_manager.py` code which already handles branch creation, settings copying, and cleanup.
+Unify on the `session/{slug}` branch convention — builds are just a skill invoked within a session, not a separate concept. The existing `worktree_manager.py` already uses this convention. Add inline comments in the build skill explaining this: planning and building can happen in the same session, so there's no reason to distinguish `build/` from `session/` branches.
 
 #### Bug 4: Sub-agent health monitoring
 
@@ -120,7 +120,7 @@ Add a monitoring section to the build orchestrator's "Step 4: Monitor and Coordi
 
 ### Risk 3: Root logger level change causes log noise
 **Impact:** Setting root logger to DEBUG could flood bridge.log with third-party library debug messages.
-**Mitigation:** Keep root logger at INFO for console, add a filter to the file handler to only accept loggers from our packages (`bridge.*`, `agent.*`, `tools.*`, `monitoring.*`).
+**Mitigation:** Level-based filter on the file handler — internal packages (`bridge.*`, `agent.*`, `tools.*`, `monitoring.*`, `models.*`) pass at DEBUG; all others pass at INFO+. External library warnings/errors still appear; their debug spam doesn't.
 
 ## No-Gos (Out of Scope)
 
@@ -148,7 +148,7 @@ No agent integration required — these are fixes to the build orchestrator skil
 
 - [ ] Job queue log lines (`Executing job`, `SDK query`, `SDK responded`) visible in `bridge.log` after bridge restart
 - [ ] Builder agents commit partial work before exiting on failure/timeout
-- [ ] `/build` agents operate in `.worktrees/{slug}/` on the `build/{slug}` branch, not on main
+- [ ] `/build` agents operate in `.worktrees/{slug}/` on the `session/{slug}` branch, not on main
 - [ ] Build orchestrator detects and reports dead sub-agents within 5 minutes
 - [ ] Documentation updated and indexed
 
@@ -187,7 +187,7 @@ See plan template for full list.
 - **Agent Type**: builder
 - **Parallel**: true
 - In `bridge/telegram_bridge.py`, move the file handler from the module logger to the root logger
-- Add a package filter so only `bridge.*`, `agent.*`, `tools.*`, `monitoring.*` loggers write to the file handler (prevent third-party noise)
+- Add a level-based filter on the file handler: internal packages (`bridge.*`, `agent.*`, `tools.*`, `monitoring.*`, `models.*`) pass at DEBUG; all others pass at INFO+ only
 - Verify `agent.job_queue` logger messages appear in `bridge.log` by checking log output
 - Run `ruff check . && black --check .`
 
@@ -198,10 +198,10 @@ See plan template for full list.
 - **Agent Type**: builder
 - **Parallel**: true
 - Update `.claude/agents/builder.md` to add a "Safety Net" section: before exiting on failure or approaching limits, commit all staged/unstaged changes with `[WIP]` prefix
-- Update `.claude/skills/build/SKILL.md` step 4 to create a git worktree (`.worktrees/{slug}/`) instead of `git checkout -b build/{slug}`
+- Update `.claude/skills/build/SKILL.md` step 4 to create a git worktree (`.worktrees/{slug}/`, branch `session/{slug}`) instead of `git checkout -b build/{slug}` — add inline comments that planning and building happen in the same session, so we use the unified `session/{slug}` convention
 - Update `.claude/skills/build/SKILL.md` agent deployment to pass the worktree path to builders so they work there
 - Update `.claude/skills/build/SKILL.md` step 4 "Monitor and Coordinate" with health polling: check TaskOutput every check of TaskList, flag agents silent >5min as warning and >15min as failure
-- Update `.claude/skills/build/SKILL.md` step 7 to push from worktree and clean up worktree after PR
+- Update `.claude/skills/build/SKILL.md` step 7 to push `session/{slug}` branch from worktree and clean up worktree after PR
 - Run `ruff check . && black --check .`
 
 ### 3. Validate all fixes
@@ -248,8 +248,8 @@ See plan template for full list.
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Worktree branch naming**: The existing `worktree_manager.py` uses `session/{slug}` convention, but the build skill uses `build/{slug}`. Should we unify to one convention or keep them separate? (Recommendation: use `build/{slug}` for builds to distinguish from interactive sessions.)
-2. **Log filter packages**: The proposed filter allows `bridge.*`, `agent.*`, `tools.*`, `monitoring.*`. Are there other internal packages that should be included?
-3. **WIP commit granularity**: Should builders commit after each file change, or only on exit? (Recommendation: only on exit — per-file commits would be too noisy.)
+1. **Worktree branch naming**: Unified to `session/{slug}`. Builds are just a skill invoked within a session — planning and building can happen in the same session, so there's no reason to distinguish `build/` from `session/` branches. The existing `worktree_manager.py` already uses this convention.
+2. **Log filter approach**: Level-based filter, not an allowlist/blocklist. Internal packages (`bridge.*`, `agent.*`, `tools.*`, `monitoring.*`, `models.*`) pass at DEBUG; everything else passes at INFO+. External library warnings/errors stay visible; their debug spam is filtered. No list to maintain for new deps.
+3. **WIP commit granularity**: Only on exit — per-file commits would be too noisy. Builders commit all staged/unstaged changes with `[WIP]` prefix before exiting on failure/timeout.
