@@ -614,6 +614,7 @@ async def _execute_job(job: Job) -> None:
             branch_name=branch_name,
             work_item_slug=job.work_item_slug,
             message_text=job.message_text[:20_000] if job.message_text else None,
+            classification_type=job.classification_type,
         )
     except Exception as e:
         logger.debug(f"AgentSession create failed (non-fatal): {e}")
