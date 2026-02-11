@@ -218,6 +218,9 @@ def summarize_file(
     Returns:
         dict with summary result
     """
+    path = Path(file_path)
+    if not path.exists():
+        return {"error": f"File not found: {file_path}"}
     return summarize(file_path, summary_type=summary_type, **kwargs)
 
 
