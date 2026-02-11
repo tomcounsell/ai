@@ -26,6 +26,7 @@ from agent.branch_manager import (
     get_plan_context,
     sanitize_branch_name,
 )
+from bridge.session_logs import save_session_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -588,6 +589,21 @@ async def _execute_job(job: Job) -> None:
         f"(session={job.session_id}, branch={branch_name}, cwd={working_dir})"
     )
 
+    # Save session snapshot at job start
+    save_session_snapshot(
+        session_id=job.session_id,
+        event="resume",
+        project_key=job.project_key,
+        branch_name=branch_name,
+        task_summary=f"Job {job.job_id} starting",
+        extra_context={
+            "job_id": job.job_id,
+            "sender": job.sender_name,
+            "message_preview": job.message_text[:200] if job.message_text else "",
+        },
+        working_dir=str(working_dir),
+    )
+
     # Track session in Redis
     agent_session = None
     try:
@@ -693,6 +709,22 @@ async def _execute_job(job: Job) -> None:
         except Exception as e:
             logger.debug(f"AgentSession update failed (non-fatal): {e}")
 
+    # Save session snapshot for error cases
+    if task.error:
+        save_session_snapshot(
+            session_id=job.session_id,
+            event="error",
+            project_key=job.project_key,
+            branch_name=branch_name,
+            task_summary=f"Job {job.job_id} failed: {task.error}",
+            extra_context={
+                "job_id": job.job_id,
+                "error": str(task.error),
+                "sender": job.sender_name,
+            },
+            working_dir=str(working_dir),
+        )
+
     # Clean up steering queue — log content of any unconsumed messages
     try:
         from agent.steering import pop_all_steering_messages
@@ -737,6 +769,20 @@ async def _execute_job(job: Job) -> None:
             )
         except Exception as e:
             logger.warning(f"[{job.project_key}] Failed to auto-mark session done: {e}")
+
+        # Save session snapshot on successful completion
+        save_session_snapshot(
+            session_id=job.session_id,
+            event="complete",
+            project_key=job.project_key,
+            branch_name=branch_name,
+            task_summary=f"Job {job.job_id} completed successfully",
+            extra_context={
+                "job_id": job.job_id,
+                "sender": job.sender_name,
+            },
+            working_dir=str(working_dir),
+        )
 
 
 def _session_branch_name(session_id: str) -> str:
