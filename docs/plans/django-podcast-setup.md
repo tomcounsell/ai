@@ -4,7 +4,7 @@ type: feature
 appetite: Medium
 owner: Tom
 created: 2026-02-11
-tracking: https://github.com/tomcounsell/django-project-template/issues/20
+tracking: https://github.com/yudame/cuttlefish/issues/35
 ---
 
 # Django Podcast App — MVP
