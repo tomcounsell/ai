@@ -23,3 +23,5 @@ class AgentSession(Model):
     branch_name = Field(null=True)
     work_item_slug = Field(null=True)  # Slug for tier 2 named work items
     message_text = Field(max_length=MSG_MAX_CHARS, null=True)
+    classification_type = Field(null=True)  # bug, feature, or chore
+    classification_confidence = Field(type=float, null=True)  # 0.0-1.0
