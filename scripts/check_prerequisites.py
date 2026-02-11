@@ -36,40 +36,38 @@ def extract_prerequisites(plan_text: str) -> list[dict[str, str]]:
 
     section = section_match.group(1)
 
-    # Parse markdown table rows (skip header and separator)
+    # Find the table whose header contains "Check Command" (not status/info tables)
     rows = []
-    in_table = False
-    for line in section.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("|"):
-            if in_table:
-                break  # End of table
-            continue
-
-        # Skip separator row (e.g., |---|---|---|)
-        if re.match(r"^\|[\s\-:]+\|", stripped):
-            in_table = True
-            continue
-
-        # Skip header row (first row before separator)
-        if not in_table:
-            continue
-
-        # Parse table cells
-        cells = [c.strip() for c in stripped.strip("|").split("|")]
-        if len(cells) >= 2:
-            # Extract command from backticks if present
-            cmd_cell = cells[1]
-            cmd_match = re.search(r"`(.+?)`", cmd_cell)
-            command = cmd_match.group(1) if cmd_match else cmd_cell
-
-            rows.append(
-                {
-                    "requirement": cells[0].strip("`").strip(),
-                    "check_command": command,
-                    "purpose": cells[2].strip() if len(cells) >= 3 else "",
-                }
-            )
+    lines = section.splitlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        # Look for a table header row containing "Check Command"
+        if stripped.startswith("|") and "check command" in stripped.lower():
+            # Skip the separator row
+            i += 1
+            if i < len(lines) and re.match(r"^\s*\|[\s\-:]+\|", lines[i]):
+                i += 1
+            # Parse data rows
+            while i < len(lines):
+                row = lines[i].strip()
+                if not row.startswith("|"):
+                    break
+                cells = [c.strip() for c in row.strip("|").split("|")]
+                if len(cells) >= 2:
+                    cmd_cell = cells[1]
+                    cmd_match = re.search(r"`(.+?)`", cmd_cell)
+                    command = cmd_match.group(1) if cmd_match else cmd_cell
+                    rows.append(
+                        {
+                            "requirement": cells[0].strip("`").strip(),
+                            "check_command": command,
+                            "purpose": cells[2].strip() if len(cells) >= 3 else "",
+                        }
+                    )
+                i += 1
+            break
+        i += 1
 
     return rows
 
