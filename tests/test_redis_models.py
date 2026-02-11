@@ -375,19 +375,34 @@ class TestAgentSession:
     def test_update_status_to_completed(self):
         from models.sessions import AgentSession
 
+        now = time.time()
         s = AgentSession.create(
             session_id="tg_valor_200",
             project_key="valor",
             status="active",
             chat_id="200",
             sender="Tom",
-            started_at=time.time(),
+            started_at=now,
+            last_activity=now,
+            tool_call_count=0,
+        )
+        assert s.status == "active"
+
+        # Popoto UniqueKeyField + KeyField limitation: changing a KeyField value
+        # changes the db_key, causing pre_save's is_self check to fail. The
+        # workaround is delete + recreate (same pattern used in production code
+        # which catches the exception). See agent/job_queue.py:690-694.
+        s.delete()
+        AgentSession.create(
+            session_id="tg_valor_200",
+            project_key="valor",
+            status="completed",
+            chat_id="200",
+            sender="Tom",
+            started_at=now,
             last_activity=time.time(),
             tool_call_count=0,
         )
-        s.status = "completed"
-        s.last_activity = time.time()
-        s.save()
 
         found = AgentSession.query.filter(session_id="tg_valor_200")
         assert len(found) == 1
@@ -489,18 +504,29 @@ class TestAgentSession:
     def test_failed_status(self):
         from models.sessions import AgentSession
 
+        now = time.time()
         s = AgentSession.create(
             session_id="fail_1",
             project_key="valor",
             status="active",
             chat_id="100",
             sender="Tom",
-            started_at=time.time(),
-            last_activity=time.time(),
+            started_at=now,
+            last_activity=now,
             tool_call_count=3,
         )
-        s.status = "failed"
-        s.save()
+        # Delete + recreate to change status KeyField (see test_update_status_to_completed)
+        s.delete()
+        AgentSession.create(
+            session_id="fail_1",
+            project_key="valor",
+            status="failed",
+            chat_id="100",
+            sender="Tom",
+            started_at=now,
+            last_activity=now,
+            tool_call_count=3,
+        )
 
         found = AgentSession.query.filter(session_id="fail_1")
         assert found[0].status == "failed"
@@ -509,21 +535,36 @@ class TestAgentSession:
     async def test_async_create_and_save(self):
         from models.sessions import AgentSession
 
+        now = time.time()
         s = await AgentSession.async_create(
             session_id="async_1",
             project_key="valor",
             status="active",
             chat_id="100",
             sender="Tom",
-            started_at=time.time(),
-            last_activity=time.time(),
+            started_at=now,
+            last_activity=now,
             tool_call_count=0,
         )
         assert s.session_id == "async_1"
 
+        # Update non-KeyField (tool_call_count) via save — this works fine
         s.tool_call_count = 5
-        s.status = "completed"
         await s.async_save()
+
+        # Update KeyField (status) via delete + recreate
+        # (see test_update_status_to_completed for explanation)
+        s.delete()
+        await AgentSession.async_create(
+            session_id="async_1",
+            project_key="valor",
+            status="completed",
+            chat_id="100",
+            sender="Tom",
+            started_at=now,
+            last_activity=now,
+            tool_call_count=5,
+        )
 
         found = await AgentSession.query.async_filter(session_id="async_1")
         assert found[0].status == "completed"
