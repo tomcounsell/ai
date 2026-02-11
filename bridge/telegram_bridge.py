@@ -259,19 +259,47 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 CONSOLE_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 FILE_FORMAT = "%(asctime)s [%(levelname)s] [%(funcName)s] %(message)s"
 
-# Setup root logger
+# Packages whose loggers should get full DEBUG output in the file handler.
+# External packages (telethon, httpx, etc.) are restricted to INFO+ to
+# avoid debug spam while keeping their warnings/errors visible.
+INTERNAL_PACKAGES = ("bridge", "agent", "tools", "monitoring", "models")
+
+
+class InternalDebugFilter(logging.Filter):
+    """Level-based filter: internal packages at DEBUG, external at INFO+.
+
+    Internal packages (bridge, agent, tools, monitoring, models) get full
+    DEBUG logging to the file handler. External packages (telethon, httpx,
+    etc.) only pass INFO+ to avoid debug spam while keeping their
+    warnings/errors visible.
+    """
+
+    def filter(self, record):
+        if record.name.split(".")[0] in INTERNAL_PACKAGES:
+            return True  # All levels for internal packages
+        return record.levelno >= logging.INFO  # INFO+ for external
+
+
+# Setup root logger with console handler (INFO level for terminal output)
 logging.basicConfig(
     level=logging.INFO,
     format=CONSOLE_FORMAT,
     handlers=[logging.StreamHandler()],
 )
-logger = logging.getLogger(__name__)
 
-# Add file handler for detailed logs
+# Add file handler to the ROOT logger so all child loggers (agent.job_queue,
+# bridge.*, tools.*, etc.) inherit it automatically. Without this, only
+# the bridge.telegram_bridge module logger would write to bridge.log.
+root_logger = logging.getLogger()
 file_handler = logging.FileHandler(LOG_DIR / "bridge.log")
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter(FILE_FORMAT))
-logger.addHandler(file_handler)
+file_handler.addFilter(InternalDebugFilter())
+root_logger.addHandler(file_handler)
+
+# Module logger for this file. It inherits the root logger's file handler,
+# so we only need to set its level to DEBUG for verbose local output.
+logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 

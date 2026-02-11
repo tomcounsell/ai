@@ -53,14 +53,23 @@ Before executing, resolve the plan path:
 1. **Resolve the plan path** using the Plan Resolution logic above
 2. **Read the plan** at `PLAN_PATH`
 3. **Run prerequisite validation** - `python scripts/check_prerequisites.py {PLAN_PATH}`. If any check fails, report the failures and stop. Do not proceed to task execution. If no Prerequisites section exists, this passes automatically.
-4. **Create a feature branch** - `git checkout -b build/{slug}` (derive slug from the plan filename)
+4. **Create an isolated worktree** - Create `.worktrees/{slug}/` with branch `session/{slug}`:
+   ```bash
+   # Builds use session/{slug} branch convention — builds are just a skill invoked
+   # within a session. Planning and building can happen in the same session,
+   # so there's no reason for a separate build/ branch prefix.
+   git worktree add .worktrees/{slug} -b session/{slug} main
+   # Copy settings that aren't tracked by git
+   cp .claude/settings.local.json .worktrees/{slug}/.claude/settings.local.json 2>/dev/null || true
+   ```
+   All subsequent agent work happens inside `.worktrees/{slug}/`, NOT the main repo directory. Derive `{slug}` from the plan filename.
 5. **Parse the Team Members** and Step by Step Tasks sections
 6. **Create all tasks** using `TaskCreate` before starting execution
 7. **Deploy agents** in order, respecting dependencies and parallel flags (agents follow SDLC: Build → Test loop with up to 5 iterations)
 8. **Monitor progress** and handle any issues
 9. **Verify Definition of Done** - Ensure all tasks completed with: code working, tests passing, docs created, quality checks pass
 10. **Run documentation gate** - Validate docs changed, scan related docs, create review issues
-11. **Push and open a PR** - `git push -u origin build/{slug}` then `gh pr create`
+11. **Push and open a PR** - `git -C .worktrees/{slug} push -u origin session/{slug}` then `gh pr create`
 12. **Migrate completed plan** - Delete plan file and close tracking issue
 13. **Report completion** with PR URL when all tasks are done
 
@@ -111,12 +120,16 @@ Task({
   description: "[Task subject]",
   prompt: `Execute task: [Task Name]
 
+IMPORTANT: You MUST work in the worktree directory: {absolute_path_to}/.worktrees/{slug}/
+Run \`cd {absolute_path_to}/.worktrees/{slug}/\` before doing any work.
+All file reads, writes, and commands should use this worktree path, not the main repo.
+
 Plan context: [relevant plan sections]
 
 Your assignment:
 - [specific actions from task]
 
-When complete, update your task status.`,
+When complete, commit your changes and update your task status.`,
   subagent_type: "[agent type from task]",
   run_in_background: [true if Parallel: true]
 })
@@ -127,6 +140,23 @@ When complete, update your task status.`,
 - Check `TaskList({})` to see overall progress
 - Use `TaskOutput({task_id, block: false})` to check on background agents
 - When a blocker completes, dependent tasks auto-unblock
+
+**Health Monitoring for Background Agents:**
+
+After deploying background agents, actively monitor their health:
+
+1. Poll `TaskOutput({task_id, block: false, timeout: 30000})` for each background agent when checking progress
+2. Check `TaskList` to see if tasks have moved to completed status
+3. If a background agent's TaskOutput returns completion but TaskList still shows `in_progress`, use `TaskUpdate` to mark it
+4. **Warning threshold (5 min):** If an agent has produced no new output for 5+ minutes, note this as a potential issue
+5. **Failure threshold (15 min):** If an agent has been completely silent for 15+ minutes:
+   - Attempt to resume the agent using its agentId
+   - If resume fails, mark the task as failed
+   - Report the failure prominently so the user is aware
+6. **On any agent failure:** Commit whatever work exists in the worktree as a safety net:
+   ```bash
+   cd .worktrees/{slug} && git add -A && git commit -m "[WIP] partial work before agent failure" || true
+   ```
 
 ### Step 5: Final Validation and Definition of Done
 
@@ -184,7 +214,7 @@ This creates tracking issues for documentation that should be reviewed for updat
 After documentation gate passes, push and create the PR:
 
 ```bash
-git push -u origin build/{slug}
+git -C .worktrees/{slug} push -u origin session/{slug}
 gh pr create --title "[plan title]" --body "$(cat <<'EOF'
 ## Summary
 [Brief description of what was built]
@@ -213,6 +243,15 @@ EOF
 ```
 
 **Important**: The PR creation step is handled by the BUILD ORCHESTRATOR (this skill), NOT by individual builder agents. Builder agents focus on their assigned tasks, while the orchestrator creates the final PR after all tasks complete and gates pass.
+
+### Step 7.5: Worktree Cleanup
+
+After pushing and creating the PR, clean up the worktree:
+
+```bash
+git worktree remove .worktrees/{slug} --force
+git worktree prune
+```
 
 ### Step 8: Plan Migration
 

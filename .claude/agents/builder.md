@@ -57,7 +57,17 @@ mypy . --ignore-missing-imports     # Type checking (if applicable)
 - Maximum 5 iterations of Build → Test loop
 - If tests fail: analyze output, fix issues, re-test
 - Do NOT mark task complete until tests pass
+- Before reporting failure after 5 iterations, commit all changes with `[WIP]` prefix
 - If unable to fix after 5 iterations, report failure details in task update
+
+**Safety Net — Commit Before Exit:**
+
+ALWAYS commit partial work before exiting, whether due to failure, turn limits, or context limits:
+
+1. Before marking a task as failed or when approaching limits, ALWAYS stage and commit
+2. Use: `git add -A && git commit -m "[WIP] partial work on {task description}" || true`
+3. The `|| true` prevents the commit command itself from failing if there's nothing to commit
+4. This ensures partial work is recoverable even on abnormal exit — losing work is worse than a messy commit
 
 ## Definition of Done
 
