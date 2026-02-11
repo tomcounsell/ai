@@ -44,7 +44,16 @@ The core work is classifying agent output (requires LLM call) and wiring up reac
 
 ## Prerequisites
 
-No external prerequisites — all dependencies already exist in the project.
+Core infrastructure bugs that would have blocked this work were fixed in PR #81 (issue #80) and commit `3f3b63f3`:
+
+| Prerequisite | Status | Fixed In |
+|-------------|--------|----------|
+| Job queue logging propagation | Done | PR #81 |
+| Builder commit-on-exit | Done | PR #81 |
+| Worktree isolation for `/build` | Done | PR #81 |
+| Sub-agent health monitoring | Done | PR #81 |
+| Reply-to session continuation | Done | `3f3b63f3` |
+| Session task list scoping | Done | PR #76 |
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
@@ -147,7 +156,7 @@ The skill definitions in `.claude/skills/` already do this — verify the links 
 
 - Not implementing full session replay/debugging UI — just log snapshots
 - Not adding reaction event handlers — Telethon can't receive them for user accounts
-- Not changing how sessions resume from reply-to — that already works
+- Not changing how sessions resume from reply-to — was broken by `respond_to_all` short-circuit, fixed in `3f3b63f3`
 - Not modifying task list scoping — already handled by #62/session-isolation
 
 ## Update System
