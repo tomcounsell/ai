@@ -84,12 +84,22 @@ def get_recent_files(directory: str, extension: str, max_age_minutes: int) -> li
     return recent
 
 
-def get_git_committed_files(directory: str, extension: str, max_age_minutes: int) -> list[str]:
+def get_git_committed_files(
+    directory: str, extension: str, max_age_minutes: int
+) -> list[str]:
     """Check git log for recently committed files in directory (even if later deleted)."""
     try:
         result = subprocess.run(
-            ["git", "log", f"--since={max_age_minutes} minutes ago", "--diff-filter=A",
-             "--name-only", "--pretty=format:", "--", f"{directory}/*{extension}"],
+            [
+                "git",
+                "log",
+                f"--since={max_age_minutes} minutes ago",
+                "--diff-filter=A",
+                "--name-only",
+                "--pretty=format:",
+                "--",
+                f"{directory}/*{extension}",
+            ],
             capture_output=True,
             text=True,
             timeout=5,

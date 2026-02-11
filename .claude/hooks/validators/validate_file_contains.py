@@ -99,12 +99,22 @@ def get_recent_files(directory: str, extension: str, max_age_minutes: int) -> li
     return recent
 
 
-def get_git_committed_files(directory: str, extension: str, max_age_minutes: int) -> list[str]:
+def get_git_committed_files(
+    directory: str, extension: str, max_age_minutes: int
+) -> list[str]:
     """Check git log for recently committed files (even if later deleted/migrated)."""
     try:
         result = subprocess.run(
-            ["git", "log", f"--since={max_age_minutes} minutes ago", "--diff-filter=A",
-             "--name-only", "--pretty=format:", "--", f"{directory}/*{extension}"],
+            [
+                "git",
+                "log",
+                f"--since={max_age_minutes} minutes ago",
+                "--diff-filter=A",
+                "--name-only",
+                "--pretty=format:",
+                "--",
+                f"{directory}/*{extension}",
+            ],
             capture_output=True,
             text=True,
             timeout=5,
@@ -122,7 +132,9 @@ def get_committed_file_content(filepath: str) -> str | None:
         # Find the last commit that had this file
         result = subprocess.run(
             ["git", "log", "-1", "--pretty=format:%H", "--", filepath],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode != 0 or not result.stdout.strip():
             return None
@@ -130,7 +142,9 @@ def get_committed_file_content(filepath: str) -> str | None:
         # Get the file content at that commit
         result = subprocess.run(
             ["git", "show", f"{commit}:{filepath}"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode != 0:
             return None
@@ -206,11 +220,19 @@ def validate(
                 content = get_committed_file_content(cfile)
                 if content and required_strings:
                     content_lower = content.lower()
-                    missing = [r for r in required_strings if r.lower() not in content_lower]
+                    missing = [
+                        r for r in required_strings if r.lower() not in content_lower
+                    ]
                     if not missing:
-                        return True, f"File '{cfile}' was committed with all required sections (since migrated)"
+                        return (
+                            True,
+                            f"File '{cfile}' was committed with all required sections (since migrated)",
+                        )
             # File existed but didn't have all sections — still count as present
-            return True, f"File(s) committed in recent history (since migrated): {', '.join(committed)}"
+            return (
+                True,
+                f"File(s) committed in recent history (since migrated): {', '.join(committed)}",
+            )
         return False, NO_FILE_ERROR.format(pattern=pattern, directory=directory)
 
     if not required_strings:
