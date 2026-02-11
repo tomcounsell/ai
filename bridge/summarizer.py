@@ -143,6 +143,13 @@ QUESTION — The agent is directly asking the human for a decision or input.
   Examples: "Should I proceed?", "Which approach do you prefer?", "Do you want me to...?"
   Key signals: direct question marks aimed at the user, "should I", "would you like", "which do you"
 
+  NOT a question (classify as STATUS_UPDATE instead):
+  - Rhetorical questions in status reports ("What could cause this? Let me investigate...")
+  - "Should I fix this?" when it's obviously a bug the agent should fix
+  - Questions about implementation details the agent should decide itself
+  - Asking permission for things clearly within the agent's authority
+  - Self-directed questions like "Let me check if..." or "I wonder if..."
+
 STATUS_UPDATE — Progress report with no question. The agent is still working.
   Examples: "Running tests...", "Found 3 issues, fixing now", "Analyzing the codebase"
   Key signals: present tense activity, no question directed at human, intermediate progress
@@ -159,6 +166,14 @@ BLOCKER — The agent is stuck and needs human help to proceed.
 ERROR — Something failed or broke.
   Examples: "Error: ModuleNotFoundError", "Build failed with exit code 1", "Tests failing: 3 errors"
   Key signals: "error:", "failed:", exception names, non-zero exit codes"""
+
+# False question detection explained:
+# Many agent outputs contain question-like text that should NOT pause for human input:
+# 1. Rhetorical questions - the agent is thinking aloud, not asking the human
+# 2. Obvious bugs - "Should I fix this obvious bug?" is not a real question
+# 3. Implementation details - the agent should make these decisions autonomously
+# 4. Permission-seeking for routine tasks - the agent has authority to proceed
+# Misclassifying these as QUESTION causes premature stopping and unnecessary pauses.
 
 
 def _classify_with_heuristics(text: str) -> ClassificationResult:
@@ -425,8 +440,17 @@ Output rules:
 - For work needing context: 2-4 sentences max
 - Lead with the outcome, not the process
 - Preserve commit hashes and URLs inline (e.g., `abc1234`, https://github.com/org/repo/pull/42)
-- If there are blockers or items needing PM action, flag on a separate line with "⚠️"
+- Flag with ⚠️ ONLY for genuinely external blockers (missing credentials, need third-party \
+access, policy decisions). Do NOT flag: implementation choices, internal obstacles, things \
+the agent could resolve with its tools
 - Tone: direct, no preamble, no filler"""
+
+# Blocker flag logic explained:
+# The ⚠️ flag is meant to alert the PM only when human intervention is truly required.
+# Genuine blockers: missing API keys, need admin access to a service, policy/legal decisions,
+# waiting on external team, need credentials the agent cannot obtain.
+# NOT blockers: code bugs (agent can fix), test failures (agent can debug), implementation
+# decisions (agent should decide), finding the right approach (agent's job).
 
 
 async def _summarize_with_haiku(prompt: str) -> str | None:
