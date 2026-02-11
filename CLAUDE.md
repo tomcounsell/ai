@@ -252,5 +252,24 @@ QUICKBOOKS_CLIENT_SECRET=your_client_secret
 QUICKBOOKS_WEBHOOK_TOKEN=webhook_token
 QUICKBOOKS_SANDBOX_MODE=True
 ```
-- on Render we are under Yudame workspace and Cuttlefish project
-- yudame/cuttlefish is a private repo
+## Render Infrastructure
+
+- **Workspace**: Yudame (`tea-cldfmjeg1b2c73f6rrug`)
+- **Repo**: `yudame/cuttlefish` (private)
+- **Production URL**: `https://ai.yuda.me` (custom domain) / `https://cuttlefish-ea1h.onrender.com`
+
+### Services
+
+| Service | ID | Type | Plan | Region |
+|---------|-----|------|------|--------|
+| cuttlefish | `srv-d3ho96p5pdvs73feafhg` | Web Service | Starter | Oregon |
+
+### Render MCP Usage
+
+- **Must select workspace first**: Use `select_workspace` with `tea-cldfmjeg1b2c73f6rrug` before other operations
+- **`update_web_service` does NOT support direct updates** — it returns a message to use the dashboard or API instead
+- **`render.yaml` does NOT auto-sync to live services** — it's only used when creating new services via "Infrastructure as Code". Changing `render.yaml` alone won't update live service settings
+- **To change service settings**: Use the Render dashboard at `https://dashboard.render.com/web/{service-id}/settings`
+- **Health checks**: Configured via dashboard, endpoint is `/health/` (lightweight) and `/health/deep/` (DB + cache)
+- **Deploy logs and metrics**: Available via `list_deploys`, `list_logs`, `get_metrics` MCP tools
+- **Environment variables**: Use `update_environment_variables` MCP tool (this one works)
