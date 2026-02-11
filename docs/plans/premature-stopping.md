@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
@@ -154,6 +154,32 @@ NOT a question (classify as STATUS_UPDATE instead):
 - Asking permission for things within its authority
 ```
 
+#### 5. Escape Hatch Tool
+
+Create `request_human_input()` tool for genuine uncertainty. This is a deliberate mechanism — requires explicit reason, is auditable, won't trigger accidentally like a keyword would.
+
+```python
+# In tools/ or bridge/
+def request_human_input(
+    reason: str,
+    options: list[str] | None = None
+) -> None:
+    """
+    Force a pause and request human input.
+
+    Use ONLY when genuinely blocked on something you cannot resolve:
+    - Missing credentials you cannot obtain
+    - Ambiguous requirements after checking all context
+    - Scope decision with significant business impact
+
+    Args:
+        reason: Clear explanation of why human input is needed
+        options: Optional list of choices for the human to pick from
+    """
+```
+
+The tool bypasses auto-continue and sends directly to chat with the reason displayed.
+
 ## Rabbit Holes
 
 - **Over-engineering classification** — The classifier already works. Focus on the source (prompts) not the filter (classifier).
@@ -198,6 +224,7 @@ No agent integration required — this is a prompt/instruction change. The agent
 - [ ] SOUL.md contains decision-making heuristic
 - [ ] Summarizer prompt refined to only flag genuine external blockers
 - [ ] Classifier prompt updated to detect false questions
+- [ ] `request_human_input()` escape hatch tool implemented
 - [ ] Test: agent handles "create an issue for X" without multi-message Q&A
 - [ ] Test: agent resolves "blocked on finding file" by searching
 - [ ] Observed reduction in unnecessary pauses over 1 week
@@ -210,6 +237,12 @@ No agent integration required — this is a prompt/instruction change. The agent
   - Name: prompt-builder
   - Role: Update SOUL.md and summarizer prompts with anti-escalation instructions
   - Agent Type: builder
+  - Resume: true
+
+- **Builder (escape-hatch)**
+  - Name: tool-builder
+  - Role: Implement request_human_input() escape hatch tool
+  - Agent Type: tool-developer
   - Resume: true
 
 - **Validator (behavior)**
@@ -241,18 +274,30 @@ No agent integration required — this is a prompt/instruction change. The agent
 - Add examples of what IS vs IS NOT a blocker
 - Update CLASSIFIER_SYSTEM_PROMPT to detect false questions
 
-### 3. Validate prompt changes
+### 3. Implement escape hatch tool
+- **Task ID**: build-escape-hatch
+- **Depends On**: none
+- **Assigned To**: tool-builder
+- **Agent Type**: tool-developer
+- **Parallel**: true
+- Create `request_human_input(reason, options)` function
+- Integrate with bridge to bypass auto-continue
+- Add to SOUL.md as the approved way to force a pause
+- Write tests for the tool
+
+### 4. Validate prompt changes
 - **Task ID**: validate-prompts
-- **Depends On**: build-soul-instructions, build-summarizer-prompt
+- **Depends On**: build-soul-instructions, build-summarizer-prompt, build-escape-hatch
 - **Assigned To**: behavior-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Verify SOUL.md contains the new sections
 - Verify summarizer prompts are updated
+- Verify escape hatch tool exists and has tests
 - Run `black . && ruff check .`
 - Run `pytest tests/` (ensure no regressions)
 
-### 4. Final Validation
+### 5. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: validate-prompts
 - **Assigned To**: behavior-validator
@@ -270,12 +315,10 @@ No agent integration required — this is a prompt/instruction change. The agent
 - `black --check . && ruff check .` — Code quality
 - `pytest tests/` — No regressions
 
----
+## Resolved Questions
 
-## Open Questions
+1. **Escape hatch:** Yes — implement as a tool call (`request_human_input(reason, options)`) rather than a keyword. Tool call forces explicit reason, is auditable, and won't trigger accidentally.
 
-1. **Escape hatch:** Should there be a way for the agent to force a pause when it's truly uncertain? (e.g., prefix with "⚠️ NEED INPUT:" to bypass auto-continue)
+2. **Measurement:** PM will track manually and raise issues as needed. No automated measurement required.
 
-2. **Measurement:** How will we measure the reduction in premature stops? Log grep for auto-continue triggers? Manual review of Telegram history?
-
-3. **Reversibility:** If the agent becomes too aggressive, what's the quickest way to dial it back? (Comment out the new SOUL.md sections?)
+3. **Reversibility:** Draft issue created at #86 with rollback options (quick: comment out SOUL.md sections; full: git revert).
