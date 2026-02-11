@@ -84,6 +84,23 @@ def get_recent_files(directory: str, extension: str, max_age_minutes: int) -> li
     return recent
 
 
+def get_git_committed_files(directory: str, extension: str, max_age_minutes: int) -> list[str]:
+    """Check git log for recently committed files in directory (even if later deleted)."""
+    try:
+        result = subprocess.run(
+            ["git", "log", f"--since={max_age_minutes} minutes ago", "--diff-filter=A",
+             "--name-only", "--pretty=format:", "--", f"{directory}/*{extension}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return []
+        return [f for f in result.stdout.strip().split("\n") if f.strip()]
+    except (subprocess.TimeoutExpired, subprocess.SubprocessError):
+        return []
+
+
 def validate(directory: str, extension: str, max_age_minutes: int) -> tuple[bool, str]:
     """Validate that a new file was created."""
     pattern = f"{directory}/*{extension}"
@@ -95,6 +112,11 @@ def validate(directory: str, extension: str, max_age_minutes: int) -> tuple[bool
     recent = get_recent_files(directory, extension, max_age_minutes)
     if recent:
         return True, f"Recently created file(s): {', '.join(recent)}"
+
+    # Check if a file was committed recently (covers create-then-migrate workflow)
+    committed = get_git_committed_files(directory, extension, max_age_minutes)
+    if committed:
+        return True, f"File(s) committed in recent history: {', '.join(committed)}"
 
     return False, NO_FILE_ERROR.format(
         pattern=pattern, directory=directory, extension=extension
