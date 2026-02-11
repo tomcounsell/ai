@@ -68,8 +68,18 @@ Experiments validated the approach before implementation:
 | `docs/experiments/task-list-isolation.md` | Experiment results for CLAUDE_CODE_TASK_LIST_ID behavior |
 | `docs/experiments/worktree-sdk-compatibility.md` | Experiment results for SDK + worktree compatibility |
 
+## Completion Signal
+
+Sessions transition to the **Complete** state when work is finished. Two mechanisms signal completion:
+
+1. **Automatic** -- `mark_work_done()` is called in `agent/job_queue.py` when a job finishes successfully. This is the primary completion mechanism.
+2. **Human signal** -- The thumbs-up emoji reaction (👍) in the Telegram group chat serves as a visual acknowledgment between humans that work is done.
+
+Note: **Telethon cannot receive emoji reaction events** for user accounts (Telegram API limitation). The 👍 reaction is purely a human-to-human signal -- it does not trigger any programmatic state change. No reaction handler is needed in the bridge.
+
 ## See Also
 
 - [Scale Job Queue (Popoto + Worktrees)](scale-job-queue-with-popoto-and-worktrees.md) -- The parallel execution foundation that this feature enables
 - [Session Watchdog](session-watchdog.md) -- Active session monitoring that works alongside isolation
+- [Bridge Workflow Gaps](bridge-workflow-gaps.md) -- Auto-continue, output classification, session logs
 - GitHub Issue [#62](https://github.com/tomcounsell/ai/issues/62) -- Tracking issue with experiment details
