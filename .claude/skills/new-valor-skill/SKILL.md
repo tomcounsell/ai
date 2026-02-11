@@ -7,11 +7,11 @@ hooks:
     - hooks:
         - type: command
           command: >-
-            uv run $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_tool_structure.py
+            $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_tool_structure.py
             --tools-dir tools
         - type: command
           command: >-
-            uv run $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_claude_md_updated.py
+            $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_claude_md_updated.py
             --tools-dir tools
 ---
 

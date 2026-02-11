@@ -25,6 +25,7 @@ from scripts.update import (
     cal_integration,
     deps,
     git,
+    hooks,
     service,
     symlinks,
     verify,
@@ -106,6 +107,7 @@ class UpdateResult:
     service_status: service.ServiceStatus | None = None
     caffeinate_status: service.CaffeinateStatus | None = None
     symlink_result: symlinks.SymlinkSyncResult | None = None
+    hook_audit: hooks.HookAuditResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -170,6 +172,16 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             if action.action == "error":
                 log(f"WARN: Failed to link {action.dst}: {action.error}", v)
                 result.warnings.append(f"Hardlink failed: {action.dst}")
+
+    # Step 1.6: Audit skill hooks for dangerous patterns
+    log("Auditing skill hooks...", v)
+    result.hook_audit = hooks.audit_skill_hooks(project_dir)
+    if result.hook_audit.issues:
+        for issue in result.hook_audit.issues:
+            log(f"WARN: [{issue.skill}] {issue.detail}", v, always=True)
+            result.warnings.append(f"Hook issue in {issue.skill}: {issue.issue_type}")
+    else:
+        log(f"Skill hooks OK ({result.hook_audit.skills_scanned} skills scanned)", v)
 
     # Step 2: Check for pending critical upgrades
     pending = git.check_upgrade_pending(project_dir)
