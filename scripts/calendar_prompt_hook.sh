@@ -62,7 +62,7 @@ if [ "$SAME_SESSION" = true ] && [ -f "$STAMPFILE" ]; then
         if [ -n "$SLUG" ]; then
             mkdir -p "$LOCKDIR"
             date +%s > "$STAMPFILE"
-            export PATH="$HOME/Library/Python/3.12/bin:$PATH"
+            export PATH="$HOME/src/ai/.venv/bin:$HOME/Library/Python/3.12/bin:$PATH"
             PREV_PROJECT=$(cat "$LOCKDIR/.calendar_hook_project" 2>/dev/null || echo "")
             exec valor-calendar --project "$PREV_PROJECT" "$SLUG"
         fi
@@ -132,5 +132,5 @@ date +%s > "$STAMPFILE"
 [ -n "$SESSION_ID" ] && echo "$SESSION_ID" > "$SESSIONFILE"
 echo "$SLUG" > "$SLUGFILE"
 echo "$PROJECT" > "$LOCKDIR/.calendar_hook_project"
-export PATH="$HOME/Library/Python/3.12/bin:$PATH"
+export PATH="$HOME/src/ai/.venv/bin:$HOME/Library/Python/3.12/bin:$PATH"
 exec valor-calendar --project "$PROJECT" "$SLUG"
