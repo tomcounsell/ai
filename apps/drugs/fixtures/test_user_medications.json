@@ -1,0 +1,246 @@
+{
+  "medications": [
+    {
+      "name": "Metformin",
+      "generic_name": "metformin",
+      "medication_type": "drug",
+      "food_timing": "with_food",
+      "common_dosages": ["500mg tablet", "850mg tablet", "1000mg tablet"]
+    },
+    {
+      "name": "Resveratrol",
+      "generic_name": "trans-resveratrol",
+      "medication_type": "supplement",
+      "food_timing": "with_food",
+      "common_dosages": ["250mg capsule", "500mg capsule"]
+    },
+    {
+      "name": "Thorne Multivitamin (AM)",
+      "generic_name": "multivitamin complex",
+      "medication_type": "supplement",
+      "food_timing": "with_food",
+      "common_dosages": ["1 capsule", "2 capsules"]
+    },
+    {
+      "name": "Aged Garlic Extract",
+      "generic_name": "allicin (aged garlic)",
+      "medication_type": "supplement",
+      "food_timing": "with_food",
+      "common_dosages": ["600mg capsule", "1200mg capsule"]
+    },
+    {
+      "name": "Vitamin D3 + K2",
+      "generic_name": "cholecalciferol + menaquinone",
+      "medication_type": "supplement",
+      "food_timing": "with_food",
+      "common_dosages": ["1000 IU / 100mcg", "5000 IU / 100mcg"]
+    },
+    {
+      "name": "Polypodium Leucotomos",
+      "generic_name": "polypodium leucotomos extract",
+      "medication_type": "supplement",
+      "food_timing": "anytime",
+      "common_dosages": ["240mg capsule", "480mg capsule"]
+    },
+    {
+      "name": "Quercetin",
+      "generic_name": "quercetin dihydrate",
+      "medication_type": "supplement",
+      "food_timing": "with_food",
+      "common_dosages": ["400mg capsule", "800mg capsule"]
+    },
+    {
+      "name": "Bromelain",
+      "generic_name": "bromelain",
+      "medication_type": "supplement",
+      "food_timing": "anytime",
+      "common_dosages": ["165mg capsule", "500mg capsule"]
+    },
+    {
+      "name": "Kirkland Krill Oil",
+      "generic_name": "krill oil (astaxanthin + omega-3)",
+      "medication_type": "supplement",
+      "food_timing": "with_food",
+      "common_dosages": ["500mg softgel"]
+    },
+    {
+      "name": "Omega-3 Fish Oil",
+      "generic_name": "omega-3 fatty acids (EPA/DHA)",
+      "medication_type": "supplement",
+      "food_timing": "with_food",
+      "common_dosages": ["1000mg softgel", "1250mg softgel"]
+    },
+    {
+      "name": "Magnesium L-Threonate",
+      "generic_name": "magnesium L-threonate",
+      "medication_type": "supplement",
+      "food_timing": "anytime",
+      "common_dosages": ["1000mg capsule", "2000mg capsule"]
+    },
+    {
+      "name": "CoQ10",
+      "generic_name": "coenzyme Q10 (ubiquinone)",
+      "medication_type": "supplement",
+      "food_timing": "with_food",
+      "common_dosages": ["100mg softgel", "200mg softgel"]
+    },
+    {
+      "name": "Ezetimibe",
+      "generic_name": "ezetimibe",
+      "medication_type": "drug",
+      "food_timing": "anytime",
+      "common_dosages": ["10mg tablet"]
+    },
+    {
+      "name": "Rosuvastatin",
+      "generic_name": "rosuvastatin calcium",
+      "medication_type": "drug",
+      "food_timing": "anytime",
+      "common_dosages": ["5mg tablet", "10mg tablet", "20mg tablet", "40mg tablet"]
+    },
+    {
+      "name": "Ramipril",
+      "generic_name": "ramipril",
+      "medication_type": "drug",
+      "food_timing": "anytime",
+      "common_dosages": ["1.25mg capsule", "2.5mg capsule", "5mg capsule", "10mg capsule"]
+    },
+    {
+      "name": "Baby Aspirin",
+      "generic_name": "acetylsalicylic acid (low-dose)",
+      "medication_type": "otc",
+      "food_timing": "with_food",
+      "common_dosages": ["81mg tablet"]
+    }
+  ],
+  "test_user": {
+    "username": "testuser1",
+    "email": "testuser1@example.com",
+    "meal_schedule": {
+      "breakfast_time": "08:00",
+      "lunch_time": "12:30",
+      "dinner_time": "19:00"
+    },
+    "medications": [
+      {
+        "medication_name": "Metformin",
+        "dosage": "500mg",
+        "frequency": "twice daily",
+        "time_preference": "morning",
+        "notes": "Take with breakfast"
+      },
+      {
+        "medication_name": "Metformin",
+        "dosage": "500mg",
+        "frequency": "twice daily",
+        "time_preference": "evening",
+        "notes": "Take with dinner"
+      },
+      {
+        "medication_name": "Resveratrol",
+        "dosage": "250mg",
+        "frequency": "once daily",
+        "time_preference": "morning",
+        "notes": ""
+      },
+      {
+        "medication_name": "Thorne Multivitamin (AM)",
+        "dosage": "1 capsule",
+        "frequency": "every other day",
+        "time_preference": "morning",
+        "notes": "Some mornings only"
+      },
+      {
+        "medication_name": "Aged Garlic Extract",
+        "dosage": "600mg",
+        "frequency": "every other day",
+        "time_preference": "evening",
+        "notes": "Some dinners only"
+      },
+      {
+        "medication_name": "Vitamin D3 + K2",
+        "dosage": "1 capsule",
+        "frequency": "once daily",
+        "time_preference": "evening",
+        "notes": "Take with dinner"
+      },
+      {
+        "medication_name": "Polypodium Leucotomos",
+        "dosage": "240mg",
+        "frequency": "once daily",
+        "time_preference": "morning",
+        "notes": "Sun/skin protection supplement"
+      },
+      {
+        "medication_name": "Quercetin",
+        "dosage": "800mg",
+        "frequency": "once daily",
+        "time_preference": "morning",
+        "notes": ""
+      },
+      {
+        "medication_name": "Bromelain",
+        "dosage": "165mg",
+        "frequency": "once daily",
+        "time_preference": "morning",
+        "notes": "Taken alongside quercetin"
+      },
+      {
+        "medication_name": "Kirkland Krill Oil",
+        "dosage": "500mg",
+        "frequency": "once daily",
+        "time_preference": "evening",
+        "notes": "Take with dinner"
+      },
+      {
+        "medication_name": "Omega-3 Fish Oil",
+        "dosage": "1250mg",
+        "frequency": "once daily",
+        "time_preference": "evening",
+        "notes": "Take with dinner"
+      },
+      {
+        "medication_name": "Magnesium L-Threonate",
+        "dosage": "2000mg",
+        "frequency": "once daily",
+        "time_preference": "evening",
+        "notes": "Take with dinner"
+      },
+      {
+        "medication_name": "CoQ10",
+        "dosage": "200mg",
+        "frequency": "every other day",
+        "time_preference": "evening",
+        "notes": "Some dinners only"
+      },
+      {
+        "medication_name": "Ezetimibe",
+        "dosage": "10mg",
+        "frequency": "once daily",
+        "time_preference": "evening",
+        "notes": "Cholesterol - take with dinner"
+      },
+      {
+        "medication_name": "Rosuvastatin",
+        "dosage": "20mg",
+        "frequency": "once daily",
+        "time_preference": "evening",
+        "notes": "Statin - take with dinner"
+      },
+      {
+        "medication_name": "Ramipril",
+        "dosage": "2.5mg",
+        "frequency": "once daily",
+        "time_preference": "evening",
+        "notes": "Blood pressure - take with dinner"
+      },
+      {
+        "medication_name": "Baby Aspirin",
+        "dosage": "81mg",
+        "frequency": "once daily",
+        "time_preference": "evening",
+        "notes": "Low-dose aspirin with dinner"
+      }
+    ]
+  }
+}
