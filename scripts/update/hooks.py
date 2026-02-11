@@ -101,7 +101,10 @@ def _audit_single_skill(
             HookIssue(
                 skill=skill_name,
                 issue_type="uv_run",
-                detail="Hook uses 'uv run' which can corrupt venv or trigger slow dependency resolution",
+                detail=(
+                    "Hook uses 'uv run' which can corrupt venv or "
+                    "trigger slow dependency resolution"
+                ),
             )
         )
         result.success = False

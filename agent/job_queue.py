@@ -26,11 +26,13 @@ from agent.branch_manager import (
     get_plan_context,
     sanitize_branch_name,
 )
+from bridge.session_logs import save_session_snapshot
 
 logger = logging.getLogger(__name__)
 
 
 MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent input
+MAX_AUTO_CONTINUES = 3  # Max status updates to auto-continue before sending to chat
 
 
 class RedisJob(Model):
@@ -588,6 +590,21 @@ async def _execute_job(job: Job) -> None:
         f"(session={job.session_id}, branch={branch_name}, cwd={working_dir})"
     )
 
+    # Save session snapshot at job start
+    save_session_snapshot(
+        session_id=job.session_id,
+        event="resume",
+        project_key=job.project_key,
+        branch_name=branch_name,
+        task_summary=f"Job {job.job_id} starting",
+        extra_context={
+            "job_id": job.job_id,
+            "sender": job.sender_name,
+            "message_preview": job.message_text[:200] if job.message_text else "",
+        },
+        working_dir=str(working_dir),
+    )
+
     # Track session in Redis
     agent_session = None
     try:
@@ -616,9 +633,73 @@ async def _execute_job(job: Job) -> None:
     send_cb = _send_callbacks.get(job.project_key)
     react_cb = _reaction_callbacks.get(job.project_key)
 
+    # Auto-continue counter (max 3 per session, resets on human reply)
+    auto_continue_count = 0
+
     async def send_to_chat(msg: str) -> None:
-        if send_cb:
-            await send_cb(job.chat_id, msg, job.message_id)
+        nonlocal auto_continue_count
+
+        if not send_cb:
+            return
+
+        # Classify the output to decide routing
+        from bridge.summarizer import OutputType, classify_output
+
+        classification = await classify_output(msg)
+        logger.info(
+            f"[{job.project_key}] Output classified as {classification.output_type.value} "
+            f"(confidence={classification.confidence:.2f}): {classification.reason}"
+        )
+
+        if (
+            classification.output_type == OutputType.STATUS_UPDATE
+            and auto_continue_count < MAX_AUTO_CONTINUES
+        ):
+            # Status update -- don't send to chat, inject "continue" to keep agent working
+            auto_continue_count += 1
+            logger.info(
+                f"[{job.project_key}] Auto-continuing "
+                f"({auto_continue_count}/{MAX_AUTO_CONTINUES})"
+            )
+
+            # Log a session snapshot for audit trail
+            save_session_snapshot(
+                session_id=job.session_id,
+                event="auto_continue",
+                project_key=job.project_key,
+                branch_name=branch_name,
+                task_summary=f"Auto-continued ({auto_continue_count}/{MAX_AUTO_CONTINUES})",
+                extra_context={
+                    "classification": classification.output_type.value,
+                    "confidence": classification.confidence,
+                    "reason": classification.reason,
+                    "message_preview": msg[:200],
+                },
+                working_dir=str(working_dir),
+            )
+
+            # Push "continue" as a steering message to keep the agent going
+            from agent.steering import push_steering_message
+
+            push_steering_message(
+                session_id=job.session_id,
+                text="continue",
+                sender="System (auto-continue)",
+            )
+            return
+
+        # For all other types (question, completion, blocker, error,
+        # or max auto-continues reached), send to chat normally
+        if (
+            auto_continue_count >= MAX_AUTO_CONTINUES
+            and classification.output_type == OutputType.STATUS_UPDATE
+        ):
+            logger.info(
+                f"[{job.project_key}] Max auto-continues reached "
+                f"({MAX_AUTO_CONTINUES}), sending to chat"
+            )
+
+        await send_cb(job.chat_id, msg, job.message_id)
 
     messenger = BossMessenger(
         _send_callback=send_to_chat,
@@ -693,6 +774,22 @@ async def _execute_job(job: Job) -> None:
         except Exception as e:
             logger.debug(f"AgentSession update failed (non-fatal): {e}")
 
+    # Save session snapshot for error cases
+    if task.error:
+        save_session_snapshot(
+            session_id=job.session_id,
+            event="error",
+            project_key=job.project_key,
+            branch_name=branch_name,
+            task_summary=f"Job {job.job_id} failed: {task.error}",
+            extra_context={
+                "job_id": job.job_id,
+                "error": str(task.error),
+                "sender": job.sender_name,
+            },
+            working_dir=str(working_dir),
+        )
+
     # Clean up steering queue — log content of any unconsumed messages
     try:
         from agent.steering import pop_all_steering_messages
@@ -737,6 +834,20 @@ async def _execute_job(job: Job) -> None:
             )
         except Exception as e:
             logger.warning(f"[{job.project_key}] Failed to auto-mark session done: {e}")
+
+        # Save session snapshot on successful completion
+        save_session_snapshot(
+            session_id=job.session_id,
+            event="complete",
+            project_key=job.project_key,
+            branch_name=branch_name,
+            task_summary=f"Job {job.job_id} completed successfully",
+            extra_context={
+                "job_id": job.job_id,
+                "sender": job.sender_name,
+            },
+            working_dir=str(working_dir),
+        )
 
 
 def _session_branch_name(session_id: str) -> str:

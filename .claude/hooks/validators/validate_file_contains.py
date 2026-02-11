@@ -226,9 +226,9 @@ def validate(
                     if not missing:
                         return (
                             True,
-                            f"File '{cfile}' was committed with all required sections (since migrated)",
+                            f"File '{cfile}' was committed with all "
+                            f"required sections (since migrated)",
                         )
-            # File existed but didn't have all sections — still count as present
             return (
                 True,
                 f"File(s) committed in recent history (since migrated): {', '.join(committed)}",
