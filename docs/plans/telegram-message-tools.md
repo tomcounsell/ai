@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor
@@ -89,12 +89,16 @@ valor-telegram send --chat "Dev: Valor" --audio ./recording.mp3
 ```
 READ request
     ↓
-Try Telegram API
-    ↓ (success)           ↓ (fail: offline/rate-limit)
-Store in SQLite cache     Read from SQLite cache
-    ↓                         ↓
-Return results            Return cached results (with staleness warning)
+Check SQLite cache
+    ↓ (hit)               ↓ (miss)
+Return cached results     Fetch from Telegram API
+                              ↓
+                          Store in SQLite cache
+                              ↓
+                          Return results
 ```
+
+Cache TTL is indefinite — messages don't change. Cache serves as persistent storage and speeds up repeated queries.
 
 ## Rabbit Holes
 
@@ -107,7 +111,7 @@ Return results            Return cached results (with staleness warning)
 
 ### Risk 1: API rate limits
 **Impact:** Frequent reads could hit Telegram limits
-**Mitigation:** Cache aggressively, add backoff logic, respect API limits
+**Mitigation:** Cache-first approach naturally reduces API calls; add backoff if rate-limited
 
 ### Risk 2: Large media uploads
 **Impact:** Sending big files could timeout
@@ -226,10 +230,3 @@ No update system changes required — local tools only.
 - `test ! -d .claude/skills/searching-message-history` - Old skill removed
 - `test ! -d .claude/skills/get-telegram-messages` - Old skill removed
 
----
-
-## Open Questions
-
-1. **Cache TTL**: How long should cached messages be considered fresh before re-fetching? (Suggestion: 5 minutes for recent, indefinite for older)
-
-2. **Offline mode**: Should we warn when serving stale cache, or just serve silently?
