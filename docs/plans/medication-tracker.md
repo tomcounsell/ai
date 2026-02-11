@@ -213,6 +213,10 @@ InteractionChecker.check_user_interactions() → Display warnings
   - Cache permanently for future users
 - **Implementation**: `apps/ai/agent/drug_interactions.py` using PydanticAI
 
+### Watch List (Future Potential)
+
+- **Examine.com API**: High-quality evidence-based supplement data. No API currently, but may release one. Would be ideal for supplement interactions, dosing, efficacy. Monitor for API availability.
+
 ### Not Available / Not Usable
 
 - **NLM Drug Interaction API**: Discontinued January 2024
