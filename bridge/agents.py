@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import platform
 import re
 import subprocess
 import time
@@ -77,8 +78,9 @@ async def _handle_update_command(tg_client, event):
     will be queued until all work completes.
     """
     # Import here to avoid circular dependency
-    from bridge.response import set_reaction
+    from bridge.response import send_response_with_files, set_reaction
 
+    machine = platform.node().split(".")[0]  # e.g. "toms-macbook-pro"
     logger.info(f"[bridge] /update command received from chat {event.chat_id}")
     try:
         await set_reaction(tg_client, event.chat_id, event.message.id, "👀")
@@ -102,7 +104,7 @@ async def _handle_update_command(tg_client, event):
     if not script_path.exists():
         await tg_client.send_message(
             event.chat_id,
-            "scripts/remote-update.sh not found.",
+            f"[{machine}] scripts/remote-update.sh not found.",
             reply_to=event.message.id,
         )
         return
@@ -122,20 +124,30 @@ async def _handle_update_command(tg_client, event):
         # Append sessions notice if any were running
         output += sessions_notice
 
-        # Truncate if too long for Telegram
-        if len(output) > 4000:
-            output = output[:4000] + "\n...(truncated)"
-        await tg_client.send_message(event.chat_id, output, reply_to=event.message.id)
+        # Prepend machine name for multi-instance identification
+        output = f"[{machine}] {output}"
+
+        # Send via send_response_with_files so <<FILE:>> markers get
+        # parsed and the log file is uploaded as an attachment
+        await send_response_with_files(
+            tg_client,
+            event=None,
+            response=output,
+            chat_id=event.chat_id,
+            reply_to=event.message.id,
+        )
     except subprocess.TimeoutExpired:
         await tg_client.send_message(
             event.chat_id,
-            "Update timed out after 120s",
+            f"[{machine}] Update timed out after 120s",
             reply_to=event.message.id,
         )
     except Exception as e:
         logger.error(f"[bridge] /update command failed: {e}")
         await tg_client.send_message(
-            event.chat_id, f"Update failed: {e}", reply_to=event.message.id
+            event.chat_id,
+            f"[{machine}] Update failed: {e}",
+            reply_to=event.message.id,
         )
 
 
