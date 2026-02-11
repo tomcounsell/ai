@@ -20,7 +20,7 @@ HAIKU = "claude-haiku-4-5-20251001"
 # Sonnet 4.5 - Balanced reasoning and speed
 # Use cases: code generation, complex analysis, documentation, test judgment
 # Strengths: Better reasoning than Haiku, still relatively fast
-SONNET = "claude-sonnet-4-5-20250514"
+SONNET = "claude-sonnet-4-5-20250929"
 
 # Sonnet 4 (previous gen) - Use SONNET instead for new code
 # Kept for reference during migration
@@ -40,7 +40,7 @@ OPUS = "claude-opus-4-5-20251101"
 
 # Anthropic models via OpenRouter (fallback when no direct API key)
 OPENROUTER_HAIKU = "anthropic/claude-haiku-4-5-20251001"
-OPENROUTER_SONNET = "anthropic/claude-sonnet-4-5-20250514"
+OPENROUTER_SONNET = "anthropic/claude-sonnet-4-5-20250929"
 OPENROUTER_OPUS = "anthropic/claude-opus-4-5-20251101"
 
 # -----------------------------------------------------------------------------
