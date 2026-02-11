@@ -4,6 +4,43 @@
 
 A web application that helps users catalog their medicines and supplements, tracks interactions between them, and suggests optimal timing based on the user's eating schedule.
 
+## Current Status
+
+| Phase | Status | Notes |
+|-------|--------|-------|
+| Phase 1: Core Catalog | ✅ Complete | Models, admin, seed data |
+| Phase 2: API Integration | 🔄 In Progress | RxNorm + OpenFDA done, AI fallback next |
+| Phase 3: Smart Scheduling | ⏳ Planned | |
+| Phase 4: Polish | ⏳ Planned | |
+
+### What's Built
+
+**Models** (`apps/drugs/models.py`):
+- `Medication` - name, generic_name, type, food_timing, known_interactions (JSON)
+- `UserMedication` - links user to medication with dosage, frequency, preferences
+- `UserMealSchedule` - user's meal times for scheduling
+
+**API Clients** (`apps/integration/`):
+- `rxnorm/client.py` - Drug normalization, RxCUI lookup, autocomplete
+- `openfda/client.py` - Drug labels, interaction warnings, food interactions
+
+**Services** (`apps/drugs/services/`):
+- `drug_lookup.py` - Lazy loading: checks DB first, fetches from APIs if missing
+- `interactions.py` - Checks user's medications for known interactions
+- `scheduler.py` - Generates daily medication schedule based on meal times
+
+**Seed Data**:
+- 16 common medications with hardcoded interaction data
+- Management command: `python manage.py seed_medications`
+
+### What's Next
+
+1. **AI Fallback for Supplements** - RxNorm/OpenFDA don't have good data for supplements (CoQ10, Quercetin, etc.). Need AI agent to fill gaps.
+2. **MedicationInteraction Model** - Currently interactions are stored as JSON on Medication. Need proper M2M model for better querying.
+3. **User Interface** - No UI yet, just admin and API.
+
+---
+
 ## Core Features
 
 ### 1. Medication Catalog
@@ -53,197 +90,245 @@ A web application that helps users catalog their medicines and supplements, trac
 
 ## Data Model
 
-### User-Facing Models
+### Current Models (Implemented)
 
-```
-UserMedication
-├── user (FK)
-├── medication (FK to Medication)
-├── dosage (CharField)
-├── frequency (CharField or structured)
-├── time_preference (morning, evening, with meals, etc.)
-├── is_active (Boolean)
-├── notes (TextField)
-├── started_at (DateTimeField)
-├── ended_at (DateTimeField, nullable)
+```python
+# apps/drugs/models.py
 
-Medication
-├── name (CharField)
-├── generic_name (CharField, nullable)
-├── medication_type (drug, supplement, vitamin, herbal)
-├── common_dosages (JSONField)
-├── food_interaction (with_food, empty_stomach, no_preference)
-├── external_ids (JSONField - RxNorm, NDC, etc.)
+class Medication(Timestampable, models.Model):
+    name = models.CharField(max_length=200)
+    generic_name = models.CharField(max_length=200, blank=True)
+    medication_type = models.CharField(choices=[drug, supplement, vitamin, otc, herbal])
+    food_timing = models.CharField(choices=[with_food, empty_stomach, anytime])
+    known_interactions = models.JSONField(default=dict)  # {medication_ids, warnings, sources}
+    common_dosages = models.JSONField(default=list)
 
-MedicationInteraction
-├── medication_a (FK)
-├── medication_b (FK)
-├── severity (minor, moderate, major, contraindicated)
-├── description (TextField)
-├── recommendation (TextField)
-├── spacing_hours (Integer, nullable - min hours between)
-├── source (CharField - where data came from)
-├── verified (Boolean)
+class UserMedication(Timestampable, Authorable, models.Model):
+    user = models.ForeignKey(User)
+    medication = models.ForeignKey(Medication)
+    dosage = models.CharField()
+    frequency = models.CharField()
+    time_preference = models.CharField(choices=[morning, evening, anytime])
+    is_active = models.BooleanField(default=True)
+    notes = models.TextField(blank=True)
 
-FoodInteraction
-├── medication (FK)
-├── food_type (grapefruit, dairy, alcohol, caffeine, high_fat, etc.)
-├── effect (reduces_absorption, increases_absorption, dangerous, etc.)
-├── description (TextField)
-
-UserMealSchedule
-├── user (FK)
-├── meal_type (breakfast, lunch, dinner, snack)
-├── typical_time (TimeField)
-├── days_of_week (JSONField or M2M)
-
-UserMedicationSchedule (generated)
-├── user (FK)
-├── user_medication (FK)
-├── suggested_time (TimeField)
-├── relation_to_meal (before, with, after, independent)
-├── notes (TextField)
+class UserMealSchedule(Timestampable, Authorable, models.Model):
+    user = models.ForeignKey(User)
+    breakfast_time = models.TimeField()
+    lunch_time = models.TimeField()
+    dinner_time = models.TimeField()
 ```
 
-### Interaction Population Flow
+### Planned Models (Not Yet Implemented)
+
+```python
+# Proper M2M for interactions (better than JSON field)
+class MedicationInteraction(models.Model):
+    medication_a = models.ForeignKey(Medication)
+    medication_b = models.ForeignKey(Medication)
+    severity = models.CharField(choices=[minor, moderate, major, contraindicated])
+    description = models.TextField()
+    recommendation = models.TextField()
+    spacing_hours = models.IntegerField(null=True)  # Min hours between doses
+    source = models.CharField()  # openfda, dailymed, ai, manual
+    verified = models.BooleanField(default=False)
+
+class FoodInteraction(models.Model):
+    medication = models.ForeignKey(Medication)
+    food_type = models.CharField()  # grapefruit, dairy, alcohol, caffeine, etc.
+    effect = models.CharField()  # reduces_absorption, increases_absorption, dangerous
+    description = models.TextField()
+```
+
+### Lazy Loading Flow
 
 ```
 User adds "Lisinopril" to their medications
     ↓
-System checks: Do we have Lisinopril in Medication table?
-    ↓ No
-Query external source (API or AI) for:
-    - Drug info
-    - Known interactions
-    - Food interactions
+DrugLookupService.lookup_drug("Lisinopril")
     ↓
-Store Medication record
-Store all MedicationInteraction records
-Store all FoodInteraction records
+Check Medication.objects.filter(name__iexact="Lisinopril")
+    ↓ Not found
+RxNormClient.normalize_drug_name("Lisinopril") → RxCUI: 29046
     ↓
-Check user's existing medications for interactions
+OpenFDAClient.get_drug_label_by_rxcui("29046") → interaction warnings
     ↓
-Display warnings and update schedule
+Create Medication(name="Lisinopril", known_interactions={...})
+    ↓
+InteractionChecker.check_user_interactions() → Display warnings
 ```
 
 ---
 
 ## External Data Sources
 
-### Available Free APIs (Commercial Use Allowed)
+### Implemented ✅
 
-#### 1. RxNorm API (NLM)
-- **URL**: https://lhncbc.nlm.nih.gov/RxNav/APIs/RxNormAPIs.html
+#### RxNorm API (NLM)
+- **Client**: `apps/integration/rxnorm/client.py`
 - **Purpose**: Drug identification and normalization
 - **License**: Free, no license needed
 - **Rate Limit**: 20 requests/second per IP
-- **Caching**: Recommended 12-24 hours
+- **Caching**: 24 hours (Django cache)
+- **Methods**:
+  - `search_drugs(name)` - Find drugs by name
+  - `get_spelling_suggestions(term)` - Autocomplete
+  - `get_rxcui(name)` - Get RxCUI identifier
+  - `get_drug_properties(rxcui)` - Drug details
+  - `get_related_drugs(rxcui)` - Brand/generic mapping
+  - `normalize_drug_name(user_input)` - Full normalization flow
 - **Attribution Required**:
   > "This product uses publicly available data from the U.S. National Library of Medicine (NLM)..."
-- **Use For**: Matching user input to standard drug names, getting RxCUI identifiers
 
-#### 2. OpenFDA API
-- **URL**: https://open.fda.gov/apis/drug/
-- **Purpose**: Drug labels, adverse events, recalls, NDC directory
-- **License**: CC0 1.0 (public domain) - commercial use allowed
-- **Rate Limit**: 240 req/min, 120k/day (with free API key)
-- **Use For**:
-  - Drug labeling data (contains interaction warnings in label text)
-  - Adverse event reports
-  - Product information
-- **Note**: No structured interaction database, but labels contain interaction sections
+#### OpenFDA API
+- **Client**: `apps/integration/openfda/client.py`
+- **Purpose**: Drug labels, adverse events, interaction warnings
+- **License**: CC0 1.0 (public domain)
+- **Rate Limit**: 240 req/min (with API key)
+- **Caching**: 24 hours (Django cache)
+- **Methods**:
+  - `get_drug_label(name)` - Label by drug name
+  - `get_drug_label_by_rxcui(rxcui)` - Label by RxCUI
+  - `get_adverse_events(name)` - Adverse event reports
+  - `search_drugs(query)` - Search drugs
+- **Parsed Fields**: brand_name, generic_name, drug_interactions, warnings, food_interactions
 
-#### 3. DailyMed API (NLM)
+### Planned 🔄
+
+#### DailyMed API (NLM)
 - **URL**: https://dailymed.nlm.nih.gov/dailymed/app-support-web-services.cfm
 - **Purpose**: Current FDA-approved drug labeling (SPL format)
-- **License**: Public access, free
 - **Use For**:
   - Full prescribing information
-  - Drug interaction sections from official labels
+  - Structured drug interaction sections
   - Can query by RxCUI (links to RxNorm)
 - **Formats**: XML and JSON
+
+#### AI Fallback (Claude/PydanticAI)
+- **Purpose**: Fill gaps when APIs don't have data (supplements, herbals)
+- **Approach**:
+  - Prompt template for interaction lookup
+  - Parse response into structured format
+  - Flag as "AI-generated, verify with pharmacist"
+  - Cache permanently for future users
+- **Implementation**: `apps/ai/agent/drug_interactions.py` using PydanticAI
 
 ### Not Available / Not Usable
 
 - **NLM Drug Interaction API**: Discontinued January 2024
 - **DrugBank**: Requires commercial license
-- **DDInter**: CC BY-NC-SA license (NonCommercial only - cannot use)
-
-### AI-Assisted Lookup (Claude)
-- Use when no structured data available from APIs
-- Summarize known interactions from training data
-- Flag as "AI-generated, verify with pharmacist"
-- Cache results permanently for future users
-- Allow admin verification to upgrade confidence
-
-### Recommended Integration Strategy
-
-1. **RxNorm**: Primary drug identification - normalize all user input
-2. **DailyMed**: Fetch official label, parse interaction/warning sections
-3. **OpenFDA**: Supplement with adverse event data, additional labeling
-4. **Claude AI**: Fill gaps when APIs don't have data, with disclaimers
+- **DDInter**: CC BY-NC-SA license (NonCommercial only)
 
 ---
 
-## API Integration TODO
+## Implementation Phases
 
-### Phase 2 Integration Tasks
+### Phase 1: Core Catalog ✅ Complete
 
-- [ ] **RxNorm Service** (`services/rxnorm.py`)
-  - [ ] Implement drug name search (`/drugs` endpoint)
-  - [ ] Implement autocomplete for drug entry (`/spellingsuggestions`)
-  - [ ] Get RxCUI for a drug name (`/rxcui`)
-  - [ ] Fetch drug properties (`/rxcui/{rxcui}/properties`)
-  - [ ] Map brand names to generic (`/rxcui/{rxcui}/related`)
-  - [ ] Add 24-hour response caching
-  - [ ] Add NLM attribution to UI
+- [x] Medication model with basic fields
+- [x] UserMedication model linking users to medications
+- [x] UserMealSchedule model for eating times
+- [x] Django admin for all models
+- [x] Seed data for 16 common medications
+- [x] Basic interaction checking service (JSON-based)
+- [x] Basic scheduling service
 
-- [ ] **DailyMed Service** (`services/dailymed.py`)
-  - [ ] Fetch SPL by RxCUI (`/spls.json?rxcui=`)
-  - [ ] Parse drug interaction section from SPL XML
-  - [ ] Parse warnings/precautions section
-  - [ ] Extract food interaction info from label
-  - [ ] Store parsed interactions in database
+### Phase 2: API Integration 🔄 In Progress
 
-- [ ] **OpenFDA Service** (`services/openfda.py`)
-  - [ ] Register for API key
-  - [ ] Fetch drug label by name/NDC (`/drug/label.json`)
-  - [ ] Parse `drug_interactions` field from label
-  - [ ] Fetch adverse events for a drug (`/drug/event.json`)
-  - [ ] Implement rate limiting (240/min)
+**Completed:**
+- [x] RxNorm client (`apps/integration/rxnorm/client.py`)
+  - [x] Drug name search (`/drugs` endpoint)
+  - [x] Autocomplete (`/spellingsuggestions`)
+  - [x] Get RxCUI for a drug name (`/rxcui`)
+  - [x] Fetch drug properties (`/rxcui/{rxcui}/properties`)
+  - [x] Map brand names to generic (`/rxcui/{rxcui}/related`)
+  - [x] 24-hour response caching
+- [x] OpenFDA client (`apps/integration/openfda/client.py`)
+  - [x] Fetch drug label by name/RxCUI
+  - [x] Parse `drug_interactions` field
+  - [x] Extract food interaction info
+  - [x] 24-hour response caching
+- [x] Lazy loading service (`apps/drugs/services/drug_lookup.py`)
+  - [x] Check database first
+  - [x] Fetch from RxNorm + OpenFDA if missing
+  - [x] Create Medication record with gathered data
 
-- [ ] **AI Interaction Service** (`services/ai_interactions.py`)
+**Remaining:**
+- [ ] DailyMed client (structured interaction parsing)
+- [ ] AI fallback agent for supplements
+  - [ ] PydanticAI agent with structured output
   - [ ] Prompt template for interaction lookup
-  - [ ] Parse Claude response into structured format
-  - [ ] Flag results as AI-generated in database
-  - [ ] Fallback when APIs return no data
-
-- [ ] **Interaction Aggregator** (`services/interactions.py`)
+  - [ ] Flag AI-generated data in database
+- [ ] MedicationInteraction model (replace JSON field)
+- [ ] FoodInteraction model
+- [ ] Interaction aggregator service
   - [ ] Orchestrate calls to all sources
   - [ ] Merge/deduplicate interaction data
   - [ ] Assign confidence levels by source
-  - [ ] Store results with source attribution
+- [ ] Add NLM attribution to UI
+
+### Phase 3: Smart Scheduling ⏳ Planned
+
+- [ ] Enhanced scheduling algorithm
+  - [ ] Consider drug-drug spacing requirements
+  - [ ] Handle interaction avoidance windows
+  - [ ] Optimize for user convenience
+- [ ] Daily plan generation with conflict detection
+- [ ] Conflict resolution suggestions
+- [ ] Schedule regeneration on changes
+
+### Phase 4: Polish ⏳ Planned
+
+- [ ] User interface (HTMX-based)
+  - [ ] Medication list page
+  - [ ] Add medication with autocomplete
+  - [ ] Interactions dashboard
+  - [ ] Daily schedule view
+- [ ] Mobile optimization
+- [ ] Export/print schedules
+- [ ] User feedback on interactions
+- [ ] Admin verification workflow
+- [ ] Safety disclaimers
 
 ---
 
-## User Interface
+## Codebase Architecture
 
-### Pages
+```
+apps/drugs/                          # Main application
+├── __init__.py
+├── admin.py                         # Django admin
+├── apps.py
+├── models.py                        # Medication, UserMedication, UserMealSchedule
+├── services/
+│   ├── __init__.py
+│   ├── drug_lookup.py               # Lazy loading from APIs
+│   ├── interactions.py              # Interaction checking
+│   └── scheduler.py                 # Daily schedule generation
+├── management/
+│   └── commands/
+│       └── seed_medications.py      # Seed 16 common medications
+├── fixtures/
+│   └── test_user_medications.json   # Test data (raw JSON, not Django fixture)
+├── migrations/
+└── tests/
 
-1. **My Medications** - List view with add/edit/remove
-2. **Add Medication** - Search/autocomplete, dosage entry
-3. **Interactions Dashboard** - Visual display of all interactions
-4. **My Schedule** - Meal times configuration
-5. **Daily Plan** - Generated medication schedule with times
-6. **Alerts** - Current warnings requiring attention
+apps/integration/rxnorm/             # RxNorm API client ✅
+├── __init__.py
+└── client.py
 
-### Key UX Considerations
+apps/integration/openfda/            # OpenFDA API client ✅
+├── __init__.py
+└── client.py
 
-- Search with autocomplete (fuzzy matching on drug names)
-- Clear severity indicators (color-coded)
-- Mobile-friendly (users check this throughout day)
-- Print/export daily schedule
-- Reminder integration (future: push notifications)
+apps/integration/dailymed/           # DailyMed API client (planned)
+├── __init__.py
+├── client.py
+└── parsers.py                       # SPL XML parsing
+
+apps/ai/agent/                       # AI agents (planned)
+└── drug_interactions.py             # AI fallback for supplements
+```
 
 ---
 
@@ -259,168 +344,18 @@ Display warnings and update schedule
 
 ### Data Accuracy
 
-- Track data source for every interaction
+- Track data source for every interaction (openfda, dailymed, ai, manual)
 - Flag AI-generated vs. verified data
 - Allow users to report inaccuracies
 - Admin review queue for flagged issues
 
 ---
 
-## Implementation Phases
-
-### Phase 1: Core Catalog
-- User medication list (CRUD)
-- Basic medication database
-- Manual interaction entry (admin)
-- Simple meal schedule
-
-### Phase 2: Automated Interactions
-- RxNorm integration for drug lookup
-- AI-powered interaction fetching
-- Caching and storage of results
-- Basic interaction warnings
-
-### Phase 3: Smart Scheduling
-- Scheduling algorithm
-- Daily plan generation
-- Conflict resolution suggestions
-
-### Phase 4: Polish
-- Mobile optimization
-- Export/print schedules
-- User feedback on interactions
-- Admin verification workflow
-
----
-
-## Technical Considerations
-
-### Codebase Architecture
-
-The medication tracker integrates into cuttlefish following existing patterns:
-
-```
-apps/drugs/                          # Main application
-├── __init__.py
-├── admin.py                         # Django admin for Medication, Interaction models
-├── apps.py
-├── models/
-│   ├── __init__.py
-│   ├── medication.py                # Medication, MedicationInteraction, FoodInteraction
-│   └── user_medication.py           # UserMedication, UserMealSchedule, UserMedicationSchedule
-├── services/
-│   ├── __init__.py
-│   ├── interactions.py              # Aggregator: orchestrates API calls, merges results
-│   └── scheduler.py                 # Timing algorithm for daily plan generation
-├── views/
-│   ├── __init__.py
-│   ├── medications.py               # CRUD views (MainContentView pattern)
-│   ├── schedule.py                  # Meal schedule, daily plan views
-│   └── partials/                    # HTMX partial views
-│       ├── medication_list.py
-│       ├── interaction_alerts.py
-│       └── daily_plan.py
-├── urls.py
-├── migrations/
-└── tests/
-    ├── __init__.py
-    ├── factories.py
-    ├── test_models/
-    ├── test_views/
-    └── test_services/
-
-apps/integration/rxnorm/             # RxNorm API client
-├── __init__.py
-├── client.py                        # RxNormClient (async, like QuickBooksClient)
-└── tests/
-    └── test_client.py
-
-apps/integration/openfda/            # OpenFDA API client
-├── __init__.py
-├── client.py                        # OpenFDAClient
-└── tests/
-    └── test_client.py
-
-apps/integration/dailymed/           # DailyMed API client
-├── __init__.py
-├── client.py                        # DailyMedClient
-├── parsers.py                       # SPL XML parsing for interaction sections
-└── tests/
-    └── test_client.py
-
-apps/ai/agent/                       # AI interaction lookup (extends existing)
-├── drug_interactions.py             # AI agent for interaction data when APIs lack info
-
-apps/public/templates/drugs/         # Templates (in central template location)
-├── medication_list.html
-├── medication_form.html
-├── medication_detail.html
-├── interactions_dashboard.html
-├── schedule_form.html
-├── daily_plan.html
-└── partials/
-    ├── medication_card.html
-    ├── interaction_alert.html
-    └── schedule_row.html
-```
-
-### Integration Patterns
-
-**API Clients** (`apps/integration/*/client.py`):
-- Async clients using `aiohttp` (matches QuickBooksClient pattern)
-- Response caching with configurable TTL
-- Proper error handling and logging
-
-**Views** (`apps/drugs/views/`):
-- Inherit from `MainContentView` for full pages
-- Use `HTMXView` for partial/component responses
-- Follow existing URL patterns in `apps/public/urls.py`
-
-**Models** (`apps/drugs/models/`):
-- Use behavior mixins from `apps/common/behaviors/` (Timestampable, Authorable)
-- Store external IDs (RxCUI, NDC) in JSONField for flexibility
-- Track data source and verification status on interaction records
-
-**AI Integration** (`apps/ai/agent/drug_interactions.py`):
-- PydanticAI agent with `Agent` prefix (e.g., `AgentDrugInteractionLookup`)
-- Returns structured interaction data
-- Results flagged as AI-generated in database
-
-### URL Structure
-
-```python
-# apps/drugs/urls.py
-urlpatterns = [
-    path("medications/", MedicationListView.as_view(), name="medication_list"),
-    path("medications/add/", MedicationCreateView.as_view(), name="medication_add"),
-    path("medications/<int:pk>/", MedicationDetailView.as_view(), name="medication_detail"),
-    path("medications/<int:pk>/edit/", MedicationUpdateView.as_view(), name="medication_edit"),
-    path("medications/<int:pk>/delete/", MedicationDeleteView.as_view(), name="medication_delete"),
-    path("interactions/", InteractionsDashboardView.as_view(), name="interactions_dashboard"),
-    path("schedule/", ScheduleView.as_view(), name="schedule"),
-    path("schedule/plan/", DailyPlanView.as_view(), name="daily_plan"),
-]
-
-# Include in main urls.py
-path("drugs/", include("apps.drugs.urls")),
-```
-
-### Performance
-
-- Cache API responses: RxNorm (24h), DailyMed (24h), OpenFDA (24h)
-- Background task for fetching new interaction data (avoid blocking user)
-- Pre-compute daily schedules, update on medication/meal changes
-- Database indexes on RxCUI, medication name for fast lookups
-
----
-
 ## Future Features (Out of Scope)
 
-The following are not part of the initial implementation but may be considered later:
-
-- **Extended medication types**: Topicals, injectables, medical devices
-- **Variable schedules**: Different schedules for weekdays vs weekends
-- **Sharing**: Share medication list with caregiver or doctor
-- **Medication history**: Track changes over time, past medications
-- **Refill tracking**: Reminders when running low
-- **Multi-user households**: Family medication tracking under one account
+- Extended medication types (topicals, injectables, medical devices)
+- Variable schedules (weekday vs weekend)
+- Share medication list with caregiver or doctor
+- Medication history tracking
+- Refill reminders
+- Multi-user households
