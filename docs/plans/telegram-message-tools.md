@@ -11,25 +11,26 @@ tracking: https://github.com/tomcounsell/ai/issues/71
 
 ## Problem
 
-We have three related Telegram capabilities scattered across confusingly-named skills and tools:
+We have fragmented Telegram capabilities with confusing distinctions:
 
-| Capability | Current Location | Data Source |
-|------------|------------------|-------------|
-| Search history | `searching-message-history` skill | SQLite (`~/.valor/telegram_history.db`) |
-| Fetch live messages | `get-telegram-messages` skill | Live Telegram API via bridge IPC |
-| Send messages | None (inline Telethon scripts) | Live Telegram API |
+| Current State | Problem |
+|---------------|---------|
+| Two skills for reading messages | Agents must understand SQLite vs API internals |
+| SQLite treated as separate data source | Should just be a cache, not a different tool |
+| No send capability | Have to write throwaway Telethon scripts |
+| No media support | Can't send images, files, or audio |
 
 **Current behavior:**
-- Agents don't know which skill to use for message lookup
-- No way to send messages without writing throwaway Python scripts
-- `valor-history` CLI documented in SOUL.md doesn't exist
-- Naming doesn't convey SQLite vs API distinction
+- `searching-message-history` skill: SQLite queries
+- `get-telegram-messages` skill: Live API calls
+- Agents confused about which to use
+- No way to send messages or media
 
 **Desired outcome:**
-- Single unified skill with clear guidance on when to use each backend
-- `telegram-send` CLI for sending messages from any Claude Code session
-- Consistent naming that reflects the actual data sources
-- Agent can reliably choose the right approach
+- **One command for reading messages** — abstracts away storage/caching
+- **One command for sending messages** — supports text and media
+- SQLite is just a transparent cache for API results
+- Agent doesn't need to know or care about the backend
 
 ## Appetite
 
@@ -38,205 +39,197 @@ We have three related Telegram capabilities scattered across confusingly-named s
 **Team:** Solo dev, PM
 
 **Interactions:**
-- PM check-ins: 1 (confirm naming and skill structure)
+- PM check-ins: 1 (confirm API-first approach)
 - Review rounds: 1
 
 ## Prerequisites
 
 | Requirement | Check Command | Purpose |
 |-------------|---------------|---------|
-| Telethon session exists | `test -f /Users/valorengels/src/ai/data/valor_bridge.session` | Reuse bridge session for sending |
-| SQLite history DB | `test -f ~/.valor/telegram_history.db` | Message history storage |
+| Telethon session exists | `test -f /Users/valorengels/src/ai/data/valor_bridge.session` | API access |
+| API credentials in .env | `grep -q TELEGRAM_API_ID .env` | Telegram authentication |
 
 ## Solution
 
 ### Key Elements
 
-- **Unified skill**: Single `telegram` skill with subsections for read (SQLite), read (live), and send
-- **Send CLI tool**: `tools/telegram_send.py` for sending messages
-- **CLI wrapper**: `scripts/telegram-send` for ergonomic usage
-- **Retire old skills**: Remove `searching-message-history` and `get-telegram-messages` directories
+- **`valor-telegram read`**: Single command to get messages. Uses API, caches to SQLite transparently.
+- **`valor-telegram send`**: Send text or media. Supports images, files, audio.
+- **Unified skill**: One `telegram` skill doc explaining both commands
+- **Cache-through architecture**: SQLite stores API results, serves as fallback when offline
 
 ### Flow
 
-**Agent needs message context** → Checks `telegram` skill → Sees decision tree → Uses SQLite for search/groups, live API for real-time DMs
+**Reading messages:**
+```
+valor-telegram read --chat "Dev: Valor" --limit 10
+valor-telegram read --chat "Dev: Valor" --search "deployment"
+valor-telegram read --chat "Tom" --since "1 hour ago"
+```
+→ Hits API first, caches result, returns messages
 
-**Agent needs to send message** → Uses `telegram-send` CLI → Specifies group/chat + message → Message delivered
+**Sending messages:**
+```
+valor-telegram send --chat "Dev: Valor" "Hello world"
+valor-telegram send --chat "Dev: Valor" --file ./screenshot.png "Check this out"
+valor-telegram send --chat "Dev: Valor" --image ./photo.jpg
+valor-telegram send --chat "Dev: Valor" --audio ./recording.mp3
+```
 
 ### Technical Approach
 
-- Reuse existing Telethon session at `data/valor_bridge.session`
-- Send tool runs independently of bridge (Telethon supports concurrent connections)
-- Unified skill doc references existing tools, adds send capability
-- Cache dialog list to avoid repeated API calls for group name resolution
+- Single CLI entry point: `valor-telegram` with subcommands
+- API-first: Always try live API, fall back to cache if offline/rate-limited
+- SQLite as cache: Store messages on read, serve from cache when appropriate
+- Media handling: Use Telethon's `send_file()` with appropriate attributes for images/audio/files
+- Session reuse: Same `valor_bridge.session` as the bridge
+
+### Cache Strategy
+
+```
+READ request
+    ↓
+Try Telegram API
+    ↓ (success)           ↓ (fail: offline/rate-limit)
+Store in SQLite cache     Read from SQLite cache
+    ↓                         ↓
+Return results            Return cached results (with staleness warning)
+```
 
 ## Rabbit Holes
 
-- **Rich message formatting**: Don't build markdown/HTML formatting support — plain text only
-- **Media sending**: Don't support photo/file uploads — text messages only for now
-- **Message editing/deletion**: Out of scope — send-only
-- **Read receipts**: Don't track delivery status
+- **Complex search syntax**: Don't build a query DSL — simple keyword search is enough
+- **Message threading/replies**: Don't try to reconstruct thread trees — flat list is fine
+- **Reaction support**: Out of scope for v1
+- **Edit/delete messages**: Out of scope — send-only
 
 ## Risks
 
-### Risk 1: Session conflicts
-**Impact:** Bridge and send tool fighting over Telethon session
-**Mitigation:** Telethon sessions support multiple concurrent connections; test concurrency explicitly
+### Risk 1: API rate limits
+**Impact:** Frequent reads could hit Telegram limits
+**Mitigation:** Cache aggressively, add backoff logic, respect API limits
 
-### Risk 2: Dialog resolution overhead
-**Impact:** Slow sends while iterating dialogs to find group by name
-**Mitigation:** Cache dialog list in SQLite (reuse existing `chats` table)
+### Risk 2: Large media uploads
+**Impact:** Sending big files could timeout
+**Mitigation:** Use Telethon's chunked upload, add progress indicator for large files
 
 ## No-Gos (Out of Scope)
 
-- Media/file sending
 - Message editing or deletion
-- Scheduled messages
-- Bot commands (we're a user account, not a bot)
-- Reply-to threading (v2 maybe)
+- Reaction adding/removing
+- Scheduled/delayed messages
+- Forwarding messages
+- Complex search operators (just keyword matching)
 
 ## Update System
 
-No update system changes required — these are local tools that don't affect deployment.
+No update system changes required — local tools only.
 
 ## Agent Integration
 
-- New `telegram-send` CLI must be added to allowed tools in the unified skill
-- Skill doc in `.claude/skills/telegram/SKILL.md` replaces two existing skills
-- No MCP server needed — CLI tools are sufficient
-- Remove stale `valor-history` reference from SOUL.md (doesn't exist)
+- New `valor-telegram` CLI exposed via unified skill
+- Skill doc at `.claude/skills/telegram/SKILL.md`
+- Remove old skills: `searching-message-history`, `get-telegram-messages`
+- No MCP server needed — CLI is sufficient
 
 ## Documentation
 
-- [ ] Create `.claude/skills/telegram/SKILL.md` as unified skill doc
-- [ ] Update `docs/features/README.md` index with telegram messaging entry
-- [ ] Remove outdated `valor-history` reference from `config/SOUL.md`
-- [ ] Delete old skill directories after migration
+- [ ] Create `.claude/skills/telegram/SKILL.md` with unified interface
+- [ ] Create `docs/features/telegram-messaging.md`
+- [ ] Update `docs/features/README.md` index
+- [ ] Remove stale references from `config/SOUL.md`
 
 ## Success Criteria
 
-- [ ] `python tools/telegram_send.py --group "Dev: Valor" "test message"` sends successfully
-- [ ] `scripts/telegram-send --help` shows usage
-- [ ] Unified skill doc at `.claude/skills/telegram/SKILL.md` exists
-- [ ] Old skill directories removed (`.claude/skills/searching-message-history/`, `.claude/skills/get-telegram-messages/`)
-- [ ] SOUL.md updated (remove `valor-history` reference)
-- [ ] Tests pass for send functionality
+- [ ] `valor-telegram read --chat "Dev: Valor" --limit 5` returns messages
+- [ ] `valor-telegram send --chat "Dev: Valor" "test"` sends successfully
+- [ ] `valor-telegram send --chat "Dev: Valor" --file ./test.png "image"` sends media
+- [ ] Old skill directories removed
+- [ ] Unified skill doc exists at `.claude/skills/telegram/SKILL.md`
+- [ ] SQLite transparently caches read results
 
 ## Team Orchestration
 
 ### Team Members
 
-- **Builder (send-tool)**
-  - Name: send-builder
-  - Role: Implement telegram_send.py and CLI wrapper
+- **Builder (CLI)**
+  - Name: cli-builder
+  - Role: Implement valor-telegram CLI with read/send subcommands
   - Agent Type: builder
   - Resume: true
 
-- **Builder (skill-consolidation)**
+- **Builder (skill)**
   - Name: skill-builder
-  - Role: Create unified skill, remove old skills, update SOUL.md
+  - Role: Create unified skill, remove old skills
   - Agent Type: builder
   - Resume: true
 
-- **Validator (send)**
-  - Name: send-validator
-  - Role: Verify send tool works, test concurrent with bridge
-  - Agent Type: validator
-  - Resume: true
-
-- **Validator (skills)**
-  - Name: skills-validator
-  - Role: Verify skill structure, old skills removed
+- **Validator**
+  - Name: telegram-validator
+  - Role: Verify CLI works, test media sending
   - Agent Type: validator
   - Resume: true
 
 ## Step by Step Tasks
 
-### 1. Build telegram_send.py
-- **Task ID**: build-send-tool
+### 1. Build valor-telegram CLI
+- **Task ID**: build-cli
 - **Depends On**: none
-- **Assigned To**: send-builder
+- **Assigned To**: cli-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `tools/telegram_send.py` with:
-  - `--group NAME` to send by group name
-  - `--chat-id ID` to send by chat ID
-  - `--reply-to MSG_ID` optional reply threading
-  - Reuse `data/valor_bridge.session`
-  - Resolve group names via `chats` table first, then API fallback
-- Create `scripts/telegram-send` wrapper script
-- Add basic tests in `tests/test_telegram_send.py`
+- Create `tools/valor_telegram.py` with:
+  - `read` subcommand: `--chat`, `--limit`, `--search`, `--since`
+  - `send` subcommand: `--chat`, `--file`, `--image`, `--audio`, message text
+  - API-first with SQLite cache fallback
+  - Reuse existing Telethon session
+- Create `scripts/valor-telegram` wrapper
+- Add tests in `tests/test_valor_telegram.py`
 
 ### 2. Build unified skill and cleanup
-- **Task ID**: build-skill-consolidation
+- **Task ID**: build-skill
 - **Depends On**: none
 - **Assigned To**: skill-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `.claude/skills/telegram/SKILL.md` with:
-  - Decision tree for which backend to use
-  - SQLite search examples (from `searching-message-history`)
-  - Live fetch examples (from `get-telegram-messages`)
-  - Send message examples (new)
+- Create `.claude/skills/telegram/SKILL.md` with examples
 - Delete `.claude/skills/searching-message-history/`
 - Delete `.claude/skills/get-telegram-messages/`
-- Update `config/SOUL.md` to remove `valor-history` reference
+- Clean up SOUL.md references
 
-### 3. Validate send tool
-- **Task ID**: validate-send
-- **Depends On**: build-send-tool
-- **Assigned To**: send-validator
+### 3. Validate
+- **Task ID**: validate-all
+- **Depends On**: build-cli, build-skill
+- **Assigned To**: telegram-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify `python tools/telegram_send.py --help` works
-- Verify `scripts/telegram-send --help` works
-- Test actual send to a test group (if safe)
-- Verify no session conflicts with running bridge
+- Test read command with various options
+- Test send command with text
+- Test send command with image file
+- Verify old skills removed
+- Verify unified skill exists
 
-### 4. Validate skill consolidation
-- **Task ID**: validate-skills
-- **Depends On**: build-skill-consolidation
-- **Assigned To**: skills-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Verify `.claude/skills/telegram/SKILL.md` exists and is complete
-- Verify old skill directories are removed
-- Verify SOUL.md no longer references `valor-history`
-- Verify skill is discoverable
-
-### 5. Documentation
+### 4. Documentation
 - **Task ID**: document-feature
-- **Depends On**: validate-send, validate-skills
+- **Depends On**: validate-all
 - **Assigned To**: documentarian
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Create `docs/features/telegram-messaging.md`
-- Add entry to `docs/features/README.md`
-
-### 6. Final Validation
-- **Task ID**: validate-all
-- **Depends On**: document-feature
-- **Assigned To**: skills-validator
-- **Agent Type**: validator
-- **Parallel**: false
-- Run `black --check . && ruff check .`
-- Verify all success criteria met
-- Generate final report
+- Update `docs/features/README.md`
 
 ## Validation Commands
 
-- `python tools/telegram_send.py --help` - Send tool works
+- `valor-telegram read --help` - Read subcommand works
+- `valor-telegram send --help` - Send subcommand works
 - `test -f .claude/skills/telegram/SKILL.md` - Unified skill exists
 - `test ! -d .claude/skills/searching-message-history` - Old skill removed
 - `test ! -d .claude/skills/get-telegram-messages` - Old skill removed
-- `grep -q "valor-history" config/SOUL.md && echo "FAIL" || echo "PASS"` - SOUL.md cleaned
 
 ---
 
 ## Open Questions
 
-1. **Test sends**: Should we send a real test message to "Dev: Valor" during validation, or just verify the tool runs without errors?
+1. **Cache TTL**: How long should cached messages be considered fresh before re-fetching? (Suggestion: 5 minutes for recent, indefinite for older)
 
-2. **Reply threading**: The issue comment mentions `--reply-to`. Is this needed for v1, or can we defer to v2?
-
-3. **CLI naming**: `telegram-send` or `valor-telegram-send` to match existing `valor-*` naming?
+2. **Offline mode**: Should we warn when serving stale cache, or just serve silently?
