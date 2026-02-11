@@ -34,6 +34,10 @@ hooks:
             docs/plans
         - type: command
           command: >-
+            $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_type_immutability.py
+            docs/plans
+        - type: command
+          command: >-
             $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_documentation_section.py
 ---
 
