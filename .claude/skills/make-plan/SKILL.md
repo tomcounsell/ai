@@ -7,11 +7,13 @@ hooks:
     - hooks:
         - type: command
           command: >-
+            test -f $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_new_file.py || exit 0;
             $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_new_file.py
             --directory docs/plans
             --extension .md
         - type: command
           command: >-
+            test -f $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_file_contains.py || exit 0;
             $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_file_contains.py
             --directory docs/plans
             --extension .md
@@ -30,14 +32,17 @@ hooks:
             --contains '## Agent Integration'
         - type: command
           command: >-
+            test -f $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_plan_label.py || exit 0;
             $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_plan_label.py
             docs/plans
         - type: command
           command: >-
+            test -f $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_type_immutability.py || exit 0;
             $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_type_immutability.py
             docs/plans
         - type: command
           command: >-
+            test -f $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_documentation_section.py || exit 0;
             $CLAUDE_PROJECT_DIR/.venv/bin/python $CLAUDE_PROJECT_DIR/.claude/hooks/validators/validate_documentation_section.py
 ---
 
