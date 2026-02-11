@@ -383,6 +383,19 @@ async def should_respond_async(
 
     telegram_config = project.get("telegram", {})
 
+    # Reply to Valor's message → always detect (needed for session continuation)
+    # Must run before any early returns so is_reply_to_valor is set correctly
+    if message.reply_to_msg_id:
+        try:
+            replied_msg = await client.get_messages(
+                event.chat_id, ids=message.reply_to_msg_id
+            )
+            if replied_msg and replied_msg.out:  # .out means sent by us (Valor)
+                logger.debug("Reply to Valor detected - continuing session")
+                return True, True
+        except Exception as e:
+            logger.debug(f"Could not check replied message: {e}")
+
     # respond_to_all means respond to everything
     if telegram_config.get("respond_to_all", True):
         return True, False
@@ -399,20 +412,6 @@ async def should_respond_async(
             ),
             False,
         )
-
-    # === respond_to_unaddressed logic (the 4 cases) ===
-
-    # Case 2: Reply to Valor's message → always respond (no Ollama needed)
-    if message.reply_to_msg_id:
-        try:
-            replied_msg = await client.get_messages(
-                event.chat_id, ids=message.reply_to_msg_id
-            )
-            if replied_msg and replied_msg.out:  # .out means sent by us (Valor)
-                logger.debug("Case 2: Reply to Valor - responding")
-                return True, True
-        except Exception as e:
-            logger.debug(f"Could not check replied message: {e}")
 
     # Case 3: @valor → always respond (no Ollama needed)
     if is_message_for_valor(text, project):
