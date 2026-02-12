@@ -1,7 +1,7 @@
 ---
-status: Planning
+status: Ready
 type: feature
-appetite: Medium
+appetite: Small
 owner: Valor
 created: 2026-02-12
 tracking: https://github.com/tomcounsell/ai/issues/66
@@ -20,8 +20,7 @@ We can only access Telegram messages programmatically through the bridge's Telet
 - The `/review` skill can screenshot web apps via `agent-browser` but has no equivalent for native desktop apps
 
 **Desired outcome:**
-- Programmatic control of Telegram Desktop: activate, navigate chats, screenshot, type
-- Screenshot conversations as visual evidence during reviews
+- Screenshot Telegram Desktop conversations as visual evidence during reviews
 - Navigate to specific chats by name to verify message delivery and formatting
 
 ## Feasibility Research (Completed)
@@ -44,13 +43,13 @@ Hands-on testing on macOS revealed the following about Telegram Desktop:
 
 ## Appetite
 
-**Size:** Medium
+**Size:** Small
 
-**Team:** Solo dev + PM. One check-in to align on command surface area, one review round.
+**Team:** Solo dev. Ship it.
 
 **Interactions:**
-- PM check-ins: 1 (scope alignment on which commands to implement first)
-- Review rounds: 1
+- PM check-ins: 0
+- Review rounds: 0
 
 ## Prerequisites
 
@@ -86,12 +85,13 @@ Activate Telegram → Navigate to chat → Screenshot → Claude reads screensho
 - **AppleScript for control** - `osascript` subprocess calls for keystroke injection and window management
 - **Single Python module** - No external dependencies beyond pyobjc-framework-Quartz (already installed)
 
-### Command Surface
+### Command Surface (v1: screenshot + navigate)
 
 ```bash
 # Window management
 agent-desktop activate                    # Bring Telegram to front
 agent-desktop status                      # Current chat name, window bounds
+agent-desktop verify                      # Check permissions, take test screenshot
 
 # Navigation
 agent-desktop navigate "Chat Name"        # Cmd+K → type → Enter
@@ -100,15 +100,9 @@ agent-desktop back                        # Escape to chat list
 # Screenshots
 agent-desktop screenshot                  # Capture window → return path
 agent-desktop screenshot --output path.png  # Capture to specific path
-
-# Text input (in active chat's message field)
-agent-desktop type "Hello world"          # Type text
-agent-desktop send                        # Press Enter to send
-agent-desktop type "Hello" --send         # Type and send in one command
-
-# Menu access
-agent-desktop menu "View" "Enter Full Screen"  # Click menu items
 ```
+
+**Deferred to v2:** `type`, `send`, `menu` commands (text input and menu access)
 
 ## Rabbit Holes
 
@@ -134,10 +128,11 @@ agent-desktop menu "View" "Enter Full Screen"  # Click menu items
 ## No-Gos (Out of Scope)
 
 - No Telegram Web automation (use `agent-browser` for that)
-- No message sending automation beyond typing in the active field (the bridge handles message sending)
+- No message sending / text input in v1 (deferred to v2 - the bridge handles message sending)
 - No reading message content programmatically from the UI (use bridge query tools)
-- No multi-window or multi-account support in v1
+- No multi-window or multi-account support
 - No automated login/authentication flow
+- No menu access commands in v1
 
 ## Update System
 
@@ -145,6 +140,7 @@ Update script needs to install `pyobjc-framework-Quartz` dependency. Add to the 
 
 - Add `pyobjc-framework-Quartz` to `pyproject.toml` dependencies
 - Remote machines will need Screen Recording and Accessibility permissions granted manually (one-time setup, cannot be automated)
+- Add permission setup steps to the `/setup` skill documentation
 
 ## Agent Integration
 
@@ -169,7 +165,7 @@ The agent-desktop tool will be exposed as a Claude Code skill (like agent-browse
 - [ ] `agent-desktop navigate "Chat Name"` opens the specified chat
 - [ ] `agent-desktop screenshot` captures a non-blank PNG of the Telegram window
 - [ ] `agent-desktop status` reports the active chat name from window title
-- [ ] `agent-desktop type "text" --send` types and sends a message in the active chat
+- [ ] `agent-desktop verify` checks permissions and reports readiness
 - [ ] Tool follows the same pattern as `tools/browser/` (manifest.json, README.md, tests/)
 - [ ] Skill definition in `.claude/skills/agent-desktop/` teaches Claude the workflow
 - [ ] All tests pass: `pytest tools/telegram_desktop/tests/ -v`
@@ -221,7 +217,7 @@ The agent-desktop tool will be exposed as a Claude Code skill (like agent-browse
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `tools/telegram_desktop/` with manifest.json, `__init__.py`, `__main__.py`
-- Implement commands: `activate`, `status`, `navigate`, `back`, `screenshot`, `type`, `send`, `menu`
+- Implement commands: `activate`, `status`, `verify`, `navigate`, `back`, `screenshot`
 - AppleScript wrapper for keystrokes via `subprocess.run(['osascript', '-e', ...])`
 - Quartz screenshot capture with window bounds detection
 - CLI argument parsing with subcommands
@@ -278,10 +274,8 @@ The agent-desktop tool will be exposed as a Claude Code skill (like agent-browse
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Screen Recording permission**: This must be granted to Terminal.app (or whatever runs Claude Code). Should we add this to the `/setup` skill as a documented manual step, or try to detect and prompt at runtime?
-
-2. **Command name**: Should the CLI be `agent-desktop` (matching `agent-browser` naming) or `telegram-desktop` (more specific)? The former is more extensible if we later add support for other desktop apps.
-
-3. **Screenshot-only vs full control**: The issue mentions "verify message formatting" as the primary use case. Should we ship screenshot + navigate first and defer `type`/`send` commands to a follow-up? That would reduce scope to Small appetite.
+1. **Screen Recording permission**: Add to `/setup` skill as a documented manual step (one-time per machine).
+2. **Command name**: `agent-desktop` — extensible for future desktop app support.
+3. **Scope**: Screenshot + navigate only in v1. Type/send/menu deferred to v2. Appetite reduced to Small.
