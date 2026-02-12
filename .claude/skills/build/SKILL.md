@@ -81,6 +81,7 @@ Before executing, resolve the plan path:
 - **Run parallel tasks together** - Tasks with `Parallel: true` and no blocking dependencies can run simultaneously
 - **Validators wait for builders** - A `validate-*` task always waits for its corresponding `build-*` task
 - **No temporary files** - Agents must not create temporary documentation, test results, or scratch files in the repo. Use /tmp for any temporary work. Only create files that are part of the deliverable.
+- **Never cd into worktrees** - The orchestrator's CWD must stay in the main repo. Use `git -C .worktrees/{slug}` for git commands and `--head session/{slug}` for `gh pr create`. Only subagents (Task tool) should cd into worktrees — their shell sessions are independent and disposable. If the orchestrator cd's into a worktree and then deletes it, the shell breaks permanently.
 - **SDLC enforcement** - All builder agents follow Plan → Build → Test → Review → Ship with test failure loops (up to 5 iterations)
 - **Definition of Done** - Tasks are complete only when: Built (code working), Tested (tests pass), Documented (docs created), Quality (lint/format pass)
 
@@ -155,7 +156,7 @@ After deploying background agents, actively monitor their health:
    - Report the failure prominently so the user is aware
 6. **On any agent failure:** Commit whatever work exists in the worktree as a safety net:
    ```bash
-   cd .worktrees/{slug} && git add -A && git commit -m "[WIP] partial work before agent failure" || true
+   git -C .worktrees/{slug} add -A && git -C .worktrees/{slug} commit -m "[WIP] partial work before agent failure" || true
    ```
 
 ### Step 5: Final Validation and Definition of Done
@@ -215,7 +216,7 @@ After documentation gate passes, push and create the PR:
 
 ```bash
 git -C .worktrees/{slug} push -u origin session/{slug}
-gh pr create --title "[plan title]" --body "$(cat <<'EOF'
+gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
 ## Summary
 [Brief description of what was built]
 
