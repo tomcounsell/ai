@@ -1,7 +1,8 @@
 # Podcast Skill Workflow: Sub-Agent Optimization
 
 **Issue**: [yudame/cuttlefish#32](https://github.com/yudame/cuttlefish/issues/32)
-**Status**: Planning
+**Status**: In Progress
+**PR**: [#56](https://github.com/yudame/cuttlefish/pull/56)
 **Migrated from**: yudame/research
 
 ---

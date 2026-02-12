@@ -841,19 +841,49 @@ The skill will:
 
 ### Phase 2: Question Discovery Analysis
 
-**When user provides Perplexity results (Phase 1 complete):**
+**When Perplexity research completes (Phase 1 complete):**
 
-1. **Read and analyze Perplexity research from research/p2-perplexity.md**
-2. **Create Phase 2 analysis in prompts.md** using the question discovery framework:
-   - What subtopics and themes emerged?
-   - What gaps exist in the academic literature?
-   - What recent developments aren't covered?
-   - What contradictions or uncertainties need more sources?
-   - What industry/implementation questions arose?
-   - What policy/regulatory angles need investigation?
-   - What practitioner perspectives are missing?
+**⚠️ CONTEXT OPTIMIZATION: Use sub-agent instead of reading research directly**
 
-3. **Generate targeted Phase 3 prompts for ALL 5 TOOLS** based on the questions discovered:
+1. **Generate digest of Perplexity research:**
+
+   Use the Task tool to spawn `podcast-research-digest` agent:
+   ```
+   Generate a compact digest of the Perplexity research.
+
+   Episode directory: apps/podcast/pending-episodes/YYYY-MM-DD-slug/
+   Research file: research/p2-perplexity.md
+
+   Create research/p2-perplexity-digest.md with:
+   - Table of contents
+   - Key findings (priority order)
+   - Statistics & data points
+   - Sources (tiered)
+   - Searchable topics and keywords
+   - Questions answered and NOT answered
+   - Contradictions & nuances
+   ```
+
+2. **Delegate question discovery to sub-agent:**
+
+   Use the Task tool to spawn `podcast-question-discovery` agent:
+   ```
+   Analyze Perplexity research to discover questions for targeted followup.
+
+   Episode directory: apps/podcast/pending-episodes/YYYY-MM-DD-slug/
+   Episode topic: [Topic]
+
+   Read research/p2-perplexity-digest.md (or p2-perplexity.md if no digest).
+   Create research/question-discovery.md with gap analysis.
+   Return ONLY the summary to orchestrator.
+   ```
+
+   The agent will return a summary with:
+   - Key findings from Perplexity
+   - Critical gaps to address
+   - Recommended tool allocation for Phase 3
+
+3. **Generate targeted Phase 3 prompts for ALL 4 TOOLS** based on the agent's gap analysis:
    - **GPT-Researcher** - Industry analysis, case studies, implementation details, technical documentation, market dynamics (automated)
    - **Gemini** - Policy analysis, regulatory frameworks, comparative policy analysis, strategic context, official documents (automated)
    - **Claude** - Comprehensive synthesis across academic, industry, policy, and recent sources (manual)
@@ -949,52 +979,44 @@ Use the Skill tool to invoke both (these are long-running, so launch via Task to
 
 **⚠️ DO NOT STOP AND WAIT FOR USER - CONTINUE AUTOMATICALLY**
 
-**Create a verification matrix:**
+**⚠️ CONTEXT OPTIMIZATION: Use sub-agents instead of reading all research directly**
 
-```markdown
-# Cross-Validation Matrix
+**Step 1: Generate digests for all research files (if not already done):**
 
-## Critical Facts Verification
+For each p2-*.md file that doesn't have a digest, spawn `podcast-research-digest` agent:
+```
+Generate a compact digest of the [tool] research.
 
-| Claim/Statistic | Perplexity | Grok | ChatGPT | Gemini | Status | Notes |
-|----------------|------------|------|---------|--------|--------|-------|
-| [Fact 1] | Source A | Source A | Source A | N/A | ✅ VERIFIED | 3 sources confirm |
-| [Fact 2] | Source B (53%) | Source C (55%) | Source B (53%) | N/A | ⚠️ REVIEW | Minor variance, different years |
-| [Fact 3] | Source D | Not found | Not found | N/A | ⚠️ SINGLE SOURCE | Only Perplexity found this |
-| [Fact 4] | Source E says X | Source F says Y | Source E says X | N/A | ⚠️ CONFLICT | Note discrepancy for Opus |
+Episode directory: apps/podcast/pending-episodes/YYYY-MM-DD-slug/
+Research file: research/p2-[tool].md
 
-**Validation Status:**
-- ✅ **VERIFIED** - 2+ independent sources confirm
-- ⚠️ **NEEDS REVIEW** - Only 1 source OR conflicting data
-- ❌ **REJECTED** - Unverifiable or contradicted
+Create research/p2-[tool]-digest.md with key findings, sources, and topics.
 ```
 
-**Source Quality Assessment:**
+**Step 2: Delegate cross-validation to sub-agent:**
 
-For key sources, document:
-- Primary vs secondary vs tertiary
-- Sample size (for studies)
-- Methodology (RCT, observational, meta-analysis, case study, opinion)
-- Year published
-- Funding source (conflicts of interest?)
-- Peer-reviewed? Official? Industry? News? Opinion?
-
-**Coverage Map:**
-
-```markdown
-## Topic Coverage Analysis
-
-Topic: [Main Topic]
-├─ [Subtopic 1] [P, C, G] ✅ Well covered, multiple sources
-├─ [Subtopic 2] [P, C] ✅ Well covered
-├─ [Subtopic 3] [G] ⚠️ Limited sources, only Grok found recent info
-├─ [Subtopic 4] [P] ⚠️ Only Perplexity, single study
-└─ [Subtopic 5] [P, C, Ge] ✅ Well covered with strategic analysis
-
-**Legend:** P=Perplexity, C=ChatGPT, G=Grok, Ge=Gemini
-
-**Action needed:** [List any gaps requiring additional research]
+Use the Task tool to spawn `podcast-cross-validator` agent:
 ```
+Cross-validate research findings across all sources.
+
+Episode directory: apps/podcast/pending-episodes/YYYY-MM-DD-slug/
+Episode topic: [Topic]
+
+Read all research/p2-*-digest.md files (or p2-*.md if no digests).
+Create research/cross-validation.md with:
+- Verification matrix (VERIFIED / SINGLE-SOURCE / CONFLICTING)
+- Source quality assessment
+- Coverage map
+- Contradictions requiring attention
+
+Return ONLY the summary to orchestrator.
+```
+
+The agent will return a summary with:
+- Verification results (N verified, N single-source, N conflicting)
+- Strongest and weakest evidence areas
+- Key contradictions to resolve in briefing
+- Recommendation for Phase 6
 
 **Update tasks:** Use TaskUpdate to mark "Cross-validate research findings" as completed, then mark "Create master research briefing" as in_progress.
 
@@ -1006,73 +1028,45 @@ Topic: [Main Topic]
 
 **⚠️ DO NOT STOP AND WAIT FOR USER - CONTINUE AUTOMATICALLY**
 
-**⭐ REQUIRED: Use the enhanced Wave 1 template from `docs/templates/podcast/p3-briefing-enhanced.md`**
+**⚠️ CONTEXT OPTIMIZATION: Delegate briefing creation to sub-agent**
 
-This template includes all Wave 1 quality improvements. DO NOT use the basic template.
+Use the Task tool to spawn `podcast-briefing-writer` agent:
+```
+Create the master research briefing from cross-validated research.
 
-**Required Structure (from enhanced template):**
-1. **Verified key findings (by subtopic)**
-2. **⭐ Depth Distribution Analysis** (Wave 1, Task B1.1) - REQUIRED
-   - Table showing sources found, depth rating, evidence quality per subtopic
-   - Flag shallow topics needing additional research
-   - Recommendation for synthesis (what's deep enough vs. preliminary)
-3. **⭐ Practical Implementation Audit** (Wave 1, Task B1.3) - REQUIRED
-   - For each major finding: "How would someone actually do this?"
-   - Specific tactics/steps with concrete parameters (timeframes, thresholds, criteria)
-   - Actionability check: Can listener implement this tomorrow?
-4. **Research gaps & uncertainties**
-5. **Source inventory (tiered by quality)**
-6. **Comparison tables** (if applicable)
-7. **Timeline of developments** (if applicable)
-8. **⭐ Story Bank** (Wave 1, Task B2.2) - REQUIRED
-   - 3-5 high-quality examples/case studies from research
-   - Tagged by: illustrative power, emotional resonance, memorability
-   - Integration opportunity notes (where in episode arc story fits best)
-9. **Practitioner perspectives** (credentialed experts)
-10. **Public discourse (opinion - NOT evidence)** ← From Grok
-11. **⭐ Counterpoint Discovery** (Wave 1, Task B1.2) - REQUIRED
-    - Where sources disagree or present alternative frameworks
-    - Dialogue opportunities (for Phase 8 episode planning)
-    - Missing perspectives that could create productive tension
-12. **Notes for Synthesis Agent** (Opus 4.6)
-    - Include takeaway clarity requirements (Wave 1, Task B2.1)
+Episode directory: apps/podcast/pending-episodes/YYYY-MM-DD-slug/
+Episode topic: [Topic]
+Episode title: [Title]
 
-**Key principles:**
+Read:
+- research/cross-validation.md (verification status)
+- All research/p2-*-digest.md files (or p2-*.md if no digests)
+
+Create research/p3-briefing.md using enhanced Wave 1 template with ALL required sections:
+- Verified key findings (organized by TOPIC)
+- Depth Distribution Analysis (B1.1)
+- Practical Implementation Audit (B1.3)
+- Story Bank with 3-5 stories (B2.2)
+- Counterpoint Discovery (B1.2)
+- Notes for Synthesis Agent with takeaway requirements (B2.1)
+- Research gaps & uncertainties
+- Source inventory (tiered by quality)
+
+Return ONLY the summary to orchestrator.
+```
+
+The agent will return a summary with:
+- Subtopics covered and verified findings count
+- Wave 1 sections complete status
+- Stories in bank and counterpoints identified
+- Confirmation ready for Phase 7
+
+**Key principles the agent follows:**
 - Organize by TOPIC, not by which tool found it
 - Include evidence hierarchy (what's well-established vs preliminary)
 - Surface contradictions explicitly
-- Note methodological limitations
-- Provide direct quotes for color/authority
+- Keep opinion separate from evidence (Grok's X/Twitter in PUBLIC DISCOURSE only)
 - Flag gaps that Opus should acknowledge
-- **CRITICAL: Keep opinion separate from evidence**
-  - Grok's X/Twitter discourse goes in PUBLIC DISCOURSE section only
-  - Never cite X posts as evidence for factual claims
-  - Use opinion for "many people believe X, but research shows Y" segments
-
-**Example structure for a subtopic:**
-
-```markdown
-### Burnout Prevalence in Early Childhood Education
-
-**Main finding:** Burnout affects 45-72% of ECE professionals depending on setting type.
-
-**Evidence:**
-- 53.2% burnout prevalence among preschool teachers — Source: Wang et al. (2020),
-  Chinese study, N=1,795 — Quality: Large observational study — Maslach Burnout Inventory
-- 64% emotional burnout — Source: European 8-country study — Quality: Multi-national survey
-- 72% high burnout among ABA therapists — Source: [Citation] — Quality: [Study type] —
-  Highest among all settings
-
-**Contradictions/Nuances:**
-- Different studies use different burnout instruments (MBI vs CBI), making direct
-  comparison difficult
-- Variation by setting type suggests context matters more than profession alone
-
-**Source quality notes:**
-- Wang study is largest single-country sample but limited to China
-- European study covers multiple countries but sample sizes per country not reported
-- ABA therapist study is smaller N but consistent across multiple smaller studies
-```
 
 **Update sources.md with verified sources organized by tier.**
 
@@ -1196,21 +1190,39 @@ Use Glob to confirm `apps/podcast/pending-episodes/YYYY-MM-DD-slug/report.md` ex
 ✓ sources.md created with validated citations
 ✓ Ready to create episode structure guidelines for NotebookLM
 
-**⚠️ DO NOT STOP AND WAIT FOR USER - INVOKE SKILL AUTOMATICALLY**
+**⚠️ DO NOT STOP AND WAIT FOR USER - INVOKE AGENT AUTOMATICALLY**
 
-**WORK TO DO:** Create content_plan.md using the podcast-episode-planner skill.
+**⚠️ CONTEXT OPTIMIZATION: Delegate episode planning to sub-agent**
 
-**⭐ REQUIRED: Use the enhanced Wave 2 template from `docs/templates/podcast/content_plan-enhanced.md`**
+Use the Task tool to spawn `podcast-episode-planner` agent:
+```
+Create the episode content plan for NotebookLM audio generation.
 
-Read `.claude/skills/podcast-episode-planner/SKILL.md` and follow it to:
-1. Read report.md, sources.md, and research/p3-briefing.md from the episode directory
-2. Classify episode type (evidence status, content density, series position)
-3. Select toolkit elements (hook type, takeaway structure, etc.)
-4. **Design Wave 2 structural elements** (Structure Map, Mode-Switching, Signposting, Depth Budget, Problem→Solution, Counterpoint Moments, Episode Arc)
-5. Create content_plan.md with structural design + NotebookLM guidance
-6. Log to logs/prompts.md
+Episode directory: apps/podcast/pending-episodes/YYYY-MM-DD-slug/
+Episode title: [Title]
+Series: [Series name or "Standalone"]
 
-**The skill produces:**
+Read report.md, sources.md, and research/p3-briefing.md.
+Create content_plan.md using enhanced Wave 2 template with ALL structural elements:
+- Episode Structure Map
+- Mode-Switching Framework
+- Signposting Language
+- Depth Budget
+- Problem → Solution Architecture
+- Counterpoint Moments (with ASSIGNED speaker positions)
+- Episode Arc
+- NotebookLM guidance
+
+Return ONLY the summary to orchestrator.
+```
+
+The agent will return a summary with:
+- Episode classification (series position, evidence status, content density)
+- Toolkit selections (hook type, takeaway structure)
+- Wave 2 checks confirmation
+- Ready for Phase 9 confirmation
+
+**The agent produces:**
 - `content_plan.md` - Episode structure guide with Wave 2 structural design + NotebookLM instructions (10-15KB)
 
 **What content_plan.md provides for NotebookLM:**
@@ -1497,45 +1509,37 @@ Can run in background while creating metadata.
 
 ---
 
-**WORK TO DO:** Generate episode metadata, companion resources, and publishing artifacts.
+**⚠️ CONTEXT OPTIMIZATION: Delegate metadata creation to sub-agent**
 
-**⭐ REQUIRED: Use the enhanced metadata template from `docs/templates/podcast/metadata-enhanced.md`**
+Use the Task tool to spawn `podcast-metadata-writer` agent:
+```
+Generate episode publishing metadata.
 
-a. **Create compelling 1-2 sentence description (plain text):**
-   - Based on report.md and transcript
-   - Highlight key topics, major stories/events covered, and main takeaways
-   - Focus on what makes this episode valuable and what listeners will learn
-   - Keep this version plain text for the `<description>` tag
-   - Include link to full research report: `https://research.yuda.me/apps/podcast/pending-episodes/YYYY-MM-DD-slug/report.md`
+Episode directory: apps/podcast/pending-episodes/YYYY-MM-DD-slug/
+Episode title: [Title]
+Series: [Series name or "Standalone"]
+Audio duration: [HH:MM:SS]
+Audio file size: [bytes]
 
-b. **Create "What You'll Learn" section (3-5 bullets):**
-   - Specific, compelling insights or myth-busts
-   - Start each bullet with verb or "Why/How/What"
-   - Include numbers when impactful
+Read report.md, transcript.txt, research/p3-briefing.md, and *_chapters.json.
+Create logs/metadata.md using enhanced template with:
+- Description (plain text + report link)
+- "What You'll Learn" (3-5 bullets)
+- Key Timestamps (5-7 from chapters)
+- Keywords (5-10 episode-specific)
+- Resources (5-10 sources with actionable descriptions)
+- Call-to-Action (primary + voiced)
+- Show Notes HTML
+- Feed.xml technical metadata
 
-c. **Extract Key Timestamps (5-7 major sections):**
-   - Use chapter markers as reference
-   - Include enticing descriptions (not just section titles)
+Return ONLY the summary to orchestrator.
+```
 
-d. **Generate episode-specific keywords (5-10 keywords):**
-   - Analyze report.md, transcript, and chapter titles
-   - Extract the most important concepts, terms, protocols, people, events mentioned
-   - Prioritize: specific technical terms, proper nouns, key concepts, frameworks
-   - Format as comma-separated list for iTunes keywords field
-
-e. **Add validated source links (3-5 sources) with actionable descriptions:**
-   - Use sources from research/p3-briefing.md (Tier 1 and Tier 2 prioritized)
-   - Verify links are still accessible with WebFetch when possible
-   - Group by type: Research Papers, Tools/Templates, Further Reading
-   - Add 1-sentence actionable description for each link
-
-f. **Define Call-to-Action:**
-   - Primary CTA: next logical step for listener
-   - Voiced CTA for audio (included in episodeFocus prompt)
-
-**Create logs/metadata.md using the enhanced template** (docs/templates/podcast/metadata-enhanced.md):
-
-The enhanced template includes sections for: Title, Publication Date, Series Info, Audio, Description, What You'll Learn, Key Timestamps, Resources & Tools Mentioned, Call-to-Action, Keywords, Companion Resources, Show Notes HTML, and Feed.xml Technical Metadata.
+The agent will return a summary confirming:
+- Description, What You'll Learn, Timestamps generated
+- Resources validated
+- Keywords generated
+- Ready for feed.xml update
 
 **Generate Companion Resources:**
 
