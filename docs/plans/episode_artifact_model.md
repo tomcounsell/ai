@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Tom
@@ -19,7 +19,7 @@ The podcast system has a Django app with Episode records imported from RSS, but:
 5. The RSS feed is a static file in a GitHub repo rather than generated from the database
 
 **Current behavior:**
-38 published episodes exist on disk with ~700+ text artifacts. The workflow ends with a `git push` to a GitHub repo. A separate `import_podcast_feed` command reads the RSS feed to create bare Episode records. There is no connection between "produce an episode" and "Episode exists in the database."
+49 published episodes exist on disk across 7 series, with ~700+ text artifacts. The workflow ends with a `git push` to a GitHub repo. A separate `import_podcast_feed` command reads the RSS feed to create bare Episode records. There is no connection between "produce an episode" and "Episode exists in the database."
 
 **Desired outcome:**
 A complete local-to-production publish pipeline. Episodes are created in the production database first (with a reserved number), the local workflow produces files as before, and a publish command pushes everything to the database. The RSS feed is generated dynamically from Django.
@@ -43,10 +43,11 @@ No prerequisites — the podcast app and Episode model already exist.
 ### Key Elements
 
 - **`EpisodeArtifact` model**: Generic document store for research, plans, prompts, logs — any text file tied to an episode
+- **Episode lifecycle fields**: `status` (draft/in_progress/complete) tracks work; `published_at` controls visibility; `episode_number` auto-assigned
 - **`start_episode` command**: Pulls a draft Episode from production DB, creates local working directory with pre-populated files
 - **`publish_episode` command**: Reads local files, populates Episode fields + creates artifacts. Runs against local DB first (test), then production DB (real publish)
-- **Dynamic RSS feed**: Django view generates feed.xml from Podcast + Episode querysets, cached at the URL
-- **Backfill import**: One-time command to import existing episodes from the research repo
+- **Deterministic renderers**: RSS feed and episode detail page both render rich show notes from Episode fields via a shared template tag — no separate update tool needed
+- **Backfill import**: One-time command to import 49 existing episodes across 3 podcasts from the research repo
 
 ### Data Flow
 
@@ -55,24 +56,25 @@ PRODUCTION (Render DB)          LOCAL MACHINE                 GITHUB (research r
 ┌──────────────────┐            ┌──────────────────┐          ┌──────────────────┐
 │                  │            │                  │          │ research.yuda.me │
 │ Episode(draft)   │ start_    │ pending-episodes/│          │                  │
-│  - number ✓      │─episode──►│  - p1-brief.md   │          │ (binary files    │
+│  - number (auto) │─episode──►│  - p1-brief.md   │          │ (binary files    │
 │  - slug ✓        │ (pulls)   │  - logs/         │          │  served here     │
 │  - title ✓       │           │  - research/     │          │  until S3)       │
 │  - description   │           │                  │ git push │                  │
 │                  │           │ Phases 1-11      │────────►│ *.mp3, cover.png │
 │                  │ publish_  │ (unchanged)      │ (archive)│                  │
-│ Episode(pub'd)   │◄─episode─│                  │          │                  │
+│ Episode(complete)│◄─episode─│                  │          │                  │
 │  + report_text   │ (pushes)  │                  │          │                  │
 │  + transcript    │           └──────────────────┘          └──────────────────┘
 │  + chapters      │
 │  + sources_text  │           Test publish targets local DB first.
 │  + audio_url     │           Production publish: DATABASE_URL=<prod>
-│  + Artifacts     │
-│    - p2-*.md     │           ┌──────────────────┐
-│    - p3-briefing │           │ Dynamic RSS Feed  │
-│    - plans/logs  │──────────►│ /podcast/feed.xml │ (cached Django view)
-│                  │           │ Serves from DB    │
-└──────────────────┘           └──────────────────┘
+│  + published_at  │
+│  + Artifacts     │           ┌──────────────────────────────────────┐
+│    - p2-*.md     │           │ Deterministic renderers (from DB)    │
+│    - p3-briefing │──────────►│ /podcast/<slug>/feed.xml  (RSS+cache)│
+│    - plans/logs  │           │ /podcast/<slug>/<ep>/     (HTML page)│
+│                  │           │ Both use {% episode_show_notes %}    │
+└──────────────────┘           └──────────────────────────────────────┘
 ```
 
 ### 1. EpisodeArtifact Model
@@ -96,14 +98,14 @@ Design decisions:
 
 ### 2. Episode Model Changes
 
-Episode already has `Publishable` (gives `published_at`). Add a `status` field for the draft→published lifecycle:
+Episode already has `Publishable` (gives `published_at`). Add a `status` field for the production lifecycle. The `status` field tracks **work completion**, while `published_at` controls **visibility** (when the episode goes live in the feed and on the site).
 
 ```python
 class Episode(Timestampable, Publishable, Expirable):
     STATUS_CHOICES = [
         ("draft", "Draft"),
         ("in_progress", "In Progress"),
-        ("published", "Published"),
+        ("complete", "Complete"),
     ]
     status = CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
     # ... existing fields ...
@@ -111,13 +113,37 @@ class Episode(Timestampable, Publishable, Expirable):
 
 - **draft**: Created via intake form or admin. Has number, slug, title, description (requirements). No audio or research yet.
 - **in_progress**: `start_episode` has been run. Local workflow underway.
-- **published**: `publish_episode` has been run. All fields populated, `published_at` set.
+- **complete**: `publish_episode` has been run. All content fields and artifacts populated.
+
+**Visibility is determined solely by `published_at`:**
+- The `publish_episode` command sets `status="complete"` AND `published_at=now()`.
+- The feed view and episode list filter on `published_at` (not status) — same as the existing `Publishable` pattern.
+- A "staged" episode is one with `status="complete"` but `published_at` not yet set (future: scheduled publishing).
+- Queries for live episodes: `filter(published_at__isnull=False).filter(Q(unpublished_at__isnull=True) | Q(unpublished_at__lt=F("published_at")))`  — unchanged from current behavior.
 
 Make `audio_url` optional (blank=True) so draft episodes can exist without audio:
 
 ```python
 audio_url = URLField(blank=True)  # currently required — change to optional
 ```
+
+**Side effect:** The existing `import_podcast_feed` command uses `audio_url` as the idempotency key (skips episodes where `audio_url` already exists in the DB). With `blank=True`, draft episodes will have `audio_url=""`. The import command's dedup check needs a guard to skip blank values: `filter(audio_url=audio_url).exclude(audio_url="")`.
+
+**Auto-assign episode numbers:** Override `save()` to auto-assign the next available `episode_number` for the podcast when not explicitly set:
+
+```python
+def save(self, *args, **kwargs):
+    if self.episode_number is None:
+        max_num = (
+            Episode.objects.filter(podcast=self.podcast)
+            .aggregate(max_num=models.Max("episode_number"))["max_num"]
+            or 0
+        )
+        self.episode_number = max_num + 1
+    super().save(*args, **kwargs)
+```
+
+Change `episode_number` to `null=True, blank=True` so it can be omitted on creation. The `unique_together` constraint still ensures no duplicates after assignment. The intake form (future) will use this auto-assignment; manual override via admin remains possible.
 
 ### 3. `start_episode` Management Command
 
@@ -167,7 +193,7 @@ What it does:
    - `logs/*.md` files
    - `companion/*.md` files
    - Any other `.md` file
-5. Updates Episode status to `published`
+5. Updates Episode `status` to `complete` and sets `published_at`
 6. Reports summary: fields populated, artifacts created, any warnings
 
 Flags:
@@ -175,41 +201,68 @@ Flags:
 - `--verbose` — show each file being processed
 - `--skip-status-check` — allow re-publishing (for updates/corrections)
 
-### 5. Dynamic RSS Feed View
+### 5. Deterministic Renderers (Feed + Episode HTML)
 
-Django view that generates RSS XML from the database. Replaces the static `feed.xml`.
+Both the RSS feed and the episode detail page are **deterministic outputs from the database**. No separate "update" tool is needed — the views render directly from Episode fields.
 
-```python
-# apps/podcast/views/feed.py
-class PodcastFeedView(View):
-    """Generate RSS feed XML for a podcast from database records."""
+#### RSS Feed View
 
-    def get(self, request, podcast_slug):
-        podcast = get_object_or_404(Podcast, slug=podcast_slug, is_public=True)
-        episodes = podcast.episodes.filter(status="published").order_by("-published_at")
-        # Generate XML with iTunes/Podcasting 2.0 namespace support
-        # Return with content_type="application/rss+xml"
-```
+`PodcastFeedView` already exists at `apps/podcast/views/feed_views.py` with the URL route at `/podcast/<slug>/feed.xml`. The template is at `apps/public/templates/podcast/feed.xml`. Changes needed:
 
-- URL: `/podcast/<podcast_slug>/feed.xml`
-- Cached (5-10 min cache, invalidated on publish)
-- Includes all iTunes namespace elements, Podcasting 2.0 tags (chapters, transcript)
-- Show notes generated from `Episode.show_notes` or `Episode.report_text`
+1. **Add caching** — 5-10 min cache TTL
+2. **Add `xmlns:content` namespace** and `<content:encoded>` element — renders rich HTML show notes inline in the feed (what `update_feed.py` used to generate for the static feed)
+3. **Add Podcasting 2.0 chapter/transcript URLs** — `<podcast:chapters>` and `<podcast:transcript>` elements when data is available
+4. **Keep existing `published_at` filter** — the existing Publishable-based filter is correct and is now the canonical visibility gate
+
+#### Episode Detail Page
+
+The existing `EpisodeDetailView` and template (`episode_detail.html`) already render from the database. Enhance the template to render the rich show notes content that `update_feed.py` used to generate:
+- Overview section from `description`
+- "What You'll Learn" bullets from `show_notes` or structured data in `companion_resources`
+- Key timestamps from `chapters` JSON
+- Sources from `sources_text`
+- Full report link via `report_text`
+
+This replaces the static `report.html` and `transcript.html` files — those are now derivable views, not stored artifacts.
+
+#### Show Notes Renderer
+
+Create a shared template include or template tag (`{% episode_show_notes episode %}`) that renders the rich HTML show notes from Episode fields. Used by both:
+- The feed template (inside `<content:encoded>`)
+- The episode detail template (on the page)
+
+This replaces the `generate_content_encoded()` function from `update_feed.py` — same output, but driven by Django template rendering instead of a standalone script.
 
 ### 6. Backfill Import Command
 
-One-time command to import existing 38 episodes from the research repo. Reuses the same logic as `publish_episode` but handles legacy naming.
+One-time command to import existing 49 episodes from the research repo at `/Users/tomcounsell/src/research/podcast/episodes/`. Creates Podcast records as needed and imports all episodes with their artifacts.
 
 ```bash
-uv run python manage.py backfill_episodes --source-dir /path/to/research/podcast/episodes/ --dry-run
+uv run python manage.py backfill_episodes --source-dir /Users/tomcounsell/src/research/podcast/episodes/ --dry-run
 ```
 
+**Podcast splitting:** The research repo has 7 series. Two become separate private podcasts; the rest go into the public "Yudame Research" podcast.
+
+| Series directory | Podcast | is_public | Episodes |
+|---|---|---|---|
+| `active-recovery` | Yudame Research | true | 4 |
+| `algorithms-for-life` | Yudame Research | true | 10 |
+| `building-a-micro-school` | Yudame Research | true | 9 |
+| `cardiovascular-health` | Yudame Research | true | 6 |
+| `kindergarten-first-principles` | Yudame Research | true | 6 |
+| `solomon-islands-telecom-series` | Solomon Islands Telecom | false | 6 |
+| `stablecoin-series` | Stablecoin | false | 8 |
+
+This mapping is hardcoded in the backfill command (it's a one-time migration, not a reusable abstraction).
+
 What it does:
-1. Walks series → episode directories
-2. Matches to existing Episode records by `(podcast_slug, episode_slug)`
-3. For each matched episode, runs the same file→field and file→artifact logic as `publish_episode`
-4. Handles legacy naming normalization (see table below)
-5. Reports: matched, unmatched, artifacts created
+1. Creates/gets Podcast records (Yudame Research, Solomon Islands Telecom, Stablecoin)
+2. Walks series → episode directories, assigns each to the correct Podcast
+3. Creates Episode records with auto-assigned `episode_number` (in directory sort order within each podcast)
+4. For each episode, runs the same file→field and file→artifact logic as `publish_episode`
+5. Handles legacy naming normalization (see table below)
+6. Sets `status="complete"` and `published_at` from file timestamps or `publish.md`
+7. Reports: podcasts created, episodes imported, artifacts created, any warnings
 
 ### File-to-Storage Mapping
 
@@ -271,24 +324,36 @@ Files **skipped**:
 
 ### Technical Approach
 
+**New files:**
 - `apps/podcast/models/episode_artifact.py` — new model
-- `apps/podcast/models/episode.py` — add `status` field, make `audio_url` optional
-- `apps/podcast/admin.py` — artifact inline on Episode, status in list display
-- `apps/podcast/views/feed.py` — dynamic RSS feed view
-- `apps/podcast/urls.py` — feed URL route
 - `apps/podcast/management/commands/start_episode.py`
 - `apps/podcast/management/commands/publish_episode.py`
 - `apps/podcast/management/commands/backfill_episodes.py`
-- Migrations for EpisodeArtifact + Episode status field + audio_url blank=True
+- `apps/podcast/templatetags/podcast_tags.py` — add `episode_show_notes` inclusion tag (file exists, extend it)
+
+**Modified files:**
+- `apps/podcast/models/episode.py` — add `status` field, auto-assign `episode_number`, make `audio_url` optional
+- `apps/podcast/models/__init__.py` — export `EpisodeArtifact`
+- `apps/podcast/admin.py` — artifact inline on Episode, status in list_display
+- `apps/podcast/views/feed_views.py` — add caching, `content:encoded` via show notes tag
+- `apps/public/templates/podcast/feed.xml` — add `xmlns:content` namespace, `content:encoded`, chapter/transcript tags
+- `apps/public/templates/podcast/episode_detail.html` — use `{% episode_show_notes %}` for rich content
+- Migrations for EpisodeArtifact + Episode status/episode_number/audio_url changes
+
+**Note:** `apps/podcast/views/feed_views.py` and `apps/podcast/urls.py` already exist — no new view file or URL route needed.
+
+**Obsoleted by this work:**
+- `apps/podcast/tools/update_feed.py` — writes to a static `feed.xml` file in the research repo. Its `generate_content_encoded()` logic is replaced by the `{% episode_show_notes %}` template tag. Don't delete it in this plan; flag for cleanup later.
 
 ## Rabbit Holes
 
 - **Don't build artifact type taxonomy** — title-based identification is enough for now
 - **Don't store binary files in the database** — mp3/png stay on GitHub Pages (S3 migration is a separate issue)
-- **Don't render HTML** — `report.html` and `transcript.html` are derivable from markdown
+- **Don't store rendered HTML as files** — `report.html` and `transcript.html` are replaced by deterministic Django views; no static HTML artifacts needed
 - **Don't build the intake form** — that's a separate feature; for now draft episodes are created via Django admin
 - **Don't migrate the podcast domain** — the old feed on research.yuda.me stays live; Apple/Spotify point updates are a manual step later
 - **Don't try to unify old and new naming** — just normalize to predictable paths in the backfill
+- **Don't delete `apps/podcast/tools/update_feed.py` yet** — it's obsoleted by the dynamic feed but may be useful as reference during implementation; flag for cleanup after this ships
 
 ## Risks
 
@@ -325,7 +390,7 @@ No agent integration required — the podcast workflow continues to produce file
 ## Documentation
 
 ### Feature Documentation
-No feature docs needed — management commands are self-documenting via `--help`.
+Management commands are self-documenting via `--help`. Update the CLAUDE.md Podcast section to add entries for the new commands and feed view to the existing tables.
 
 ### Inline Documentation
 - [ ] Docstring on `EpisodeArtifact` model explaining purpose and title conventions
@@ -335,16 +400,21 @@ No feature docs needed — management commands are self-documenting via `--help`
 ## Success Criteria
 
 - [ ] `EpisodeArtifact` model exists with `episode`, `title`, `content`, `metadata` fields
-- [ ] Episode has `status` field (draft/in_progress/published) and optional `audio_url`
+- [ ] Episode has `status` field (draft/in_progress/complete), auto-assigned `episode_number`, and optional `audio_url`
 - [ ] Migrations run cleanly
-- [ ] Admin shows artifacts as inline on Episode, status in list display
+- [ ] Admin shows artifacts as inline on Episode, status in list_display
 - [ ] `start_episode` creates local directory from draft Episode in DB
-- [ ] `publish_episode` populates Episode fields + creates artifacts from local files
+- [ ] `publish_episode` populates Episode fields + creates artifacts, sets `status="complete"` and `published_at`
 - [ ] `publish_episode` is idempotent (re-running updates, doesn't duplicate)
-- [ ] `backfill_episodes` imports existing episodes from research repo
-- [ ] Dynamic RSS feed view generates valid XML matching existing feed structure
+- [ ] `backfill_episodes` imports 49 episodes into 3 podcasts (Yudame Research public, Solomon Islands private, Stablecoin private)
+- [ ] RSS feed renders `content:encoded` with rich show notes via `{% episode_show_notes %}`
+- [ ] Episode detail page renders the same rich show notes
+- [ ] `import_podcast_feed` still works with blank `audio_url` on draft episodes
+- [ ] Feed filters on `published_at` (Publishable pattern), not on status
 - [ ] Test publish on local DB works, then production publish works
+- [ ] Tests pass for new models, commands, and feed changes
 - [ ] Inline documentation on all new code
+- [ ] CLAUDE.md podcast tables updated with new commands
 
 ## Team Orchestration
 
@@ -362,10 +432,16 @@ No feature docs needed — management commands are self-documenting via `--help`
   - Agent Type: builder
   - Resume: true
 
-- **Builder (feed)**
+- **Builder (renderers)**
   - Name: feed-builder
-  - Role: Create dynamic RSS feed view with iTunes/Podcasting 2.0 support
+  - Role: Build shared show notes template tag, enhance RSS feed with content:encoded and caching, enhance episode detail page
   - Agent Type: builder
+  - Resume: true
+
+- **Builder (tests)**
+  - Name: test-builder
+  - Role: Write tests for new models, commands, and feed changes
+  - Agent Type: test-engineer
   - Resume: true
 
 - **Validator**
@@ -383,9 +459,12 @@ No feature docs needed — management commands are self-documenting via `--help`
 - **Agent Type**: database-architect
 - **Parallel**: true
 - Create `apps/podcast/models/episode_artifact.py`
-- Add `status` field and `audio_url` blank=True to Episode
+- Add `status` field (draft/in_progress/complete) to Episode
+- Make `episode_number` nullable with auto-assign in `save()`
+- Make `audio_url` blank=True
 - Register EpisodeArtifact in `__init__.py`
 - Add ArtifactInline to Episode admin, status to list_display
+- Guard `import_podcast_feed` dedup logic against blank `audio_url`
 - Generate migrations
 
 ### 2. Create publish_episode command
@@ -416,27 +495,41 @@ No feature docs needed — management commands are self-documenting via `--help`
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `apps/podcast/management/commands/backfill_episodes.py`
+- Hardcode series→podcast mapping (5 public series → Yudame Research, solomon-islands → private, stablecoin → private)
+- Create Podcast records as needed, create Episode records with auto-assigned numbers (directory sort order)
 - Reuse publish logic with legacy naming normalization
-- Walk series→episode dirs, match by slug, import artifacts
+- Set `status="complete"` and `published_at` for all backfilled episodes
 
-### 5. Create dynamic RSS feed view
+### 5. Build deterministic renderers (feed + episode HTML)
 - **Task ID**: build-feed
 - **Depends On**: build-models
 - **Assigned To**: feed-builder
 - **Agent Type**: builder
 - **Parallel**: true (parallel with commands)
-- Create `apps/podcast/views/feed.py`
-- Add URL route in `apps/podcast/urls.py`
-- iTunes namespace, Podcasting 2.0 tags, chapter/transcript links
-- Cache with appropriate TTL
+- Create `{% episode_show_notes %}` inclusion tag in `apps/podcast/templatetags/podcast_tags.py` — renders rich HTML (overview, timestamps, sources, report link) from Episode fields
+- Modify `apps/podcast/views/feed_views.py` — add caching
+- Modify `apps/public/templates/podcast/feed.xml` — add `xmlns:content` namespace, `content:encoded` using show notes tag, `podcast:chapters`, `podcast:transcript`
+- Modify `apps/public/templates/podcast/episode_detail.html` — use `{% episode_show_notes %}` for rich content section
 
-### 6. Validate all components
-- **Task ID**: validate-all
+### 6. Write tests
+- **Task ID**: build-tests
 - **Depends On**: build-publish, build-start, build-backfill, build-feed
+- **Assigned To**: test-builder
+- **Agent Type**: test-engineer
+- **Parallel**: false
+- Add `EpisodeArtifact` model tests to `apps/podcast/tests/test_models.py` (creation, unique_together, status field)
+- Add command tests to `apps/podcast/tests/test_commands.py` (start_episode, publish_episode, backfill_episodes — at least dry-run paths)
+- Update `apps/podcast/tests/test_feeds.py` — verify status-based filtering, `content:encoded` presence
+- Update `apps/podcast/tests/test_import_command.py` — verify blank `audio_url` guard
+
+### 7. Validate all components
+- **Task ID**: validate-all
+- **Depends On**: build-tests
 - **Assigned To**: plan-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Verify migrations apply cleanly
+- Run full test suite
 - Dry-run backfill against research repo
 - Diff dynamic feed against existing static feed.xml
 - Test start_episode → publish_episode round-trip on local DB
@@ -446,16 +539,18 @@ No feature docs needed — management commands are self-documenting via `--help`
 
 - `DJANGO_SETTINGS_MODULE=settings uv run python manage.py makemigrations --check --dry-run` — no pending migrations
 - `DJANGO_SETTINGS_MODULE=settings uv run python manage.py migrate` — migrations apply
-- `DJANGO_SETTINGS_MODULE=settings uv run python manage.py backfill_episodes --source-dir /path/to/episodes --dry-run` — backfill preview
+- `DJANGO_SETTINGS_MODULE=settings uv run python manage.py backfill_episodes --source-dir /Users/tomcounsell/src/research/podcast/episodes/ --dry-run` — backfill preview
 - `DJANGO_SETTINGS_MODULE=settings uv run python manage.py publish_episode /path/to/episode --dry-run` — publish preview
 - `DJANGO_SETTINGS_MODULE=settings pytest apps/podcast/tests/ -v` — all tests pass
+- `DJANGO_SETTINGS_MODULE=settings pytest apps/podcast/tests/test_models.py -k "artifact" -v` — artifact model tests
+- `DJANGO_SETTINGS_MODULE=settings pytest apps/podcast/tests/test_feeds.py -v` — feed tests including content:encoded
 - `curl http://localhost:8000/podcast/yudame-research/feed.xml` — dynamic feed renders
 
 ---
 
 ## Open Questions
 
-None — all architectural decisions resolved.
+None — all questions resolved.
 
 ### Decided
 
@@ -464,7 +559,11 @@ None — all architectural decisions resolved.
 - **Direct DB connection for production.** No API endpoint needed — Render provides external PostgreSQL connection strings.
 - **Slug is the stable identifier.** Matching between disk and DB is always by `(podcast_slug, episode_slug)`, never by episode number.
 - **No duplication between Episode fields and artifacts.** `report.md`, `sources.md`, transcript, and chapters become Episode field values. All other files become artifacts. A file goes to one place, never both.
-- **Episode numbers assigned on production at intake.** The intake form (future feature) creates a draft Episode with a reserved number. `start_episode` pulls it down. The local workflow never assigns episode numbers.
+- **Episode numbers auto-assigned.** Model `save()` assigns next available number for the podcast. Backfill imports in directory sort order. Intake form (future) relies on auto-assignment.
+- **Status tracks work, `published_at` tracks visibility.** Status is draft → in_progress → complete. `published_at` (from Publishable mixin) is the sole gate for feed inclusion and site visibility. No "published" status — an episode can be complete but staged (not yet live).
+- **Feed and episode page are deterministic renderers.** Both the RSS feed `content:encoded` and the episode detail HTML page render from the same Episode fields via a shared `{% episode_show_notes %}` template tag. No separate update tool needed. Replaces `update_feed.py` and static `report.html`/`transcript.html`.
+- **Three podcasts from backfill.** "Yudame Research" (public, 35 episodes from 5 series), "Solomon Islands Telecom" (private, 6 episodes), "Stablecoin" (private, 8 episodes). Mapping hardcoded in backfill command.
+- **Backfill source: `/Users/tomcounsell/src/research/podcast/episodes/`** — single checkout of the research repo containing all 49 episodes across 7 series directories.
 - **Binary files stay on GitHub Pages for now.** Audio and cover images continue to be served from `research.yuda.me`. URLs are stored in `audio_url` and `cover_image_url`. S3 migration is a separate issue.
 - **Dynamic RSS feed from Django.** Feed is generated from the database, cached. The old static feed on research.yuda.me stays live until Apple/Spotify directory entries are manually updated.
 - **Git push becomes archival.** The research repo push in Phase 12 continues for archiving binary files (mp3, cover.png) but is no longer the publishing mechanism.
@@ -474,3 +573,4 @@ None — all architectural decisions resolved.
 - **Intake form**: Web form on production for creating draft episodes with reserved numbers and requirements
 - **S3 migration**: Move mp3/cover.png from GitHub Pages to S3/cloud storage
 - **Domain migration**: Update Apple Podcasts and Spotify to point to new feed URL
+- **Cleanup `update_feed.py`**: Remove `apps/podcast/tools/update_feed.py` once the dynamic feed is verified in production
