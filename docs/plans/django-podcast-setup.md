@@ -78,7 +78,7 @@ Podcast (Timestampable)
 
 Episode (Timestampable)
 ├── podcast                 FK → Podcast
-├── title                   CharField(200)
+├── title                   CharField(200)  — includes series prefix e.g. "Cardiovascular Health: Lifestyle Foundations"
 ├── slug                    SlugField
 ├── episode_number          PositiveIntegerField
 ├── description             TextField (plain text summary)
@@ -91,13 +91,16 @@ Episode (Timestampable)
 ├── is_explicit             BooleanField default=False
 ├── transcript_url          URLField (blank)
 ├── chapters_url            URLField (blank)
-├── companion_summary_url   URLField (blank)
-├── companion_checklist_url URLField (blank)
-├── companion_frameworks_url URLField (blank)
-├── report_url              URLField (blank)
-├── sources_url             URLField (blank)
+├── companion_resources     JSONField (flexible dict of companion URLs — summary, checklist, frameworks, etc.)
+├── report_text             TextField (blank — full report content stored in DB)
+├── sources_text            TextField (blank — full sources/citations stored in DB)
+├── ordering: episode_number (ascending) — re-releases update published_at but keep their position
 └── unique_together: (podcast, episode_number)
     unique_together: (podcast, slug)
+
+Note: Report and sources are served at deterministic URLs via routing
+(e.g. /podcast/{slug}/{episode-slug}/report/, /podcast/{slug}/{episode-slug}/sources/)
+— no need to store URLs for these.
 ```
 
 ### Flow
@@ -114,10 +117,10 @@ Episode (Timestampable)
 
 - Follow established patterns from `apps/drugs/` (models, admin, views, urls, apps.py)
 - Use `Timestampable` behavior mixin on both models
-- RSS feed: Use Django's `django.contrib.syndication` framework or raw XML `HttpResponse` with proper content type
+- RSS feed: Compile from DB content using a Django template with proper XML content type, cached. Replicates the existing feed.xml structure exactly.
 - Public views: Use `MainContentView` pattern for pages, templates in `apps/public/templates/podcast/`
 - Audio URLs: Store as URLField pointing to `research.yuda.me` for now (R2 migration later)
-- Episode ordering: `episode_number` within a podcast (ascending), most recent first in feeds
+- Episode ordering: `episode_number` within a podcast (ascending in DB, most recent first in feeds). Re-releases update `published_at` to bust player caches but keep their episode number.
 - Import command: Parse XML with `xml.etree.ElementTree`, extract iTunes namespace metadata
 
 ## Rabbit Holes
@@ -141,7 +144,7 @@ Episode (Timestampable)
 
 ### Risk 3: Episode numbering during import
 **Impact:** Episodes from different "series" (cardiovascular, stablecoin, etc.) are currently in one feed with separate episode numbering. Flattening into a single podcast requires renumbering.
-**Mitigation:** Import in chronological order (by `pubDate`), assign sequential episode numbers. Store original series name in show notes or a metadata field for reference.
+**Mitigation:** Import in chronological order (by `pubDate`), assign sequential episode numbers 1-N. Original series name is preserved as a title prefix (e.g. "Cardiovascular Health: Lifestyle Foundations"). **Decision made** — all previous numbers are replaced.
 
 ## No-Gos (Out of Scope)
 
@@ -282,7 +285,15 @@ No agent integration required — this is a Django web feature. Future MCP tools
   - `PodcastListView` — list of public podcasts
   - `PodcastDetailView` — episodes for a podcast
   - `EpisodeDetailView` — single episode page
-- Create `apps/podcast/urls.py`
+  - `EpisodeReportView` — serves report_text at deterministic URL
+  - `EpisodeSourcesView` — serves sources_text at deterministic URL
+- Create `apps/podcast/urls.py` with routes:
+  - `/podcast/` → podcast list
+  - `/podcast/{slug}/` → podcast detail (episode list)
+  - `/podcast/{slug}/feed.xml` → RSS feed
+  - `/podcast/{slug}/{episode-slug}/` → episode detail
+  - `/podcast/{slug}/{episode-slug}/report/` → report content
+  - `/podcast/{slug}/{episode-slug}/sources/` → sources content
 - Create templates in `apps/public/templates/podcast/`:
   - `podcast_list.html`
   - `podcast_detail.html`
@@ -297,10 +308,12 @@ No agent integration required — this is a Django web feature. Future MCP tools
 - Create `apps/podcast/management/commands/import_podcast_feed.py`
 - Parse `feed.xml` from URL or local file
 - Create Podcast from channel metadata
-- Create Episodes from items, ordered chronologically
-- Assign sequential episode numbers
+- Create Episodes from items, ordered chronologically by pubDate
+- Assign sequential episode numbers 1-N (replaces any original numbering)
+- Merge original series name as title prefix (e.g. "Cardiovascular Health: Lifestyle Foundations")
 - Extract: title, description, audio URL, duration, file size, pub date, cover image
 - Handle iTunes namespace for metadata
+- Idempotent: skip episodes that already exist (match by audio_url)
 - Log progress and any parse warnings
 
 ### 7. Write tests
@@ -336,10 +349,16 @@ No agent integration required — this is a Django web feature. Future MCP tools
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Episode numbering strategy**: When importing 33+ episodes from 7 different topic areas into one public feed, should we order strictly by publication date and number 1-33? Or group by original series and maintain some ordering? (Current plan: strict chronological, renumber 1-N)
+1. **Episode numbering strategy**: Strict chronological by pubDate, renumber 1-N. All previous episode numbers are replaced.
 
-2. **Original series name preservation**: Should we store the original series name (e.g., "Cardiovascular Health", "Stablecoin Series") as a field on Episode for reference, or is it enough to encode it in the episode title? (e.g., "Cardiovascular Health: Lifestyle Foundations")
+2. **Original series name preservation**: Series name merged as title prefix (e.g. "Cardiovascular Health: Lifestyle Foundations"). No separate series field needed.
 
-3. **Feed URL structure**: Is `/podcast/{slug}/feed.xml` the right pattern, or do you prefer something like `/feeds/podcast/{slug}.xml` or `/podcast/{slug}/rss`?
+3. **Feed URL structure**: `/podcast/{slug}/feed.xml` confirmed.
+
+4. **Companion resources**: Single `companion_resources` JSONField for flexible companion URLs. Report and sources stored as TextFields in DB, served at deterministic URLs.
+
+5. **Ordering**: By `episode_number`, not `published_at`. Re-releases bump `published_at` to bust player caches but keep their position.
+
+6. **RSS generation**: Compiled from DB via Django template, cached. Replicates existing feed.xml structure.

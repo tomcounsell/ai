@@ -133,6 +133,8 @@ filterwarnings = [
 dev = [
     "django-browser-reload>=1.18.0",
     "pre-commit>=4.3.0",
+    "pyright>=1.1.408",
+    "ruff>=0.15.0",
 ]
 e2e-testing = [
     "browser-use>=0.1.40",
