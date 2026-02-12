@@ -116,6 +116,7 @@ urlpatterns = [
     path("", include("apps.public.urls", namespace="public")),
     path("staff/", include("apps.staff.urls", namespace="staff")),
     path("drugs/", include("apps.drugs.urls", namespace="drugs")),
+    path("podcast/", include("apps.podcast.urls", namespace="podcast")),
     # Legacy redirect for old /ai/mcp/ URLs
     path(
         "ai/mcp/<path:subpath>",

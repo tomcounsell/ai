@@ -53,6 +53,7 @@ PROJECT_APPS = [
     "apps.ai",  # AI integrations and agents (includes QuickBooks MCP)
     "apps.staff",  # for staff-only admin tools
     "apps.drugs",  # Medication tracker
+    "apps.podcast",  # Podcast management and feeds
 ]
 
 INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + PROJECT_APPS

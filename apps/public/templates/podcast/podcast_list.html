@@ -1,0 +1,33 @@
+{% extends base_template %}
+
+{% block title %}Podcasts{% endblock %}
+
+{% block content_width %}12{% endblock %}
+
+{% block main_header %}
+<h1 class="text-3xl font-bold tracking-tight text-gray-900">Podcasts</h1>
+{% endblock %}
+
+{% block content %}
+<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+  {% for podcast in podcasts %}
+  <a href="{% url 'podcast:detail' slug=podcast.slug %}"
+     class="block bg-white border border-gray-200 p-6 hover:shadow-md transition-shadow">
+    {% if podcast.cover_image_url %}
+    <img src="{{ podcast.cover_image_url }}" alt="{{ podcast.title }}"
+         class="w-full h-48 object-cover mb-4">
+    {% endif %}
+    <h2 class="font-mono text-lg font-semibold mb-2 text-gray-900">{{ podcast.title }}</h2>
+    <p class="text-sm text-gray-600 mb-3">{{ podcast.description|truncatewords:30 }}</p>
+    <span class="text-xs text-gray-500 font-mono">
+      <i class="fas fa-user mr-1"></i> {{ podcast.author_name }}
+    </span>
+  </a>
+  {% empty %}
+  <div class="col-span-full text-center py-12 text-gray-500">
+    <i class="fas fa-podcast text-4xl mb-4 block"></i>
+    <p class="text-sm">No podcasts available yet.</p>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}
