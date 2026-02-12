@@ -1,0 +1,90 @@
+[
+  {
+    "label": "Django Server",
+    "command": "uv run python manage.py runserver",
+    "env": {
+      "DJANGO_SETTINGS_MODULE": "settings",
+      "PYTHONUNBUFFERED": "1"
+    },
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "tags": ["django-server"]
+  },
+  {
+    "label": "Tailwind Watch",
+    "command": "uv run python manage.py tailwind watch",
+    "env": {
+      "DJANGO_SETTINGS_MODULE": "settings",
+      "PYTHONUNBUFFERED": "1"
+    },
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "tags": ["tailwind"]
+  },
+  {
+    "label": "Run Tests",
+    "command": "DJANGO_SETTINGS_MODULE=settings uv run pytest -v",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "tags": ["pytest"]
+  },
+  {
+    "label": "Run Tests (current file)",
+    "command": "DJANGO_SETTINGS_MODULE=settings uv run pytest -v $ZED_FILE",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "tags": ["pytest"]
+  },
+  {
+    "label": "Run E2E Tests",
+    "command": "DJANGO_SETTINGS_MODULE=settings uv run pytest -m e2e apps/public/tests/ -v",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Lint Code",
+    "command": "uv run pre-commit run --all-files",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "hide": "on_success"
+  },
+  {
+    "label": "Django Shell",
+    "command": "uv run python manage.py shell",
+    "env": {
+      "DJANGO_SETTINGS_MODULE": "settings",
+      "PYTHONUNBUFFERED": "1"
+    },
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "MCP Server",
+    "command": "uv run python -m apps.ai.mcp.cuttlefish_server",
+    "env": {
+      "PYTHONUNBUFFERED": "1"
+    },
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always"
+  },
+  {
+    "label": "Dev (Server + Tailwind)",
+    "command": "uv run python manage.py runserver & uv run python manage.py tailwind watch; wait",
+    "env": {
+      "DJANGO_SETTINGS_MODULE": "settings",
+      "PYTHONUNBUFFERED": "1"
+    },
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "tags": ["dev"]
+  }
+]
