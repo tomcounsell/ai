@@ -77,6 +77,18 @@ Sessions transition to the **Complete** state when work is finished. Two mechani
 
 Note: **Telethon cannot receive emoji reaction events** for user accounts (Telegram API limitation). The 👍 reaction is purely a human-to-human signal -- it does not trigger any programmatic state change. No reaction handler is needed in the bridge.
 
+## Auto-Continue and Session Scope
+
+The auto-continue system uses job re-enqueue rather than steering queue injection. When a status update triggers auto-continue, a new job is enqueued through the normal job queue with the same session context:
+
+- `session_id` -- preserves thread identity
+- `work_item_slug` -- preserves slug-scoped task list binding
+- `task_list_id` -- preserves the CLAUDE_CODE_TASK_LIST_ID value
+
+This ensures auto-continued work remains within the correct isolation scope. The previous approach (steering queue injection) could bypass session scoping if the agent process had already exited.
+
+See [Reaction Semantics](reaction-semantics.md) for details on the re-enqueue design and the race condition it fixes.
+
 ## See Also
 
 - [Scale Job Queue (Popoto + Worktrees)](scale-job-queue-with-popoto-and-worktrees.md) -- The parallel execution foundation that this feature enables

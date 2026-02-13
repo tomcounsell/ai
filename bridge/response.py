@@ -151,7 +151,8 @@ INVALID_REACTIONS = [
 # Reaction emojis for different stages (all validated 2026-02-13)
 REACTION_RECEIVED = "👀"  # Message acknowledged
 REACTION_PROCESSING = "🤔"  # Default thinking emoji
-REACTION_SUCCESS = "👍"  # Completed successfully
+REACTION_SUCCESS = "👍"  # Simple ack, no text reply needed
+REACTION_COMPLETE = "🏆"  # Work done, text reply attached
 REACTION_ERROR = "😱"  # Something went wrong
 
 # Intent-specific processing emojis (classified by local Ollama)
@@ -361,11 +362,19 @@ async def send_response_with_files(
         return False
 
     # Filter out tool logs before processing
+    original_response = response
     response = filter_tool_logs(response)
 
-    # If filtering removed everything, no response needed
+    # If filtering removed everything but original had content, use fallback
     if not response:
-        return False
+        if original_response and original_response.strip():
+            logger.warning(
+                f"filter_tool_logs stripped entire response ({len(original_response)} chars), "
+                f"using fallback"
+            )
+            response = "Done."
+        else:
+            return False
 
     text, files = extract_files_from_response(response)
 

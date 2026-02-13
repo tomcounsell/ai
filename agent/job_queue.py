@@ -26,6 +26,7 @@ from agent.branch_manager import (
     get_plan_context,
     sanitize_branch_name,
 )
+from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
 from bridge.session_logs import save_session_snapshot
 
 logger = logging.getLogger(__name__)
@@ -64,6 +65,9 @@ class RedisJob(Model):
     reply_to_msg_id = Field(type=int, null=True)
     chat_id_for_enrichment = Field(null=True)  # Telegram chat ID for API calls
     classification_type = Field(null=True)  # Auto-classified type (bug/feature/chore)
+    auto_continue_count = Field(
+        type=int, default=0
+    )  # Persisted across re-enqueued jobs
 
 
 class Job:
@@ -164,6 +168,10 @@ class Job:
     def classification_type(self) -> str | None:
         return self._rj.classification_type
 
+    @property
+    def auto_continue_count(self) -> int:
+        return self._rj.auto_continue_count or 0
+
 
 async def _push_job(
     project_key: str,
@@ -187,6 +195,7 @@ async def _push_job(
     reply_to_msg_id: int | None = None,
     chat_id_for_enrichment: str | None = None,
     classification_type: str | None = None,
+    auto_continue_count: int = 0,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project."""
     await RedisJob.async_create(
@@ -213,6 +222,7 @@ async def _push_job(
         reply_to_msg_id=reply_to_msg_id,
         chat_id_for_enrichment=chat_id_for_enrichment,
         classification_type=classification_type,
+        auto_continue_count=auto_continue_count,
     )
     return await RedisJob.query.async_count(project_key=project_key, status="pending")
 
@@ -440,6 +450,7 @@ async def enqueue_job(
     reply_to_msg_id: int | None = None,
     chat_id_for_enrichment: str | None = None,
     classification_type: str | None = None,
+    auto_continue_count: int = 0,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -471,6 +482,7 @@ async def enqueue_job(
         reply_to_msg_id=reply_to_msg_id,
         chat_id_for_enrichment=chat_id_for_enrichment,
         classification_type=classification_type,
+        auto_continue_count=auto_continue_count,
     )
     _ensure_worker(project_key)
     logger.info(
@@ -643,11 +655,14 @@ async def _execute_job(job: Job) -> None:
     send_cb = _send_callbacks.get(job.project_key)
     react_cb = _reaction_callbacks.get(job.project_key)
 
-    # Auto-continue counter (max 3 per session, resets on human reply)
-    auto_continue_count = 0
+    # Auto-continue counter (max 3 per session, persisted across re-enqueued jobs)
+    auto_continue_count = job.auto_continue_count or 0
+    # Flag to skip reaction when a continuation job is enqueued
+    _defer_reaction = False
 
     async def send_to_chat(msg: str) -> None:
         nonlocal auto_continue_count
+        nonlocal _defer_reaction
 
         if not send_cb:
             return
@@ -665,10 +680,10 @@ async def _execute_job(job: Job) -> None:
             classification.output_type == OutputType.STATUS_UPDATE
             and auto_continue_count < MAX_AUTO_CONTINUES
         ):
-            # Status update -- don't send to chat, inject "continue" to keep agent working
+            # Status update -- don't send to chat, re-enqueue job to continue session
             auto_continue_count += 1
             logger.info(
-                f"[{job.project_key}] Auto-continuing "
+                f"[{job.project_key}] Auto-continuing via job re-enqueue "
                 f"({auto_continue_count}/{MAX_AUTO_CONTINUES})"
             )
 
@@ -688,14 +703,26 @@ async def _execute_job(job: Job) -> None:
                 working_dir=str(working_dir),
             )
 
-            # Push "continue" as a steering message to keep the agent going
-            from agent.steering import push_steering_message
-
-            push_steering_message(
+            # Re-enqueue a continuation job with the same session_id
+            # This uses the same mechanism as user reply-to messages:
+            # SDK creates session with continue_conversation=True, resume=session_id
+            await enqueue_job(
+                project_key=job.project_key,
                 session_id=job.session_id,
-                text="continue",
-                sender="System (auto-continue)",
+                working_dir=job.working_dir,
+                message_text="continue",
+                sender_name="System (auto-continue)",
+                chat_id=job.chat_id,
+                message_id=job.message_id,
+                priority="high",
+                work_item_slug=job.work_item_slug,
+                task_list_id=job.task_list_id,
+                auto_continue_count=auto_continue_count,
             )
+
+            # Signal that this job should NOT set a reaction
+            # (defer to the continuation job)
+            _defer_reaction = True
             return
 
         # For all other types (question, completion, blocker, error,
@@ -817,9 +844,15 @@ async def _execute_job(job: Job) -> None:
     except Exception as e:
         logger.debug(f"Steering queue cleanup failed (non-fatal): {e}")
 
-    # Set reaction based on result
-    if react_cb:
-        emoji = "\U0001f44d" if not task.error else "\u274c"
+    # Set reaction based on result and delivery state
+    # Skip if a continuation job was enqueued (defer reaction to that job)
+    if react_cb and not _defer_reaction:
+        if task.error:
+            emoji = REACTION_ERROR
+        elif messenger.has_communicated():
+            emoji = REACTION_COMPLETE
+        else:
+            emoji = REACTION_SUCCESS
         try:
             await react_cb(job.chat_id, job.message_id, emoji)
         except Exception as e:
