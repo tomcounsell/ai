@@ -187,7 +187,7 @@ NEW_TEST_EMOJIS = [
     "✔",
     "☑",
     "✓",
-    # Stamps/seals
+    # Stamps/seals/medals
     "🔖",
     "📌",
     "🏅",
@@ -200,7 +200,7 @@ NEW_TEST_EMOJIS = [
     "⬆",
     "↗",
     "▶",
-    # Other "done" candidates
+    # "Done" candidates
     "🔔",
     "📣",
     "📢",
@@ -380,12 +380,12 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.new:
-        print("Testing NEW candidate emojis...")
-        emojis = NEW_TEST_EMOJIS
-    elif args.full:
+    if args.full:
         print("Testing FULL emoji list...")
         emojis = FULL_TEST_EMOJIS
+    elif args.new:
+        print("Testing NEW candidate emojis...")
+        emojis = NEW_TEST_EMOJIS
     else:
         print("Testing previously RATE-LIMITED emojis...")
         emojis = RATE_LIMITED_EMOJIS

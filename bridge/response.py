@@ -155,7 +155,7 @@ REACTION_SUCCESS = "👍"  # Completed successfully
 REACTION_ERROR = "😱"  # Something went wrong
 
 # Intent-specific processing emojis (classified by local Ollama)
-# All emojis validated 2026-02-05 via scripts/test_emoji_reactions.py
+# All emojis validated 2026-02-13 via scripts/test_emoji_reactions.py
 INTENT_REACTIONS = {
     "search": "👀",  # Searching/looking
     "code_execution": "👨‍💻",  # Running code
