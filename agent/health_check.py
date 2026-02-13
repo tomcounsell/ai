@@ -12,6 +12,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from claude_agent_sdk import HookContext, PostToolUseHookInput
+
 from config.models import MODEL_FAST
 
 logger = logging.getLogger(__name__)
@@ -222,7 +224,9 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
 
 
 async def watchdog_hook(
-    input_data: Any, tool_use_id: str | None, context: Any
+    input_data: PostToolUseHookInput,
+    tool_use_id: str | None,
+    context: HookContext,
 ) -> dict[str, Any]:
     """PostToolUse hook — fires every tool call.
 

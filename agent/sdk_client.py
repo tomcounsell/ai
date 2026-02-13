@@ -31,12 +31,12 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
-    HookMatcher,
     ResultMessage,
     TextBlock,
 )
 
-from agent.health_check import watchdog_hook
+from agent.agent_definitions import get_agent_definitions
+from agent.hooks import build_hooks_config
 from agent.workflow_state import WorkflowState
 from agent.workflow_types import WorkflowStateData
 
@@ -187,6 +187,7 @@ class ValorAgent:
         permission_mode: str = "bypassPermissions",
         workflow_id: str | None = None,
         task_list_id: str | None = None,
+        max_budget_usd: float | None = None,
     ):
         """
         Initialize ValorAgent.
@@ -198,6 +199,8 @@ class ValorAgent:
             workflow_id: Optional workflow ID for multi-phase workflow tracking.
             task_list_id: Optional task list ID to scope sub-agent Task storage
                 via CLAUDE_CODE_TASK_LIST_ID environment variable.
+            max_budget_usd: Maximum budget in USD for a single agent session.
+                Defaults to SDK_MAX_BUDGET_USD env var or 5.00.
         """
         self.working_dir = (
             Path(working_dir) if working_dir else Path(__file__).parent.parent
@@ -206,6 +209,9 @@ class ValorAgent:
         self.permission_mode = permission_mode
         self.workflow_id = workflow_id
         self.task_list_id = task_list_id
+        self.max_budget_usd = max_budget_usd or float(
+            os.getenv("SDK_MAX_BUDGET_USD", "5.00")
+        )
         self.workflow_state: WorkflowState | None = None
 
         # Load workflow state if workflow_id provided
@@ -349,11 +355,9 @@ class ValorAgent:
             resume=session_id,
             setting_sources=["local", "project"],
             env=env,
-            hooks={
-                "PostToolUse": [
-                    HookMatcher(matcher="", hooks=[watchdog_hook]),
-                ],
-            },
+            hooks=build_hooks_config(),
+            agents=get_agent_definitions(),
+            max_budget_usd=self.max_budget_usd,
         )
 
     async def query(
