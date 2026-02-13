@@ -42,7 +42,7 @@ class RedisJob(Model):
     project_key = KeyField()
     status = KeyField(default="pending")  # pending | running | completed | failed
     priority = Field(default="high")  # "high" (top of stack) or "low" (bottom)
-    created_at = SortedField(type=float, sort_by="project_key")
+    created_at = SortedField(type=float, partition_by="project_key")
     session_id = Field()
     working_dir = Field()
     message_text = Field(max_length=MSG_MAX_CHARS)

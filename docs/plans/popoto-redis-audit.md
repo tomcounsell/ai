@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Shipped
 type: chore
 appetite: Medium
 owner: Valor
