@@ -283,7 +283,6 @@ The podcast production system uses a **12-phase workflow** defined in `.claude/s
 | `notebooklm_prompt.py` | Generate episodeFocus prompts |
 | `transcribe_only.py` | Local Whisper transcription |
 | `generate_chapters.py` | AI-powered chapter generation |
-| `update_feed.py` | Update feed.xml with structured HTML show notes |
 | `generate_companion_resources.py` | Create summary, checklist, frameworks |
 | `generate_landing_page.py` | Generate HTML episode page |
 | `cover_art.py` | AI cover art and branding |
@@ -292,8 +291,15 @@ The podcast production system uses a **12-phase workflow** defined in `.claude/s
 | `gemini_deep_research.py` | Gemini research integration |
 | `gpt_researcher_run.py` | GPT Researcher integration |
 
+### Management Commands
+| Command | Purpose |
+|---------|---------|
+| `start_episode` | Pull draft Episode from DB, create local working directory |
+| `publish_episode` | Read local files, populate Episode fields + create artifacts |
+| `backfill_episodes` | One-time import of existing episodes from research repo |
+
 ### Episode Working Directory
-All in-progress episode work happens in `apps/podcast/pending-episodes/{feed-slug}-{episode-slug}/`. This directory is **gitignored**. Once an episode is complete, files are imported into the Django database.
+All in-progress episode work happens in `apps/podcast/pending-episodes/{podcast-slug}/{episode-slug}/`. This directory is **gitignored**. Once an episode is complete, `publish_episode` imports files into the Django database.
 
 ### Templates
 - `docs/templates/podcast/p3-briefing-enhanced.md` — Research briefing
