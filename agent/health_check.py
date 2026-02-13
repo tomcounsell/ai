@@ -150,6 +150,7 @@ def _repush_messages(session_id: str, messages: list[dict]) -> None:
             msg.get("text", ""),
             msg.get("sender", "unknown"),
             is_abort=msg.get("is_abort", False),
+            target_agent=msg.get("target_agent"),
         )
     logger.info(f"[steering] Re-pushed {len(messages)} message(s) to {session_id}")
 
@@ -182,7 +183,11 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
     for msg in messages:
         sender = msg.get("sender", "supervisor")
         text = msg.get("text", "")
-        parts.append(f"[{sender}]: {text}")
+        target = msg.get("target_agent")
+        prefix = f"[{sender}]"
+        if target:
+            prefix = f"[{sender} -> @{target}]"
+        parts.append(f"{prefix}: {text}")
 
     combined = "\n".join(parts)
     logger.info(
