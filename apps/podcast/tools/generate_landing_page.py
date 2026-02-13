@@ -30,12 +30,13 @@ The script will:
 
 import argparse
 import json
-import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
 from xml.sax.saxutils import escape
+
+from episode_config import load_config
 
 
 def parse_metadata_md(metadata_path: Path) -> dict:
@@ -167,11 +168,12 @@ def get_transcript_preview(episode_dir: Path, max_chars: int = 500) -> str:
     try:
         with open(transcript_files[0]) as f:
             data = json.load(f)
-            if "text" in data:
-                text = data["text"][:max_chars]
-                return text + "..." if len(data["text"]) > max_chars else text
-    except:
-        pass
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    if "text" in data:
+        text = data["text"][:max_chars]
+        return text + "..." if len(data["text"]) > max_chars else text
     return None
 
 
@@ -180,26 +182,42 @@ def generate_html(
     episode_dir: Path,
     companion_resources: list,
     transcript_preview: str,
+    config: dict = None,
 ) -> str:
-    """Generate the HTML landing page."""
+    """Generate the HTML landing page.
+
+    Args:
+        metadata: Episode metadata from logs/metadata.md
+        episode_dir: Path to episode directory
+        companion_resources: List of companion resource dicts
+        transcript_preview: Preview text from transcript
+        config: Episode config from load_config()
+    """
+    config = config or {}
+
     title = escape(metadata.get("title", "Episode"))
     description = escape(metadata.get("description", ""))
     duration = metadata.get("duration", "")
     pub_date = metadata.get("pub_date", "")
     series = metadata.get("series_name", "")
 
+    # Get config values
+    podcast_title = config.get("podcast_title", "Yudame Research")
+    website_url = config.get("website_url", "https://research.yuda.me")
+    podcast_slug = config.get("podcast_slug", "yudame-research")
+
     # Get episode slug for URLs
     slug = episode_dir.name
 
-    # Build base URL
-    base_url = f"https://research.yuda.me/podcast/episodes/{slug}"
+    # Build base URL from config
+    base_url = f"{website_url}/podcast/episodes/{slug}"
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{title} | Yudame Research Podcast</title>
+    <title>{title} | {podcast_title} Podcast</title>
     <meta name="description" content="{description[:160]}">
     <meta property="og:title" content="{title}">
     <meta property="og:description" content="{description[:160]}">
@@ -404,8 +422,8 @@ def generate_html(
     </section>
 
     <footer>
-        <p>Yudame Research Podcast &copy; {datetime.now().year}</p>
-        <p><a href="https://research.yuda.me/podcast/feed.xml">Subscribe via RSS</a></p>
+        <p>{podcast_title} Podcast &copy; {datetime.now().year}</p>
+        <p><a href="{website_url}/podcast/{podcast_slug}/feed.xml">Subscribe via RSS</a></p>
     </footer>
 </body>
 </html>
@@ -451,6 +469,9 @@ def main():
     print(f"Episode: {episode_dir.name}")
     print(f"Metadata: {metadata_path}")
 
+    # Load episode config
+    config = load_config(episode_dir)
+
     # Parse metadata
     metadata = parse_metadata_md(metadata_path)
 
@@ -459,6 +480,7 @@ def main():
         return 1
 
     print(f"Title: {metadata['title']}")
+    print(f"Podcast: {config.get('podcast_title', 'Yudame Research')}")
 
     # Get companion resources
     companion_resources = get_companion_resources(episode_dir)
@@ -470,7 +492,9 @@ def main():
         print("Transcript: Found")
 
     # Generate HTML
-    html = generate_html(metadata, episode_dir, companion_resources, transcript_preview)
+    html = generate_html(
+        metadata, episode_dir, companion_resources, transcript_preview, config
+    )
 
     if args.dry_run:
         print("\n=== GENERATED HTML ===\n")
@@ -482,7 +506,8 @@ def main():
     output_path = episode_dir / args.output
     output_path.write_text(html)
     print(f"\nCreated: {output_path}")
-    print(f"URL: https://research.yuda.me/podcast/episodes/{episode_dir.name}/")
+    website_url = config.get("website_url", "https://research.yuda.me")
+    print(f"URL: {website_url}/podcast/episodes/{episode_dir.name}/")
 
     return 0
 

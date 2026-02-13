@@ -116,10 +116,13 @@ If the episode directory already exists, check for a `research-prompt.md` file. 
 **Create the episode directory and files using setup_episode.py:**
 
 ```bash
-# For standalone episodes (uses today's date automatically)
+# For public episodes (default yudame-research podcast)
 uv run python ~/src/cuttlefish/apps/podcast/tools/setup_episode.py --slug "topic-slug" --title "Episode Title"
 
-# For series episodes
+# For private podcast episodes (loads config from database)
+uv run python ~/src/cuttlefish/apps/podcast/tools/setup_episode.py --podcast stablecoin --slug "overview" --title "Stablecoin Overview"
+
+# For series episodes (legacy)
 uv run python ~/src/cuttlefish/apps/podcast/tools/setup_episode.py --slug "topic-slug" --title "Series: Ep. X, Topic" \
   --series "series-name" --episode-num X
 
@@ -127,6 +130,8 @@ uv run python ~/src/cuttlefish/apps/podcast/tools/setup_episode.py --slug "topic
 uv run python ~/src/cuttlefish/apps/podcast/tools/setup_episode.py --slug "topic-slug" --title "Episode Title" \
   --context "Research focus and key questions"
 ```
+
+The `--podcast` parameter loads configuration from the database (PodcastConfig model) and saves it as `episode_config.json` in the episode directory. This config is used by downstream tools to adapt branding, CTAs, depth level, and sponsor breaks for public vs private feeds.
 
 **What setup_episode.py creates:**
 ```
@@ -1557,46 +1562,22 @@ These scripts create:
 - `companion/*-frameworks.md` - Key frameworks reference
 - `index.html` - Episode landing page
 
-**Update feed.xml using update_feed.py:**
+**Publish Episode to Database:**
+
+The Django `publish_episode` management command reads local files and creates/updates the Episode record in the database. The dynamic Django feed views then serve the episode via RSS.
 
 ```bash
-# Preview changes (dry-run)
-uv run python ~/src/cuttlefish/apps/podcast/tools/update_feed.py apps/podcast/pending-episodes/EPISODE_PATH/ --dry-run
-
-# Apply changes
-uv run python ~/src/cuttlefish/apps/podcast/tools/update_feed.py apps/podcast/pending-episodes/EPISODE_PATH/
+# Publish episode to database
+uv run python manage.py publish_episode apps/podcast/pending-episodes/EPISODE_PATH/
 ```
 
-**What update_feed.py does:**
-1. Reads logs/metadata.md for title, description, keywords, sources
-2. Auto-detects audio file, cover.png, chapters JSON
-3. Gets duration/size from file if not in metadata
-4. Generates complete `<item>` XML with plain text + HTML content
-5. Inserts into feed.xml at correct position
-6. Updates `<lastBuildDate>`
+**What publish_episode does:**
+1. Reads episode files (report.md, metadata, audio, etc.)
+2. Creates/updates Episode model in database
+3. Creates EpisodeArtifact records for companion resources
+4. Episode is immediately available in the dynamic RSS feed
 
-🚨 **CRITICAL: Validate feed.xml**
-
-**Invoke feed validation:**
-
-Use the Skill tool: `podcast-feed-validator`
-
-The skill validates:
-1. Channel-level metadata (Section 1 requirements)
-2. Episode metadata (Section 2 & 3 requirements)
-3. File metadata accuracy (actual file size and duration match feed)
-4. XML structure validity
-5. Content quality checks (report links, source URLs, HTML formatting)
-
-If validation fails, DO NOT proceed to Phase 12 until issues are fixed.
-
-**VERIFY FEED.XML UPDATE:**
-
-Use Bash: `git diff podcast/feed.xml` to review the new `<item>` entry.
-
-**Expected output:**
-- New `<item>` entry visible
-- `<lastBuildDate>` updated in channel metadata
+**Feed is served dynamically** via Django views at `/podcast/{slug}/feed.xml`. No manual XML editing required.
 - Duration matches file: MM:SS format
 - File size matches: exact bytes
 - pubDate in RFC 2822 format

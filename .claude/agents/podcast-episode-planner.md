@@ -89,3 +89,12 @@ After writing the complete plan, return ONLY a brief summary:
 ```
 
 The orchestrator does not need the full plan in context - NotebookLM will read it directly.
+
+**Config-Aware Planning:**
+Read `episode_config.json` from the episode directory to adapt content plan:
+- `is_public` - Affects CTA messaging and sponsor break inclusion
+- `sponsor_break` - Whether to include sponsor splice point placeholder
+- `depth_level` - Baseline knowledge to assume (accessible/intermediate/advanced)
+- `opening_script` / `closing_script` - Custom brand scripts if provided
+
+For private feeds, omit sponsor breaks and adapt CTAs appropriately.

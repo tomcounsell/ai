@@ -1,7 +1,21 @@
 from django.contrib import admin
 from unfold.admin import ModelAdmin, TabularInline
 
-from apps.podcast.models import Episode, EpisodeArtifact, Podcast
+from apps.podcast.models import Episode, EpisodeArtifact, Podcast, PodcastConfig
+
+
+class PodcastConfigInline(TabularInline):
+    model = PodcastConfig
+    fields = [
+        "depth_level",
+        "sponsor_break",
+        "companion_access",
+        "opening_script",
+        "closing_script",
+    ]
+    extra = 0
+    max_num = 1
+    can_delete = False
 
 
 class EpisodeInline(TabularInline):
@@ -25,7 +39,7 @@ class PodcastAdmin(ModelAdmin):
     search_fields = ["title", "description"]
     prepopulated_fields = {"slug": ("title",)}
     ordering = ["title"]
-    inlines = [EpisodeInline]
+    inlines = [PodcastConfigInline, EpisodeInline]
 
 
 @admin.register(Episode)

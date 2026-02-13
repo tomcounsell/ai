@@ -3,23 +3,32 @@
 Create episode directory structure and template files.
 
 Usage:
-    # Standalone episode
+    # Public episode (default: yudame-research)
+    python setup_episode.py --slug "topic-name" --title "Episode Title"
+
+    # Private podcast episode
+    python setup_episode.py --podcast stablecoin --slug "overview" --title "Stablecoin Overview"
+
+    # Legacy standalone episode (date-prefixed)
     python setup_episode.py --date 2025-12-26 --slug "topic-name" --title "Episode Title"
 
-    # Series episode
-    python setup_episode.py --date 2025-12-26 --slug "lifestyle" --title "Cardiovascular Health: Ep. 1, Lifestyle Foundations" --series "cardiovascular-health-series" --episode-num 1
+    # Series episode (legacy)
+    python setup_episode.py --slug "lifestyle" --title "Cardiovascular Health: Ep. 1" --series "cardiovascular-health-series" --episode-num 1
 
     # With research context
-    python setup_episode.py --date 2025-12-26 --slug "topic" --title "Title" --context "Research focus and key questions"
+    python setup_episode.py --slug "topic" --title "Title" --context "Research focus and key questions"
 
 Output:
     Creates directory structure with template files ready for podcast workflow.
+    Includes episode_config.json snapshot from podcast configuration.
 """
 
 import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
+
+from episode_config import DEFAULT_CONFIG, save_config
 
 
 def create_prompts_template(date: str, slug: str, title: str) -> str:
@@ -134,10 +143,18 @@ def create_sources_template(date: str, title: str) -> str:
 
 
 def get_episode_path(
-    base_dir: Path, date: str, slug: str, series: str = None, episode_num: int = None
+    base_dir: Path,
+    date: str,
+    slug: str,
+    podcast: str = None,
+    series: str = None,
+    episode_num: int = None,
 ) -> Path:
-    """Determine episode directory path based on standalone vs series."""
-    if series:
+    """Determine episode directory path based on podcast, series, or standalone."""
+    if podcast:
+        # Podcast episode: {podcast-slug}/{episode-slug}/
+        return base_dir / "podcast" / "pending-episodes" / podcast / slug
+    elif series:
         # Series episode: series-name/epX-slug/
         ep_dir = f"ep{episode_num}-{slug}" if episode_num else slug
         return base_dir / "podcast" / "pending-episodes" / series / ep_dir
@@ -146,10 +163,37 @@ def get_episode_path(
         return base_dir / "podcast" / "pending-episodes" / f"{date}-{slug}"
 
 
+def load_podcast_config(podcast_slug: str) -> dict:
+    """Load config from database for the given podcast slug."""
+    import os
+
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "settings")
+    import django
+
+    django.setup()
+
+    from apps.podcast.models import Podcast
+
+    podcast = Podcast.objects.select_related("config").get(slug=podcast_slug)
+
+    if hasattr(podcast, "config"):
+        return podcast.config.to_dict()
+
+    # Podcast exists but no config - return minimal info with defaults
+    return {
+        **DEFAULT_CONFIG,
+        "podcast_slug": podcast.slug,
+        "podcast_title": podcast.title,
+        "is_public": podcast.is_public,
+        "website_url": podcast.website_url or DEFAULT_CONFIG["website_url"],
+    }
+
+
 def setup_episode(
     date: str,
     slug: str,
     title: str,
+    podcast: str = None,
     series: str = None,
     episode_num: int = None,
     context: str = None,
@@ -168,7 +212,7 @@ def setup_episode(
         base_dir = Path(__file__).parent.parent.parent
 
     # Get episode path
-    episode_dir = get_episode_path(base_dir, date, slug, series, episode_num)
+    episode_dir = get_episode_path(base_dir, date, slug, podcast, series, episode_num)
 
     # Check if already exists
     if episode_dir.exists():
@@ -187,7 +231,28 @@ def setup_episode(
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
 
-    log(f"✓ Created directories: research/, logs/, tmp/")
+    log("✓ Created directories: research/, logs/, tmp/")
+
+    # Save episode config snapshot
+    config_file = episode_dir / "episode_config.json"
+    if not config_file.exists():
+        if podcast:
+            # Load config from database
+            try:
+                config = load_podcast_config(podcast)
+                log(f"✓ Loaded config from database for podcast: {podcast}")
+            except Exception as e:
+                log(f"⚠️  Could not load podcast config: {e}")
+                log("   Using default public config")
+                config = DEFAULT_CONFIG.copy()
+        else:
+            # Use default public config
+            config = DEFAULT_CONFIG.copy()
+
+        save_config(episode_dir, config)
+        log("✓ Saved episode_config.json")
+    else:
+        log("✓ episode_config.json already exists")
 
     # Create template files
     files_created = []
@@ -227,7 +292,8 @@ def setup_episode(
     log("  ├── logs/")
     log("  │   └── prompts.md")
     log("  ├── tmp/")
-    log("  └── sources.md")
+    log("  ├── sources.md")
+    log("  └── episode_config.json")
 
     return episode_dir
 
@@ -238,22 +304,33 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Standalone episode
-  %(prog)s --date 2025-12-26 --slug "sleep-optimization" --title "Sleep Optimization for Athletes"
+  # Public episode (default yudame-research)
+  %(prog)s --slug "sleep-optimization" --title "Sleep Optimization for Athletes"
 
-  # Series episode
-  %(prog)s --date 2025-12-26 --slug "lifestyle" --title "Cardiovascular Health: Ep. 1, Lifestyle" --series "cardiovascular-health-series" --episode-num 1
+  # Private podcast episode
+  %(prog)s --podcast stablecoin --slug "overview" --title "Stablecoin Overview"
+
+  # Legacy standalone episode (date-prefixed)
+  %(prog)s --date 2025-12-26 --slug "sleep-optimization" --title "Sleep Optimization"
+
+  # Series episode (legacy)
+  %(prog)s --slug "lifestyle" --title "Cardiovascular Health: Ep. 1" --series "cardiovascular-health-series" --episode-num 1
 
   # With research context
-  %(prog)s --date 2025-12-26 --slug "burnout" --title "Educator Burnout" --context "Research early childhood educator burnout interventions"
+  %(prog)s --slug "burnout" --title "Educator Burnout" --context "Research early childhood educator burnout interventions"
 """,
     )
 
     parser.add_argument(
+        "--podcast",
+        "-p",
+        help="Podcast slug (e.g., 'stablecoin'). Loads config from database.",
+    )
+    parser.add_argument(
         "--date",
         "-d",
         default=datetime.now().strftime("%Y-%m-%d"),
-        help="Episode date in YYYY-MM-DD format (default: today)",
+        help="Episode date in YYYY-MM-DD format (default: today). Used for legacy standalone directories.",
     )
     parser.add_argument(
         "--slug",
@@ -282,11 +359,16 @@ Examples:
     if args.episode_num and not args.series:
         parser.error("--series is required when --episode-num is specified")
 
+    # Validate podcast vs series (mutually exclusive)
+    if args.podcast and args.series:
+        parser.error("--podcast and --series are mutually exclusive")
+
     try:
-        episode_dir = setup_episode(
+        setup_episode(
             date=args.date,
             slug=args.slug,
             title=args.title,
+            podcast=args.podcast,
             series=args.series,
             episode_num=args.episode_num,
             context=args.context,

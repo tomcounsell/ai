@@ -227,4 +227,13 @@ After writing the metadata, return ONLY:
 **Ready for feed.xml update:** Yes
 ```
 
-The orchestrator does not need the full metadata in context - update_feed.py reads it directly.
+The orchestrator does not need the full metadata in context - the Django feed views read episode data from the database.
+
+**Config-Aware Metadata:**
+Read `episode_config.json` from the episode directory to get feed-specific settings:
+- `website_url` - Base URL for resource links (default: https://research.yuda.me)
+- `podcast_slug` - Podcast identifier for feed URLs
+- `is_public` - Affects CTA language and resource gating
+- `companion_access` - Whether companion resources are public or gated
+
+Adapt URLs and CTAs based on config values. For private feeds, use appropriate domain and messaging.

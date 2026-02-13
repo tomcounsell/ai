@@ -305,8 +305,14 @@ The output must include ALL of the following sections:
 ### Closing Instructions
 - Callback to opening: [How to reference the opening hook]
 - Key takeaway: [Single most important point]
-- Call-to-action: [Next step for listener]
-- Sign-off: "Find the full research and sources at research dot yuda dot me—that's Y-U-D-A dot M-E."
+- Call-to-action: [Next step for listener - adapt based on episode_config.json is_public flag]
+- Sign-off: [Use closing_script from episode_config.json if provided, otherwise default: "Find the full research and sources at research dot yuda dot me—that's Y-U-D-A dot M-E."]
+
+**Config-Aware Closing:**
+Read `episode_config.json` from the episode directory for feed-specific settings:
+- `is_public` - Affects CTA messaging
+- `closing_script` - Custom closing script if provided
+- `sponsor_break` - Whether to include sponsor splice point in structure
 
 ---
 

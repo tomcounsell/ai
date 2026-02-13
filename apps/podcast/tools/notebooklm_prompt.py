@@ -2,16 +2,19 @@
 """
 Generate NotebookLM prompt for manual audio generation.
 
-Reads episode metadata and outputs a ready-to-paste prompt.
+Reads episode metadata and config, outputs a ready-to-paste prompt.
 
 Usage:
     python notebooklm_prompt.py ../pending-episodes/YYYY-MM-DD-slug/
+    python notebooklm_prompt.py ../pending-episodes/stablecoin/overview/
     python notebooklm_prompt.py ../pending-episodes/YYYY-MM-DD-slug/ --series "Series Name"
 """
 
 import argparse
 import sys
 from pathlib import Path
+
+from episode_config import load_config
 
 
 def get_episode_title(episode_dir: Path, title_override: str = "") -> str:
@@ -65,10 +68,75 @@ def get_series_name(episode_dir: Path, series_override: str = "") -> str:
     return ""
 
 
-def generate_prompt(episode_title: str, series_name: str = "") -> str:
-    """Generate the NotebookLM prompt."""
+def generate_prompt(
+    episode_title: str, series_name: str = "", config: dict = None
+) -> str:
+    """Generate the NotebookLM prompt.
+
+    Args:
+        episode_title: Title of the episode
+        series_name: Optional series name
+        config: Episode config dict from load_config()
+    """
+    config = config or {}
+
     series_intro = f" from our {series_name} series" if series_name else ""
     series_open = f" from our {series_name} series" if series_name else ""
+
+    # Get brand elements from config
+    podcast_title = config.get("podcast_title", "Yudame Research")
+    is_public = config.get("is_public", True)
+    website_url = config.get("website_url", "https://research.yuda.me")
+    opening_script = config.get("opening_script", "")
+    closing_script = config.get("closing_script", "")
+    depth_level = config.get("depth_level", "accessible")
+    sponsor_break = config.get("sponsor_break", True)
+
+    # Parse website URL for spoken version
+    website_spoken = website_url.replace("https://", "").replace("http://", "")
+    website_spoken = website_spoken.replace(".", " dot ")
+
+    # Build opening/closing brand elements
+    if opening_script:
+        brand_open = opening_script
+    else:
+        brand_open = f"Welcome to {podcast_title}{series_open} by Valor Engels..."
+
+    if closing_script:
+        brand_close = closing_script
+    else:
+        brand_close = f"Find full research and sources at {website_spoken}"
+
+    # Depth level guidance
+    depth_guidance = ""
+    if depth_level == "advanced":
+        depth_guidance = """
+AUDIENCE DEPTH:
+- Assume baseline knowledge of the domain
+- Can use technical terminology with brief clarification
+- Focus more on nuance and edge cases than fundamentals"""
+    elif depth_level == "intermediate":
+        depth_guidance = """
+AUDIENCE DEPTH:
+- Assume some familiarity with the topic area
+- Define specialized terms but move quickly through basics
+- Balance accessibility with technical depth"""
+    else:  # accessible
+        depth_guidance = """
+AUDIENCE DEPTH:
+- Assume minimal prior knowledge
+- Define all technical terms before building on them
+- Use analogies and examples to make concepts concrete"""
+
+    # Sponsor break section (only for public feeds)
+    sponsor_section = ""
+    if sponsor_break and is_public:
+        sponsor_section = """
+
+SPONSOR BREAK:
+- Include a natural transition point around the 10-12 minute mark for sponsor insertion
+- Use phrases like: "Before we dive into...", "Let's pause here for a moment..."
+- This creates a clean splice point for post-production sponsor integration"""
 
     return f"""Create a two-host podcast episode on: {episode_title}{series_intro}
 
@@ -95,12 +163,13 @@ DIALOGUE DYNAMICS - CRITICAL:
 - Use phrases like: "Wait, but doesn't that contradict...", "I disagree because...", "I see it differently - here's why...", "Let me push back on that..."
 - After debating, resolve through synthesis: "Both perspectives have merit when you consider..."
 - Target 2-3 counterpoint moments throughout the episode
+{depth_guidance}
 
 Brand elements:
 - Producer: Valor Engels
-- Open with: "Welcome to Yuda Me Research{series_open} by Valor Engels..."
-- Close with: "Find full research and sources at research dot yuda dot me - that's Y-U-D-A dot M-E"
-
+- Open with: "{brand_open}"
+- Close with: "{brand_close}"
+{sponsor_section}
 EPISODE ARC:
 - Opening (3-5 min): Hook with specific stat/story, define the problem, preview structure
 - Middle (20-30 min): Build from foundation to evidence to application with clear mode-switching
@@ -152,6 +221,9 @@ def main():
         print(f"Error: Directory not found: {episode_dir}", file=sys.stderr)
         sys.exit(1)
 
+    # Load episode config
+    config = load_config(episode_dir)
+
     # Get episode metadata
     episode_title = get_episode_title(episode_dir, args.title)
     series_name = get_series_name(episode_dir, args.series)
@@ -189,7 +261,7 @@ def main():
         sys.exit(1)
 
     # Generate and print prompt
-    prompt = generate_prompt(episode_title, series_name)
+    prompt = generate_prompt(episode_title, series_name, config)
 
     print("\n" + "=" * 60)
     print("📋 NOTEBOOKLM PROMPT (copy-paste ready):")
