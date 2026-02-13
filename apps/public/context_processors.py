@@ -5,7 +5,7 @@ These processors add variables to the context of all templates rendered
 through a RequestContext.
 """
 
-from typing import Any, Dict
+from typing import Any
 
 from django.http import HttpRequest
 
@@ -25,10 +25,8 @@ def active_navigation(request: HttpRequest) -> dict[str, Any]:
     active_section = None
 
     # Determine active section based on URL path
-    if path == "/":
+    if path == "/" or path.startswith("/landing"):
         active_section = "home"
-    elif path.startswith("/landing"):
-        active_section = "home"  # Treat landing as home for nav
     elif path.startswith("/todos"):
         active_section = "todos"
     elif path.startswith("/team"):
@@ -43,3 +41,14 @@ def active_navigation(request: HttpRequest) -> dict[str, Any]:
         active_section = "blog"
 
     return {"active_section": active_section}
+
+
+def debug_toolbar_toggle(request: HttpRequest) -> dict[str, Any]:
+    from settings.env import LOCAL, STAGE
+
+    if not (LOCAL or STAGE):
+        return {}
+    return {
+        "show_debug_toolbar_toggle": True,
+        "debug_toolbar_enabled": request.COOKIES.get("debug_toolbar", "on") == "on",
+    }

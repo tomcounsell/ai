@@ -136,6 +136,15 @@ Provides links to important pages, legal information, and site metadata.
           Created by Tom Counsell
         </a>
       </p>
+      {% if show_debug_toolbar_toggle %}
+      <button
+        onclick="document.cookie='debug_toolbar='+(document.cookie.includes('debug_toolbar=on')||!document.cookie.includes('debug_toolbar=')?'off':'on')+';path=/';location.reload();"
+        class="text-mono text-xs mt-4 md:mt-0 px-2 py-1"
+        style="color: var(--color-text-light-gray); border: 1px solid var(--color-border-light); background: none; cursor: pointer; letter-spacing: 0.05em;"
+      >
+        DDT: {{ debug_toolbar_enabled|yesno:"ON,OFF" }}
+      </button>
+      {% endif %}
     </div>
   </div>
 </footer>
