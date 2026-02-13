@@ -173,6 +173,46 @@ class Job:
         return self._rj.auto_continue_count or 0
 
 
+# Fields to extract from RedisJob for delete-and-recreate pattern.
+# Excludes job_id (AutoKeyField, auto-generated on create).
+_REDIS_JOB_FIELDS = [
+    "project_key",
+    "status",
+    "priority",
+    "created_at",
+    "session_id",
+    "working_dir",
+    "message_text",
+    "sender_name",
+    "sender_id",
+    "chat_id",
+    "message_id",
+    "chat_title",
+    "revival_context",
+    "workflow_id",
+    "work_item_slug",
+    "task_list_id",
+    "has_media",
+    "media_type",
+    "youtube_urls",
+    "non_youtube_urls",
+    "reply_to_msg_id",
+    "chat_id_for_enrichment",
+    "classification_type",
+    "auto_continue_count",
+]
+
+
+def _extract_job_fields(redis_job: RedisJob) -> dict:
+    """Extract all non-auto fields from a RedisJob instance.
+
+    Returns a dict suitable for RedisJob.create(**fields) or
+    RedisJob.async_create(**fields). Excludes job_id since that is
+    an AutoKeyField and will be auto-generated on create.
+    """
+    return {field: getattr(redis_job, field) for field in _REDIS_JOB_FIELDS}
+
+
 async def _push_job(
     project_key: str,
     session_id: str,
@@ -232,6 +272,11 @@ async def _pop_job(project_key: str) -> Job | None:
     Pop the highest priority pending job for a project.
 
     Order: high priority first, then within same priority FILO (newest first).
+
+    Uses delete-and-recreate instead of field mutation to avoid KeyField
+    index corruption. Popoto's KeyField.on_save() only ADDs to the new
+    status index set but never REMOVEs from the old one, so mutating
+    status and calling save() leaves a stale entry in the pending index.
     """
     pending = await RedisJob.query.async_filter(
         project_key=project_key, status="pending"
@@ -246,9 +291,13 @@ async def _pop_job(project_key: str) -> Job | None:
 
     pending.sort(key=sort_key)
     chosen = pending[0]
-    chosen.status = "running"
-    await chosen.async_save()
-    return Job(chosen)
+
+    # Delete-and-recreate to avoid KeyField index corruption
+    fields = _extract_job_fields(chosen)
+    await chosen.async_delete()
+    fields["status"] = "running"
+    new_job = await RedisJob.async_create(**fields)
+    return Job(new_job)
 
 
 async def _pending_depth(project_key: str) -> int:
@@ -282,28 +331,37 @@ def _recover_interrupted_jobs(project_key: str) -> int:
     Reset any jobs stuck in 'running' status back to 'pending' with high priority.
 
     Called at startup to recover jobs orphaned by a previous crash or restart.
+    Uses delete-and-recreate to avoid KeyField index corruption.
     Returns the number of recovered jobs.
     """
-    running_jobs = RedisJob.query.filter(project_key=project_key, status="running")
+    running_jobs = list(
+        RedisJob.query.filter(project_key=project_key, status="running")
+    )
     if not running_jobs:
         return 0
 
+    count = len(running_jobs)
     for job in running_jobs:
+        old_id = job.job_id
         logger.warning(
-            f"[{project_key}] Recovering interrupted job {job.job_id} "
+            f"[{project_key}] Recovering interrupted job {old_id} "
             f"(session={job.session_id}, msg={job.message_text[:80]!r}...)"
         )
-        job.status = "pending"
-        job.priority = "high"
-        job.save()
+        fields = _extract_job_fields(job)
+        job.delete()
+        fields["status"] = "pending"
+        fields["priority"] = "high"
+        new_job = RedisJob.create(**fields)
+        logger.info(f"[{project_key}] Recovered job {old_id} -> {new_job.job_id}")
 
-    logger.warning(f"[{project_key}] Recovered {len(running_jobs)} interrupted job(s)")
-    return len(running_jobs)
+    logger.warning(f"[{project_key}] Recovered {count} interrupted job(s)")
+    return count
 
 
 async def _reset_running_jobs(project_key: str) -> int:
     """
     Async version: reset running jobs back to pending during graceful shutdown.
+    Uses delete-and-recreate to avoid KeyField index corruption.
     Returns the number of reset jobs.
     """
     running_jobs = await RedisJob.query.async_filter(
@@ -313,14 +371,112 @@ async def _reset_running_jobs(project_key: str) -> int:
         return 0
 
     for job in running_jobs:
+        old_id = job.job_id
         logger.info(
-            f"[{project_key}] Resetting in-flight job {job.job_id} to pending for next startup"
+            f"[{project_key}] Resetting in-flight job {old_id} to pending for next startup"
         )
-        job.status = "pending"
-        job.priority = "high"
-        await job.async_save()
+        fields = _extract_job_fields(job)
+        await job.async_delete()
+        fields["status"] = "pending"
+        fields["priority"] = "high"
+        new_job = await RedisJob.async_create(**fields)
+        logger.info(f"[{project_key}] Reset job {old_id} -> {new_job.job_id}")
 
     return len(running_jobs)
+
+
+def _recover_orphaned_jobs(project_key: str) -> int:
+    """
+    Scan for RedisJob objects stranded by past index corruption.
+
+    Orphans exist in the Redis class set but not in any status KeyField index.
+    This can happen when a crash occurs between delete and recreate, or when
+    KeyField.on_save() adds to the new index but the old index entry was never
+    cleaned up (leaving the object visible in the class set but invisible to
+    status-based queries).
+
+    Re-creates orphans with status 'pending' and priority 'high'.
+    """
+    from popoto.models.db_key import DB_key
+    from popoto.redis_db import POPOTO_REDIS_DB
+
+    # Get all RedisJob keys from the class set
+    class_set_key = RedisJob._meta.db_class_set_key.redis_key
+    all_keys = POPOTO_REDIS_DB.smembers(class_set_key)
+    if not all_keys:
+        return 0
+
+    # Get all keys in status index sets
+    # KeyField index pattern: $KeyF:RedisJob:status:{value}
+    indexed_keys: set[bytes] = set()
+    for status in ["pending", "running", "completed", "failed"]:
+        index_key = DB_key(
+            RedisJob._meta.fields["status"].get_special_use_field_db_key(
+                RedisJob, "status"
+            ),
+            status,
+        ).redis_key
+        indexed_keys.update(POPOTO_REDIS_DB.smembers(index_key))
+
+    # Find orphans (in class set but not in any status index)
+    orphan_keys = all_keys - indexed_keys
+    if not orphan_keys:
+        return 0
+
+    recovered = 0
+    for key in orphan_keys:
+        try:
+            key_str = key.decode() if isinstance(key, bytes) else key
+
+            # Load the object data from Redis hash
+            data = POPOTO_REDIS_DB.hgetall(key_str)
+            if not data:
+                # Hash was deleted, just a stale class set entry -- clean it up
+                POPOTO_REDIS_DB.srem(class_set_key, key)
+                continue
+
+            # Check if this belongs to our project
+            pk_bytes = data.get(b"project_key", b"")
+            pk = pk_bytes.decode() if isinstance(pk_bytes, bytes) else pk_bytes
+            if pk != project_key:
+                continue
+
+            # Try to load as a RedisJob object for proper field extraction
+            try:
+                from popoto.models.encoding import decode_popoto_model_hashmap
+
+                orphan_job = decode_popoto_model_hashmap(RedisJob, data)
+                if orphan_job is None:
+                    continue
+                fields = _extract_job_fields(orphan_job)
+            except Exception:
+                # If decoding fails, skip this orphan
+                logger.warning(
+                    f"[{project_key}] Could not decode orphan {key_str}, skipping"
+                )
+                continue
+
+            # Delete the orphan hash and class set entry
+            POPOTO_REDIS_DB.delete(key_str)
+            POPOTO_REDIS_DB.srem(class_set_key, key)
+
+            # Create new properly-indexed job
+            fields["status"] = "pending"
+            fields["priority"] = "high"
+            new_job = RedisJob.create(**fields)
+            recovered += 1
+            logger.warning(
+                f"[{project_key}] Recovered orphaned job from key {key_str} "
+                f"-> {new_job.job_id}"
+            )
+        except Exception as e:
+            logger.error(f"[{project_key}] Failed to recover orphan {key}: {e}")
+
+    if recovered:
+        logger.warning(
+            f"[{project_key}] Recovered {recovered} orphaned job(s) from index corruption"
+        )
+    return recovered
 
 
 # === Per-project worker ===
@@ -506,16 +662,26 @@ async def _worker_loop(project_key: str) -> None:
     Process jobs sequentially for one project.
     Runs until queue is empty, then exits (restarted on next enqueue).
     After each job, checks for a restart flag written by remote-update.sh.
+
+    Includes a drain guard: when the queue appears empty, the worker yields
+    to the event loop (sleep 0.1s) and re-checks once before exiting. This
+    prevents losing jobs created between async_create index writes.
     """
     try:
         while True:
             job = await _pop_job(project_key)
             if job is None:
-                logger.info(f"[{project_key}] Queue empty, worker exiting")
-                # Good time to check restart flag — queue is empty
-                if _check_restart_flag():
-                    _trigger_restart()
-                break
+                # Drain guard: yield to event loop, let in-flight creates finish
+                await asyncio.sleep(0.1)
+                job = await _pop_job(project_key)
+                if job is None:
+                    logger.info(f"[{project_key}] Queue empty, worker exiting")
+                    if _check_restart_flag():
+                        _trigger_restart()
+                    break
+                logger.info(
+                    f"[{project_key}] Drain guard caught job that would have been lost"
+                )
 
             try:
                 await _execute_job(job)
