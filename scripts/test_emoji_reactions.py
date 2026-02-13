@@ -175,6 +175,82 @@ FULL_TEST_EMOJIS = [
     "🔍",
 ]
 
+# New emojis to test - "complete/done" candidates and more
+NEW_TEST_EMOJIS = [
+    # Stars
+    "⭐",
+    "🌟",
+    "✨",
+    "💫",
+    "🌠",
+    # Checks/marks
+    "✔",
+    "☑",
+    "✓",
+    # Stamps/seals
+    "🔖",
+    "📌",
+    "🏅",
+    "🥇",
+    "🥈",
+    "🥉",
+    "🎖",
+    # Arrows/indicators
+    "➡",
+    "⬆",
+    "↗",
+    "▶",
+    # Other "done" candidates
+    "🔔",
+    "📣",
+    "📢",
+    "🎯",
+    "🪄",
+    "✌",
+    "🤘",
+    "🤙",
+    "💪",
+    "🙌",
+    "🫶",
+    "🤞",
+    "💐",
+    "🌹",
+    "🌺",
+    # Misc symbols
+    "♥",
+    "☀",
+    "🌈",
+    "⚽",
+    "🏈",
+    "🎲",
+    "🧩",
+    "🎵",
+    "🎶",
+    "🔑",
+    "💎",
+    "🧲",
+    "🪬",
+    "🧿",
+    # Animals
+    "🐶",
+    "🐱",
+    "🐸",
+    "🐔",
+    "🦅",
+    "🐝",
+    "🦋",
+    "🐢",
+    "🐙",
+    # More faces
+    "🥳",
+    "😏",
+    "🫠",
+    "🥺",
+    "😤",
+    "🫣",
+    "🫢",
+]
+
 
 async def test_reactions_for_real(emojis_to_test: list[str], delay: float = 0.5):
     """Test each emoji by actually trying to set it as a reaction."""
@@ -292,6 +368,11 @@ def main():
         help="Test all emojis (not just rate-limited ones)",
     )
     parser.add_argument(
+        "--new",
+        action="store_true",
+        help="Test NEW candidate emojis (stars, checks, stamps, etc.)",
+    )
+    parser.add_argument(
         "--delay",
         type=float,
         default=0.5,
@@ -299,7 +380,10 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.full:
+    if args.new:
+        print("Testing NEW candidate emojis...")
+        emojis = NEW_TEST_EMOJIS
+    elif args.full:
         print("Testing FULL emoji list...")
         emojis = FULL_TEST_EMOJIS
     else:
