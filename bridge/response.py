@@ -85,7 +85,7 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm"}
 # Audio extensions (Telegram can play these)
 AUDIO_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".flac", ".aac"}
 
-# Validated 73 emojis on 2026-02-05 via scripts/test_emoji_reactions.py
+# Validated 73 emojis on 2026-02-13 via scripts/test_emoji_reactions.py
 # fmt: off
 VALIDATED_REACTIONS = [
     # Hearts/love
@@ -111,7 +111,7 @@ VALIDATED_REACTIONS = [
 ]
 # fmt: on
 
-# Known INVALID reactions - do not use these
+# Known INVALID reactions - do not use these (tested 2026-02-13)
 # fmt: off
 INVALID_REACTIONS = [
     "😂",  # ReactionInvalidError - tears of joy not allowed!
@@ -127,10 +127,28 @@ INVALID_REACTIONS = [
     "🔍",  # Magnifying glass - not a reaction
     # Emojis with U+FE0F variation selector (use base forms instead):
     "❤️", "❤️‍🔥", "✍️", "☃️", "🤷‍♂️", "🤷‍♀️",
+    # Stars (all invalid, tested 2026-02-13)
+    "⭐", "🌟", "✨", "💫", "🌠",
+    # Checks/marks (all invalid - Telegram doesn't allow any check emojis!)
+    "✔", "☑", "✓",
+    # Stamps/seals/medals (all invalid)
+    "🔖", "📌", "🏅", "🥇", "🥈", "🥉", "🎖",
+    # Arrows/indicators (all invalid)
+    "➡", "⬆", "↗", "▶",
+    # "Done" candidates (all invalid)
+    "🔔", "📣", "📢", "🎯", "🪄", "✌", "🤘", "🤙",
+    "💪", "🙌", "🫶", "🤞", "💐", "🌹", "🌺",
+    # Misc symbols (all invalid)
+    "♥", "☀", "🌈", "⚽", "🏈", "🎲", "🧩",
+    "🎵", "🎶", "🔑", "💎", "🧲", "🪬", "🧿",
+    # Animals (all invalid - only 🕊🐳🦄🙈🙉🙊 work)
+    "🐶", "🐱", "🐸", "🐔", "🦅", "🐝", "🦋", "🐢", "🐙",
+    # Faces (all invalid)
+    "🥳", "😏", "🫠", "🥺", "😤", "🫣", "🫢",
 ]
 # fmt: on
 
-# Reaction emojis for different stages (all validated 2026-02-05)
+# Reaction emojis for different stages (all validated 2026-02-13)
 REACTION_RECEIVED = "👀"  # Message acknowledged
 REACTION_PROCESSING = "🤔"  # Default thinking emoji
 REACTION_SUCCESS = "👍"  # Completed successfully

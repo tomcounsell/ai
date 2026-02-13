@@ -16,16 +16,32 @@ def redis_test_db():
     Uses SELECT on the existing connection so that popoto's module-level
     POPOTO_REDIS_DB reference (used by Query, fields, etc.) points at the
     test database without needing to replace the object.
+
+    Also resets the async Redis connection to use db=1, since popoto v1.0.0b2
+    maintains a separate _POPOTO_ASYNC_REDIS_DB connection.
     """
+    import popoto.redis_db as rdb
+    import redis.asyncio as aioredis
     from popoto.redis_db import POPOTO_REDIS_DB
 
-    # Switch to db=1 and flush before each test
+    # Switch sync connection to db=1 and flush before each test
     POPOTO_REDIS_DB.select(1)
     POPOTO_REDIS_DB.flushdb()
+
+    # Reset async Redis connection to point at db=1.
+    # Directly create the aioredis.Redis object (constructor is sync)
+    # rather than calling the async set_async_redis_db_settings().
+    rdb._POPOTO_ASYNC_REDIS_DB = None
+    rdb._POPOTO_ASYNC_REDIS_DB = aioredis.Redis(db=1)
+
     yield
+
     # Flush test db and switch back to production db=0
     POPOTO_REDIS_DB.flushdb()
     POPOTO_REDIS_DB.select(0)
+
+    # Reset async connection back to default (lazy-init on next use)
+    rdb._POPOTO_ASYNC_REDIS_DB = None
 
 
 @pytest.fixture

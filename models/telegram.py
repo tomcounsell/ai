@@ -18,6 +18,6 @@ class TelegramMessage(Model):
     direction = KeyField()  # "in" | "out"
     sender = KeyField()
     content = Field(max_length=MSG_MAX_CHARS)
-    timestamp = SortedField(type=float, sort_by="chat_id")
+    timestamp = SortedField(type=float, partition_by="chat_id")
     message_type = KeyField(default="text")  # text, media, response, acknowledgment
     session_id = Field(null=True)
