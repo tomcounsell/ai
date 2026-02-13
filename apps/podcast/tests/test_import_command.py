@@ -162,3 +162,42 @@ class ImportPodcastFeedTestCase(TestCase):
 
         # Invalid
         self.assertIsNone(parse_duration("abc"))
+
+
+class ImportBlankAudioUrlTestCase(TestCase):
+    """Tests for the blank audio_url guard in import_podcast_feed."""
+
+    @mock.patch("urllib.request.urlopen", side_effect=_mock_urlopen)
+    def test_import_skips_dedup_when_audio_url_blank(self, mock_url):
+        """Draft episodes with blank audio_url don't block import.
+
+        If a draft episode exists with audio_url='', the dedup check
+        (which matches on audio_url) should not block importing new
+        episodes that have a real audio_url.
+        """
+        from django.core.management import call_command
+
+        # Create a podcast and a draft episode with blank audio_url
+        podcast = Podcast.objects.create(
+            title="Test Podcast",
+            slug="test-podcast",
+            description="A test podcast",
+            author_name="Test Author",
+            author_email="test@example.com",
+        )
+        Episode.objects.create(
+            podcast=podcast,
+            title="Draft Episode",
+            slug="draft-ep",
+            episode_number=99,
+            audio_url="",
+            status="draft",
+        )
+
+        out = StringIO()
+        call_command("import_podcast_feed", stdout=out)
+
+        # The two episodes from the feed should still be imported
+        # (the draft with blank audio_url should not interfere)
+        episodes_with_audio = Episode.objects.exclude(audio_url="")
+        self.assertEqual(episodes_with_audio.count(), 2)

@@ -4,6 +4,12 @@ from apps.common.behaviors import Expirable, Publishable, Timestampable
 
 from .podcast import Podcast
 
+STATUS_CHOICES = [
+    ("draft", "Draft"),
+    ("in_progress", "In Progress"),
+    ("complete", "Complete"),
+]
+
 
 class Episode(Timestampable, Publishable, Expirable):
     podcast = models.ForeignKey(
@@ -11,12 +17,13 @@ class Episode(Timestampable, Publishable, Expirable):
     )
     title = models.CharField(max_length=200)
     slug = models.SlugField()
-    episode_number = models.PositiveIntegerField()
+    episode_number = models.PositiveIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
     description = models.TextField(blank=True)
     show_notes = models.TextField(blank=True)
 
     # Audio
-    audio_url = models.URLField()
+    audio_url = models.URLField(blank=True)
     audio_duration_seconds = models.PositiveIntegerField(null=True, blank=True)
     audio_file_size_bytes = models.BigIntegerField(null=True, blank=True)
 
@@ -45,6 +52,17 @@ class Episode(Timestampable, Publishable, Expirable):
 
     def __str__(self):
         return f"{self.episode_number}. {self.title}"
+
+    def save(self, *args, **kwargs):
+        if self.episode_number is None:
+            max_num = (
+                Episode.objects.filter(podcast=self.podcast).aggregate(
+                    max_num=models.Max("episode_number")
+                )["max_num"]
+                or 0
+            )
+            self.episode_number = max_num + 1
+        super().save(*args, **kwargs)
 
     @property
     def effective_cover_image_url(self):

@@ -2,11 +2,14 @@ from django.db.models import F, Q
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
 from django.template.loader import render_to_string
+from django.utils.decorators import method_decorator
 from django.views import View
+from django.views.decorators.cache import cache_page
 
 from apps.podcast.models import Podcast
 
 
+@method_decorator(cache_page(300), name="dispatch")
 class PodcastFeedView(View):
     """Generate a valid podcast RSS XML feed for a given Podcast."""
 

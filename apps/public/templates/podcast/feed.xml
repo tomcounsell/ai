@@ -2,7 +2,8 @@
 <rss version="2.0"
      xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd"
      xmlns:podcast="https://podcastindex.org/namespace/1.0"
-     xmlns:atom="http://www.w3.org/2005/Atom">
+     xmlns:atom="http://www.w3.org/2005/Atom"
+     xmlns:content="http://purl.org/rss/1.0/modules/content/">
   <channel>
     <title>{{ podcast.title }}</title>
     <link>{{ podcast.website_url }}</link>
@@ -38,6 +39,7 @@
       <itunes:explicit>{% if episode.is_explicit %}true{% else %}false{% endif %}</itunes:explicit>
       {% if episode.effective_cover_image_url %}<itunes:image href="{{ episode.effective_cover_image_url }}"/>{% endif %}
       <itunes:summary>{{ episode.description }}</itunes:summary>
+      <content:encoded><![CDATA[{% episode_show_notes episode %}]]></content:encoded>
     </item>
 {% endfor %}
   </channel>

@@ -318,8 +318,12 @@ class Command(BaseCommand):
             return "warning"
 
         # Idempotency check: skip if audio_url already exists for this podcast
-        if not dry_run:
-            if Episode.objects.filter(podcast=podcast, audio_url=audio_url).exists():
+        if not dry_run and audio_url:
+            if (
+                Episode.objects.filter(podcast=podcast, audio_url=audio_url)
+                .exclude(audio_url="")
+                .exists()
+            ):
                 self.stdout.write(f"  [{episode_number}] Skipped (exists): {title}")
                 return "skipped"
 

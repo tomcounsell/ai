@@ -1,4 +1,9 @@
+import json
+import logging
+
 from django import template
+
+logger = logging.getLogger(__name__)
 
 register = template.Library()
 
@@ -20,3 +25,32 @@ def default_zero(value: int | None) -> int:
     if value is None:
         return 0
     return value
+
+
+@register.inclusion_tag("podcast/_show_notes.html")
+def episode_show_notes(episode) -> dict:
+    """Render rich HTML show notes from Episode fields.
+
+    Produces structured show notes including an overview from the episode
+    description, key timestamps parsed from the chapters JSON field,
+    sources text, and a link to the full report when available.
+
+    Usage in templates::
+
+        {% load podcast_tags %}
+        {% episode_show_notes episode %}
+    """
+    chapters = []
+    if episode.chapters:
+        try:
+            chapters = json.loads(episode.chapters)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Invalid chapters JSON for episode %s", episode.pk)
+
+    return {
+        "episode": episode,
+        "description": episode.description,
+        "chapters": chapters,
+        "sources_text": episode.sources_text,
+        "report_text": episode.report_text,
+    }

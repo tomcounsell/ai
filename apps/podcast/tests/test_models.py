@@ -2,7 +2,7 @@ from django.db import IntegrityError
 from django.test import TestCase
 from django.utils import timezone
 
-from apps.podcast.models import Episode, Podcast
+from apps.podcast.models import Episode, EpisodeArtifact, Podcast
 
 
 class PodcastModelTestCase(TestCase):
@@ -283,3 +283,195 @@ class EpisodeModelTestCase(TestCase):
         self.assertEqual(episodes[0].episode_number, 1)
         self.assertEqual(episodes[1].episode_number, 2)
         self.assertEqual(episodes[2].episode_number, 3)
+
+    def test_status_defaults_to_draft(self):
+        """New episode has status='draft' by default."""
+        episode = Episode.objects.create(
+            podcast=self.podcast,
+            title="Draft Episode",
+            slug="draft-ep",
+            episode_number=1,
+            audio_url="https://example.com/ep1.mp3",
+        )
+        episode.refresh_from_db()
+        self.assertEqual(episode.status, "draft")
+
+    def test_episode_number_auto_assignment_when_none(self):
+        """Episode with episode_number=None gets next available number."""
+        Episode.objects.create(
+            podcast=self.podcast,
+            title="Episode One",
+            slug="ep-one",
+            episode_number=3,
+            audio_url="https://example.com/ep1.mp3",
+        )
+        episode = Episode.objects.create(
+            podcast=self.podcast,
+            title="Episode Auto",
+            slug="ep-auto",
+            audio_url="https://example.com/ep-auto.mp3",
+        )
+        episode.refresh_from_db()
+        self.assertEqual(episode.episode_number, 4)
+
+    def test_episode_number_auto_assignment_first_episode(self):
+        """First episode with episode_number=None gets number 1."""
+        episode = Episode.objects.create(
+            podcast=self.podcast,
+            title="First Auto",
+            slug="first-auto",
+            audio_url="https://example.com/first-auto.mp3",
+        )
+        episode.refresh_from_db()
+        self.assertEqual(episode.episode_number, 1)
+
+    def test_episode_number_auto_scoped_to_podcast(self):
+        """Auto-numbering is scoped to the podcast, not global."""
+        other_podcast = Podcast.objects.create(
+            title="Other Podcast",
+            slug="other-podcast",
+            description="Another podcast.",
+            author_name="Author",
+            author_email="a@b.com",
+        )
+        Episode.objects.create(
+            podcast=other_podcast,
+            title="Other Ep",
+            slug="other-ep",
+            episode_number=10,
+            audio_url="https://example.com/other.mp3",
+        )
+        episode = Episode.objects.create(
+            podcast=self.podcast,
+            title="My Ep",
+            slug="my-ep",
+            audio_url="https://example.com/my-ep.mp3",
+        )
+        episode.refresh_from_db()
+        self.assertEqual(episode.episode_number, 1)
+
+    def test_audio_url_can_be_blank(self):
+        """Episode can be saved with blank audio_url."""
+        episode = Episode.objects.create(
+            podcast=self.podcast,
+            title="No Audio",
+            slug="no-audio",
+            episode_number=1,
+            audio_url="",
+        )
+        episode.refresh_from_db()
+        self.assertEqual(episode.audio_url, "")
+
+    def test_save_without_episode_number_auto_assigns(self):
+        """Episode saved without explicit episode_number gets one assigned."""
+        ep = Episode(
+            podcast=self.podcast,
+            title="No Number",
+            slug="no-number",
+        )
+        ep.save()
+        ep.refresh_from_db()
+        self.assertIsNotNone(ep.episode_number)
+        self.assertEqual(ep.episode_number, 1)
+
+
+class EpisodeArtifactModelTestCase(TestCase):
+    """Tests for the EpisodeArtifact model."""
+
+    def setUp(self):
+        self.podcast = Podcast.objects.create(
+            title="Artifact Podcast",
+            slug="artifact-podcast",
+            description="A podcast for artifact tests.",
+            author_name="Author",
+            author_email="a@b.com",
+        )
+        self.episode = Episode.objects.create(
+            podcast=self.podcast,
+            title="Artifact Episode",
+            slug="artifact-ep",
+            episode_number=1,
+            audio_url="https://example.com/ep1.mp3",
+        )
+
+    def test_create_artifact(self):
+        """Create an EpisodeArtifact with episode FK, title, content."""
+        artifact = EpisodeArtifact.objects.create(
+            episode=self.episode,
+            title="research/p2-perplexity.md",
+            content="# Research\n\nSome research content.",
+        )
+        artifact.refresh_from_db()
+        self.assertEqual(artifact.episode, self.episode)
+        self.assertEqual(artifact.title, "research/p2-perplexity.md")
+        self.assertEqual(artifact.content, "# Research\n\nSome research content.")
+        self.assertEqual(artifact.metadata, {})
+        self.assertIsNotNone(artifact.pk)
+
+    def test_unique_together_episode_title(self):
+        """Duplicate (episode, title) raises IntegrityError."""
+        EpisodeArtifact.objects.create(
+            episode=self.episode,
+            title="research/p2-perplexity.md",
+            content="First version.",
+        )
+        with self.assertRaises(IntegrityError):
+            EpisodeArtifact.objects.create(
+                episode=self.episode,
+                title="research/p2-perplexity.md",
+                content="Duplicate version.",
+            )
+
+    def test_ordering_by_title(self):
+        """Artifacts are ordered by title."""
+        EpisodeArtifact.objects.create(
+            episode=self.episode,
+            title="research/z-last.md",
+            content="Last.",
+        )
+        EpisodeArtifact.objects.create(
+            episode=self.episode,
+            title="logs/a-first.md",
+            content="First.",
+        )
+        EpisodeArtifact.objects.create(
+            episode=self.episode,
+            title="plans/m-middle.md",
+            content="Middle.",
+        )
+        artifacts = list(EpisodeArtifact.objects.filter(episode=self.episode))
+        self.assertEqual(artifacts[0].title, "logs/a-first.md")
+        self.assertEqual(artifacts[1].title, "plans/m-middle.md")
+        self.assertEqual(artifacts[2].title, "research/z-last.md")
+
+    def test_str_representation(self):
+        """__str__ returns 'episode / title' format."""
+        artifact = EpisodeArtifact.objects.create(
+            episode=self.episode,
+            title="research/brief.md",
+            content="Brief content.",
+        )
+        self.assertEqual(str(artifact), f"{self.episode} / research/brief.md")
+
+    def test_metadata_json_field(self):
+        """Metadata JSONField stores and retrieves structured data."""
+        artifact = EpisodeArtifact.objects.create(
+            episode=self.episode,
+            title="logs/generation.md",
+            content="Log content.",
+            metadata={"quality_score": 8.5, "keywords": ["ai", "research"]},
+        )
+        artifact.refresh_from_db()
+        self.assertEqual(artifact.metadata["quality_score"], 8.5)
+        self.assertEqual(artifact.metadata["keywords"], ["ai", "research"])
+
+    def test_cascade_delete_with_episode(self):
+        """Deleting episode cascades to artifacts."""
+        EpisodeArtifact.objects.create(
+            episode=self.episode,
+            title="research/brief.md",
+            content="Content.",
+        )
+        self.assertEqual(EpisodeArtifact.objects.count(), 1)
+        self.episode.delete()
+        self.assertEqual(EpisodeArtifact.objects.count(), 0)

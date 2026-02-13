@@ -1,0 +1,20 @@
+<div class="episode-show-notes">
+  {% if description %}
+  <h3>Overview</h3>
+  <p>{{ description }}</p>
+  {% endif %}
+
+  {% if chapters %}
+  <h3>Key Timestamps</h3>
+  <ul>
+    {% for chapter in chapters %}
+    <li>{{ chapter.start_time }} - {{ chapter.title }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+
+  {% if sources_text %}
+  <h3>Sources</h3>
+  <p>{{ sources_text|linebreaksbr }}</p>
+  {% endif %}
+</div>

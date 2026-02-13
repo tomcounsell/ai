@@ -116,3 +116,47 @@ class PodcastFeedTestCase(TestCase):
         """Returns 404 for a nonexistent podcast slug."""
         response = self.client.get("/podcast/nonexistent-podcast/feed.xml")
         self.assertEqual(response.status_code, 404)
+
+    def test_feed_contains_content_namespace(self):
+        """Response contains xmlns:content namespace declaration."""
+        response = self.client.get(f"/podcast/{self.podcast.slug}/feed.xml")
+        content = response.content.decode("utf-8")
+        self.assertIn("xmlns:content", content)
+        self.assertIn("http://purl.org/rss/1.0/modules/content/", content)
+
+    def test_feed_contains_content_encoded(self):
+        """Response contains <content:encoded> element for episodes."""
+        response = self.client.get(f"/podcast/{self.podcast.slug}/feed.xml")
+        content = response.content.decode("utf-8")
+        self.assertIn("content:encoded", content)
+
+    def test_feed_filters_on_published_at(self):
+        """Feed filters on published_at, not status field."""
+        # Create an episode with status=complete but no published_at
+        Episode.objects.create(
+            podcast=self.podcast,
+            title="Complete But Unpublished",
+            slug="complete-unpublished",
+            episode_number=5,
+            status="complete",
+            audio_url="https://example.com/complete.mp3",
+            published_at=None,
+        )
+        response = self.client.get(f"/podcast/{self.podcast.slug}/feed.xml")
+        content = response.content.decode("utf-8")
+        self.assertNotIn("Complete But Unpublished", content)
+
+    def test_feed_excludes_draft_episodes_without_published_at(self):
+        """Draft episodes with no published_at don't appear in feed."""
+        Episode.objects.create(
+            podcast=self.podcast,
+            title="Draft No Publish",
+            slug="draft-no-publish",
+            episode_number=6,
+            status="draft",
+            audio_url="https://example.com/draft.mp3",
+            published_at=None,
+        )
+        response = self.client.get(f"/podcast/{self.podcast.slug}/feed.xml")
+        content = response.content.decode("utf-8")
+        self.assertNotIn("Draft No Publish", content)
