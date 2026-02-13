@@ -146,9 +146,9 @@ def build_context_prefix(
     """Build project context to inject into agent prompt."""
     context_parts = []
 
-    # Check user permissions and add restrictions if needed
+    # Check user permissions - Q&A restrictions only apply to DMs
     permissions = get_user_permissions(sender_id)
-    if permissions == "qa_only":
+    if permissions == "qa_only" and is_dm:
         context_parts.append(
             "RESTRICTION: This user has Q&A-only access. "
             "Do NOT make any code changes, file edits, git commits, or run destructive commands. "
