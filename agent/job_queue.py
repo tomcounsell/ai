@@ -803,9 +803,13 @@ async def _execute_job(job: Job) -> None:
             last_heartbeat = time.time()
 
     # Update session status in Redis
+    # When auto-continue deferred, session is still active (not completed)
     if agent_session:
         try:
-            agent_session.status = "completed" if not task.error else "failed"
+            if _defer_reaction:
+                agent_session.status = "active"  # Continuation job pending
+            else:
+                agent_session.status = "completed" if not task.error else "failed"
             agent_session.last_activity = time.time()
             await agent_session.async_save()
         except Exception as e:
@@ -859,8 +863,8 @@ async def _execute_job(job: Job) -> None:
             logger.warning(f"Failed to set reaction: {e}")
 
     # Auto-mark session as done after successful completion
-    # This prevents false "Unfinished work detected" revival notifications
-    if not task.error:
+    # Skip when auto-continue deferred — continuation job will handle cleanup
+    if not task.error and not _defer_reaction:
         try:
             from agent.branch_manager import mark_work_done
 
@@ -890,6 +894,11 @@ async def _execute_job(job: Job) -> None:
                 "sender": job.sender_name,
             },
             working_dir=str(working_dir),
+        )
+    elif _defer_reaction:
+        logger.info(
+            f"[{job.project_key}] Skipping session cleanup — "
+            f"continuation job enqueued (auto-continue {auto_continue_count}/{MAX_AUTO_CONTINUES})"
         )
 
 
