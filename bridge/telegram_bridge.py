@@ -1155,12 +1155,16 @@ async def main():
             _ensure_worker,
             _get_pending_jobs_sync,
             _recover_interrupted_jobs,
+            _recover_orphaned_jobs,
         )
 
         for _pkey in ACTIVE_PROJECTS:
             recovered = _recover_interrupted_jobs(_pkey)
             if recovered:
                 logger.info(f"[{_pkey}] Recovered {recovered} interrupted job(s)")
+            orphans = _recover_orphaned_jobs(_pkey)
+            if orphans:
+                logger.info(f"[{_pkey}] Recovered {orphans} orphaned job(s)")
             pending_jobs = _get_pending_jobs_sync(_pkey)
             if pending_jobs:
                 logger.info(
