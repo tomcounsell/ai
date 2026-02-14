@@ -5,7 +5,7 @@ The podcast service layer (`apps/podcast/services/`) provides a database-backed 
 ## Architecture
 
 ```
-Management Commands / Agent Orchestrator
+Management Commands / Task Pipeline
            |
            v
    Service Layer (this module)
@@ -270,38 +270,64 @@ Eight prompt templates live in `apps/podcast/services/prompts/` and are used by 
 | `write_metadata.md` | `write_metadata.py` |
 | `write_synthesis.md` | `write_synthesis.py` |
 
-## Agent Orchestrator
+## Task Pipeline
 
-The agent orchestrator (`apps/podcast/agent/`) connects the service layer to an Anthropic Claude model for autonomous episode production.
+The podcast production pipeline (`apps/podcast/tasks.py`) uses Django 6.0's `@task` framework to execute each workflow phase as an independent background task. Each task calls the service layer, advances the workflow, and enqueues its successor(s).
 
-### Components
+### Entry Point
 
-| File | Purpose |
-|------|---------|
-| `orchestrator.py` | `run_episode(episode_id)` -- agentic loop using Anthropic Messages API |
-| `tools.py` | 24 tool definitions mapping to service functions |
-| `system_prompt.md` | Agent instructions with decision logic for all 12 phases |
+```python
+from apps.podcast.tasks import produce_episode
 
-### `run_episode(episode_id, model, max_iterations, api_key) -> dict`
+result = produce_episode.enqueue(episode_id=42)
+```
 
-Entry point for autonomous production. The orchestrator:
-1. Loads the system prompt and converts tool definitions to Anthropic tool schemas
-2. Sends an initial message instructing the agent to produce the episode
-3. Enters a tool_use loop: the model calls service functions via tool_use blocks, results are sent back, until the model produces a final text response or hits `max_iterations` (default 50)
-4. Persists session metadata to `EpisodeWorkflow.agent_session_id`
+### Task Functions
 
-Returns `{final_message, iterations, tool_calls, episode_id}`.
+| Task | Service Call | Next Task |
+|------|------------|-----------|
+| `produce_episode` | `setup.setup_episode` | `step_perplexity_research` |
+| `step_perplexity_research` | `research.run_perplexity_research` | `step_question_discovery` |
+| `step_question_discovery` | `analysis.discover_questions` | `step_gpt_research` + `step_gemini_research` (parallel) |
+| `step_gpt_research` | `research.run_gpt_researcher` | _(signal fan-in)_ |
+| `step_gemini_research` | `research.run_gemini_research` | _(signal fan-in)_ |
+| `step_research_digests` | `analysis.create_research_digest` (per artifact) | `step_cross_validation` |
+| `step_cross_validation` | `analysis.cross_validate` | `step_master_briefing` |
+| `step_master_briefing` | `analysis.write_briefing` | Quality Gate Wave 1 → `step_synthesis` |
+| `step_synthesis` | `synthesis.synthesize_report` | `step_episode_planning` |
+| `step_episode_planning` | `synthesis.plan_episode_content` | Quality Gate Wave 2 → `step_audio_generation` |
+| `step_audio_generation` | `audio.generate_audio` | `step_transcribe_audio` |
+| `step_transcribe_audio` | `audio.transcribe_audio` | `step_generate_chapters` |
+| `step_generate_chapters` | `audio.generate_episode_chapters` | `step_cover_art` + `step_metadata` + `step_companions` (parallel) |
+| `step_cover_art` | `publishing.generate_cover_art` | _(signal fan-in)_ |
+| `step_metadata` | `publishing.write_episode_metadata` | _(signal fan-in)_ |
+| `step_companions` | `publishing.generate_companions` | _(signal fan-in)_ |
+| `step_publish` | `publishing.publish_episode` | _(complete)_ |
 
-### Tool Categories
+### Concurrency Guard
 
-The 24 tools map 1:1 to service functions:
+Each sequential step acquires a `select_for_update` lock to prevent duplicate execution:
 
-| Category | Tools |
-|----------|-------|
-| Setup | `setup_episode` |
-| Research | `run_perplexity_research`, `run_gpt_researcher`, `run_gemini_research`, `add_manual_research` |
-| Analysis | `discover_questions`, `create_research_digest`, `cross_validate`, `write_briefing` |
-| Synthesis | `synthesize_report`, `plan_episode_content` |
-| Audio | `generate_audio`, `transcribe_audio`, `generate_episode_chapters` |
-| Publishing | `generate_cover_art`, `write_episode_metadata`, `generate_companions`, `publish_episode` |
-| Workflow | `get_status`, `advance_step`, `pause_for_human`, `resume_workflow`, `check_quality_gate`, `fail_step` |
+```python
+def _acquire_step_lock(episode_id, expected_step):
+    with transaction.atomic():
+        wf = EpisodeWorkflow.objects.select_for_update().get(episode_id=episode_id)
+        if wf.status == "running" and wf.current_step == expected_step:
+            raise ValueError(f"Step '{expected_step}' already running")
+```
+
+### Fan-In Signal (`apps/podcast/signals.py`)
+
+Parallel steps (Targeted Research and Publishing Assets) use a `post_save` signal on `EpisodeArtifact` for fan-in coordination. When all expected artifacts have content, the signal enqueues the next step using `select_for_update` to prevent double-enqueue.
+
+### Quality Gates
+
+- **Wave 1** (after Master Briefing): Checks `p3-briefing` artifact has 200+ words. Pauses for human review on failure.
+- **Wave 2** (after Episode Planning): Checks `content_plan` artifact exists. Pauses for human review on failure.
+
+### Settings
+
+```python
+# settings/base.py
+PODCAST_DEFAULT_MODEL = "claude-sonnet-4-20250514"
+```

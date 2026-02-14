@@ -324,15 +324,16 @@ PydanticAI-powered tools for research processing and content generation. Each is
 | `write_synthesis.py` | Narrative report (5,000-8,000 words) | Opus |
 | `plan_episode.py` | Episode structure for NotebookLM | Opus |
 
-### Agent Orchestrator (`apps/podcast/agent/`)
+### Task Pipeline (`apps/podcast/tasks.py`)
 
-Autonomous episode production via Anthropic Messages API with tool_use loop.
+Django `@task`-per-step pipeline for autonomous episode production.
 
 | File | Purpose |
 |------|---------|
-| `orchestrator.py` | `run_episode(episode_id)` -- agentic loop with 24 tools |
-| `tools.py` | Tool definitions mapping to service functions |
-| `system_prompt.md` | Agent instructions for all 12 phases |
+| `tasks.py` | 17 `@task` functions: `produce_episode` entry point + one per workflow step |
+| `signals.py` | `post_save` fan-in signal for parallel steps (Targeted Research, Publishing Assets) |
+
+**Entry point:** `produce_episode.enqueue(episode_id=42)`
 
 ### Models
 
@@ -366,7 +367,7 @@ Standalone CLI scripts for external service integrations and file processing.
 ### Management Commands
 | Command | Purpose |
 |---------|---------|
-| `start_episode` | Pull draft Episode from DB, call `setup_episode()` service |
+| `start_episode` | Pull draft Episode from DB, call `setup_episode()`, enqueue `produce_episode` task pipeline |
 | `publish_episode` | Call `services.publishing.publish_episode()` |
 | `backfill_episodes` | One-time import of existing episodes from research repo |
 

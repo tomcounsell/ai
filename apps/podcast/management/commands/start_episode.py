@@ -140,7 +140,17 @@ class Command(BaseCommand):
         episode.status = "in_progress"
         episode.save(update_fields=["status", "modified_at"])
 
-        # ── 7. Summary ──────────────────────────────────────────────
+        # ── 7. Enqueue the production task pipeline ──────────────────
+        from apps.podcast.tasks import produce_episode
+
+        result = produce_episode.enqueue(episode_id=episode.id)
+        self.stdout.write(
+            self.style.SUCCESS(
+                f"Enqueued produce_episode task (result id: {result.id})"
+            )
+        )
+
+        # ── 8. Summary ──────────────────────────────────────────────
         ep_number = (
             episode.episode_number if episode.episode_number is not None else "TBD"
         )

@@ -1,1 +1,1 @@
-"""Anthropic Agent SDK orchestrator for podcast episode production."""
+"""Podcast agent module -- replaced by the task pipeline in apps.podcast.tasks."""
