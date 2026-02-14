@@ -12,6 +12,7 @@ This document outlines general conventions and best practices for AI integration
 - [Monitoring and Logging](#monitoring-and-logging)
 - [Cost Management](#cost-management)
 - [Production Considerations](#production-considerations)
+- [Named AI Tools](#named-ai-tools)
 
 ---
 
@@ -855,3 +856,134 @@ async def cache_completion(
 - [PydanticAI Integration Guide](PYDANTIC_AI_INTEGRATION.md) - Detailed PydanticAI patterns
 - [MCP Development Guide](MCP_DEVELOPMENT_GUIDE.md) - Model Context Protocol servers
 - [Error Handling](ERROR_HANDLING.md) - General error handling patterns
+
+---
+
+## Named AI Tools
+
+Named AI tools are self-contained PydanticAI modules that perform specific AI tasks. Each tool is a single Python file with one public function, one output model, and one PydanticAI Agent.
+
+### Location
+
+`apps/podcast/services/` — one file per tool, flat alongside existing services.
+
+### Convention Rules
+
+| Rule | Description |
+|------|-------------|
+| File name = tool name | `generate_chapters.py` contains `generate_chapters()` |
+| One public function per module | Same name as the file |
+| Pydantic output model in same file | No shared output models |
+| Module-level Agent | `agent = Agent(...)` defined at module scope |
+| Model is tool's decision | Each tool picks what's appropriate (Sonnet for simple, Opus for complex) |
+| Logging includes usage | `logger.info(...)` with model name, input tokens, output tokens |
+| No shared base class | Each tool is fully self-contained |
+| Sync only | Use `run_sync()`, no async |
+
+### Example: `generate_chapters.py`
+
+```python
+"""Generate chapter markers from a podcast transcript."""
+
+import logging
+
+from pydantic import BaseModel
+from pydantic_ai import Agent
+
+logger = logging.getLogger(__name__)
+
+
+# --- Output schema ---
+
+
+class Chapter(BaseModel):
+    title: str
+    start_time: str  # "MM:SS"
+    summary: str
+
+
+class ChapterList(BaseModel):
+    chapters: list[Chapter]
+
+
+# --- Agent ---
+
+agent = Agent(
+    "anthropic:claude-sonnet-4-5-20250929",
+    output_type=ChapterList,
+    system_prompt=(
+        "You are a podcast editor. Given a transcript with timestamps, "
+        "identify 10-15 natural topic transitions and generate chapter markers. "
+        "Each chapter should have a concise, descriptive title."
+    ),
+    defer_model_check=True,
+)
+
+
+# --- Public interface ---
+
+
+def generate_chapters(transcript: str, episode_title: str) -> ChapterList:
+    """Generate chapter markers from a transcript.
+
+    Args:
+        transcript: Full episode transcript with timestamps.
+        episode_title: Title of the episode for context.
+
+    Returns:
+        ChapterList with 10-15 chapters.
+    """
+    result = agent.run_sync(
+        f"Episode: {episode_title}\n\nTranscript:\n{transcript}"
+    )
+    logger.info(
+        "generate_chapters: model=%s input_tokens=%d output_tokens=%d",
+        agent.model,
+        result.usage().input_tokens,
+        result.usage().output_tokens,
+    )
+    return result.output
+```
+
+### Long Prompts
+
+For tools with lengthy system prompts, store the prompt in `apps/podcast/services/prompts/{tool_name}.md` and load at module level:
+
+```python
+from pathlib import Path
+
+_PROMPT_FILE = Path(__file__).parent / "prompts" / "write_synthesis.md"
+_SYSTEM_PROMPT = _PROMPT_FILE.read_text()
+
+agent = Agent(
+    "anthropic:claude-opus-4-6",
+    output_type=SynthesisReport,
+    system_prompt=_SYSTEM_PROMPT,
+    defer_model_check=True,
+)
+```
+
+### Available Tools
+
+| Tool | Purpose | Model |
+|------|---------|-------|
+| `generate_chapters` | Chapter markers from transcript | Sonnet |
+| `digest_research` | Compact research digest | Sonnet |
+| `discover_questions` | Gap analysis and followup questions | Sonnet |
+| `write_metadata` | Episode publishing metadata | Sonnet |
+| `cross_validate` | Cross-source verification matrix | Sonnet |
+| `write_briefing` | Master research briefing | Sonnet |
+| `write_synthesis` | Narrative report (5,000-8,000 words) | Opus |
+| `plan_episode` | Episode structure for NotebookLM | Opus |
+
+### Testing
+
+Each tool has tests in `apps/podcast/tests/test_ai_tools/`. Tests mock the PydanticAI Agent to avoid real API calls:
+
+```python
+from unittest.mock import MagicMock, patch
+
+with patch("apps.podcast.services.generate_chapters.agent") as mock_agent:
+    mock_agent.run_sync.return_value = mock_result
+    result = generate_chapters("transcript", "Episode Title")
+```
