@@ -3,7 +3,7 @@
 import logging
 from typing import Literal
 
-from ..cto_tools_server import Risk, RiskAction
+from ..server import Risk, RiskAction
 from .types import Correlation
 
 logger = logging.getLogger(__name__)

@@ -2,7 +2,10 @@ import logging
 from typing import Optional
 
 import requests
-from icecream import ic
+try:
+    from icecream import ic
+except ImportError:
+    ic = lambda *args, **kwargs: args[0] if args else None
 
 from settings import DEBUG, LOOPS_API_KEY
 

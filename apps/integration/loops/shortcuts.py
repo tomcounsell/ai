@@ -1,6 +1,9 @@
 from django.conf import settings
 from django.urls import reverse
-from icecream import ic
+try:
+    from icecream import ic
+except ImportError:
+    ic = lambda *args, **kwargs: args[0] if args else None
 
 from apps.common.models import User
 from apps.common.models.team import Role

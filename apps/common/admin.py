@@ -3,6 +3,7 @@ from django.contrib.admin import SimpleListFilter
 from django.db.models import Count
 from django.shortcuts import redirect
 from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 from django.utils.translation import gettext_lazy as _
 from rest_framework_api_key.admin import APIKeyModelAdmin
 from unfold.admin import ModelAdmin, TabularInline
@@ -220,10 +221,10 @@ class UserAdmin(ModelAdmin):
     @admin.display(description="Status")
     def status_badge(self, obj):
         if obj.is_active:
-            return format_html(
+            return mark_safe(
                 '<span class="unfold-badge bg-green-500 text-white">Active</span>'
             )
-        return format_html(
+        return mark_safe(
             '<span class="unfold-badge bg-red-500 text-white">Inactive</span>'
         )
 
@@ -390,10 +391,10 @@ class TeamAdmin(ModelAdmin):
     @admin.display(description="Status")
     def status_badge(self, obj):
         if obj.is_active:
-            return format_html(
+            return mark_safe(
                 '<span class="unfold-badge bg-green-500 text-white">Active</span>'
             )
-        return format_html(
+        return mark_safe(
             '<span class="unfold-badge bg-red-500 text-white">Inactive</span>'
         )
 
@@ -530,20 +531,20 @@ class BlogPostAdmin(ModelAdmin):
     @admin.display(description="Status")
     def publishing_status(self, obj):
         if obj.is_published:
-            return format_html(
+            return mark_safe(
                 '<span class="unfold-badge bg-green-500 text-white">Published</span>'
             )
-        return format_html(
+        return mark_safe(
             '<span class="unfold-badge bg-gray-500 text-white">Draft</span>'
         )
 
     @admin.display(description="Expiration")
     def expiration_status(self, obj):
         if obj.is_expired:
-            return format_html(
+            return mark_safe(
                 '<span class="unfold-badge bg-red-500 text-white">Expired</span>'
             )
-        return format_html(
+        return mark_safe(
             '<span class="unfold-badge bg-green-500 text-white">Active</span>'
         )
 
@@ -705,20 +706,20 @@ class EmailAdmin(ModelAdmin):
     @admin.display(description="Sent")
     def sent_status(self, obj):
         if obj.sent_at:
-            return format_html(
+            return mark_safe(
                 '<span class="unfold-badge bg-green-500 text-white">Sent</span>'
             )
-        return format_html(
+        return mark_safe(
             '<span class="unfold-badge bg-yellow-500 text-white">Pending</span>'
         )
 
     @admin.display(description="Read")
     def read_status(self, obj):
         if obj.read_at:
-            return format_html(
+            return mark_safe(
                 '<span class="unfold-badge bg-green-500 text-white">Read</span>'
             )
-        return format_html(
+        return mark_safe(
             '<span class="unfold-badge bg-gray-500 text-white">Unread</span>'
         )
 
@@ -772,10 +773,10 @@ class SMSAdmin(ModelAdmin):
     @admin.display(description="Sent")
     def sent_status(self, obj):
         if obj.sent_at:
-            return format_html(
+            return mark_safe(
                 '<span class="unfold-badge bg-green-500 text-white">Sent</span>'
             )
-        return format_html(
+        return mark_safe(
             '<span class="unfold-badge bg-yellow-500 text-white">Pending</span>'
         )
 
@@ -876,29 +877,27 @@ class UploadAdmin(ModelAdmin):
 @admin.register(Image)
 class ImageAdmin(ModelAdmin):
     list_display = ("display_name", "dimensions_display", "preview", "created_at")
-    search_fields = ("upload__name", "upload__original", "id")
+    search_fields = ("name", "original", "id")
 
     def get_readonly_fields(self, request, obj=None):
         """Only use timestamp fields if they are available."""
         readonly_fields = ["dimensions_display", "preview"]
-        if hasattr(obj, "upload") and obj.upload:
-            if hasattr(obj.upload, "created_at"):
+        if obj:
+            if hasattr(obj, "created_at"):
                 readonly_fields.append("created_at")
-            if hasattr(obj.upload, "modified_at"):
+            if hasattr(obj, "modified_at"):
                 readonly_fields.append("modified_at")
         return readonly_fields
 
     fieldsets = (
-        ("Image Information", {"fields": ("upload", "thumbnail_url")}),
+        ("Image Information", {"fields": ("original", "name", "thumbnail_url")}),
         ("File Information", {"fields": ("dimensions_display", "preview")}),
         ("Timestamps", {"fields": ("created_at", "modified_at")}),
     )
 
     @admin.display(description="Name")
     def display_name(self, obj):
-        if hasattr(obj, "upload") and obj.upload and hasattr(obj.upload, "name"):
-            return obj.upload.name or f"Image {obj.id}"
-        return f"Image {obj.id}"
+        return obj.name or f"Image {obj.id}"
 
     @admin.display(description="Dimensions")
     def dimensions_display(self, obj):
@@ -921,18 +920,6 @@ class ImageAdmin(ModelAdmin):
                 obj.original,
             )
         return "-"
-
-    @admin.display(description="Created At")
-    def created_at(self, obj):
-        if hasattr(obj, "upload") and obj.upload and hasattr(obj.upload, "created_at"):
-            return obj.upload.created_at
-        return None
-
-    @admin.display(description="Modified At")
-    def modified_at(self, obj):
-        if hasattr(obj, "upload") and obj.upload and hasattr(obj.upload, "modified_at"):
-            return obj.upload.modified_at
-        return None
 
 
 @admin.register(Payment)
@@ -1074,7 +1061,7 @@ class SubscriptionAdmin(ModelAdmin):
                     '<span class="unfold-badge bg-purple-500 text-white">Trial ends {}</span>',
                     obj.trial_end.strftime("%Y-%m-%d"),
                 )
-            return format_html(
+            return mark_safe(
                 '<span class="unfold-badge bg-purple-500 text-white">Trial</span>'
             )
         return "-"
@@ -1083,43 +1070,27 @@ class SubscriptionAdmin(ModelAdmin):
 @admin.register(Document)
 class DocumentAdmin(ModelAdmin):
     list_display = ("id", "display_name", "display_type", "created_at")
-    search_fields = ("id",)
+    search_fields = ("id", "name", "original")
 
     def get_readonly_fields(self, request, obj=None):
         """Only use timestamp fields if they are available."""
         readonly_fields = []
-        if hasattr(obj, "upload") and obj.upload:
-            if hasattr(obj.upload, "created_at"):
+        if obj:
+            if hasattr(obj, "created_at"):
                 readonly_fields.append("created_at")
-            if hasattr(obj.upload, "modified_at"):
+            if hasattr(obj, "modified_at"):
                 readonly_fields.append("modified_at")
         return readonly_fields
 
     @admin.display(description="Name")
     def display_name(self, obj):
-        if hasattr(obj, "upload") and obj.upload and hasattr(obj.upload, "name"):
-            return obj.upload.name or f"Document {obj.id}"
-        return f"Document {obj.id}"
+        return obj.name or f"Document {obj.id}"
 
     @admin.display(description="Type")
     def display_type(self, obj):
-        if hasattr(obj, "upload") and obj.upload and hasattr(obj.upload, "file_type"):
-            file_type = obj.upload.file_type
-            if file_type:
-                return format_html(
-                    '<span class="unfold-badge bg-blue-500 text-white">{}</span>',
-                    file_type,
-                )
+        if hasattr(obj, "file_type") and obj.file_type:
+            return format_html(
+                '<span class="unfold-badge bg-blue-500 text-white">{}</span>',
+                obj.file_type,
+            )
         return "-"
-
-    @admin.display(description="Created At")
-    def created_at(self, obj):
-        if hasattr(obj, "upload") and obj.upload and hasattr(obj.upload, "created_at"):
-            return obj.upload.created_at
-        return None
-
-    @admin.display(description="Modified At")
-    def modified_at(self, obj):
-        if hasattr(obj, "upload") and obj.upload and hasattr(obj.upload, "modified_at"):
-            return obj.upload.modified_at
-        return None

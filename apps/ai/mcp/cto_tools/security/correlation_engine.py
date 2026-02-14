@@ -3,7 +3,7 @@
 import logging
 from datetime import datetime
 
-from ..cto_tools_server import Risk
+from ..server import Risk
 from .connector_registry import ConnectorRegistry
 from .types import Alert, Asset, Correlation, Policy, QueryFilters
 

@@ -10,7 +10,10 @@ import logging
 from typing import Any, Dict, List, Optional, Union
 
 from django.conf import settings
-from icecream import ic
+try:
+    from icecream import ic
+except ImportError:
+    ic = lambda *args, **kwargs: args[0] if args else None
 
 # Import Stripe only if it's available
 try:

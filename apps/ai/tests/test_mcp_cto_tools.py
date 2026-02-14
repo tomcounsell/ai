@@ -6,7 +6,7 @@ import inspect
 
 import pytest
 
-from apps.ai.mcp.cto_tools_server import (
+from apps.ai.mcp.cto_tools.server import (
     architecture_review,
     configure_connector,
     list_connectors,

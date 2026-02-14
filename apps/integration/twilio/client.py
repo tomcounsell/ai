@@ -4,7 +4,10 @@ from typing import Any, Dict, Optional
 from django.conf import settings
 
 # For local development and testing without actual API calls
-from icecream import ic
+try:
+    from icecream import ic
+except ImportError:
+    ic = lambda *args, **kwargs: args[0] if args else None
 
 logger = logging.getLogger(__name__)
 
