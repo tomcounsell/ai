@@ -349,9 +349,15 @@ class ChatSendMessageView(View):
 
 ## Tool Development
 
-### Tool Organization
+### Standalone AI Tools (Named AI Tools)
 
-**Keep tools focused and in separate files:**
+For self-contained AI processing tasks that don't need Django model interaction, use the **Named AI Tools** pattern: one file, one function, one Agent. This is simpler than the full adapter pattern and appropriate for tasks like text analysis, content generation, and data transformation.
+
+See [Named AI Tools](AI_CONVENTIONS.md#named-ai-tools) for the full convention and examples.
+
+### Agent Tool Organization
+
+For tools that are registered on a PydanticAI Agent via `@agent.tool`, keep them focused and in separate files:
 
 ```
 apps/ai/agent/tools/
@@ -795,8 +801,9 @@ CODE_EXECUTION_TIMEOUT=5
 
 Before merging PydanticAI integration code, verify:
 
-- [ ] PydanticAI models are clearly named (e.g., `Agent*` prefix)
-- [ ] Adapter pattern is used for Django ↔ PydanticAI conversion
+- [ ] Correct pattern chosen: [Named AI Tool](AI_CONVENTIONS.md#named-ai-tools) for standalone processing, adapter pattern for Django model interaction
+- [ ] PydanticAI models are clearly named (e.g., `Agent*` prefix) when coexisting with Django models
+- [ ] Adapter pattern is used for Django ↔ PydanticAI conversion (when applicable)
 - [ ] Only one system prompt definition (decorator OR constructor)
 - [ ] Async boundaries handled with Django utilities (`async_to_sync`)
 - [ ] Result attributes used correctly (`result.output`)

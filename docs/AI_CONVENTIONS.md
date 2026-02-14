@@ -839,48 +839,37 @@ async def cache_completion(
 
 ---
 
-## Summary
-
-**Key principles for AI integration:**
-
-1. **Separation of concerns**: Django models (database) ↔ Adapters ↔ PydanticAI models (in-memory)
-2. **Clear naming**: Prefix PydanticAI models with `Agent` to avoid confusion
-3. **Centralized providers**: Single source of truth for model configuration
-4. **Proper async handling**: Use Django's async utilities, not custom event loop code
-5. **Comprehensive logging**: Track usage, costs, and performance
-6. **Error handling**: Classify errors and handle appropriately
-7. **Security**: Sandbox tool execution, validate inputs
-8. **Production-ready**: Background tasks, rate limiting, caching
-
-**See also:**
-- [PydanticAI Integration Guide](PYDANTIC_AI_INTEGRATION.md) - Detailed PydanticAI patterns
-- [MCP Development Guide](MCP_DEVELOPMENT_GUIDE.md) - Model Context Protocol servers
-- [Error Handling](ERROR_HANDLING.md) - General error handling patterns
-
----
-
 ## Named AI Tools
 
-Named AI tools are self-contained PydanticAI modules that perform specific AI tasks. Each tool is a single Python file with one public function, one output model, and one PydanticAI Agent.
+Named AI Tools are self-contained PydanticAI modules that perform a single AI task. Each tool is one Python file with one public function, one Pydantic output model, and one PydanticAI Agent. This pattern is for **standalone AI processing** — tasks that take structured input and return structured output without Django model interaction.
+
+**When to use Named AI Tools vs. the full adapter pattern:**
+
+| Use Case | Pattern |
+|----------|---------|
+| Standalone AI processing (no DB reads/writes) | Named AI Tool |
+| Django model ↔ AI agent with persistence | Full adapter pattern (see [PydanticAI Integration Guide](PYDANTIC_AI_INTEGRATION.md)) |
+| MCP-exposed capabilities | MCP server (see [MCP Development Guide](MCP_DEVELOPMENT_GUIDE.md)) |
 
 ### Location
 
-`apps/podcast/services/` — one file per tool, flat alongside existing services.
+Place Named AI Tools in `apps/{app_name}/services/`, one file per tool, flat alongside other service modules. Longer system prompts go in `apps/{app_name}/services/prompts/{tool_name}.md`.
 
 ### Convention Rules
 
 | Rule | Description |
 |------|-------------|
-| File name = tool name | `generate_chapters.py` contains `generate_chapters()` |
+| File name = function name | `generate_chapters.py` exports `generate_chapters()` |
 | One public function per module | Same name as the file |
-| Pydantic output model in same file | No shared output models |
+| Pydantic output model in same file | No shared output models across tools |
 | Module-level Agent | `agent = Agent(...)` defined at module scope |
 | Model is tool's decision | Each tool picks what's appropriate (Sonnet for simple, Opus for complex) |
 | Logging includes usage | `logger.info(...)` with model name, input tokens, output tokens |
 | No shared base class | Each tool is fully self-contained |
-| Sync only | Use `run_sync()`, no async |
+| Sync interface | Use `agent.run_sync()` — callers don't need async |
+| `defer_model_check=True` | Skip model validation at import time |
 
-### Example: `generate_chapters.py`
+### Canonical Example
 
 ```python
 """Generate chapter markers from a podcast transcript."""
@@ -945,9 +934,9 @@ def generate_chapters(transcript: str, episode_title: str) -> ChapterList:
     return result.output
 ```
 
-### Long Prompts
+### Long System Prompts
 
-For tools with lengthy system prompts, store the prompt in `apps/podcast/services/prompts/{tool_name}.md` and load at module level:
+For tools with lengthy system prompts, store them in a sibling `prompts/` directory and load at module level:
 
 ```python
 from pathlib import Path
@@ -963,7 +952,29 @@ agent = Agent(
 )
 ```
 
-### Available Tools
+### Testing
+
+Each tool has tests in `apps/{app_name}/tests/test_ai_tools/`. Tests mock the PydanticAI Agent to avoid real API calls:
+
+```python
+from unittest.mock import MagicMock, patch
+
+def test_returns_expected_output():
+    mock_result = MagicMock()
+    mock_result.output = ChapterList(chapters=[...])
+    mock_result.usage.return_value = MagicMock(input_tokens=100, output_tokens=50)
+
+    with patch("apps.podcast.services.generate_chapters.agent") as mock_agent:
+        mock_agent.run_sync.return_value = mock_result
+        mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+        result = generate_chapters("transcript", "Episode Title")
+
+    assert isinstance(result, ChapterList)
+```
+
+### Current Implementations
+
+**Podcast** (`apps/podcast/services/`):
 
 | Tool | Purpose | Model |
 |------|---------|-------|
@@ -976,14 +987,23 @@ agent = Agent(
 | `write_synthesis` | Narrative report (5,000-8,000 words) | Opus |
 | `plan_episode` | Episode structure for NotebookLM | Opus |
 
-### Testing
+---
 
-Each tool has tests in `apps/podcast/tests/test_ai_tools/`. Tests mock the PydanticAI Agent to avoid real API calls:
+## Summary
 
-```python
-from unittest.mock import MagicMock, patch
+**Key principles for AI integration:**
 
-with patch("apps.podcast.services.generate_chapters.agent") as mock_agent:
-    mock_agent.run_sync.return_value = mock_result
-    result = generate_chapters("transcript", "Episode Title")
-```
+1. **Separation of concerns**: Django models (database) ↔ Adapters ↔ PydanticAI models (in-memory)
+2. **Named AI Tools**: Self-contained PydanticAI modules for standalone AI processing tasks
+3. **Clear naming**: Prefix PydanticAI models with `Agent` to avoid confusion with Django models
+4. **Centralized providers**: Single source of truth for model configuration
+5. **Proper async handling**: Use Django's async utilities, not custom event loop code
+6. **Comprehensive logging**: Track usage, costs, and performance
+7. **Error handling**: Classify errors and handle appropriately
+8. **Security**: Sandbox tool execution, validate inputs
+9. **Production-ready**: Background tasks, rate limiting, caching
+
+**See also:**
+- [PydanticAI Integration Guide](PYDANTIC_AI_INTEGRATION.md) - Detailed PydanticAI patterns
+- [MCP Development Guide](MCP_DEVELOPMENT_GUIDE.md) - Model Context Protocol servers
+- [Error Handling](ERROR_HANDLING.md) - General error handling patterns

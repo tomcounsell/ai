@@ -130,6 +130,23 @@ Production scripts that handle audio, feeds, cover art, and research.
 
 The "series" concept is deprecated. Instead, each podcast topic/audience gets its own `Podcast` (feed) with independent episode numbering starting at 1. For example, "Building a Micro-School" is one feed, a future cybersecurity topic would be another feed. No season numbers — just feed + episode number. The `podcast-series.md` skill and `/podcast-series` command are migrated for reference but immediately deprecated.
 
+### AI Services Layer (`apps/podcast/services/`)
+
+In addition to the migrated CLI tools, a new **PydanticAI services layer** has been built for AI-powered research processing and content generation. These Named AI Tools (see [convention](../AI_CONVENTIONS.md#named-ai-tools)) replace Claude Code sub-agent delegation for tasks like cross-validation, briefing creation, synthesis, and episode planning.
+
+| Service | Replaces Sub-Agent |
+|---------|-------------------|
+| `digest_research.py` | `podcast-research-digest` |
+| `discover_questions.py` | `podcast-question-discovery` |
+| `cross_validate.py` | `podcast-cross-validator` |
+| `write_briefing.py` | `podcast-briefing-writer` |
+| `write_synthesis.py` | `podcast-synthesis-writer` |
+| `plan_episode.py` | `podcast-episode-planner` |
+| `write_metadata.py` | `podcast-metadata-writer` |
+| `generate_chapters.py` | `tools/generate_chapters.py` |
+
+These services return typed Pydantic models instead of writing files to disk, making them composable and testable. The Claude Code sub-agents remain available as an alternative orchestration path.
+
 ### What Gets Adapted
 
 Every migrated file needs path updates. Key patterns:
@@ -165,7 +182,8 @@ research repo                     cuttlefish repo
 ├── podcast/episodes/ (frozen)    ├── .claude/skills/podcast-* (moved)
 ├── podcast/feed.xml (frozen)     ├── .claude/commands/podcast-* (moved)
 └── (educational content)         ├── .claude/agents/podcast-* (moved)
-                                  ├── apps/podcast/tools/*.py (moved)
+                                  ├── apps/podcast/services/*.py (PydanticAI AI tools)
+                                  ├── apps/podcast/tools/*.py (CLI scripts, moved)
                                   ├── apps/podcast/pending-episodes/ (gitignored, WIP)
                                   ├── docs/templates/podcast/ (moved)
                                   └── CLAUDE.md (updated with podcast workflow docs)

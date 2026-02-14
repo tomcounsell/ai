@@ -462,6 +462,8 @@ apps/podcast/pending-episodes/YYYY-MM-DD-slug/
                     PHASES 2-6: RESEARCH & BRIEFING
 ═══════════════════════════════════════════════════════════════
 
+**PydanticAI Service Alternatives:** Phases 3, 5, 6, 7, and 8 have PydanticAI-powered services in `apps/podcast/services/` that can replace Claude Code sub-agent delegation. These return typed Pydantic models and are testable without API calls. The sub-agent approach (described below) and the service approach are interchangeable — both produce equivalent outputs. See `apps/podcast/services/` for: `digest_research`, `discover_questions`, `cross_validate`, `write_briefing`, `write_synthesis`, `plan_episode`, `write_metadata`, `generate_chapters`.
+
 This section covers:
 - **Phase 2:** Academic Foundation (Perplexity)
 - **Phase 3:** Question Discovery

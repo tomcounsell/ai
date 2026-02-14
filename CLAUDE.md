@@ -23,6 +23,9 @@ uv run python manage.py createsuperuser
 # Django development server
 uv run python manage.py runserver
 
+# Background task worker (production only — dev uses ImmediateBackend)
+uv run python manage.py db_worker
+
 # MCP server
 uv run python -m apps.ai.mcp.cuttlefish_server
 
@@ -148,6 +151,18 @@ MCP servers are in `apps/ai/mcp/` using FastMCP:
   - Warm minimalism with bronze accent (#D4A574)
 - **Documentation**: See `docs/BRANDING_BRIEF.md` for rationale and guidelines
 
+### Background Tasks
+Django 6.0's native `@task` framework for long-running operations:
+
+- **Define**: `from django.tasks import task` → `@task` decorator on any function
+- **Enqueue**: `my_task.enqueue(arg1=val)` → returns `TaskResult`
+- **Status**: `result.status.name` → `NEW`, `RUNNING`, `SUCCESSFUL`, `FAILED`
+- **Dev/Test**: `ImmediateBackend` runs tasks inline (configured in `settings/base.py`)
+- **Production**: `DatabaseBackend` via `django-tasks-db` (configured in `settings/production.py`)
+- **Worker**: `python manage.py db_worker` (Render Background Worker service)
+- **Package**: `django-tasks-db` (in `pyproject.toml`)
+- **Tests**: `apps/common/tests/test_tasks.py`
+
 ### Behavior Mixin Pattern
 Common model functionality via mixins in `apps/common/behaviors/`:
 - Timestampable, Authorable, Publishable, Expirable
@@ -229,6 +244,7 @@ Use a hybrid Notion + codebase approach for planning:
 - Use adapter pattern for Django ↔ PydanticAI conversion
 - Never mutate `os.environ` for API keys - pass as parameters
 - Use Django's `async_to_sync` / `sync_to_async` utilities, not custom event loop code
+- **Named AI Tools**: Self-contained PydanticAI modules (one file, one function, one Agent) for standalone AI tasks — see [Named AI Tools](docs/AI_CONVENTIONS.md#named-ai-tools)
 - See [PydanticAI Integration Guide](docs/PYDANTIC_AI_INTEGRATION.md) for full details
 - See [AI Conventions](docs/AI_CONVENTIONS.md) for general AI patterns
 
@@ -276,13 +292,30 @@ The podcast production system uses a **12-phase workflow** defined in `.claude/s
 | `gpt-researcher/` | GPT-based deep research |
 | `chatgpt-deep-research/` | ChatGPT deep research |
 
+### AI Services (`apps/podcast/services/`)
+
+PydanticAI-powered tools for research processing and content generation. Each service is a single-file module with one public function, one Pydantic output model, and one PydanticAI Agent. See [Named AI Tools convention](docs/AI_CONVENTIONS.md#named-ai-tools).
+
+| Service | Purpose | Model |
+|---------|---------|-------|
+| `generate_chapters.py` | Chapter markers from transcript | Sonnet |
+| `digest_research.py` | Compact research digest | Sonnet |
+| `discover_questions.py` | Gap analysis and followup questions | Sonnet |
+| `write_metadata.py` | Episode publishing metadata | Sonnet |
+| `cross_validate.py` | Cross-source verification matrix | Sonnet |
+| `write_briefing.py` | Master research briefing | Sonnet |
+| `write_synthesis.py` | Narrative report (5,000-8,000 words) | Opus |
+| `plan_episode.py` | Episode structure for NotebookLM | Opus |
+
 ### Python Tools (`apps/podcast/tools/`)
+
+Standalone CLI scripts for external service integrations and file processing.
+
 | Script | Purpose |
 |--------|---------|
 | `notebooklm_api.py` | NotebookLM Enterprise API with episodeFocus |
 | `notebooklm_prompt.py` | Generate episodeFocus prompts |
 | `transcribe_only.py` | Local Whisper transcription |
-| `generate_chapters.py` | AI-powered chapter generation |
 | `generate_companion_resources.py` | Create summary, checklist, frameworks |
 | `generate_landing_page.py` | Generate HTML episode page |
 | `cover_art.py` | AI cover art and branding |
@@ -325,6 +358,9 @@ OPENROUTER_API_KEY=your_key
 | Service | ID | Type | Plan | Region |
 |---------|-----|------|------|--------|
 | cuttlefish | `srv-d3ho96p5pdvs73feafhg` | Web Service | Starter | Oregon |
+| cuttlefish-worker | _(pending creation)_ | Background Worker | Starter | Oregon |
+
+The background worker runs `python manage.py db_worker` to process tasks enqueued via Django 6.0's `@task` framework. It shares the same database, environment group, and build as the web service.
 
 ### Render MCP Usage
 
