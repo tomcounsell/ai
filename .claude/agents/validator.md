@@ -5,6 +5,7 @@ model: sonnet
 color: yellow
 disallowedTools: Write, Edit, NotebookEdit
 ---
+<!-- NOTE: For SDK sessions, the programmatic definition in agent/agent_definitions.py takes precedence. -->
 
 # Validator
 

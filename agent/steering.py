@@ -7,7 +7,7 @@ checks this queue on every tool call and injects messages via the SDK.
 Queue design:
 - Key:    steering:{session_id}
 - Type:   Redis List (RPUSH to add, LPOP to consume)
-- Values: JSON strings with text, sender, timestamp, is_abort
+- Values: JSON strings with text, sender, timestamp, is_abort, target_agent (optional)
 - TTL:    None (persist until consumed or session completion)
 """
 
@@ -39,6 +39,7 @@ def push_steering_message(
     text: str,
     sender: str,
     is_abort: bool = False,
+    target_agent: str | None = None,
 ) -> None:
     """Push a message to a session's steering queue.
 
@@ -47,6 +48,9 @@ def push_steering_message(
         text: Message text from supervisor
         sender: Name of the sender
         is_abort: If True, signals the session should abort
+        target_agent: Optional agent name this message is addressed to.
+            When set, only the named agent should act on it. Consumers
+            do not filter by this field yet -- it is stored for future use.
     """
     r = _get_redis()
     key = _queue_key(session_id)
@@ -55,18 +59,21 @@ def push_steering_message(
     if not is_abort and text.strip().lower() in ABORT_KEYWORDS:
         is_abort = True
 
-    payload = json.dumps(
-        {
-            "text": text,
-            "sender": sender,
-            "timestamp": time.time(),
-            "is_abort": is_abort,
-        }
-    )
+    msg_dict: dict[str, str | float | bool | None] = {
+        "text": text,
+        "sender": sender,
+        "timestamp": time.time(),
+        "is_abort": is_abort,
+    }
+    if target_agent is not None:
+        msg_dict["target_agent"] = target_agent
+
+    payload = json.dumps(msg_dict)
     r.rpush(key, payload)
+    target_suffix = f" target={target_agent}" if target_agent else ""
     logger.info(
         f"[steering] Pushed {'ABORT' if is_abort else 'message'} to {key}: "
-        f"{text[:80]!r} (from {sender})"
+        f"{text[:80]!r} (from {sender}){target_suffix}"
     )
 
 
@@ -76,6 +83,14 @@ def pop_all_steering_messages(session_id: str) -> list[dict]:
     Drains the queue via sequential LPOPs. Not strictly atomic, but safe
     because only one consumer exists per session (the watchdog hook).
     Returns empty list if no messages.
+
+    Each returned dict contains:
+        - text (str): The message body
+        - sender (str): Who sent the message
+        - timestamp (float): Unix timestamp when pushed
+        - is_abort (bool): Whether this is an abort signal
+        - target_agent (str | None): Optional agent name this message
+          is addressed to. Present only when the pusher specified one.
     """
     r = _get_redis()
     key = _queue_key(session_id)

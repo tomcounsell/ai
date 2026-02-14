@@ -12,6 +12,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from claude_agent_sdk import HookContext, PostToolUseHookInput
+
 from config.models import MODEL_FAST
 
 logger = logging.getLogger(__name__)
@@ -150,6 +152,7 @@ def _repush_messages(session_id: str, messages: list[dict]) -> None:
             msg.get("text", ""),
             msg.get("sender", "unknown"),
             is_abort=msg.get("is_abort", False),
+            target_agent=msg.get("target_agent"),
         )
     logger.info(f"[steering] Re-pushed {len(messages)} message(s) to {session_id}")
 
@@ -182,7 +185,11 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
     for msg in messages:
         sender = msg.get("sender", "supervisor")
         text = msg.get("text", "")
-        parts.append(f"[{sender}]: {text}")
+        target = msg.get("target_agent")
+        prefix = f"[{sender}]"
+        if target:
+            prefix = f"[{sender} -> @{target}]"
+        parts.append(f"{prefix}: {text}")
 
     combined = "\n".join(parts)
     logger.info(
@@ -217,7 +224,9 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
 
 
 async def watchdog_hook(
-    input_data: Any, tool_use_id: str | None, context: Any
+    input_data: PostToolUseHookInput,
+    tool_use_id: str | None,
+    context: HookContext,
 ) -> dict[str, Any]:
     """PostToolUse hook — fires every tool call.
 

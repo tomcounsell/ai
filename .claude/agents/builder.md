@@ -11,6 +11,7 @@ hooks:
         - type: command
           command: "black $CLAUDE_PROJECT_DIR || true"
 ---
+<!-- NOTE: For SDK sessions, the programmatic definition in agent/agent_definitions.py takes precedence. -->
 
 # Builder
 
