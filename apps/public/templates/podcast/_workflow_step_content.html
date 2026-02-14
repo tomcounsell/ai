@@ -17,6 +17,31 @@
   </div>
 </div>
 
+<!-- Pipeline action button -->
+{% if button_state.show %}
+<div class="mb-6 px-3 py-3 border border-gray-200 bg-gray-50">
+  {% if button_state.blocked_reason %}
+  <p class="text-sm text-gray-600 mb-2 font-mono">
+    <i class="fas fa-info-circle text-blue-500 mr-1"></i>
+    {{ button_state.blocked_reason }}
+  </p>
+  {% endif %}
+  {% if button_state.error %}
+  <p class="text-sm text-red-600 mb-2 font-mono">
+    <i class="fas fa-exclamation-triangle text-red-500 mr-1"></i>
+    {{ button_state.error|truncatechars:200 }}
+  </p>
+  {% endif %}
+  <form method="post"
+        action="{% url 'podcast:episode_workflow' slug=podcast.slug episode_slug=episode.slug step=current_step %}"
+        hx-post="{% url 'podcast:episode_workflow' slug=podcast.slug episode_slug=episode.slug step=current_step %}"
+        hx-swap="none">
+    {% csrf_token %}
+    {% include "components/forms/action_button.html" with text=button_state.label color=button_state.color icon=button_state.icon attrs=button_state.disabled|yesno:"disabled,"|default:"" %}
+  </form>
+</div>
+{% endif %}
+
 <!-- Sub-steps checklist -->
 <div class="space-y-3">
   {% for step in current_phase.sub_steps %}
