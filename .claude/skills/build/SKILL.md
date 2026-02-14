@@ -70,8 +70,9 @@ Before executing, resolve the plan path:
 9. **Verify Definition of Done** - Ensure all tasks completed with: code working, tests passing, docs created, quality checks pass
 10. **Run documentation gate** - Validate docs changed, scan related docs, create review issues
 11. **Push and open a PR** - `git -C .worktrees/{slug} push -u origin session/{slug}` then `gh pr create`
-12. **Migrate completed plan** - Delete plan file and close tracking issue
-13. **Report completion** with PR URL when all tasks are done
+12. **Run documentation cascade** - Invoke `/update-docs {PR-number}` to surgically update affected docs
+13. **Migrate completed plan** - Delete plan file and close tracking issue
+14. **Report completion** with PR URL when all tasks are done
 
 ## Critical Rules
 
@@ -254,9 +255,26 @@ git worktree remove .worktrees/{slug} --force
 git worktree prune
 ```
 
+### Step 7.6: Documentation Cascade
+
+After the PR is created, run the `/update-docs` cascade to find and surgically update any existing documentation affected by the code changes in this build. Pass the PR number so the cascade can inspect the full diff:
+
+```
+/update-docs {PR-number}
+```
+
+This invokes the cascade command defined in `.claude/commands/update-docs.md`, which:
+- Launches parallel agents to explore the change diff and inventory all docs
+- Cross-references changes against every doc in the repo (triage questions)
+- Makes targeted surgical edits to affected docs (read before edit, preserve structure)
+- Creates GitHub issues for conflicts needing human review
+- Commits any doc updates to the PR branch before merge
+
+**Note**: The cascade is best-effort. If it finds nothing to update, that's fine — proceed to plan migration. If it makes edits, those are committed directly to the PR branch.
+
 ### Step 8: Plan Migration
 
-After PR is successfully created, clean up the completed plan:
+After PR is successfully created and documentation cascade completes, clean up the completed plan:
 
 ```bash
 python scripts/migrate_completed_plan.py {PLAN_PATH}
@@ -341,6 +359,7 @@ After all tasks complete:
 - [x] All build tasks completed
 - [x] All validators passed
 - [x] Documentation gate passed
+- [x] Documentation cascade completed (`/update-docs`)
 - [x] Success criteria met
 
 ### Artifacts Created
