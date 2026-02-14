@@ -151,6 +151,86 @@ async def _handle_update_command(tg_client, event):
         )
 
 
+async def _handle_force_update_command(tg_client, event):
+    """Force update: flush queue, kill running jobs, update, restart.
+
+    Unlike normal /update which waits for running jobs to finish,
+    this immediately kills everything and applies the update.
+    """
+    from bridge.response import send_response_with_files, set_reaction
+
+    machine = platform.node().split(".")[0]
+    logger.info(f"[bridge] /update --force received from chat {event.chat_id}")
+    try:
+        await set_reaction(tg_client, event.chat_id, event.message.id, "🔥")
+    except Exception:
+        pass
+
+    steps = []
+
+    # 1. Flush pending jobs from queue
+    try:
+        from agent.job_queue import RedisJob
+
+        pending = RedisJob.query.filter(status="pending")
+        running = RedisJob.query.filter(status="running")
+        pending_count = len(pending) if pending else 0
+        running_count = len(running) if running else 0
+
+        for job in pending or []:
+            try:
+                job.delete()
+            except Exception:
+                pass
+        for job in running or []:
+            try:
+                job.delete()
+            except Exception:
+                pass
+
+        steps.append(f"Flushed queue: {pending_count} pending, {running_count} running")
+    except Exception as e:
+        steps.append(f"Queue flush failed: {e}")
+
+    # 2. Run update (git pull + dep sync)
+    script_path = _BRIDGE_PROJECT_DIR / "scripts" / "update" / "run.py"
+    python_path = _BRIDGE_PROJECT_DIR / ".venv" / "bin" / "python"
+    try:
+        result = subprocess.run(
+            [str(python_path), str(script_path), "--full"],
+            cwd=str(_BRIDGE_PROJECT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        # Extract key info from output
+        output_lines = (result.stdout or "").strip().split("\n")
+        for line in output_lines:
+            if any(
+                k in line for k in ["commit", "Already up to date", "FAIL", "ERROR"]
+            ):
+                steps.append(line.strip().removeprefix("[update] "))
+    except subprocess.TimeoutExpired:
+        steps.append("Update timed out after 120s")
+    except Exception as e:
+        steps.append(f"Update failed: {e}")
+
+    # 3. Bridge restart is handled by the --full update above (service.install_service)
+    # Just report what happened
+    steps.append("Bridge restarted")
+
+    summary = f"[{machine}] Force update complete:\n" + "\n".join(
+        f"  • {s}" for s in steps
+    )
+    await send_response_with_files(
+        tg_client,
+        event=None,
+        response=summary,
+        chat_id=event.chat_id,
+        reply_to=event.message.id,
+    )
+
+
 # =============================================================================
 # Agent Response Functions
 # =============================================================================

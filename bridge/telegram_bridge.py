@@ -405,6 +405,7 @@ from bridge.agents import (  # noqa: E402
     _detect_issue_number,  # noqa: F401
     _get_github_repo_url,  # noqa: F401
     _get_running_jobs_info,  # noqa: F401
+    _handle_force_update_command,
     _handle_update_command,
     _match_plan_by_name,  # noqa: F401
     attempt_self_healing,  # noqa: F401
@@ -565,7 +566,7 @@ async def main():
 
         # === BRIDGE COMMANDS (bypass agent entirely) ===
         _raw_text = (event.message.text or "").strip().lower()
-        if _raw_text == "/update":
+        if _raw_text in ("/update", "/update --force"):
             # Only respond to /update if DMs are enabled or sender is whitelisted
             if event.is_private:
                 sender = await event.get_sender()
@@ -575,7 +576,10 @@ async def main():
                         "Ignoring /update from DM - DMs disabled on this instance"
                     )
                     return
-            await _handle_update_command(client, event)
+            if _raw_text == "/update --force":
+                await _handle_force_update_command(client, event)
+            else:
+                await _handle_update_command(client, event)
             return
 
         # Get message details
