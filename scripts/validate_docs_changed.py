@@ -207,8 +207,11 @@ def check_deprecated_markers(doc_paths: list[str]) -> list[tuple[str, int, str]]
             if stripped.startswith("#"):
                 continue
 
+            # Strip inline code (backtick-wrapped text) before checking
+            cleaned = re.sub(r"`[^`]+`", "", stripped)
+
             # Check for deprecated markers
-            if DEPRECATED_RE.search(stripped):
+            if DEPRECATED_RE.search(cleaned):
                 violations.append((doc_path, line_num, stripped))
 
     return violations

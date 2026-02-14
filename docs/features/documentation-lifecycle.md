@@ -113,7 +113,7 @@ python scripts/migrate_completed_plan.py docs/plans/my-feature.md --skip-issue
 |---------|-------|----------|
 | Plan validation blocks write | Missing or empty `## Documentation` section | Add checklist items with doc paths OR explicit exemption with 50+ char justification |
 | Build validation fails (exit 1) | Expected docs not created/modified | Create/modify the docs listed in plan's Documentation section |
-| Build validation warns (exit 2) | Stale markers found in changed docs | Remove DEPRECATED/LEGACY/OBSOLETE markers from documentation |
+| Build validation warns (exit 2) | Stale markers found in changed docs | Remove `DEPRECATED`/`LEGACY`/`OBSOLETE` markers from documentation |
 | Migration fails - doc not found | Feature doc path doesn't match plan | Ensure `docs/features/` path in plan matches created doc |
 | Migration fails - not indexed | Feature missing from README.md | Add entry to `docs/features/README.md` table |
 | Migration fails - can't close issue | `gh` CLI issue | Verify `tracking:` URL in plan frontmatter is valid |
