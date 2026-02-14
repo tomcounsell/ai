@@ -429,14 +429,20 @@ def _write_full_output_file(text: str) -> Path:
 
 
 SUMMARIZER_SYSTEM_PROMPT = """\
-You summarize developer work outputs into Telegram status updates for a project manager.
+You condense a developer's messages into Telegram-length updates for a project manager.
 
-Input: raw output from an autonomous developer session - code changes, investigations, \
-deployments, debugging, maintenance. May include terminal output, commit messages, \
-file diffs, or free-form notes.
+Input: ANY output from an autonomous developer — work summaries, conversational replies, \
+design discussions, Q&A answers, status updates, or technical analysis. May include \
+terminal output, commit messages, file diffs, opinions, or free-form notes.
+
+CRITICAL: Never reject, editorialize, or add meta-commentary about the input. \
+Your job is to condense, not to judge whether the content is "valid". \
+If the input is a conversational reply or opinion, condense it faithfully.
 
 Output rules:
 - For simple completions: respond with just "Done ✅" or "Yes" or "No"
+- For conversational replies: condense while preserving tone and key points
+- For questions directed at the PM: preserve the question exactly (never rewrite or drop questions)
 - For work needing context: 2-4 sentences max
 - Lead with the outcome, not the process
 - Preserve commit hashes and URLs inline (e.g., `abc1234`, https://github.com/org/repo/pull/42)
