@@ -43,28 +43,57 @@ No prerequisites — this work has no external dependencies.
 
 - **Plan Documentation Validator**: Ensures `## Documentation` section contains actionable tasks with target paths
 - **Build Completion Gate**: Validates docs were actually created/modified before PR can merge
-- **Related Docs Scanner**: Identifies other docs that may need updates based on changed files
+- **Documentation Cascade Command** (`/update-docs`): Post-build parallel discovery + triage of all docs affected by a change, with targeted surgical edits (adapted from [cuttlefish's update-docs](https://github.com/tomcounsell/cuttlefish/blob/main/.claude/commands/update-docs.md))
 - **Plan Migration & Cleanup**: Deletes completed plans after verifying feature docs exist
-- **Discrepancy Issue Creator**: Opens GitHub issues when auto-updates have interesting conflicts
 
 ### Flow
 
-**Plan created** → [Doc section validated] → **Plan ready** → [Build executes] → **Build complete** → [Doc gate validates] → **PR ready** → [Related docs scanned] → **Auto-updates applied** → [Issues created for discrepancies] → **Plan deleted** → **Done**
+**Plan created** → [Doc section validated] → **Plan ready** → [Build executes] → **Build complete** → [Doc gate validates] → **PR ready** → [/update-docs cascade runs] → [Targeted edits to affected docs] → [Issues for conflicts needing human review] → **Plan deleted** → **Done**
 
 ### Technical Approach
 
 - New hook validators in `.claude/hooks/validators/`
-- New scripts in `scripts/` for doc validation and migration
-- Enhanced `/build` command with doc gate step
-- GitHub CLI for issue creation
+- New `/update-docs` command (`.claude/commands/update-docs.md`) using parallel agent discovery pattern
+- Enhanced `/build` command with doc gate step and post-build cascade trigger
+- GitHub CLI for issue creation on conflicts
 - Diff-based detection: compare doc state before/after build
+
+### Documentation Cascade Pattern (from cuttlefish)
+
+The `/update-docs` command runs after a build completes. It uses two parallel agents:
+
+**Agent A — Explore the change:**
+- Read the PR diff (`gh pr diff --name-only`) and changed files
+- Extract: what was added/changed, key API surface, deviations from plan
+
+**Agent B — Inventory all documentation:**
+Search every doc location that could be affected:
+
+| Location | What lives there |
+|----------|-----------------|
+| `CLAUDE.md` | Primary project guidance, architecture, rules |
+| `docs/features/*.md` | Feature documentation |
+| `docs/plans/*.md` | Plans that may reference this as prerequisite |
+| `.claude/skills/` | Workflow skills that may reference tools or patterns |
+| `.claude/commands/` | Slash commands |
+| `config/SOUL.md` | Agent identity and behavior |
+
+**Triage — Cross-reference change against docs:**
+For each doc, ask:
+- Does it **reference** the area that changed?
+- Does it **depend on** the change?
+- Does it **teach a pattern** this change modifies?
+- Does it **orchestrate a workflow** using the changed components?
+
+Skip unrelated files. Make surgical, targeted edits — not rewrites. Read before edit. Document what IS, not what WAS.
 
 ## Rabbit Holes
 
-- **Semantic doc analysis**: Don't try to understand if docs are "good" - just verify they exist and were touched
+- **Semantic doc analysis**: Don't try to understand if docs are "good" — just verify they exist and were touched. The cascade makes targeted edits, not quality judgments.
 - **Cross-repo doc updates**: Only handle docs within this repo
-- **Doc generation from code**: Don't auto-generate docs from docstrings - humans write docs
-- **Complex conflict resolution**: For discrepancies, just create an issue - don't try to merge conflicting content
+- **Doc generation from code**: Don't auto-generate docs from docstrings — agents write docs with human review
+- **Full doc rewrites**: The cascade makes surgical edits. If a doc needs a major rewrite, create an issue instead.
+- **Complex conflict resolution**: For discrepancies needing human judgment, create an issue — don't try to merge conflicting content
 
 ## Risks
 
@@ -110,9 +139,10 @@ No agent integration required — this is a hook/script enhancement to existing 
 
 - [ ] Plans without actionable Documentation section are rejected by hook
 - [ ] `/build` fails if no docs were created/modified (unless plan explicitly states "no docs needed")
+- [ ] `/update-docs` cascade discovers and triages affected docs using parallel agents
+- [ ] `/update-docs` makes targeted surgical edits to affected docs (not rewrites)
+- [ ] GitHub issues created for conflicts needing human review
 - [ ] Completed plans are deleted after successful build with feature doc verified
-- [ ] Related docs scanner identifies affected files with confidence scores
-- [ ] GitHub issues created for HIGH confidence discrepancies
 - [ ] Documentation updated and indexed
 
 ## Team Orchestration
@@ -176,17 +206,20 @@ No agent integration required — this is a hook/script enhancement to existing 
 - Support explicit "No documentation changes needed" in plan (rare - most changes affect docs)
 - Exit 0 on success, exit 1 on failure (no override mechanism)
 
-### 3. Create related docs scanner
-- **Task ID**: build-related-scanner
+### 3. Create /update-docs cascade command
+- **Task ID**: build-update-docs-command
 - **Depends On**: none
 - **Assigned To**: script-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `scripts/scan_related_docs.py`
-- Accept list of changed files as input
-- Scan all markdown files in `docs/` for references to changed paths
-- Output confidence-scored list: HIGH (direct file reference), MED-HIGH (direct function/class reference), MED (directory reference), LOW (keyword match)
-- Return JSON for programmatic use
+- Create `.claude/commands/update-docs.md` adapted from cuttlefish's pattern
+- Command accepts PR number, commit SHA, or change description as input
+- Step 1: Launch two parallel agents — Agent A explores the change (diff, changed files, API surface), Agent B inventories all docs in the repo
+- Step 2: Cross-reference using triage questions (references, dependencies, patterns, workflows)
+- Step 3: Create task list of affected docs, ordered by dependency (foundational first)
+- Step 4: Make targeted surgical edits — read before edit, preserve existing structure
+- Step 5: Verify only intended files touched, create issues for conflicts needing human review
+- Principles: match actual API (not plan), cross-reference don't duplicate, document what IS not what WAS
 
 ### 4. Create plan migration script
 - **Task ID**: build-migration-script
@@ -202,18 +235,6 @@ No agent integration required — this is a hook/script enhancement to existing 
 - Delete the plan file
 - Update tracking issue to closed state
 
-### 5. Create discrepancy issue creator
-- **Task ID**: build-issue-creator
-- **Depends On**: build-related-scanner
-- **Assigned To**: script-builder
-- **Agent Type**: builder
-- **Parallel**: false
-- Create `scripts/create_doc_review_issue.py`
-- Accept related docs scan output
-- For HIGH and MED-HIGH confidence items, create GitHub issue with label `docs-review`
-- Include context: what changed, what doc references it, suggested action
-- Return issue URL
-
 ### 6. Integrate plan validator hook
 - **Task ID**: build-hook-integration
 - **Depends On**: build-plan-validator
@@ -224,20 +245,19 @@ No agent integration required — this is a hook/script enhancement to existing 
 - Add `validate_documentation_section.py` to Stop hooks
 - Test that plans without proper Documentation section are rejected
 
-### 7. Integrate doc gate into build
+### 6. Integrate doc gate into build
 - **Task ID**: build-gate-integration
-- **Depends On**: build-doc-change-validator, build-related-scanner, build-migration-script, build-issue-creator
+- **Depends On**: build-doc-change-validator, build-update-docs-command, build-migration-script
 - **Assigned To**: integration-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Update `.claude/commands/build.md`
-- Add doc validation step after final validation task
-- Add related docs scan step
-- Add issue creation for discrepancies
-- Add plan deletion step on success
-- Ensure PR is blocked if doc validation fails
+- Add doc validation step after final validation task — PR blocked if docs not created/modified
+- Add `/update-docs` cascade as post-build step (runs after PR is ready, before merge)
+- Add plan deletion step on success (after feature doc verified)
+- The cascade handles related doc discovery, triage, targeted edits, and issue creation for conflicts
 
-### 8. Validate complete system
+### 7. Validate complete system
 - **Task ID**: validate-system
 - **Depends On**: build-hook-integration, build-gate-integration
 - **Assigned To**: system-validator
@@ -251,7 +271,7 @@ No agent integration required — this is a hook/script enhancement to existing 
 - Test: Completed plan is deleted after successful build
 - Run all validation commands
 
-### 9. Documentation
+### 8. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-system
 - **Assigned To**: doc-writer
@@ -261,7 +281,7 @@ No agent integration required — this is a hook/script enhancement to existing 
 - Add entry to `docs/features/README.md` index
 - Include usage examples and troubleshooting
 
-### 10. Final Validation
+### 9. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: system-validator
@@ -275,8 +295,8 @@ No agent integration required — this is a hook/script enhancement to existing 
 
 - `python .claude/hooks/validators/validate_documentation_section.py --plan-directory docs/plans --test` - Test plan validator
 - `python scripts/validate_docs_changed.py docs/plans/test-plan.md --dry-run` - Test doc change validator
-- `python scripts/scan_related_docs.py --changed-files bridge/telegram_bridge.py` - Test related docs scanner
 - `python scripts/migrate_completed_plan.py docs/plans/test-plan.md --dry-run` - Test migration script
+- `cat .claude/commands/update-docs.md` - Verify cascade command exists with parallel discovery pattern
 - `ruff check .claude/hooks/validators/ scripts/` - Lint new code
 - `black --check .claude/hooks/validators/ scripts/` - Format check
 
