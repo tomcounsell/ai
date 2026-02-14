@@ -235,7 +235,7 @@ No agent integration required — this is a hook/script enhancement to existing 
 - Delete the plan file
 - Update tracking issue to closed state
 
-### 6. Integrate plan validator hook
+### 5. Integrate plan validator hook
 - **Task ID**: build-hook-integration
 - **Depends On**: build-plan-validator
 - **Assigned To**: integration-builder
