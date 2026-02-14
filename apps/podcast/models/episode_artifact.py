@@ -23,7 +23,8 @@ class EpisodeArtifact(Timestampable):
         Episode, on_delete=models.CASCADE, related_name="artifacts"
     )
     title = models.CharField(max_length=200)
-    content = models.TextField()
+    content = models.TextField(blank=True)
+    url = models.URLField(blank=True)
     metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:

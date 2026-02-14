@@ -211,8 +211,8 @@ class PublishEpisodeCommandTestCase(TestCase):
         # report.md and sources.md should NOT be artifacts
         self.assertNotIn("report.md", artifact_titles)
         self.assertNotIn("sources.md", artifact_titles)
-        # tmp/ files should NOT be artifacts
-        self.assertNotIn("tmp/scratch.md", artifact_titles)
+        # tmp/ files are imported as artifacts (process artifacts)
+        self.assertIn("tmp/scratch.md", artifact_titles)
 
     def test_idempotent_no_duplicate_artifacts(self):
         """Re-running publish_episode updates rather than duplicates artifacts."""
@@ -294,6 +294,8 @@ class BackfillEpisodesCommandTestCase(TestCase):
 
     def test_dry_run_shows_what_would_be_imported(self):
         """backfill_episodes --dry-run does not create any database records."""
+        episode_count_before = Episode.objects.count()
+
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create a minimal source directory structure
             source_dir = Path(tmpdir) / "episodes"
@@ -315,9 +317,8 @@ class BackfillEpisodesCommandTestCase(TestCase):
 
         output_text = out.getvalue()
         self.assertIn("DRY RUN", output_text)
-        # No episodes should have been created in the database
-        # (the command may create podcasts in non-dry-run mode)
-        self.assertEqual(Episode.objects.count(), 0)
+        # Dry run should not create any new episodes
+        self.assertEqual(Episode.objects.count(), episode_count_before)
 
     def test_raises_error_for_nonexistent_source(self):
         """backfill_episodes raises CommandError for nonexistent source directory."""

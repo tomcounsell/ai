@@ -20,10 +20,10 @@ EPISODE_FIELD_FILES = {"report.md", "sources.md"}
 SKIP_EXTENSIONS = {".mp3", ".png", ".jpg", ".jpeg", ".wav", ".m4a"}
 
 # Specific files to skip (derivable or redundant)
-SKIP_FILES = {"report.html", "transcript.html"}
+SKIP_FILES = {"report.html", "transcript.html", ".DS_Store"}
 
 # Directories to skip entirely
-SKIP_DIRS = {"tmp"}
+SKIP_DIRS: set[str] = set()
 
 
 def extract_transcript_text(data) -> str:
@@ -184,8 +184,21 @@ def populate_episode_fields(
     else:
         warnings.append("No *_chapters.json file found")
 
-    # Audio file metadata (*.mp3)
+    # transcript.txt -> transcript (fallback when no JSON transcript exists)
+    if "transcript" not in fields_populated:
+        transcript_txt_path = episode_dir / "transcript.txt"
+        if transcript_txt_path.is_file():
+            content = transcript_txt_path.read_text(encoding="utf-8")
+            if verbose:
+                stdout(f"  transcript.txt -> transcript ({len(content)} chars)")
+            if not dry_run:
+                episode.transcript = content
+            fields_populated.append("transcript")
+
+    # Audio file metadata (*.mp3, *.m4a)
     audio_files = list(episode_dir.glob("*.mp3"))
+    if not audio_files:
+        audio_files = list(episode_dir.glob("*.m4a"))
     if audio_files:
         audio_path = audio_files[0]
         if len(audio_files) > 1:
@@ -262,7 +275,12 @@ def create_artifacts(
     normalize_title_fn: Callable[[str], str] | None = None,
 ) -> tuple[int, int, list[str]]:
     """Walk the episode directory and create EpisodeArtifact records
-    for all markdown files that are not mapped to Episode fields.
+    for all text-readable files that are not mapped to Episode fields.
+
+    Imports .md, .txt, .json files as text artifacts. Imports .pdf files
+    as URL-only artifacts (binary content stays external). Skips binary
+    media (.mp3, .m4a, .png, .jpg, .wav), HTML (derivable), and files
+    already mapped to Episode fields.
 
     Parameters:
         episode: The Episode model instance.
@@ -287,64 +305,83 @@ def create_artifacts(
         rel_path = path.relative_to(episode_dir)
         rel_str = str(rel_path)
 
-        # Skip files in excluded directories
-        if any(part in SKIP_DIRS for part in rel_path.parts):
-            if verbose:
-                stdout(f"  SKIP (tmp dir): {rel_str}")
-            continue
-
-        # Skip binary files
+        # Skip binary media files (served externally)
         if path.suffix.lower() in SKIP_EXTENSIONS:
             if verbose:
                 stdout(f"  SKIP (binary): {rel_str}")
             continue
 
-        # Skip specific derivable files
+        # Skip specific derivable/junk files
         if path.name in SKIP_FILES:
             if verbose:
                 stdout(f"  SKIP (derivable): {rel_str}")
             continue
 
-        # Skip *_chapters.txt (redundant with JSON)
-        if path.name.endswith("_chapters.txt"):
-            if verbose:
-                stdout(f"  SKIP (redundant): {rel_str}")
-            continue
-
-        # Skip JSON files (transcript/chapters already handled as fields,
-        # other JSON files are not artifacts)
-        if path.suffix.lower() == ".json":
-            if verbose:
-                stdout(f"  SKIP (json): {rel_str}")
-            continue
-
-        # Skip HTML files
+        # Skip HTML files (derivable from report content)
         if path.suffix.lower() == ".html":
             if verbose:
                 stdout(f"  SKIP (html): {rel_str}")
             continue
 
-        # Only process markdown files as artifacts
-        if path.suffix.lower() != ".md":
+        # Skip *_chapters.txt (redundant with chapters JSON)
+        if path.name.endswith("_chapters.txt"):
             if verbose:
-                stdout(f"  SKIP (not markdown): {rel_str}")
+                stdout(f"  SKIP (redundant): {rel_str}")
             continue
 
-        # Skip files that are mapped to Episode fields
-        if rel_str in ("report.md", "sources.md"):
+        # Skip *_chapters.json (already mapped to Episode.chapters)
+        if path.name.endswith("_chapters.json"):
             if verbose:
                 stdout(f"  SKIP (episode field): {rel_str}")
             continue
 
-        # Read the file content
+        # Keep root-level *_transcript.json as artifacts (has timing data),
+        # but skip duplicates in subdirectories
+        if path.name.endswith("_transcript.json"):
+            if len(rel_path.parts) > 1:
+                if verbose:
+                    stdout(f"  SKIP (duplicate transcript): {rel_str}")
+                continue
+
+        # Skip files that are mapped to Episode fields
+        if rel_str in ("report.md", "sources.md", "transcript.txt"):
+            if verbose:
+                stdout(f"  SKIP (episode field): {rel_str}")
+            continue
+
+        # Title is the relative path, optionally normalized
+        title = normalize_title_fn(rel_str) if normalize_title_fn else rel_str
+
+        # Handle PDF files (URL-only artifacts, binary content stays external)
+        if path.suffix.lower() == ".pdf":
+            podcast_slug = episode.podcast.slug
+            episode_slug = episode.slug
+            pdf_url = (
+                f"https://research.yuda.me/podcast/episodes/"
+                f"{podcast_slug}/{episode_slug}/{rel_str}"
+            )
+            if verbose:
+                stdout(f"  ARTIFACT (url): {title}")
+            if not dry_run:
+                _, was_created = EpisodeArtifact.objects.update_or_create(
+                    episode=episode,
+                    title=title,
+                    defaults={"content": "", "url": pdf_url},
+                )
+                if was_created:
+                    created += 1
+                else:
+                    updated += 1
+            else:
+                created += 1
+            continue
+
+        # Read text content (.md, .txt, .json)
         try:
             content = path.read_text(encoding="utf-8")
         except Exception as e:
             warnings.append(f"Could not read {rel_str}: {e}")
             continue
-
-        # Title is the relative path, optionally normalized
-        title = normalize_title_fn(rel_str) if normalize_title_fn else rel_str
 
         if verbose:
             stdout(f"  ARTIFACT: {title} ({len(content)} chars)")
@@ -360,7 +397,6 @@ def create_artifacts(
             else:
                 updated += 1
         else:
-            # In dry-run mode, count as created
             created += 1
 
     return created, updated, warnings

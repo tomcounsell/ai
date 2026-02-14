@@ -425,21 +425,19 @@ class Command(BaseCommand):
             rel_path = path.relative_to(episode_dir)
             rel_str = str(rel_path)
 
-            if any(part in SKIP_DIRS for part in rel_path.parts):
-                continue
             if path.suffix.lower() in SKIP_EXTENSIONS:
                 continue
             if path.name in SKIP_FILES:
                 continue
-            if path.name.endswith("_chapters.txt"):
-                continue
-            if path.suffix.lower() == ".json":
-                continue
             if path.suffix.lower() == ".html":
                 continue
-            if path.suffix.lower() != ".md":
+            if path.name.endswith("_chapters.txt"):
                 continue
-            if rel_str in EPISODE_FIELD_FILES:
+            if path.name.endswith("_chapters.json"):
+                continue
+            if path.name.endswith("_transcript.json") and len(rel_path.parts) > 1:
+                continue
+            if rel_str in ("report.md", "sources.md", "transcript.txt"):
                 continue
 
             title = self._normalize_artifact_title(rel_str)
