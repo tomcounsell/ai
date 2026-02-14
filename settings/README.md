@@ -6,18 +6,24 @@ This project uses a modular approach to organize Django settings, which makes th
 
 - `settings/__init__.py`: Main entry point that loads all settings modules in the correct order
 - `settings/env.py`: Handles environment variables and deployment type
-- `settings/base.py`: Core Django settings (apps, middleware, templates, REST framework, etc.)
+- `settings/base.py`: Core Django settings (apps, middleware, templates, REST framework, background tasks)
 - `settings/database.py`: Database and cache configuration
 - `settings/third_party.py`: External services and integrations
 - `settings/logging.py`: Logging configuration for different environments
-- `settings/scheduler/`: Celery and task scheduling configuration
-  - `scheduler/celery.py`: Celery app configuration
-  - `scheduler/beat.py`: Celery beat scheduler
 - `settings/local.py`: Local development overrides (not in git)
 - `settings/local_template.py`: Template for local settings
-- `settings/production.py`: Production-specific settings 
+- `settings/production.py`: Production-specific settings (DatabaseBackend for tasks, Supabase storage)
 - `settings/asgi.py`: ASGI application entry point (for async features)
 - `settings/wsgi.py`: WSGI application entry point
+
+### Background Tasks (`TASKS` setting)
+
+Django 6.0's native task framework is configured via the `TASKS` setting:
+
+- **`settings/base.py`**: `ImmediateBackend` — runs tasks synchronously (dev/test)
+- **`settings/production.py`**: `DatabaseBackend` via `django-tasks-db` — persists tasks to PostgreSQL, executed by `manage.py db_worker`
+
+Task status values: `NEW`, `RUNNING`, `SUCCESSFUL`, `FAILED`
 
 ## Environment Variables
 

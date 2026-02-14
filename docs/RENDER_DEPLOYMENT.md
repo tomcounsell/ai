@@ -151,6 +151,20 @@ Connect to PostgreSQL:
   gunicorn settings.wsgi:application --bind 0.0.0.0:$PORT --timeout 180 --keep-alive 5 --worker-connections 1000 --preload
   ```
 
+### Background Worker Specs
+
+- **Name**: `cuttlefish-worker`
+- **Type**: Background Worker
+- **Plan**: Starter
+- **Region**: Oregon (same as web service)
+- **Build Command**: Same as web service (`./build.sh`)
+- **Start Command**: `python manage.py db_worker`
+- **Environment**: Same env group as web service (`cuttlefish`)
+
+The worker uses Django 6.0's native `@task` framework with `django-tasks-db` (`DatabaseBackend`). It polls PostgreSQL for enqueued tasks and executes them. The worker shares the same database and environment as the web service.
+
+Tasks are defined with `@task` decorator and enqueued with `.enqueue()`. In dev/test, the `ImmediateBackend` runs tasks inline — no worker needed.
+
 ### Database Specs
 
 - **Plan**: Free (can upgrade to paid plans)
@@ -278,18 +292,21 @@ render run python manage.py migrate
 - PostgreSQL: Free (max 1GB storage)
 - Web Service: Not available (minimum Starter plan)
 
-### Minimal Production ($7/month)
+### Minimal Production ($14/month)
 - PostgreSQL: Free
 - Web Service: Starter ($7/month)
+- Background Worker: Starter ($7/month)
 
-### Recommended Production ($28/month)
+### Recommended Production ($35/month)
 - PostgreSQL: Starter ($7/month)
 - Web Service: Pro ($21/month)
-- Auto-scaling enabled
+- Background Worker: Starter ($7/month)
+- Auto-scaling enabled on web
 
-### With Redis ($35/month)
+### With Redis ($42/month)
 - PostgreSQL: Starter ($7/month)
 - Web Service: Pro ($21/month)
+- Background Worker: Starter ($7/month)
 - Redis: Starter ($7/month)
 
 ## Next Steps

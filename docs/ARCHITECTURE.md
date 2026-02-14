@@ -42,6 +42,12 @@ graph TD
             Templates["Templates"]
             Static["Static Files"]
         end
+
+        %% Background Tasks
+        subgraph Tasks ["Background Tasks"]
+            TaskFramework["Django 6.0 @task"]
+            Worker["db_worker process"]
+        end
     end
 
     %% Database
@@ -56,16 +62,19 @@ graph TD
     API --> Common
     Integration --> Common
     AI --> Common
-    
+
     Integration --> AWS
-    Integration --> Twilio 
+    Integration --> Twilio
     Integration --> Loops
     AI --> AI_Services
-    
+
+    TaskFramework --> DB
+    Worker --> TaskFramework
+
     Public --> Frontend
     Public --> Templates
     API --> URLs
-    
+
     %% User interactions
     User((User)) --> Frontend
     User --> API
@@ -133,13 +142,22 @@ graph TD
    - HTMX handles dynamic frontend interactions
    - Tailwind CSS v4 with django-tailwind-cli provides styling
 
+5. **Background Tasks**:
+   - Long-running operations use Django 6.0's native `@task` decorator
+   - Tasks enqueued with `.enqueue()`, tracked via `TaskResult`
+   - Dev/test: `ImmediateBackend` runs tasks inline (synchronous)
+   - Production: `DatabaseBackend` (`django-tasks-db`) persists tasks to PostgreSQL
+   - Worker process (`manage.py db_worker`) polls and executes queued tasks
+   - Task status: `NEW` → `RUNNING` → `SUCCESSFUL` or `FAILED`
+
 ## Technology Stack
 
-- **Backend**: Django, DRF, PostgreSQL
+- **Backend**: Django 6.0, DRF, PostgreSQL
 - **Frontend**: HTMX, Tailwind CSS v4 with django-tailwind-cli
+- **Background Tasks**: Django 6.0 native `@task` + `django-tasks-db` (DatabaseBackend)
 - **External Services**: AWS, Twilio, Loops
 - **AI Integration**: PydanticAI framework with OpenAI/Anthropic, MCP protocol
-- **Deployment**: Docker, Render
+- **Deployment**: Render (web service + background worker)
 
 ## AI Integration Architecture
 

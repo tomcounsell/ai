@@ -26,6 +26,26 @@ services:
           property: connectionString
       - fromGroup: cuttlefish
 
+  # Background worker for Django 6.0 @task framework (django-tasks-db)
+  - type: worker
+    name: cuttlefish-worker
+    runtime: python
+    buildCommand: ./build.sh
+    startCommand: python manage.py db_worker
+    repo: https://github.com/tomcounsell/cuttlefish.git
+    branch: main
+    region: oregon
+    plan: starter
+    envVars:
+      - key: DEPLOYMENT_TYPE
+        value: PRODUCTION
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: cuttlefish-keyvalue
+          property: connectionString
+      - fromGroup: cuttlefish
+
   - type: keyvalue
     name: cuttlefish-keyvalue
     region: oregon

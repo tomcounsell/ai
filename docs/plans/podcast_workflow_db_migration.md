@@ -47,11 +47,11 @@ The service layer is fundamentally plumbing — transforming file I/O into DB I/
 
 These provide abstract interfaces that the service layer calls. Each hides its implementation details (which cloud provider, which task runner, which LLM) behind a clean API.
 
-| Module | Issue | Interface | Purpose |
-|--------|-------|-----------|---------|
-| File Storage Service | [#61](https://github.com/yudame/cuttlefish/issues/61) | `store_file(key, content) → url` | Binary files (audio, images) without knowing S3 vs R2 vs local |
-| Background Task Service | [#62](https://github.com/yudame/cuttlefish/issues/62) | `enqueue(fn, *args) → task_id` | Long-running ops without knowing Celery vs Django-Q2 |
-| LLM Service | [#63](https://github.com/yudame/cuttlefish/issues/63) | `call_llm(prompt, context) → str` | AI calls with retry/budget without knowing Anthropic vs OpenAI details |
+| Module | Issue | Interface | Status |
+|--------|-------|-----------|--------|
+| File Storage Service | [#61](https://github.com/yudame/cuttlefish/issues/61) | `store_file(key, content) → url` | Done ([PR #68](https://github.com/yudame/cuttlefish/pull/68)) |
+| Background Task Service | [#62](https://github.com/yudame/cuttlefish/issues/62) | `@task` + `.enqueue(**kwargs) → TaskResult` | Done ([PR #68](https://github.com/yudame/cuttlefish/pull/68)) |
+| LLM Service | [#63](https://github.com/yudame/cuttlefish/issues/63) | Named PydanticAI tools in `apps/podcast/services/` | Planning |
 
 ### Environment (API keys for external services)
 
@@ -221,20 +221,26 @@ def save_audio(episode_id: int, audio_bytes: bytes, filename: str) -> str:
     return url
 ```
 
-#### 5. Background Tasks via Task Service
+#### 5. Background Tasks via Django 6.0 `@task`
 
-Long-running operations submitted through the Background Task Service (#62):
+Long-running operations use Django 6.0's native task framework (implemented in [#62](https://github.com/yudame/cuttlefish/issues/62)):
 
 ```python
 # apps/podcast/services/research.py
-from apps.common.services.tasks import enqueue
+from django.tasks import task
 
-def run_perplexity_research_async(episode_id: int, prompt: str) -> str:
-    """Submit Perplexity research as a background task. Returns task_id."""
-    return enqueue(run_perplexity_research, episode_id, prompt)
+@task
+def run_perplexity_research(episode_id: int, prompt: str) -> dict:
+    """Long-running research task."""
+    # ... API call that takes minutes ...
+    return {"status": "done", "results": [...]}
+
+# Enqueue for background execution:
+result = run_perplexity_research.enqueue(episode_id=42, prompt="...")
+result.status.name  # "NEW" → "RUNNING" → "SUCCESSFUL" or "FAILED"
 ```
 
-The service functions themselves are synchronous and testable. The `enqueue()` wrapper is only used by the orchestrator when it needs non-blocking execution.
+The `@task` decorated functions are synchronous and testable. In dev/test, `ImmediateBackend` runs them inline. In production, `DatabaseBackend` persists them to PostgreSQL and the `db_worker` process executes them.
 
 #### 6. Agent SDK Integration
 
@@ -343,7 +349,7 @@ apps/podcast/services/
 
 ### Risk 3: Background task reliability
 **Impact:** Long-running tasks (GPT-Researcher: 20 min, NotebookLM: 15 min) could fail silently if the worker crashes or times out.
-**Mitigation:** EpisodeWorkflow tracks task status. Service functions update workflow history on start/success/fail. The Background Task Service (#62) owns retry logic. The agent checks workflow status before proceeding.
+**Mitigation:** EpisodeWorkflow tracks task status. Service functions update workflow history on start/success/fail. Django 6.0's `@task` framework tracks status (`SUCCESSFUL`/`FAILED`) with error details via `TaskResult.errors`. The agent checks workflow status before proceeding.
 
 ### Risk 4: File storage cost
 **Impact:** Audio files are 20-80MB each. Hosting, bandwidth, and storage costs add up.
@@ -391,7 +397,7 @@ No MCP server changes needed — the Agent SDK runs server-side, not through MCP
 - [ ] `EpisodeWorkflow` model created with migration
 - [ ] All 16 service functions implemented and importable
 - [ ] Each service function reads from DB and writes to DB (no filesystem paths)
-- [ ] Services use `store_file()` (#61), `enqueue()` (#62), `call_llm()` (#63) — never direct provider calls
+- [ ] Services use `store_file()` (#61), `@task` + `.enqueue()` (#62), PydanticAI tools (#63) — never direct provider calls
 - [ ] All 6 sub-agent prompt templates extracted and tested
 - [ ] Agent tool definitions exist mapping to service functions
 - [ ] `start_episode` management command updated to call `services.setup.setup_episode()`
@@ -590,8 +596,8 @@ No MCP server changes needed — the Agent SDK runs server-side, not through MCP
 
 ## Resolved Questions
 
-1. ~~Background task runner choice~~ → Decided by #62 (Background Task Service). This plan just calls `enqueue()`.
-2. ~~S3 provider~~ → Decided by #61 (File Storage Service). This plan just calls `store_file()`.
+1. ~~Background task runner choice~~ → Django 6.0 native `@task` + `django-tasks-db` DatabaseBackend. Tasks decorated with `@task`, enqueued with `.enqueue()`, status via `result.status.name` (`SUCCESSFUL`/`FAILED`). Done in [PR #68](https://github.com/yudame/cuttlefish/pull/68).
+2. ~~S3 provider~~ → Supabase Storage via File Storage Service abstraction. Done in [PR #68](https://github.com/yudame/cuttlefish/pull/68). This plan just calls `store_file()`.
 3. ~~Prompt template management~~ → Files in `apps/podcast/services/prompts/*.md`. Version-controlled, simple.
 4. ~~Existing tools/ scripts~~ → Keep as thin CLI wrappers that call services internally. Gradual migration.
 

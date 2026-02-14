@@ -131,6 +131,7 @@ This is a high-level overview of key project files and directories. Some deeper 
       - test_error_handling.py
       - test_factories.py
       - test_form_validation.py
+      - test_tasks.py
       - tests.py
     - **utilities/**
       - **compression/**
@@ -560,7 +561,7 @@ The project extensively uses behavior mixins for common model functionality:
 
 ## Technology Stack
 
-- **Backend**: Django 5.2
+- **Backend**: Django 6.0
 - **API**: Django REST Framework 3.16
 - **Frontend**: HTMX + Tailwind CSS v4
 - **Database**: PostgreSQL

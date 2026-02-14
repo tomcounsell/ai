@@ -1,281 +1,226 @@
 ---
-status: Ready
-type: feature
+status: Done
+type: chore
 appetite: Small
 owner: Valor
 created: 2026-02-14
 tracking: https://github.com/yudame/cuttlefish/issues/62
+pr: https://github.com/yudame/cuttlefish/pull/68
 ---
 
-# Background Task Service: Abstract Interface for Async Task Execution
+# Background Task Service: Django 6.0 Tasks Framework
 
 ## Problem
 
-The podcast workflow has 6+ operations that take 1-20 minutes (API calls to Perplexity, Gemini, NotebookLM, GPT-Researcher, OpenAI Whisper, cover art generation). On a web server with ~30s request timeouts, these must run in the background. The workflow code should not know whether the runner is Celery, Django-Q2, or a simple thread pool.
+The podcast workflow has 6+ operations that take 1-20 minutes (API calls to Perplexity, Gemini, NotebookLM, GPT-Researcher, OpenAI Whisper, cover art generation). On a web server with ~30s request timeouts, these must run in the background.
 
 **Current behavior:**
-No abstraction exists. Long-running operations would block request threads or require direct integration with a specific task queue.
+Django 6.0 with native tasks framework. Tasks are defined with `@task`, enqueued with `.enqueue()`, and tracked via `TaskResult`. `ImmediateBackend` runs tasks inline in dev/test; `DatabaseBackend` via `django-tasks-db` processes tasks asynchronously in production with `manage.py db_worker`.
 
 **Desired outcome:**
-A task execution abstraction that lets callers enqueue functions for background execution and poll for results, with the underlying worker configured via Django settings.
+Upgrade to Django 6.0 and adopt its native tasks framework. Tasks are defined with `@task`, enqueued with `.enqueue()`, and tracked via `TaskResult`. Backend is swappable via `TASKS` setting — no custom abstraction needed.
 
 ## Appetite
 
 **Size:** Small
 
-**Team:** Solo dev. Two backends (sync + async worker), status persistence in DB.
+**Team:** Solo dev. Upgrade Django, configure backends, validate with tests.
 
 **Interactions:**
-- PM check-ins: 0-1 (confirm Django-Q2 vs Celery choice)
 - Review rounds: 1
 
 ## Prerequisites
 
-None - this is a foundational service.
+None — this is a foundational upgrade.
 
 ## Solution
 
 ### Key Elements
 
-- **Abstract task interface**: `enqueue()`, `get_status()`, `cancel()`
-- **Backend registry**: Select backend via `TASK_BACKEND` Django setting
-- **Two backends**: `SyncTaskRunner` (dev) and `DjangoQRunner` (prod)
-- **Status persistence**: Task model stores status for polling
+- **Django 6.0 upgrade** from 5.2
+- **Native `@task` decorator** — no custom TaskBackend ABC, no custom model
+- **Three backends**: `ImmediateBackend` (dev), `DummyBackend` (test), `DatabaseBackend` (prod)
+- **`django-tasks-db`** for production — uses existing Postgres, worker via `manage.py db_worker`
 
 ### Technical Approach
 
-1. **Create TaskStatus model at `apps/common/models/task_status.py`:**
+1. **Upgrade Django and add `django-tasks-db`:**
 
-   ```python
-   from django.db import models
-   from apps.common.behaviors import Timestampable
-
-   class TaskStatus(Timestampable):
-       class Status(models.TextChoices):
-           PENDING = "pending"
-           RUNNING = "running"
-           COMPLETE = "complete"
-           FAILED = "failed"
-           CANCELLED = "cancelled"
-
-       task_id = models.CharField(max_length=64, unique=True, db_index=True)
-       status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
-       func_name = models.CharField(max_length=255)
-       result = models.JSONField(null=True, blank=True)
-       error = models.TextField(blank=True)
-       started_at = models.DateTimeField(null=True, blank=True)
-       completed_at = models.DateTimeField(null=True, blank=True)
+   ```bash
+   uv add "Django>=6.0"
+   uv add django-tasks-db
    ```
 
-2. **Create task service module at `apps/common/services/tasks.py`:**
+2. **Add to `INSTALLED_APPS` in `settings/base.py`:**
 
    ```python
-   import uuid
-   from abc import ABC, abstractmethod
-   from typing import Callable, Any
-   from django.conf import settings
-   from django.utils import timezone
-   from apps.common.models import TaskStatus
+   THIRD_PARTY_APPS = [
+       ...
+       "django_tasks_db",
+   ]
+   ```
 
-   class TaskBackend(ABC):
-       @abstractmethod
-       def submit(self, task_id: str, fn: Callable, *args, **kwargs) -> None:
-           """Submit function for execution."""
-           pass
+3. **Configure task backends in settings:**
 
-       @abstractmethod
-       def cancel(self, task_id: str) -> bool:
-           """Attempt to cancel task."""
-           pass
-
-   class SyncTaskRunner(TaskBackend):
-       """Synchronous execution for development. Runs immediately in-process."""
-
-       def submit(self, task_id: str, fn: Callable, *args, **kwargs) -> None:
-           task = TaskStatus.objects.get(task_id=task_id)
-           task.status = TaskStatus.Status.RUNNING
-           task.started_at = timezone.now()
-           task.save()
-
-           try:
-               result = fn(*args, **kwargs)
-               task.status = TaskStatus.Status.COMPLETE
-               task.result = result
-           except Exception as e:
-               task.status = TaskStatus.Status.FAILED
-               task.error = str(e)
-           finally:
-               task.completed_at = timezone.now()
-               task.save()
-
-       def cancel(self, task_id: str) -> bool:
-           # Sync tasks complete immediately, can't cancel
-           return False
-
-   class DjangoQRunner(TaskBackend):
-       """Django-Q2 backend for production async execution."""
-
-       def submit(self, task_id: str, fn: Callable, *args, **kwargs) -> None:
-           from django_q.tasks import async_task
-
-           # Wrap function to update status
-           def wrapper(task_id, fn, *args, **kwargs):
-               task = TaskStatus.objects.get(task_id=task_id)
-               task.status = TaskStatus.Status.RUNNING
-               task.started_at = timezone.now()
-               task.save()
-
-               try:
-                   result = fn(*args, **kwargs)
-                   task.status = TaskStatus.Status.COMPLETE
-                   task.result = result
-               except Exception as e:
-                   task.status = TaskStatus.Status.FAILED
-                   task.error = str(e)
-               finally:
-                   task.completed_at = timezone.now()
-                   task.save()
-
-           async_task(wrapper, task_id, fn, *args, **kwargs)
-
-       def cancel(self, task_id: str) -> bool:
-           # Django-Q2 cancellation is limited, mark as cancelled
-           task = TaskStatus.objects.filter(
-               task_id=task_id, status=TaskStatus.Status.PENDING
-           ).update(status=TaskStatus.Status.CANCELLED)
-           return task > 0
-
-   # Backend registry
-   _backends = {
-       'sync': SyncTaskRunner,
-       'django_q': DjangoQRunner,
+   ```python
+   # settings/base.py — default for dev
+   TASKS = {
+       "default": {
+           "BACKEND": "django.tasks.backends.immediate.ImmediateBackend",
+       }
    }
 
-   def _get_backend() -> TaskBackend:
-       backend_name = getattr(settings, 'TASK_BACKEND', 'sync')
-       return _backends[backend_name]()
-
-   # Public API
-   def enqueue(fn: Callable, *args, task_id: str = "", **kwargs) -> str:
-       """Submit a function for background execution. Returns a task_id."""
-       if not task_id:
-           task_id = str(uuid.uuid4())[:8]
-
-       TaskStatus.objects.create(
-           task_id=task_id,
-           func_name=f"{fn.__module__}.{fn.__name__}",
-           status=TaskStatus.Status.PENDING,
-       )
-
-       _get_backend().submit(task_id, fn, *args, **kwargs)
-       return task_id
-
-   def get_status(task_id: str) -> dict:
-       """Returns status dict with status, result, error."""
-       try:
-           task = TaskStatus.objects.get(task_id=task_id)
-           return {
-               "status": task.status,
-               "result": task.result,
-               "error": task.error,
-               "started_at": task.started_at,
-               "completed_at": task.completed_at,
-           }
-       except TaskStatus.DoesNotExist:
-           return {"status": "unknown", "result": None, "error": "Task not found"}
-
-   def cancel(task_id: str) -> bool:
-       """Attempt to cancel a pending/running task."""
-       return _get_backend().cancel(task_id)
-   ```
-
-3. **Add settings configuration:**
-
-   ```python
-   # settings/base.py
-   TASK_BACKEND = env.str("TASK_BACKEND", default="sync")
-
-   # settings/local.py
-   TASK_BACKEND = "sync"
-
-   # settings/production.py
-   TASK_BACKEND = "django_q"
-   Q_CLUSTER = {
-       'name': 'cuttlefish',
-       'workers': 2,
-       'recycle': 500,
-       'timeout': 1200,  # 20 minutes max
-       'orm': 'default',
+   # settings/production.py — DatabaseBackend with worker
+   TASKS = {
+       "default": {
+           "BACKEND": "django_tasks_db.DatabaseBackend",
+           "QUEUES": ["default"],
+       }
    }
    ```
 
-4. **Write tests in `apps/common/tests/test_tasks.py`:**
+   No test-specific override needed — `ImmediateBackend` runs tasks synchronously, which is correct for both dev and test.
+
+4. **Define tasks using `@task` in relevant app modules:**
+
+   Example (not part of this issue — just showing the pattern callers will use):
+
+   ```python
+   # apps/podcast/tasks.py
+   from django.tasks import task
+
+   @task
+   def run_perplexity_research(episode_id: int, query: str) -> dict:
+       """Long-running research task."""
+       # ... API call that takes minutes ...
+       return {"status": "done", "results": [...]}
+   ```
+
+   Enqueue from a view or service:
+
+   ```python
+   result = run_perplexity_research.enqueue(episode_id=42, query="...")
+   result_id = result.id  # UUID — store this for polling
+
+   # Later, check status:
+   result = run_perplexity_research.get_result(result_id)
+   result.refresh()
+   result.status      # NEW, RUNNING, SUCCESSFUL, FAILED
+   result.return_value # available when SUCCESSFUL
+   result.errors       # list of TaskError when FAILED
+   ```
+
+5. **Run migrations for `django_tasks_db`:**
+
+   ```bash
+   uv run python manage.py migrate django_tasks_db
+   ```
+
+6. **Add worker process for production (Render):**
+
+   Add a Background Worker service on Render that runs:
+
+   ```bash
+   python manage.py db_worker
+   ```
+
+   This polls the database for enqueued tasks and executes them. In dev, `ImmediateBackend` runs tasks inline — no worker needed.
+
+7. **Write validation tests in `apps/common/tests/test_tasks.py`:**
 
    ```python
    import pytest
-   from apps.common.services.tasks import enqueue, get_status, cancel
-   from apps.common.models import TaskStatus
+   from django.tasks import task
 
-   @pytest.fixture
-   def sync_backend(settings):
-       settings.TASK_BACKEND = "sync"
+   @task
+   def add(a: int, b: int) -> int:
+       return a + b
 
-   def test_enqueue_and_complete(sync_backend, db):
-       def add(a, b):
-           return a + b
+   @task
+   def fail() -> None:
+       raise ValueError("boom")
 
-       task_id = enqueue(add, 2, 3)
-       status = get_status(task_id)
+   @pytest.mark.django_db
+   def test_enqueue_and_complete():
+       """ImmediateBackend runs task synchronously and returns result."""
+       result = add.enqueue(a=2, b=3)
+       assert result.status.name == "SUCCESSFUL"
 
-       assert status["status"] == "complete"
-       assert status["result"] == 5
+   @pytest.mark.django_db
+   def test_enqueue_with_failure():
+       """Failed tasks store error information."""
+       result = fail.enqueue()
+       assert result.status.name == "FAILED"
+       assert len(result.errors) > 0
+       assert "boom" in result.errors[0].traceback
 
-   def test_enqueue_with_error(sync_backend, db):
-       def fail():
-           raise ValueError("boom")
+   @pytest.mark.django_db
+   def test_task_args_must_be_json_serializable():
+       """Django tasks enforce JSON-serializable arguments."""
+       from datetime import datetime
 
-       task_id = enqueue(fail)
-       status = get_status(task_id)
+       @task
+       def process(data):
+           return data
 
-       assert status["status"] == "failed"
-       assert "boom" in status["error"]
-
-   def test_custom_task_id(sync_backend, db):
-       task_id = enqueue(lambda: 42, task_id="my-task")
-       assert task_id == "my-task"
-       assert get_status("my-task")["result"] == 42
+       with pytest.raises(TypeError):
+           process.enqueue(data=datetime.now())
    ```
 
 ### File Changes
 
 | File | Action | Description |
 |------|--------|-------------|
-| `apps/common/models/task_status.py` | Create | TaskStatus model |
-| `apps/common/models/__init__.py` | Modify | Export TaskStatus |
-| `apps/common/services/tasks.py` | Create | Task service + backends |
-| `apps/common/tests/test_tasks.py` | Create | Unit tests |
-| `apps/common/migrations/0004_task_status.py` | Create | Migration |
-| `settings/base.py` | Modify | Add TASK_BACKEND setting |
-| `settings/production.py` | Modify | Add Q_CLUSTER config |
-| `pyproject.toml` | Modify | Add django-q2 dependency |
+| `pyproject.toml` | Modify | Upgrade `Django>=6.0`, add `django-tasks-db` |
+| `settings/base.py` | Modify | Add `django_tasks_db` to `INSTALLED_APPS`, add `TASKS` config |
+| `settings/production.py` | Modify | Override `TASKS` to use `DatabaseBackend` |
+| `apps/common/tests/test_tasks.py` | Create | Validation tests for task framework |
+
+**No custom models, no custom service module, no migrations in our code.**
+
+### Render Deployment
+
+Add a Background Worker service alongside the existing web service:
+
+| Setting | Value |
+|---------|-------|
+| Name | `cuttlefish-worker` |
+| Type | Background Worker |
+| Build Command | (same as web service) |
+| Start Command | `python manage.py db_worker` |
+| Environment | Same env group as web service |
+
+The worker shares the same Postgres database and `DATABASE_URL`.
+
+## Django 6.0 Upgrade Notes
+
+Check for breaking changes before upgrading:
+- Review [Django 6.0 release notes](https://docs.djangoproject.com/en/6.0/releases/6.0/) for deprecation removals
+- Run `python -Wa manage.py check` after upgrade to surface warnings
+- Run full test suite to catch regressions
+- Third-party packages may need updates — check compatibility of `django-unfold`, `drf-yasg`, `django-debug-toolbar`, etc.
 
 ## Rabbit Holes
 
-- **Don't add Celery backend** - Django-Q2 is simpler, uses Django ORM, no Redis required for basic setup
-- **Don't add priority queues** - All podcast tasks are similar priority
-- **Don't add task chaining** - Workflow orchestration is handled by the calling code
+- **Don't build a custom task abstraction** — Django 6.0 provides exactly this
+- **Don't use Redis for the task backend** — DatabaseBackend uses Postgres (already available), simpler to operate. Redis stays for caching only
+- **Don't add priority queues or task chaining** — not needed yet
+- **Don't add Celery** — DatabaseBackend is sufficient at this scale
 
 ## No-Gos
 
 - No distributed task locking (not needed yet)
 - No scheduled/cron tasks (separate concern)
-- No task retries (caller handles retry logic)
+- No task retries in the framework (caller handles retry logic)
+- No custom task status model (Django manages this)
 
 ## Acceptance Criteria
 
-- [ ] Module importable: `from apps.common.services.tasks import enqueue, get_status`
-- [ ] At least two backends: synchronous (dev) and async worker (prod)
-- [ ] Task status persisted in DB and queryable
-- [ ] Backend selected by Django settings (`TASK_BACKEND`)
-- [ ] Tests pass with synchronous backend
-- [ ] No podcast-specific code — general-purpose utility
+- [x] Django upgraded to 6.0+
+- [x] `TASKS` setting configured with `ImmediateBackend` (dev) and `DatabaseBackend` (prod)
+- [x] `django-tasks-db` installed and migrations applied
+- [x] Tasks definable with `@task` decorator and enqueueable with `.enqueue()`
+- [x] Task results trackable via `.get_result()` and `.refresh()`
+- [x] Tests pass with `ImmediateBackend` — status is `SUCCESSFUL` (not `COMPLETE`)
+- [x] Worker command `manage.py db_worker` documented for Render deployment
+- [x] No podcast-specific code — general-purpose infrastructure
