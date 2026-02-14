@@ -44,6 +44,7 @@ THIRD_PARTY_APPS = [
     "django_htmx",
     "drf_yasg",
     "django_extensions",
+    "django_tasks_db",
 ]
 
 PROJECT_APPS = [
@@ -63,6 +64,13 @@ if LOCAL:
         "django_browser_reload",
     ]
 SITE_ID = 1
+
+# Background task backend (ImmediateBackend for dev/test — runs tasks inline)
+TASKS = {
+    "default": {
+        "BACKEND": "django.tasks.backends.immediate.ImmediateBackend",
+    }
+}
 
 # Middleware configuration
 MIDDLEWARE = [

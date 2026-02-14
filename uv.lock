@@ -872,6 +872,7 @@ dependencies = [
     { name = "django-redis" },
     { name = "django-storages" },
     { name = "django-tailwind-cli" },
+    { name = "django-tasks-db" },
     { name = "django-unfold" },
     { name = "django-widget-tweaks" },
     { name = "djangorestframework" },
@@ -959,6 +960,7 @@ requires-dist = [
     { name = "django-storages", specifier = ">=1.14.6" },
     { name = "django-stubs", marker = "extra == 'dev'" },
     { name = "django-tailwind-cli", specifier = ">=4.4.2" },
+    { name = "django-tasks-db", specifier = ">=0.12.0" },
     { name = "django-unfold", specifier = ">=0.71.0" },
     { name = "django-widget-tweaks", specifier = ">=1.5.0" },
     { name = "djangorestframework", specifier = ">=3.16.1" },
@@ -1268,6 +1270,35 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/f0/6d/ad632a539d7cc74a07e43f6292dae66ea2c8944c637da22945768cc9b846/django_tailwind_cli-4.5.1.tar.gz", hash = "sha256:e3cdacab1d7e81f08c3ec44a4e8217c7b3a1e986825c1cd4c2acca58fbc584ac", size = 99414 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/28/3f/e1fa6aa71e15b2c7f1d4807657be2dfb3b17c7ed9b9595fea30e8a8f36bc/django_tailwind_cli-4.5.1-py3-none-any.whl", hash = "sha256:72991e93c070da864c63d2af96cf601b70af51fadfae786b9326b2ff0e124a72", size = 34275 },
+]
+
+[[package]]
+name = "django-tasks"
+version = "0.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "django" },
+    { name = "django-stubs-ext" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1d/6e/34d4e77bb7951e5a5acbd846f43240f062c68bb04d9c246cb446a55d4cbc/django_tasks-0.12.0.tar.gz", hash = "sha256:58be66c1e487da32a3ce7320bd1949d0d1dc381b9004819f92591eb37fb2c1b8", size = 15445 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/e7/40c45768e84efd77e3ae6ffdcd2b5540011036cbb00c6df6ef2a2ad69551/django_tasks-0.12.0-py3-none-any.whl", hash = "sha256:ffcc1d7bdfad3bc5ef9c2d498596c6546484c9ec6b182fb9709c691eb66a8709", size = 15758 },
+]
+
+[[package]]
+name = "django-tasks-db"
+version = "0.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "django" },
+    { name = "django-stubs-ext" },
+    { name = "django-tasks" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f4/25/bc21ad4a610634f0a66f4faea4522eed26b55dbd50c4ac853128d24091d3/django_tasks_db-0.12.0.tar.gz", hash = "sha256:314d486b8c1786705b4afaf03dadaf0b1b104163acce9c5d9c9bb2aef205c501", size = 26724 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/09/1c/e14198615e22df28b333540f2e506d6ddef7aff16d510818e94ebc01440c/django_tasks_db-0.12.0-py3-none-any.whl", hash = "sha256:69e3a1edcbf1efeeb1268da465e8ea5296ddd80834719769acc719b82da2d62e", size = 28832 },
 ]
 
 [[package]]

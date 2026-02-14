@@ -31,3 +31,11 @@ CSRF_TRUSTED_ORIGINS = [
 
 # File Storage Service - use Supabase in production
 STORAGE_BACKEND = "supabase"
+
+# Background task backend (DatabaseBackend for production — worker via manage.py db_worker)
+TASKS = {
+    "default": {
+        "BACKEND": "django_tasks_db.DatabaseBackend",
+        "QUEUES": ["default"],
+    }
+}
