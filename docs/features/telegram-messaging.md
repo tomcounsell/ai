@@ -4,20 +4,23 @@ Unified interface for reading and sending Telegram messages via the `valor-teleg
 
 ## Overview
 
-Consolidates two previously separate skills (`searching-message-history` and `get-telegram-messages`) into a single unified tool. Messages are read from a local SQLite cache populated by the bridge, while sending uses Telethon directly.
+Consolidates previously separate skills into a single unified tool. Both reading and sending use Telethon to connect directly to the Telegram API. Fetched messages are cached in SQLite for fast subsequent access.
 
 ## CLI Reference
 
 ### Reading Messages
 
 ```bash
-# Recent messages from a group
+# Recent messages from a group (live fetch from Telegram)
 valor-telegram read --chat "Dev: Valor" --limit 10
 
-# Recent messages from a DM user
+# Recent messages from a DM user (same code path as groups)
 valor-telegram read --chat "Tom" --limit 5
 
-# Search by keyword
+# Cache-only mode (skip live fetch, use SQLite only)
+valor-telegram read --chat "Dev: Valor" --limit 10 --cached
+
+# Search by keyword (uses SQLite cache)
 valor-telegram read --chat "Dev: Valor" --search "deployment"
 
 # Time-filtered messages
@@ -52,7 +55,17 @@ valor-telegram chats
 ## Architecture
 
 ```
-valor-telegram read
+valor-telegram read (default: live fetch)
+    ↓
+resolve_chat(name) → chat_id
+    ↓
+Telethon client → Telegram API → get_messages(chat_id)
+    ↓
+Upsert into SQLite cache
+    ↓
+Format and display
+
+valor-telegram read --cached (cache-only)
     ↓
 resolve_chat(name) → chat_id
     ↓
@@ -80,10 +93,15 @@ Chat names are resolved in order:
 
 | Component | Source | Purpose |
 |-----------|--------|---------|
-| Reading | SQLite (`~/.valor/telegram_history.db`) | Cached messages from bridge |
+| Reading (default) | Telethon (live API) | Real-time messages from any chat |
+| Reading (--cached) | SQLite (`~/.valor/telegram_history.db`) | Fast offline access to cached messages |
 | Sending | Telethon (direct API) | Real-time message delivery |
 | Chat names | SQLite `chats` table | Group name → chat_id mapping |
 | User names | `dm_whitelist.json` | Username → user_id mapping |
+
+### Fallback Behavior
+
+If live fetch fails (no session, network issues), the CLI automatically falls back to the SQLite cache with a warning. This ensures reads always return data when available.
 
 ## Files
 

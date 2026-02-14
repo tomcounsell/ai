@@ -13,11 +13,14 @@ Unified interface for reading and sending Telegram messages.
 ## Reading Messages
 
 ```bash
-# Recent messages from a chat
+# Recent messages from a chat (live fetch from Telegram API)
 valor-telegram read --chat "Dev: Valor" --limit 10
 
-# Recent messages from a DM user
+# Recent messages from a DM user (same code path as groups)
 valor-telegram read --chat "Tom" --limit 5
+
+# Cache-only mode (skip live fetch, use SQLite)
+valor-telegram read --chat "Dev: Valor" --limit 10 --cached
 
 # Search messages by keyword
 valor-telegram read --chat "Dev: Valor" --search "deployment"
@@ -56,12 +59,16 @@ valor-telegram chats
 - **Check what someone said**: `valor-telegram read --chat "Tom" --limit 10`
 - **Find a past discussion**: `valor-telegram read --chat "Dev: Valor" --search "authentication"`
 - **Get recent context**: `valor-telegram read --chat "Dev: Valor" --since "2 hours ago"`
+- **Fast offline reads**: `valor-telegram read --chat "Dev: Valor" --cached --limit 20`
 - **Send a status update**: `valor-telegram send --chat "Dev: Valor" "Deployment complete"`
 - **Share a file**: `valor-telegram send --chat "Tom" "Here's the report" --file ./report.pdf`
 
 ## Notes
 
 - Chat names are resolved from the history database (groups) and DM whitelist (users)
-- Messages are read from the SQLite cache at `~/.valor/telegram_history.db`
+- Reads are **live by default** — messages are fetched directly from Telegram via Telethon
+- Fetched messages are automatically cached in SQLite for fast subsequent access
+- Use `--cached` to skip the live API call and read from SQLite only (faster, works offline)
+- If live fetch fails (network, session issues), reads fall back to cache automatically
 - Sending uses Telethon directly (requires bridge session and API credentials)
 - Use `valor-telegram chats` if unsure of the exact chat name
