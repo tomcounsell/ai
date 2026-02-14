@@ -1,110 +1,87 @@
 # Documentation Lifecycle Enforcement
 
-Automated validation and migration system that ensures plans include proper documentation tasks, verifies documentation changes actually happen, and manages the lifecycle from plan completion to feature documentation.
+Automated validation and enforcement system that ensures documentation is a first-class deliverable throughout the plan-build-ship lifecycle.
 
 ## How It Works
 
-The documentation lifecycle follows a multi-stage enforcement flow:
+The documentation lifecycle has three enforcement gates plus a cascade system:
 
-### 1. Plan Creation - Documentation Section Validation
+### Gate 1: Plan Creation (PostToolUse Hook)
 
-When `/make-plan` creates a plan, a Stop hook (`validate_documentation_section.py`) validates that the plan includes a properly structured `## Documentation` section:
+When a plan document is written to `docs/plans/`, a PostToolUse hook validates the `## Documentation` section:
 
-- **Section must exist** - Cannot skip documentation planning
-- **Section must have substance** - No empty placeholders or "TBD"
-- **Must include checklist items OR explicit exemption** - Either:
-  - At least 2 checklist items (`- [ ]`) specifying docs to create/update
-  - "No documentation changes needed" with explanation (50+ chars)
+- **Trigger**: Any `Write` tool call targeting `docs/plans/*.md`
+- **Validator**: `.claude/hooks/validators/validate_documentation_section.py`
+- **Rules**:
+  - Section must exist with content below it
+  - Must contain at least one checkbox task (`- [ ]`) with a doc path, OR
+  - Explicit exemption phrase ("No documentation changes needed") with 50+ char justification
+  - Empty or missing sections block the write
 
-If validation fails, the agent is blocked from proceeding until the section is complete.
+**Example valid section:**
+```markdown
+## Documentation
+- [ ] Create `docs/features/my-feature.md` describing the new capability
+- [ ] Add entry to `docs/features/README.md` index table
+```
 
-### 2. Plan Execution - Documentation Change Verification
+**Example valid exemption:**
+```markdown
+## Documentation
+No documentation changes needed — this is a one-line config fix with no user-facing or architectural impact.
+```
 
-After implementing the plan, `validate_docs_changed.py` verifies that promised documentation changes actually happened:
+### Gate 2: Build Completion (Post-Build Validation)
 
-- **Extracts expected doc paths** from the plan's `## Documentation` section (files in backticks)
-- **Checks git status** for changed `.md` files (staged, unstaged, untracked)
-- **Validates at least one match** - At least one expected doc was created/modified
-- **Respects explicit exemptions** - If plan states "no docs needed", validation passes
+After the build agent creates a PR, a validation script checks that promised docs were actually delivered:
 
-Exit codes:
-- `0` - Validation passed (docs changed as planned)
-- `1` - Validation failed (expected docs not changed)
-- `2` - File or command error
+- **Script**: `scripts/validate_docs_changed.py`
+- **Invoked by**: Build skill (Step 7.5 in `.claude/skills/build/SKILL.md`)
+- **Phase 1 — Diff Check**: Parses the plan's `## Documentation` section, extracts expected doc paths, and verifies they appear in `git diff` against the base branch
+- **Phase 2 — Stale Marker Scan**: Scans all changed `.md` files for stale markers (`DEPRECATED`, `LEGACY`, `OBSOLETE`, `TODO: remove`, `FIXME: update`)
+- **Flags**: `--dry-run` (report only), `--base-branch` (compare target, defaults to `main`)
+- **Exit codes**: 0 = pass, 1 = missing docs (hard fail), 2 = stale markers found (warning)
 
-### 3. Related Documentation Scanning
+### Gate 3: Plan Migration
 
-When code changes occur, `scan_related_docs.py` identifies documentation that may need updates:
+After work ships, `scripts/migrate_completed_plan.py` validates feature docs and cleans up:
 
-**Scanning Strategy**:
-- **HIGH Confidence**: Direct file path references (exact match)
-- **MED-HIGH Confidence**: Function/class name references from changed files
-- **MED Confidence**: Directory or module references
-- **LOW Confidence**: Keyword matches (filename without extension)
-
-For each `.md` file in `docs/`, the scanner:
-1. Extracts function and class names from changed Python files
-2. Searches for file paths, identifiers, directories, and keywords
-3. Returns confidence-scored results sorted by relevance
-
-### 4. GitHub Issue Creation
-
-`create_doc_review_issue.py` creates GitHub issues for HIGH and MED-HIGH confidence matches:
-
-- **Groups results by document** for clarity
-- **Formats issue with context**:
-  - Summary (changed files count, affected docs count)
-  - List of changed files
-  - Documents requiring review (grouped by confidence)
-  - Suggested review actions
-- **Uses `gh` CLI** to create issue with `docs-review` label
-- **Pipes from scanner**: `scan_related_docs.py --json | create_doc_review_issue.py`
-
-### 5. Plan Migration to Feature Documentation
-
-After work ships, `migrate_completed_plan.py` validates feature docs and cleans up:
-
-**Validation Checks**:
-1. Feature doc exists at path specified in plan's `## Documentation` section
-2. Feature doc has title (`# Heading`) and substantial content (10+ chars beyond title)
-3. Feature is indexed in `docs/features/README.md` (table entry with feature name)
-4. Tracking issue can be closed via `gh` CLI
-
-**On Success**:
-- Deletes the plan file from `docs/plans/`
-- Closes tracking issue with "Plan completed and migrated to feature documentation" comment
+- Validates that the feature doc exists under `docs/features/`
+- Checks the feature doc has substantive content (200+ chars excluding frontmatter)
+- Verifies the feature is indexed in `docs/features/README.md`
+- Only then deletes the plan and closes the tracking GitHub issue via `gh` CLI
 
 **Dry-Run Mode**: Use `--dry-run` to validate without making changes.
 
+### Documentation Cascade (`/update-docs`)
+
+A slash command (`.claude/commands/update-docs.md`) automates documentation updates after code changes:
+
+- **Trigger**: Invoked manually or as Step 7.6 in the build skill
+- **Phase 1 — Explore**: Two parallel agents examine recent code changes and inventory all existing docs
+- **Phase 2 — Triage**: Cross-reference changes against docs to identify what needs updates, creation, or deletion
+- **Phase 3 — Edit**: Surgical, targeted edits to affected docs only (no full rewrites)
+- **Phase 4 — Verify**: Checks for broken links, verifies feature index, runs `validate_docs_changed.py` in dry-run mode, and commits all doc changes
+- **Scope**: CLAUDE.md, feature docs, plans, guides, reference docs, architecture docs, README files
+
 ## Components
 
-| Path | Purpose |
-|------|---------|
-| `.claude/hooks/validators/validate_documentation_section.py` | Stop hook validator for plan documentation sections |
-| `scripts/validate_docs_changed.py` | Post-implementation validator that docs were actually changed |
-| `scripts/scan_related_docs.py` | Confidence-scored scanner for docs referencing changed files |
-| `scripts/create_doc_review_issue.py` | GitHub issue creator for HIGH/MED-HIGH doc matches |
-| `scripts/migrate_completed_plan.py` | Feature doc validator and plan cleanup tool |
+| Component | Path | Purpose |
+|-----------|------|---------|
+| Plan validator | `.claude/hooks/validators/validate_documentation_section.py` | Gate 1: Block plans without proper doc section |
+| Hook wiring | `.claude/settings.json` (PostToolUse on Write) | Connects validator to file writes |
+| Build validator | `scripts/validate_docs_changed.py` | Gate 2: Verify docs delivered post-build |
+| Build integration | `.claude/skills/build/SKILL.md` (Steps 7.5 + 7.6) | Invokes validator then cascade in build flow |
+| Migration validator | `scripts/migrate_completed_plan.py` | Gate 3: Block migration without feature doc |
+| Cascade command | `.claude/commands/update-docs.md` | Automated doc updates after code changes |
 
 ## Usage
 
 ### Validate Documentation Section (Plan Creation)
 
-Automatically runs via Stop hook when `/make-plan` finishes. Manual validation:
+Runs automatically via PostToolUse hook when writing plan files. The hook reads from stdin and validates the Write tool input.
 
-```bash
-# Validate specific plan
-uv run .claude/hooks/validators/validate_documentation_section.py docs/plans/my-feature.md
-
-# Auto-detect newest plan file
-uv run .claude/hooks/validators/validate_documentation_section.py
-```
-
-**Exit codes**:
-- `0` - Validation passed, prints JSON `{"result": "continue", "message": "..."}`
-- `2` - Validation failed, prints error to stderr, blocks agent
-
-### Validate Docs Were Changed (Post-Implementation)
+### Validate Docs Were Changed (Post-Build)
 
 ```bash
 # Validate after implementing plan
@@ -112,44 +89,10 @@ python scripts/validate_docs_changed.py docs/plans/my-feature.md
 
 # Dry-run mode (show what would be validated)
 python scripts/validate_docs_changed.py docs/plans/my-feature.md --dry-run
+
+# Compare against different base branch
+python scripts/validate_docs_changed.py docs/plans/my-feature.md --base-branch develop
 ```
-
-**Exit codes**:
-- `0` - Validation passed (docs changed or exempted)
-- `1` - Validation failed (expected docs not changed)
-- `2` - File or command error
-
-### Scan Related Documentation
-
-```bash
-# Scan for docs referencing changed files
-python scripts/scan_related_docs.py bridge/telegram_bridge.py tools/search.py
-
-# JSON output (for piping to issue creator)
-python scripts/scan_related_docs.py --json bridge/telegram_bridge.py
-```
-
-**Output formats**:
-- Text: Human-readable grouped by confidence level
-- JSON: Structured data with `changed_files`, `docs_directory`, `total_matches`, `results`
-
-### Create Doc Review Issue
-
-```bash
-# From stdin (piped from scanner)
-python scripts/scan_related_docs.py --json file.py | python scripts/create_doc_review_issue.py
-
-# From file
-python scripts/scan_related_docs.py --json file.py > scan.json
-python scripts/create_doc_review_issue.py --scan-output scan.json
-
-# Custom title and dry-run
-python scripts/create_doc_review_issue.py --scan-output scan.json \
-  --title "Review docs after feature X" \
-  --dry-run
-```
-
-**Requirements**: GitHub CLI (`gh`) must be installed and authenticated.
 
 ### Migrate Completed Plan
 
@@ -159,33 +102,31 @@ python scripts/migrate_completed_plan.py docs/plans/my-feature.md
 
 # Dry-run (validate only)
 python scripts/migrate_completed_plan.py docs/plans/my-feature.md --dry-run
-```
 
-**Exit codes**:
-- `0` - Plan successfully migrated (or would be in dry-run)
-- `1` - Validation failed, plan not migrated
-- `2` - File or command error
+# Skip issue closing
+python scripts/migrate_completed_plan.py docs/plans/my-feature.md --skip-issue
+```
 
 ## Troubleshooting
 
 | Problem | Cause | Solution |
 |---------|-------|----------|
-| Plan validation fails with "missing section" | No `## Documentation` section in plan | Add section following template in error message |
-| Plan validation fails with "incomplete section" | Section is empty or has only placeholders | Add specific checklist items OR "No documentation changes needed" with explanation |
-| Docs validation fails after implementation | Expected docs not created/modified | Create/modify the docs listed in plan, OR add exemption statement to plan |
-| Scanner returns no results | Changed files not referenced in docs | This is normal - not all code changes require doc updates |
-| Issue creator fails | `gh` CLI not installed/authenticated | Install from https://cli.github.com/ and run `gh auth login` |
-| Migration fails - feature doc not found | Doc path in plan doesn't match actual location | Ensure `docs/features/` path in plan matches created doc |
-| Migration fails - feature not indexed | Feature missing from README.md table | Add entry to `docs/features/README.md` following format |
-| Migration fails - can't close issue | `gh` CLI can't extract issue number | Check that `tracking:` URL in plan frontmatter is valid GitHub issue URL |
+| Plan validation blocks write | Missing or empty `## Documentation` section | Add checklist items with doc paths OR explicit exemption with 50+ char justification |
+| Build validation fails (exit 1) | Expected docs not created/modified | Create/modify the docs listed in plan's Documentation section |
+| Build validation warns (exit 2) | Stale markers found in changed docs | Remove `DEPRECATED`/`LEGACY`/`OBSOLETE` markers from documentation |
+| Migration fails - doc not found | Feature doc path doesn't match plan | Ensure `docs/features/` path in plan matches created doc |
+| Migration fails - not indexed | Feature missing from README.md | Add entry to `docs/features/README.md` table |
+| Migration fails - can't close issue | `gh` CLI issue | Verify `tracking:` URL in plan frontmatter is valid |
 
-## Design Principles
+## Limitations
 
-From the plan (`docs/plans/documentation-lifecycle-enforcement.md`):
+- Gate 1 validates Markdown structure, not content quality
+- Gate 2 diff check relies on file paths matching between plan and actual files
+- Stale marker scan uses simple string matching, not semantic analysis
+- Migration validator checks existence and length, not comprehensiveness
 
-- **Prevention over detection** - Block incomplete plans at creation time
-- **Explicit over implicit** - Require clear documentation intent (tasks or exemption)
-- **Confidence-based triage** - Only escalate HIGH/MED-HIGH matches to issues
-- **Automated cleanup** - Migrate completed plans automatically, don't accumulate debt
-- **Lightweight validation** - Simple pattern matching, no heavy parsing
-- **No silent failures** - Validation blocks agent progress, requires explicit fixing
+## Related
+
+- [Session Isolation](session-isolation.md) — Task list and worktree scoping
+- [Bridge Self-Healing](bridge-self-healing.md) — Another lifecycle enforcement pattern
+- Plan requirements in `CLAUDE.md` — Documents the three required plan sections
