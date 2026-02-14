@@ -52,6 +52,11 @@ def _mock_urlopen(url):
 class ImportPodcastFeedTestCase(TestCase):
     """Tests for the import_podcast_feed management command."""
 
+    def setUp(self):
+        # Clean up any pre-existing records to ensure test isolation
+        Episode.objects.all().delete()
+        Podcast.objects.all().delete()
+
     @mock.patch("urllib.request.urlopen", side_effect=_mock_urlopen)
     def test_import_creates_podcast(self, mock_url):
         """Verify podcast record created with correct fields."""
@@ -166,6 +171,11 @@ class ImportPodcastFeedTestCase(TestCase):
 
 class ImportBlankAudioUrlTestCase(TestCase):
     """Tests for the blank audio_url guard in import_podcast_feed."""
+
+    def setUp(self):
+        # Clean up any pre-existing records to ensure test isolation
+        Episode.objects.all().delete()
+        Podcast.objects.all().delete()
 
     @mock.patch("urllib.request.urlopen", side_effect=_mock_urlopen)
     def test_import_skips_dedup_when_audio_url_blank(self, mock_url):

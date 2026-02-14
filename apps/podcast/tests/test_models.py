@@ -8,6 +8,10 @@ from apps.podcast.models import Episode, EpisodeArtifact, Podcast
 class PodcastModelTestCase(TestCase):
     """Tests for the Podcast model."""
 
+    def setUp(self):
+        # Clean up any pre-existing records to ensure test isolation
+        Podcast.objects.all().delete()
+
     def test_create_podcast(self):
         """Create a podcast with all required fields, verify it saves."""
         podcast = Podcast.objects.create(
@@ -89,6 +93,10 @@ class EpisodeModelTestCase(TestCase):
     """Tests for the Episode model."""
 
     def setUp(self):
+        # Clean up any pre-existing records to ensure test isolation
+        Episode.objects.all().delete()
+        Podcast.objects.all().delete()
+
         self.podcast = Podcast.objects.create(
             title="Test Podcast",
             slug="test-podcast",
@@ -379,6 +387,11 @@ class EpisodeArtifactModelTestCase(TestCase):
     """Tests for the EpisodeArtifact model."""
 
     def setUp(self):
+        # Clean up any pre-existing records to ensure test isolation
+        EpisodeArtifact.objects.all().delete()
+        Episode.objects.all().delete()
+        Podcast.objects.all().delete()
+
         self.podcast = Podcast.objects.create(
             title="Artifact Podcast",
             slug="artifact-podcast",

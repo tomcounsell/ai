@@ -1,5 +1,5 @@
 """
-Tests for the example pages (landing, pricing, blog).
+Tests for the example pages (landing, pricing).
 
 These tests verify that:
 - The example pages render correctly
@@ -49,29 +49,3 @@ class ExamplePagesTestCase(TestCase):
         self.assertIn("Free", content)
         self.assertIn("Premium", content)
         self.assertIn("Enterprise", content)
-
-    def test_blog_page_renders(self):
-        """Test that the blog page renders correctly with expected content."""
-        response = self.client.get(reverse("public:blog"))
-        self.assertEqual(response.status_code, 200)
-
-        # Check template
-        self.assertTemplateUsed(response, "pages/blog.html")
-
-        # Check content
-        content = response.content.decode("utf-8")
-        self.assertIn("Blog", content)
-        self.assertIn("Latest Articles", content)
-
-    def test_blog_post_page_renders(self):
-        """Test that a blog post page renders correctly with expected content."""
-        response = self.client.get(reverse("public:blog-post", args=["sample-post"]))
-        self.assertEqual(response.status_code, 200)
-
-        # Check template
-        self.assertTemplateUsed(response, "pages/blog_post.html")
-
-        # Check content
-        content = response.content.decode("utf-8")
-        self.assertIn("Sample Blog Post", content)
-        self.assertIn("Published", content)

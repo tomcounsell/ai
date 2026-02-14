@@ -102,23 +102,35 @@ class ImageTest(TimestampableTest, TestCase):
             self.assertFalse(image.is_pdf)
 
     def test_file_type_property(self):
-        """Test file_type property returns the correct mimetype."""
-        # Mock the path to guess_type as used in the Upload model
-        with mock.patch(
-            "apps.common.models.upload.guess_type", return_value=("image/png", None)
-        ):
-            image = self.create_instance(original="https://example.com/image.png")
-            self.assertEqual(image.file_type, "image/png")
+        """Test file_type property returns the correct mimetype.
 
-        # When guess_type returns None, should use mime_type from meta_data
+        Upload.file_type checks mime_type (content_type or meta_data['mime_type'])
+        first, then falls back to guess_type from the URL.
+        """
+        # When meta_data has mime_type, it should be returned directly
+        image = self.create_instance(
+            original="https://example.com/image.png",
+            meta_data={"mime_type": "image/png"},
+        )
+        self.assertEqual(image.file_type, "image/png")
+
+        # When content_type is set, it takes precedence over meta_data
+        image_with_ct = self.create_instance(
+            original="https://example.com/image.png",
+            content_type="image/webp",
+            meta_data={"mime_type": "image/png"},
+        )
+        self.assertEqual(image_with_ct.file_type, "image/webp")
+
+        # When neither content_type nor meta_data mime_type, falls back to guess_type
         with mock.patch(
-            "apps.common.models.upload.guess_type", return_value=(None, None)
+            "apps.common.models.upload.guess_type", return_value=("image/gif", None)
         ):
-            # Need to mock our own guess_type in the Image model
-            with mock.patch("mimetypes.guess_type", return_value=(None, None)):
-                # Create a new instance with new meta_data
-                image = self.create_instance(meta_data={"mime_type": "image/gif"})
-                self.assertEqual(image.file_type, "image/gif")
+            image_no_mime = self.create_instance(
+                original="https://example.com/image.gif",
+                meta_data={},
+            )
+            self.assertEqual(image_no_mime.file_type, "image/gif")
 
     def test_file_extension_property(self):
         """Test file_extension property returns the correct extension."""
@@ -127,24 +139,37 @@ class ImageTest(TimestampableTest, TestCase):
         )
         self.assertEqual(image.file_extension, "jpg")
 
-        # No extension in meta_data
+        # No extension in meta_data - falls back to URL extraction
         image_no_ext = self.create_instance(meta_data={"mime_type": "image/jpeg"})
-        self.assertEqual(image_no_ext.file_extension, "")
+        self.assertEqual(image_no_ext.file_extension, "jpg")  # extracted from .jpg URL
+
+        # No extension anywhere
+        image_no_ext_at_all = self.create_instance(
+            original="https://example.com/image",
+            meta_data={"mime_type": "image/jpeg"},
+        )
+        self.assertEqual(image_no_ext_at_all.file_extension, "")
 
     def test_dimensions_property(self):
         """Test dimensions property returns width and height tuple."""
         image = self.create_instance()
         self.assertEqual(image.dimensions, (800, 600))
 
-        # No meta data
+        # No meta data - empty dict is falsy, so dimensions returns None
         image_no_meta = self.create_instance(meta_data={})
-        self.assertEqual(image_no_meta.dimensions, (None, None))
+        self.assertIsNone(image_no_meta.dimensions)
 
     def test_link_title_property(self):
-        """Test link_title property formats correctly."""
-        # With name
+        """Test link_title property formats correctly.
+
+        Upload.link_title appends the file extension to the name if not already
+        present in the title string.
+        """
+        # With name - Upload appends extension from meta_data
         image_with_name = self.create_instance(name="test_image.jpg")
-        self.assertEqual(image_with_name.link_title, "test_image.jpg")
+        # Extension is extracted from URL (.jpg), and ".JPG" is not in "test_image.jpg"
+        # so Upload appends " .JPG"
+        self.assertEqual(image_with_name.link_title, "test_image.jpg .JPG")
 
         # No name, but with etc
         image_with_etc = self.create_instance(

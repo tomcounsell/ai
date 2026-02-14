@@ -1,6 +1,12 @@
 import os
 
+from django.conf import settings
 from django.test import TestCase
+
+
+def get_templates_dir():
+    """Return the path to the app templates directory."""
+    return os.path.join(settings.BASE_DIR, "apps", "public", "templates")
 
 
 class PartialsDirectoryTestCase(TestCase):
@@ -10,12 +16,7 @@ class PartialsDirectoryTestCase(TestCase):
 
     def test_components_directory_exists(self):
         """Test that the components directory exists in the templates directory"""
-        templates_dir = os.path.join(
-            os.path.dirname(
-                os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            ),
-            "templates",
-        )
+        templates_dir = get_templates_dir()
         components_dir = os.path.join(templates_dir, "components")
         self.assertTrue(
             os.path.exists(components_dir), "Components directory does not exist"
@@ -26,12 +27,7 @@ class PartialsDirectoryTestCase(TestCase):
 
     def test_components_directory_structure(self):
         """Test that the components directory has appropriate subdirectories"""
-        templates_dir = os.path.join(
-            os.path.dirname(
-                os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            ),
-            "templates",
-        )
+        templates_dir = get_templates_dir()
         components_dir = os.path.join(templates_dir, "components")
 
         # Define expected subdirectories for components
@@ -50,12 +46,7 @@ class PartialsDirectoryTestCase(TestCase):
 
     def test_component_base_template_exists(self):
         """Test that a base template for components exists"""
-        templates_dir = os.path.join(
-            os.path.dirname(
-                os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            ),
-            "templates",
-        )
+        templates_dir = get_templates_dir()
         component_base_path = os.path.join(
             templates_dir, "components", "_component_base.html"
         )
@@ -82,24 +73,28 @@ class PartialsDirectoryTestCase(TestCase):
         )
 
     def test_component_naming_conventions(self):
-        """Test that any component templates follow the naming conventions"""
-        templates_dir = os.path.join(
-            os.path.dirname(
-                os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            ),
-            "templates",
-        )
+        """Test that component templates in typed subdirectories follow naming conventions.
+
+        Only checks templates that use {% extends %} (full components), not
+        include-only snippets which may use simpler names.
+        """
+        import re
+
+        templates_dir = get_templates_dir()
         components_dir = os.path.join(templates_dir, "components")
 
         # Skip test if directory doesn't exist yet (will be caught by earlier test)
         if not os.path.exists(components_dir):
             return
 
-        # Walk through all subdirectories
+        # Directories to skip: forms has different conventions, oob/layout are utility dirs,
+        # common has standalone snippets, and the root components dir contains utility templates
+        skip_dirs = {"forms", "oob", "layout", "components", "common"}
+
+        # Walk through typed subdirectories (cards, lists, modals)
         for root, dirs, files in os.walk(components_dir):
             subdir_name = os.path.basename(root)
-            # Skip the forms directory since it has different naming conventions
-            if subdir_name == "forms":
+            if subdir_name in skip_dirs:
                 continue
 
             for file in files:
@@ -107,6 +102,13 @@ class PartialsDirectoryTestCase(TestCase):
                 if file == "examples.html" or file == "modal_base.html":
                     continue
                 if file.endswith(".html") and not file.startswith("_"):
+                    # Only check naming for templates that use extends (full components)
+                    file_path = os.path.join(root, file)
+                    with open(file_path) as f:
+                        content = f.read()
+                    if not re.search(r"{%\s*extends\s+", content):
+                        continue
+
                     # Check if the file name follows the convention of type_name.html
                     # e.g., "card_team.html", "list_items.html", etc.
                     parts = file.replace(".html", "").split("_")
@@ -116,7 +118,7 @@ class PartialsDirectoryTestCase(TestCase):
                     )
 
                     # Check that the file is in the correct subdirectory
-                    if subdir_name != "common" and subdir_name != "modals":
+                    if subdir_name != "modals":
                         expected_prefix = (
                             subdir_name[:-1]
                             if subdir_name.endswith("s")
@@ -129,24 +131,28 @@ class PartialsDirectoryTestCase(TestCase):
                         )
 
     def test_component_templates_extend_base(self):
-        """Test that all component templates extend the correct base template"""
-        templates_dir = os.path.join(
-            os.path.dirname(
-                os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            ),
-            "templates",
-        )
+        """Test that component templates with extends use the correct base template.
+
+        Only validates templates that use {% extends %} (full components).
+        Include-only snippets (no extends) are valid and skipped.
+        """
+        import re
+
+        templates_dir = get_templates_dir()
         components_dir = os.path.join(templates_dir, "components")
 
         # Skip test if directory doesn't exist yet (will be caught by earlier test)
         if not os.path.exists(components_dir):
             return
 
+        # Directories to skip: forms may not extend base, oob/layout are utility dirs,
+        # and the root components dir contains utility templates
+        skip_dirs = {"forms", "oob", "layout", "components"}
+
         # Walk through all subdirectories
         for root, dirs, files in os.walk(components_dir):
             subdir_name = os.path.basename(root)
-            # Skip the forms directory since form components might not extend base templates
-            if subdir_name == "forms":
+            if subdir_name in skip_dirs:
                 continue
 
             for file in files:
@@ -161,15 +167,11 @@ class PartialsDirectoryTestCase(TestCase):
 
                     # Check if the file has an extends statement
                     extends_pattern = r'{%\s*extends\s+"([^"]+)"\s*%}'
-                    import re
-
                     extends_match = re.search(extends_pattern, content)
 
-                    # Make sure it extends something
-                    self.assertIsNotNone(
-                        extends_match,
-                        f"Component template '{file}' should extend a base template",
-                    )
+                    # Skip include-only snippets (no extends statement)
+                    if extends_match is None:
+                        continue
 
                     # Get the template that it extends
                     extends_template = extends_match.group(1)

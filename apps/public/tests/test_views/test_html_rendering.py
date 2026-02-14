@@ -30,7 +30,7 @@ class HTMLRenderingTestCase(TestCase):
 
     def test_login_page_renders_correctly(self):
         """Test that the login page renders correctly."""
-        url = reverse("login")
+        url = reverse("public:account-login")
         response = self.client.get(url)
 
         # Check status code and template
@@ -47,7 +47,7 @@ class HTMLRenderingTestCase(TestCase):
     def test_settings_page_logged_in(self):
         """Test that the settings page renders correctly when logged in."""
         self.client.login(username="htmluser", password="testpassword123")
-        url = reverse("settings")
+        url = reverse("public:account-settings")
         response = self.client.get(url)
 
         # Check status code and template
@@ -61,10 +61,10 @@ class HTMLRenderingTestCase(TestCase):
         self.assertIn('name="last_name"', html)
         self.assertIn('name="old_password"', html)  # Password form
 
-    def test_home_page_logged_in(self):
-        """Test that the home page renders correctly when logged in."""
+    def test_dashboard_page_logged_in(self):
+        """Test that the dashboard page renders correctly when logged in."""
         self.client.login(username="htmluser", password="testpassword123")
-        url = reverse("home")
+        url = reverse("public:dashboard")
         response = self.client.get(url)
 
         # Check status code and template
@@ -72,11 +72,11 @@ class HTMLRenderingTestCase(TestCase):
         self.assertTemplateUsed(response, "pages/home.html")
 
         # Check base template is extended
-        self.assertTemplateUsed(response, "_base.html")
+        self.assertTemplateUsed(response, "base.html")
 
     def test_form_error_rendering(self):
         """Test that form errors are properly rendered."""
-        url = reverse("login")
+        url = reverse("public:account-login")
         response = self.client.post(
             url, {"username": "nonexistent", "password": "wrongpassword"}
         )
@@ -88,7 +88,7 @@ class HTMLRenderingTestCase(TestCase):
     def test_message_rendering(self):
         """Test that messages are properly rendered."""
         self.client.login(username="htmluser", password="testpassword123")
-        url = reverse("settings")
+        url = reverse("public:account-settings")
 
         # Make a valid form submission that should generate success message
         response = self.client.post(

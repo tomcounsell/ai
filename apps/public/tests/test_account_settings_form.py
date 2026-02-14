@@ -23,7 +23,7 @@ class AccountSettingsFormTestCase(TestCase):
         )
         self.client = Client()
         self.client.login(username="testuser", password="password123")
-        self.url = reverse("account_settings")
+        self.url = reverse("public:account-settings")
 
     def test_account_settings_form_layout(self):
         """Test that the account settings form has the correct layout."""

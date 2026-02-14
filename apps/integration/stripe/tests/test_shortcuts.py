@@ -2,6 +2,10 @@
 Unit tests for Stripe shortcuts.
 """
 
+import pytest
+
+pytest.importorskip("stripe", reason="stripe package not installed")
+
 from unittest.mock import MagicMock, patch
 
 from django.test import TestCase

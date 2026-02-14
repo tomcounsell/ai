@@ -1,17 +1,16 @@
 from django.db import models
 
+from .upload import Upload
+
 accepted_file_types = ["pdf", "doc", "docx", "rtf", "pages"]
 
 
-class Document(models.Model):
+class Document(Upload):
     """
     Represents a generic document that can be uploaded.
 
     This class serves as a base for specific document types and includes common attributes
     and behaviors related to uploading and timestamping.
-
-    Attributes:
-        upload: ForeignKey to the Upload model that contains the file data
 
     Methods:
         display: A property that must be implemented by subclasses to provide the HTML
@@ -20,10 +19,6 @@ class Document(models.Model):
     Note:
         This class is intended to be subclassed by specific document types.
     """
-
-    upload = models.ForeignKey(
-        "common.Upload", on_delete=models.CASCADE, related_name="documents"
-    )
 
     @property
     def display(self):
