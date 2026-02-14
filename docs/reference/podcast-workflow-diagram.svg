@@ -1,0 +1,217 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 968.6875000000002 6914" width="968.6875000000002" height="6914" style="--bg:#ffffff;--fg:#1f2328;--line:#d1d9e0;--accent:#0969da;--muted:#59636e;--_text:#1f2328;--_text-sec:#59636e;--_text-muted:#a5a7a9;--_text-faint:#c7c8c9;--_line:#d1d9e0;--_arrow:#0969da;--_node-fill:#f8f8f9;--_node-stroke:#d2d3d4;--_group-fill:#ffffff;--_group-hdr:#f4f4f4;--_inner-stroke:#e4e5e5;--_key-badge:#e9e9ea;background:#ffffff">
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="4.8" refX="8" refY="2.4" orient="auto">
+    <polygon points="0 0, 8 2.4, 0 4.8" fill="#0969da" />
+  </marker>
+  <marker id="arrowhead-start" markerWidth="8" markerHeight="4.8" refX="0" refY="2.4" orient="auto-start-reverse">
+    <polygon points="8 0, 0 2.4, 8 4.8" fill="#0969da" />
+  </marker>
+</defs>
+<rect x="309.30000000000007" y="188" width="254.75000000000006" height="580" rx="0" ry="0" fill="#ffffff" stroke="#d2d3d4" stroke-width="1" />
+<rect x="309.30000000000007" y="188" width="254.75000000000006" height="28" rx="0" ry="0" fill="#f4f4f4" stroke="#d2d3d4" stroke-width="1" />
+<text x="321.30000000000007" y="202" dy="0.35em" font-size="12" font-weight="600" fill="#59636e">Phase 1: Setup</text>
+<rect x="305.7250000000001" y="812" width="261.9" height="580" rx="0" ry="0" fill="#ffffff" stroke="#d2d3d4" stroke-width="1" />
+<rect x="305.7250000000001" y="812" width="261.9" height="28" rx="0" ry="0" fill="#f4f4f4" stroke="#d2d3d4" stroke-width="1" />
+<text x="317.7250000000001" y="826" dy="0.35em" font-size="12" font-weight="600" fill="#59636e">Phase 2: Academic Foundation</text>
+<rect x="102.87500000000011" y="1436" width="782.85" height="424" rx="0" ry="0" fill="#ffffff" stroke="#d2d3d4" stroke-width="1" />
+<rect x="102.87500000000011" y="1436" width="782.85" height="28" rx="0" ry="0" fill="#f4f4f4" stroke="#d2d3d4" stroke-width="1" />
+<text x="114.87500000000011" y="1450" dy="0.35em" font-size="12" font-weight="600" fill="#59636e">Phase 3: Question Discovery</text>
+<rect x="73.48750000000024" y="1904" width="855.2" height="268" rx="0" ry="0" fill="#ffffff" stroke="#d2d3d4" stroke-width="1" />
+<rect x="73.48750000000024" y="1904" width="855.2" height="28" rx="0" ry="0" fill="#f4f4f4" stroke="#d2d3d4" stroke-width="1" />
+<text x="85.48750000000024" y="1918" dy="0.35em" font-size="12" font-weight="600" fill="#59636e">Phase 4: Targeted Followup PARALLEL</text>
+<rect x="40" y="2372" width="841.6125000000001" height="580" rx="0" ry="0" fill="#ffffff" stroke="#d2d3d4" stroke-width="1" />
+<rect x="40" y="2372" width="841.6125000000001" height="28" rx="0" ry="0" fill="#f4f4f4" stroke="#d2d3d4" stroke-width="1" />
+<text x="52" y="2386" dy="0.35em" font-size="12" font-weight="600" fill="#59636e">Phase 5: Cross-Validation</text>
+<rect x="277.78750000000014" y="2996" width="398.3375" height="268" rx="0" ry="0" fill="#ffffff" stroke="#d2d3d4" stroke-width="1" />
+<rect x="277.78750000000014" y="2996" width="398.3375" height="28" rx="0" ry="0" fill="#f4f4f4" stroke="#d2d3d4" stroke-width="1" />
+<text x="289.78750000000014" y="3010" dy="0.35em" font-size="12" font-weight="600" fill="#59636e">Phase 6: Master Briefing</text>
+<rect x="276.72500000000014" y="3308" width="349.2250000000001" height="424" rx="0" ry="0" fill="#ffffff" stroke="#d2d3d4" stroke-width="1" />
+<rect x="276.72500000000014" y="3308" width="349.2250000000001" height="28" rx="0" ry="0" fill="#f4f4f4" stroke="#d2d3d4" stroke-width="1" />
+<text x="288.72500000000014" y="3322" dy="0.35em" font-size="12" font-weight="600" fill="#59636e">Phase 7: Synthesis</text>
+<rect x="339.68750000000017" y="3776" width="233.29999999999995" height="424" rx="0" ry="0" fill="#ffffff" stroke="#d2d3d4" stroke-width="1" />
+<rect x="339.68750000000017" y="3776" width="233.29999999999995" height="28" rx="0" ry="0" fill="#f4f4f4" stroke="#d2d3d4" stroke-width="1" />
+<text x="351.68750000000017" y="3790" dy="0.35em" font-size="12" font-weight="600" fill="#59636e">Phase 8: Episode Planning</text>
+<rect x="343.2625000000001" y="4244" width="226.1500000000001" height="424" rx="0" ry="0" fill="#ffffff" stroke="#d2d3d4" stroke-width="1" />
+<rect x="343.2625000000001" y="4244" width="226.1500000000001" height="28" rx="0" ry="0" fill="#f4f4f4" stroke="#d2d3d4" stroke-width="1" />
+<text x="355.2625000000001" y="4258" dy="0.35em" font-size="12" font-weight="600" fill="#59636e">Phase 9: Audio Generation</text>
+<rect x="209.46250000000003" y="4712" width="524.9250000000002" height="580" rx="0" ry="0" fill="#ffffff" stroke="#d2d3d4" stroke-width="1" />
+<rect x="209.46250000000003" y="4712" width="524.9250000000002" height="28" rx="0" ry="0" fill="#f4f4f4" stroke="#d2d3d4" stroke-width="1" />
+<text x="221.46250000000003" y="4726" dy="0.35em" font-size="12" font-weight="600" fill="#59636e">Phase 10: Audio Processing</text>
+<rect x="197.95000000000016" y="5336" width="629.5125" height="580" rx="0" ry="0" fill="#ffffff" stroke="#d2d3d4" stroke-width="1" />
+<rect x="197.95000000000016" y="5336" width="629.5125" height="28" rx="0" ry="0" fill="#f4f4f4" stroke="#d2d3d4" stroke-width="1" />
+<text x="209.95000000000016" y="5350" dy="0.35em" font-size="12" font-weight="600" fill="#59636e">Phase 11: Publishing PARALLEL</text>
+<rect x="303.93750000000017" y="5960" width="269.04999999999995" height="736" rx="0" ry="0" fill="#ffffff" stroke="#d2d3d4" stroke-width="1" />
+<rect x="303.93750000000017" y="5960" width="269.04999999999995" height="28" rx="0" ry="0" fill="#f4f4f4" stroke="#d2d3d4" stroke-width="1" />
+<text x="315.93750000000017" y="5974" dy="0.35em" font-size="12" font-weight="600" fill="#59636e">Phase 12: Commit and Push</text>
+<polyline points="436.67500000000007,124 436.67500000000007,244" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,280 436.67500000000007,400" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,436 436.67500000000007,556" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,592 436.67500000000007,712" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,748 436.67500000000007,868" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,904 436.67500000000007,1024" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,1060 436.67500000000007,1180" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,1216 436.67500000000007,1336" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,1372 436.67500000000007,1492" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,1528 436.67500000000007,1648" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,1684 436.67500000000007,1804" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,1840 436.67500000000007,1860 801.3125000000002,1860 801.3125000000002,1960" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,1840 436.67500000000007,1860 197.2875000000002,1860 197.2875000000002,2116" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,1840 436.67500000000007,1860 321.08750000000015,1860 321.08750000000015,1960" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="436.67500000000007,1840 436.67500000000007,1860 562.9875000000002,1860 562.9875000000002,1960" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="801.3125000000002,1996 801.3125000000002,2116" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="197.2875000000002,2152 197.2875000000002,2290 402.8625000000002,2290" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="321.08750000000015,1996 321.08750000000015,2290 402.8625000000002,2290" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="562.9875000000002,1996 562.9875000000002,2290 585.0125000000002,2290" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="801.3125000000002,2152 801.3125000000002,2290 585.0125000000002,2290" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="493.93750000000017,2308 493.93750000000017,2328 142.35000000000005,2328 142.35000000000005,2428" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="493.93750000000017,2308 493.93750000000017,2328 316.3250000000001,2328 316.3250000000001,2428" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="493.93750000000017,2308 493.93750000000017,2328 476.00000000000017,2328 476.00000000000017,2428" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="493.93750000000017,2308 493.93750000000017,2328 632.1000000000001,2328 632.1000000000001,2428" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="493.93750000000017,2308 493.93750000000017,2328 781.0500000000002,2328 781.0500000000002,2428" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="142.35000000000005,2464 142.35000000000005,2602 379.5625000000001,2602" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="316.3250000000001,2464 316.3250000000001,2602 379.5625000000001,2602" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="476.00000000000017,2464 476.00000000000017,2602 533.1125000000002,2602" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="632.1000000000001,2464 632.1000000000001,2602 533.1125000000002,2602" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="781.0500000000002,2464 781.0500000000002,2602 533.1125000000002,2602" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,2620 456.33750000000015,2740" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,2776 456.33750000000015,2896" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,2932 456.33750000000015,3052" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,3088 456.33750000000015,3108 387.2875000000001,3108 387.2875000000001,3208" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,3088 456.33750000000015,3108 571.9875000000002,3108 571.9875000000002,3208" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="387.2875000000001,3244 387.2875000000001,3382 358.1125000000001,3382" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="571.9875000000002,3244 571.9875000000002,3382 554.5625000000001,3382" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,3400 456.33750000000015,3520" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,3556 456.33750000000015,3676" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,3712 456.33750000000015,3832" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,3868 456.33750000000015,3988" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,4024 456.33750000000015,4144" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,4180 456.33750000000015,4300" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,4336 456.33750000000015,4456" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,4492 456.33750000000015,4612" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,4648 456.33750000000015,4768" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,4804 456.33750000000015,4924" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,4960 456.33750000000015,5080" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,5116 456.33750000000015,5236" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,5272 456.33750000000015,5292 305.6625,5292 305.6625,5392" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,5272 456.33750000000015,5292 479.6375,5292 479.6375,5392" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="456.33750000000015,5272 456.33750000000015,5292 689.3625000000002,5292 689.3625000000002,5392" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="305.6625,5428 305.6625,5566 365.26250000000016,5566" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="479.6375,5428 479.6375,5566 511.66250000000014,5566" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="689.3625000000002,5428 689.3625000000002,5566 511.66250000000014,5566" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="438.46250000000015,5584 438.46250000000015,5704" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="438.46250000000015,5740 438.46250000000015,5860" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="438.46250000000015,5896 438.46250000000015,6016" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="438.46250000000015,6052 438.46250000000015,6172" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="438.46250000000015,6208 438.46250000000015,6328" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="438.46250000000015,6364 438.46250000000015,6484" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="438.46250000000015,6520 438.46250000000015,6640" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<polyline points="438.46250000000015,6676 438.46250000000015,6796" fill="none" stroke="#d1d9e0" stroke-width="0.75" marker-end="url(#arrowhead)" />
+<circle cx="436.67500000000007" cy="82" r="42" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="402.8625000000002" y="2272" width="182.15" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<circle cx="438.46250000000015" cy="6835" r="39" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="331.30000000000007" y="244" width="210.75000000000003" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="334.87500000000006" y="400" width="203.60000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="349.17500000000007" y="556" width="175" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="345.6000000000001" y="712" width="182.15" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="334.87500000000006" y="868" width="203.60000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="338.45000000000005" y="1024" width="196.45000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="327.7250000000001" y="1180" width="217.9" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="345.6000000000001" y="1336" width="182.15" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="327.7250000000001" y="1492" width="217.9" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="309.8500000000001" y="1648" width="253.65" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="320.57500000000005" y="1804" width="232.20000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="706.6625000000003" y="1960" width="189.3" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="695.9375000000002" y="2116" width="210.75000000000003" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="95.48750000000018" y="2116" width="203.60000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="222.86250000000013" y="1960" width="196.45000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="443.31250000000017" y="1960" width="239.35000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="62.00000000000004" y="2428" width="160.70000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="379.5625000000001" y="2584" width="153.55" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="246.7000000000001" y="2428" width="139.25" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="409.95000000000016" y="2428" width="132.10000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="566.0500000000002" y="2428" width="132.10000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="722.1500000000002" y="2428" width="117.80000000000001" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="358.1125000000001" y="2740" width="196.45000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="372.41250000000014" y="2896" width="167.85000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="365.26250000000016" y="3052" width="182.15" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="303.36250000000007" y="3208" width="167.85000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="495.2125000000002" y="3208" width="153.55" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="358.1125000000001" y="3364" width="196.45000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="354.53750000000014" y="3520" width="203.60000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="343.8125000000001" y="3676" width="225.05" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="361.6875000000001" y="3832" width="189.3" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="361.6875000000001" y="3988" width="189.3" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="372.41250000000014" y="4144" width="167.85000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="365.26250000000016" y="4300" width="182.15" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="375.9875000000001" y="4456" width="160.70000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="365.26250000000016" y="4612" width="182.15" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="325.9375000000001" y="4768" width="260.8" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="361.6875000000001" y="4924" width="189.3" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="350.96250000000015" y="5080" width="210.75000000000003" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="375.9875000000001" y="5236" width="160.70000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="225.3125" y="5392" width="160.70000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="365.26250000000016" y="5548" width="146.4" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="410.0125" y="5392" width="139.25" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="573.2625000000002" y="5392" width="232.20000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="354.53750000000014" y="5704" width="167.85000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="347.38750000000016" y="5860" width="182.15" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="372.41250000000014" y="6016" width="132.10000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="343.8125000000001" y="6172" width="189.3" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="401.01250000000016" y="6328" width="74.9" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="372.41250000000014" y="6484" width="132.10000000000002" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<rect x="325.9375000000001" y="6640" width="225.05" height="36" rx="0" ry="0" fill="#f8f8f9" stroke="#d2d3d4" stroke-width="0.75" />
+<text x="436.67500000000007" y="82" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Start</text>
+<text x="493.93750000000017" y="2290" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">All research complete</text>
+<text x="438.46250000000015" y="6835" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Done</text>
+<text x="436.67500000000007" y="262" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Determine episode details</text>
+<text x="436.67500000000007" y="418" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Check existing directory</text>
+<text x="436.67500000000007" y="574" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Run setup_episode.py</text>
+<text x="436.67500000000007" y="730" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Verify setup complete</text>
+<text x="436.67500000000007" y="886" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Create Perplexity prompt</text>
+<text x="436.67500000000007" y="1042" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Save to logs/prompts.md</text>
+<text x="436.67500000000007" y="1198" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Run Perplexity API 30-120s</text>
+<text x="436.67500000000007" y="1354" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Save p2-perplexity.md</text>
+<text x="436.67500000000007" y="1510" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Generate Perplexity digest</text>
+<text x="436.67500000000007" y="1666" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Analyze gaps and contradictions</text>
+<text x="436.67500000000007" y="1822" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Generate targeted prompts x4</text>
+<text x="801.3125000000002" y="1978" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Display manual prompts</text>
+<text x="801.3125000000002" y="2134" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">USER: paste Claude + Grok</text>
+<text x="197.2875000000002" y="2134" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Create placeholder files</text>
+<text x="321.08750000000015" y="1978" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">GPT-Researcher 6-20 min</text>
+<text x="562.9875000000002" y="1978" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Gemini Deep Research 3-10 min</text>
+<text x="142.35000000000005" y="2446" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Digest: perplexity</text>
+<text x="456.3375000000001" y="2602" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">All digests ready</text>
+<text x="316.3250000000001" y="2446" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Digest: chatgpt</text>
+<text x="476.00000000000017" y="2446" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Digest: gemini</text>
+<text x="632.1000000000001" y="2446" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Digest: claude</text>
+<text x="781.0500000000002" y="2446" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Digest: grok</text>
+<text x="456.33750000000015" y="2758" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Cross-validate findings</text>
+<text x="456.33750000000015" y="2914" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Verification matrix</text>
+<text x="456.33750000000015" y="3070" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Create p3-briefing.md</text>
+<text x="387.2875000000001" y="3226" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">GATE: Verify Wave 1</text>
+<text x="571.9875000000002" y="3226" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Update sources.md</text>
+<text x="456.33750000000015" y="3382" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Invoke synthesis-writer</text>
+<text x="456.33750000000015" y="3538" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Create report.md 15-25KB</text>
+<text x="456.3375000000001" y="3694" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">GATE: Verify report quality</text>
+<text x="456.3375000000001" y="3850" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Invoke episode-planner</text>
+<text x="456.3375000000001" y="4006" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Create content_plan.md</text>
+<text x="456.33750000000015" y="4162" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">GATE: Verify Wave 2</text>
+<text x="456.33750000000015" y="4318" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Verify 5 source files</text>
+<text x="456.33750000000015" y="4474" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Run NotebookLM API</text>
+<text x="456.33750000000015" y="4630" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Download MP3 5-15 min</text>
+<text x="456.3375000000001" y="4786" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Transcribe with Whisper 5-10 min</text>
+<text x="456.3375000000001" y="4942" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Create chapter markers</text>
+<text x="456.33750000000015" y="5098" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Embed chapters via ffmpeg</text>
+<text x="456.33750000000015" y="5254" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Verify all outputs</text>
+<text x="305.6625" y="5410" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Generate cover art</text>
+<text x="438.46250000000015" y="5566" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">All assets ready</text>
+<text x="479.6375" y="5410" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Create metadata</text>
+<text x="689.3625000000002" y="5410" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Generate companion resources</text>
+<text x="438.46250000000015" y="5722" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Run publish_episode</text>
+<text x="438.46250000000015" y="5878" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">GATE: Verify Wave 4/5</text>
+<text x="438.46250000000015" y="6034" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Review changes</text>
+<text x="438.4625000000001" y="6190" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Stage files + feed.xml</text>
+<text x="438.46250000000015" y="6346" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Commit</text>
+<text x="438.46250000000015" y="6502" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Push to GitHub</text>
+<text x="438.4625000000001" y="6658" text-anchor="middle" dy="0.35em" font-size="13" font-weight="500" fill="#1f2328">Verify episode live 2-3 min</text>
+</svg>
