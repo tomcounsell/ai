@@ -1,200 +1,188 @@
-# Podcast Episode Workflow — Dependency & Parallelism Diagram
+# Podcast Episode Workflow -- DB-Backed Flow
 
-## Mermaid Flow Diagram
+## Data Flow Diagram
 
 ```mermaid
 flowchart TD
-    S((Start)) --> s1_1[Determine episode details]
+    S((Start)) --> s1[setup_episode]
 
-    subgraph P1[Phase 1: Setup]
-        s1_1 --> s1_2[Check existing directory]
-        s1_2 --> s1_3[Run setup_episode.py]
-        s1_3 --> s1_4[Verify setup complete]
+    subgraph P1["Phase 1: Setup"]
+        s1 -->|"creates"| a1[p1-brief artifact]
+        s1 -->|"creates"| wf[EpisodeWorkflow record]
+        s1 -->|"sets"| status1["Episode.status = in_progress"]
     end
 
-    s1_4 --> s2_1[Create Perplexity prompt]
+    a1 --> s2[run_perplexity_research]
 
-    subgraph P2[Phase 2: Academic Foundation]
-        s2_1 --> s2_2[Save to logs/prompts.md]
-        s2_2 --> s2_3[Run Perplexity API 30-120s]
-        s2_3 --> s2_4[Save p2-perplexity.md]
+    subgraph P2["Phase 2: Perplexity Research"]
+        s2 -->|"creates"| a2[p2-perplexity artifact]
     end
 
-    s2_4 --> s3_1[Generate Perplexity digest]
+    a2 --> s3[discover_questions]
 
-    subgraph P3[Phase 3: Question Discovery]
-        s3_1 --> s3_2[Analyze gaps and contradictions]
-        s3_2 --> s3_3[Generate targeted prompts x4]
+    subgraph P3["Phase 3: Question Discovery"]
+        s3 -->|"reads"| a2
+        s3 -->|"creates"| a3[question-discovery artifact]
     end
 
-    s3_3 --> s4_1[Display manual prompts]
-    s3_3 --> s4_2[Create placeholder files]
-    s3_3 --> s4_3[GPT-Researcher 6-20 min]
-    s3_3 --> s4_4[Gemini Deep Research 3-10 min]
+    a3 --> s4_fork[Targeted Research]
 
-    subgraph P4[Phase 4: Targeted Followup PARALLEL]
-        s4_1 --> s4_5[USER: paste Claude + Grok]
-        s4_2
-        s4_3
-        s4_4
+    subgraph P4["Phase 4: Targeted Research (parallel)"]
+        s4_fork --> s4a[run_gpt_researcher]
+        s4_fork --> s4b[run_gemini_research]
+        s4_fork --> s4c["add_manual_research (human)"]
+        s4a -->|"creates"| a4a[p2-chatgpt artifact]
+        s4b -->|"creates"| a4b[p2-gemini artifact]
+        s4c -->|"creates"| a4c["p2-{source} artifact"]
     end
 
-    s4_2 --> s5_fork[All research complete]
-    s4_3 --> s5_fork
-    s4_4 --> s5_fork
-    s4_5 --> s5_fork
+    a4a --> s5_pre["create_research_digest (per source)"]
+    a4b --> s5_pre
+    a4c --> s5_pre
 
-    s5_fork --> s5_1a[Digest: perplexity]
-    s5_fork --> s5_1b[Digest: chatgpt]
-    s5_fork --> s5_1c[Digest: gemini]
-    s5_fork --> s5_1d[Digest: claude]
-    s5_fork --> s5_1e[Digest: grok]
-
-    subgraph P5[Phase 5: Cross-Validation]
-        s5_1a --> s5_join[All digests ready]
-        s5_1b --> s5_join
-        s5_1c --> s5_join
-        s5_1d --> s5_join
-        s5_1e --> s5_join
-        s5_join --> s5_2[Cross-validate findings]
-        s5_2 --> s5_3[Verification matrix]
+    subgraph P5["Phase 5: Cross-Validation"]
+        s5_pre -->|"creates"| a5d["digest-* artifacts"]
+        a5d --> s5[cross_validate]
+        s5 -->|"reads all p2-*"| s5
+        s5 -->|"creates"| a5[cross-validation artifact]
     end
 
-    s5_3 --> s6_1[Create p3-briefing.md]
+    a5 --> s6[write_briefing]
 
-    subgraph P6[Phase 6: Master Briefing]
-        s6_1 --> s6_2[GATE: Verify Wave 1]
-        s6_1 --> s6_3[Update sources.md]
+    subgraph P6["Phase 6: Master Briefing"]
+        s6 -->|"reads"| a5
+        s6 -->|"reads"| a5d
+        s6 -->|"creates"| a6[p3-briefing artifact]
+        a6 --> gate1{"GATE: wave_1\n(200+ words)"}
     end
 
-    s6_2 --> s7_1[Invoke synthesis-writer]
-    s6_3 --> s7_1
+    gate1 -->|"pass"| s7[synthesize_report]
 
-    subgraph P7[Phase 7: Synthesis]
-        s7_1 --> s7_2[Create report.md 15-25KB]
-        s7_2 --> s7_3[GATE: Verify report quality]
+    subgraph P7["Phase 7: Synthesis"]
+        s7 -->|"reads"| a6
+        s7 -->|"reads all p2-*"| s7
+        s7 -->|"writes"| report["Episode.report_text"]
+        s7 -->|"writes"| sources["Episode.sources_text"]
     end
 
-    s7_3 --> s8_1[Invoke episode-planner]
+    report --> s8[plan_episode_content]
 
-    subgraph P8[Phase 8: Episode Planning]
-        s8_1 --> s8_2[Create content_plan.md]
-        s8_2 --> s8_3[GATE: Verify Wave 2]
+    subgraph P8["Phase 8: Episode Planning"]
+        s8 -->|"reads"| report
+        s8 -->|"reads"| a6
+        s8 -->|"creates"| a8[content_plan artifact]
+        a8 --> gate2{"GATE: wave_2\n(plan exists)"}
     end
 
-    s8_3 --> s9_1[Verify 5 source files]
+    gate2 -->|"pass"| s9[generate_audio]
 
-    subgraph P9[Phase 9: Audio Generation]
-        s9_1 --> s9_2[Run NotebookLM API]
-        s9_2 --> s9_3[Download MP3 5-15 min]
+    subgraph P9["Phase 9: Audio Generation (5-30 min)"]
+        s9 -->|"reads"| report
+        s9 -->|"reads"| a6
+        s9 -->|"reads"| a8
+        s9 -->|"NotebookLM API"| nlm["Create notebook + upload + generate"]
+        nlm -->|"store_file"| audio_url["Episode.audio_url"]
+        nlm -->|"writes"| audio_size["Episode.audio_file_size_bytes"]
     end
 
-    s9_3 --> s10_1[Transcribe with Whisper 5-10 min]
+    audio_url --> s10a[transcribe_audio]
 
-    subgraph P10[Phase 10: Audio Processing]
-        s10_1 --> s10_2[Create chapter markers]
-        s10_2 --> s10_3[Embed chapters via ffmpeg]
-        s10_3 --> s10_4[Verify all outputs]
+    subgraph P10["Phase 10: Audio Processing"]
+        s10a -->|"Whisper API"| transcript["Episode.transcript"]
+        transcript --> s10b[generate_episode_chapters]
+        s10b -->|"writes"| chapters["Episode.chapters"]
     end
 
-    s10_4 --> s11_1[Generate cover art]
-    s10_4 --> s11_2[Create metadata]
-    s10_4 --> s11_3[Generate companion resources]
+    chapters --> s11_fork[Publishing Assets]
 
-    subgraph P11[Phase 11: Publishing PARALLEL]
-        s11_1 --> s11_join[All assets ready]
-        s11_2 --> s11_join
-        s11_3 --> s11_join
-        s11_join --> s11_4[Run publish_episode]
-        s11_4 --> s11_5[GATE: Verify Wave 4/5]
+    subgraph P11["Phase 11: Publishing (parallel)"]
+        s11_fork --> s11a["generate_cover_art (stub)"]
+        s11_fork --> s11b[write_episode_metadata]
+        s11_fork --> s11c[generate_companions]
+        s11b -->|"creates"| a11b[metadata artifact]
+        s11b -->|"writes"| desc["Episode.description"]
+        s11b -->|"writes"| notes["Episode.show_notes"]
+        s11c -->|"creates"| a11c["companion-* artifacts"]
+        s11c -->|"writes"| comp["Episode.companion_resources"]
     end
 
-    s11_5 --> s12_1[Review changes]
+    a11b --> s12[publish_episode]
+    a11c --> s12
 
-    subgraph P12[Phase 12: Commit and Push]
-        s12_1 --> s12_2[Stage files + feed.xml]
-        s12_2 --> s12_3[Commit]
-        s12_3 --> s12_4[Push to GitHub]
-        s12_4 --> s12_5[Verify episode live 2-3 min]
+    subgraph P12["Phase 12: Publish"]
+        s12 -->|"sets"| status2["Episode.status = complete"]
+        s12 -->|"sets"| pub["Episode.published_at = now"]
     end
 
-    s12_5 --> E((Done))
+    pub --> E((Done))
 ```
 
-## Legend
+## Workflow State Machine
 
-| Color | Meaning |
-|-------|---------|
-| **Dark gray** | Serial step (must run in order) |
-| **Blue** | Parallel step (can run simultaneously with siblings) |
-| **Green** | Automated agent/API (no user action) |
-| **Amber** | User wait/input required |
-| **Red** | Quality gate (blocks if requirements unmet) |
-| **Diamond** | Fork/join point for parallel execution |
-
-## Critical Path (Longest Serial Chain)
-
-The **critical path** determines minimum wall-clock time:
-
-```
-Setup → Perplexity (30-120s) → Question Discovery → GPT-Researcher (6-20 min)
-→ Cross-Validation → Master Briefing → Synthesis → Episode Planning
-→ Audio Generation (5-15 min) → Transcription (5-10 min)
-→ Publishing → Commit & Push → Deploy (2-3 min)
+```mermaid
+stateDiagram-v2
+    [*] --> not_started
+    not_started --> running : setup_episode()
+    running --> running : advance_step()
+    running --> paused_for_human : pause_for_human()
+    running --> paused_at_gate : check_quality_gate() fails
+    running --> failed : fail_step()
+    running --> complete : advance_step("Publish")
+    paused_for_human --> running : resume_workflow()
+    paused_at_gate --> running : resume_workflow()
+    failed --> running : resume_workflow()
+    complete --> [*]
 ```
 
-**Estimated minimum:** ~45-75 minutes (mostly waiting on APIs and audio generation)
+## Database Writes Per Phase
+
+| Phase | Artifacts Created | Episode Fields Written | Workflow Transition |
+|-------|-------------------|----------------------|---------------------|
+| 1 Setup | `p1-brief` | `status` | pending -> running |
+| 2 Perplexity | `p2-perplexity` | -- | advance to step 2 |
+| 3 Question Discovery | `question-discovery` | -- | advance to step 3 |
+| 4 Targeted Research | `p2-chatgpt`, `p2-gemini`, `p2-{source}`, `digest-*` | -- | advance to step 4 |
+| 5 Cross-Validation | `cross-validation` | -- | advance to step 5 |
+| 6 Master Briefing | `p3-briefing` | -- | advance to step 6 + wave_1 gate |
+| 7 Synthesis | -- | `report_text`, `sources_text` | advance to step 7 |
+| 8 Episode Planning | `content_plan` | -- | advance to step 8 + wave_2 gate |
+| 9 Audio Generation | -- | `audio_url`, `audio_file_size_bytes` | advance to step 9 |
+| 10 Audio Processing | -- | `transcript`, `chapters` | advance to step 10 |
+| 11 Publishing | `metadata`, `companion-summary`, `companion-checklist`, `companion-frameworks` | `description`, `show_notes`, `companion_resources` | advance to step 11 |
+| 12 Publish | -- | `status`, `published_at` | running -> complete |
+
+## Quality Gates
+
+| Gate | Location | Check | Blocks |
+|------|----------|-------|--------|
+| `wave_1` | After Phase 6 | `p3-briefing` exists with 200+ words | Phase 7 (Synthesis) |
+| `wave_2` | After Phase 8 | `content_plan` artifact exists | Phase 9 (Audio Generation) |
+
+## Human-in-the-Loop Pause Points
+
+| Trigger | Reason | Resumes When |
+|---------|--------|-------------|
+| Phase 4 | Manual research needed (Grok, Claude) | `add_manual_research()` called, then `resume_workflow()` |
+| Phase 6 | Wave 1 quality gate failure | Human reviews briefing, triggers retry |
+| Phase 8 | Wave 2 quality gate failure | Human reviews plan, triggers retry |
+| Phase 11 | Cover art not automated | Cover art manually uploaded |
+| Any phase | Unrecoverable error | Human investigates and calls `resume_workflow()` |
+
+## Critical Path
+
+```
+Setup -> Perplexity (30-120s) -> Question Discovery -> Targeted Research (6-20 min)
+-> Cross-Validation -> Master Briefing -> Synthesis -> Episode Planning
+-> Audio Generation (5-30 min) -> Transcription (5-10 min) -> Chapters
+-> Metadata + Companions -> Publish
+```
+
+**Estimated minimum wall-clock time:** 45-75 minutes (dominated by API wait times for research tools, NotebookLM audio generation, and Whisper transcription).
 
 ## Parallel Execution Opportunities
 
-### 1. Phase 4 — Research Tools (biggest time saver)
-```
-                  ┌─→ GPT-Researcher (6-20 min) ──────┐
-3.3 Prompts ready ├─→ Gemini Deep Research (3-10 min) ─┤→ Phase 5
-                  ├─→ User: Claude (manual) ───────────┤
-                  └─→ User: Grok (manual) ─────────────┘
-```
-All 4 tools run simultaneously. The bottleneck is whichever finishes last (usually GPT-Researcher or the user's manual submissions).
+**Phase 4 -- Research tools:** GPT-Researcher, Gemini, and manual research run concurrently. The bottleneck is whichever finishes last.
 
-### 2. Phase 5 — Research Digests
-```
-           ┌─→ digest: p2-perplexity ─┐
-           ├─→ digest: p2-chatgpt ────┤
-All p2s ───├─→ digest: p2-gemini ─────┤→ Cross-validator
-           ├─→ digest: p2-claude ─────┤
-           └─→ digest: p2-grok ───────┘
-```
-5 digest agents run in parallel, then feed into a single cross-validator.
+**Phase 5 -- Research digests:** One `create_research_digest` call per `p2-*` artifact, all independent.
 
-### 3. Phase 6 — Briefing Outputs
-```
-              ┌─→ 6.2 Verify Wave 1 ──┐
-6.1 Briefing ─┤                        ├→ Phase 7
-              └─→ 6.3 Update sources ──┘
-```
-Verification and source update can happen concurrently.
-
-### 4. Phase 11 — Publishing Assets
-```
-              ┌─→ 11.1 Cover art ──────────────┐
-10.4 Audio ───├─→ 11.2 Metadata ───────────────┤→ 11.4 publish_episode
-              └─→ 11.3 Companion resources ────┘
-```
-Cover art, metadata, and companion resources all generate independently.
-
-## Steps Requiring User Action
-
-| Step | Action | Can work in parallel? |
-|------|--------|----------------------|
-| 4.5 | Paste Claude + Grok research results | Yes — while GPT-Researcher + Gemini run |
-| 9.2-9.3 | Manual NotebookLM (fallback only) | No — blocking wait |
-| 12.4 | Approve git push | No — final step |
-
-## Quality Gates (Blocking Checkpoints)
-
-| Gate | Phase | What's Checked | Blocks |
-|------|-------|---------------|--------|
-| Wave 1 | 6.2 | Depth analysis, story bank, counterpoints, actionability | Phase 7 |
-| Report QA | 7.3 | 15-25KB, narrative structure, citations | Phase 8 |
-| Wave 2 | 8.3 | Structure map, counterpoints, depth budget, signposting | Phase 9 |
-| Wave 4/5 | 11.5 | Description, resources, CTA, feed validity | Phase 12 |
+**Phase 11 -- Publishing assets:** Cover art, metadata, and companion resources generate independently.

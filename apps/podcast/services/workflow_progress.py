@@ -304,3 +304,62 @@ def compute_workflow_progress(
         phase_11,
         phase_12,
     ]
+
+
+def get_workflow_summary(episode_id: int) -> dict:
+    """Get combined workflow progress from both computed phases and EpisodeWorkflow.
+
+    Fetches the Episode and its artifacts, computes the 12-phase progress
+    using ``compute_workflow_progress``, and — if an ``EpisodeWorkflow``
+    record exists — merges in the persisted workflow state (current step,
+    status, blocked_on, and history).
+
+    Returns a dict with keys:
+        ``phases`` -- list of phase dicts (number, name, status, progress)
+        ``overall_progress`` -- float 0.0-1.0 across all sub-steps
+        ``workflow`` -- EpisodeWorkflow state dict or ``None``
+    """
+    from apps.podcast.models import Episode, EpisodeArtifact, EpisodeWorkflow
+
+    episode = Episode.objects.get(pk=episode_id)
+    artifact_titles = list(
+        EpisodeArtifact.objects.filter(episode=episode).values_list("title", flat=True)
+    )
+
+    phases = compute_workflow_progress(episode, artifact_titles)
+
+    phase_dicts = [
+        {
+            "number": p.number,
+            "name": p.name,
+            "description": p.description,
+            "status": p.status,
+            "progress": p.progress_fraction,
+        }
+        for p in phases
+    ]
+
+    # Overall progress across all sub-steps
+    total_sub = sum(len(p.sub_steps) for p in phases)
+    completed_sub = sum(sum(1 for s in p.sub_steps if s.complete) for p in phases)
+    overall = completed_sub / total_sub if total_sub > 0 else 0.0
+
+    # Merge persisted workflow state if available
+    workflow_state: dict | None = None
+    try:
+        wf = EpisodeWorkflow.objects.get(episode_id=episode_id)
+        workflow_state = {
+            "current_step": wf.current_step,
+            "status": wf.status,
+            "blocked_on": wf.blocked_on,
+            "agent_session_id": wf.agent_session_id,
+            "history": wf.history,
+        }
+    except EpisodeWorkflow.DoesNotExist:
+        pass
+
+    return {
+        "phases": phase_dicts,
+        "overall_progress": round(overall, 4),
+        "workflow": workflow_state,
+    }

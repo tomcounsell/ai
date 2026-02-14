@@ -1,7 +1,13 @@
 from django.contrib import admin
 from unfold.admin import ModelAdmin, TabularInline
 
-from apps.podcast.models import Episode, EpisodeArtifact, Podcast, PodcastConfig
+from apps.podcast.models import (
+    Episode,
+    EpisodeArtifact,
+    EpisodeWorkflow,
+    Podcast,
+    PodcastConfig,
+)
 
 
 class PodcastConfigInline(TabularInline):
@@ -67,3 +73,12 @@ class EpisodeArtifactAdmin(ModelAdmin):
     search_fields = ["title", "content"]
     raw_id_fields = ["episode"]
     ordering = ["title"]
+
+
+@admin.register(EpisodeWorkflow)
+class EpisodeWorkflowAdmin(ModelAdmin):
+    list_display = ["episode", "current_step", "status", "blocked_on", "created_at"]
+    list_filter = ["status", "current_step"]
+    search_fields = ["episode__title", "current_step", "blocked_on"]
+    raw_id_fields = ["episode"]
+    ordering = ["-created_at"]

@@ -64,6 +64,19 @@ class Command(BaseCommand):
                 f"(expected 'draft')"
             )
 
+        # ── 1b. Create workflow tracking and p1-brief artifact in DB
+        from apps.podcast.services.setup import setup_episode
+
+        try:
+            setup_episode(episode.id)
+            self.stdout.write(
+                self.style.SUCCESS("Created workflow tracking in database")
+            )
+        except Exception as e:
+            self.stdout.write(
+                self.style.WARNING(f"Could not create workflow tracking: {e}")
+            )
+
         # ── 2. Create the local working directory ───────────────────
         base_dir: Path = (
             settings.BASE_DIR

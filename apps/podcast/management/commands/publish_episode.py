@@ -124,12 +124,24 @@ class Command(BaseCommand):
         )
         warnings.extend(artifact_warnings)
 
-        # Update status and published_at
+        # Mark episode as published via service layer
         if not dry_run:
-            episode.status = "complete"
-            if not episode.published_at:
-                episode.published_at = timezone.now()
-            episode.save()
+            from apps.podcast.services.publishing import (
+                publish_episode as service_publish,
+            )
+
+            try:
+                service_publish(episode.id)
+                self.stdout.write(
+                    self.style.SUCCESS("Episode published via service layer")
+                )
+            except Exception as e:
+                self.stdout.write(self.style.WARNING(f"Service publish failed: {e}"))
+                # Fallback: set status directly if service fails
+                episode.status = "complete"
+                if not episode.published_at:
+                    episode.published_at = timezone.now()
+                episode.save()
 
         self.stdout.write("")
         self.stdout.write(self.style.SUCCESS("=== Publish Summary ==="))
