@@ -58,6 +58,7 @@ dependencies = [
     "urllib3>=2.6.3",
     "requests>=2.32.4",
     "aiohttp>=3.13.3",
+    "supabase>=2.28.0",
 ]
 
 [project.optional-dependencies]

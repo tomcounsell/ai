@@ -28,3 +28,6 @@ CSRF_TRUSTED_ORIGINS = [
     "https://ai.yuda.me",
     "https://cuttlefish-ea1h.onrender.com",
 ]
+
+# File Storage Service - use Supabase in production
+STORAGE_BACKEND = "supabase"

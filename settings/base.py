@@ -3,6 +3,7 @@ Core Django settings common to all environments.
 """
 
 import mimetypes
+import os
 
 # Detect if we are in a test environment
 import sys
@@ -236,3 +237,21 @@ SWAGGER_SETTINGS = {
 
 # Silence the warning about compat renderers
 SWAGGER_USE_COMPAT_RENDERERS = False
+
+# ============================================================================
+# File Storage Service
+# ============================================================================
+# Options: "local", "supabase", "s3"
+STORAGE_BACKEND = "local"
+
+# Supabase Storage (default production backend)
+SUPABASE_PROJECT_URL = os.environ.get("SUPABASE_PROJECT_URL", "")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+SUPABASE_BUCKET_NAME = os.environ.get("SUPABASE_BUCKET_NAME", "")
+
+# S3-compatible storage (alternative production backend)
+S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "")
+S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "")
+S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "")
+S3_BUCKET = os.environ.get("S3_BUCKET", "")
+S3_PUBLIC_URL = os.environ.get("S3_PUBLIC_URL", "")
