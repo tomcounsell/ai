@@ -825,12 +825,24 @@ async def _execute_job(job: Job) -> None:
     auto_continue_count = job.auto_continue_count or 0
     # Flag to skip reaction when a continuation job is enqueued
     _defer_reaction = False
+    # Gate: once a COMPLETION is sent, suppress all further outputs
+    _completion_sent = False
 
     async def send_to_chat(msg: str) -> None:
         nonlocal auto_continue_count
         nonlocal _defer_reaction
+        nonlocal _completion_sent
 
         if not send_cb:
+            return
+
+        # If we already sent a completion, drop all subsequent outputs.
+        # The work is done — further messages are noise that spams the chat.
+        if _completion_sent:
+            logger.info(
+                f"[{job.project_key}] Dropping post-completion output "
+                f"({len(msg)} chars): {msg[:100]!r}"
+            )
             return
 
         # Classify the output to decide routing
@@ -903,6 +915,13 @@ async def _execute_job(job: Job) -> None:
             )
 
         await send_cb(job.chat_id, msg, job.message_id)
+
+        # After sending a COMPLETION, close the gate — no more outputs
+        if classification.output_type == OutputType.COMPLETION:
+            _completion_sent = True
+            logger.info(
+                f"[{job.project_key}] Completion sent — suppressing further outputs"
+            )
 
     messenger = BossMessenger(
         _send_callback=send_to_chat,
