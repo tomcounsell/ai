@@ -86,8 +86,8 @@ async def pre_tool_use_hook(
     # For Bash, check if command writes to sensitive files
     if tool_name == "Bash":
         command = tool_input.get("command", "")
-        # Simple heuristic: check for redirect operators targeting sensitive files
         for sensitive in SENSITIVE_PATHS:
+            # Redirect operators: > file, >> file, >file, >>file
             if f"> {sensitive}" in command or f">{sensitive}" in command:
                 logger.warning(
                     f"[pre_tool_use] Blocked Bash write to sensitive file: {sensitive}"
@@ -99,5 +99,20 @@ async def pre_tool_use_hook(
                         "Sensitive files must be managed manually."
                     ),
                 }
+            # Commands that write/move/copy to sensitive files
+            # e.g. cp x .env, mv x .env, tee .env, tee -a .env
+            write_cmds = ("cp ", "mv ", "tee ", "tee -a ")
+            for cmd in write_cmds:
+                if cmd in command and sensitive in command:
+                    logger.warning(
+                        f"[pre_tool_use] Blocked Bash {cmd.strip()} to sensitive file: {sensitive}"
+                    )
+                    return {
+                        "decision": "block",
+                        "reason": (
+                            f"Blocked: Bash command writes to sensitive file '{sensitive}'. "
+                            "Sensitive files must be managed manually."
+                        ),
+                    }
 
     return {}

@@ -23,11 +23,11 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 _AGENTS_DIR = _REPO_ROOT / ".claude" / "agents"
 
 # Read-only tools suitable for validation and review agents.
+# Bash is intentionally excluded — it can write files and run arbitrary commands.
 _READ_ONLY_TOOLS = [
     "Read",
     "Glob",
     "Grep",
-    "Bash",
     "WebFetch",
 ]
 
