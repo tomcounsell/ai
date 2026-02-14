@@ -80,6 +80,102 @@ def format_timestamp(ts: str | None) -> str:
         return ts[:16] if len(ts) > 16 else ts
 
 
+def _fetch_live_messages(chat_id: str, limit: int) -> list[dict]:
+    """Fetch messages from Telegram via Telethon and upsert into SQLite cache.
+
+    Returns a list of message dicts with keys: message_id, sender, content,
+    timestamp, message_type.
+    """
+    import sqlite3
+
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
+    async def _fetch():
+        from telethon import TelegramClient
+
+        session_path = str(Path(__file__).parent.parent / "data" / "valor_bridge")
+        api_id = int(os.environ.get("TELEGRAM_API_ID", "0"))
+        api_hash = os.environ.get("TELEGRAM_API_HASH", "")
+
+        if not api_id or not api_hash:
+            raise RuntimeError(
+                "TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in .env"
+            )
+
+        client = TelegramClient(session_path, api_id, api_hash)
+        await client.start()
+        try:
+            msgs = await client.get_messages(int(chat_id), limit=limit)
+            results = []
+            for msg in msgs:
+                if msg is None:
+                    continue
+                # Determine sender name
+                sender_name = "unknown"
+                try:
+                    sender = await msg.get_sender()
+                    if sender is not None:
+                        if hasattr(sender, "first_name"):
+                            sender_name = sender.first_name or ""
+                            if getattr(sender, "last_name", None):
+                                sender_name += f" {sender.last_name}"
+                            sender_name = sender_name.strip() or "unknown"
+                        elif hasattr(sender, "title"):
+                            sender_name = sender.title or "unknown"
+                except Exception:
+                    pass
+
+                content = msg.text or ""
+                timestamp = msg.date.isoformat() if msg.date else None
+                msg_type = "text"
+                if msg.photo:
+                    msg_type = "photo"
+                elif msg.document:
+                    msg_type = "document"
+                elif msg.sticker:
+                    msg_type = "sticker"
+
+                results.append(
+                    {
+                        "message_id": msg.id,
+                        "sender": sender_name,
+                        "content": content,
+                        "timestamp": timestamp,
+                        "message_type": msg_type,
+                    }
+                )
+
+            # Upsert fetched messages into SQLite cache
+            from tools.telegram_history import store_message
+
+            for m in results:
+                try:
+                    store_message(
+                        chat_id=chat_id,
+                        content=m["content"],
+                        sender=m["sender"],
+                        message_id=m["message_id"],
+                        timestamp=(
+                            datetime.fromisoformat(m["timestamp"])
+                            if m["timestamp"]
+                            else None
+                        ),
+                        message_type=m["message_type"],
+                    )
+                except sqlite3.IntegrityError:
+                    pass  # Duplicate message, skip
+                except Exception:
+                    pass  # Best-effort cache update
+
+            return results
+        finally:
+            await client.disconnect()
+
+    return asyncio.run(_fetch())
+
+
 def cmd_read(args: argparse.Namespace) -> int:
     """Read messages from a chat."""
     from tools.telegram_history import (
@@ -102,7 +198,7 @@ def cmd_read(args: argparse.Namespace) -> int:
                 )
                 return 1
 
-    # Search mode
+    # Search mode (always uses SQLite cache)
     if args.search:
         if chat_id:
             days = 365  # search broadly when explicit search
@@ -134,13 +230,28 @@ def cmd_read(args: argparse.Namespace) -> int:
             print("Error: --chat is required when not using --search", file=sys.stderr)
             return 1
 
-        result = get_recent_messages(chat_id=chat_id, limit=args.limit)
+        use_cache = getattr(args, "cached", False)
 
-        if "error" in result:
-            print(f"Error: {result['error']}", file=sys.stderr)
-            return 1
+        if not use_cache:
+            # Live fetch via Telethon (default)
+            try:
+                messages = _fetch_live_messages(chat_id, args.limit)
+            except Exception as e:
+                print(
+                    f"Warning: Live fetch failed ({e}), falling back to cache.",
+                    file=sys.stderr,
+                )
+                use_cache = True
 
-        messages = result.get("messages", [])
+        if use_cache:
+            # Cache-only path (fallback or --cached flag)
+            result = get_recent_messages(chat_id=chat_id, limit=args.limit)
+
+            if "error" in result:
+                print(f"Error: {result['error']}", file=sys.stderr)
+                return 1
+
+            messages = result.get("messages", [])
 
         # Filter by --since if provided
         if args.since:
@@ -294,6 +405,11 @@ def main() -> int:
         "--since", help="Time filter, e.g. '1 hour ago', '2 days ago'"
     )
     read_parser.add_argument("--json", action="store_true", help="Output as JSON")
+    read_parser.add_argument(
+        "--cached",
+        action="store_true",
+        help="Use cached messages only (skip live fetch)",
+    )
 
     # send subcommand
     send_parser = subparsers.add_parser("send", help="Send a message")
