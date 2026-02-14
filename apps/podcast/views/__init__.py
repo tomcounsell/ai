@@ -7,10 +7,13 @@ from .podcast_views import (
     PodcastListView,
 )
 
+from apps.podcast.workflow import EpisodeWorkflowView
+
 __all__ = [
     "EpisodeDetailView",
     "EpisodeReportView",
     "EpisodeSourcesView",
+    "EpisodeWorkflowView",
     "PodcastDetailView",
     "PodcastFeedView",
     "PodcastListView",
