@@ -17,6 +17,26 @@ import gpt_researcher_run
 import perplexity_deep_research
 
 
+def _perplexity_side_effect(*args, **kwargs):
+    """Mock side effect that creates the log file like the real function does."""
+    log_file = kwargs.get("log_file")
+    if log_file:
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_file, "w") as f:
+            f.write("Mock log output\n")
+    return ("Test research result", {})
+
+
+def _gemini_side_effect(*args, **kwargs):
+    """Mock side effect that creates the log file like the real function does."""
+    log_file = kwargs.get("log_file")
+    if log_file:
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        with open(log_file, "w") as f:
+            f.write("Mock log output\n")
+    return "Test research result"
+
+
 class TestPerplexityDeepResearch:
     """Tests for Perplexity Deep Research tool."""
 
@@ -43,7 +63,7 @@ class TestPerplexityDeepResearch:
     @patch("perplexity_deep_research.run_perplexity_research")
     def test_auto_save_creates_files(self, mock_research):
         """Test that auto-save creates output and log files."""
-        mock_research.return_value = "Test research result"
+        mock_research.side_effect = _perplexity_side_effect
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch(
@@ -60,19 +80,18 @@ class TestPerplexityDeepResearch:
                     perplexity_deep_research.main()
                 assert exc_info.value.code == 0
 
-            # Check that files were created
-            files = list(Path(tmpdir).glob("*"))
-            assert len(files) == 2, f"Expected 2 files, found {len(files)}"
-
+            # Check that files were created (.md output, .meta.json sidecar, .txt log)
             md_files = list(Path(tmpdir).glob("*.md"))
             txt_files = list(Path(tmpdir).glob("*.txt"))
+            json_files = list(Path(tmpdir).glob("*.meta.json"))
             assert len(md_files) == 1, "Should create one .md file"
             assert len(txt_files) == 1, "Should create one .txt log file"
+            assert len(json_files) == 1, "Should create one .meta.json sidecar file"
 
     @patch("perplexity_deep_research.run_perplexity_research")
     def test_custom_output_path(self, mock_research):
         """Test custom output file path."""
-        mock_research.return_value = "Test research result"
+        mock_research.side_effect = _perplexity_side_effect
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_file = Path(tmpdir) / "custom_output.md"
@@ -83,6 +102,7 @@ class TestPerplexityDeepResearch:
                     "perplexity_deep_research.py",
                     "--output",
                     str(output_file),
+                    "--auto-save",
                     "--quiet",
                     "Test prompt",
                 ],
@@ -98,7 +118,7 @@ class TestPerplexityDeepResearch:
     @patch("perplexity_deep_research.run_perplexity_research")
     def test_no_auto_save(self, mock_research, capsys):
         """Test that --no-auto-save prints to stdout."""
-        mock_research.return_value = "Test research result"
+        mock_research.return_value = ("Test research result", {})
 
         with patch(
             "sys.argv", ["perplexity_deep_research.py", "--no-auto-save", "Test prompt"]
@@ -137,7 +157,7 @@ class TestGeminiDeepResearch:
     @patch("gemini_deep_research.run_gemini_research")
     def test_auto_save_creates_files(self, mock_research):
         """Test that auto-save creates output and log files."""
-        mock_research.return_value = "Test research result"
+        mock_research.side_effect = _gemini_side_effect
 
         with tempfile.TemporaryDirectory() as tmpdir:
             with patch(
@@ -219,7 +239,7 @@ class TestLogDirectory:
     @patch("perplexity_deep_research.run_perplexity_research")
     def test_perplexity_log_dir_creates_subdirectory(self, mock_research):
         """Test that --log-dir creates subdirectory for Perplexity."""
-        mock_research.return_value = "Test result"
+        mock_research.side_effect = _perplexity_side_effect
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir) / "logs"
@@ -246,7 +266,7 @@ class TestLogDirectory:
     @patch("gemini_deep_research.run_gemini_research")
     def test_gemini_log_dir_creates_subdirectory(self, mock_research):
         """Test that --log-dir creates subdirectory for Gemini."""
-        mock_research.return_value = "Test result"
+        mock_research.side_effect = _gemini_side_effect
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_dir = Path(tmpdir) / "logs"
@@ -277,7 +297,7 @@ class TestFileOutputFormat:
     @patch("perplexity_deep_research.run_perplexity_research")
     def test_perplexity_output_contains_metadata(self, mock_research):
         """Test that Perplexity output file contains metadata."""
-        mock_research.return_value = "Research content here"
+        mock_research.return_value = ("Research content here", {})
 
         with tempfile.TemporaryDirectory() as tmpdir:
             output_file = Path(tmpdir) / "output.md"

@@ -35,6 +35,35 @@ def pytest_configure(config):
     # Set TESTING flag for error handling in utilities/logger.py
     settings.TESTING = True
 
+    # Use plain StaticFilesStorage for tests so collectstatic is not required.
+    # The default CompressedManifestStaticFilesStorage needs a manifest built
+    # by collectstatic, which causes ValueError in tests.
+    settings.STORAGES = {
+        **settings.STORAGES,
+        "staticfiles": {
+            "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+        },
+    }
+
+    # Reset Django's storage handler caches so the updated STORAGES setting
+    # is picked up. The StorageHandler caches backends (cached_property) and
+    # created storage instances (_storages dict).
+    from django.core.files.storage import storages
+    from django.utils.functional import empty
+
+    storages._backends = None
+    storages._storages = {}
+    # Clear the cached_property so it re-reads from settings.STORAGES
+    try:
+        del storages.backends
+    except AttributeError:
+        pass
+
+    # Reset the lazy staticfiles_storage so it re-creates from the handler.
+    from django.contrib.staticfiles.storage import staticfiles_storage
+
+    staticfiles_storage._wrapped = empty
+
     # Register test markers
     config.addinivalue_line("markers", "unit: mark test as a unit test")
     config.addinivalue_line("markers", "integration: mark test as an integration test")

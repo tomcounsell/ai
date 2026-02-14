@@ -48,7 +48,7 @@ class AccountViewsTestCase(TestCase):
 
     def test_login_view_get(self):
         """Test that login view renders correctly."""
-        url = reverse("login")
+        url = reverse("public:account-login")
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, 200)
@@ -56,7 +56,7 @@ class AccountViewsTestCase(TestCase):
 
     def test_login_view_post_valid(self):
         """Test successful login."""
-        url = reverse("login")
+        url = reverse("public:account-login")
         response = self.client.post(
             url, {"username": self.username, "password": self.password}
         )
@@ -70,7 +70,7 @@ class AccountViewsTestCase(TestCase):
 
     def test_login_view_post_invalid(self):
         """Test login with invalid credentials."""
-        url = reverse("login")
+        url = reverse("public:account-login")
         response = self.client.post(
             url, {"username": self.username, "password": "wrongpassword"}
         )
@@ -149,19 +149,19 @@ class AccountViewsTestCase(TestCase):
         )
         self.assertTrue(login_success)
 
-    def test_home_view_unauthenticated(self):
-        """Test that home view requires login."""
-        url = reverse("public:home")
+    def test_dashboard_view_unauthenticated(self):
+        """Test that dashboard view requires login."""
+        url = reverse("public:dashboard")
         response = self.client.get(url)
 
         # Should redirect to login page
         self.assertEqual(response.status_code, 302)
         self.assertIn("login", response.url)
 
-    def test_home_view_authenticated(self):
-        """Test that authenticated users can access home."""
+    def test_dashboard_view_authenticated(self):
+        """Test that authenticated users can access dashboard."""
         self.client.login(username=self.username, password=self.password)
-        url = reverse("public:home")
+        url = reverse("public:dashboard")
         response = self.client.get(url)
 
         self.assertEqual(response.status_code, 200)
@@ -172,15 +172,15 @@ class AccountViewsTestCase(TestCase):
         # First login
         self.client.login(username=self.username, password=self.password)
 
-        # Verify login status
-        home_url = reverse("public:home")
-        response = self.client.get(home_url)
+        # Verify login status via dashboard (login-required view)
+        dashboard_url = reverse("public:dashboard")
+        response = self.client.get(dashboard_url)
         self.assertEqual(response.status_code, 200)
 
         # Then logout - use the client directly to log out
         self.client.logout()
 
         # Verify user is now logged out
-        response = self.client.get(home_url)
+        response = self.client.get(dashboard_url)
         self.assertEqual(response.status_code, 302)  # Should redirect to login page
         self.assertIn("login", response.url)

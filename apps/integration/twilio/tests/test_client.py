@@ -2,6 +2,10 @@
 Unit tests for the TwilioClient
 """
 
+import pytest
+
+pytest.importorskip("twilio.rest", reason="twilio package not installed")
+
 from unittest.mock import MagicMock, patch
 
 from django.conf import settings

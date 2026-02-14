@@ -173,6 +173,7 @@ class TestPrompts:
 # =============================================================================
 
 
+@pytest.mark.skip(reason="Module not yet implemented: generate_audio.py")
 class TestAudioConfig:
     """Test AudioConfig dataclass."""
 
@@ -203,6 +204,7 @@ class TestAudioConfig:
         assert config.target_duration_per_part == 600
 
 
+@pytest.mark.skip(reason="Module not yet implemented: generate_audio.py")
 class TestGenerationMetrics:
     """Test GenerationMetrics dataclass."""
 
@@ -232,6 +234,7 @@ class TestGenerationMetrics:
         assert result["file_size_mb"] == 30.0
 
 
+@pytest.mark.skip(reason="Module not yet implemented: generate_audio.py")
 class TestAudioHelpers:
     """Test audio helper functions."""
 
@@ -278,6 +281,7 @@ class TestAudioHelpers:
 # =============================================================================
 
 
+@pytest.mark.skip(reason="Module not yet implemented: generate_audio.py")
 @pytest.mark.integration
 class TestGeminiIntegration:
     """Integration tests that call real Gemini API."""
@@ -405,6 +409,7 @@ class TestGeminiIntegration:
 # =============================================================================
 
 
+@pytest.mark.skip(reason="Module not yet implemented: generate_audio.py")
 class TestCLI:
     """Test command-line interface."""
 

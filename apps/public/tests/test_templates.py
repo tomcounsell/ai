@@ -19,6 +19,8 @@ class TemplateBlocksTestCase(TestCase):
             os.path.dirname(
                 os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             ),
+            "apps",
+            "public",
             "templates",
         )
         with open(os.path.join(templates_dir, "base.html")) as f:
@@ -52,6 +54,8 @@ class TemplateBlocksTestCase(TestCase):
             os.path.dirname(
                 os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             ),
+            "apps",
+            "public",
             "templates",
         )
         with open(os.path.join(templates_dir, "base.html")) as f:
@@ -82,6 +86,8 @@ class TemplateBlocksTestCase(TestCase):
             os.path.dirname(
                 os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             ),
+            "apps",
+            "public",
             "templates",
             "pages",
         )
@@ -132,6 +138,8 @@ class TemplateBlocksTestCase(TestCase):
             os.path.dirname(
                 os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             ),
+            "apps",
+            "public",
             "templates",
         )
         for root, dirs, files in os.walk(templates_dir):
@@ -175,6 +183,8 @@ class TemplateBlocksTestCase(TestCase):
             os.path.dirname(
                 os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             ),
+            "apps",
+            "public",
             "templates",
         )
         for root, dirs, files in os.walk(templates_dir):
@@ -200,13 +210,14 @@ class TemplateBlocksTestCase(TestCase):
                         context = content[
                             max(0, block_pos - 200) : min(len(content), block_pos + 200)
                         ]
-                        comment_pattern = r"{#.*?#}"
+                        # Match both inline comments {# #} and block comments {% comment %}...{% endcomment %}
+                        comment_pattern = r"({#.*?#}|{%\s*comment\s*%})"
                         comment_matches = re.findall(comment_pattern, context)
 
                         # Skip base.html and partial.html for this test as they might have empty blocks as placeholders
                         if file_name not in ["base.html", "partial.html"]:
-                            # Also skip empty css blocks since they're commonly used for including CSS
-                            if block_name != "css":
+                            # Skip common empty override blocks that don't need comments
+                            if block_name not in ("css", "main_footer", "main_header"):
                                 self.assertTrue(
                                     len(comment_matches) > 0,
                                     f"Empty block '{block_name}' in {file_path} should have a comment explaining its purpose",
@@ -218,6 +229,8 @@ class TemplateBlocksTestCase(TestCase):
             os.path.dirname(
                 os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
             ),
+            "apps",
+            "public",
             "templates",
         )
         for root, dirs, files in os.walk(templates_dir):

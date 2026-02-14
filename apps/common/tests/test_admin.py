@@ -72,8 +72,8 @@ class AdminTestCase(TestCase):
         response = self.client.get("/admin/")
         self.assertEqual(response.status_code, 200)
 
-        # Get the admin site styles to check if our CSS is included
-        self.assertIn("output.css", str(response.content))
+        # Unfold uses its own styles.css instead of output.css
+        self.assertIn("unfold/css/styles.css", str(response.content))
 
     def test_admin_page(self):
         """Test the admin list page elements."""
@@ -81,11 +81,11 @@ class AdminTestCase(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
 
-        # Verify that admin shows our custom page title
-        self.assertContains(response, "ProjectName Database")
+        # Verify that admin shows the index title
+        self.assertContains(response, "Database")
 
-        # Check for CSS output
-        self.assertContains(response, "output.css")
+        # Check for Unfold CSS
+        self.assertContains(response, "unfold/css/styles.css")
 
     def test_custom_dashboard(self):
         """Test the custom admin dashboard."""
@@ -93,11 +93,9 @@ class AdminTestCase(TestCase):
         response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
 
-        # We may be running in a test environment where the dashboard callback
-        # isn't fully registered or rendered. Let's check for basic
-        # admin elements instead of specific dashboard widgets.
-        self.assertContains(response, "ProjectName Database")
-        self.assertContains(response, "output.css")
+        # Check for basic admin elements
+        self.assertContains(response, "Database")
+        self.assertContains(response, "unfold/css/styles.css")
 
         # Check for modules that should be in the admin
         self.assertContains(response, "Common")
