@@ -255,25 +255,22 @@ python -c "from tools.sms_reader import get_recent_messages; print(get_recent_me
 python -c "from tools.sms_reader import search_messages; print(search_messages('verification'))"
 ```
 
-**Telegram History** - Search stored message history via CLI:
+**Telegram** - Read and send Telegram messages:
 ```bash
-# Search across all chats
-valor-history search "keyword" --days 30
+# Recent messages
+valor-telegram read --chat "Dev: Valor" --limit 10
 
-# Search specific group
-valor-history search "authentication" --group "Dev: Valor"
+# Search messages
+valor-telegram read --chat "Dev: Valor" --search "keyword"
 
-# Recent messages from a group
-valor-history recent --group "Dev: Valor" --limit 20
+# Send message
+valor-telegram send --chat "Dev: Valor" "Hello"
 
-# List known groups
-valor-history groups
-
-# Search stored links
-valor-history links --domain github.com
+# List chats
+valor-telegram chats
 ```
 
-**When to check history**: Use valor-history when context cues suggest prior messages may be relevant:
+**When to check history**: Use `valor-telegram read --search` when context cues suggest prior messages may be relevant:
 - "what do you think of these" / "those links I shared"
 - "as I mentioned earlier" / "like we discussed"
 - References to recent work without explicit details
