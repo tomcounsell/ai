@@ -29,6 +29,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Session Watchdog](session-watchdog.md) | Active session monitoring with proper cleanup and state management | Shipped |
 | [Steering Queue](steering-queue.md) | Mid-execution course correction via Telegram reply threads | Shipped |
 | [Telegram History & Links](telegram-history.md) | Searchable message history and link compilation from Telegram | Shipped |
+| [Telegram Messaging](telegram-messaging.md) | Unified interface for reading and sending Telegram messages via `valor-telegram` CLI | Shipped |
 | [YouTube Transcription](youtube-transcription.md) | Auto-transcribe YouTube videos shared in messages for Claude context | Shipped |
 
 ## Adding New Entries
