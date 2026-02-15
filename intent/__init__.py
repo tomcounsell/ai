@@ -1,12 +1,17 @@
 """
 Intent Recognition Module
 
-Classify user message intents using Ollama or heuristics.
+Classify user message intents using Ollama (preferred) or regex heuristics (fallback).
+
+Actively used by: bridge/response.py -> get_processing_emoji()
+Called from: bridge/telegram_bridge.py message handler (line ~730)
+Purpose: Selects the Telegram reaction emoji shown while a message is being processed.
+         Maps intents (e.g., "search", "code_execution") to emojis via INTENT_REACTIONS.
+Graceful degradation: On any failure, falls back to the default "thinking" emoji.
 """
 
 import os
 import re
-from typing import Any
 
 import requests
 

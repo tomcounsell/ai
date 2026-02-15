@@ -492,6 +492,8 @@ def get_processing_emoji(message: str) -> str:
         Emoji string for the processing stage
     """
     try:
+        # intent/ module classifies message type (search, code, chat, etc.)
+        # to pick a contextual reaction emoji. Falls back to default on failure.
         from intent import classify_intent
 
         result = classify_intent(message, use_ollama=True)
