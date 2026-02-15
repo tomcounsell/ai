@@ -5,10 +5,12 @@ After a code change lands, find every document that references the changed area 
 ## Principles
 
 1. **Document what IS, not what WAS** — match the actual API/behavior, not the plan
-2. **Cross-reference, don't duplicate** — link to the source of truth rather than restating
-3. **Surgical edits only** — preserve existing structure, change only what the code change invalidates
-4. **Read before edit** — always read the full file before modifying it
-5. **When in doubt, create an issue** — flag conflicts needing human judgment rather than guessing
+2. **Full context, not just diffs** — read entire modified files, not just changed lines. The diff shows what moved; the full file shows what it means.
+3. **Cross-reference, don't duplicate** — link to the source of truth rather than restating
+4. **Surgical edits only** — preserve existing structure, change only what the code change invalidates
+5. **Read before edit** — always read the full file before modifying it
+6. **Hunt stale references** — after a refactor, grep for old pattern keywords across all docs. If the code stopped using "history" as a data bus, search docs for "history" too.
+7. **When in doubt, create an issue** — flag conflicts needing human judgment rather than guessing
 
 ## Step 1: Understand the Change (Parallel Exploration)
 
@@ -20,6 +22,8 @@ Spawn a sub-agent with this prompt:
 
 ```
 Explore and summarize the code change described by: <INPUT>
+
+### Pass 1: Structural read (diff only)
 
 1. If this looks like a PR number (e.g. "123" or "#123"):
    - Run: gh pr view <number> --json title,body,files,additions,deletions
@@ -34,11 +38,33 @@ Explore and summarize the code change described by: <INPUT>
    - Run: git log --oneline -20
    - Identify the most relevant recent commits and inspect their diffs
 
-Produce a structured summary:
+### Pass 2: Full file reads (not just diff)
+
+For every modified file, read the ENTIRE file — not just the changed lines.
+This reveals context the diff hides: return type conventions, naming patterns,
+how callers use the changed code, and whether the change is consistent with
+the rest of the file.
+
+### Pass 3: Cross-file data flow
+
+Trace how data flows between modified files. Look for:
+- String keys used in one file and matched in another (fragile coupling)
+- Shared data structures written by one module, read by another
+- Import changes that add or remove cross-module dependencies
+
+### Pass 4: Intent vs. actual changes
+
+If a PR description or commit message exists, compare what it CLAIMS changed
+against what the diff ACTUALLY shows. Flag discrepancies — stated removals
+that are actually additions, described refactors that are incomplete, etc.
+
+### Produce a structured summary:
 - **What changed**: Files modified, functions added/removed/renamed, config keys changed
 - **API surface changes**: New/removed/renamed public interfaces, parameters, return types
 - **Behavioral changes**: Different defaults, new error conditions, changed workflows
+- **Cross-file couplings**: Data that flows between modified files and how
 - **Key terms**: Important identifiers (function names, config keys, command names, file paths) that docs might reference
+- **Retired terms**: Old identifiers, patterns, or concepts that the change replaces — these become grep targets for stale references
 ```
 
 ### Agent B — Documentation Inventory
@@ -100,6 +126,28 @@ Format:
 ```
 
 If zero documents are affected, report that clearly and stop.
+
+## Step 2b: Stale Reference Sweep
+
+Using the **Retired terms** from Agent A's summary, grep across ALL docs for old keywords that the change replaced. This catches references the triage questions miss — docs that use an old name, old pattern, or old concept without directly depending on the changed file.
+
+```bash
+# For each retired term, search all doc locations
+rg "<retired-term>" docs/ CLAUDE.md config/SOUL.md .claude/commands/ .claude/skills/
+```
+
+Add any new hits to the affected documents list from Step 2.
+
+## Step 2c: What's Missing
+
+After identifying docs that need updating, ask what docs *should exist but don't*:
+
+- Did the change introduce a new feature that has no `docs/features/*.md` entry?
+- Did it add a new command or skill with no corresponding documentation?
+- Did it create a new config key or environment variable not listed in setup/deployment docs?
+- Is there a new cross-file pattern or data flow that warrants a feature doc?
+
+If something is missing, add a task to create it (not just update existing docs).
 
 ## Step 3: Make Surgical Edits
 
