@@ -63,6 +63,67 @@ If your independent results differ from builder's claims:
 - Report: "Builder claimed X, but independent verification shows Y"
 - This is a HARD FAIL, not a warning
 
+## TDD Verification
+
+This is a separate validation step that verifies test-driven development discipline. Run this check for every task that involves code changes.
+
+### Step 1: Identify Changed Files
+
+Run `git diff --name-only` (or `git diff --name-only HEAD~1` for committed changes) to get the list of changed files. Separate them into two categories:
+
+- **Implementation files**: Any `.py` file outside of `tests/` (e.g., `tools/foo.py`, `bridge/handler.py`)
+- **Test files**: Any `.py` file inside `tests/` (e.g., `tests/test_foo.py`, `tests/test_handler.py`)
+
+### Step 2: Verify Test Coverage for Each Implementation File
+
+For each changed implementation file, check that a corresponding test file was also created or modified. The correspondence rules are:
+
+- `tools/foo.py` expects `tests/test_foo.py`
+- `bridge/handler.py` expects `tests/test_handler.py` or `tests/test_bridge_handler.py`
+- `agent/sdk_client.py` expects `tests/test_sdk_client.py` or `tests/test_agent_sdk_client.py`
+- Nested paths collapse: the test file must at minimum contain the base filename with `test_` prefix
+
+Report:
+- **PASS** if every changed implementation file has a corresponding test file that was also changed
+- **FAIL** with a list of implementation files missing test coverage
+
+### Step 3: Test Hygiene
+
+Check for these anti-patterns:
+
+- **Orphaned tests**: Test files in `tests/` that import from or reference modules that no longer exist. Run a quick check: for each test file, verify that the module it tests still exists on disk.
+- **Test bloat from copy-paste**: Look for multiple test functions with near-identical structure (same assertions, same setup, differing only in input values). These should be parameterized with `@pytest.mark.parametrize`.
+- **Zombie tests after deletion**: If a commit deletes an implementation file, verify that corresponding test files were also removed or updated. Implementation deletion without test cleanup is a FAIL.
+
+### Exceptions — Do NOT Flag These
+
+The TDD check does not apply to changes that are purely:
+
+- Documentation files (`.md`, `.rst`, `.txt`)
+- Configuration files (`pyproject.toml`, `.env.example`, `.env`, `*.toml`, `*.yaml`, `*.yml`, `*.json`)
+- Plan documents (`docs/plans/*`)
+- Agent, skill, or command prompt files (`.claude/agents/*`, `.claude/skills/*`, `.claude/commands/*`)
+- Pure deletion of dead code where no new behavior is introduced
+- `__init__.py` files (unless they contain substantial logic)
+- Migration files (`*/migrations/*`)
+- Comment-only or docstring-only changes within existing files
+
+When all changed files fall exclusively into these exception categories, report the TDD check as **PASS (exempt — no testable code changes)**.
+
+### TDD Report Format
+
+Include the TDD verification as a distinct section in your validation report:
+
+```
+**TDD Verification**:
+- Changed implementation files: [list]
+- Changed test files: [list]
+- Coverage: [N/M implementation files have corresponding tests]
+- Hygiene: [orphaned tests: Y/N, copy-paste bloat: Y/N, zombie tests: Y/N]
+- Result: PASS | FAIL | PASS (exempt)
+- Details: [specifics if FAIL]
+```
+
 ## Workflow
 
 1. **Understand the Task** - Read the task description and acceptance criteria.
