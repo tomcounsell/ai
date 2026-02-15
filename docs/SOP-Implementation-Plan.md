@@ -1,8 +1,10 @@
 # Standard Operating Procedures (SOP) Implementation Plan
 
+> **⚠️ DEPRECATED**: The `sops/` directory was deleted in PR #118. SOPs have been superseded by `.claude/skills/`. This document is retained for historical reference only.
+
 **Created**: 2025-11-19
 **Updated**: 2026-01-19
-**Status**: Phase 1 Complete (9 SOPs Created)
+**Status**: Deprecated — replaced by `.claude/skills/`
 **Goal**: Structure all agentic skills with formal SOPs
 
 ---

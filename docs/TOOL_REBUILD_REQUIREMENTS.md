@@ -21,7 +21,6 @@ All tools are available in `tools/`:
 - **image-gen** - Image generation tool
 
 ### Supporting Modules (Added 2026-01-19)
-- **analytics/** - Metrics collection, SQLite storage, dashboard reporting
 - **intent/** - Ollama-based intent classification with heuristic fallback
 
 See [tools/README.md](../tools/README.md) for usage documentation.

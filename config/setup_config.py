@@ -59,10 +59,10 @@ def create_env_file(force: bool = False) -> bool:
         True if file was created successfully, False otherwise.
     """
     env_file = Path(".env")
-    template_file = Path(".env.template")
+    template_file = Path(".env.example")
 
     if not template_file.exists():
-        console.print("❌ .env.template file not found!", style="bold red")
+        console.print("❌ .env.example file not found!", style="bold red")
         return False
 
     if env_file.exists() and not force:
