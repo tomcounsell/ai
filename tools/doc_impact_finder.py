@@ -338,11 +338,17 @@ def _rerank_single_candidate(
     )
     try:
         response = client.messages.create(
-            model="claude-haiku-4-20250514",
+            model="claude-haiku-4-5-20251001",
             max_tokens=200,
             messages=[{"role": "user", "content": prompt}],
         )
         text = response.content[0].text.strip()
+        # Strip markdown code fences if present (Haiku often wraps JSON in ```json ... ```)
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
         parsed = json.loads(text)
         score = float(parsed.get("score", 0))
         reason = parsed.get("reason", "")
