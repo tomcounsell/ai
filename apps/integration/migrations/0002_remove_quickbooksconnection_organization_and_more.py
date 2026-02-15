@@ -10,13 +10,13 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RemoveField(
-            model_name="quickbooksconnection",
-            name="organization",
-        ),
         migrations.AlterUniqueTogether(
             name="quickbooksconnection",
             unique_together=None,
+        ),
+        migrations.RemoveField(
+            model_name="quickbooksconnection",
+            name="organization",
         ),
         migrations.DeleteModel(
             name="MCPSession",
