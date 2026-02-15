@@ -77,6 +77,33 @@ Three changes, all prompt-level:
 | "The existing code doesn't have tests" | That's why we're fixing it. Add tests for what you touch. |
 | "I can't test this without mocking everything" | If it needs that many mocks, the design is wrong. Simplify first. |
 
+### Test Hygiene — Preventing Bloat
+
+TDD without pruning leads to a growing test suite where outdated, overlapping, and redundant tests accumulate. The enforcement gates must include a **test maintenance obligation** alongside the test-creation obligation.
+
+**Builder prompt addition — REFACTOR includes tests:**
+
+During the REFACTOR phase of RED-GREEN-REFACTOR, the builder MUST also refactor tests:
+- **Consolidate overlapping tests**: If two tests verify the same behavior through different paths, merge them into one parameterized test
+- **Delete dead tests**: If a test exercises code that was just deleted or replaced, delete the test
+- **Collapse scaffolding tests**: Initial granular tests written during RED phase can be consolidated once the implementation stabilizes. Five narrow unit tests that all test "returns correct value" can become one parameterized test.
+- **Remove tests for removed features**: When deleting a feature, delete its tests in the same commit — not "later"
+
+**Validator prompt addition — test hygiene check:**
+
+The validator checks not just "do tests exist?" but also:
+- Are there test files for code that no longer exists? (orphaned tests)
+- Are there multiple test functions with near-identical structure that should be parameterized?
+- Did a deletion commit remove implementation but leave tests behind?
+
+**Rationalization table additions:**
+
+| Rationalization | Reality |
+|---|---|
+| "I'll clean up the tests later" | You won't. Consolidate now while context is fresh. |
+| "More tests = better coverage" | Redundant tests slow CI and obscure intent. Quality over quantity. |
+| "I shouldn't delete tests someone else wrote" | If the code they tested is gone, the tests are dead weight. Delete them. |
+
 ### Exceptions (Explicit, Not Implicit)
 
 TDD does not apply to:
