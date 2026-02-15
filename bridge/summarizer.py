@@ -154,10 +154,23 @@ STATUS_UPDATE — Progress report with no question. The agent is still working.
   Examples: "Running tests...", "Found 3 issues, fixing now", "Analyzing the codebase"
   Key signals: present tense activity, no question directed at human, intermediate progress
 
-COMPLETION — The work is done. Final summary or deliverable.
-  Examples: "Done. Committed abc1234", "PR created: https://...", \
-"All tests passing, pushed to main"
-  Key signals: past tense, "done", "complete", "finished", commit hashes, PR URLs, final summaries
+COMPLETION — The work is done AND evidence is provided.
+  REQUIRES at least one of:
+  - Command output showing test results (N passed, 0 failed)
+  - Specific numbers (test counts, error counts, line counts)
+  - Command exit codes or verification output
+  - File paths confirmed to exist
+  - PR/commit URLs with passing status
+  Examples: "All 42 tests passed, committed abc1234", \
+"PR created: https://... — CI green", "ruff check: 0 errors, black: reformatted 3 files"
+  Key signals: specific numbers, command output pasted, exit codes mentioned
+
+  NOT completion (classify as STATUS_UPDATE instead):
+  - "Done" or "Complete" without any evidence
+  - "Should work now" (hedging = not verified)
+  - "Committed and pushed" without test results
+  - Hedging language: "should", "probably", "seems to", "looks like", "I think", "I believe"
+  - Claims without proof: "Fixed the bug" without reproduction test output
 
 BLOCKER — The agent is stuck and needs human help to proceed.
   Examples: "I don't have access to...", "This requires permissions I don't have", "Blocked on..."

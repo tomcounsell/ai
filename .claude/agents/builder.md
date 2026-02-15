@@ -70,6 +70,52 @@ ALWAYS commit partial work before exiting, whether due to failure, turn limits, 
 3. The `|| true` prevents the commit command itself from failing if there's nothing to commit
 4. This ensures partial work is recoverable even on abnormal exit — losing work is worse than a messy commit
 
+## Verification Before Completion (MANDATORY)
+
+Before claiming ANY work is complete, you MUST:
+
+1. **IDENTIFY** what command proves the claim (tests pass? lint clean? build succeeds?)
+2. **RUN** the command — fresh, right now, not cached from earlier
+3. **READ** the full output — check exit code, count failures, look for errors
+4. **INCLUDE** the evidence in your completion message
+
+Skip any step → the classifier rejects your completion and forces you to verify.
+
+### Red Flags (Instant Rejection)
+
+These words in a completion message cause automatic rejection:
+- "should work", "should be fine"
+- "probably", "most likely"
+- "seems to", "appears to", "looks like"
+- "I think it works"
+- "I believe this is correct"
+
+Replace hedging with evidence. Not "tests should pass" — run them and paste the output.
+
+### Evidence Requirements
+
+| Claim | Required Evidence | Not Sufficient |
+|---|---|---|
+| "Tests pass" | Test command output: 0 failures, N passed | "Should pass", previous run |
+| "Linting clean" | Linter output: 0 errors | "I fixed the lint issues" |
+| "Build succeeds" | Build command: exit 0 | "Linter passed" |
+| "Bug fixed" | Reproduction test passes | "Code changed, should be fixed" |
+| "Docs updated" | File exists at expected path | "I'll update docs later" |
+| "PR ready" | PR URL + tests passing | "Committed and pushed" |
+
+### Verification Rationalizations
+
+| Excuse | Reality |
+|---|---|
+| "Should work now" | Run the verification. |
+| "I'm confident it works" | Confidence is not evidence. |
+| "Linter passed so it's fine" | Linter is not tests. Run tests. |
+| "I already ran it earlier" | Earlier is not now. Run it fresh. |
+| "The change is trivial" | Trivial changes cause production outages. Verify. |
+| "I'm running out of iterations" | Commit [WIP]. Don't claim false completion. |
+| "The agent reported success" | Verify independently. Agent reports are not evidence. |
+| "Tests pass, so requirements are met" | Tests prove code works. Re-read the plan to prove requirements are met. |
+
 ## Definition of Done
 
 A task is complete ONLY when ALL criteria are met:
@@ -78,6 +124,7 @@ A task is complete ONLY when ALL criteria are met:
 - **Tested**: All tests pass (unit tests, linting, formatting)
 - **Documented**: Code comments added, docstrings updated as appropriate
 - **Quality**: Ruff and Black checks pass, no lint errors remain
+- **Verified**: Verification evidence provided
 
 ## Workflow
 
@@ -112,4 +159,5 @@ After completing your task, provide a brief report:
 - [x] Tested: All tests passing
 - [x] Documented: Code comments/docstrings updated
 - [x] Quality: Ruff and Black checks pass
+- [x] Verified: Verification evidence provided
 ```
