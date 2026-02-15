@@ -26,6 +26,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
 | [Scale Job Queue (Popoto + Worktrees)](scale-job-queue-with-popoto-and-worktrees.md) | Redis persistence and git worktrees for parallel build execution | Shipped |
 | [SDK Modernization](sdk-modernization.md) | Upgrade to SDK v0.1.35 with programmatic agents, expanded hooks, and cost budgeting | Shipped |
+| [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) | Two-stage semantic search (embedding recall + LLM reranking) for finding docs affected by code changes | Shipped |
 | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
 | [Session Watchdog](session-watchdog.md) | Active session monitoring with proper cleanup and state management | Shipped |
 | [Steering Queue](steering-queue.md) | Mid-execution course correction via Telegram reply threads | Shipped |

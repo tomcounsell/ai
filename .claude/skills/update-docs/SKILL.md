@@ -19,7 +19,7 @@ After a code change lands, find every document that references the changed area 
 
 ## Step 1: Understand the Change (Parallel Exploration)
 
-Launch two agents in parallel using the Task tool.
+Launch three agents in parallel using the Task tool.
 
 ### Agent A — Change Explorer
 
@@ -98,11 +98,41 @@ Sort by importance: CLAUDE.md first, then features, then commands, then plans, t
 Do NOT read file contents in full — scan headings, section titles, and grep for key identifiers.
 ```
 
-Wait for both agents to complete before proceeding.
+### Agent C — Semantic Impact Finder
+
+Spawn a sub-agent with this prompt:
+
+```
+Run the semantic doc impact finder to identify conceptually related documentation
+that may need updating, even if there are no shared keywords.
+
+1. First, ensure the doc index is current:
+   python3 -c "import sys; sys.path.insert(0, '.'); from tools.doc_impact_finder import index_docs; index_docs()"
+
+2. Then find affected docs using the change summary:
+   python3 -c "
+   import sys, json
+   sys.path.insert(0, '.')
+   from tools.doc_impact_finder import find_affected_docs
+   results = find_affected_docs('''<CHANGE_SUMMARY>''')
+   for r in results:
+       print(f'{r.relevance:.2f} | {r.path} | {r.sections} | {r.reason}')
+   "
+
+Replace <CHANGE_SUMMARY> with a 2-3 sentence natural language summary of the code change.
+
+Report the results as a ranked list. If no embedding API key is configured, report
+that gracefully — the cascade continues with Agents A and B alone.
+```
+
+**Note**: Agent C may return zero results if no embedding API key is configured.
+This is expected — the cascade degrades gracefully to lexical-only matching.
+
+Wait for all three agents to complete before proceeding. If Agent C failed or returned no results, proceed with Agents A and B output only.
 
 ## Step 2: Triage — Cross-Reference Changes Against Docs
 
-Using the outputs from Agent A (change summary) and Agent B (doc inventory), evaluate every doc file against these four triage questions:
+Using the outputs from Agent A (change summary), Agent B (doc inventory), and Agent C (semantic impact finder — if available), evaluate every doc file against these four triage questions:
 
 For each document in the inventory, ask:
 
@@ -114,6 +144,14 @@ For each document in the inventory, ask:
 | 4 | Does it **orchestrate a workflow** using the changed components? (step-by-step instructions that now have different steps) | Needs update |
 
 If ALL four answers are NO, skip that doc.
+
+### Merge Semantic Results
+
+If Agent C returned results, add any documents it identified that aren't already in the affected list from the triage questions above. Agent C catches conceptual coupling that keyword matching misses (e.g., "changed session scoping" finding session-isolation.md even without shared identifiers).
+
+For each Agent C result with relevance >= 0.5:
+- If already in the affected list: note the semantic reason as additional context
+- If NOT in the affected list: add it with Agent C's reason as the justification
 
 Produce an ordered task list of affected docs. Order by dependency — foundational docs first (CLAUDE.md, feature docs), then derivative docs (commands, plans, skills).
 
