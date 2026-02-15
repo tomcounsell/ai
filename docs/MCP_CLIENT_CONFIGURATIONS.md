@@ -581,28 +581,6 @@ Adjust connection timeouts:
 }
 ```
 
-### QuickBooks MCP (Local - Requires OAuth)
-
-**Configuration:**
-
-```json
-{
-  "mcpServers": {
-    "quickbooks": {
-      "command": "uvx",
-      "args": [
-        "run",
-        "https://raw.githubusercontent.com/yudame/cuttlefish/main/apps/ai/mcp/quickbooks_server.py"
-      ],
-      "env": {
-        "QUICKBOOKS_ORG_ID": "your_org_id",
-        "QUICKBOOKS_API_KEY": "your_api_key"
-      }
-    }
-  }
-}
-```
-
 ---
 
 ## Troubleshooting

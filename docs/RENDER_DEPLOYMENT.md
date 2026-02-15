@@ -40,12 +40,6 @@ Create an environment group named `cuttlefish` in the Render dashboard with thes
 SECRET_KEY=<generate-random-secret-key>
 DEBUG=False
 ALLOWED_HOSTS=cuttlefish-production.onrender.com,ai.yuda.me
-
-# QuickBooks OAuth (if using QuickBooks MCP)
-QUICKBOOKS_CLIENT_ID=<your-quickbooks-client-id>
-QUICKBOOKS_CLIENT_SECRET=<your-quickbooks-client-secret>
-QUICKBOOKS_WEBHOOK_TOKEN=<your-webhook-token>
-QUICKBOOKS_SANDBOX_MODE=False
 ```
 
 ### Auto-configured Variables
@@ -174,11 +168,10 @@ Tasks are defined with `@task` decorator and enqueued with `.enqueue()`. In dev/
 
 ## MCP Server Deployment
 
-The Creative Juices MCP and QuickBooks MCP servers are accessible via Django:
+The MCP servers are accessible via Django:
 
 - **Creative Juices Landing**: https://ai.yuda.me/mcp/creative-juices
 - **Creative Juices Manifest**: https://ai.yuda.me/mcp/creative-juices/manifest.json
-- **QuickBooks OAuth**: https://ai.yuda.me/api/quickbooks/connect/
 
 These are served by Django views and work automatically once deployed.
 
@@ -253,9 +246,6 @@ To enable Redis for caching/sessions:
 - **Solution**: Verify all required env vars are set
 - **Check**: `DEPLOYMENT_TYPE`, `SECRET_KEY`, `DATABASE_URL`
 
-**Issue**: QuickBooks OAuth fails
-- **Solution**: Add QuickBooks credentials to Render
-- **Verify**: Redirect URI matches Render URL
 
 ## Manual Deployment Commands
 
@@ -315,8 +305,7 @@ After deployment:
 
 1. **Verify Health**: Check https://your-app.onrender.com/health/
 2. **Test MCP Endpoints**: Visit MCP landing pages
-3. **Configure OAuth**: Set QuickBooks redirect URI
-4. **Add Custom Domain**: Configure DNS for ai.yuda.me
+3. **Add Custom Domain**: Configure DNS for ai.yuda.me
 5. **Monitor**: Set up alerts in Render dashboard
 6. **Document URLs**: Update team documentation with production URLs
 

@@ -52,7 +52,7 @@ PROJECT_APPS = [
     "apps.integration",
     "apps.api",
     "apps.public",  # for web front-end
-    "apps.ai",  # AI integrations and agents (includes QuickBooks MCP)
+    "apps.ai",  # AI integrations and agents
     "apps.staff",  # for staff-only admin tools
     "apps.drugs",  # Medication tracker
     "apps.podcast",  # Podcast management and feeds

@@ -18,13 +18,12 @@
 Cuttlefish is a Django-based AI integration platform that provides multiple services:
 
 1. **Model Context Protocol (MCP) Servers**
-   - QuickBooks integration for AI assistants
    - Creative Juices for creative thinking prompts
+   - CTO Tools for engineering leadership
    - Hosted and accessible via web endpoints
 
 2. **Django Web Application**
    - Serves MCP server landing pages and manifests
-   - OAuth integration flows
    - REST API endpoints
    - Web-based interfaces with HTMX
 
@@ -57,16 +56,9 @@ apps/
 │   └── utils/        # Helper functions and utilities
 │
 ├── integration/      # External service integrations
-│   └── quickbooks/   # QuickBooks API integration (depends on common)
-│       ├── client.py         # Async API client with OAuth handling
-│       ├── models.py         # QuickBooksConnection model
-│       ├── oauth_views.py    # OAuth flow implementation
-│       ├── api.py           # Synchronous API wrapper
-│       └── tests/           # Integration tests
 │
-├── ai/              # MCP servers and AI functionality (depends on integration)
+├── ai/              # MCP servers and AI functionality
 │   ├── mcp/         # Model Context Protocol servers
-│   │   ├── quickbooks_server.py      # QuickBooks MCP server
 │   │   ├── creative_juices_server.py # Creative Juices MCP server
 │   │   ├── creative_juices_words.py  # Word lists for Creative Juices
 │   │   ├── CREATIVE_JUICES_README.md # Creative Juices installation guide
@@ -79,7 +71,6 @@ apps/
 │   └── tests/       # MCP server tests
 │
 ├── api/             # REST API endpoints (depends on all above)
-│   └── quickbooks/  # QuickBooks-specific API views
 │
 ├── public/          # Web UI with HTMX (depends on all above)
 │   ├── templates/   # All templates centralized here
@@ -106,25 +97,7 @@ settings/
 
 ## MCP Server Implementations
 
-### 1. QuickBooks MCP Server
-
-**Purpose**: Enables AI assistants to interact with QuickBooks data through standardized MCP protocol.
-
-**Key Components**:
-- **Server**: `apps/ai/mcp/quickbooks_server.py` - Main MCP server with tool handlers
-- **Client**: `apps/integration/quickbooks/client.py` - Async QuickBooks API client
-- **OAuth**: `apps/integration/quickbooks/oauth_views.py` - OAuth authentication flow
-- **Models**: `apps/integration/models/quickbooks.py` - QuickBooksConnection, Organization
-
-**Running**:
-```bash
-uv run python -m apps.ai.mcp.quickbooks_server
-```
-
-**Authentication**: OAuth 2.0 flow with token refresh
-**Data Access**: Customers, invoices, vendors, payments, company info
-
-### 2. Creative Juices MCP Server
+### Creative Juices MCP Server
 
 **Purpose**: Provides randomness tools to encourage creative thinking through concrete metaphors and strategic frameworks.
 
@@ -149,7 +122,7 @@ uv run python -m apps.ai.mcp.creative_juices_server
 
 ### MCP Web Hosting Architecture
 
-Both MCP servers are deployed via Django web views:
+MCP servers are deployed via Django web views:
 
 **Django Views** (`apps/ai/views/mcp_views.py`):
 - `CreativeJuicesLandingView` - Serves HTML landing page
@@ -220,39 +193,7 @@ Reusable model behaviors in `apps/common/behaviors/`:
   - Boolean fields start with `is_` or `has_`
   - Clear, descriptive variable names
 
-## QuickBooks Integration Deep Dive
-
-### MCP Server Entry Points
-
-The MCP server enables AI assistants to interact with QuickBooks data:
-
-1. **Main Server**: `apps/ai/mcp/quickbooks_server.py`
-   - Handles MCP protocol communication
-   - Routes tool calls to appropriate handlers
-   - Manages authentication and sessions
-
-2. **QuickBooks Client**: `apps/integration/quickbooks/client.py`
-   - Async HTTP client for QuickBooks API
-   - OAuth token management
-   - Request/response handling
-
-### OAuth Authentication Flow
-
-Located in `apps/integration/quickbooks/oauth_views.py`:
-1. User initiates connection at `/api/quickbooks/connect/`
-2. Redirected to QuickBooks for authorization
-3. Callback processes tokens at `/api/quickbooks/callback/`
-4. Tokens stored in `QuickBooksConnection` model
-5. MCP server uses tokens for API access
-
 ### Key Models and Their Locations
-
-**QuickBooks Models** (`apps/integration/models/quickbooks.py`):
-- `Organization`: B2B organization management
-- `QuickBooksConnection`: OAuth tokens and company info
-- `MCPSession`: Active MCP session tracking
-- Stores access/refresh tokens, realm ID, company name
-- Handles token refresh automatically
 
 **AI Models** (`apps/ai/models/`):
 - `ChatSession`: Chat conversation tracking
@@ -340,36 +281,18 @@ Located in `apps/integration/quickbooks/oauth_views.py`:
    - Add deployment guide to `apps/ai/mcp/DEPLOYMENT.md`
    - Update spec in `docs/specs/`
 
-### Adding New QuickBooks Operations
-
-1. **Define the tool**: `apps/ai/mcp/quickbooks_server.py`
-   - Add `@mcp.tool()` decorated function
-   - Use type hints for parameter validation
-
-2. **Add API method**: `apps/integration/quickbooks/client.py`
-   - Implement async method
-   - Handle QuickBooks API specifics
-
-3. **Write tests**:
-   - MCP tests: `apps/ai/tests/test_mcp_quickbooks.py`
-   - Integration tests: `apps/integration/quickbooks/tests/`
-
 ### Common File Locations
 
 **Configuration**:
 - Environment variables: `.env.local` (copy from `.env.example`)
 - Django settings: `settings/` directory
-- QuickBooks config: `settings/third_party.py`
-
 **URLs and Routing**:
 - Main URLs: `settings/urls.py`
 - AI/MCP URLs: `apps/ai/urls.py`
-- QuickBooks OAuth: `apps/integration/quickbooks/urls.py`
 
 **Templates** (all in `apps/public/templates/`):
 - Base layout: `base.html`
 - HTMX partials: `partials/`
-- QuickBooks UI: `quickbooks/`
 
 **Static Files**:
 - CSS: `apps/public/static/css/`
@@ -379,7 +302,6 @@ Located in `apps/integration/quickbooks/oauth_views.py`:
 **Tests**:
 - Test factories: `apps/common/tests/factories.py`
 - MCP tests: `apps/ai/tests/`
-- Integration tests: `apps/integration/quickbooks/tests/`
 - E2E tests: `apps/*/tests/test_e2e_*.py`
 
 **Documentation**:
@@ -420,16 +342,6 @@ Located in `apps/integration/quickbooks/oauth_views.py`:
 
 ## Critical Code Paths to Understand
 
-### MCP Request Flow (QuickBooks)
-
-1. **MCP Client** → connects to server via stdio
-2. **quickbooks_server.py** → receives tool call request
-3. **Authentication** → validates API key from request
-4. **Tool Router** → matches tool name to handler
-5. **QuickBooks Client** → makes async API request
-6. **Token Refresh** → automatic if token expired
-7. **Response** → formatted and returned to MCP client
-
 ### MCP Request Flow (Creative Juices)
 
 1. **MCP Client** → connects to server via stdio
@@ -437,16 +349,6 @@ Located in `apps/integration/quickbooks/oauth_views.py`:
 3. **Tool Router** → matches tool name (get_inspiration, think_outside_the_box, reality_check)
 4. **Word Selection** → random selection from appropriate category
 5. **Response** → formatted sparks/questions with instructions
-
-### OAuth Connection Flow
-
-1. **User clicks "Connect"** → `/api/quickbooks/connect/`
-2. **OAuth URL built** → `apps/integration/quickbooks/oauth_views.py:26`
-3. **QuickBooks auth** → User authorizes in QuickBooks
-4. **Callback received** → `/api/quickbooks/callback/`
-5. **Tokens exchanged** → `apps/integration/quickbooks/oauth_views.py:45`
-6. **Connection saved** → `QuickBooksConnection` model
-7. **MCP enabled** → Server can now access QuickBooks data
 
 ### Django Web Deployment Flow
 
@@ -463,9 +365,6 @@ Located in `apps/integration/quickbooks/oauth_views.py`:
 ```bash
 # Start Django dev server
 uv run python manage.py runserver
-
-# Start QuickBooks MCP server
-uv run python -m apps.ai.mcp.quickbooks_server
 
 # Start Creative Juices MCP server
 uv run python -m apps.ai.mcp.creative_juices_server
@@ -515,9 +414,6 @@ uv run python manage.py createsuperuser
 ### MCP Testing
 
 ```bash
-# Test QuickBooks MCP server locally
-uv run python -m apps.ai.mcp.quickbooks_server
-
 # Test Creative Juices MCP server
 uv run python -m apps.ai.mcp.creative_juices_server
 
@@ -525,7 +421,6 @@ uv run python -m apps.ai.mcp.creative_juices_server
 mcp-inspector uv run python -m apps.ai.mcp.creative_juices_server
 
 # Run MCP tests
-DJANGO_SETTINGS_MODULE=settings pytest apps/ai/tests/test_mcp_quickbooks.py -v
 DJANGO_SETTINGS_MODULE=settings pytest apps/ai/tests/test_mcp_creative_juices.py -v
 ```
 
@@ -649,7 +544,6 @@ mcp__render__get_metrics(
 ### Why Django for MCP Hosting?
 
 - Serves dynamic content and static assets
-- OAuth integration for QuickBooks
 - Centralized deployment and monitoring
 - CORS handling for manifest.json
 - Future extensibility (analytics, user management)
@@ -708,7 +602,7 @@ The `docs/` directory contains comprehensive guides for specific topics:
 - **docs/ARCHITECTURE.md** - System design overview
 - **docs/REPO_MAP.md** - Codebase navigation
 - **CLAUDE.md** - Commands and guidelines
-- **docs/specs/** - Feature specifications (QuickBooks, Creative Juices, Desktop Agent)
+- **docs/specs/** - Feature specifications (Creative Juices, Desktop Agent)
 
 ### Feature Development Guides
 
@@ -753,11 +647,6 @@ The `docs/` directory contains comprehensive guides for specific topics:
 - Verify: PostgreSQL is running (`psql -l`)
 - Ensure: Virtual environment activated
 
-**OAuth Flow Fails**:
-- Check: Redirect URI matches QuickBooks app settings
-- Verify: `QUICKBOOKS_SANDBOX_MODE` matches environment
-- Debug: Check logs in `apps/integration/quickbooks/oauth_views.py`
-
 **Django 404 on MCP URLs**:
 - Check: Django routing in `settings/urls.py` includes `apps/ai/urls.py`
 - Verify: Views imported in `apps/ai/views/__init__.py`
@@ -777,17 +666,6 @@ import logging
 logging.basicConfig(level=logging.DEBUG)
 ```
 
-**Test QuickBooks Connection**:
-```python
-# Django shell
-from apps.integration.quickbooks.client import QuickBooksClient
-from apps.integration.quickbooks.models import QuickBooksConnection
-
-conn = QuickBooksConnection.objects.first()
-client = QuickBooksClient(conn)
-await client.test_connection()
-```
-
 **Test Django Views**:
 ```python
 # Django shell
@@ -801,8 +679,8 @@ print(response.status_code, response.content[:100])
 
 ✅ **Context successfully loaded.** The assistant now has comprehensive understanding of:
 - The full scope of Cuttlefish: MCP servers, Django web app, future desktop agent
-- QuickBooks MCP integration with OAuth and async API
 - Creative Juices MCP with randomness tools and web hosting
+- CTO Tools MCP for engineering leadership
 - Django architecture with behavior mixins and HTMX
 - Where to find all major components
 - How data flows through the system
@@ -815,8 +693,7 @@ print(response.status_code, response.content[:100])
 You can ask the assistant to:
 - Add new MCP servers or tools
 - Enhance existing MCP functionality
-- Fix bugs in QuickBooks or Creative Juices
-- Improve the OAuth flow
+- Fix bugs in Creative Juices or CTO Tools
 - Add new Django views or API endpoints
 - Create web interfaces with HTMX
 - Write tests for new features

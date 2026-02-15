@@ -4,26 +4,24 @@
 [![Tests](https://github.com/yudame/cuttlefish/actions/workflows/test.yml/badge.svg)](https://github.com/yudame/cuttlefish/actions/workflows/test.yml)
 [![Documentation](https://github.com/yudame/cuttlefish/actions/workflows/docs.yml/badge.svg)](https://yudame.github.io/cuttlefish/)
 
-A B2B SaaS platform providing multiple integrations via Model Context Protocol (MCP), enabling AI assistants to interact with various business tools and services. Currently supports QuickBooks Online with more integrations coming soon.
+An AI integration platform providing MCP servers, podcast production workflows, and creative tools. Built with Django, FastMCP, and PydanticAI.
 
 ## Key Features
 
-- **MCP Server**: Full Model Context Protocol implementation for AI integration
-- **QuickBooks API**: Complete QuickBooks Online API v3 integration
+- **MCP Servers**: Creative Juices and CTO Tools via Model Context Protocol
+- **Podcast Production**: 12-phase automated workflow with NotebookLM audio generation
+- **AI Integration**: PydanticAI Named AI Tools for research, synthesis, and content planning
 - **Multi-tenant**: Support for multiple organizations with isolated data
-- **OAuth 2.0**: Secure QuickBooks authorization flow
-- **Webhooks**: Real-time updates from QuickBooks
 - **Usage Tracking**: Monitor API calls and resource consumption
-- **Subscription Tiers**: Flexible pricing with usage limits
 
 ## Technology Stack
 
 - **Backend**: Python, Django, PostgreSQL
-- **MCP**: Model Context Protocol (mcp-python)
-- **API**: Django Rest Framework, QuickBooks Online API v3
+- **MCP**: Model Context Protocol (FastMCP)
+- **API**: Django Rest Framework
 - **Web**: HTMX, Tailwind CSS v4
-- **Hosting**: Render, AWS S3
-- **Integrations**: QuickBooks, Stripe, Loops (email), Twilio (SMS)
+- **Hosting**: Render, Supabase Storage
+- **Integrations**: Stripe, Loops (email), Twilio (SMS)
 
 ## Setup and Documentation
 
@@ -121,15 +119,15 @@ For detailed testing conventions and practices, see [Test Conventions](docs/adva
 
 _Defines the application programming interface (API) layer, responsible for handling all the RESTful requests._
 
-- `apps/api/`: api app 
+- `apps/api/`: api app
   - `serializers/`: Contains serializer classes for converting complex data types to JSON.
   - `tests/`: Holds test cases for the API application.
   - `views/`: Contains views that manage the logic and control flow for API requests.
-  - `urls.py`: URL declarations for API routes. 
+  - `urls.py`: URL declarations for API routes.
 
 ### Common
 
-_General purpose and shared components for any applications. 
+_General purpose and shared components for any applications.
 This includes models, forms, views, and other components that are shared across multiple apps._
 
 _Key Features include 1. Enhanced User model with best practices for consumer-facing apps. 2. Common model behaviors like timestamping, authoring, etc. 3. Large collection of utility functions for common problems encountered while building applications. 4. Communication-related models (SMS, Email) for handling notifications and messaging._
