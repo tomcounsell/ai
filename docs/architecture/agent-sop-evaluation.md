@@ -1,9 +1,11 @@
 # Agent-SOP Framework Evaluation
 
+> **⚠️ DEPRECATED**: The `sops/` directory was deleted in PR #118. SOPs have been superseded by `.claude/skills/`. This document is retained for historical reference only.
+
 **Created**: 2025-11-19
 **Updated**: 2026-01-20
-**Status**: ✅ Adopted
-**Decision**: Implemented (9 SOPs created in `sops/`)
+**Status**: Deprecated — `sops/` deleted, replaced by `.claude/skills/`
+**Decision**: Originally implemented (9 SOPs created in `sops/`), later superseded by skills
 
 ---
 
