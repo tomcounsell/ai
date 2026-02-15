@@ -19,6 +19,8 @@ dependencies = [
     "psutil>=5.9.0", # System resource monitoring for SDK diagnostics
     "pypdf>=6.6.2",
     "html2text>=2024.2.26", # HTML to markdown conversion for web fetch
+    "numpy>=1.26.0", # Vector math for semantic doc impact finder
+    "openai>=1.0.0", # Embedding API for semantic doc impact finder
 ]
 
 [project.optional-dependencies]

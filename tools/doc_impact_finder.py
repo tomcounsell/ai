@@ -13,12 +13,22 @@ import hashlib
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+
+# Maximum number of texts to embed in a single API call
+EMBEDDING_BATCH_SIZE = 100
+
+# Minimum cosine similarity for embedding-only fallback (no Haiku reranking)
+MIN_SIMILARITY_THRESHOLD = 0.3
+
+# Maximum chars of section content sent to Haiku for reranking
+HAIKU_CONTENT_PREVIEW_CHARS = 2000
 
 
 class AffectedDoc(BaseModel):
@@ -83,7 +93,7 @@ def chunk_markdown(content: str, file_path: str) -> list[dict]:
 def get_embedding_provider() -> tuple | None:
     """Detect available embedding API and return (embed_function, model_name).
 
-    Priority order: OPENAI_API_KEY, VOYAGE_API_KEY, ANTHROPIC_API_KEY.
+    Priority order: OPENAI_API_KEY, VOYAGE_API_KEY.
     Returns None if no provider is available.
     """
     if os.environ.get("OPENAI_API_KEY"):
@@ -97,64 +107,50 @@ def get_embedding_provider() -> tuple | None:
         except ImportError:
             logger.warning("VOYAGE_API_KEY set but voyageai package not installed")
 
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        # Anthropic does not have a native embedding API; try voyageai first,
-        # then fall back to OpenAI if available.
-        try:
-            import voyageai  # noqa: F401
-
-            return _embed_voyage, "voyage-3-lite"
-        except ImportError:
-            pass
-        if os.environ.get("OPENAI_API_KEY"):
-            return _embed_openai, "text-embedding-3-small"
-        logger.warning(
-            "ANTHROPIC_API_KEY set but no embedding provider available "
-            "(need voyageai package or OPENAI_API_KEY)"
-        )
-
     return None
 
 
 def _embed_openai(texts: list[str]) -> list[list[float]]:
-    """Embed texts using OpenAI's text-embedding-3-small model."""
+    """Embed texts using OpenAI's text-embedding-3-small model.
+
+    Handles batching internally — splits into chunks of EMBEDDING_BATCH_SIZE.
+    """
     import openai
 
     client = openai.OpenAI()
-    response = client.embeddings.create(model="text-embedding-3-small", input=texts)
-    return [item.embedding for item in response.data]
+
+    if len(texts) <= EMBEDDING_BATCH_SIZE:
+        response = client.embeddings.create(model="text-embedding-3-small", input=texts)
+        return [item.embedding for item in response.data]
+
+    # Batch large requests
+    all_embeddings: list[list[float]] = []
+    for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
+        batch = texts[i : i + EMBEDDING_BATCH_SIZE]
+        response = client.embeddings.create(model="text-embedding-3-small", input=batch)
+        all_embeddings.extend(item.embedding for item in response.data)
+    return all_embeddings
 
 
 def _embed_voyage(texts: list[str]) -> list[list[float]]:
-    """Embed texts using Voyage AI."""
+    """Embed texts using Voyage AI.
+
+    Handles batching internally — splits into chunks of EMBEDDING_BATCH_SIZE.
+    """
     import voyageai
 
     client = voyageai.Client()
-    result = client.embed(texts, model="voyage-3-lite")
-    return result.embeddings
 
+    if len(texts) <= EMBEDDING_BATCH_SIZE:
+        result = client.embed(texts, model="voyage-3-lite")
+        return result.embeddings
 
-# ---------------------------------------------------------------------------
-# Public embedding function
-# ---------------------------------------------------------------------------
-
-
-def embed_texts(texts: list[str]) -> list[list[float]]:
-    """Embed a list of texts using the detected provider.
-
-    Raises RuntimeError if no provider is available.
-    Handles API errors gracefully by logging and re-raising.
-    """
-    provider = get_embedding_provider()
-    if provider is None:
-        raise RuntimeError("No embedding API key available")
-
-    embed_fn, model_name = provider
-    try:
-        return embed_fn(texts)
-    except Exception:
-        logger.exception("Embedding API call failed (model=%s)", model_name)
-        raise
+    all_embeddings: list[list[float]] = []
+    for i in range(0, len(texts), EMBEDDING_BATCH_SIZE):
+        batch = texts[i : i + EMBEDDING_BATCH_SIZE]
+        result = client.embed(batch, model="voyage-3-lite")
+        all_embeddings.extend(result.embeddings)
+    return all_embeddings
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +223,7 @@ def index_docs(repo_root: Path | None = None) -> dict:
     """Walk doc locations, chunk on ## headings, embed, and save index.
 
     Uses content hashing to skip re-embedding unchanged chunks.
+    Batches embedding calls to stay within API limits.
     Returns the saved index dict.
     """
     if repo_root is None:
@@ -236,7 +233,7 @@ def index_docs(repo_root: Path | None = None) -> dict:
     if provider is None:
         logger.warning(
             "No embedding API key available; skipping doc indexing. "
-            "Set OPENAI_API_KEY, VOYAGE_API_KEY, or ANTHROPIC_API_KEY."
+            "Set OPENAI_API_KEY or VOYAGE_API_KEY."
         )
         return _default_index()
 
@@ -274,7 +271,7 @@ def index_docs(repo_root: Path | None = None) -> dict:
         else:
             to_embed_indices.append(i)
 
-    # Batch embed new/changed chunks
+    # Batch embed new/changed chunks (embed_fn handles internal batching)
     if to_embed_indices:
         texts_to_embed = [all_chunks[i]["content"] for i in to_embed_indices]
         try:
@@ -285,7 +282,7 @@ def index_docs(repo_root: Path | None = None) -> dict:
             logger.exception("Failed to embed %d chunks", len(to_embed_indices))
             return _default_index()
 
-    # Build final index
+    # Build final index — store more content for Haiku reranking
     index_chunks = []
     for chunk in all_chunks:
         index_chunks.append(
@@ -294,7 +291,7 @@ def index_docs(repo_root: Path | None = None) -> dict:
                 "section": chunk["section"],
                 "content_hash": chunk["content_hash"],
                 "embedding": chunk.get("embedding", []),
-                "content_preview": chunk["content"][:200],
+                "content_preview": chunk["content"][:HAIKU_CONTENT_PREVIEW_CHARS],
             }
         )
 
@@ -321,6 +318,51 @@ def index_docs(repo_root: Path | None = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _rerank_single_candidate(
+    client,
+    change_summary: str,
+    chunk: dict,
+) -> tuple[float, str, dict] | None:
+    """Rerank a single candidate using Claude Haiku. Returns (score, reason, chunk) or None."""
+    prompt = (
+        f"You are evaluating whether a documentation section needs updating "
+        f"given a code change.\n\n"
+        f"## Code Change\n{change_summary}\n\n"
+        f"## Documentation Section\n"
+        f"File: {chunk['path']}\n"
+        f"Section: {chunk['section']}\n"
+        f"Content preview: {chunk['content_preview']}\n\n"
+        f"Does this doc section need updating given this change? "
+        f"Respond with ONLY a JSON object: "
+        f'{{"score": <0-10>, "reason": "<brief explanation>"}}'
+    )
+    try:
+        response = client.messages.create(
+            model="claude-haiku-4-20250514",
+            max_tokens=200,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = response.content[0].text.strip()
+        parsed = json.loads(text)
+        score = float(parsed.get("score", 0))
+        reason = parsed.get("reason", "")
+        if score >= 5:
+            return (score, reason, chunk)
+    except (json.JSONDecodeError, KeyError, IndexError):
+        logger.warning(
+            "Could not parse Haiku response for %s %s",
+            chunk["path"],
+            chunk["section"],
+        )
+    except Exception:
+        logger.exception(
+            "Haiku reranking failed for %s %s",
+            chunk["path"],
+            chunk["section"],
+        )
+    return None
+
+
 def find_affected_docs(
     change_summary: str,
     top_n: int = 15,
@@ -331,7 +373,7 @@ def find_affected_docs(
     Stage 1: Embed the change summary, compute cosine similarity against all
              indexed doc chunks, take top-N candidates.
     Stage 2: For each candidate, ask Claude Haiku to score relevance (0-10)
-             and explain why. Filter to score >= 5.
+             and explain why. Calls are parallelized for speed. Filter to score >= 5.
 
     Returns a list of AffectedDoc sorted by relevance (highest first).
     Returns empty list if no embedding API key is available.
@@ -343,7 +385,7 @@ def find_affected_docs(
     if provider is None:
         logger.warning(
             "No embedding API key available; cannot find affected docs. "
-            "Set OPENAI_API_KEY, VOYAGE_API_KEY, or ANTHROPIC_API_KEY."
+            "Set OPENAI_API_KEY or VOYAGE_API_KEY."
         )
         return []
 
@@ -377,7 +419,7 @@ def find_affected_docs(
     if not candidates:
         return []
 
-    # Stage 2: LLM reranking with Claude Haiku
+    # Stage 2: LLM reranking with Claude Haiku (parallelized)
     try:
         import anthropic
 
@@ -388,43 +430,18 @@ def find_affected_docs(
         return _candidates_to_affected_docs(candidates)
 
     results: list[tuple[float, str, dict]] = []
-    for sim_score, chunk in candidates:
-        prompt = (
-            f"You are evaluating whether a documentation section needs updating "
-            f"given a code change.\n\n"
-            f"## Code Change\n{change_summary}\n\n"
-            f"## Documentation Section\n"
-            f"File: {chunk['path']}\n"
-            f"Section: {chunk['section']}\n"
-            f"Content preview: {chunk['content_preview']}\n\n"
-            f"Does this doc section need updating given this change? "
-            f"Respond with ONLY a JSON object: "
-            f'{{"score": <0-10>, "reason": "<brief explanation>"}}'
-        )
-        try:
-            response = client.messages.create(
-                model="claude-haiku-4-20250514",
-                max_tokens=200,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            text = response.content[0].text.strip()
-            parsed = json.loads(text)
-            score = float(parsed.get("score", 0))
-            reason = parsed.get("reason", "")
-            if score >= 5:
-                results.append((score, reason, chunk))
-        except (json.JSONDecodeError, KeyError, IndexError):
-            logger.warning(
-                "Could not parse Haiku response for %s %s",
-                chunk["path"],
-                chunk["section"],
-            )
-        except Exception:
-            logger.exception(
-                "Haiku reranking failed for %s %s",
-                chunk["path"],
-                chunk["section"],
-            )
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(
+                _rerank_single_candidate, client, change_summary, chunk
+            ): chunk
+            for _sim_score, chunk in candidates
+        }
+        for future in as_completed(futures):
+            result = future.result()
+            if result is not None:
+                results.append(result)
 
     # Sort by score descending
     results.sort(key=lambda x: x[0], reverse=True)
@@ -444,7 +461,7 @@ def find_affected_docs(
         doc_map[path]["reasons"].append(reason)
         doc_map[path]["max_score"] = max(doc_map[path]["max_score"], score)
 
-    # Convert to AffectedDoc list
+    # Convert to AffectedDoc list — join all reasons
     affected: list[AffectedDoc] = []
     for info in doc_map.values():
         affected.append(
@@ -452,7 +469,7 @@ def find_affected_docs(
                 path=info["path"],
                 relevance=info["max_score"] / 10.0,
                 sections=info["sections"],
-                reason=info["reasons"][0],
+                reason="; ".join(info["reasons"]),
             )
         )
 
@@ -463,9 +480,14 @@ def find_affected_docs(
 def _candidates_to_affected_docs(
     candidates: list[tuple[float, dict]],
 ) -> list[AffectedDoc]:
-    """Convert embedding-only candidates to AffectedDoc (fallback when Haiku unavailable)."""
+    """Convert embedding-only candidates to AffectedDoc (fallback when Haiku unavailable).
+
+    Applies MIN_SIMILARITY_THRESHOLD to filter out irrelevant results.
+    """
     doc_map: dict[str, dict] = {}
     for sim, chunk in candidates:
+        if sim < MIN_SIMILARITY_THRESHOLD:
+            continue
         path = chunk["path"]
         if path not in doc_map:
             doc_map[path] = {

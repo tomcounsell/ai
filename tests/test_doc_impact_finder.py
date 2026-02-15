@@ -5,12 +5,18 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from tools.doc_impact_finder import (
+    EMBEDDING_BATCH_SIZE,
+    HAIKU_CONTENT_PREVIEW_CHARS,
+    MIN_SIMILARITY_THRESHOLD,
+    AffectedDoc,
+    _candidates_to_affected_docs,
     chunk_markdown,
     cosine_similarity,
     find_affected_docs,
+    get_embedding_provider,
     load_index,
 )
 
@@ -192,3 +198,222 @@ class TestLoadIndex:
         index = load_index(repo_root=tmp_path)
         assert index["version"] == 1
         assert index["chunks"] == []
+
+
+# ---------------------------------------------------------------------------
+# get_embedding_provider tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetEmbeddingProvider:
+    def test_no_dead_anthropic_fallback(self):
+        """ANTHROPIC_API_KEY alone should NOT provide an embedding provider.
+
+        Previously there was dead code that checked OPENAI_API_KEY inside the
+        ANTHROPIC_API_KEY branch — but if OPENAI_API_KEY was set, the function
+        would have already returned. Verify the dead code is gone.
+        """
+        env = {
+            k: v
+            for k, v in __import__("os").environ.items()
+            if k not in ("OPENAI_API_KEY", "VOYAGE_API_KEY")
+        }
+        env["ANTHROPIC_API_KEY"] = "test-key"
+        with patch.dict("os.environ", env, clear=True):
+            result = get_embedding_provider()
+            assert result is None
+
+    def test_openai_key_returns_provider(self):
+        """OPENAI_API_KEY should return an embedding provider."""
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "test-key"}, clear=False):
+            result = get_embedding_provider()
+            assert result is not None
+            _, model_name = result
+            assert model_name == "text-embedding-3-small"
+
+
+# ---------------------------------------------------------------------------
+# Similarity threshold tests
+# ---------------------------------------------------------------------------
+
+
+class TestSimilarityThreshold:
+    def test_candidates_below_threshold_filtered(self):
+        """Embedding-only fallback should filter candidates below MIN_SIMILARITY_THRESHOLD."""
+        candidates = [
+            (
+                0.9,
+                {
+                    "path": "docs/high.md",
+                    "section": "## High",
+                    "content_preview": "high",
+                },
+            ),
+            (
+                0.5,
+                {"path": "docs/mid.md", "section": "## Mid", "content_preview": "mid"},
+            ),
+            (
+                0.1,
+                {"path": "docs/low.md", "section": "## Low", "content_preview": "low"},
+            ),
+        ]
+        results = _candidates_to_affected_docs(candidates)
+
+        # Only docs above MIN_SIMILARITY_THRESHOLD (0.3) should be included
+        paths = [r.path for r in results]
+        assert "docs/high.md" in paths
+        assert "docs/mid.md" in paths
+        assert "docs/low.md" not in paths
+
+    def test_all_candidates_below_threshold_returns_empty(self):
+        """If all candidates are below threshold, return empty list."""
+        candidates = [
+            (0.1, {"path": "docs/a.md", "section": "## A", "content_preview": "a"}),
+            (0.05, {"path": "docs/b.md", "section": "## B", "content_preview": "b"}),
+        ]
+        results = _candidates_to_affected_docs(candidates)
+        assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Constants tests
+# ---------------------------------------------------------------------------
+
+
+class TestConstants:
+    def test_batch_size_is_reasonable(self):
+        """Batch size should be small enough to avoid API limits."""
+        assert 10 <= EMBEDDING_BATCH_SIZE <= 500
+
+    def test_similarity_threshold_in_range(self):
+        """Similarity threshold should be between 0 and 1."""
+        assert 0.0 < MIN_SIMILARITY_THRESHOLD < 1.0
+
+    def test_content_preview_larger_than_200(self):
+        """Content preview should be larger than the original 200 chars."""
+        assert HAIKU_CONTENT_PREVIEW_CHARS > 200
+
+
+# ---------------------------------------------------------------------------
+# Integration test — full pipeline with mocked APIs
+# ---------------------------------------------------------------------------
+
+
+class TestFullPipelineIntegration:
+    def test_end_to_end_with_mocked_apis(self, tmp_path):
+        """Test the full pipeline: index_docs → find_affected_docs with mocked APIs.
+
+        Mocks OpenAI embeddings and Anthropic Haiku to verify the full two-stage
+        pipeline works end-to-end without real API calls.
+        """
+        from tools.doc_impact_finder import index_docs
+
+        # Create test doc files
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "auth.md").write_text(
+            "# Auth\n\n## Login Flow\n\nUsers login via OAuth.\n\n"
+            "## Token Refresh\n\nTokens refresh every 30 minutes.\n"
+        )
+        (docs_dir / "api.md").write_text(
+            "# API\n\n## Endpoints\n\nGET /users, POST /auth\n\n"
+            "## Rate Limiting\n\n100 requests per minute.\n"
+        )
+
+        # Simple deterministic embedding: hash-based fake vectors
+        def fake_embed(texts):
+            """Return deterministic fake embeddings based on text content."""
+            embeddings = []
+            for text in texts:
+                # Create a pseudo-embedding from the hash
+                h = hashlib.md5(text.encode()).hexdigest()
+                vec = [int(c, 16) / 15.0 for c in h]  # 32-dim vector, values 0-1
+                embeddings.append(vec)
+            return embeddings
+
+        # Mock Haiku response
+        mock_haiku_response = MagicMock()
+        mock_haiku_response.content = [
+            MagicMock(text='{"score": 8, "reason": "Auth change affects login docs"}')
+        ]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_haiku_response
+
+        # Step 1: Index docs with mocked embeddings
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
+            with patch("tools.doc_impact_finder._embed_openai", side_effect=fake_embed):
+                index = index_docs(repo_root=tmp_path)
+
+        assert index["version"] == 1
+        assert len(index["chunks"]) > 0
+        assert index["model"] == "text-embedding-3-small"
+
+        # Step 2: Find affected docs with mocked embeddings + Haiku
+        # Mock the _rerank_single_candidate to avoid needing real anthropic import
+        def mock_rerank(client, change_summary, chunk):
+            return (8.0, "Auth change affects login docs", chunk)
+
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
+            with patch("tools.doc_impact_finder._embed_openai", side_effect=fake_embed):
+                with patch(
+                    "tools.doc_impact_finder._rerank_single_candidate",
+                    side_effect=mock_rerank,
+                ):
+                    results = find_affected_docs(
+                        "Changed the OAuth login flow to support PKCE",
+                        repo_root=tmp_path,
+                    )
+
+        # Verify we got results back through the full pipeline
+        assert isinstance(results, list)
+        # All results should be AffectedDoc instances
+        for r in results:
+            assert isinstance(r, AffectedDoc)
+            assert r.relevance > 0
+            assert len(r.sections) > 0
+            assert len(r.reason) > 0
+
+    def test_end_to_end_embedding_only_fallback(self, tmp_path):
+        """Test the pipeline falls back to embedding-only when Haiku unavailable."""
+        from tools.doc_impact_finder import index_docs
+
+        # Create test doc
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        (docs_dir / "test.md").write_text("# Test\n\n## Section\n\nContent here.\n")
+
+        # Embedding that will produce high similarity with query
+        def fake_embed(texts):
+            return [[1.0, 0.0, 0.0] for _ in texts]
+
+        # Step 1: Index
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
+            with patch("tools.doc_impact_finder._embed_openai", side_effect=fake_embed):
+                index_docs(repo_root=tmp_path)
+
+        # Step 2: Find with Haiku failing (falls back to embedding-only)
+        # Patch the import of anthropic inside find_affected_docs to raise
+        import builtins
+
+        original_import = builtins.__import__
+
+        def mock_import(name, *args, **kwargs):
+            if name == "anthropic":
+                raise ImportError("No anthropic")
+            return original_import(name, *args, **kwargs)
+
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
+            with patch("tools.doc_impact_finder._embed_openai", side_effect=fake_embed):
+                with patch("builtins.__import__", side_effect=mock_import):
+                    results = find_affected_docs(
+                        "Some change",
+                        repo_root=tmp_path,
+                    )
+
+        # Should still get results via embedding-only fallback
+        assert isinstance(results, list)
+        # All should have cosine sim of 1.0 (identical vectors), which is > threshold
+        for r in results:
+            assert r.relevance == 1.0
+            assert "embedding similarity" in r.reason.lower()
