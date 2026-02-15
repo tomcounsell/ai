@@ -1,0 +1,11 @@
+{
+  "keymaps": [
+    {
+      "context": "Editor",
+      "bindings": {
+        "alt-shift-r": "task: spawn",
+        "alt-shift-s": "task: spawn"
+      }
+    }
+  ]
+}
