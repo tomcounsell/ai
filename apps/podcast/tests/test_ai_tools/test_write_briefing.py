@@ -99,7 +99,6 @@ class TestWriteBriefing:
             result = write_briefing(
                 cross_validation="Cross-validation JSON here",
                 research_digests={"perplexity": "Digest A"},
-                episode_topic="Sleep Science",
                 episode_title="Better Sleep Tonight",
             )
 
@@ -125,7 +124,6 @@ class TestWriteBriefing:
             write_briefing(
                 cross_validation="Validated claims data",
                 research_digests=digests,
-                episode_topic="Sleep",
                 episode_title="Episode Title",
             )
 
@@ -136,7 +134,6 @@ class TestWriteBriefing:
             assert "--- Digest: perplexity ---" in call_args
             assert "--- Digest: gemini ---" in call_args
             assert "Episode Title" in call_args
-            assert "Sleep" in call_args
 
     def test_logs_usage(self, caplog):
         sample = self._make_sample_briefing()
@@ -150,7 +147,6 @@ class TestWriteBriefing:
                 write_briefing(
                     cross_validation="data",
                     research_digests={"tool": "digest"},
-                    episode_topic="Topic",
                     episode_title="Title",
                 )
 
@@ -177,7 +173,6 @@ class TestWriteBriefing:
             result = write_briefing(
                 cross_validation="minimal",
                 research_digests={},
-                episode_topic="Sparse",
                 episode_title="Sparse Episode",
             )
 
