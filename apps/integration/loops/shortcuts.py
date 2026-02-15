@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.urls import reverse
+
 try:
     from icecream import ic
 except ImportError:

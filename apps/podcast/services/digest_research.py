@@ -1,6 +1,7 @@
 """Generate a compact structured digest from raw research output."""
 
 import logging
+from pathlib import Path
 
 from pydantic import BaseModel
 from pydantic_ai import Agent
@@ -36,16 +37,13 @@ class ResearchDigest(BaseModel):
 
 # --- Agent ---
 
+_PROMPT_FILE = Path(__file__).parent / "prompts" / "research_digest.md"
+_SYSTEM_PROMPT = _PROMPT_FILE.read_text()
+
 agent = Agent(
     "anthropic:claude-sonnet-4-5-20250929",
     output_type=ResearchDigest,
-    system_prompt=(
-        "You are a research analyst. Given raw research output from a deep "
-        "research tool, create a compact structured digest. Prioritize findings "
-        "by importance, tier sources by quality (tier1: meta-analyses/systematic "
-        "reviews, tier2: RCTs/large studies, tier3: case studies/reports), and "
-        "identify what questions remain unanswered."
-    ),
+    system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
 )
 

@@ -82,12 +82,3 @@ For each recommendation:
 
 5. **Prioritize ruthlessly:** Not all gaps are equal. Focus recommendations on questions that will most improve the episode's depth, accuracy, and actionability.
 
-## Input Format
-
-You will receive:
-- **Episode topic** for context
-- **Research text** (a digest or raw research from the initial research phase)
-
-## Output Format
-
-Return a structured `QuestionDiscovery` with all eight sections populated. The output should provide a clear roadmap for Phase 3 targeted followup research, with specific questions assigned to specific tools based on their strengths.

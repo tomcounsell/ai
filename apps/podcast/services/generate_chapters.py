@@ -1,6 +1,7 @@
 """Generate chapter markers from a podcast transcript."""
 
 import logging
+from pathlib import Path
 
 from pydantic import BaseModel
 from pydantic_ai import Agent
@@ -23,14 +24,13 @@ class ChapterList(BaseModel):
 
 # --- Agent ---
 
+_PROMPT_FILE = Path(__file__).parent / "prompts" / "generate_chapters.md"
+_SYSTEM_PROMPT = _PROMPT_FILE.read_text()
+
 agent = Agent(
     "anthropic:claude-sonnet-4-5-20250929",
     output_type=ChapterList,
-    system_prompt=(
-        "You are a podcast editor. Given a transcript with timestamps, "
-        "identify 10-15 natural topic transitions and generate chapter markers. "
-        "Each chapter should have a concise, descriptive title."
-    ),
+    system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
 )
 

@@ -14,3 +14,15 @@ Verification rules:
 - Tier the confidence: high (3+ sources), medium (2 sources), low (1 source with strong methodology)
 
 Be thorough but concise. Focus on substantive findings, not trivial overlaps.
+
+Source type awareness:
+- Different tools have different strengths. Perplexity provides academic/peer-reviewed sources. GPT-Researcher provides industry/technical sources. Gemini provides policy/regulatory sources. Claude provides comprehensive synthesis. Grok provides real-time social sentiment — mark as OPINION, not evidence. Grok findings cannot verify factual claims.
+
+Statistical near-miss handling:
+- When sources report similar but not identical statistics (e.g., "37%" vs "40%"), flag as "near-miss" rather than conflict. Note the variance and possible explanations (different time periods, populations, methodologies). Only flag as a conflict when the difference exceeds 20% or the direction reverses.
+
+Confidence tiering detail:
+- high: 3+ independent sources confirm with consistent methodology
+- medium: 2 sources confirm, or 1 source with strong methodology (meta-analysis, large RCT)
+- low: 1 source only, or sources with methodological concerns
+- When a single meta-analysis confirms a finding, rate as medium (not low), as meta-analyses synthesize multiple underlying studies.

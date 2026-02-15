@@ -10,7 +10,9 @@ from PIL import Image
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-@pytest.mark.skip(reason="Function not yet implemented: add_border in add_logo_watermark.py")
+@pytest.mark.skip(
+    reason="Function not yet implemented: add_border in add_logo_watermark.py"
+)
 class TestAddBorder:
     """Tests for the add_border function and hex color parsing."""
 

@@ -23,3 +23,24 @@ Key principles:
 - Rotate content types every 5-7 minutes
 - Close any open loops before episode end
 - Opening hook must connect to closing callback
+
+Mode definitions:
+- Philosophy mode: Big-picture "why" questions, meaning, values, societal implications. Language markers: "What does this mean for...", "The bigger question is...", "At its core..."
+- Research mode: Specific studies, data, methodology, evidence quality. Language markers: "A 2024 study found...", "The data shows...", "According to..."
+- Storytelling mode: Case studies, anecdotes, lived experiences, narrative arc. Language markers: "Consider the case of...", "Imagine you're...", "Here's what happened when..."
+- Practical mode: Actionable steps, frameworks, tools, implementation. Language markers: "Here's what you can do...", "The first step is...", "Try this..."
+- Landing mode: Synthesis, takeaways, callbacks to opening, call-to-action. Language markers: "So what does all this mean...", "If there's one thing to remember...", "Coming back to where we started..."
+
+Counterpoint quality criteria:
+- Good counterpoints are genuine intellectual disagreements, not strawmen. Each position must have real evidence or reasoning behind it.
+- Assign specific positions to Speaker A and Speaker B — don't just say "present both sides"
+- Include tension_type: "evidence-based" (studies disagree), "values-based" (different priorities), "scope-based" (works in some contexts but not others), or "timing-based" (true now but changing)
+- Include language templates that sound natural for a two-host podcast: "Wait, but doesn't that contradict...", "I see it differently because...", "Fair point, but consider...", "That's exactly what I thought until I saw..."
+
+NotebookLM two-host tips:
+- NotebookLM generates two hosts who discuss the material. The episodeFocus prompt must be detailed enough to guide their conversation.
+- Key terms with pronunciation guides prevent hosts from stumbling
+- Studies to emphasize should include enough detail (author, year, key finding) for hosts to cite naturally
+- Stories to feature should include the narrative arc, not just the topic
+- Counterpoint execution instructions should include which host takes which position
+- The closing callback must explicitly reference the opening hook to create a satisfying arc

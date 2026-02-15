@@ -1,6 +1,7 @@
 """Generate episode publishing metadata from report and transcript."""
 
 import logging
+from pathlib import Path
 
 from pydantic import BaseModel
 from pydantic_ai import Agent
@@ -35,16 +36,13 @@ class EpisodeMetadata(BaseModel):
 
 # --- Agent ---
 
+_PROMPT_FILE = Path(__file__).parent / "prompts" / "write_metadata.md"
+_SYSTEM_PROMPT = _PROMPT_FILE.read_text()
+
 agent = Agent(
     "anthropic:claude-sonnet-4-5-20250929",
     output_type=EpisodeMetadata,
-    system_prompt=(
-        "You are a podcast publishing specialist. Given an episode report, "
-        "transcript, and chapter markers, generate publishing metadata "
-        "optimized for podcast discovery. Write descriptions that are "
-        "compelling but accurate, keywords that are specific to the episode, "
-        "and a call-to-action that gives listeners a clear next step."
-    ),
+    system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
 )
 

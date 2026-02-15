@@ -10,6 +10,7 @@ import logging
 from typing import Any, Dict, List, Optional, Union
 
 from django.conf import settings
+
 try:
     from icecream import ic
 except ImportError:

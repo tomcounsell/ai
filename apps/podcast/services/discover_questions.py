@@ -1,6 +1,7 @@
 """Analyze research to discover questions for targeted followup research."""
 
 import logging
+from pathlib import Path
 
 from pydantic import BaseModel
 from pydantic_ai import Agent
@@ -35,18 +36,13 @@ class QuestionDiscovery(BaseModel):
 
 # --- Agent ---
 
+_PROMPT_FILE = Path(__file__).parent / "prompts" / "discover_questions.md"
+_SYSTEM_PROMPT = _PROMPT_FILE.read_text()
+
 agent = Agent(
     "anthropic:claude-sonnet-4-5-20250929",
     output_type=QuestionDiscovery,
-    system_prompt=(
-        "You are a research strategist. Given initial research findings, "
-        "identify gaps, contradictions, and emerging questions that need "
-        "targeted followup. Think creatively about what questions we should "
-        "be asking. Recommend which research tools should investigate which "
-        "questions based on their strengths: GPT-Researcher for "
-        "industry/technical, Gemini for policy/regulatory, Claude for "
-        "comprehensive synthesis, Grok for real-time/practitioner perspectives."
-    ),
+    system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
 )
 

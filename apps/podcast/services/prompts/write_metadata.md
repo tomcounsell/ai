@@ -74,14 +74,3 @@ Write a natural-language CTA that hosts can voice at the end of the episode:
 - Primary CTA gives listener a clear next step
 - Voiced CTA sounds natural when spoken aloud
 
-## Input Format
-
-You will receive:
-- **Episode title** for context
-- **Report** (report.md narrative synthesis)
-- **Transcript** (full episode transcript)
-- **Chapters** (chapter markers as JSON)
-
-## Output Format
-
-Return a structured `EpisodeMetadata` with all seven fields populated. The metadata should be ready for direct use in RSS feed generation, show notes HTML, and podcast app listings.

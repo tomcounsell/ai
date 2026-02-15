@@ -853,7 +853,7 @@ Named AI Tools are self-contained PydanticAI modules that perform a single AI ta
 
 ### Location
 
-Place Named AI Tools in `apps/{app_name}/services/`, one file per tool, flat alongside other service modules. Longer system prompts go in `apps/{app_name}/services/prompts/{tool_name}.md`.
+Place Named AI Tools in `apps/{app_name}/services/`, one file per tool, flat alongside other service modules. System prompts live in `apps/{app_name}/services/prompts/{tool_name}.md` and are loaded at module level.
 
 ### Convention Rules
 
@@ -868,6 +868,7 @@ Place Named AI Tools in `apps/{app_name}/services/`, one file per tool, flat alo
 | No shared base class | Each tool is fully self-contained |
 | Sync interface | Use `agent.run_sync()` — callers don't need async |
 | `defer_model_check=True` | Skip model validation at import time |
+| Prompt in `.md` file | System prompt loaded from `prompts/{tool_name}.md` at module level |
 
 ### Canonical Example
 
@@ -875,11 +876,15 @@ Place Named AI Tools in `apps/{app_name}/services/`, one file per tool, flat alo
 """Generate chapter markers from a podcast transcript."""
 
 import logging
+from pathlib import Path
 
 from pydantic import BaseModel
 from pydantic_ai import Agent
 
 logger = logging.getLogger(__name__)
+
+_PROMPT_FILE = Path(__file__).parent / "prompts" / "generate_chapters.md"
+_SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 
 
 # --- Output schema ---
@@ -900,11 +905,7 @@ class ChapterList(BaseModel):
 agent = Agent(
     "anthropic:claude-sonnet-4-5-20250929",
     output_type=ChapterList,
-    system_prompt=(
-        "You are a podcast editor. Given a transcript with timestamps, "
-        "identify 10-15 natural topic transitions and generate chapter markers. "
-        "Each chapter should have a concise, descriptive title."
-    ),
+    system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
 )
 
@@ -932,24 +933,6 @@ def generate_chapters(transcript: str, episode_title: str) -> ChapterList:
         result.usage().output_tokens,
     )
     return result.output
-```
-
-### Long System Prompts
-
-For tools with lengthy system prompts, store them in a sibling `prompts/` directory and load at module level:
-
-```python
-from pathlib import Path
-
-_PROMPT_FILE = Path(__file__).parent / "prompts" / "write_synthesis.md"
-_SYSTEM_PROMPT = _PROMPT_FILE.read_text()
-
-agent = Agent(
-    "anthropic:claude-opus-4-6",
-    output_type=SynthesisReport,
-    system_prompt=_SYSTEM_PROMPT,
-    defer_model_check=True,
-)
 ```
 
 ### Testing

@@ -122,9 +122,7 @@ class SupabaseStorageManager:
         :return: List of file metadata.
         """
         try:
-            files = self.storage_client.list(
-                path_prefix, options={"limit": limit}
-            )
+            files = self.storage_client.list(path_prefix, options={"limit": limit})
             return files or []
         except Exception:
             return []

@@ -28,19 +28,6 @@ Analyze the full episode transcript and create chapter markers that help listene
    - Summarize the key point or finding discussed in that segment
    - Include specific details (study names, statistics, frameworks) when relevant
 
-## Input Format
-
-You will receive:
-- **Episode title** for context
-- **Full transcript** with timestamps
-
-## Output Format
-
-Return a structured `ChapterList` with a list of `Chapter` objects, each containing:
-- `title`: Concise chapter title (2-8 words)
-- `start_time`: Timestamp in "MM:SS" format
-- `summary`: 1-2 sentence description of the segment content
-
 ## Quality Standards
 
 - Chapters should roughly correspond to the episode's natural three-section structure (Foundation/Evidence/Application) where applicable

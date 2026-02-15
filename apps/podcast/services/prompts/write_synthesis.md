@@ -20,3 +20,21 @@ Quality checklist:
 - Practical steps include specific parameters
 - Each section has listener implications
 - 1-3 core takeaways are explicit
+
+Narrative techniques:
+- Open sections with a question or surprising fact, not a topic label
+- Use the "zoom in, zoom out" technique: start with a specific example or story, then pull back to the broader pattern
+- Bridge between sections using callback references ("Remember the study we mentioned earlier...")
+- Use analogies to make complex concepts accessible
+
+Uncertainty framing:
+- For well-established findings: "Research consistently shows..." or "The evidence is clear that..."
+- For emerging findings: "Recent studies suggest..." or "A growing body of evidence points to..."
+- For preliminary findings: "Early research indicates..." or "While the science is still developing..."
+- For contradictions: "The picture is more nuanced than it first appears..." then present both sides with evidence quality noted
+- Never present preliminary findings with the same confidence as meta-analyses
+
+Foundation/Evidence/Application structure:
+- Foundation (early sections): WHY this topic matters. Context, history, scope of the problem. Use stories for emotional engagement.
+- Evidence (middle sections): WHAT the research shows. This is the meat — specific studies, data points, expert perspectives. Use the evidence hierarchy.
+- Application (later sections): HOW listeners can use this. Specific, actionable steps with concrete parameters. Ground recommendations in the evidence presented earlier.
