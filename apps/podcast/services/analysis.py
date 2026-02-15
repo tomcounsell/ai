@@ -493,7 +493,6 @@ def write_briefing(episode_id: int) -> EpisodeArtifact:
     result = _write_briefing(
         cross_validation=cv_artifact.content,
         research_digests=research_digests,
-        episode_topic=episode.title,
         episode_title=episode.title,
     )
 
@@ -513,3 +512,155 @@ def write_briefing(episode_id: int) -> EpisodeArtifact:
     action = "Created" if created else "Updated"
     logger.info("%s p3-briefing artifact for episode %s", action, episode_id)
     return artifact
+
+
+def craft_research_prompt(episode_id: int, research_type: str) -> EpisodeArtifact:
+    """Craft a single AI-generated research prompt for the given research type.
+
+    Reads the ``p1-brief`` artifact, calls the
+    :func:`~apps.podcast.services.craft_research_prompt.craft_research_prompt`
+    Named AI Tool, and saves the result as a ``prompt-{research_type}`` artifact.
+
+    Args:
+        episode_id: Primary key of the target :class:`Episode`.
+        research_type: One of ``"perplexity"``, ``"gpt"``, or ``"gemini"``.
+
+    Returns:
+        The ``prompt-{research_type}`` :class:`EpisodeArtifact`.
+    """
+    from apps.podcast.services.craft_research_prompt import (
+        craft_research_prompt as _craft_research_prompt,
+    )
+
+    episode = Episode.objects.get(pk=episode_id)
+
+    # Read p1-brief artifact
+    try:
+        brief = EpisodeArtifact.objects.get(episode=episode, title="p1-brief")
+        episode_brief = brief.content
+    except EpisodeArtifact.DoesNotExist:
+        episode_brief = episode.description
+
+    result = _craft_research_prompt(
+        episode_brief=episode_brief,
+        episode_title=episode.title,
+        research_type=research_type,
+    )
+
+    artifact, created = EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title=f"prompt-{research_type}",
+        defaults={
+            "content": result.prompt,
+            "description": f"AI-crafted {research_type} research prompt.",
+            "workflow_context": "Research Gathering",
+        },
+    )
+
+    action = "Created" if created else "Updated"
+    logger.info(
+        "%s prompt-%s artifact for episode %s", action, research_type, episode_id
+    )
+    return artifact
+
+
+def craft_targeted_research_prompts(
+    episode_id: int,
+) -> dict[str, EpisodeArtifact]:
+    """Craft GPT-Researcher and Gemini prompts in a single AI call.
+
+    Reads the ``p1-brief`` and ``question-discovery`` artifacts, calls the
+    :func:`~apps.podcast.services.craft_research_prompt.craft_targeted_prompts`
+    Named AI Tool, saves the prompts as ``prompt-gpt`` and ``prompt-gemini``
+    artifacts, and creates empty placeholder ``p2-chatgpt`` / ``p2-gemini``
+    artifacts for the fan-in signal.
+
+    Args:
+        episode_id: Primary key of the target :class:`Episode`.
+
+    Returns:
+        A dict mapping ``"prompt-gpt"`` and ``"prompt-gemini"`` to their
+        :class:`EpisodeArtifact` instances.
+    """
+    from apps.podcast.services.craft_research_prompt import (
+        craft_targeted_prompts as _craft_targeted_prompts,
+    )
+
+    episode = Episode.objects.get(pk=episode_id)
+
+    # Read p1-brief artifact
+    try:
+        brief = EpisodeArtifact.objects.get(episode=episode, title="p1-brief")
+        episode_brief = brief.content
+    except EpisodeArtifact.DoesNotExist:
+        episode_brief = episode.description
+
+    # Read question-discovery artifact
+    qd_artifact = EpisodeArtifact.objects.get(
+        episode=episode, title="question-discovery"
+    )
+    if not qd_artifact.content:
+        raise ValueError(
+            f"question-discovery artifact for episode {episode_id} has no content."
+        )
+
+    result = _craft_targeted_prompts(
+        episode_brief=episode_brief,
+        question_discovery=qd_artifact.content,
+        episode_title=episode.title,
+    )
+
+    # Save prompts as artifacts (canonical data-passing mechanism)
+    gpt_artifact, _ = EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="prompt-gpt",
+        defaults={
+            "content": result.gpt_prompt,
+            "description": "AI-crafted GPT-Researcher research prompt.",
+            "workflow_context": "Research Gathering",
+        },
+    )
+    gemini_artifact, _ = EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="prompt-gemini",
+        defaults={
+            "content": result.gemini_prompt,
+            "description": "AI-crafted Gemini research prompt.",
+            "workflow_context": "Research Gathering",
+        },
+    )
+
+    # Create empty placeholder artifacts for the targeted research steps.
+    # These are required for fan-in correctness: without them, if one
+    # research task finishes before the other starts, the signal would see
+    # only one p2-* artifact (with content) and advance prematurely.
+    # The empty content="" causes two no-op signal evaluations, which is
+    # acceptable overhead for correctness.
+    EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="p2-chatgpt",
+        defaults={
+            "content": "",
+            "description": "GPT-Researcher targeted research (placeholder).",
+            "workflow_context": "Research Gathering",
+        },
+    )
+    EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="p2-gemini",
+        defaults={
+            "content": "",
+            "description": "Gemini targeted research (placeholder).",
+            "workflow_context": "Research Gathering",
+        },
+    )
+
+    logger.info(
+        "craft_targeted_research_prompts: saved prompt-gpt + prompt-gemini "
+        "artifacts for episode %s",
+        episode_id,
+    )
+    return {
+        "prompt-gpt": gpt_artifact,
+        "prompt-gemini": gemini_artifact,
+    }

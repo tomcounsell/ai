@@ -90,7 +90,6 @@ agent = Agent(
 def write_briefing(
     cross_validation: str,
     research_digests: dict[str, str],
-    episode_topic: str,
     episode_title: str,
 ) -> MasterBriefing:
     """Create the master research briefing from cross-validated research.
@@ -98,7 +97,6 @@ def write_briefing(
     Args:
         cross_validation: JSON or text of cross-validation results.
         research_digests: Mapping of tool name to digest text.
-        episode_topic: Topic of the episode.
         episode_title: Title of the episode.
 
     Returns:
@@ -110,7 +108,7 @@ def write_briefing(
             f"--- Digest: {tool_name} ---\n{text}\n--- End Digest ---"
         )
     prompt = (
-        f"Episode: {episode_title}\nTopic: {episode_topic}\n\n"
+        f"Episode: {episode_title}\n\n"
         f"Cross-Validation Results:\n{cross_validation}\n\n"
         f"Research Digests:\n" + "\n\n".join(digest_sections)
     )

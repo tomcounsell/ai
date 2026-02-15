@@ -26,9 +26,6 @@ logger = logging.getLogger(__name__)
 # Artifact prefix / title mapping for fan-in steps
 # ---------------------------------------------------------------------------
 
-# Targeted Research: all p2-* artifacts from the three research tools
-_TARGETED_RESEARCH_TITLES = {"p2-perplexity", "p2-chatgpt", "p2-gemini"}
-
 # Publishing Assets: all required publishing artifacts
 _PUBLISHING_ASSET_TITLES = {
     "metadata",
@@ -54,22 +51,21 @@ def _prefix_for_step(step: str) -> str | None:
 def _check_targeted_research_complete(episode_id: int) -> bool:
     """Check whether all targeted research artifacts have content.
 
-    Targeted Research expects p2-chatgpt and p2-gemini to have content.
-    (p2-perplexity is created in an earlier phase and is already populated.)
+    Targeted Research expects all p2-* artifacts (except p2-perplexity,
+    which is created in an earlier phase) to have content. The set of
+    expected artifacts is determined by the placeholder artifacts created
+    during question discovery.
     """
-    artifacts = EpisodeArtifact.objects.filter(
+    targeted_artifacts = EpisodeArtifact.objects.filter(
         episode_id=episode_id,
         title__startswith="p2-",
-    )
+    ).exclude(title="p2-perplexity")
 
-    # We need at least the two targeted research artifacts
-    # (p2-chatgpt, p2-gemini) plus the existing p2-perplexity.
-    titles_with_content = set(
-        artifacts.exclude(content="").values_list("title", flat=True)
-    )
+    if not targeted_artifacts.exists():
+        return False
 
-    required = {"p2-chatgpt", "p2-gemini"}
-    return required.issubset(titles_with_content)
+    # All targeted artifacts must have content
+    return not targeted_artifacts.filter(content="").exists()
 
 
 def _check_publishing_assets_complete(episode_id: int) -> bool:

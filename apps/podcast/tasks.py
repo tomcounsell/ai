@@ -69,70 +69,28 @@ def _acquire_step_lock(episode_id: int, expected_step: str) -> None:
             )
 
 
-def _craft_research_prompt(episode_id: int, research_type: str) -> str:
-    """Build a research prompt from episode artifacts.
+def _get_crafted_prompt(episode_id: int, artifact_title: str) -> str:
+    """Read a pre-generated prompt from an artifact.
 
     Args:
         episode_id: Primary key of the Episode.
-        research_type: One of ``"perplexity"``, ``"gpt"``, or ``"gemini"``.
+        artifact_title: Title of the prompt artifact, e.g. ``"prompt-gpt"``
+            or ``"prompt-gemini"``.
 
     Returns:
-        A prompt string suitable for passing to a research service function.
+        The crafted prompt string.
+
+    Raises:
+        EpisodeArtifact.DoesNotExist: If no matching artifact exists.
+        ValueError: If the artifact has no content.
     """
-    if research_type == "perplexity":
-        # Read the p1-brief artifact for initial academic/peer-reviewed research
-        try:
-            brief = EpisodeArtifact.objects.get(episode_id=episode_id, title="p1-brief")
-            context = brief.content
-        except EpisodeArtifact.DoesNotExist:
-            from apps.podcast.models import Episode
-
-            episode = Episode.objects.get(pk=episode_id)
-            context = episode.description
-
-        return (
-            "Conduct comprehensive academic and peer-reviewed research on "
-            "the following topic. Focus on systematic reviews, meta-analyses, "
-            "landmark studies, and recent findings from credible institutions.\n\n"
-            f"{context}"
+    artifact = EpisodeArtifact.objects.get(episode_id=episode_id, title=artifact_title)
+    if not artifact.content:
+        raise ValueError(
+            f"Prompt artifact '{artifact_title}' for episode {episode_id} "
+            f"has no content."
         )
-
-    elif research_type == "gpt":
-        # Read question-discovery artifact for industry/technical questions
-        try:
-            qd = EpisodeArtifact.objects.get(
-                episode_id=episode_id, title="question-discovery"
-            )
-            context = qd.content
-        except EpisodeArtifact.DoesNotExist:
-            context = ""
-
-        return (
-            "Investigate the following industry and technical questions using "
-            "multi-agent research. Focus on practical applications, case "
-            "studies, industry reports, and expert perspectives.\n\n"
-            f"{context}"
-        )
-
-    elif research_type == "gemini":
-        # Read question-discovery artifact for policy/strategic questions
-        try:
-            qd = EpisodeArtifact.objects.get(
-                episode_id=episode_id, title="question-discovery"
-            )
-            context = qd.content
-        except EpisodeArtifact.DoesNotExist:
-            context = ""
-
-        return (
-            "Research the following policy, regulatory, and strategic "
-            "questions. Focus on government reports, regulatory frameworks, "
-            "policy analyses, and strategic assessments.\n\n"
-            f"{context}"
-        )
-
-    else:
-        raise ValueError(f"Unknown research type: {research_type}")
+    return artifact.content
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +126,8 @@ def step_perplexity_research(episode_id: int) -> None:
     """Run Perplexity Deep Research and enqueue question discovery."""
     _acquire_step_lock(episode_id, "Perplexity Research")
     try:
-        prompt = _craft_research_prompt(episode_id, "perplexity")
-        research.run_perplexity_research(episode_id, prompt=prompt)
+        artifact = analysis.craft_research_prompt(episode_id, "perplexity")
+        research.run_perplexity_research(episode_id, prompt=artifact.content)
         workflow.advance_step(episode_id, "Perplexity Research")
         step_question_discovery.enqueue(episode_id=episode_id)
     except Exception as exc:
@@ -193,6 +151,9 @@ def step_question_discovery(episode_id: int) -> None:
     _acquire_step_lock(episode_id, "Question Discovery")
     try:
         analysis.discover_questions(episode_id)
+        # Generate targeted prompts and create placeholder artifacts
+        # before advancing, so prompts are available as artifacts
+        analysis.craft_targeted_research_prompts(episode_id)
         workflow.advance_step(episode_id, "Question Discovery")
         # Fan-out: enqueue both targeted research steps in parallel
         step_gpt_research.enqueue(episode_id=episode_id)
@@ -224,7 +185,7 @@ def step_gpt_research(episode_id: int) -> None:
             f"not 'Targeted Research'"
         )
     try:
-        prompt = _craft_research_prompt(episode_id, "gpt")
+        prompt = _get_crafted_prompt(episode_id, "prompt-gpt")
         research.run_gpt_researcher(episode_id, prompt=prompt)
         logger.info("step_gpt_research: completed for episode %d", episode_id)
         # Do NOT enqueue next step -- signal handles fan-in
@@ -249,7 +210,7 @@ def step_gemini_research(episode_id: int) -> None:
             f"not 'Targeted Research'"
         )
     try:
-        prompt = _craft_research_prompt(episode_id, "gemini")
+        prompt = _get_crafted_prompt(episode_id, "prompt-gemini")
         research.run_gemini_research(episode_id, prompt=prompt)
         logger.info("step_gemini_research: completed for episode %d", episode_id)
         # Do NOT enqueue next step -- signal handles fan-in

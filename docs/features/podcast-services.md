@@ -141,6 +141,16 @@ write_briefing(episode_id: int) -> EpisodeArtifact
 ```
 Creates the master research briefing from `cross-validation` and `digest-*` (or `p2-*`) artifacts. Delegates to the `write_briefing` Named AI Tool. Saves result as `p3-briefing` artifact with verified findings, story bank, counterpoints, and source inventory.
 
+```python
+craft_research_prompt(episode_id: int, research_type: str) -> EpisodeArtifact
+```
+Reads the `p1-brief` artifact, delegates to the `craft_research_prompt` Named AI Tool to generate a topic-specific research prompt, and saves the result as a `prompt-{research_type}` artifact.
+
+```python
+craft_targeted_research_prompts(episode_id: int) -> dict[str, EpisodeArtifact]
+```
+Reads `p1-brief` and `question-discovery` artifacts, delegates to the `craft_research_prompt` Named AI Tool for batch GPT + Gemini prompt generation, saves prompts as `prompt-gpt` and `prompt-gemini` artifacts, and creates empty `p2-chatgpt` and `p2-gemini` placeholder artifacts for fan-in.
+
 ---
 
 ### `synthesis.py` -- Report and Planning
@@ -257,10 +267,11 @@ Combines `compute_workflow_progress` with `EpisodeWorkflow` state into a single 
 
 ## Prompt Templates
 
-Eight prompt templates live in `apps/podcast/services/prompts/` and are used by the Named AI Tools:
+Nine prompt templates live in `apps/podcast/services/prompts/` and are used by the Named AI Tools:
 
 | Template | Used By |
 |----------|---------|
+| `craft_research_prompt.md` | `craft_research_prompt.py` |
 | `cross_validate.md` | `cross_validate.py` |
 | `discover_questions.md` | `discover_questions.py` |
 | `generate_chapters.md` | `generate_chapters.py` |
