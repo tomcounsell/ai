@@ -92,14 +92,6 @@ OPENAI_ORG_ID = os.environ.get("OPENAI_ORG_ID", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "2023-06-01")
 
-# QuickBooks Integration Settings
-QUICKBOOKS_CLIENT_ID = os.environ.get("QUICKBOOKS_CLIENT_ID", "")
-QUICKBOOKS_CLIENT_SECRET = os.environ.get("QUICKBOOKS_CLIENT_SECRET", "")
-QUICKBOOKS_WEBHOOK_TOKEN = os.environ.get("QUICKBOOKS_WEBHOOK_TOKEN", "")
-QUICKBOOKS_SANDBOX_MODE = (
-    os.environ.get("QUICKBOOKS_SANDBOX_MODE", "True").lower() == "true"
-)
-
 # MCP Server Settings
 MCP_SERVER_HOST = os.environ.get("MCP_SERVER_HOST", "0.0.0.0")
 MCP_SERVER_PORT = int(os.environ.get("MCP_SERVER_PORT", "8080"))

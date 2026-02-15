@@ -45,8 +45,6 @@ apps/ai/
 ├── mcp/                        # Model Context Protocol servers
 │   ├── __init__.py
 │   ├── server.py               # Base MCP server
-│   ├── quickbooks_server.py    # QuickBooks MCP
-│   ├── quickbooks_tools.py
 │   └── creative_juices_server.py
 ├── views/                      # Django views
 │   ├── __init__.py
@@ -218,8 +216,8 @@ class AgentChatMessage(BaseModel):
 | Django models | Singular noun | `chat.py`, `completion.py` |
 | Agent definitions | Singular noun | `chat.py`, `assistant.py` |
 | Tools | Function/feature name | `code_execution.py`, `web_search.py` |
-| MCP servers | `{service}_server.py` | `quickbooks_server.py` |
-| MCP tools | `{service}_tools.py` | `quickbooks_tools.py` |
+| MCP servers | `{service}_server.py` | `creative_juices_server.py` |
+| MCP tools | `{service}_tools.py` | `creative_juices_tools.py` |
 | Adapters | Match model file | `chat.py` (in `adapters/`) |
 | Providers | `providers.py` | Standard name |
 

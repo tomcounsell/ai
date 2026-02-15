@@ -22,7 +22,6 @@ Model Context Protocol (MCP) servers in this project use **FastMCP** from the of
 ```
 apps/ai/mcp/
 ├── __init__.py
-├── quickbooks_server.py        # QuickBooks integration
 ├── creative_juices_server.py   # Creative Juices tool
 └── creative_juices_words.py    # Data for Creative Juices
 ```
@@ -116,7 +115,7 @@ def main():
 
 3. **Local Execution (When Required)**
    - Only for servers requiring local file system access or sensitive credentials
-   - Examples: QuickBooks (requires OAuth), local development tools
+   - Examples: local development tools
    - Uses `uvx run` for zero-install execution from GitHub
 
 **Configuration Examples:**
@@ -149,39 +148,6 @@ For MCP clients that support HTTP/SSE transport:
 ```
 
 **Note:** Claude Desktop doesn't support direct HTTP URLs - use MCPB bundles instead.
-
-### Local Execution (When Needed)
-
-For servers requiring local access or credentials:
-
-```json
-{
-  "mcpServers": {
-    "quickbooks": {
-      "command": "uvx",
-      "args": [
-        "run",
-        "https://raw.githubusercontent.com/yudame/cuttlefish/main/apps/ai/mcp/quickbooks_server.py"
-      ],
-      "env": {
-        "QUICKBOOKS_ORG_ID": "your_org_id",
-        "QUICKBOOKS_API_KEY": "your_api_key"
-      }
-    }
-  }
-}
-```
-
-### Local Development Testing
-
-```bash
-# Set environment variables
-export QUICKBOOKS_ORG_ID=your_org_id
-export QUICKBOOKS_API_KEY=your_api_key
-
-# Run server locally
-uv run python -m apps.ai.mcp.quickbooks_server
-```
 
 ---
 
@@ -375,16 +341,6 @@ Shows:
 - Weekly review framework tool
 - Structured prompts for CTO workflows
 - Documentation with brand-compliant styling
-
-### QuickBooks Server (Local - OAuth Required)
-**File:** `apps/ai/mcp/quickbooks_server.py`
-
-Shows:
-- Local execution pattern for OAuth credentials
-- Resource definitions for QuickBooks data access
-- Tools for creating invoices, searching customers
-- Client initialization with organization ID
-- Environment variable configuration
 
 ---
 

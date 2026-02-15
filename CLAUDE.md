@@ -55,7 +55,6 @@ DJANGO_SETTINGS_MODULE=settings pytest --cov=apps --cov-report=html
 python tools/testing/browser_test_runner.py apps/**/tests/test_e2e_*.py
 
 # Test MCP servers locally
-uv run python -m apps.ai.mcp.quickbooks_server
 uv run python -m apps.ai.mcp.creative_juices_server
 ```
 
@@ -98,7 +97,7 @@ The project follows a layered architecture with clear dependencies:
 ```
 apps/common/ (foundation - no dependencies)
     ├── apps/integration/ (external services)
-    ├── apps/ai/ (MCP server, depends on integration for QuickBooks)
+    ├── apps/ai/ (MCP servers and AI agents)
     ├── apps/api/ (REST endpoints)
     ├── apps/public/ (web UI with HTMX)
     └── apps/staff/ (admin tools)
@@ -117,13 +116,10 @@ MCP servers are in `apps/ai/mcp/` using FastMCP:
 
 | Server | File | Endpoint | Purpose |
 |--------|------|----------|---------|
-| QuickBooks | `quickbooks_server.py` | Local only (OAuth) | Accounting integration |
 | Creative Juices | `creative_juices_server.py` | `/mcp/creative-juices/serve` | Creative thinking tools |
 | CTO Tools | `cto_tools/server.py` | `/mcp/cto-tools/serve` | Security review & engineering tools |
 
 **Supporting code:**
-- `apps/integration/quickbooks/client.py`: Async QuickBooks API client with OAuth
-- `apps/integration/models/quickbooks.py`: Organization, QuickBooksConnection, MCPSession
 - `apps/ai/models/`: Chat sessions and feedback models
 
 **See** [MCP Development Guide](docs/MCP_DEVELOPMENT_GUIDE.md) for patterns and creating new servers
@@ -229,7 +225,7 @@ Use a hybrid Notion + codebase approach for planning:
 | **`docs/plans/`** | Detailed implementation plans with code paths, architecture decisions |
 
 **Workflow:**
-1. Create/find Notion task with appropriate tag (quickbooks, mcp, podcast, website)
+1. Create/find Notion task with appropriate tag (mcp, podcast, website)
 2. Write high-level spec in Notion page body
 3. When ready to implement, create `docs/plans/[feature-name].md` with detailed plan
 4. Link them: set Notion Description to `Plan: docs/plans/[feature-name].md`
@@ -252,9 +248,8 @@ Use a hybrid Notion + codebase approach for planning:
 
 1. Add `@mcp.tool()` decorated function in server file
 2. Use type hints for automatic schema generation
-3. For QuickBooks: implement client method in `apps/integration/quickbooks/client.py`
-4. Write tests in both `apps/ai/tests/` and `apps/integration/` tests
-5. See [MCP Development Guide](docs/MCP_DEVELOPMENT_GUIDE.md) for full patterns
+3. Write tests in `apps/ai/tests/`
+4. See [MCP Development Guide](docs/MCP_DEVELOPMENT_GUIDE.md) for full patterns
 
 ### Environment Variables
 Required in `.env.local`:
@@ -263,10 +258,6 @@ DATABASE_URL=postgres://$(whoami)@localhost:5432/cuttlefish
 DEPLOYMENT_TYPE=LOCAL
 SECRET_KEY=your-secret-key
 DEBUG=True
-QUICKBOOKS_CLIENT_ID=your_client_id
-QUICKBOOKS_CLIENT_SECRET=your_client_secret
-QUICKBOOKS_WEBHOOK_TOKEN=webhook_token
-QUICKBOOKS_SANDBOX_MODE=True
 ```
 ## Podcast Production System
 
