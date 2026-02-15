@@ -1,3 +1,8 @@
+---
+name: update
+description: Pull latest changes, sync dependencies, verify environment, and restart the bridge service. Use when deploying updates, after git pull, or when the bridge needs a fresh start.
+---
+
 # Update & Restart
 
 Pull the latest changes from the remote repository, sync dependencies, and restart the bridge service.

@@ -1,3 +1,8 @@
+---
+name: update-docs
+description: Cascade documentation updates after code changes — finds and surgically edits all affected docs. Use when code has been merged, a PR landed, or after any refactor to keep docs in sync with implementation.
+---
+
 # Update Docs — Cascade Skill
 
 After a code change lands, find every document that references the changed area and make targeted, surgical updates so docs match the actual implementation.
