@@ -1,117 +1,123 @@
-# Open Deep Research Review — Implementation Plan
+# Open Deep Research as a p2-* Research Source
 
 **Issue:** [#77](https://github.com/yudame/cuttlefish/issues/77)
 **Status:** Plan
 
-## Executive Summary
+## Context
 
-Together AI's [Open Deep Research](https://github.com/togethercomputer/open_deep_research) is a Streamlit-based agentic research tool using multi-hop reasoning with self-reflection loops. After reviewing the architecture against our podcast research pipeline (Phases 2-6), there are two patterns worth adopting and several things to skip.
+Our podcast pipeline runs 3 independent deep research tools in parallel, each producing a `p2-*.md` artifact:
 
-## Their Architecture (Summary)
+| Slot | Tool | Focus | Speed |
+|------|------|-------|-------|
+| `p2-perplexity` | Perplexity `sonar-deep-research` | Academic/peer-reviewed | 30-120s |
+| `p2-chatgpt` | GPT-Researcher (local multi-agent) | Industry/technical | 6-20 min |
+| `p2-gemini` | Gemini `deep-research-pro-preview` | Policy/regulatory | 3-10 min |
 
-- **Stack:** Streamlit UI, LangGraph agent orchestration, Together AI inference API
-- **Core loop:** Plan queries → search (Tavily/SerpAPI) → evaluate results → reflect on quality → iterate (up to N hops)
-- **Self-reflection:** After each search hop, the agent evaluates whether it has enough information or needs to refine the query and search again
-- **Citation:** Inline source tracking through the search → evaluate cycle
-- **Models:** Together AI models (DeepSeek, Llama, etc.) via their inference API
+Together's [Open Deep Research](https://github.com/togethercomputer/open_deep_research) is a candidate to add as a 4th source or replace one of the existing three.
 
-## What to Adopt
+## What Together Open Deep Research Does
 
-### 1. Iterative Query Refinement (High Value)
+An open-source Python package (`together-open-deep-research`) with a callable `DeepResearcher` class:
 
-**What they do:** Instead of a single research query, they run a plan→search→evaluate→refine loop. If results are weak, the agent reformulates the query and searches again.
+```python
+from together_open_deep_research import DeepResearcher
 
-**Our gap:** Our pipeline is linear — `craft_research_prompt` generates one prompt per tool, fires it, and moves on. If Perplexity returns shallow results on a subtopic, we don't retry with a better query.
-
-**Implementation:**
-
-Add an optional retry loop to `research.py` research functions:
-
-```
-services/research.py:
-  run_perplexity_research(episode_id, prompt, max_retries=2)
-    1. Run research with initial prompt
-    2. Call digest_research on result
-    3. If digest shows gaps/low confidence findings → craft refined prompt
-    4. Retry with refined prompt, merge results
-    5. Save final merged artifact
+researcher = DeepResearcher(
+    budget=6,              # number of search iterations
+    max_queries=-1,        # unlimited queries per iteration
+    max_sources=-1,        # unlimited sources
+    planning_model="...",  # Together AI model for planning
+    answer_model="...",    # Together AI model for synthesis
+)
+answer = researcher("your research topic")  # returns markdown string
 ```
 
-**Files to modify:**
-- `apps/podcast/services/research.py` — Add retry loop to `run_perplexity_research` (start with Perplexity only, it's fastest)
-- `apps/podcast/services/prompts/refine_research_query.md` — New prompt template for query refinement
-- `apps/podcast/services/refine_query.py` — New Named AI Tool: takes a digest + original prompt, outputs refined prompt
+**Architecture:** Multi-hop agentic loop:
+1. Generate clarifying questions → refine topic
+2. Generate search queries
+3. Search via Tavily → evaluate results
+4. Check completeness → if gaps, generate more queries and search again
+5. Filter low-quality sources
+6. Synthesize final answer with citations
 
-**Estimated effort:** 1-2 days
+**Key differentiator:** Iterative search refinement. Our current tools fire one query and return. This tool loops until it decides it has enough coverage.
 
-### 2. Research Quality Scoring per Source (Medium Value)
+**Dependencies:** `litellm`, `tavily-python`, `langgraph`, `langchain`, `langchain-together`, `smolagents`, `gradio`, `together>=1.3.5`, plus system `pandoc`.
 
-**What they do:** Self-reflection step grades each search result before including it in the final output.
+## Assessment
 
-**Our gap:** Our cross-validation catches contradictions *across* sources, but doesn't score individual source quality *before* they enter the pipeline. Low-quality sources waste downstream tokens.
+### Strengths
+- **Iterative search** — automatically refines queries when initial results are weak
+- **Source filtering** — LLM grades each source before including it
+- **Completeness check** — explicitly evaluates whether research is sufficient
+- **Programmable** — clean `DeepResearcher(topic) -> str` interface fits our pattern
 
-**Implementation:**
+### Concerns
+- **Heavy dependencies** — pulls in LangGraph, LangChain, smolagents, Gradio. That's a lot of framework for one research tool
+- **Together AI lock-in** — requires `TOGETHER_API_KEY` and `TAVILY_API_KEY` (2 new API keys)
+- **Overlaps with issue #78** — if we're replacing tools with `o3-deep-research` (issue #78), adding Together as a 4th tool first may be throwaway work
+- **Speed unknown** — no benchmarks on how long the iterative loop takes; could be slower than GPT-Researcher's 6-20 min
+- **Quality unknown** — Together's models (DeepSeek, Llama) vs. our current stack (GPT-5.2, Gemini, Perplexity) — unclear if quality matches
 
-Add a quality pre-filter in the digest step:
+### Verdict
 
+**Don't add as a new tool. Steal the patterns instead.**
+
+The valuable parts are the *techniques* (iterative search, completeness checking, source filtering), not the package itself. The dependency footprint is too heavy and the API key sprawl isn't worth it — especially given issue #78 plans to consolidate onto `o3-deep-research`.
+
+## What to Steal
+
+### 1. Iterative Completeness Check
+
+**Their pattern:** After each search round, an LLM evaluates whether the collected results adequately cover the research topic. If not, it generates refined queries targeting the gaps.
+
+**Where to apply:** Build this into whichever tool wins the #78 consolidation. Specifically, the `o3-deep-research` tool already does multi-hop reasoning natively, but we should add an explicit completeness check at the service layer:
+
+```python
+# In research.py, after getting results:
+def _check_completeness(result_text: str, original_prompt: str) -> bool:
+    """Quick LLM check: does the result adequately cover the prompt?"""
+    ...
 ```
-services/digest_research.py:
-  Add quality_score field to ResearchDigest output
-  Add source_reliability assessment per finding
-  Flag findings below threshold for exclusion from briefing
-```
 
-**Files to modify:**
-- `apps/podcast/services/digest_research.py` — Add quality scoring to output model
-- `apps/podcast/services/prompts/digest_research.md` — Update prompt to include quality assessment
-- `apps/podcast/services/analysis.py` — `write_briefing` can filter low-quality findings
+**File:** `apps/podcast/services/research.py`
 
-**Estimated effort:** 0.5 day
+### 2. Source Quality Pre-filter
 
-## What to Skip
+**Their pattern:** `filter_results()` uses an LLM to grade each source for relevance and quality before it enters the synthesis step. Low-quality sources are dropped.
 
-### Multi-hop Agent Orchestration (LangGraph)
-Their LangGraph-based agent loop is tightly coupled to their Streamlit UI and Together AI models. Our pipeline already has a clean service layer with `@task` orchestration. Adopting LangGraph would add complexity without clear benefit — we'd be replacing our working Django task pipeline with a second orchestration framework.
+**Where to apply:** Add to `digest_research.py` — our digest step already summarizes each research source but doesn't grade quality. Adding a quality score per finding lets `write_briefing` filter before synthesis.
 
-### Together AI Models
-Their models (DeepSeek-R1, Llama) are optimized for their inference API. We already use Anthropic (Sonnet/Opus) for analysis and OpenAI for GPT-Researcher. Adding another LLM provider for marginal gains isn't worth the integration cost right now. Revisit if Together releases a model that clearly outperforms on research tasks.
+**File:** `apps/podcast/services/digest_research.py`, `apps/podcast/services/prompts/digest_research.md`
 
-### Tavily/SerpAPI Search Integration
-They use these as search backends. Our tools (Perplexity, Gemini, GPT-Researcher) already have built-in web search. Adding raw search APIs would duplicate functionality.
+### 3. Query Generation Strategy
 
-### Streamlit UI
-Irrelevant — we use Django + HTMX.
+**Their pattern:** Instead of one monolithic research prompt, they generate multiple targeted search queries from the topic, then run them in parallel.
+
+**Where to apply:** Our `craft_research_prompt.py` already generates per-tool prompts. The improvement would be generating 3-5 sub-queries per tool instead of 1, then merging results. This is most relevant for the `o3-deep-research` integration in #78 — we could pass multiple queries as structured input.
+
+**File:** `apps/podcast/services/craft_research_prompt.py`
 
 ## Implementation Plan
 
-### Phase 1: Query Refinement (Priority)
+These improvements are **additive to issue #78**, not standalone work. They should be implemented as part of the `o3-deep-research` integration:
 
-| Step | Task | Files |
-|------|------|-------|
-| 1 | Create `refine_query.py` Named AI Tool | `apps/podcast/services/refine_query.py` |
-| 2 | Create prompt template | `apps/podcast/services/prompts/refine_research_query.md` |
-| 3 | Add retry loop to `run_perplexity_research` | `apps/podcast/services/research.py` |
-| 4 | Add `max_retries` param to task pipeline | `apps/podcast/tasks.py` |
-| 5 | Test with a real episode | Manual validation |
+| Priority | Pattern | Apply When | Files |
+|----------|---------|------------|-------|
+| 1 | Completeness check | Phase 1 of #78 (new tool) | `services/research.py` |
+| 2 | Source quality pre-filter | Phase 1 of #78 (digest update) | `services/digest_research.py`, `prompts/digest_research.md` |
+| 3 | Multi-query generation | Phase 3 of #78 (prompt crafting) | `services/craft_research_prompt.py` |
 
-### Phase 2: Quality Scoring (After Phase 1 ships)
-
-| Step | Task | Files |
-|------|------|-------|
-| 1 | Add quality fields to `ResearchDigest` model | `apps/podcast/services/digest_research.py` |
-| 2 | Update digest prompt | `apps/podcast/services/prompts/digest_research.md` |
-| 3 | Add quality filtering to `write_briefing` | `apps/podcast/services/analysis.py` |
-| 4 | Test quality gate with existing episode data | Manual validation |
+**No new dependencies needed.** These patterns are implemented with our existing PydanticAI Named AI Tools (Sonnet for quick checks, same as current pipeline).
 
 ## Success Criteria
 
-- [ ] Perplexity research retries at least once when initial results have gaps
-- [ ] Refined queries produce measurably better coverage on subtopics
-- [ ] Research digests include quality scores per finding
-- [ ] Low-quality findings are flagged (not silently dropped) in briefing
+- [ ] Research results include explicit completeness evaluation
+- [ ] Research digests include quality score per finding
+- [ ] Briefing step can filter out low-quality findings
+- [ ] Craft research prompt can generate sub-queries (not just one prompt)
 
-## Not In Scope (per issue)
+## Relationship to Other Issues
 
-- Full Together AI integration as a research provider
-- Replacing existing research tools
-- LangGraph adoption
+- **Issue #78** (Replace research tools with OpenAI Deep Research API) — This issue's patterns feed into #78's implementation. The techniques above should be built into the `o3-deep-research` integration, not as a separate tool.
+- This issue becomes "research complete, patterns identified" once this plan is approved. Actual implementation happens in #78.
