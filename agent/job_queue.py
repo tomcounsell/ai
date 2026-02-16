@@ -840,7 +840,8 @@ async def _execute_job(job: Job) -> None:
         # The work is done — further messages are noise that spams the chat.
         if _completion_sent:
             logger.info(
-                f"[{job.project_key}] Dropping post-completion output "
+                f"[{job.project_key}] Dropping suppressed output "
+                f"(completion sent or auto-continued) "
                 f"({len(msg)} chars): {msg[:100]!r}"
             )
             return
@@ -897,6 +898,12 @@ async def _execute_job(job: Job) -> None:
                 task_list_id=job.task_list_id,
                 auto_continue_count=auto_continue_count,
             )
+
+            # Suppress BackgroundTask's final messenger.send(result) call.
+            # Without this, _run_work() re-sends the SDK result through
+            # send_to_chat after we already auto-continued, causing duplicate
+            # messages in chat.
+            _completion_sent = True
 
             # Signal that this job should NOT set a reaction
             # (defer to the continuation job)
