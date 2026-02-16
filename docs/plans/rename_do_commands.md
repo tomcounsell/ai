@@ -214,4 +214,4 @@ No agent integration required — slash commands are invoked by the human user i
 
 ## Open Questions
 
-1. Should we also rename `update` → `do-update` and `review` → `do-review` to fully commit to the `do-*` pattern?
+None — all questions resolved.
