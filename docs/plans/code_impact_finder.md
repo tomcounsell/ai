@@ -1,4 +1,4 @@
----
+x---
 status: Planning
 type: feature
 appetite: Medium
@@ -96,7 +96,7 @@ The only new chunking logic needed — `chunk_markdown()` already lives in the c
 
 **Python files** — Use `ast` module (stdlib, no new deps):
 - Each top-level function → one chunk
-- Each class → one chunk (entire class body)
+- Each class → **two levels of chunks**: one chunk for the entire class body (captures conceptual coupling), plus one chunk per method (captures specific behavioral dependencies). Duplicate hits on the same code are fine — a class-level hit says "this class is related" while a method-level hit says "this specific method touches the thing you're changing."
 - Module-level code (imports, constants, assignments) → one "preamble" chunk
 - Decorators included with their function/class
 
@@ -130,21 +130,22 @@ Patterns from repo root, excluding noise:
 
 Skip: `agents/*/state.json`, `data/`, `logs/`, `.git/`, `.venv/`, `generated_images/`
 
-Estimated corpus: ~400 files, ~2000 chunks.
+Estimated corpus: ~400 files, ~2500 chunks (higher than single-level due to dual class+method chunking).
 
 #### 4. Code reranking prompt (in `code_impact_finder.py`)
 
-Instead of doc_impact_finder's "does this doc need updating?", the code finder passes a different prompt builder:
+The code finder indexes both code **and** docs in a single corpus. Docs are the highest level of truth in this codebase, so they must always be surfaced as context when planning changes. The reranking prompt handles both:
 
 > Given a proposed change described as: "{change_summary}"
 >
-> Would this code be AFFECTED by or COUPLED TO this change? Consider:
+> Would this file be AFFECTED by or COUPLED TO this change? Consider:
 > - Direct modifications needed
 > - Behavioral dependencies (uses same abstractions, shares state)
 > - Configuration coupling (reads same env vars, config keys)
 > - Test coverage (tests that exercise affected paths)
+> - Documentation that describes affected behavior and would need updating
 >
-> Code: {file_path} — {section_name}
+> File: {file_path} — {section_name}
 > ```
 > {content_preview}
 > ```
@@ -399,6 +400,8 @@ No update system changes required — this is a new tool in `tools/` with no new
 
 ## Open Questions
 
-1. **Chunking granularity for large classes**: Should a 200-line class be one chunk, or should it be split into methods? One chunk preserves class context but may be too large for embedding quality. Methods lose class context but are more focused. Leaning toward: one chunk per class (with method-level sub-chunks only if class exceeds 100 lines).
+_All resolved._
 
-2. **Should the code finder also surface docs?** The issue mentions surfacing docs for the Documentation section. We could either (a) have the code finder index docs too and return them with `impact_type="docs"`, or (b) keep the two finders separate and run both during do-plan. Leaning toward (a) — single index, single query, simpler integration.
+1. ~~**Chunking granularity for large classes**~~ — **Resolved: both.** Every class gets a full class-level chunk AND per-method chunks. Duplicate hits on the same code are a feature, not a bug — class-level catches conceptual coupling, method-level catches specific behavioral dependencies. The planner benefits from both signals.
+
+2. ~~**Should the code finder also surface docs?**~~ — **Resolved: yes (option a).** The code finder indexes docs alongside code in a single corpus, returning doc hits with `impact_type="docs"`. Docs are the highest level of truth and must always be in the planner's context. During do-plan, only the code finder runs — no need to invoke both finders separately.
