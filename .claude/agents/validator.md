@@ -53,7 +53,7 @@ Do NOT trust the builder's self-reported output. You MUST verify independently:
 | "Tests pass" | Run `pytest tests/ -v` — confirm 0 failures |
 | "Linting clean" | Run `ruff check .` — confirm 0 errors |
 | "Formatting clean" | Run `black --check .` — confirm no reformats needed |
-| "File created at X" | Run `ls -la X` — confirm file exists |
+| "File created at X" | Use Read tool on path X — confirm file exists and has expected content |
 | "Committed abc1234" | Run `git log --oneline -1` — confirm commit hash matches |
 
 ### Discrepancy Handling
