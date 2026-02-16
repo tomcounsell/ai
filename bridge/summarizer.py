@@ -68,6 +68,7 @@ class ClassificationResult:
     output_type: OutputType
     confidence: float  # 0.0-1.0
     reason: str  # Brief explanation
+    was_rejected_completion: bool = False  # True when COMPLETION → STATUS_UPDATE downgrade
 
 
 @dataclass
@@ -405,11 +406,30 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
     except (TypeError, ValueError):
         confidence = 0.5
 
-    return ClassificationResult(
+    result = ClassificationResult(
         output_type=output_type,
         confidence=confidence,
         reason=str(reason),
     )
+
+    # Detect rejected completions: classifier downgraded COMPLETION → STATUS_UPDATE
+    # due to hedging language or missing evidence
+    if result.output_type == OutputType.STATUS_UPDATE:
+        reason_lower = result.reason.lower()
+        hedging_patterns = [
+            "hedg",
+            "no evidence",
+            "no proof",
+            "without verification",
+            "unverified",
+            "not verified",
+            "no test",
+            "no command output",
+        ]
+        if any(p in reason_lower for p in hedging_patterns):
+            result.was_rejected_completion = True
+
+    return result
 
 
 def _build_summary_prompt(text: str, artifacts: dict[str, list[str]]) -> str:
