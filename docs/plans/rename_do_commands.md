@@ -59,6 +59,17 @@ User types `/do-plan slug` → Plan created → User types `/do-build docs/plans
 - Add new `do-docs` command (thin wrapper pointing to `update-docs` skill)
 - Add new `do-test` command (runs pytest with appropriate flags)
 - Update `.claude/agents/plan-maker.md` if it references old names
+- Update `scripts/update/symlinks.py` to prune stale hardlinks from `~/.claude/`
+- Update setup command to remove old hardlinks during fresh setup
+
+### Command Descriptions
+
+These commands will rarely be invoked by exact name. Users will say things like "make a plan", "execute the plan", "update docs", or "run tests". Each command's `description` frontmatter must make this mapping unambiguous:
+
+- **do-plan**: "Create or update feature plan documents. Use when the user says 'make a plan', 'plan this', 'flesh out the idea', or anything about planning work."
+- **do-build**: "Execute a plan document using team orchestration. Use when the user says 'build this', 'execute the plan', 'implement the plan', or anything about running/shipping a plan."
+- **do-docs**: "Cascade documentation updates after code changes. Use when the user says 'update docs', 'sync the docs', or anything about documentation."
+- **do-test**: "Run the test suite. Use when the user says 'run tests', 'test this', or anything about testing."
 
 ## Rabbit Holes
 
@@ -79,7 +90,12 @@ User types `/do-plan slug` → Plan created → User types `/do-build docs/plans
 
 ## Update System
 
-No update system changes required — this is a rename of local development commands only.
+The update system (`scripts/update/symlinks.py`) syncs `.claude/{skills,commands}` to `~/.claude/` via hardlinks. Currently it only **creates** links — it never removes stale ones. After this rename, old hardlinks (`~/.claude/commands/make-plan.md`, `~/.claude/commands/build.md`, `~/.claude/skills/make-plan/`, `~/.claude/skills/build/`) will linger on every deployed machine.
+
+Changes required:
+- **`scripts/update/symlinks.py`**: Add a cleanup pass that removes hardlinks in `~/.claude/{skills,commands}` that no longer have a corresponding source in the project's `.claude/` directory. Track removals in `SymlinkSyncResult`.
+- **`scripts/update/run.py`**: Log cleaned-up stale links alongside created ones.
+- **Setup command** (`.claude/commands/setup.md`): No changes needed — setup runs `/update` which will handle cleanup automatically.
 
 ## Agent Integration
 
@@ -100,6 +116,9 @@ No agent integration required — slash commands are invoked by the human user i
 - [ ] `/do-test` works
 - [ ] No remaining references to old command names in docs
 - [ ] All renamed skills have correct `name:` in SKILL.md frontmatter
+- [ ] All command/skill descriptions include natural language triggers so "make a plan" invokes `do-plan`, "execute the plan" invokes `do-build`, etc.
+- [ ] `scripts/update/symlinks.py` removes stale hardlinks from `~/.claude/` that no longer exist in the project
+- [ ] Running `/update` on a machine with old hardlinks cleans them up automatically
 
 ## Team Orchestration
 
@@ -119,7 +138,7 @@ No agent integration required — slash commands are invoked by the human user i
 
 ## Step by Step Tasks
 
-### 1. Rename command files
+### 1. Rename command files and update descriptions
 - **Task ID**: rename-commands
 - **Depends On**: none
 - **Assigned To**: renamer
@@ -129,6 +148,7 @@ No agent integration required — slash commands are invoked by the human user i
 - `git mv .claude/commands/build.md .claude/commands/do-build.md`
 - Copy/adapt `.claude/commands/update-docs.md` → `.claude/commands/do-docs.md`
 - Create `.claude/commands/do-test.md`
+- Update each command's `description` frontmatter to include natural language triggers (see "Command Descriptions" in Technical Approach)
 
 ### 2. Rename skill directories
 - **Task ID**: rename-skills
@@ -139,28 +159,42 @@ No agent integration required — slash commands are invoked by the human user i
 - `git mv .claude/skills/make-plan .claude/skills/do-plan`
 - `git mv .claude/skills/build .claude/skills/do-build`
 - Update `name:` field in each renamed SKILL.md
+- Update each SKILL.md `description` to include natural language triggers matching the command descriptions
 - Create `.claude/skills/do-docs/` and `.claude/skills/do-test/` if needed
 
-### 3. Update all references
+### 3. Add stale hardlink cleanup to update system
+- **Task ID**: update-symlinks
+- **Depends On**: rename-commands, rename-skills
+- **Assigned To**: renamer
+- **Agent Type**: builder
+- **Parallel**: false
+- In `scripts/update/symlinks.py`: add `_cleanup_stale_commands()` and `_cleanup_stale_skills()` that remove entries in `~/.claude/{commands,skills}` with no corresponding source in the project `.claude/` dir
+- Add `removed: int` counter to `SymlinkSyncResult` and track "removed" actions in `LinkAction`
+- In `scripts/update/run.py`: log removed stale links alongside created ones
+
+### 4. Update all references
 - **Task ID**: update-refs
 - **Depends On**: rename-commands, rename-skills
 - **Assigned To**: renamer
 - **Agent Type**: builder
 - **Parallel**: false
-- Update CLAUDE.md (all `/make-plan` → `/do-plan`, `/build` → `/do-build`)
+- Update CLAUDE.md (all `/make-plan` → `/do-plan`, `/build` → `/do-build`, `/update-docs` → `/do-docs`)
 - Update all docs/ files referencing old names
 - Update `.claude/agents/plan-maker.md`
 - Update any cross-references in other commands
+- Update `scripts/calendar_prompt_hook.sh` if it references old command names
 
-### 4. Final validation
+### 5. Final validation
 - **Task ID**: validate-all
-- **Depends On**: update-refs
+- **Depends On**: update-refs, update-symlinks
 - **Assigned To**: rename-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Grep for any remaining `make-plan`, `/build` references (excluding git history)
-- Verify new command files exist and have correct frontmatter
+- Verify new command files exist and have correct frontmatter with natural language descriptions
 - Verify skill directories exist with correct SKILL.md names
+- Verify `scripts/update/symlinks.py` has cleanup logic
+- Run `python -c "from scripts.update.symlinks import SymlinkSyncResult; assert hasattr(SymlinkSyncResult, 'removed')"` to verify new field
 
 ## Validation Commands
 
