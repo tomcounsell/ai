@@ -179,10 +179,10 @@ After all validation tasks pass, run the documentation lifecycle checks:
 
 **6.1 Validate Documentation Changes**
 
-Run the doc validation script to verify documentation was created/updated. **All commands in this gate MUST use `git -C` for worktree git operations — never cd into the worktree.**
+Run the doc validation script to verify documentation was created/updated. **All commands in this gate MUST use subshells `(cd ... && ...)` if they need worktree CWD — this preserves the parent shell's CWD.**
 
 ```bash
-python scripts/validate_docs_changed.py {PLAN_PATH}
+(cd .worktrees/{slug} && python scripts/validate_docs_changed.py {PLAN_PATH})
 ```
 
 - **Exit 0**: Documentation requirements met, proceed to next step
@@ -195,8 +195,7 @@ python scripts/validate_docs_changed.py {PLAN_PATH}
 Collect all changed files from git and scan for related docs:
 
 ```bash
-CHANGED_FILES=$(git -C .worktrees/{slug} diff --name-only main...HEAD | tr '\n' ' ')
-python scripts/scan_related_docs.py --json $CHANGED_FILES > /tmp/related_docs.json
+(cd .worktrees/{slug} && CHANGED_FILES=$(git diff --name-only main...HEAD | tr '\n' ' ') && python scripts/scan_related_docs.py --json $CHANGED_FILES > /tmp/related_docs.json)
 ```
 
 This identifies existing documentation that may need updates based on code changes.
