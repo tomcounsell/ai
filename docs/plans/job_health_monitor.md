@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
@@ -54,7 +54,7 @@ No prerequisites — this work uses existing Redis infrastructure and asyncio pa
   1. Queries all `running` RedisJobs across all project keys
   2. For each job, checks: is `_active_workers[project_key]` present and `.done() == False`?
   3. If worker is dead: reuse `_recover_interrupted_jobs()` logic (delete-and-recreate as `pending`)
-  4. If job exceeds `MAX_JOB_DURATION` (default 30 min, 2h for builds): same recovery
+  4. If job exceeds max duration (45 min standard, 2.5h for builds): same recovery. Timeout is measured from `started_at` (processing start), not `created_at` (enqueue time)
   5. Logs each recovery action clearly
 - Start `_job_health_loop()` as an asyncio task alongside the existing session watchdog in bridge startup
 - Add `__main__.py` in `agent/` for CLI: parse `--status`, `--flush-stuck`, `--flush-job <id>` args
@@ -71,7 +71,7 @@ No prerequisites — this work uses existing Redis infrastructure and asyncio pa
 
 ### Risk 1: Race condition between health check and normal completion
 **Impact:** Health check resets a job that's about to complete normally, causing duplicate execution.
-**Mitigation:** Only recover jobs where the worker asyncio Task is `.done()` AND the job has been `running` for > 5 minutes. Normal jobs complete in seconds to minutes; a 5-min running job with a dead worker is definitively stuck.
+**Mitigation:** Only recover jobs where the worker asyncio Task is `.done()` AND the job has been running for > 5 minutes (measured from `started_at`). Normal jobs complete in seconds to minutes; a 5-min running job with a dead worker is definitively stuck.
 
 ### Risk 2: Health check runs during bridge shutdown
 **Impact:** Could interfere with graceful shutdown's `_reset_running_jobs()`.
@@ -107,7 +107,7 @@ No agent integration required — this is bridge-internal infrastructure. The he
 - [ ] `started_at` field added to `RedisJob`, populated when job transitions to `running`
 - [ ] Health check loop runs every 5 minutes, detects `running` jobs with dead workers
 - [ ] Dead jobs are automatically recovered (reset to `pending`) and logged
-- [ ] Jobs exceeding `MAX_JOB_DURATION` are detected and recovered
+- [ ] Jobs exceeding timeout are detected and recovered (45 min standard, 2.5h builds, measured from `started_at`)
 - [ ] `python -m agent.job_queue --status` shows current queue state (running, pending, counts)
 - [ ] `python -m agent.job_queue --flush-stuck` recovers all orphaned running jobs
 - [ ] Health check integrates into bridge startup alongside session watchdog
@@ -150,8 +150,10 @@ No agent integration required — this is bridge-internal infrastructure. The he
   - Query all `running` RedisJobs
   - For each: check `_active_workers[project_key]` is alive (exists and not `.done()`)
   - If worker dead or missing: log warning, call recovery (delete-recreate as `pending`)
-  - If `started_at` exists and `time.time() - started_at > MAX_JOB_DURATION`: same recovery
-  - `MAX_JOB_DURATION = 1800` (30 min default)
+  - If `started_at` exists and job exceeds max duration: same recovery
+  - `JOB_TIMEOUT_DEFAULT = 2700` (45 min for standard jobs)
+  - `JOB_TIMEOUT_BUILD = 9000` (2.5 hours for build jobs — detected by `/do-build` in message_text)
+  - Timeouts measured from `started_at` (processing start), not `created_at` (enqueue time)
 - Create `_job_health_loop()`: run `_job_health_check()` every 300 seconds (5 min)
 - Wire `_job_health_loop()` into bridge startup (same place session watchdog starts)
 
