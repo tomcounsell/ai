@@ -82,7 +82,7 @@ Before executing, resolve the plan path:
 - **Run parallel tasks together** - Tasks with `Parallel: true` and no blocking dependencies can run simultaneously
 - **Validators wait for builders** - A `validate-*` task always waits for its corresponding `build-*` task
 - **No temporary files** - Agents must not create temporary documentation, test results, or scratch files in the repo. Use /tmp for any temporary work. Only create files that are part of the deliverable.
-- **Never cd into worktrees** - The orchestrator's CWD must stay in the main repo. Use `git -C .worktrees/{slug}` for git commands and `--head session/{slug}` for `gh pr create`. Only subagents (Task tool) should cd into worktrees — their shell sessions are independent and disposable. If the orchestrator cd's into a worktree and then deletes it, the shell breaks permanently.
+- **Never cd into worktrees** - The orchestrator's CWD must stay in the main repo. Use `git -C .worktrees/{slug}` for git commands and `--head session/{slug}` for `gh pr create`. Only subagents (Task tool) should cd into worktrees — their shell sessions are independent and disposable. If the orchestrator cd's into a worktree and then deletes it, the shell breaks permanently. **Before worktree cleanup (Step 7.5), always run `cd /Users/valorengels/src/ai` first as a safety reset.**
 - **SDLC enforcement** - All builder agents follow Plan → Build → Test → Review → Ship with test failure loops (up to 5 iterations)
 - **Definition of Done** - Tasks are complete only when: Built (code working), Tested (tests pass), Documented (docs created), Quality (lint/format pass)
 
@@ -179,7 +179,7 @@ After all validation tasks pass, run the documentation lifecycle checks:
 
 **6.1 Validate Documentation Changes**
 
-Run the doc validation script to verify documentation was created/updated:
+Run the doc validation script to verify documentation was created/updated. **All commands in this gate MUST use `git -C` for worktree git operations — never cd into the worktree.**
 
 ```bash
 python scripts/validate_docs_changed.py {PLAN_PATH}
@@ -195,7 +195,7 @@ python scripts/validate_docs_changed.py {PLAN_PATH}
 Collect all changed files from git and scan for related docs:
 
 ```bash
-CHANGED_FILES=$(git diff --name-only main...HEAD | tr '\n' ' ')
+CHANGED_FILES=$(git -C .worktrees/{slug} diff --name-only main...HEAD | tr '\n' ' ')
 python scripts/scan_related_docs.py --json $CHANGED_FILES > /tmp/related_docs.json
 ```
 
@@ -248,11 +248,16 @@ EOF
 
 ### Step 7.5: Worktree Cleanup
 
-After pushing and creating the PR, clean up the worktree:
+After pushing and creating the PR, clean up the worktree. **CRITICAL**: The shell CWD may be inside the worktree (from subagent work or doc gate commands). You MUST `cd` to the repo root first, or the removal will nuke the CWD and permanently break the shell session.
 
 ```bash
-git worktree remove .worktrees/{slug} --force
-git worktree prune
+cd /Users/valorengels/src/ai && git worktree remove .worktrees/{slug} --force && git worktree prune
+```
+
+If the above fails (CWD already broken), use an absolute-path fresh shell:
+
+```bash
+/bin/bash -c 'cd /Users/valorengels/src/ai && git worktree remove .worktrees/{slug} --force; git worktree prune'
 ```
 
 ### Step 7.6: Documentation Cascade
@@ -277,7 +282,7 @@ This invokes the cascade skill defined in `.claude/skills/do-docs/SKILL.md`, whi
 After PR is successfully created and documentation cascade completes, clean up the completed plan:
 
 ```bash
-python scripts/migrate_completed_plan.py {PLAN_PATH}
+cd /Users/valorengels/src/ai && python scripts/migrate_completed_plan.py {PLAN_PATH}
 ```
 
 This deletes the plan document and closes the tracking issue, completing the lifecycle.
