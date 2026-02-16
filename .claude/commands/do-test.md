@@ -1,5 +1,6 @@
 ---
 description: "Run the test suite. Use when the user says 'run tests', 'test this', or anything about testing."
+argument-hint: <optional test path or pattern>
 ---
 
 # Test (Stub)

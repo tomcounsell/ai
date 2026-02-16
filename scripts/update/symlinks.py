@@ -126,44 +126,123 @@ def _ensure_hardlink(
         result.errors += 1
 
 
+def _is_hardlinked_to_project(dst_file: Path, src_dir: Path) -> bool:
+    """Check if dst_file shares an inode with any file under src_dir.
+
+    This ensures we only clean up files that THIS project created,
+    not files from other projects that also sync to ~/.claude/.
+    """
+    try:
+        dst_ino = os.stat(dst_file).st_ino
+    except OSError:
+        return False
+
+    for src_file in src_dir.rglob("*"):
+        if src_file.is_file():
+            try:
+                if os.stat(src_file).st_ino == dst_ino:
+                    return True
+            except OSError:
+                continue
+    return False
+
+
 def _cleanup_stale_commands(
     src_dir: Path, dst_dir: Path, result: SymlinkSyncResult
 ) -> None:
-    """Remove command files in dst_dir that have no corresponding source in src_dir."""
+    """Remove command files in dst_dir that were hardlinked from old source names.
+
+    Only removes files that share an inode with a file in src_dir (proving
+    this project created them) but whose name no longer exists in src_dir.
+    Files from other projects are left untouched.
+    """
     if not dst_dir.is_dir():
         return
 
+    # Collect inodes of all current source commands
+    src_inodes: set[int] = set()
+    if src_dir.is_dir():
+        for src_file in sorted(src_dir.glob("*.md")):
+            try:
+                src_inodes.add(os.stat(src_file).st_ino)
+            except OSError:
+                continue
+
     for dst_file in sorted(dst_dir.glob("*.md")):
         src_file = src_dir / dst_file.name
-        if not src_file.exists():
-            rel_dst = str(dst_file).replace(str(Path.home()), "~")
-            try:
-                dst_file.unlink()
-                result.actions.append(LinkAction("", rel_dst, "removed"))
-                result.removed += 1
-            except OSError as e:
-                result.actions.append(LinkAction("", rel_dst, "error", str(e)))
-                result.errors += 1
+        if src_file.exists():
+            continue  # Still has a source — not stale
+
+        # Only remove if this file's inode matches a current source file,
+        # meaning it's an old hardlink from a previous name in this project
+        try:
+            dst_ino = os.stat(dst_file).st_ino
+        except OSError:
+            continue
+
+        if dst_ino not in src_inodes:
+            continue  # Not from this project — leave it alone
+
+        rel_dst = str(dst_file).replace(str(Path.home()), "~")
+        try:
+            dst_file.unlink()
+            result.actions.append(LinkAction("", rel_dst, "removed"))
+            result.removed += 1
+        except OSError as e:
+            result.actions.append(LinkAction("", rel_dst, "error", str(e)))
+            result.errors += 1
 
 
 def _cleanup_stale_skills(
     src_dir: Path, dst_dir: Path, result: SymlinkSyncResult
 ) -> None:
-    """Remove skill directories in dst_dir that have no corresponding source in src_dir."""
+    """Remove skill directories in dst_dir that were hardlinked from old source names.
+
+    Only removes directories whose SKILL.md shares an inode with a file in
+    src_dir (proving this project created them) but whose name no longer
+    exists in src_dir. Directories from other projects are left untouched.
+    """
     if not dst_dir.is_dir():
         return
+
+    # Collect inodes of all current source SKILL.md files
+    src_inodes: set[int] = set()
+    if src_dir.is_dir():
+        for skill_dir in sorted(src_dir.iterdir()):
+            skill_file = skill_dir / "SKILL.md"
+            if skill_file.is_file():
+                try:
+                    src_inodes.add(os.stat(skill_file).st_ino)
+                except OSError:
+                    continue
 
     for dst_skill_dir in sorted(dst_dir.iterdir()):
         if not dst_skill_dir.is_dir():
             continue
 
         src_skill_dir = src_dir / dst_skill_dir.name
-        if not src_skill_dir.exists():
-            rel_dst = str(dst_skill_dir).replace(str(Path.home()), "~")
-            try:
-                shutil.rmtree(dst_skill_dir)
-                result.actions.append(LinkAction("", rel_dst, "removed"))
-                result.removed += 1
-            except OSError as e:
-                result.actions.append(LinkAction("", rel_dst, "error", str(e)))
-                result.errors += 1
+        if src_skill_dir.exists():
+            continue  # Still has a source — not stale
+
+        # Only remove if SKILL.md inode matches a current source,
+        # meaning it's an old hardlink from a previous name in this project
+        dst_skill_file = dst_skill_dir / "SKILL.md"
+        if not dst_skill_file.is_file():
+            continue
+
+        try:
+            dst_ino = os.stat(dst_skill_file).st_ino
+        except OSError:
+            continue
+
+        if dst_ino not in src_inodes:
+            continue  # Not from this project — leave it alone
+
+        rel_dst = str(dst_skill_dir).replace(str(Path.home()), "~")
+        try:
+            shutil.rmtree(dst_skill_dir)
+            result.actions.append(LinkAction("", rel_dst, "removed"))
+            result.removed += 1
+        except OSError as e:
+            result.actions.append(LinkAction("", rel_dst, "error", str(e)))
+            result.errors += 1
