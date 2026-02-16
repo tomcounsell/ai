@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: In Progress
 type: bug
 appetite: Medium
 owner: Valor
