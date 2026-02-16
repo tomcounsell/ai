@@ -825,8 +825,8 @@ ai/
 |-- .claude/                  # Claude Code configuration (symlinked to ~/.claude/ for global access)
 |   |-- agents/               # Subagent definitions (flat structure, all at root level)
 |   |   +-- *.md              # builder, validator, github, stripe, sentry, specialists, etc.
-|   |-- commands/             # Skill definitions (/prime, /build, /sdlc, etc.)
-|   |-- skills/               # Complex multi-step skills (make-plan, etc.)
+|   |-- commands/             # Skill definitions (/prime, /do-build, /sdlc, etc.)
+|   |-- skills/               # Complex multi-step skills (do-plan, etc.)
 |   |-- hooks/                # Validation hooks
 |   |-- settings.local.json   # Local Claude Code settings
 |   +-- README.md             # Architecture and cross-repo usage docs

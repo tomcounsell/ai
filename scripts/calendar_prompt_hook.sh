@@ -17,7 +17,7 @@ PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 
 # Skip bare slash commands (no extra prompt = no real work)
-# e.g. "/update" skips, but "/build implement auth" tracks
+# e.g. "/update" skips, but "/do-build implement auth" tracks
 if echo "$PROMPT" | grep -qE '^\s*/[a-zA-Z0-9_-]+\s*$'; then
     exit 0
 fi

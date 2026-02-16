@@ -1,6 +1,6 @@
 ---
-name: build
-description: Execute a plan document using team orchestration. Deploys builder/validator agent pairs to complete tasks in order, with parallel execution where specified.
+name: do-build
+description: "Execute a plan document using team orchestration. Use when the user says 'build this', 'execute the plan', 'implement the plan', or anything about running/shipping a plan."
 ---
 
 # Build (Plan Execution)
@@ -11,8 +11,8 @@ You are the **team lead** executing a plan document. You orchestrate work using 
 
 The build skill supports two invocation methods:
 
-1. **By plan path**: `/build docs/plans/my-feature.md`
-2. **By issue number**: `/build #17` or `/build 17`
+1. **By plan path**: `/do-build docs/plans/my-feature.md`
+2. **By issue number**: `/do-build #17` or `/do-build 17`
 
 When invoked with an issue number, the skill will:
 - Search all files in `docs/plans/*.md`
@@ -70,7 +70,7 @@ Before executing, resolve the plan path:
 9. **Verify Definition of Done** - Ensure all tasks completed with: code working, tests passing, docs created, quality checks pass
 10. **Run documentation gate** - Validate docs changed, scan related docs, create review issues
 11. **Push and open a PR** - `git -C .worktrees/{slug} push -u origin session/{slug}` then `gh pr create`
-12. **Run documentation cascade** - Invoke `/update-docs {PR-number}` to surgically update affected docs
+12. **Run documentation cascade** - Invoke `/do-docs {PR-number}` to surgically update affected docs
 13. **Migrate completed plan** - Delete plan file and close tracking issue
 14. **Report completion** with PR URL when all tasks are done
 
@@ -257,13 +257,13 @@ git worktree prune
 
 ### Step 7.6: Documentation Cascade
 
-After the PR is created, run the `/update-docs` cascade to find and surgically update any existing documentation affected by the code changes in this build. Pass the PR number so the cascade can inspect the full diff:
+After the PR is created, run the `/do-docs` cascade to find and surgically update any existing documentation affected by the code changes in this build. Pass the PR number so the cascade can inspect the full diff:
 
 ```
-/update-docs {PR-number}
+/do-docs {PR-number}
 ```
 
-This invokes the cascade command defined in `.claude/commands/update-docs.md`, which:
+This invokes the cascade skill defined in `.claude/skills/do-docs/SKILL.md`, which:
 - Launches parallel agents to explore the change diff and inventory all docs
 - Cross-references changes against every doc in the repo (triage questions)
 - Makes targeted surgical edits to affected docs (read before edit, preserve structure)
@@ -299,13 +299,13 @@ When deploying an agent, include:
 
 **By file path:**
 ```
-/build docs/plans/implement-auth.md
+/do-build docs/plans/implement-auth.md
 ```
 
 **By issue number:**
 ```
-/build #42
-/build 42
+/do-build #42
+/do-build 42
 ```
 
 Both methods will execute the same plan if the plan file has:
@@ -359,7 +359,7 @@ After all tasks complete:
 - [x] All build tasks completed
 - [x] All validators passed
 - [x] Documentation gate passed
-- [x] Documentation cascade completed (`/update-docs`)
+- [x] Documentation cascade completed (`/do-docs`)
 - [x] Success criteria met
 
 ### Artifacts Created

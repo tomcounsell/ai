@@ -87,7 +87,7 @@ Add a "Common Rationalizations" section after the validation checks:
 | "I checked the important parts" | Check ALL the criteria. Partial validation is no validation. |
 | "This is the same pattern as last time" | Last time might have been wrong. Validate fresh. |
 
-**3. Plan-Maker Skill** (`.claude/skills/make-plan/SKILL.md`)
+**3. Plan-Maker Skill** (`.claude/skills/do-plan/SKILL.md`)
 
 Add a "Common Rationalizations" section in the "Anti-Patterns to Avoid" area:
 
@@ -145,7 +145,7 @@ No update system changes required — this is purely prompt engineering on agent
 
 ## Agent Integration
 
-No agent integration required — changes are to agent prompts (`.claude/agents/code-reviewer.md`, `.claude/agents/validator.md`, `.claude/agents/builder.md`) and the make-plan skill (`.claude/skills/make-plan/SKILL.md`), all loaded natively by Claude Code.
+No agent integration required — changes are to agent prompts (`.claude/agents/code-reviewer.md`, `.claude/agents/validator.md`, `.claude/agents/builder.md`) and the do-plan skill (`.claude/skills/do-plan/SKILL.md`), all loaded natively by Claude Code.
 
 ## Documentation
 
@@ -208,7 +208,7 @@ No agent integration required — changes are to agent prompts (`.claude/agents/
 - **Assigned To**: prompt-engineer
 - **Agent Type**: builder
 - **Parallel**: true
-- Read `.claude/skills/make-plan/SKILL.md`
+- Read `.claude/skills/do-plan/SKILL.md`
 - Add "Common Rationalizations" section near the "Anti-Patterns to Avoid" area
 - Include 8-entry table covering vague scope, grab-bags, skipping risks/boundaries
 - Position so agent sees it when writing plans, not just as reference material
@@ -243,7 +243,7 @@ No agent integration required — changes are to agent prompts (`.claude/agents/
 
 - `cat .claude/agents/code-reviewer.md` - Verify rationalization table present
 - `cat .claude/agents/validator.md` - Verify rationalization table present
-- `cat .claude/skills/make-plan/SKILL.md` - Verify rationalization table present
+- `cat .claude/skills/do-plan/SKILL.md` - Verify rationalization table present
 - `cat .claude/agents/builder.md` - Verify commit discipline table present
 - `pytest tests/ -v` - Ensure existing tests still pass
 - `ruff check .` - Linting

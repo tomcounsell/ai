@@ -7,11 +7,11 @@ created: 2026-02-15
 tracking: https://github.com/tomcounsell/ai/issues/109
 ---
 
-# Semantic Doc Impact Finder for /update-docs
+# Semantic Doc Impact Finder for /do-docs
 
 ## Problem
 
-`/update-docs` finds affected documentation via lexical matching — regex for file paths, function names, class names, and keywords (`scripts/scan_related_docs.py`). This catches direct references but misses conceptual coupling.
+`/do-docs` finds affected documentation via lexical matching — regex for file paths, function names, class names, and keywords (`scripts/scan_related_docs.py`). This catches direct references but misses conceptual coupling.
 
 **Current behavior:**
 - Agent A reads the diff, Agent B inventories docs, then triage cross-references using keyword matching
@@ -49,7 +49,7 @@ tracking: https://github.com/tomcounsell/ai/issues/109
 - **Embedding index**: Pre-computed embeddings for all doc sections, stored as flat JSON with content hashes for cache invalidation
 - **Semantic search**: Query embedding from change summary → cosine similarity → top-N candidates
 - **LLM reranker**: Haiku scores each candidate chunk against the change summary (0-10) with explanation
-- **Integration**: Slots into `/update-docs` Step 1 as Agent C alongside existing Agents A and B
+- **Integration**: Slots into `/do-docs` Step 1 as Agent C alongside existing Agents A and B
 
 ### Flow
 
@@ -111,7 +111,7 @@ Stage 2 — LLM reranking:
 - Filter to score >= 5
 - Return sorted by score with path, section, relevance, and reason
 
-**3. Integration with `/update-docs`**
+**3. Integration with `/do-docs`**
 
 In Step 1, add Agent C as a third parallel agent:
 
@@ -151,14 +151,14 @@ Use whatever key is available in `.env`. Fall back gracefully — if no embeddin
 
 - **Vector database**: Don't use Pinecone, Weaviate, Chroma, etc. Flat JSON + numpy cosine similarity is perfect for <100 chunks. Adding a DB adds dependency and complexity for zero benefit at this scale.
 - **sqlite-vec**: The issue mentions this as an option. Don't bother — the overhead of setting up SQLite extensions isn't worth it for <100 vectors. A flat JSON file with numpy is simpler and just as fast.
-- **Real-time indexing via git hooks**: Don't. Index on-demand when `/update-docs` runs. Post-commit hooks are fragile and this operation is fast enough to run every time.
+- **Real-time indexing via git hooks**: Don't. Index on-demand when `/do-docs` runs. Post-commit hooks are fragile and this operation is fast enough to run every time.
 - **Embedding the code changes too**: Don't embed diffs. The change summary (natural language from Agent A) is a much better query than raw diff text.
 - **Fine-tuning embeddings**: Off-the-shelf embeddings are excellent for doc-to-doc similarity. No fine-tuning needed.
 
 ## Risks
 
 ### Risk 1: Embedding API latency
-**Impact:** Adds seconds to `/update-docs` if re-indexing many chunks
+**Impact:** Adds seconds to `/do-docs` if re-indexing many chunks
 **Mitigation:** Content hashing means only changed chunks get re-embedded. At <100 chunks, even full re-index is fast. Agent C runs in parallel with A and B, so latency is hidden.
 
 ### Risk 2: False positives from semantic search
@@ -173,7 +173,7 @@ Use whatever key is available in `.env`. Fall back gracefully — if no embeddin
 
 - External vector databases (Pinecone, Weaviate, Chroma)
 - Replacing the existing lexical scanner (`scan_related_docs.py`) — this complements it
-- Re-architecting `/update-docs` beyond adding Agent C
+- Re-architecting `/do-docs` beyond adding Agent C
 - Embedding code files or diffs (only docs are indexed)
 - Automatic re-indexing via git hooks
 
@@ -187,18 +187,18 @@ Use whatever key is available in `.env`. Fall back gracefully — if no embeddin
 
 ## Agent Integration
 
-No new MCP server needed. The finder is a Python tool in `tools/doc_impact_finder.py` that agents invoke via `python -c` or `python -m`. It integrates into `/update-docs` through the existing agent orchestration pattern (Agent C is spawned by the cascade orchestrator just like Agents A and B).
+No new MCP server needed. The finder is a Python tool in `tools/doc_impact_finder.py` that agents invoke via `python -c` or `python -m`. It integrates into `/do-docs` through the existing agent orchestration pattern (Agent C is spawned by the cascade orchestrator just like Agents A and B).
 
 Changes needed:
 - Add `tools/doc_impact_finder.py` — the new tool
-- Update `.claude/commands/update-docs.md` — add Agent C to Step 1
+- Update `.claude/commands/do-docs.md` — add Agent C to Step 1
 - No changes to `.mcp.json` or bridge
 
 ## Documentation
 
 - [ ] Create `docs/features/semantic-doc-impact-finder.md` describing the tool
 - [ ] Add entry to `docs/features/README.md` index table
-- [ ] Update `.claude/commands/update-docs.md` with Agent C instructions
+- [ ] Update `.claude/commands/do-docs.md` with Agent C instructions
 - [ ] Add embedding API key to setup documentation
 
 ## Success Criteria
@@ -210,7 +210,7 @@ Changes needed:
 - [ ] Semantic search catches conceptual matches that grep misses (test: "changed session scoping" → finds session-isolation.md)
 - [ ] Haiku reranker filters false positives (score < 5 excluded)
 - [ ] Graceful degradation when no embedding API key is available
-- [ ] `/update-docs` Step 1 launches Agent C in parallel with A and B
+- [ ] `/do-docs` Step 1 launches Agent C in parallel with A and B
 - [ ] Step 2 triage merges all three agent signals
 - [ ] `data/doc_embeddings.json` is gitignored
 - [ ] All existing tests pass
@@ -228,7 +228,7 @@ Changes needed:
 
 - **Builder (integration)**
   - Name: integration-builder
-  - Role: Wire Agent C into `/update-docs` cascade
+  - Role: Wire Agent C into `/do-docs` cascade
   - Agent Type: builder
   - Resume: true
 
@@ -262,13 +262,13 @@ Changes needed:
   - Test graceful degradation with no API key
   - Test cosine similarity math
 
-### 2. Integrate Agent C into /update-docs
+### 2. Integrate Agent C into /do-docs
 - **Task ID**: build-integration
 - **Depends On**: build-finder
 - **Assigned To**: integration-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Update `.claude/commands/update-docs.md`:
+- Update `.claude/commands/do-docs.md`:
   - Step 1 adds Agent C — Semantic Impact Finder
   - Agent C runs in parallel with existing Agents A and B
   - Agent C prompt: run `index_docs()` then `find_affected_docs()` with change summary
@@ -285,7 +285,7 @@ Changes needed:
 - Verify `index_docs()` produces `data/doc_embeddings.json` with chunked entries
 - Verify `find_affected_docs("changed session scoping")` returns session-related docs
 - Verify graceful degradation: unset all embedding API keys, confirm empty results + warning
-- Verify `/update-docs` command references Agent C
+- Verify `/do-docs` command references Agent C
 - Run `pytest tests/test_doc_impact_finder.py -v`
 - Run `ruff check . && black --check .`
 
@@ -315,7 +315,7 @@ Changes needed:
 - `python -c "from tools.doc_impact_finder import index_docs; index_docs()"` - Indexing runs without error
 - `test -f data/doc_embeddings.json` - Index file created
 - `grep -q doc_embeddings .gitignore` - Index file is gitignored
-- `grep -q 'Agent C' .claude/commands/update-docs.md` - Integration in cascade
+- `grep -q 'Agent C' .claude/commands/do-docs.md` - Integration in cascade
 - `pytest tests/test_doc_impact_finder.py -v` - Unit tests pass
 - `pytest tests/ -v` - All tests pass
 - `ruff check .` - Linting

@@ -5,7 +5,7 @@ description: Creates structured feature plans. Repo-specific configuration for p
 
 # Plan Maker Agent
 
-Subagent for creating plans in this repository. For the full planning workflow and Shape Up methodology, see `.claude/skills/make-plan/SKILL.md`.
+Subagent for creating plans in this repository. For the full planning workflow and Shape Up methodology, see `.claude/skills/do-plan/SKILL.md`.
 
 ## Repo-Specific Configuration
 

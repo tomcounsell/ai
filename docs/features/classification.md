@@ -30,9 +30,9 @@ If classification fails, the field stays `null` and the user specifies the type 
 
 Both fields are nullable and backward-compatible with existing sessions/jobs.
 
-### Make-Plan Pre-Population
+### Do-Plan Pre-Population
 
-The `/make-plan` skill (`.claude/skills/make-plan/SKILL.md`) checks for `classification_type` in the session context when creating a new plan. If available, it pre-populates the `type:` field in the frontmatter template. The user can override this during drafting.
+The `/do-plan` skill (`.claude/skills/do-plan/SKILL.md`) checks for `classification_type` in the session context when creating a new plan. If available, it pre-populates the `type:` field in the frontmatter template. The user can override this during drafting.
 
 ### Type Immutability Hook
 
@@ -45,7 +45,7 @@ The hook:
 2. Extracts `status:` and `type:` from both versions' frontmatter
 3. If the HEAD version has a locked status and the type changed, exits with code 2 (blocking the save)
 
-This is registered as a Stop hook in the make-plan skill.
+This is registered as a Stop hook in the do-plan skill.
 
 ### Reclassify Skill
 
@@ -68,7 +68,7 @@ Telegram message
      -> store in classification_result dict
   -> enqueue_job(classification_type=...)
   -> _execute_job() stores on AgentSession
-  -> /make-plan reads classification_type from session context
+  -> /do-plan reads classification_type from session context
   -> pre-populates type: in plan frontmatter
 ```
 
@@ -82,4 +82,4 @@ Telegram message
 | `agent/job_queue.py` | RedisJob with classification passthrough |
 | `.claude/hooks/validators/validate_type_immutability.py` | Immutability enforcement |
 | `.claude/skills/reclassify/SKILL.md` | Reclassification during Planning |
-| `.claude/skills/make-plan/SKILL.md` | Pre-population of type field |
+| `.claude/skills/do-plan/SKILL.md` | Pre-population of type field |

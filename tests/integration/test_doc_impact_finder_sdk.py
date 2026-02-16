@@ -1,7 +1,7 @@
 """Integration tests for doc_impact_finder through the Agent SDK invocation pattern.
 
 Tests the tool as the agent actually calls it: via python3 -c subprocess commands
-matching the exact invocation in .claude/skills/update-docs/SKILL.md (Agent C).
+matching the exact invocation in .claude/skills/do-docs/SKILL.md (Agent C).
 
 Verifies:
 1. Subprocess invocation matches skill definition
@@ -28,7 +28,7 @@ PYTHON = sys.executable
 def run_tool_subprocess(
     code: str, env_override: dict | None = None
 ) -> subprocess.CompletedProcess:
-    """Run a python -c command the same way the agent does in /update-docs Agent C."""
+    """Run a python -c command the same way the agent does in /do-docs Agent C."""
     env = os.environ.copy()
     if env_override:
         env.update(env_override)

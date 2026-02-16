@@ -63,7 +63,7 @@ The highest-leverage, lowest-cost tools get distilled into existing agent prompt
 | Rapoport's Rules (steelman) | `code-reviewer.md` | Every code review should steelman before critiquing |
 | Occam's Broom + "Surely" operator | `code-reviewer.md`, `validator.md` | Detect hidden assumptions in code and claims |
 | Cranes vs Skyhooks | `builder.md` | Builder should demand mechanistic solutions, not hand-wave |
-| Chmess check | `make-plan/SKILL.md` | Plans should pass "does this matter?" before deep investment |
+| Chmess check | `do-plan/SKILL.md` | Plans should pass "does this matter?" before deep investment |
 | Sphexishness | `builder.md` | Builder should notice when it's repeating a routine that doesn't fit |
 
 **Cost:** ~5-6 lines per prompt × 4-5 prompts = ~30 lines. Negligible context impact.
@@ -100,7 +100,7 @@ The remaining tools are reference material, not skills. They inform the system b
 | `dennett-steelman` | Tier 1 extraction — Rapoport's Rules embedded in code-reviewer | More effective as a code review behavior than a standalone skill |
 | `dennett-stances` | Reference doc only | Claude already navigates abstraction levels well; a reference doc for edge cases suffices |
 | `dennett-agency` | Reference doc only | Narrow use case (coaching/delegation); rarely needed in dev work |
-| `dennett-meta` | Tier 1 extraction — Chmess check embedded in make-plan | The one useful tool (Chmess) is better as a plan-maker gate |
+| `dennett-meta` | Tier 1 extraction — Chmess check embedded in do-plan | The one useful tool (Chmess) is better as a plan-maker gate |
 
 Reference material goes into `docs/reference/dennett-thinking-tools.md` — available if an agent needs it, but never auto-loaded.
 
@@ -110,7 +110,7 @@ Reference material goes into `docs/reference/dennett-thinking-tools.md` — avai
 
 ### Technical Approach
 
-1. **Distill Tier 1 additions**: Extract the 5-6 most impactful tools into 5-6 line "Thinking Discipline" sections for code-reviewer, validator, builder, and make-plan prompts.
+1. **Distill Tier 1 additions**: Extract the 5-6 most impactful tools into 5-6 line "Thinking Discipline" sections for code-reviewer, validator, builder, and do-plan prompts.
 
 2. **Condense Tier 2 skills**: Take the 3 on-demand skill files from PR #111 (decomposition, clarity, creativity), cut each to ~50 lines by removing examples and keeping only the method and anti-patterns.
 
@@ -135,7 +135,7 @@ Reference material goes into `docs/reference/dennett-thinking-tools.md` — avai
 
 ### Risk 2: On-demand skills never get invoked
 **Impact:** Tier 2 skills rot unused because nobody remembers they exist
-**Mitigation:** Document when to invoke them in CLAUDE.md. Consider adding hints in the make-plan and build skills ("For architecture work, consider invoking dennett-decomposition").
+**Mitigation:** Document when to invoke them in CLAUDE.md. Consider adding hints in the do-plan and do-build skills ("For architecture work, consider invoking dennett-decomposition").
 
 ### Risk 3: Context budget still too high
 **Impact:** Even 30 lines of Tier 1 additions + occasional Tier 2 loading degrades code context
@@ -166,7 +166,7 @@ No new MCP integration needed. Tier 1 changes are inline in existing agent promp
 
 ## Success Criteria
 
-- [ ] 5-6 highest-leverage Dennett tools embedded in existing agent prompts (code-reviewer, validator, builder, make-plan)
+- [ ] 5-6 highest-leverage Dennett tools embedded in existing agent prompts (code-reviewer, validator, builder, do-plan)
 - [ ] 3 condensed on-demand skills: decomposition, clarity, creativity (~50 lines each)
 - [ ] Full 77-tool reference doc in `docs/reference/`
 - [ ] Unused standalone skill directories removed
@@ -208,7 +208,7 @@ No new MCP integration needed. Tier 1 changes are inline in existing agent promp
   - Sphexishness check (am I repeating a routine that doesn't fit?)
 - Add "Thinking Discipline" section to `.claude/agents/validator.md`:
   - Occam's Broom (what's being ignored in this validation?)
-- Add Chmess check to `.claude/skills/make-plan/SKILL.md`:
+- Add Chmess check to `.claude/skills/do-plan/SKILL.md`:
   - "Before deep investment, ask: who cares about this? What decision does it change?"
 - Keep each addition to 5-6 lines maximum
 
