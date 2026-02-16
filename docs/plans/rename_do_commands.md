@@ -45,7 +45,7 @@ No prerequisites — this work has no external dependencies.
 
 - **Command renames**: Rename `.claude/commands/make-plan.md` → `do-plan.md`, `build.md` → `do-build.md`, `update-docs.md` → `do-docs.md`
 - **Skill renames**: Rename `.claude/skills/make-plan/` → `do-plan/`, `.claude/skills/build/` → `do-build/`, `.claude/skills/update-docs/` → `do-docs/`
-- **New command**: Add `do-test.md` command
+- **New command stub**: Add `do-test.md` command as a placeholder — full skill built separately in [#121](https://github.com/tomcounsell/ai/issues/121)
 - **Plan template update**: The do-plan skill's plan template success criteria should always include tests and docs as standard checklist items (via `/do-test` and `/do-docs`)
 - **Reference updates**: Update all references in CLAUDE.md, docs, and other commands
 
@@ -114,7 +114,7 @@ No agent integration required — slash commands are invoked by the human user i
 - [ ] `/do-plan` works (old `/make-plan` removed)
 - [ ] `/do-build` works (old `/build` removed)
 - [ ] `/do-docs` works (old `/update-docs` removed)
-- [ ] `/do-test` works
+- [ ] `/do-test` stub exists (full skill tracked in [#121](https://github.com/tomcounsell/ai/issues/121))
 - [ ] No remaining references to old command names in docs
 - [ ] All renamed skills have correct `name:` in SKILL.md frontmatter
 - [ ] All command/skill descriptions include natural language triggers so "make a plan" invokes `do-plan`, "execute the plan" invokes `do-build`, etc.
@@ -214,5 +214,4 @@ No agent integration required — slash commands are invoked by the human user i
 
 ## Open Questions
 
-1. What should `/do-test` do exactly — just `pytest tests/`? Or something more specific (linting, type checks)?
-2. Should we also rename `update` → `do-update` and `review` → `do-review` to fully commit to the `do-*` pattern?
+1. Should we also rename `update` → `do-update` and `review` → `do-review` to fully commit to the `do-*` pattern?
