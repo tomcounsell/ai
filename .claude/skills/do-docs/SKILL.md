@@ -231,7 +231,7 @@ After all edits are complete:
    If any document has contradictory information that cannot be resolved from the code alone (e.g., a plan doc describes future work that may or may not still be valid), create a GitHub issue:
    ```bash
    gh issue create --title "Doc conflict: <filepath> may need human review" \
-     --body "The /update-docs cascade found a potential conflict in <filepath> after <change description>. The doc references <X> but the code now does <Y>. Human judgment needed to resolve."
+     --body "The /do-docs cascade found a potential conflict in <filepath> after <change description>. The doc references <X> but the code now does <Y>. Human judgment needed to resolve."
    ```
 
 4. **Report summary:**
@@ -263,6 +263,6 @@ After all edits are complete:
 ## Integration
 
 This skill pairs with:
-- `/build` — run after build completes to cascade doc updates for the shipped code
-- `/make-plan` — plans created here may need updating when prerequisites ship
+- `/do-build` — run after build completes to cascade doc updates for the shipped code
+- `/do-plan` — plans created here may need updating when prerequisites ship
 - `/review` — review can invoke this to verify docs match implementation

@@ -581,7 +581,7 @@ Use snake_case for slugs:
 
 **Plans are written directly on the main branch.** The plan document itself is just a document — no feature branch needed.
 
-When the plan is *executed* (via `/build`), the build command creates a feature branch, does the work there, and opens a PR. See `.claude/commands/build.md` for that workflow.
+When the plan is *executed* (via `/do-build`), the build skill creates a feature branch, does the work there, and opens a PR. See `.claude/skills/do-build/SKILL.md` for that workflow.
 
 ## Status Tracking
 
