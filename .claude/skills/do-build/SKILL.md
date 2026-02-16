@@ -82,7 +82,7 @@ Before executing, resolve the plan path:
 - **Run parallel tasks together** - Tasks with `Parallel: true` and no blocking dependencies can run simultaneously
 - **Validators wait for builders** - A `validate-*` task always waits for its corresponding `build-*` task
 - **No temporary files** - Agents must not create temporary documentation, test results, or scratch files in the repo. Use /tmp for any temporary work. Only create files that are part of the deliverable.
-- **Never cd into worktrees** - The orchestrator's CWD must stay in the main repo. Use `git -C .worktrees/{slug}` for git commands and `--head session/{slug}` for `gh pr create`. Only subagents (Task tool) should cd into worktrees — their shell sessions are independent and disposable. If the orchestrator cd's into a worktree and then deletes it, the shell breaks permanently. **Before worktree cleanup (Step 7.5), always run `cd /Users/valorengels/src/ai` first as a safety reset.**
+- **Never cd into worktrees** - The orchestrator's CWD must stay in the main repo. Use `git -C .worktrees/{slug}` for git commands, subshells `(cd .worktrees/{slug} && ...)` when Python scripts need worktree CWD, and `--head session/{slug}` for `gh pr create`. Only subagents (Task tool) should have bare `cd` into worktrees — their shell sessions are independent and disposable. If the orchestrator's CWD ends up inside a worktree and that worktree is deleted, the shell breaks permanently and cannot recover.
 - **SDLC enforcement** - All builder agents follow Plan → Build → Test → Review → Ship with test failure loops (up to 5 iterations)
 - **Definition of Done** - Tasks are complete only when: Built (code working), Tested (tests pass), Documented (docs created), Quality (lint/format pass)
 
@@ -173,13 +173,25 @@ When the final `validate-all` task completes, verify Definition of Done criteria
 
 If any criterion is not met, report the issue and do NOT proceed to PR creation.
 
+### Step 5.5: CWD Safety Reset
+
+Before running any orchestrator bash commands, verify the shell CWD is the main repo root (not inside a worktree). Run this as a sanity check:
+
+```bash
+cd $(git rev-parse --show-toplevel) && pwd
+```
+
+The output should be the main repo path, NOT a `.worktrees/` path. If the CWD is somehow inside the worktree, this resets it. All subsequent orchestrator commands depend on CWD being the repo root.
+
 ### Step 6: Documentation Gate
 
 After all validation tasks pass, run the documentation lifecycle checks:
 
 **6.1 Validate Documentation Changes**
 
-Run the doc validation script to verify documentation was created/updated. **All commands in this gate MUST use subshells `(cd ... && ...)` if they need worktree CWD — this preserves the parent shell's CWD.**
+Run the doc validation script to verify documentation was created/updated. This script runs `git diff` internally and needs the worktree as CWD to see the session branch changes.
+
+**Execute each command below exactly as written, including the parentheses.** The `(...)` subshell syntax ensures the `cd` happens in a child process — the orchestrator's CWD stays in the main repo.
 
 ```bash
 (cd .worktrees/{slug} && python scripts/validate_docs_changed.py {PLAN_PATH})
@@ -247,17 +259,19 @@ EOF
 
 ### Step 7.5: Worktree Cleanup
 
-After pushing and creating the PR, clean up the worktree. **CRITICAL**: The shell CWD may be inside the worktree (from subagent work or doc gate commands). You MUST `cd` to the repo root first, or the removal will nuke the CWD and permanently break the shell session.
+After pushing and creating the PR, clean up the worktree using `worktree_manager.py` which handles CWD safely via `subprocess(cwd=repo_root)`:
 
 ```bash
-cd /Users/valorengels/src/ai && git worktree remove .worktrees/{slug} --force && git worktree prune
+python -c "
+from pathlib import Path
+from agent.worktree_manager import remove_worktree, prune_worktrees
+repo = Path('$(git rev-parse --show-toplevel)')
+remove_worktree(repo, '{slug}', delete_branch=False)
+prune_worktrees(repo)
+"
 ```
 
-If the above fails (CWD already broken), use an absolute-path fresh shell:
-
-```bash
-/bin/bash -c 'cd /Users/valorengels/src/ai && git worktree remove .worktrees/{slug} --force; git worktree prune'
-```
+Note: `delete_branch=False` because the PR still references `session/{slug}`. The branch is cleaned up when the PR is merged.
 
 ### Step 7.6: Documentation Cascade
 
@@ -281,7 +295,7 @@ This invokes the cascade skill defined in `.claude/skills/do-docs/SKILL.md`, whi
 After PR is successfully created and documentation cascade completes, clean up the completed plan:
 
 ```bash
-cd /Users/valorengels/src/ai && python scripts/migrate_completed_plan.py {PLAN_PATH}
+cd $(git rev-parse --show-toplevel) && python scripts/migrate_completed_plan.py {PLAN_PATH}
 ```
 
 This deletes the plan document and closes the tracking issue, completing the lifecycle.
