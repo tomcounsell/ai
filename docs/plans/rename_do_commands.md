@@ -43,9 +43,10 @@ No prerequisites — this work has no external dependencies.
 
 ### Key Elements
 
-- **Command renames**: Rename `.claude/commands/make-plan.md` → `do-plan.md`, `build.md` → `do-build.md`
-- **Skill renames**: Rename `.claude/skills/make-plan/` → `do-plan/`, `.claude/skills/build/` → `do-build/`
-- **New commands**: Add `do-docs.md` and `do-test.md` commands
+- **Command renames**: Rename `.claude/commands/make-plan.md` → `do-plan.md`, `build.md` → `do-build.md`, `update-docs.md` → `do-docs.md`
+- **Skill renames**: Rename `.claude/skills/make-plan/` → `do-plan/`, `.claude/skills/build/` → `do-build/`, `.claude/skills/update-docs/` → `do-docs/`
+- **New command**: Add `do-test.md` command
+- **Plan template update**: The do-plan skill's plan template success criteria should always include tests and docs as standard checklist items (via `/do-test` and `/do-docs`)
 - **Reference updates**: Update all references in CLAUDE.md, docs, and other commands
 
 ### Flow
@@ -56,7 +57,7 @@ User types `/do-plan slug` → Plan created → User types `/do-build docs/plans
 
 - Rename files/directories for commands and skills
 - Find-and-replace all references across the codebase
-- Add new `do-docs` command (thin wrapper pointing to `update-docs` skill)
+- Rename `update-docs` command and skill to `do-docs`
 - Add new `do-test` command (runs pytest with appropriate flags)
 - Update `.claude/agents/plan-maker.md` if it references old names
 - Update `scripts/update/symlinks.py` to prune stale hardlinks from `~/.claude/`
@@ -112,11 +113,12 @@ No agent integration required — slash commands are invoked by the human user i
 
 - [ ] `/do-plan` works (old `/make-plan` removed)
 - [ ] `/do-build` works (old `/build` removed)
-- [ ] `/do-docs` works
+- [ ] `/do-docs` works (old `/update-docs` removed)
 - [ ] `/do-test` works
 - [ ] No remaining references to old command names in docs
 - [ ] All renamed skills have correct `name:` in SKILL.md frontmatter
 - [ ] All command/skill descriptions include natural language triggers so "make a plan" invokes `do-plan`, "execute the plan" invokes `do-build`, etc.
+- [ ] do-plan skill's plan template includes `/do-test` and `/do-docs` as standard success criteria items
 - [ ] `scripts/update/symlinks.py` removes stale hardlinks from `~/.claude/` that no longer exist in the project
 - [ ] Running `/update` on a machine with old hardlinks cleans them up automatically
 
@@ -146,7 +148,7 @@ No agent integration required — slash commands are invoked by the human user i
 - **Parallel**: true
 - `git mv .claude/commands/make-plan.md .claude/commands/do-plan.md`
 - `git mv .claude/commands/build.md .claude/commands/do-build.md`
-- Copy/adapt `.claude/commands/update-docs.md` → `.claude/commands/do-docs.md`
+- `git mv .claude/commands/update-docs.md .claude/commands/do-docs.md`
 - Create `.claude/commands/do-test.md`
 - Update each command's `description` frontmatter to include natural language triggers (see "Command Descriptions" in Technical Approach)
 
@@ -158,9 +160,16 @@ No agent integration required — slash commands are invoked by the human user i
 - **Parallel**: true
 - `git mv .claude/skills/make-plan .claude/skills/do-plan`
 - `git mv .claude/skills/build .claude/skills/do-build`
+- `git mv .claude/skills/update-docs .claude/skills/do-docs`
 - Update `name:` field in each renamed SKILL.md
 - Update each SKILL.md `description` to include natural language triggers matching the command descriptions
-- Create `.claude/skills/do-docs/` and `.claude/skills/do-test/` if needed
+- **Update the do-plan skill's plan template**: Change the Success Criteria template section to always include standard test and docs items:
+  ```
+  - [ ] Tests pass (`/do-test`)
+  - [ ] Documentation updated (`/do-docs`)
+  ```
+  These go alongside the custom criteria, making test and docs a built-in part of every plan's definition of done
+- Create `.claude/skills/do-test/` if needed
 
 ### 3. Add stale hardlink cleanup to update system
 - **Task ID**: update-symlinks
@@ -205,6 +214,5 @@ No agent integration required — slash commands are invoked by the human user i
 
 ## Open Questions
 
-1. Should `update-docs` command/skill be renamed to `do-docs`, or should `do-docs` be a new command that delegates to `update-docs`? (I assumed rename for consistency)
-2. What should `/do-test` do exactly — just `pytest tests/`? Or something more specific?
-3. Should we also rename `update` → `do-update` and `review` → `do-review` to fully commit to the `do-*` pattern?
+1. What should `/do-test` do exactly — just `pytest tests/`? Or something more specific (linting, type checks)?
+2. Should we also rename `update` → `do-update` and `review` → `do-review` to fully commit to the `do-*` pattern?
