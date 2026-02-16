@@ -36,26 +36,99 @@ After writing or editing Python files:
 - Black will auto-format code
 - Fix any remaining issues before marking complete
 
-## SDLC Workflow (Build → Test Loop)
+## TDD Workflow (Red → Green → Refactor)
 
-Follow this autonomous cycle for all code changes:
+**Tests come first.** For pure logic and testable units, write the test before the implementation. For integration-heavy code (external APIs, Telegram bridge, SDK clients), tests must exist before completion but may be written alongside implementation.
 
-1. **Build** - Implement the changes
-2. **Test** - Run tests and quality checks
-3. **Fix** - If tests fail, analyze and fix (loop back to Build)
-4. **Complete** - When all tests pass, mark task complete
+Follow this cycle for code changes:
 
-**Test Phase Commands:**
+### 1. RED — Write a Failing Test
+
+Before writing implementation code, write a test that defines the desired behavior.
+
+- The test MUST fail when you run it (proving it tests something new)
+- The test defines WHAT the code should do, not HOW
+- If you cannot write a test, you do not understand the requirement yet — clarify first
+
 ```bash
-# Run these in sequence, capture failures
-pytest tests/ -v                    # Unit tests
+# Write the test, then run it to confirm it fails
+pytest tests/ -v -x                 # Should see RED (failure)
+```
+
+### 2. GREEN — Write Minimal Implementation
+
+Write the smallest amount of code that makes the failing test pass. Nothing more.
+
+- Do NOT add features the test does not require
+- Do NOT optimize prematurely
+- Do NOT write additional code "while you're in there"
+- The goal is a passing test, not a polished solution
+
+```bash
+# Run again to confirm the test passes
+pytest tests/ -v -x                 # Should see GREEN (pass)
+ruff check .                        # Linting
+black --check .                     # Formatting
+```
+
+### 3. REFACTOR — Clean Up Code AND Tests
+
+With all tests green, improve the design of both implementation and tests.
+
+- Simplify, rename, extract — but change no behavior
+- Run tests after every refactor step to confirm nothing broke
+- This phase includes **test hygiene** (see below)
+
+```bash
+# Confirm everything still passes after refactoring
+pytest tests/ -v                    # All tests still GREEN
 ruff check .                        # Linting
 black --check .                     # Formatting
 mypy . --ignore-missing-imports     # Type checking (if applicable)
 ```
 
+### Test Hygiene (REFACTOR Phase)
+
+During the REFACTOR phase, you MUST also refactor tests:
+
+- **Consolidate overlapping tests** into parameterized tests (`@pytest.mark.parametrize`)
+- **Delete dead tests** — tests for deleted or replaced code serve no purpose
+- **Collapse scaffolding tests** — once implementation stabilizes, merge trivial step-by-step tests into meaningful behavioral tests
+- **Remove tests for removed features** in the same commit that removes the feature
+- **Quality over quantity** — 5 precise tests beat 20 redundant ones
+
+### TDD Exceptions
+
+TDD does NOT apply to:
+
+- Documentation-only changes (markdown, comments)
+- Configuration files (`pyproject.toml`, `.env.example`)
+- Plan documents (`docs/plans/`)
+- Agent/skill prompt files (the prompts themselves)
+- Pure deletion of dead code (no new behavior being added)
+
+For everything else: **test first when possible, test before completion always**.
+
+### Common Rationalizations
+
+Do not fall for these. Each one is a path to untested code.
+
+| Rationalization | Reality |
+|---|---|
+| "It's too simple to test" | Simple code still breaks. Write the test. |
+| "I'll write tests after" | You won't. Write them now. |
+| "This is just a refactor" | Refactors break things. Tests prove they don't. |
+| "The test would just duplicate the code" | Then your abstraction is wrong. |
+| "This is just config/boilerplate" | Config errors cause production outages. Test the behavior. |
+| "I'm running out of iterations" | Commit [WIP] with tests. Don't ship untested code. |
+| "The existing code doesn't have tests" | That's why we're fixing it. Add tests for what you touch. |
+| "I can't test this without mocking everything" | If it needs that many mocks, the design is wrong. Simplify first. |
+| "I'll clean up the tests later" | You won't. Consolidate now while context is fresh. |
+| "More tests = better coverage" | Redundant tests slow CI and obscure intent. Quality over quantity. |
+| "I shouldn't delete tests someone else wrote" | If the code they tested is gone, the tests are dead weight. Delete them. |
+
 **Failure Handling:**
-- Maximum 5 iterations of Build → Test loop
+- Maximum 5 iterations of Red → Green → Refactor loop
 - If tests fail: analyze output, fix issues, re-test
 - Do NOT mark task complete until tests pass
 - Before reporting failure after 5 iterations, commit all changes with `[WIP]` prefix
@@ -120,8 +193,10 @@ Replace hedging with evidence. Not "tests should pass" — run them and paste th
 
 A task is complete ONLY when ALL criteria are met:
 
+- **Tests written first (TDD)**: Failing tests existed before implementation code (or alongside for integration-heavy code)
 - **Built**: Code is implemented and working
 - **Tested**: All tests pass (unit tests, linting, formatting)
+- **Test hygiene**: No redundant, dead, or overlapping tests remain
 - **Documented**: Code comments added, docstrings updated as appropriate
 - **Quality**: Ruff and Black checks pass, no lint errors remain
 - **Verified**: Verification evidence provided
@@ -129,10 +204,11 @@ A task is complete ONLY when ALL criteria are met:
 ## Workflow
 
 1. **Understand the Task** - Read the task description (via `TaskGet` if task ID provided, or from prompt).
-2. **Build** - Do the work. Write code, create files, make changes.
-3. **Test** - Run validation (tests, type checks, linting).
-4. **Fix** - If tests fail, loop back to Build (up to 5 iterations).
-5. **Complete** - When Definition of Done is met, use `TaskUpdate` to mark task as `completed` with a brief summary.
+2. **RED** - Write a failing test that defines the desired behavior.
+3. **GREEN** - Write the minimal implementation to make the test pass.
+4. **REFACTOR** - Clean up code AND tests. Consolidate, delete dead tests, simplify.
+5. **Validate** - Run full test suite, linting, formatting (loop back to step 2 for next behavior, up to 5 iterations on failures).
+6. **Complete** - When Definition of Done is met, use `TaskUpdate` to mark task as `completed` with a brief summary.
 
 ## Report
 
@@ -152,11 +228,14 @@ After completing your task, provide a brief report:
 - [file1.py] - [what changed]
 - [file2.py] - [what changed]
 
+**TDD iterations**: [N Red→Green→Refactor cycles]
 **Test iterations**: [N iterations to pass all tests]
 
 **Definition of Done checklist**:
+- [x] Tests written first (TDD): Failing tests before implementation
 - [x] Built: Code implemented and working
 - [x] Tested: All tests passing
+- [x] Test hygiene: No redundant or dead tests
 - [x] Documented: Code comments/docstrings updated
 - [x] Quality: Ruff and Black checks pass
 - [x] Verified: Verification evidence provided
