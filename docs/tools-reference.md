@@ -41,6 +41,27 @@ from tools.telegram_history import search_messages
 results = search_messages(query="deployment", limit=10)
 ```
 
+### Code Impact Finder (`tools.code_impact_finder`)
+
+Semantic search for code, configs, and docs coupled to a proposed change. Two-stage pipeline: embedding recall + Claude Haiku reranking. Used during `/do-plan` Phase 1 for blast radius analysis.
+
+```bash
+# CLI: find code affected by a change
+.venv/bin/python -m tools.code_impact_finder "change session ID derivation"
+
+# CLI: check index status
+.venv/bin/python -m tools.code_impact_finder --status
+```
+
+```python
+from tools.code_impact_finder import find_affected_code, index_code
+
+index_code()  # Build/refresh the embedding index
+results = find_affected_code("change session ID derivation")
+for r in results:
+    print(f"{r.relevance:.2f} | {r.path} | {r.section} | {r.impact_type}")
+```
+
 ### Link Analysis (`tools.link_analysis`)
 
 URL extraction and metadata analysis.
