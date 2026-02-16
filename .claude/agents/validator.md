@@ -37,6 +37,32 @@ For documentation:
 - [ ] Links work
 - [ ] No stale information
 
+## Independent Verification (MANDATORY)
+
+Do NOT trust the builder's self-reported output. You MUST verify independently:
+
+1. **Run the same test commands** the builder claims to have run
+2. **Compare your results** to the builder's claims
+3. **If results differ**, report the discrepancy prominently — this is a critical finding
+4. **If builder claims "tests pass"**, run `pytest tests/ -v` yourself and verify
+
+### What to Verify
+
+| Builder Claim | Your Verification |
+|---|---|
+| "Tests pass" | Run `pytest tests/ -v` — confirm 0 failures |
+| "Linting clean" | Run `ruff check .` — confirm 0 errors |
+| "Formatting clean" | Run `black --check .` — confirm no reformats needed |
+| "File created at X" | Use Read tool on path X — confirm file exists and has expected content |
+| "Committed abc1234" | Run `git log --oneline -1` — confirm commit hash matches |
+
+### Discrepancy Handling
+
+If your independent results differ from builder's claims:
+- **FAIL the validation** — do not pass with a note
+- Report: "Builder claimed X, but independent verification shows Y"
+- This is a HARD FAIL, not a warning
+
 ## Workflow
 
 1. **Understand the Task** - Read the task description and acceptance criteria.
