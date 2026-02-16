@@ -878,8 +878,18 @@ async def _execute_job(job: Job) -> None:
                     "confidence": classification.confidence,
                     "reason": classification.reason,
                     "message_preview": msg[:200],
+                    "coaching_message": "pending",  # Updated after build
                 },
                 working_dir=str(working_dir),
+            )
+
+            # Build context-aware coaching message instead of bare "continue"
+            from bridge.coach import build_coaching_message
+
+            coaching_message = build_coaching_message(
+                classification=classification,
+                plan_file=None,  # TODO: wire plan_file from WorkflowState
+                job_message_text=job.message_text,
             )
 
             # Re-enqueue a continuation job with the same session_id
@@ -889,7 +899,7 @@ async def _execute_job(job: Job) -> None:
                 project_key=job.project_key,
                 session_id=job.session_id,
                 working_dir=job.working_dir,
-                message_text="continue",
+                message_text=coaching_message,
                 sender_name="System (auto-continue)",
                 chat_id=job.chat_id,
                 message_id=job.message_id,

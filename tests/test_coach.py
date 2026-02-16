@@ -107,7 +107,7 @@ class TestExtractSuccessCriteria:
 
     def test_empty_section(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            f.write("# Plan\n\n## Success Criteria\n\n## Risks\n")
+            f.write("# Plan\n\n## Success Criteria\n## Risks\n")
             f.flush()
             assert _extract_success_criteria(f.name) is None
             Path(f.name).unlink()

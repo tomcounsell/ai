@@ -95,9 +95,9 @@ def _extract_success_criteria(plan_file: str) -> str | None:
 
         content = path.read_text()
         match = re.search(
-            r"## Success Criteria\s*\n(.*?)(?=\n## |\Z)",
+            r"^## Success Criteria\s*\n(.*?)(?=^## |\Z)",
             content,
-            re.DOTALL,
+            re.DOTALL | re.MULTILINE,
         )
         if match:
             criteria = match.group(1).strip()
