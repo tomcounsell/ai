@@ -1,5 +1,5 @@
 ---
-description: Cascade documentation updates after code changes — finds and surgically edits all affected docs
+description: "Cascade documentation updates after code changes. Use when the user says 'update docs', 'sync the docs', or anything about documentation."
 argument-hint: <PR-number, commit-SHA, or change-description>
 ---
 
@@ -9,4 +9,4 @@ You are the documentation cascade agent. After a code change lands, find every a
 
 **Input**: $1
 
-Read and follow the full workflow defined in `.claude/skills/update-docs/SKILL.md`.
+Read and follow the full workflow defined in `.claude/skills/do-docs/SKILL.md`.

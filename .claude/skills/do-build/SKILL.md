@@ -1,6 +1,6 @@
 ---
-name: build
-description: Execute a plan document using team orchestration. Deploys builder/validator agent pairs to complete tasks in order, with parallel execution where specified.
+name: do-build
+description: "Execute a plan document using team orchestration. Use when the user says 'build this', 'execute the plan', 'implement the plan', or anything about running/shipping a plan."
 ---
 
 # Build (Plan Execution)

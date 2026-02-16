@@ -1,6 +1,6 @@
 ---
-name: make-plan
-description: Create or update feature plan documents using Shape Up principles. Use when the user wants to plan a new feature, flesh out a plan, update an existing plan, or needs a structured approach to scoping work. Outputs to docs/plans/{slug}.md with problem statement, appetite, solution, risks, and boundaries.
+name: do-plan
+description: "Create or update feature plan documents. Use when the user says 'make a plan', 'plan this', 'flesh out the idea', or anything about planning work."
 allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion
 ---
 
@@ -210,7 +210,8 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 - [ ] [Criterion 1]
 - [ ] [Criterion 2]
 - [ ] [Criterion 3]
-- [ ] Documentation updated and indexed
+- [ ] Tests pass (`/do-test`)
+- [ ] Documentation updated (`/do-docs`)
 
 ## Team Orchestration
 
