@@ -28,7 +28,7 @@ The key insight: documentation often describes the *concept* using different voc
 
 ## Integration
 
-The finder runs as **Agent C** in the `/update-docs` cascade skill (`.claude/skills/update-docs/SKILL.md`), alongside:
+The finder runs as **Agent C** in the `/do-docs` cascade skill (`.claude/skills/do-docs/SKILL.md`), alongside:
 
 - **Agent A** (Change Explorer): Analyzes the code diff, traces data flow, identifies retired terms
 - **Agent B** (Documentation Inventory): Scans all doc locations for references
@@ -80,7 +80,7 @@ class AffectedDoc(BaseModel):
 
 ### Graceful Degradation
 
-- **No API key**: `find_affected_docs()` returns empty list, logs a warning. The `/update-docs` cascade continues with Agents A and B.
+- **No API key**: `find_affected_docs()` returns empty list, logs a warning. The `/do-docs` cascade continues with Agents A and B.
 - **No index file**: `find_affected_docs()` warns "Doc index is empty" and returns empty list.
 - **API call failure**: Logs the exception and returns empty list (or falls back to embedding-only results if only Haiku reranking fails).
 

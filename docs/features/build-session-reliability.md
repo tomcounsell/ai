@@ -24,11 +24,11 @@ git add -A && git commit -m "[WIP] partial work on {task}" || true
 
 ## Worktree Isolation
 
-**Problem:** `/build` created a feature branch but agents worked in the main worktree on the main branch. The feature branch received zero commits.
+**Problem:** `/do-build` created a feature branch but agents worked in the main worktree on the main branch. The feature branch received zero commits.
 
 **Fix:** The build skill now creates an isolated git worktree (`.worktrees/{slug}/`) with a `session/{slug}` branch. All builder agents receive the worktree path and are instructed to work there. The unified `session/{slug}` branch convention reflects that builds are a skill invoked within a session -- planning and building can happen in the same session. After PR creation, the worktree is cleaned up automatically.
 
-**File:** `.claude/skills/build/SKILL.md`
+**File:** `.claude/skills/do-build/SKILL.md`
 
 ## Sub-Agent Health Monitoring
 
@@ -42,7 +42,7 @@ git add -A && git commit -m "[WIP] partial work on {task}" || true
 | 15 minutes of silence | Attempt to resume agent; mark task failed if resume fails |
 | Any agent failure | Commit whatever work exists in the worktree as a safety net |
 
-**File:** `.claude/skills/build/SKILL.md` (Step 4: Monitor and Coordinate)
+**File:** `.claude/skills/do-build/SKILL.md` (Step 4: Monitor and Coordinate)
 
 ## Related Files
 
@@ -50,5 +50,5 @@ git add -A && git commit -m "[WIP] partial work on {task}" || true
 |------|------|
 | `bridge/telegram_bridge.py` | Root logger setup with InternalDebugFilter |
 | `.claude/agents/builder.md` | Builder sub-agent definition with safety net |
-| `.claude/skills/build/SKILL.md` | Build orchestration with worktree isolation and health monitoring |
+| `.claude/skills/do-build/SKILL.md` | Build orchestration with worktree isolation and health monitoring |
 | [Issue #80](https://github.com/tomcounsell/ai/issues/80) | Tracking issue |

@@ -2,12 +2,12 @@
 
 ## Overview
 
-Plans can declare environment prerequisites in a `## Prerequisites` markdown table. Before `/build` executes any tasks, it runs `scripts/check_prerequisites.py` to verify all requirements are met.
+Plans can declare environment prerequisites in a `## Prerequisites` markdown table. Before `/do-build` executes any tasks, it runs `scripts/check_prerequisites.py` to verify all requirements are met.
 
 ## How It Works
 
 1. Plan author adds a `## Prerequisites` section with a markdown table listing requirements, check commands, and purposes
-2. When `/build` is invoked, step 0 runs `python scripts/check_prerequisites.py <plan-path>`
+2. When `/do-build` is invoked, step 0 runs `python scripts/check_prerequisites.py <plan-path>`
 3. The script parses the table, runs each check command, and reports pass/fail
 4. If any check fails, the build stops with a clear report of what's missing
 5. Plans without a Prerequisites section pass automatically (backward compatible)
@@ -36,5 +36,5 @@ Plans can declare environment prerequisites in a `## Prerequisites` markdown tab
 | File | Purpose |
 |------|---------|
 | `scripts/check_prerequisites.py` | Prerequisite checker script |
-| `.claude/skills/make-plan/SKILL.md` | Plan template with Prerequisites section |
-| `.claude/commands/build.md` | Build skill with step 0 check |
+| `.claude/skills/do-plan/SKILL.md` | Plan template with Prerequisites section |
+| `.claude/commands/do-build.md` | Build skill with step 0 check |

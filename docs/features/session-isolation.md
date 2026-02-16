@@ -5,7 +5,7 @@
 Session isolation prevents task lists and filesystem state from bleeding between concurrent or back-to-back coding sessions. It uses a two-tier model:
 
 - **Tier 1 (automatic, thread-scoped):** Every session gets an isolated task list automatically, with zero configuration. Scoped by Telegram thread ID or local session ID. Ephemeral and disposable.
-- **Tier 2 (named, slug-scoped):** When `/make-plan {slug}` is invoked, the session graduates to a durable, named task list keyed by the slug. The same slug ties together the task list, branch, worktree, plan doc, and GitHub issue.
+- **Tier 2 (named, slug-scoped):** When `/do-plan {slug}` is invoked, the session graduates to a durable, named task list keyed by the slug. The same slug ties together the task list, branch, worktree, plan doc, and GitHub issue.
 
 This approach ensures ad-hoc conversations never pollute each other's tasks, while planned work items get persistent, resumable task isolation that survives session restarts.
 
@@ -16,25 +16,25 @@ This approach ensures ad-hoc conversations never pollute each other's tasks, whi
 The bridge injects `CLAUDE_CODE_TASK_LIST_ID` into the environment when spawning Claude Code via the SDK client:
 
 - **Tier 1**: `CLAUDE_CODE_TASK_LIST_ID=thread-{chat_id}-{root_message_id}` for Telegram sessions, or `session-{session_id}` for local Claude Code sessions.
-- **Tier 2**: `CLAUDE_CODE_TASK_LIST_ID={slug}` when a work item slug is assigned via `/make-plan`.
+- **Tier 2**: `CLAUDE_CODE_TASK_LIST_ID={slug}` when a work item slug is assigned via `/do-plan`.
 
 The env var is set in `ValorAgent._create_options()` and passed through `get_agent_response_sdk()`.
 
 **Important distinction:** `CLAUDE_CODE_TASK_LIST_ID` scopes **sub-agent Task storage** (`~/.claude/tasks/{id}/`) used by `TaskCreate`/`TaskList`/`TaskUpdate` when spawned via the `Task` tool. It does **not** affect `TodoWrite`, which is scoped by Claude Code's internal session ID automatically. In practice, this means:
 
-- Sub-agent tasks (spawned during `/build`) are isolated by the env var
+- Sub-agent tasks (spawned during `/do-build`) are isolated by the env var
 - In-session todos (TodoWrite) are isolated by session ID -- no env var needed
 - For cross-session persistence, use `--session-id` with a deterministic ID derived from the thread
 
 ### Model Fields
 
-- `AgentSession.work_item_slug` -- Redis model field storing the active slug for a session. Set when `/make-plan {slug}` runs.
+- `AgentSession.work_item_slug` -- Redis model field storing the active slug for a session. Set when `/do-plan {slug}` runs.
 - `Job.work_item_slug` -- Propagated from the session to each job for task list routing.
 - `Job.task_list_id` -- The computed task list ID (either slug or thread-derived).
 
 ### Tier Transition
 
-Tier 1 tasks do not migrate to tier 2. They are scratch work from investigation and exploration. When `/make-plan` runs, it creates a clean slate for the named task list. The plan document captures what matters.
+Tier 1 tasks do not migrate to tier 2. They are scratch work from investigation and exploration. When `/do-plan` runs, it creates a clean slate for the named task list. The plan document captures what matters.
 
 ### Git Worktrees for Filesystem Isolation
 
@@ -42,7 +42,7 @@ Each tier 2 work item gets its own git worktree for filesystem isolation:
 
 - Worktrees live under `.worktrees/{slug}/` (added to `.gitignore`)
 - Branch convention: `session/{slug}`
-- Created at `/build` time via `agent/worktree_manager.py`
+- Created at `/do-build` time via `agent/worktree_manager.py`
 - `settings.local.json` is copied into the worktree's `.claude/` directory (since it's not tracked by git)
 - On completion: changes are merged back, worktree is removed
 - Stale worktree references are pruned on startup via `git worktree prune`

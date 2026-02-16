@@ -45,10 +45,10 @@ The system makes autonomous decisions about parallelization, validation loops, a
 │   └── ...                # All agents at root level
 ├── commands/              # Skills (slash commands)
 │   ├── prime.md           # Codebase primer
-│   ├── build.md           # Plan execution with agent teams
+│   ├── do-build.md        # Plan execution with agent teams
 │   └── ...
 ├── skills/                # Complex multi-step skills
-│   └── make-plan/         # Shape Up planning methodology
+│   └── do-plan/           # Shape Up planning methodology
 └── hooks/                 # Validation hooks
     └── validators/        # File and content validators
 ```
@@ -121,7 +121,7 @@ The standard workflow pairs builders with validators:
 3. If validation fails, builder receives feedback and iterates
 4. Loop until validation passes
 
-This pairing is a **workflow practice**, not enforced by directory structure. The `/build` skill orchestrates this pattern automatically.
+This pairing is a **workflow practice**, not enforced by directory structure. The `/do-build` skill orchestrates this pattern automatically.
 
 ## Thread-Based Engineering
 

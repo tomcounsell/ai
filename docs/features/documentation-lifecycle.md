@@ -36,7 +36,7 @@ No documentation changes needed — this is a one-line config fix with no user-f
 After the build agent creates a PR, a validation script checks that promised docs were actually delivered:
 
 - **Script**: `scripts/validate_docs_changed.py`
-- **Invoked by**: Build skill (Step 7.5 in `.claude/skills/build/SKILL.md`)
+- **Invoked by**: Build skill (Step 7.5 in `.claude/skills/do-build/SKILL.md`)
 - **Phase 1 — Diff Check**: Parses the plan's `## Documentation` section, extracts expected doc paths, and verifies they appear in `git diff` against the base branch
 - **Phase 2 — Stale Marker Scan**: Scans all changed `.md` files for stale markers (`DEPRECATED`, `LEGACY`, `OBSOLETE`, `TODO: remove`, `FIXME: update`)
 - **Flags**: `--dry-run` (report only), `--base-branch` (compare target, defaults to `main`)
@@ -53,9 +53,9 @@ After work ships, `scripts/migrate_completed_plan.py` validates feature docs and
 
 **Dry-Run Mode**: Use `--dry-run` to validate without making changes.
 
-### Documentation Cascade (`/update-docs`)
+### Documentation Cascade (`/do-docs`)
 
-A slash command (`.claude/commands/update-docs.md`) automates documentation updates after code changes:
+A slash command (`.claude/commands/do-docs.md`) automates documentation updates after code changes:
 
 - **Trigger**: Invoked manually or as Step 7.6 in the build skill
 - **Phase 1 — Explore**: Two parallel agents examine recent code changes and inventory all existing docs
@@ -71,9 +71,9 @@ A slash command (`.claude/commands/update-docs.md`) automates documentation upda
 | Plan validator | `.claude/hooks/validators/validate_documentation_section.py` | Gate 1: Block plans without proper doc section |
 | Hook wiring | `.claude/settings.json` (PostToolUse on Write) | Connects validator to file writes |
 | Build validator | `scripts/validate_docs_changed.py` | Gate 2: Verify docs delivered post-build |
-| Build integration | `.claude/skills/build/SKILL.md` (Steps 7.5 + 7.6) | Invokes validator then cascade in build flow |
+| Build integration | `.claude/skills/do-build/SKILL.md` (Steps 7.5 + 7.6) | Invokes validator then cascade in build flow |
 | Migration validator | `scripts/migrate_completed_plan.py` | Gate 3: Block migration without feature doc |
-| Cascade command | `.claude/commands/update-docs.md` | Automated doc updates after code changes |
+| Cascade command | `.claude/commands/do-docs.md` | Automated doc updates after code changes |
 
 ## Usage
 

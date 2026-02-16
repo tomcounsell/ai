@@ -46,7 +46,7 @@ Guidance for Claude Code when working with this repository.
 - Start with minimal tools, expand only if needed
 
 ### 7. DEFINITION OF DONE
-- Enforced by the `/build` command and builder agent — see `.claude/commands/build.md`
+- Enforced by the `/do-build` command and builder agent — see `.claude/commands/do-build.md`
 - Not complete until: tests pass, docs created, PR opened, plan migrated
 
 ### 8. PARALLEL EXECUTION (P-Thread Pattern)
@@ -55,9 +55,9 @@ Guidance for Claude Code when working with this repository.
 - Always aggregate results before reporting
 
 ### 9. SDLC IS AUTONOMOUS
-- The `/build` command owns the full cycle: Build → Test → Review → Ship
+- The `/do-build` command owns the full cycle: Build → Test → Review → Ship
 - Builder agents loop on test failures automatically (up to 5 iterations)
-- Do NOT manually orchestrate SDLC steps — invoke `/build` and let it run
+- Do NOT manually orchestrate SDLC steps — invoke `/do-build` and let it run
 
 ### 10. ALWAYS RESTART RUNNING SERVICES
 - If bridge is running and you modify bridge/agent code, restart immediately after committing
@@ -76,15 +76,15 @@ The standard flow from conversation to shipped feature:
 - If it's a real piece of work: create a GitHub issue
 
 ### Phase 2: Planning
-- Invoke `/make-plan {slug}` referencing the issue
+- Invoke `/do-plan {slug}` referencing the issue
 - Agent creates a feature branch (`session/{slug}`) and writes `docs/plans/{slug}.md`
 - A link to the plan doc is added to the top of the issue description
 - Two links sent back to chat: issue URL + plan doc URL (on its branch in GitHub)
 - Iterate on the plan via conversation as needed
 
 ### Phase 3: Building
-- Invoke `/build docs/plans/{slug}.md` (or `/build #{issue-number}`)
-- The build command autonomously executes: Build → Test → loop until passing → PR
+- Invoke `/do-build docs/plans/{slug}.md` (or `/do-build #{issue-number}`)
+- The do-build command autonomously executes: Build → Test → loop until passing → PR
 - When complete, a PR link is sent back to the Telegram chat
 - Plan doc is migrated and tracking issue is closed
 
@@ -152,7 +152,7 @@ Work is DONE when:
 Sessions get automatic task list isolation via the `CLAUDE_CODE_TASK_LIST_ID` environment variable, injected by the SDK client when spawning Claude Code.
 
 - **Tier 1 (thread-scoped):** Ad-hoc conversations get ephemeral, disposable task lists keyed by `thread-{chat_id}-{root_message_id}`. No configuration needed -- the bridge derives the ID from the Telegram thread automatically.
-- **Tier 2 (slug-scoped):** Planned work items (created via `/make-plan {slug}`) get durable, named task lists keyed by the slug. The slug ties together the task list, branch, worktree, plan doc, and GitHub issue.
+- **Tier 2 (slug-scoped):** Planned work items (created via `/do-plan {slug}`) get durable, named task lists keyed by the slug. The slug ties together the task list, branch, worktree, plan doc, and GitHub issue.
 - **Git worktrees:** Filesystem isolation is available for tier 2 work via `agent/worktree_manager.py`. Each work item gets its own worktree under `.worktrees/{slug}/` with branch `session/{slug}`.
 
 See `docs/features/session-isolation.md` for the full technical design.
@@ -193,7 +193,7 @@ The bridge includes automatic crash recovery (see `docs/features/bridge-self-hea
 
 ## Plan Requirements (This Repo Only)
 
-Plans created with `/make-plan` must include three required sections. These are enforced by hooks that block plan creation if sections are missing or empty.
+Plans created with `/do-plan` must include three required sections. These are enforced by hooks that block plan creation if sections are missing or empty.
 
 ### ## Documentation (Required)
 
@@ -211,7 +211,7 @@ Example:
 - [ ] Add entry to `docs/features/README.md` index table
 ```
 
-The `/build` workflow validates that these docs were actually created before allowing PR merge.
+The `/do-build` workflow validates that these docs were actually created before allowing PR merge.
 
 ### ## Update System (Required)
 
@@ -242,7 +242,7 @@ The **## Agent Integration** section should cover:
 | `/setup` | New machine configuration |
 | `/review` | Implementation validation with screenshots |
 | `/add-feature` | How to extend the system |
-| `/sdlc` | Autonomous Plan→Build→Test→Ship workflow |
+| `/sdlc` | Autonomous Plan → Build → Test → Ship workflow |
 | `docs/deployment.md` | Multi-instance deployment |
 | `docs/tools-reference.md` | Complete tool documentation |
 | `config/SOUL.md` | Valor persona and philosophy |

@@ -7,11 +7,11 @@ created: 2026-02-15
 tracking: https://github.com/tomcounsell/ai/issues/119
 ---
 
-# Code Impact Finder for /make-plan Blast Radius Analysis
+# Code Impact Finder for /do-plan Blast Radius Analysis
 
 ## Problem
 
-During `/make-plan` Phase 1, the planner explores the codebase with Glob/Grep to understand what a proposed change will touch. This misses non-obvious coupling — changing session scoping won't grep-match `job_queue.py` even though it depends on session IDs. The planner ends up with blind spots in the Solution, Risks, and Rabbit Holes sections.
+During `/do-plan` Phase 1, the planner explores the codebase with Glob/Grep to understand what a proposed change will touch. This misses non-obvious coupling — changing session scoping won't grep-match `job_queue.py` even though it depends on session IDs. The planner ends up with blind spots in the Solution, Risks, and Rabbit Holes sections.
 
 **Current behavior:** Planner uses keyword-based search. Misses conceptual coupling between modules that share no vocabulary but depend on the same abstractions.
 
@@ -19,7 +19,7 @@ During `/make-plan` Phase 1, the planner explores the codebase with Glob/Grep to
 
 ## Appetite
 
-**Size:** Medium — Solo dev + PM. One check-in to align on chunking strategy and make-plan integration, one review round.
+**Size:** Medium — Solo dev + PM. One check-in to align on chunking strategy and do-plan integration, one review round.
 
 **Team:** Solo dev, PM
 
@@ -42,11 +42,11 @@ During `/make-plan` Phase 1, the planner explores the codebase with Glob/Grep to
 - **Shared embedding core**: Extract the embedding/similarity/reranking pipeline from `doc_impact_finder.py` into a shared module. Both finders reuse the same index-embed-recall-rerank pattern.
 - **Code-aware chunker**: Use Python `ast` module to split `.py` files into function/class-level chunks. Non-Python files (JSON, YAML, shell, Markdown) use simpler heuristics.
 - **Code impact finder**: New tool at `tools/code_impact_finder.py` that indexes the full codebase (not just docs) and answers "what code is coupled to this change?"
-- **make-plan integration**: During Phase 1, run the code impact finder against the problem statement to surface affected files before writing the plan.
+- **do-plan integration**: During Phase 1, run the code impact finder against the problem statement to surface affected files before writing the plan.
 
 ### Flow
 
-**User invokes /make-plan** → Planner reads issue → **Code impact finder runs against problem statement** → Returns ranked list of coupled files with reasons → Planner uses results to populate Solution (files to modify), Risks (unexpected dependencies), Rabbit Holes (tangential coupling), Documentation (affected docs)
+**User invokes /do-plan** → Planner reads issue → **Code impact finder runs against problem statement** → Returns ranked list of coupled files with reasons → Planner uses results to populate Solution (files to modify), Risks (unexpected dependencies), Rabbit Holes (tangential coupling), Documentation (affected docs)
 
 ### Technical Approach
 
@@ -162,9 +162,9 @@ class AffectedCode(BaseModel):
     reason: str         # "Reads session_id which is being restructured"
 ```
 
-#### 6. make-plan integration
+#### 6. do-plan integration
 
-In `.claude/skills/make-plan/SKILL.md`, add to Phase 1 after "Understand the request":
+In `.claude/skills/do-plan/SKILL.md`, add to Phase 1 after "Understand the request":
 
 ```
 **Impact analysis** (if code_impact_finder is available):
@@ -188,7 +188,7 @@ These guardrails live in the **shared core**, so both doc_impact_finder and code
 - If the embedding model in the index doesn't match the current provider, discard and rebuild (model switch = full invalidation, unavoidable).
 
 **Cost ceiling** (inside `build_index()`):
-- If a reindex would embed >1000 chunks in one run, emit a warning in the output with estimated cost and proceed anyway. The warning is informational, not blocking — the tool should never hang waiting for confirmation when invoked by make-plan or update-docs.
+- If a reindex would embed >1000 chunks in one run, emit a warning in the output with estimated cost and proceed anyway. The warning is informational, not blocking — the tool should never hang waiting for confirmation when invoked by do-plan or do-docs.
 - At current pricing (~$0.02/1M tokens), even a full 2000-chunk reindex costs <$0.05. The ceiling exists so future codebase growth doesn't silently 10x the cost.
 
 **`--status` flag** (generic, in core):
@@ -223,7 +223,7 @@ These guardrails live in the **shared core**, so both doc_impact_finder and code
 
 ## No-Gos (Out of Scope)
 
-- Modifying the `/update-docs` skill (it continues using `doc_impact_finder` as-is, just backed by shared core)
+- Modifying the `/do-docs` skill (it continues using `doc_impact_finder` as-is, just backed by shared core)
 - Adding new embedding providers beyond OpenAI/Voyage
 - Building a UI or dashboard for impact results
 - Auto-generating plan content from impact results
@@ -236,15 +236,15 @@ No update system changes required — this is a new tool in `tools/` with no new
 
 ## Agent Integration
 
-- **No new MCP server needed** — the code impact finder is invoked by the make-plan skill within Claude Code, not as an external tool
-- The make-plan SKILL.md will be updated to call the finder during Phase 1
+- **No new MCP server needed** — the code impact finder is invoked by the do-plan skill within Claude Code, not as an external tool
+- The do-plan SKILL.md will be updated to call the finder during Phase 1
 - The finder runs as a Python module call: `python -m tools.code_impact_finder "change summary"` or imported directly
 - **No bridge changes** — this is a skill-internal tool, not a Telegram-facing capability
 - Integration test: verify the finder returns results when given a known change summary against the indexed codebase
 
 ## Documentation
 
-- [ ] Create `docs/features/code-impact-finder.md` describing the tool, its architecture, and how it integrates with make-plan
+- [ ] Create `docs/features/code-impact-finder.md` describing the tool, its architecture, and how it integrates with do-plan
 - [ ] Add entry to `docs/features/README.md` index table
 - [ ] Update `docs/tools-reference.md` with code_impact_finder entry
 - [ ] Add inline docstrings to all public functions in new modules
@@ -258,7 +258,7 @@ No update system changes required — this is a new tool in `tools/` with no new
 - [ ] All 21 existing doc_impact_finder tests still pass after refactor
 - [ ] Python chunking uses `ast` module for function/class-level granularity
 - [ ] Running against "change session ID derivation" surfaces `bridge/telegram_bridge.py`, `agent/sdk_client.py`, and session-related code
-- [ ] make-plan SKILL.md updated with Phase 1 impact analysis step
+- [ ] do-plan SKILL.md updated with Phase 1 impact analysis step
 - [ ] Integration test: index repo, query with known change, verify relevant files returned
 - [ ] Missing/corrupt index auto-rebuilds silently on next run (both finders)
 - [ ] Model mismatch (provider change) triggers full rebuild without manual intervention (both finders)
@@ -288,9 +288,9 @@ No update system changes required — this is a new tool in `tools/` with no new
   - Agent Type: builder
   - Resume: true
 
-- **Builder (make-plan integration)**
+- **Builder (do-plan integration)**
   - Name: plan-integrator
-  - Role: Update make-plan SKILL.md to invoke code impact finder in Phase 1
+  - Role: Update do-plan SKILL.md to invoke code impact finder in Phase 1
   - Agent Type: builder
   - Resume: true
 
@@ -342,13 +342,13 @@ No update system changes required — this is a new tool in `tools/` with no new
 - Add `--status` CLI flag for diagnostic output
 - Write tests for chunking, discovery, guardrails, and end-to-end pipeline
 
-### 4. Integrate with make-plan
+### 4. Integrate with do-plan
 - **Task ID**: build-integration
 - **Depends On**: build-code-finder
 - **Assigned To**: plan-integrator
 - **Agent Type**: builder
 - **Parallel**: false
-- Update `.claude/skills/make-plan/SKILL.md` Phase 1 with impact analysis step
+- Update `.claude/skills/do-plan/SKILL.md` Phase 1 with impact analysis step
 - Add CLI entry point: `python -m tools.code_impact_finder "change summary"`
 - Document expected output format for planner consumption
 
@@ -360,7 +360,7 @@ No update system changes required — this is a new tool in `tools/` with no new
 - **Parallel**: false
 - Index the repo, query with "change session ID derivation"
 - Verify session-related files appear in results
-- Verify make-plan SKILL.md references the tool correctly
+- Verify do-plan SKILL.md references the tool correctly
 - Run all tests (doc_impact_finder + code_impact_finder)
 
 ### 6. Documentation
@@ -393,7 +393,7 @@ No update system changes required — this is a new tool in `tools/` with no new
 - `python -m tools.code_impact_finder --status` — code index health summary
 - `rm data/doc_embeddings.json && python -m tools.doc_impact_finder "test query"` — doc finder rebuilds silently
 - `rm data/code_embeddings.json && python -m tools.code_impact_finder "test query"` — code finder rebuilds silently
-- `grep -q "impact" .claude/skills/make-plan/SKILL.md` — make-plan references the tool
+- `grep -q "impact" .claude/skills/do-plan/SKILL.md` — do-plan references the tool
 - `test -f docs/features/code-impact-finder.md` — feature doc exists
 - `grep -q "code-impact-finder" docs/features/README.md` — indexed in README
 
@@ -401,4 +401,4 @@ No update system changes required — this is a new tool in `tools/` with no new
 
 1. **Chunking granularity for large classes**: Should a 200-line class be one chunk, or should it be split into methods? One chunk preserves class context but may be too large for embedding quality. Methods lose class context but are more focused. Leaning toward: one chunk per class (with method-level sub-chunks only if class exceeds 100 lines).
 
-2. **Should the code finder also surface docs?** The issue mentions surfacing docs for the Documentation section. We could either (a) have the code finder index docs too and return them with `impact_type="docs"`, or (b) keep the two finders separate and run both during make-plan. Leaning toward (a) — single index, single query, simpler integration.
+2. **Should the code finder also surface docs?** The issue mentions surfacing docs for the Documentation section. We could either (a) have the code finder index docs too and return them with `impact_type="docs"`, or (b) keep the two finders separate and run both during do-plan. Leaning toward (a) — single index, single query, simpler integration.

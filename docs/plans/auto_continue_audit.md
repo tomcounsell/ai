@@ -238,7 +238,7 @@ No agent integration required — this is a bridge-internal change. The agent do
 
 ## Open Questions
 
-1. **Should we raise MAX_AUTO_CONTINUES from 3?** The current limit seems reasonable, but some long-running tasks (like `/build`) legitimately produce many status updates. Should the limit be configurable per-task or per-session type?
+1. **Should we raise MAX_AUTO_CONTINUES from 3?** The current limit seems reasonable, but some long-running tasks (like `/do-build`) legitimately produce many status updates. Should the limit be configurable per-task or per-session type?
 
 2. **Should the "job outlives parent" case be a hard error or graceful degradation?** When a continuation job finds no active conversation, should it (a) send a summary to chat and stop, (b) log and discard, or (c) attempt to resume anyway?
 

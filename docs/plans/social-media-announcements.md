@@ -58,7 +58,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/social-media-a
 User: "Post this to X: [content]" → Agent uses `/announce-x` → Tweet posted → URL returned
 
 **Multi-Platform Release:**
-User: "Announce [product] release" → Agent drafts copy for each platform → Plan created with exact content → User approves → `/build` executes → All URLs returned
+User: "Announce [product] release" → Agent drafts copy for each platform → Plan created with exact content → User approves → `/do-build` executes → All URLs returned
 
 ### Technical Approach
 
