@@ -24,11 +24,25 @@ Creates structured feature plans in `docs/plans/` following Shape Up principles:
 2. **Narrow the problem** - Challenge vague requests:
    - Not: "redesign the auth system"
    - Yes: "login fails when users have 2FA enabled on certain providers"
-3. **Set appetite** - Based on communication overhead, not dev time (solo coding is fast; alignment is the bottleneck):
+3. **Blast radius analysis** — If the change involves code modifications, run the code impact finder to surface coupled files:
+   ```bash
+   cd /Users/valorengels/src/ai && .venv/bin/python -m tools.code_impact_finder "PROBLEM_STATEMENT_HERE"
+   ```
+
+   Use results to inform plan sections:
+   - Files with `impact_type="modify"` → **Solution** section (code that needs changes)
+   - Files with `impact_type="dependency"` → **Risks** section (unexpected coupling)
+   - Files with `impact_type="test"` → **Success Criteria** section (tests to update)
+   - Files with `impact_type="config"` → **Solution** section (configs to adjust)
+   - Files with `impact_type="docs"` → **Documentation** section (docs covering affected areas)
+   - Tangentially coupled files scoring below 0.5 relevance → **Rabbit Holes** section (tempting but out of scope)
+
+   This step is advisory — use the output as input to your analysis, not as an automated plan writer. Skip if the change is purely documentation or process-related.
+4. **Set appetite** - Based on communication overhead, not dev time (solo coding is fast; alignment is the bottleneck):
    - **Small**: Solo dev, no review. Ship it.
    - **Medium**: Solo dev + PM. 1-2 check-ins to align on scope, 1 review round.
    - **Large**: Solo dev + PM + reviewer(s). 2-3 PM check-ins, 2+ review rounds.
-4. **Rough out solution** - Key components and flow, stay abstract
+5. **Rough out solution** - Key components and flow, stay abstract
 
 ### Phase 2: Write Initial Plan
 
