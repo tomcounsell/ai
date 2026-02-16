@@ -50,19 +50,49 @@ During `/make-plan` Phase 1, the planner explores the codebase with Glob/Grep to
 
 ### Technical Approach
 
-#### 1. Extract shared pipeline (`tools/impact_finder_core.py`)
+#### 1. Refactor into generic pipeline (`tools/impact_finder_core.py`)
 
-Move reusable components out of `doc_impact_finder.py`:
-- `get_embedding_provider()` → provider detection
-- `_embed_openai()` / `_embed_voyage()` → batched embedding with `EMBEDDING_BATCH_SIZE`
-- `cosine_similarity()` → numpy dot product
-- `_rerank_single_candidate()` → parallel Haiku reranking
-- `load_index()` / `save_index()` → content-hashed index management
+The existing `doc_impact_finder.py` is 520 lines. Only three things are doc-specific:
+- `DOC_PATTERNS` + `_discover_doc_files()` — which files to index
+- `chunk_markdown()` — how to split files into chunks
+- The reranking prompt in `_rerank_single_candidate()` — what question to ask Haiku
+
+Everything else is generic: embedding providers, batching, cosine similarity, index load/save, the two-stage find pipeline, candidate grouping, fallback path. Extract all of that into `impact_finder_core.py` as a **configurable pipeline**.
+
+```python
+# The core provides a generic find() function:
+def find_affected(
+    change_summary: str,
+    discover_files: Callable[[Path], list[Path]],   # what to index
+    chunk_file: Callable[[str, str], list[dict]],    # how to chunk
+    rerank_prompt: Callable[[str, dict], str],        # what to ask Haiku
+    index_name: str,                                  # "doc_embeddings" or "code_embeddings"
+    result_builder: Callable[[list], list[BaseModel]], # how to shape output
+    top_n: int = 15,
+    repo_root: Path | None = None,
+) -> list[BaseModel]:
+```
+
+Each finder becomes a thin config file (~50-80 lines) that passes its specific callables to the core.
+
+`doc_impact_finder.py` shrinks to: `DOC_PATTERNS`, `chunk_markdown()`, the doc reranking prompt, `AffectedDoc` model, and a `find_affected_docs()` that calls `find_affected()` with doc-specific config.
+
+`code_impact_finder.py` provides: `CODE_PATTERNS`, code-aware chunking, the code reranking prompt, `AffectedCode` model, and a `find_affected_code()` that calls `find_affected()` with code-specific config.
+
+**Shared in core (not duplicated):**
+- `get_embedding_provider()` / `_embed_openai()` / `_embed_voyage()`
+- `cosine_similarity()`
+- `load_index()` / `save_index()` with content-hashed cache management
+- `_rerank_candidates()` — parallel Haiku reranking (takes prompt builder as arg)
+- `build_index()` — discover → chunk → diff against cache → embed new → save
+- `_candidates_to_results()` — fallback grouping when Haiku is unavailable
+- `chunk_markdown()` — used by both finders (docs are markdown; code finder indexes `.md` files too)
 - Constants: `EMBEDDING_BATCH_SIZE`, `MIN_SIMILARITY_THRESHOLD`, `HAIKU_CONTENT_PREVIEW_CHARS`
+- Self-healing guardrails (section 7)
 
-`doc_impact_finder.py` becomes a thin wrapper: doc-specific chunking + file discovery + the shared core.
+#### 2. Code-aware chunking (in `code_impact_finder.py`)
 
-#### 2. Code-aware chunking (`tools/code_impact_finder.py`)
+The only new chunking logic needed — `chunk_markdown()` already lives in the core.
 
 **Python files** — Use `ast` module (stdlib, no new deps):
 - Each top-level function → one chunk
@@ -79,14 +109,14 @@ Move reusable components out of `doc_impact_finder.py`:
 - Non-function code → one chunk
 
 **Markdown/Skills** (`.md`):
-- Reuse `chunk_markdown()` from the shared core (already splits on `##`)
+- Reuse `chunk_markdown()` from core
 
 **CLAUDE.md and SKILL.md**:
-- These are high-value context files — index them with priority
+- High-value context files — indexed with priority
 
-#### 3. File discovery
+#### 3. Code file discovery (in `code_impact_finder.py`)
 
-Index these patterns from repo root, excluding noise:
+Patterns from repo root, excluding noise:
 ```
 **/*.py          (exclude .venv/, __pycache__/, .worktrees/)
 **/*.md          (exclude .venv/, node_modules/)
@@ -102,9 +132,9 @@ Skip: `agents/*/state.json`, `data/`, `logs/`, `.git/`, `.venv/`, `generated_ima
 
 Estimated corpus: ~400 files, ~2000 chunks.
 
-#### 4. Reranking prompt
+#### 4. Code reranking prompt (in `code_impact_finder.py`)
 
-Instead of doc_impact_finder's "does this doc need updating?", use:
+Instead of doc_impact_finder's "does this doc need updating?", the code finder passes a different prompt builder:
 
 > Given a proposed change described as: "{change_summary}"
 >
@@ -121,7 +151,7 @@ Instead of doc_impact_finder's "does this doc need updating?", use:
 >
 > Rate relevance 0.0-1.0. Respond with ONLY a JSON object: {"score": 0.X, "reason": "..."}
 
-#### 5. Output model
+#### 5. Output model (in `code_impact_finder.py`)
 
 ```python
 class AffectedCode(BaseModel):
@@ -148,6 +178,26 @@ Use results to inform:
 
 The integration is advisory — the planner uses the output as input, not as an automated rewrite.
 
+#### 7. Self-maintaining guardrails (in `impact_finder_core.py`)
+
+These guardrails live in the **shared core**, so both doc_impact_finder and code_impact_finder get identical health management for free. No finder-specific health code.
+
+**Auto-heal on every run** (inside `build_index()`):
+- Before querying, check index age and staleness. If >30% of chunks have changed content hashes, log a one-line note in output ("reindexing 847/2100 chunks") but proceed automatically.
+- If the index file is missing or corrupt, rebuild from scratch silently. This is the expected path on a fresh clone.
+- If the embedding model in the index doesn't match the current provider, discard and rebuild (model switch = full invalidation, unavoidable).
+
+**Cost ceiling** (inside `build_index()`):
+- If a reindex would embed >1000 chunks in one run, emit a warning in the output with estimated cost and proceed anyway. The warning is informational, not blocking — the tool should never hang waiting for confirmation when invoked by make-plan or update-docs.
+- At current pricing (~$0.02/1M tokens), even a full 2000-chunk reindex costs <$0.05. The ceiling exists so future codebase growth doesn't silently 10x the cost.
+
+**`--status` flag** (generic, in core):
+- `python -m tools.impact_finder_core --status doc` / `--status code` prints a one-screen summary for the given index: index age, chunk count, embedding model, estimated staleness (% of files modified since last index), estimated reindex cost. No side effects.
+- Both `python -m tools.doc_impact_finder --status` and `python -m tools.code_impact_finder --status` delegate to the core's status function with their respective index name.
+- This is a diagnostic escape hatch, not something anyone should need to run routinely.
+
+**No new infrastructure:** No database, no scheduler, no monitoring service. Each index is a JSON file. The guardrails are `if` statements inside the shared `build_index()` path.
+
 ## Rabbit Holes
 
 - **Tree-sitter for parsing**: `ast` module is sufficient for Python. Tree-sitter adds a native dependency for marginal benefit on a Python-heavy repo.
@@ -155,6 +205,7 @@ The integration is advisory — the planner uses the output as input, not as an 
 - **Real-time incremental indexing**: Content hashing already handles cache invalidation. No need for file watchers or git hooks.
 - **Embedding fine-tuning**: Off-the-shelf OpenAI/Voyage embeddings are good enough. Don't fine-tune.
 - **Auto-populating plan sections**: The tool surfaces information; the planner decides what to include. Don't automate plan writing.
+- **External monitoring for index health**: The guardrails are inline `if` statements, not a separate health-check system. Don't build a monitoring service for a JSON cache file.
 
 ## Risks
 
@@ -200,13 +251,19 @@ No update system changes required — this is a new tool in `tools/` with no new
 
 ## Success Criteria
 
-- [ ] `tools/impact_finder_core.py` extracted with shared pipeline; `doc_impact_finder.py` refactored to use it
-- [ ] All 21 existing doc_impact_finder tests still pass
-- [ ] `tools/code_impact_finder.py` indexes Python, Markdown, config, shell, and SKILL files
+- [ ] `tools/impact_finder_core.py` contains the full generic pipeline: embedding, indexing, reranking, guardrails
+- [ ] `doc_impact_finder.py` is a thin wrapper (~50-80 lines): doc patterns, doc reranking prompt, `AffectedDoc` model
+- [ ] `code_impact_finder.py` is a thin wrapper (~80-120 lines): code patterns, AST chunking, code reranking prompt, `AffectedCode` model
+- [ ] Both finders share identical health management — guardrails are in core, not duplicated
+- [ ] All 21 existing doc_impact_finder tests still pass after refactor
 - [ ] Python chunking uses `ast` module for function/class-level granularity
 - [ ] Running against "change session ID derivation" surfaces `bridge/telegram_bridge.py`, `agent/sdk_client.py`, and session-related code
 - [ ] make-plan SKILL.md updated with Phase 1 impact analysis step
 - [ ] Integration test: index repo, query with known change, verify relevant files returned
+- [ ] Missing/corrupt index auto-rebuilds silently on next run (both finders)
+- [ ] Model mismatch (provider change) triggers full rebuild without manual intervention (both finders)
+- [ ] Large reindex (>1000 chunks) emits cost warning in output but does not block (both finders)
+- [ ] `--status` flag works on both: `python -m tools.doc_impact_finder --status` and `python -m tools.code_impact_finder --status`
 - [ ] Documentation updated and indexed
 
 ## Team Orchestration
@@ -281,7 +338,9 @@ No update system changes required — this is a new tool in `tools/` with no new
 - Implement file discovery for Python, Markdown, config, shell, SKILL files
 - Implement code-specific reranking prompt
 - Add `AffectedCode` model with impact_type classification
-- Write tests for chunking, discovery, and end-to-end pipeline
+- Implement self-healing guardrails: auto-rebuild on missing/corrupt index, model mismatch detection, cost warning on large reindex
+- Add `--status` CLI flag for diagnostic output
+- Write tests for chunking, discovery, guardrails, and end-to-end pipeline
 
 ### 4. Integrate with make-plan
 - **Task ID**: build-integration
@@ -330,6 +389,10 @@ No update system changes required — this is a new tool in `tools/` with no new
 - `python -m pytest tests/test_doc_impact_finder.py -v` — existing tests still pass after core extraction
 - `python -m pytest tests/test_code_impact_finder.py -v` — new code finder tests pass
 - `python -m tools.code_impact_finder "change session ID derivation"` — returns relevant files
+- `python -m tools.doc_impact_finder --status` — doc index health summary
+- `python -m tools.code_impact_finder --status` — code index health summary
+- `rm data/doc_embeddings.json && python -m tools.doc_impact_finder "test query"` — doc finder rebuilds silently
+- `rm data/code_embeddings.json && python -m tools.code_impact_finder "test query"` — code finder rebuilds silently
 - `grep -q "impact" .claude/skills/make-plan/SKILL.md` — make-plan references the tool
 - `test -f docs/features/code-impact-finder.md` — feature doc exists
 - `grep -q "code-impact-finder" docs/features/README.md` — indexed in README
