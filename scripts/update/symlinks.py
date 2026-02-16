@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,7 +14,7 @@ class LinkAction:
 
     src: str
     dst: str
-    action: str  # "created", "exists", "error"
+    action: str  # "created", "exists", "removed", "error"
     error: str | None = None
 
 
@@ -25,6 +26,7 @@ class SymlinkSyncResult:
     actions: list[LinkAction] = field(default_factory=list)
     created: int = 0
     skipped: int = 0
+    removed: int = 0
     errors: int = 0
 
 
@@ -34,6 +36,9 @@ def sync_claude_dirs(project_dir: Path) -> SymlinkSyncResult:
     Skills (directories with SKILL.md) and commands (.md files) are
     shared cross-repo via hardlinks at the user level. Agents are
     repo-specific and are NOT synced.
+
+    Also cleans up stale hardlinks in ~/.claude/ that no longer have
+    a corresponding source in the project directory.
     """
     result = SymlinkSyncResult()
     user_claude = Path.home() / ".claude"
@@ -44,6 +49,14 @@ def sync_claude_dirs(project_dir: Path) -> SymlinkSyncResult:
     # Sync commands: each is a .md file
     _sync_commands(
         project_dir / ".claude" / "commands", user_claude / "commands", result
+    )
+
+    # Clean up stale hardlinks that no longer have a source
+    _cleanup_stale_commands(
+        project_dir / ".claude" / "commands", user_claude / "commands", result
+    )
+    _cleanup_stale_skills(
+        project_dir / ".claude" / "skills", user_claude / "skills", result
     )
 
     if result.errors > 0:
@@ -111,3 +124,46 @@ def _ensure_hardlink(
     except OSError as e:
         result.actions.append(LinkAction(rel_src, rel_dst, "error", str(e)))
         result.errors += 1
+
+
+def _cleanup_stale_commands(
+    src_dir: Path, dst_dir: Path, result: SymlinkSyncResult
+) -> None:
+    """Remove command files in dst_dir that have no corresponding source in src_dir."""
+    if not dst_dir.is_dir():
+        return
+
+    for dst_file in sorted(dst_dir.glob("*.md")):
+        src_file = src_dir / dst_file.name
+        if not src_file.exists():
+            rel_dst = str(dst_file).replace(str(Path.home()), "~")
+            try:
+                dst_file.unlink()
+                result.actions.append(LinkAction("", rel_dst, "removed"))
+                result.removed += 1
+            except OSError as e:
+                result.actions.append(LinkAction("", rel_dst, "error", str(e)))
+                result.errors += 1
+
+
+def _cleanup_stale_skills(
+    src_dir: Path, dst_dir: Path, result: SymlinkSyncResult
+) -> None:
+    """Remove skill directories in dst_dir that have no corresponding source in src_dir."""
+    if not dst_dir.is_dir():
+        return
+
+    for dst_skill_dir in sorted(dst_dir.iterdir()):
+        if not dst_skill_dir.is_dir():
+            continue
+
+        src_skill_dir = src_dir / dst_skill_dir.name
+        if not src_skill_dir.exists():
+            rel_dst = str(dst_skill_dir).replace(str(Path.home()), "~")
+            try:
+                shutil.rmtree(dst_skill_dir)
+                result.actions.append(LinkAction("", rel_dst, "removed"))
+                result.removed += 1
+            except OSError as e:
+                result.actions.append(LinkAction("", rel_dst, "error", str(e)))
+                result.errors += 1

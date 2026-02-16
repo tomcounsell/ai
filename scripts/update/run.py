@@ -167,6 +167,15 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         for action in result.symlink_result.actions:
             if action.action == "created":
                 log(f"  {action.dst}", v, always=True)
+    if result.symlink_result.removed > 0:
+        log(
+            f"Removed {result.symlink_result.removed} stale hardlink(s)",
+            v,
+            always=True,
+        )
+        for action in result.symlink_result.actions:
+            if action.action == "removed":
+                log(f"  {action.dst}", v, always=True)
     if result.symlink_result.errors > 0:
         for action in result.symlink_result.actions:
             if action.action == "error":
