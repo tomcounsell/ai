@@ -1,161 +1,218 @@
-# Replace Research Tools with OpenAI Deep Research API
+# Automated Claude Deep Research Tool (p2-claude)
 
 **Issue:** [#78](https://github.com/yudame/cuttlefish/issues/78)
 **Status:** Plan
 
 ## Summary
 
-Replace our three independent research tools (Perplexity, GPT-Researcher, Gemini) with OpenAI's Deep Research API (`o3-deep-research`). This consolidates the research pipeline from 3 tools with 3 API keys and 3 different integration patterns into one unified tool that handles multi-hop reasoning, web search, and citation tracking natively.
+Replace the manual "paste Claude deep research results" step with an automated `p2-claude` research tool using Claude Opus + web search via the Anthropic API. This runs alongside Perplexity, GPT-Researcher, and Gemini as an independent p2-* source — not a replacement for any of them.
 
 ## Current State
 
-| Tool | Role | Speed | Integration | Issues |
-|------|------|-------|-------------|--------|
-| Perplexity (`sonar-deep-research`) | Academic/peer-reviewed | 30-120s | REST sync/async | Solid, but limited to Perplexity's search index |
-| GPT-Researcher | Industry/technical | 6-20 min | Local multi-agent framework | Slow, fragile, requires Tavily key, no metadata output |
-| Gemini (`deep-research-pro-preview`) | Policy/regulatory | 3-10 min | REST polling | Preview API, subject to change |
+The `p2-claude` artifact is currently produced manually:
+1. User copies a research prompt from the workflow
+2. User pastes it into claude.ai and runs deep research
+3. User copies the output back and pastes it via `add_manual_research()`
 
-**Pain points:**
-- 3 different API patterns to maintain
-- 3 API keys to manage (Perplexity, OpenAI+Tavily, Google)
-- GPT-Researcher is the weakest link — slow, no structured metadata, depends on third-party library stability
-- No unified quality scoring across tools
-- Targeted research prompts must be crafted differently per tool
+This is the only research step that isn't automated. All others (`p2-perplexity`, `p2-chatgpt`, `p2-gemini`) run via API.
 
-## Proposed State
+## Proposed Tool
 
-Replace all three with `o3-deep-research` via the OpenAI Responses API:
+**Claude Opus 4 + web search tool** via the Anthropic Messages API.
 
-| Slot | Model | Role | Prompt Strategy |
-|------|-------|------|-----------------|
-| `p2-primary` | `o3-deep-research` | Broad academic + industry research | System prompt emphasizes peer-reviewed sources, RCTs, meta-analyses, industry reports |
-| `p2-targeted-1` | `o3-deep-research` | Gap-filling from question discovery | Prompt includes gaps/contradictions from question-discovery artifact |
-| `p2-targeted-2` | `o3-deep-research` | Policy/regulatory focus | System prompt emphasizes government docs, regulatory frameworks, comparative policy |
+```python
+# apps/podcast/tools/claude_deep_research.py
 
-Same 3-source cross-validation pattern, but all powered by one API. The differentiation comes from prompt engineering, not tool selection.
+import anthropic
 
-## Why o3-deep-research
+client = anthropic.Anthropic()
 
-- **Native multi-hop reasoning**: Plans queries, evaluates results, iterates automatically — no need to build our own retry loop (addresses issue #77 Phase 1)
-- **Built-in web search + code interpreter**: Searches the open web, can analyze data programmatically
-- **Inline citations with annotations**: Every claim links to source URL with character offsets — much richer than what we get from Perplexity
-- **Single API pattern**: Standard OpenAI Responses API with `background=True` for async
-- **MCP support**: Can connect to private knowledge sources if needed later
+response = client.messages.create(
+    model="claude-opus-4-6",
+    max_tokens=16384,
+    messages=[
+        {"role": "user", "content": research_prompt}
+    ],
+    tools=[{
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "max_uses": 20,
+    }],
+)
+```
 
-## Pricing
+**Why Opus + web search:**
+- Opus is the strongest model for comprehensive synthesis — matches/exceeds what users get from claude.ai deep research
+- Web search tool gives real-time access to current sources, citations with URLs
+- We already have `ANTHROPIC_API_KEY` — no new API keys
+- `anthropic` package already in dependencies — no new deps
+- Fits our existing tool pattern: `function(prompt) -> (content, metadata)`
 
-- **Input:** $10/M tokens
-- **Output:** $40/M tokens
-- **Estimated cost per research call:** $1-5 depending on depth (comparable to current Perplexity + GPT-Researcher combined)
-- **3 calls per episode:** ~$3-15 total research cost per episode
-
-Perplexity current cost is ~$0.01-0.05 per call. This is significantly more expensive, but quality and automation justify it given the use case.
+**Pricing:**
+- Opus 4.6: $15/M input, $75/M output tokens
+- Web search: $10 per 1,000 searches
+- Estimated per call: $2-8 depending on output length and number of searches
+- With 20 max searches: ~$0.20 search cost + token costs
 
 ## Implementation Plan
 
-### Phase 1: New Research Tool (Replace GPT-Researcher first)
+### Step 1: Create the tool script
 
-GPT-Researcher is the weakest tool — replace it first as proof of concept.
+**File:** `apps/podcast/tools/claude_deep_research.py`
 
-| Step | Task | Files |
-|------|------|-------|
-| 1 | Create `openai_deep_research.py` tool | `apps/podcast/tools/openai_deep_research.py` |
-| 2 | Implement sync and async (background) modes | Same file |
-| 3 | Extract citations as structured metadata | Same file |
-| 4 | Add cost tracking (input/output tokens) | Same file |
-| 5 | Wire into `research.py` as `run_openai_research()` | `apps/podcast/services/research.py` |
-| 6 | Update task pipeline to use new tool for `p2-chatgpt` slot | `apps/podcast/tasks.py` |
-| 7 | Test with a real episode | Manual validation |
-
-**Tool API pattern** (follows existing conventions):
+Following the exact pattern of `perplexity_deep_research.py`:
 
 ```python
-# apps/podcast/tools/openai_deep_research.py
-
-def run_deep_research(
+def run_claude_research(
     prompt: str,
     system_message: str = "",
-    model: str = "o3-deep-research",
-    background: bool = True,
+    model: str = "claude-opus-4-6",
+    max_searches: int = 20,
+    max_tokens: int = 16384,
     timeout: int = 600,
     verbose: bool = False,
 ) -> tuple[str | None, dict]:
-    """Run OpenAI Deep Research and return (content, metadata).
+    """Run Claude deep research with web search and return (content, metadata).
 
     Returns:
         Tuple of (report_text, metadata_dict) where metadata includes
-        citations, token usage, and cost estimate.
+        citations, token usage, search count, and cost estimate.
     """
 ```
 
-### Phase 2: Replace Gemini
+**Key features:**
+- Extracts final text from response content blocks
+- Collects all citations (url, title, cited_text) into metadata
+- Tracks token usage and web search count for cost estimation
+- Handles `pause_turn` stop reason by continuing the conversation
+- CLI mode for standalone testing: `python claude_deep_research.py "prompt"`
+- Streaming support for progress visibility
 
-| Step | Task | Files |
-|------|------|-------|
-| 1 | Update `run_gemini_research` to call `openai_deep_research` | `apps/podcast/services/research.py` |
-| 2 | Create policy-focused system prompt | `apps/podcast/services/prompts/deep_research_policy.md` |
-| 3 | Update `craft_research_prompt.py` — Gemini prompt style → Deep Research style | `apps/podcast/services/craft_research_prompt.py` |
-| 4 | Update task pipeline | `apps/podcast/tasks.py` |
-| 5 | Rename artifact from `p2-gemini` to `p2-policy` | Migration needed |
+### Step 2: Wire into the service layer
 
-### Phase 3: Replace Perplexity
+**File:** `apps/podcast/services/research.py`
 
-| Step | Task | Files |
-|------|------|-------|
-| 1 | Update `run_perplexity_research` to call `openai_deep_research` | `apps/podcast/services/research.py` |
-| 2 | Create academic-focused system prompt | `apps/podcast/services/prompts/deep_research_academic.md` |
-| 3 | Update `craft_research_prompt.py` — Perplexity prompt style → Deep Research style | `apps/podcast/services/craft_research_prompt.py` |
-| 4 | Update task pipeline | `apps/podcast/tasks.py` |
-| 5 | Rename artifact from `p2-perplexity` to `p2-academic` | Migration needed |
+Add `run_claude_research()` following the exact pattern of `run_perplexity_research()`:
 
-### Phase 4: Cleanup
+```python
+def run_claude_research(episode_id: int, prompt: str) -> EpisodeArtifact:
+    """Call Claude Opus with web search and save results as p2-claude."""
+    episode = Episode.objects.get(pk=episode_id)
+    context = _get_episode_context(episode)
 
-| Step | Task | Files |
-|------|------|-------|
-| 1 | Remove `gpt_researcher_run.py` | `apps/podcast/tools/gpt_researcher_run.py` |
-| 2 | Remove `gemini_deep_research.py` | `apps/podcast/tools/gemini_deep_research.py` |
-| 3 | Remove `perplexity_deep_research.py` | `apps/podcast/tools/perplexity_deep_research.py` |
-| 4 | Remove `gpt-researcher` from dependencies | `pyproject.toml` |
-| 5 | Update craft_research_prompt to use unified prompt strategy | `apps/podcast/services/craft_research_prompt.py` |
-| 6 | Update skill files that reference old tools | `.claude/skills/` |
-| 7 | Update CLAUDE.md references | `CLAUDE.md` |
-| 8 | Remove unused env vars from `.env.example` | `PERPLEXITY_API_KEY`, `GOOGLE_AI_API_KEY`, `TAVILY_API_KEY` |
+    full_prompt = (
+        f"Episode: {episode.title}\n\n"
+        f"Context:\n{context}\n\n"
+        f"Research query:\n{prompt}"
+    )
 
-## Artifact Naming Migration
+    from apps.podcast.tools.claude_deep_research import (
+        run_claude_research as _claude,
+    )
 
-| Current | New | Rationale |
-|---------|-----|-----------|
-| `p2-perplexity` | `p2-academic` | Named by research focus, not tool |
-| `p2-chatgpt` | `p2-industry` | Named by research focus, not tool |
-| `p2-gemini` | `p2-policy` | Named by research focus, not tool |
-| `prompt-perplexity` | `prompt-academic` | Consistent with above |
-| `prompt-gpt` | `prompt-industry` | Consistent with above |
-| `prompt-gemini` | `prompt-policy` | Consistent with above |
+    content_text, metadata = _claude(prompt=full_prompt, verbose=False)
 
-This renaming is optional but recommended — it decouples artifact identity from implementation details. Can be done in Phase 4 or deferred.
+    artifact, created = EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="p2-claude",
+        defaults={
+            "content": content_text or "",
+            "description": "Claude Opus deep research with web search.",
+            "workflow_context": "Research Gathering",
+            "metadata": metadata,
+        },
+    )
+    return artifact
+```
+
+### Step 3: Add task pipeline step
+
+**File:** `apps/podcast/tasks.py`
+
+Add `step_claude_research` task, parallel with GPT-Researcher and Gemini in Phase 4:
+
+```python
+@task
+def step_claude_research(episode_id: int) -> None:
+    """Phase 4: Run Claude deep research (parallel)."""
+    episode = Episode.objects.get(pk=episode_id)
+
+    # Read the crafted prompt (or fall back to question-discovery context)
+    prompt_artifact = EpisodeArtifact.objects.filter(
+        episode=episode, title="prompt-claude"
+    ).first()
+
+    prompt = prompt_artifact.content if prompt_artifact else _get_episode_context(episode)
+
+    research.run_claude_research(episode_id, prompt)
+```
+
+Wire into the existing fan-in signal so it completes alongside `step_gpt_research` and `step_gemini_research`.
+
+### Step 4: Add prompt crafting
+
+**File:** `apps/podcast/services/craft_research_prompt.py`
+
+Add `"claude"` as a valid `research_type` in `craft_research_prompt()`. The Claude prompt should emphasize comprehensive synthesis — combining academic rigor with practical analysis, since Opus excels at long-form reasoning.
+
+**File:** `apps/podcast/services/prompts/craft_research_prompt.md`
+
+Add Claude-specific guidance:
+
+> **Claude Prompts** (comprehensive synthesis):
+> - Request multi-perspective analysis combining academic, industry, and policy viewpoints
+> - Ask for critical evaluation of competing claims with evidence weighting
+> - Emphasize narrative coherence and identification of non-obvious connections
+> - Request explicit uncertainty flagging where evidence is weak
+
+### Step 5: Update workflow progress tracking
+
+**File:** `apps/podcast/services/workflow_progress.py`
+
+The `p2-claude` artifact is already tracked in Phase 4 targeted sources (line 144). No changes needed — it will automatically show as complete when the artifact is created by the automated tool instead of manual paste.
+
+### Step 6: Update targeted research prompt crafting
+
+**File:** `apps/podcast/services/analysis.py`
+
+Update `craft_targeted_research_prompts()` to also generate a `prompt-claude` artifact, or create a separate function. The fan-in signal needs to account for the new parallel step.
+
+**File:** `apps/podcast/tasks.py`
+
+Update the Phase 4 orchestration to enqueue `step_claude_research` alongside the existing targeted research tasks.
+
+## Files Changed (Summary)
+
+| File | Change |
+|------|--------|
+| `apps/podcast/tools/claude_deep_research.py` | **New** — standalone tool script |
+| `apps/podcast/services/research.py` | Add `run_claude_research()` |
+| `apps/podcast/services/craft_research_prompt.py` | Add `"claude"` research type |
+| `apps/podcast/services/prompts/craft_research_prompt.md` | Add Claude prompt guidance |
+| `apps/podcast/tasks.py` | Add `step_claude_research` task, wire into Phase 4 fan-in |
+| `apps/podcast/services/analysis.py` | Generate `prompt-claude` in targeted prompts |
+| `.claude/skills/new-podcast-episode.md` | Remove manual Claude research instructions |
+
+## What This Does NOT Change
+
+- Perplexity, GPT-Researcher, and Gemini continue running as-is
+- Cross-validation, briefing, synthesis phases unchanged
+- No new dependencies or API keys
+- No model changes — existing pipeline uses the same `ANTHROPIC_API_KEY`
 
 ## Risk Assessment
 
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
-| Higher cost per episode | High | Low | Budget ~$15/episode; quality gain justifies it |
-| o3-deep-research quality varies by topic | Medium | Medium | Keep Perplexity as fallback for Phase 3; test thoroughly |
-| API latency (minutes per call) | High | Low | Already handle this — Gemini and GPT-Researcher are slow too |
-| Single provider dependency | Medium | Medium | OpenAI is our most stable provider; can add fallback later |
-| Citation format differs from current tools | Low | Low | Extract to common format in `openai_deep_research.py` |
+| Opus cost per call ($2-8) | Certain | Low | Budget ~$5/episode for this tool; quality justifies it |
+| Web search rate limits | Low | Medium | `max_uses=20` caps searches; handle `too_many_requests` gracefully |
+| `pause_turn` handling complexity | Medium | Low | Implement continuation loop; similar to Gemini's polling pattern |
+| Output quality vs. claude.ai deep research | Low | Low | Same model (Opus), same web access; API may actually be more controllable via system prompts |
 
 ## Success Criteria
 
-- [ ] GPT-Researcher replaced with `o3-deep-research` (Phase 1)
-- [ ] Episode research quality maintained or improved (manual review)
-- [ ] Research pipeline runs end-to-end with new tool
-- [ ] Gemini replaced (Phase 2)
-- [ ] Perplexity replaced (Phase 3)
-- [ ] Old tools and dependencies removed (Phase 4)
-- [ ] Single API key (`OPENAI_API_KEY`) handles all research
-
-## Dependencies
-
-- `OPENAI_API_KEY` with access to `o3-deep-research` model
-- `openai` Python package (already in dependencies)
-- No new packages needed
+- [ ] `claude_deep_research.py` tool works standalone via CLI
+- [ ] `run_claude_research()` service creates `p2-claude` artifact with citations
+- [ ] Task pipeline runs `step_claude_research` in parallel with GPT-Researcher and Gemini
+- [ ] Manual Claude research step removed from workflow skill
+- [ ] Episode produced end-to-end with automated `p2-claude` source
