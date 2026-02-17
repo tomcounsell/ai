@@ -21,9 +21,8 @@ from pydantic import BaseModel
 
 from tools.impact_finder_core import (
     MIN_SIMILARITY_THRESHOLD,
-    _embed_openai,
-    _embed_voyage,
     chunk_markdown,
+    get_embedding_provider,
 )
 from tools.impact_finder_core import build_index as _core_build_index
 from tools.impact_finder_core import find_affected as _core_find_affected
@@ -298,10 +297,14 @@ def chunk_code_file(content: str, file_path: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
+VALID_IMPACT_TYPES = {"modify", "dependency", "test", "config", "docs"}
+
+
 def _classify_impact_type(path: str) -> str:
     """Classify impact type based on file path.
 
     Returns one of: "test", "config", "docs", "modify".
+    Used as fallback when Haiku reranking doesn't provide an impact_type.
     """
     if path.startswith("tests/") or "/tests/" in path:
         return "test"
@@ -332,69 +335,18 @@ def _code_rerank_prompt(change_summary: str, chunk: dict) -> str:
     return (
         f'Given a proposed change described as: "{change_summary}"\n\n'
         f"Would this file/section be AFFECTED by or COUPLED TO this change? Consider:\n"
-        f"- Direct modifications needed\n"
-        f"- Behavioral dependencies (uses same abstractions, shares state)\n"
-        f"- Configuration coupling (reads same env vars, config keys)\n"
-        f"- Test coverage (tests that exercise affected paths)\n"
-        f"- Documentation that describes affected behavior\n\n"
+        f"- Direct modifications needed (impact_type: modify)\n"
+        f"- Behavioral dependencies — uses same abstractions, shares state, "
+        f"imported by affected code (impact_type: dependency)\n"
+        f"- Configuration coupling — reads same env vars, config keys (impact_type: config)\n"
+        f"- Test coverage — tests that exercise affected paths (impact_type: test)\n"
+        f"- Documentation that describes affected behavior (impact_type: docs)\n\n"
         f"File: {chunk['path']} — {chunk['section']}\n"
         f"```\n{chunk['content_preview']}\n```\n\n"
-        f"Rate relevance 0-10. Respond with ONLY a JSON object: "
-        f'{{"score": <0-10>, "reason": "..."}}'
+        f"Rate relevance 0-10. Respond with ONLY a JSON object:\n"
+        f'{{"score": <0-10>, "impact_type": "<type>", "reason": "..."}}\n'
+        f"Valid impact_type values: modify, dependency, test, config, docs"
     )
-
-
-# ---------------------------------------------------------------------------
-# Reranking (backward compat wrapper)
-# ---------------------------------------------------------------------------
-
-
-def _rerank_single_candidate(
-    client,
-    change_summary: str,
-    chunk: dict,
-) -> tuple[float, str, dict] | None:
-    """Rerank a single code candidate using Claude Haiku.
-
-    Backward-compatible wrapper: builds the code-specific prompt and delegates
-    to the core reranker.
-    """
-    from tools.impact_finder_core import (
-        _rerank_single_candidate as _core_rerank,
-    )
-
-    prompt = _code_rerank_prompt(change_summary, chunk)
-    return _core_rerank(client, prompt, chunk)
-
-
-# ---------------------------------------------------------------------------
-# Embedding provider (module-level for patchability)
-# ---------------------------------------------------------------------------
-
-
-def get_embedding_provider() -> tuple | None:
-    """Detect available embedding API and return (embed_function, model_name).
-
-    Priority order: OPENAI_API_KEY, VOYAGE_API_KEY.
-    Returns None if no provider is available.
-
-    References module-level _embed_openai / _embed_voyage so that
-    tests can patch tools.code_impact_finder._embed_openai.
-    """
-    import os
-
-    if os.environ.get("OPENAI_API_KEY"):
-        return _embed_openai, "text-embedding-3-small"
-
-    if os.environ.get("VOYAGE_API_KEY"):
-        try:
-            import voyageai  # noqa: F401
-
-            return _embed_voyage, "voyage-3-lite"
-        except ImportError:
-            logger.warning("VOYAGE_API_KEY set but voyageai package not installed")
-
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -408,16 +360,20 @@ def _build_affected_code(
     """Convert reranked results to AffectedCode list.
 
     Each (score, reason, chunk) tuple becomes one AffectedCode entry.
-    impact_type is classified based on file path.
+    Uses Haiku-provided impact_type when valid, falls back to path-based classification.
     """
     affected: list[AffectedCode] = []
     for score, reason, chunk in results:
+        haiku_type = chunk.get("haiku_impact_type", "")
+        impact_type = (
+            haiku_type if haiku_type in VALID_IMPACT_TYPES else _classify_impact_type(chunk["path"])
+        )
         affected.append(
             AffectedCode(
                 path=chunk["path"],
                 section=chunk.get("section", ""),
                 relevance=score / 10.0,
-                impact_type=_classify_impact_type(chunk["path"]),
+                impact_type=impact_type,
                 reason=reason,
             )
         )
@@ -502,7 +458,6 @@ def find_affected_code(
         top_n=top_n,
         repo_root=repo_root,
         embed_provider=get_embedding_provider(),
-        reranker=_rerank_single_candidate,
     )
 
 

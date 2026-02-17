@@ -206,6 +206,51 @@ class TestAffectedCode:
         assert item.relevance == 0.8
         assert item.impact_type == "modify"
 
+    def test_haiku_impact_type_overrides_path_classification(self):
+        """Haiku-provided impact_type takes precedence over path-based classification."""
+        from tools.code_impact_finder import _build_affected_code
+
+        results = [
+            (
+                8.0,
+                "Shares state with changed module",
+                {
+                    "path": "tools/some_tool.py",
+                    "section": "def helper",
+                    "haiku_impact_type": "dependency",
+                },
+            ),
+            (
+                7.0,
+                "Directly modified",
+                {
+                    "path": "tools/another.py",
+                    "section": "def main",
+                },
+            ),
+        ]
+        affected = _build_affected_code(results)
+        assert affected[0].impact_type == "dependency"
+        assert affected[1].impact_type == "modify"
+
+    def test_invalid_haiku_impact_type_falls_back(self):
+        """Invalid Haiku impact_type falls back to path-based classification."""
+        from tools.code_impact_finder import _build_affected_code
+
+        results = [
+            (
+                8.0,
+                "Some reason",
+                {
+                    "path": "tests/test_foo.py",
+                    "section": "def test_bar",
+                    "haiku_impact_type": "banana",
+                },
+            ),
+        ]
+        affected = _build_affected_code(results)
+        assert affected[0].impact_type == "test"  # path-based fallback
+
 
 # ---------------------------------------------------------------------------
 # TestCodeFinderPipeline — full pipeline with mocked APIs
@@ -242,13 +287,13 @@ class TestCodeFinderPipeline:
                 embeddings.append(vec)
             return embeddings
 
-        # Mock Haiku reranker
-        def mock_rerank(client, change_summary, chunk):
+        # Mock Haiku reranker — patches the core single-candidate reranker
+        def mock_rerank(client, prompt, chunk):
             return (8.0, "Relevant to the change", chunk)
 
         # Step 1: Index code with mocked embeddings
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
-            with patch("tools.code_impact_finder._embed_openai", side_effect=fake_embed):
+            with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
                 index = index_code(repo_root=tmp_path)
 
         assert index["version"] == 1
@@ -257,9 +302,9 @@ class TestCodeFinderPipeline:
 
         # Step 2: Find affected code with mocked embeddings + reranker
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
-            with patch("tools.code_impact_finder._embed_openai", side_effect=fake_embed):
+            with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
                 with patch(
-                    "tools.code_impact_finder._rerank_single_candidate",
+                    "tools.impact_finder_core._rerank_single_candidate",
                     side_effect=mock_rerank,
                 ):
                     results = find_affected_code(

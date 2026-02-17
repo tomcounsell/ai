@@ -13,10 +13,8 @@ import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import TypeVar
 
 import numpy as np
-from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +29,6 @@ HAIKU_CONTENT_PREVIEW_CHARS = 2000
 
 # Warn if reindex exceeds this many chunks
 COST_WARNING_THRESHOLD = 1000
-
-T = TypeVar("T", bound=BaseModel)
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +344,9 @@ def _rerank_single_candidate(
         score = float(parsed.get("score", 0))
         reason = parsed.get("reason", "")
         if score >= 5:
+            # Pass through any extra fields (e.g. impact_type) via chunk
+            if "impact_type" in parsed:
+                chunk = {**chunk, "haiku_impact_type": parsed["impact_type"]}
             return (score, reason, chunk)
     except (json.JSONDecodeError, KeyError, IndexError):
         logger.warning(
@@ -369,7 +368,6 @@ def _rerank_candidates(
     change_summary: str,
     candidates: list[tuple[float, dict]],
     prompt_builder: Callable[[str, dict], str],
-    reranker: Callable | None = None,
 ) -> list[tuple[float, str, dict]]:
     """Parallel Haiku reranking with ThreadPoolExecutor(max_workers=5).
 
@@ -378,28 +376,18 @@ def _rerank_candidates(
         change_summary: Description of the change.
         candidates: List of (similarity_score, chunk_dict) tuples.
         prompt_builder: Callable that takes (change_summary, chunk) and returns prompt string.
-        reranker: Optional custom single-candidate reranker function.
-            Signature: (client, change_summary, chunk) -> (score, reason, chunk) | None.
-            If None, uses the default _rerank_single_candidate with prompt_builder.
 
     Returns:
         List of (score, reason, chunk) tuples for candidates scoring >= 5.
     """
     results: list[tuple[float, str, dict]] = []
 
-    def _default_rerank(client, _change_summary, chunk):
-        return _rerank_single_candidate(client, prompt_builder(_change_summary, chunk), chunk)
-
-    rerank_fn = reranker or _default_rerank
+    def _do_rerank(client, change_summary, chunk):
+        return _rerank_single_candidate(client, prompt_builder(change_summary, chunk), chunk)
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {
-            executor.submit(
-                rerank_fn,
-                client,
-                change_summary,
-                chunk,
-            ): chunk
+            executor.submit(_do_rerank, client, change_summary, chunk): chunk
             for _sim_score, chunk in candidates
         }
         for future in as_completed(futures):
@@ -428,7 +416,6 @@ def find_affected(
     top_n: int = 15,
     repo_root: Path | None = None,
     embed_provider: tuple | None = None,
-    reranker: Callable | None = None,
 ) -> list:
     """Two-stage impact finder: embed query, cosine recall, Haiku rerank, build results.
 
@@ -445,9 +432,6 @@ def find_affected(
         top_n: Number of top candidates to pass to Haiku for reranking.
         repo_root: Repository root path. Defaults to cwd.
         embed_provider: Optional (embed_fn, model_name) tuple. Auto-detected if None.
-        reranker: Optional custom reranker function.
-            Signature: (client, change_summary, chunk) -> (score, reason, chunk) | None.
-            If None, uses the default core reranker with rerank_prompt_builder.
 
     Returns:
         List of result models (type depends on result_builder).
@@ -504,9 +488,7 @@ def find_affected(
         # Fall back to embedding-only results
         return fallback_builder(candidates)
 
-    results = _rerank_candidates(
-        client, change_summary, candidates, rerank_prompt_builder, reranker=reranker
-    )
+    results = _rerank_candidates(client, change_summary, candidates, rerank_prompt_builder)
 
     return result_builder(results)
 

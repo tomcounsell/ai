@@ -18,16 +18,14 @@ from tools.impact_finder_core import (
     EMBEDDING_BATCH_SIZE,
     HAIKU_CONTENT_PREVIEW_CHARS,
     MIN_SIMILARITY_THRESHOLD,
-    _embed_openai,
-    _embed_voyage,
     chunk_markdown,
     cosine_similarity,
+    get_embedding_provider,
 )
 from tools.impact_finder_core import build_index as _core_build_index
 from tools.impact_finder_core import find_affected as _core_find_affected
 from tools.impact_finder_core import load_index as _core_load_index
 
-# Re-export core symbols for backward compatibility
 __all__ = [
     "EMBEDDING_BATCH_SIZE",
     "HAIKU_CONTENT_PREVIEW_CHARS",
@@ -39,10 +37,6 @@ __all__ = [
     "get_embedding_provider",
     "index_docs",
     "load_index",
-    "_candidates_to_affected_docs",
-    "_embed_openai",
-    "_embed_voyage",
-    "_rerank_single_candidate",
 ]
 
 
@@ -78,40 +72,6 @@ def _discover_doc_files(repo_root: Path) -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# Embedding provider (module-level for patchability)
-# ---------------------------------------------------------------------------
-
-
-def get_embedding_provider() -> tuple | None:
-    """Detect available embedding API and return (embed_function, model_name).
-
-    Priority order: OPENAI_API_KEY, VOYAGE_API_KEY.
-    Returns None if no provider is available.
-
-    This function references module-level _embed_openai / _embed_voyage so that
-    tests can patch tools.doc_impact_finder._embed_openai and the patch takes effect.
-    """
-    import os
-
-    if os.environ.get("OPENAI_API_KEY"):
-        return _embed_openai, "text-embedding-3-small"
-
-    if os.environ.get("VOYAGE_API_KEY"):
-        try:
-            import voyageai  # noqa: F401
-
-            return _embed_voyage, "voyage-3-lite"
-        except ImportError:
-            import logging
-
-            logging.getLogger(__name__).warning(
-                "VOYAGE_API_KEY set but voyageai package not installed"
-            )
-
-    return None
-
-
-# ---------------------------------------------------------------------------
 # Doc-specific reranking prompt
 # ---------------------------------------------------------------------------
 
@@ -130,29 +90,6 @@ def _doc_rerank_prompt(change_summary: str, chunk: dict) -> str:
         f"Respond with ONLY a JSON object: "
         f'{{"score": <0-10>, "reason": "<brief explanation>"}}'
     )
-
-
-# ---------------------------------------------------------------------------
-# Doc-specific reranking (backward compat wrapper)
-# ---------------------------------------------------------------------------
-
-
-def _rerank_single_candidate(
-    client,
-    change_summary: str,
-    chunk: dict,
-) -> tuple[float, str, dict] | None:
-    """Rerank a single doc candidate using Claude Haiku.
-
-    Backward-compatible wrapper: builds the doc-specific prompt and delegates
-    to the core reranker.
-    """
-    from tools.impact_finder_core import (
-        _rerank_single_candidate as _core_rerank,
-    )
-
-    prompt = _doc_rerank_prompt(change_summary, chunk)
-    return _core_rerank(client, prompt, chunk)
 
 
 # ---------------------------------------------------------------------------
@@ -279,5 +216,4 @@ def find_affected_docs(
         top_n=top_n,
         repo_root=repo_root,
         embed_provider=get_embedding_provider(),
-        reranker=_rerank_single_candidate,
     )

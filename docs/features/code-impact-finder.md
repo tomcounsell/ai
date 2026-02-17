@@ -62,6 +62,8 @@ class AffectedCode(BaseModel):
     reason: str         # "Reads session_id which is being restructured"
 ```
 
+The `impact_type` is determined by Haiku during reranking (it classifies the relationship to the change). Falls back to path-based heuristics when Haiku doesn't provide one.
+
 ## Integration with /do-plan
 
 During Phase 1, after narrowing the problem, the planner runs:

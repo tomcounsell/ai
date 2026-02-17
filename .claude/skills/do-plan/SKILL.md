@@ -26,7 +26,7 @@ Creates structured feature plans in `docs/plans/` following Shape Up principles:
    - Yes: "login fails when users have 2FA enabled on certain providers"
 3. **Blast radius analysis** — If the change involves code modifications, run the code impact finder to surface coupled files:
    ```bash
-   cd /Users/valorengels/src/ai && .venv/bin/python -m tools.code_impact_finder "PROBLEM_STATEMENT_HERE"
+   .venv/bin/python -m tools.code_impact_finder "PROBLEM_STATEMENT_HERE"
    ```
 
    Use results to inform plan sections:
