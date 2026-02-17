@@ -48,7 +48,7 @@ Detection uses the `SKILL_DETECTORS` mapping in `bridge/coach.py`. Currently sup
 |---------|-------|---------------|
 | `/do-plan` | plan | Finalized plan doc with all required sections |
 | `/do-build` | build | Passing tests, commit hashes, and a PR link |
-| `/do-test` | test | Test output with pass/fail counts and coverage |
+| `/do-test` | test | Test output with pass/fail counts and failure details |
 | `/do-docs` | document | Created/updated doc file paths and index entry |
 
 Detection works two ways (OR logic):
