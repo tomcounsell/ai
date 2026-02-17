@@ -21,6 +21,20 @@ _BRIDGE_PROJECT_DIR = Path(__file__).parent.parent
 logger = logging.getLogger(__name__)
 
 
+def _get_machine_name() -> str:
+    """Get the macOS Computer Name, falling back to hostname."""
+    try:
+        result = subprocess.run(
+            ["scutil", "--get", "ComputerName"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return platform.node().split(".")[0]
+
+
 # =============================================================================
 # Job Queue Integration
 # =============================================================================
@@ -73,7 +87,7 @@ async def _handle_update_command(tg_client, event):
     # Import here to avoid circular dependency
     from bridge.response import send_response_with_files, set_reaction
 
-    machine = platform.node().split(".")[0]  # e.g. "toms-macbook-pro"
+    machine = _get_machine_name()
     logger.info(f"[bridge] /update command received from chat {event.chat_id}")
     try:
         await set_reaction(tg_client, event.chat_id, event.message.id, "👀")
@@ -152,7 +166,7 @@ async def _handle_force_update_command(tg_client, event):
     """
     from bridge.response import send_response_with_files, set_reaction
 
-    machine = platform.node().split(".")[0]
+    machine = _get_machine_name()
     logger.info(f"[bridge] /update --force received from chat {event.chat_id}")
     try:
         await set_reaction(tg_client, event.chat_id, event.message.id, "🔥")
