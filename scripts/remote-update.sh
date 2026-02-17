@@ -35,3 +35,15 @@ fi
 # ── Run update in cron mode ──────────────────────────────────────────
 # Output goes directly to Telegram - keep it clean for PM-style summary
 "$PYTHON" "$PROJECT_DIR/scripts/update/run.py" --cron
+
+# ── Reload daydream plist if present ─────────────────────────────────
+DAYDREAM_PLIST="$PROJECT_DIR/com.valor.daydream.plist"
+DAYDREAM_DST="$HOME/Library/LaunchAgents/com.valor.daydream.plist"
+DAYDREAM_LABEL="com.valor.daydream"
+if [ -f "$DAYDREAM_PLIST" ]; then
+    if launchctl list | grep -q "$DAYDREAM_LABEL"; then
+        launchctl unload "$DAYDREAM_DST" 2>/dev/null || true
+    fi
+    cp "$DAYDREAM_PLIST" "$DAYDREAM_DST"
+    launchctl load "$DAYDREAM_DST" 2>/dev/null || true
+fi
