@@ -1,5 +1,5 @@
 ---
-description: Scale compute by spawning multiple agents in parallel for independent tasks
+description: "Scale compute by spawning multiple agents in parallel for independent tasks. Use when facing multiple independent tasks that can run concurrently."
 ---
 
 # Parallel Thread Execution (P-Thread)

@@ -1,5 +1,5 @@
 ---
-description: "Review pull requests by analyzing code changes, validating against plan requirements, and capturing visual proof via screenshots"
+description: "Review pull requests by analyzing code changes, validating against plan requirements, and capturing visual proof via screenshots. Use when the user says 'review this PR', 'check the pull request', 'do a PR review', or provides a PR URL for review."
 argument-hint: <PR-number>
 ---
 

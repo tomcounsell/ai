@@ -1,5 +1,5 @@
 ---
-description: Guide for extending the Valor system with new skills, tools, and capabilities
+description: "Guide for extending the Valor system with new skills, tools, and capabilities. Use when adding a new feature, skill, tool, or MCP server to the system."
 ---
 
 # Add Feature - Extension Guide

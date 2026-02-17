@@ -1,5 +1,5 @@
 ---
-description: Systematically audit new or modified tools for quality, architecture compliance, and integration patterns
+description: "Systematically audit new or modified tools for quality, architecture compliance, and integration patterns. Use after creating or modifying a tool to verify it meets standards."
 ---
 
 # Tool Audit System
