@@ -25,7 +25,7 @@ The classifier (`bridge/summarizer.py`) and coach (`bridge/coach.py`) are two ha
 - Two prompt engineering surfaces (classifier system prompt + coach templates) that must agree on what "done" means
 
 **Desired outcome:**
-A single LLM call that both classifies the output AND generates the coaching message when auto-continuing. No string matching on LLM reasoning. The same model that decides "this isn't done" explains exactly what's missing.
+A single Haiku call that classifies the output AND — when rejecting — generates the coaching message in the same pass. Most of the time (~60-70%) the classifier approves the output (completion, question, blocker, error) and it flows straight through to the summarizer with no coaching needed. Only when the classifier rejects (downgrading a completion to status, or flagging a status update for auto-continue) does it also produce a coaching message. One LLM call, two possible outcomes: pass (no coaching) or fail (coaching included).
 
 ## Appetite
 
@@ -49,23 +49,27 @@ No prerequisites — uses the same Anthropic API key and MODEL_FAST already in u
 
 ### Key Elements
 
-- **Combined classify-and-coach prompt**: Single system prompt that returns classification + coaching message in one structured response
-- **Structured output schema**: JSON response with `type`, `confidence`, `reason`, and `coaching_message` fields — no string matching needed
-- **Coach simplification**: `build_coaching_message()` becomes a thin dispatcher that uses the LLM-generated coaching for rejections and keeps existing skill/plan-aware coaching for status updates
-- **Heuristic fallback preserved**: The existing `_classify_with_heuristics()` stays as fallback when LLM is unavailable, paired with existing static coach templates
+- **Single Haiku call with pass/fail branching**: One prompt, one call. The LLM classifies AND coaches in the same response. `coaching_message` is null on pass (majority case — output goes to summarizer), populated on fail (auto-continue with guidance).
+- **Structured output schema**: JSON response with `type`, `confidence`, `reason`, and `coaching_message` fields — no string matching needed. The `coaching_message` field being null vs populated IS the pass/fail signal.
+- **Coach simplification**: `build_coaching_message()` becomes a thin dispatcher that uses the LLM-generated coaching when available and keeps existing skill/plan-aware coaching as enrichment for the heuristic fallback path.
+- **Heuristic fallback preserved**: The existing `_classify_with_heuristics()` stays as fallback when LLM is unavailable, paired with existing static coach templates.
 
 ### Flow
 
-**Agent output arrives** → `classify_and_coach(text, context)` → single LLM call → returns `ClassificationResult` with `coaching_message` field populated → bridge uses `coaching_message` directly for auto-continue → no string matching, no second system
+**Agent output arrives** → `classify_output(text)` → single Haiku call → returns `ClassificationResult`:
+- **Pass (~60-70%):** `type` is completion/question/blocker/error → `coaching_message` is null → output flows to summarizer → delivered to Telegram
+- **Fail (~30-40%):** `type` is status (auto-continue needed) → `coaching_message` is populated with specific guidance → bridge uses it directly as the continuation prompt
+
+Same Haiku call, same JSON response. The `coaching_message` field is simply null when the output is approved and populated when it's rejected. No second LLM call, no string matching.
 
 ### Technical Approach
 
-1. **Extend `ClassificationResult`** — add `coaching_message: str | None` field (None for types that don't auto-continue)
-2. **Merge the classifier prompt** — expand `CLASSIFIER_SYSTEM_PROMPT` to also generate a coaching message when classifying as `status` (especially rejected completions). The prompt tells the LLM: "If you're downgrading a completion, explain specifically what evidence was missing"
-3. **Update JSON schema** — response becomes `{"type": "...", "confidence": 0.95, "reason": "...", "coaching_message": "..."}`
-4. **Remove `was_rejected_completion` detection** — the hedging pattern matching in `_parse_classification_response()` (lines 418-432) is deleted. The LLM now explicitly returns coaching when it rejects
-5. **Simplify `build_coaching_message()`** — check if `classification.coaching_message` exists first; if so, use it. Fall through to existing skill/plan-aware coaching only when no LLM coaching was provided (heuristic fallback path)
-6. **Pass context to classifier** — optionally pass plan file path and active skill info so the LLM can reference success criteria in its coaching
+1. **Extend `ClassificationResult`** — add `coaching_message: str | None` field. Null on pass-through types (completion, question, blocker, error). Populated on status/auto-continue.
+2. **Merge the classifier prompt** — expand `CLASSIFIER_SYSTEM_PROMPT` to: "When classifying as `status`, also return a `coaching_message` explaining what the agent should do or fix. When classifying as any other type, set `coaching_message` to null." This is the key design: one prompt, two branches.
+3. **Update JSON schema** — response becomes `{"type": "...", "confidence": 0.95, "reason": "...", "coaching_message": "..."|null}`. The majority of responses will have `coaching_message: null` since most output is approved.
+4. **Remove `was_rejected_completion` detection** — the hedging pattern matching in `_parse_classification_response()` (lines 418-432) is deleted. The LLM now explicitly returns coaching when it rejects — no need to reverse-engineer intent from the reason field.
+5. **Simplify `build_coaching_message()`** — check if `classification.coaching_message` exists first; if so, prefix with `[System Coach]` and return. Fall through to existing skill/plan-aware coaching only when no LLM coaching was provided (heuristic fallback path).
+6. **Pass context to classifier** — optionally pass plan file path and active skill info so the LLM can reference success criteria in its coaching when rejecting.
 
 ## Rabbit Holes
 
