@@ -118,7 +118,7 @@ SOME_VAR: $1  # First argument passed to skill
 - `/prime` - Codebase onboarding
 - `/pthread` - Parallel thread execution
 - `/sdlc` - Autonomous dev workflow
-- `/review` - Implementation validation
+- `/do-pr-review` - PR review and implementation validation
 - `/setup` - New machine configuration
 
 ## Adding to the Telegram Bridge

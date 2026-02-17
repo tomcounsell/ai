@@ -265,4 +265,4 @@ After all edits are complete:
 This skill pairs with:
 - `/do-build` — run after build completes to cascade doc updates for the shipped code
 - `/do-plan` — plans created here may need updating when prerequisites ship
-- `/review` — review can invoke this to verify docs match implementation
+- `/do-pr-review` — PR review can invoke this to verify docs match implementation

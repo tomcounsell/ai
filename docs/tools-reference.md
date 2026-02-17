@@ -151,7 +151,7 @@ agent-browser snapshot -i
 
 ### Screenshot Naming Convention
 
-For `/review` workflow, screenshots follow this pattern:
+For `/do-pr-review` workflow, screenshots follow this pattern:
 
 ```
 generated_images/{workflow_id}/{nn}_{descriptive_name}.png
@@ -166,12 +166,12 @@ generated_images/review-auth/03_error_state.png
 
 Multi-step processes that combine tools for common tasks.
 
-### Review Workflow (`/review`)
+### PR Review Workflow (`/do-pr-review`)
 
 Validate implementation against spec with screenshots.
 
 ```
-/review [workflow_id] [spec_file]
+/do-pr-review [workflow_id] [spec_file]
 ```
 
 Steps:

@@ -8,7 +8,7 @@ Prepare the application for review by starting necessary services and ensuring t
 
 ## When to Use
 
-- Before running `/review` command with UI validation
+- Before running `/do-pr-review` command with UI validation
 - Before manual testing of web applications
 - When setting up local development environment for testing
 - Before browser automation with `agent-browser`
@@ -269,7 +269,7 @@ lsof -ti:3000 | xargs kill
 ## Integration Notes
 
 **Works with:**
-- `/review` - Ensures app is running before screenshots
+- `/do-pr-review` - Ensures app is running before screenshots
 - `agent-browser` - Prepares environment for browser automation
 - Local development workflow
 

@@ -17,7 +17,7 @@ We can only access Telegram messages programmatically through the bridge's Telet
 - Bridge queries return message text and metadata, but we can't verify visual presentation
 - No way to screenshot actual conversations for review evidence
 - Debugging UX issues (broken formatting, missing reactions) requires manual inspection
-- The `/review` skill can screenshot web apps via `agent-browser` but has no equivalent for native desktop apps
+- The `/do-pr-review` skill can screenshot web apps via `agent-browser` but has no equivalent for native desktop apps
 
 **Desired outcome:**
 - Screenshot Telegram Desktop conversations as visual evidence during reviews
