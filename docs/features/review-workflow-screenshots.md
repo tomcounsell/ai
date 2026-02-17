@@ -8,17 +8,17 @@ implemented: 2026-02-04
 
 ## Overview
 
-The `/review` command validates implementations against specifications and captures visual proof via screenshots.
+The `/do-pr-review` command validates implementations against specifications and captures visual proof via screenshots.
 
 **Status:** ✅ Implemented
 **Implementation files:**
-- `.claude/commands/review.md` - Review workflow command
+- `.claude/commands/do-pr-review.md` - Review workflow command
 - `.claude/commands/prepare_app.md` - App preparation command
 - `CLAUDE.md` - Documentation and integration
 
 ## Source Inspiration
 
-From `indydan/tac-6/.claude/commands/review.md` and the `adw_review.py` workflow.
+From `indydan/tac-6/.claude/commands/do-pr-review.md` and the `adw_review.py` workflow.
 
 ## Problem Statement
 
@@ -32,7 +32,7 @@ This means work gets shipped without visual verification and issues aren't categ
 
 ## Proposed Solution
 
-Create a `/review` command that:
+Create a `/do-pr-review` command that:
 1. Finds the spec file for current work
 2. Compares implementation against requirements
 3. Captures screenshots of critical UI paths
@@ -59,7 +59,7 @@ Create a `/review` command that:
 
 ```
 .claude/commands/
-  review.md           # Review workflow command
+  do-pr-review.md           # Review workflow command
   prepare_app.md      # App setup for review (start servers, etc.)
 
 agents/
@@ -140,7 +140,7 @@ Examples:
 
 ## Implementation Steps
 
-1. Create `.claude/commands/review.md` with review logic
+1. Create `.claude/commands/do-pr-review.md` with review logic
 2. Create `.claude/commands/prepare_app.md` for app setup
 3. Add screenshot storage to `agents/{id}/review/review_img/`
 4. Integrate with agent-browser for captures

@@ -240,7 +240,7 @@ The **## Agent Integration** section should cover:
 |----------|---------|
 | `/prime` | Full architecture deep dive and codebase onboarding |
 | `/setup` | New machine configuration |
-| `/review` | Implementation validation with screenshots |
+| `/do-pr-review` | PR review with implementation validation and screenshots |
 | `/add-feature` | How to extend the system |
 | `/sdlc` | Autonomous Plan → Build → Test → Ship workflow |
 | `docs/deployment.md` | Multi-instance deployment |
