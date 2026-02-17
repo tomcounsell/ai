@@ -90,12 +90,28 @@ async def check_all_sessions() -> None:
                         ", ".join(assessment["issues"]),
                     )
         except Exception as e:
-            logger.error(
-                "[watchdog] Error handling session %s: %s",
-                session.session_id,
-                e,
-                exc_info=True,
-            )
+            if "Unique constraint violated" in str(e):
+                # CRASH GUARD: Stale sessions left behind by SDK crashes can have
+                # duplicate Redis keys. When the watchdog tries to save/update them,
+                # popoto raises "Unique constraint violated". We catch this and mark
+                # the session as failed to prevent the watchdog from looping on it
+                # every cycle. See docs/features/coaching-loop.md "Related Guards".
+                try:
+                    session.status = "failed"
+                    session.save()
+                    logger.warning(
+                        "[watchdog] Marked stale session %s as failed (unique constraint)",
+                        session.session_id,
+                    )
+                except Exception:
+                    pass
+            else:
+                logger.error(
+                    "[watchdog] Error handling session %s: %s",
+                    session.session_id,
+                    e,
+                    exc_info=True,
+                )
 
     if fixed_count > 0:
         logger.info(

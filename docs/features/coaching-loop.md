@@ -42,6 +42,29 @@ To add a future skill, add an entry to `SKILL_DETECTORS` — the coach picks it 
 
 The system also fixes a bug where `BackgroundTask._run_work()` would re-send SDK results through `send_to_chat` after auto-continue already handled them. Setting `_completion_sent=True` in the auto-continue path prevents this.
 
+## Error-Classified Output Bypass (Crash Guard)
+
+When the SDK crashes or returns an error, the output classifier labels it as `ERROR`. Error-classified outputs **skip auto-continue entirely** and are sent directly to chat. This prevents the system from endlessly re-enqueuing continuation jobs for a session that will keep crashing.
+
+### Flow
+
+1. SDK session crashes or returns an error message
+2. Output classifier labels the result as `OutputType.ERROR`
+3. The `send_to_chat` callback in `agent/job_queue.py` checks the classification
+4. Because the type is `ERROR`, auto-continue logic is bypassed completely
+5. The error message is sent to chat so the user sees what happened
+6. Session cleanup in `agent/sdk_client.py` marks the session as `failed` in Redis
+7. The session watchdog (`monitoring/session_watchdog.py`) handles any stale sessions left behind by crashes, including those with unique constraint violations from duplicate session IDs
+
+### Why This Matters
+
+Without this guard, an SDK crash would produce output classified as a status update (since error messages are short and lack completion evidence). The auto-continue system would then re-enqueue the job, which would crash again, creating an infinite crash loop consuming resources and flooding logs.
+
+### Related Guards
+
+- **Session cleanup on SDK error**: `agent/sdk_client.py` marks sessions as `failed` in the `except` block, preventing the watchdog from trying to interact with dead sessions
+- **Unique constraint handling**: `monitoring/session_watchdog.py` catches `Unique constraint violated` errors from stale sessions and marks them as `failed` to break the watchdog loop
+
 ## Key Files
 
 | File | Purpose |
@@ -50,6 +73,8 @@ The system also fixes a bug where `BackgroundTask._run_work()` would re-send SDK
 | `bridge/summarizer.py` | `ClassificationResult.was_rejected_completion` flag |
 | `agent/job_queue.py` | Auto-continue wiring, WorkflowState resolution, duplicate suppression |
 | `tests/test_coach.py` | Coach module tests (skill detection, criteria extraction, coaching tiers) |
+| `agent/sdk_client.py` | Session cleanup on SDK errors (marks sessions as `failed`) |
+| `monitoring/session_watchdog.py` | Stale session detection with unique constraint handling |
 | `tests/test_auto_continue.py` | Auto-continue duplicate suppression tests |
 
 ## Tuning Guide

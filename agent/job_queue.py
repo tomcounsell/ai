@@ -1011,7 +1011,17 @@ async def _execute_job(job: Job) -> None:
             f"(confidence={classification.confidence:.2f}): {classification.reason}"
         )
 
-        if (
+        if classification.output_type == OutputType.ERROR:
+            # CRASH GUARD: Error-classified outputs bypass auto-continue entirely.
+            # Without this, SDK crashes would be misclassified as status updates
+            # and re-enqueued indefinitely, creating an infinite crash loop.
+            # See docs/features/coaching-loop.md "Error-Classified Output Bypass".
+            logger.info(
+                f"[{job.project_key}] Error classified — skipping auto-continue"
+            )
+            # Fall through to send error to chat
+
+        elif (
             classification.output_type == OutputType.STATUS_UPDATE
             and auto_continue_count < MAX_AUTO_CONTINUES
         ):

@@ -24,7 +24,7 @@ The watchdog runs as an `asyncio.create_task()` in the bridge's `main()` functio
 3. Applies four detection heuristics (silence, loop, error cascade, duration)
 4. Sends a Telegram alert for any session showing issues, respecting cooldowns
 
-The watchdog is **read-only** — it never modifies session state, tool history, or log files.
+The watchdog fixes problems automatically — marking stuck sessions as abandoned and crashed sessions as failed. It creates GitHub issues for problems that can't be auto-fixed. It never modifies tool history or log files.
 
 ## Detection Heuristics
 
@@ -65,7 +65,11 @@ Fires when `time.time() - session.started_at > DURATION_THRESHOLD`. Most tasks s
 - 1 issue detected: `warning`
 - 2+ issues detected: `critical`
 
-## Alert System
+### Unique Constraint Handling (Crash Guard)
+
+When the watchdog encounters a `Unique constraint violated` error while processing a session, it marks that session as `failed` instead of logging the error and retrying every cycle. This prevents infinite retry loops caused by stale sessions left over from SDK crashes. See [Coaching Loop — Error Crash Guard](coaching-loop.md) for the full crash guard mechanism.
+
+## Remediation
 
 Alerts are sent as Telegram messages to the chat where the session originated. Each alert includes session ID, project key, duration, tool call count, and a bulleted list of detected issues.
 
