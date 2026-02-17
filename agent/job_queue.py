@@ -840,7 +840,8 @@ async def _execute_job(job: Job) -> None:
         # The work is done — further messages are noise that spams the chat.
         if _completion_sent:
             logger.info(
-                f"[{job.project_key}] Dropping post-completion output "
+                f"[{job.project_key}] Dropping suppressed output "
+                f"(completion sent or auto-continued) "
                 f"({len(msg)} chars): {msg[:100]!r}"
             )
             return
@@ -877,8 +878,35 @@ async def _execute_job(job: Job) -> None:
                     "confidence": classification.confidence,
                     "reason": classification.reason,
                     "message_preview": msg[:200],
+                    "coaching_context": "pending",  # Updated below after coaching builds
                 },
                 working_dir=str(working_dir),
+            )
+
+            # Build context-aware coaching message instead of bare "continue"
+            from bridge.coach import build_coaching_message
+
+            # Resolve plan_file from WorkflowState if available
+            _plan_file = None
+            if job.workflow_id:
+                try:
+                    from agent.workflow_state import WorkflowState
+
+                    ws = WorkflowState.load(job.workflow_id)
+                    if ws.data and ws.data.plan_file:
+                        _plan_file = ws.data.plan_file
+                except Exception:
+                    pass  # Degrade gracefully — coach without plan context
+
+            coaching_message = build_coaching_message(
+                classification=classification,
+                plan_file=_plan_file,
+                job_message_text=job.message_text,
+            )
+
+            logger.info(
+                f"[{job.project_key}] Coaching message "
+                f"({len(coaching_message)} chars): {coaching_message[:120]!r}"
             )
 
             # Re-enqueue a continuation job with the same session_id
@@ -888,7 +916,7 @@ async def _execute_job(job: Job) -> None:
                 project_key=job.project_key,
                 session_id=job.session_id,
                 working_dir=job.working_dir,
-                message_text="continue",
+                message_text=coaching_message,
                 sender_name="System (auto-continue)",
                 chat_id=job.chat_id,
                 message_id=job.message_id,
@@ -897,6 +925,12 @@ async def _execute_job(job: Job) -> None:
                 task_list_id=job.task_list_id,
                 auto_continue_count=auto_continue_count,
             )
+
+            # Suppress BackgroundTask's final messenger.send(result) call.
+            # Without this, _run_work() re-sends the SDK result through
+            # send_to_chat after we already auto-continued, causing duplicate
+            # messages in chat.
+            _completion_sent = True
 
             # Signal that this job should NOT set a reaction
             # (defer to the continuation job)
