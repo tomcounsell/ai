@@ -35,9 +35,10 @@ class TestDaydreamPlist:
         with open(PROJECT_ROOT / "com.valor.daydream.plist", "rb") as f:
             data = plistlib.load(f)
         args = data["ProgramArguments"]
-        assert len(args) == 2
-        assert "python" in args[0]
-        assert "daydream.py" in args[1]
+        # Uses bash -c to source .env before running python
+        assert args[0] == "/bin/bash"
+        assert "daydream.py" in args[-1]
+        assert ".env" in args[-1]
 
     def test_plist_log_paths(self):
         with open(PROJECT_ROOT / "com.valor.daydream.plist", "rb") as f:

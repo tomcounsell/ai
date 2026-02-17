@@ -6,8 +6,9 @@
     <string>com.valor.daydream</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/valorengels/src/ai/.venv/bin/python</string>
-        <string>/Users/valorengels/src/ai/scripts/daydream.py</string>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>set -a; source /Users/valorengels/src/ai/.env; set +a; exec /Users/valorengels/src/ai/.venv/bin/python /Users/valorengels/src/ai/scripts/daydream.py</string>
     </array>
     <key>WorkingDirectory</key>
     <string>/Users/valorengels/src/ai</string>

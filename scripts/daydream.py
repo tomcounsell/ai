@@ -418,10 +418,10 @@ class DaydreamRunner:
             (3, "Check Error Logs (Sentry)", self.step_check_sentry),
             (4, "Clean Up Task Management", self.step_clean_tasks),
             (5, "Update Documentation", self.step_update_docs),
-            (6, "Produce Daily Report", self.step_produce_report),
-            (7, "Session Analysis", self.step_session_analysis),
-            (8, "LLM Reflection", self.step_llm_reflection),
-            (9, "Memory Consolidation", self.step_memory_consolidation),
+            (6, "Session Analysis", self.step_session_analysis),
+            (7, "LLM Reflection", self.step_llm_reflection),
+            (8, "Memory Consolidation", self.step_memory_consolidation),
+            (9, "Produce Daily Report", self.step_produce_report),
             (10, "GitHub Issue Creation", self.step_create_github_issue),
         ]
 
@@ -457,7 +457,7 @@ class DaydreamRunner:
                 logger.error(f"Step {step_num} failed: {e}")
                 self.state.daily_report.append(f"Failed: {step_name} - {str(e)}")
                 self.state.save()
-                raise
+                continue
 
         logger.info("Daydream completed successfully")
 
