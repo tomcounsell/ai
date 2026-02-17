@@ -22,7 +22,7 @@ For the full feature description, see [Daydream Reactivation](../features/daydre
 
 | Step | Name | Failure Mode |
 |------|------|-------------|
-| 1 | Legacy Cleanup | Non-blocking. Logs warning, continues. |
+| 1 | File Cleanup | Non-blocking. Logs warning, continues. |
 | 2 | Log Review | Non-blocking. Skips if `logs/bridge.log` missing. |
 | 3 | Sentry Check | Non-blocking. Skips if MCP unavailable. |
 | 4 | Task Cleanup | Non-blocking. Requires `gh` CLI authentication. |
