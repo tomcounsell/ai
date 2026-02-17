@@ -1,25 +1,44 @@
-# Coaching Loop: Context-Aware Auto-Continue Messages
+# Coaching Loop
 
-## Overview
+The coaching loop prevents the auto-continue system from blindly sending "continue" when the agent pauses. Instead, it generates context-aware coaching messages that guide the agent toward productive next steps.
 
-When the output classifier downgrades a completion to STATUS_UPDATE (due to hedging or missing evidence), the auto-continue system sends targeted coaching messages instead of bare "continue". The coach is explanatory and supportive — it tells the agent what it needs to confirm next time it stops, rather than barking commands.
+## Architecture
 
-**Philosophy:** The coach is here to help, not to be a supervisor. When uncertain about context, it degrades gracefully to plain "continue" rather than risk misdirecting the agent. It is better to say little or nothing than to accidentally coach in the wrong direction.
+The classifier and coach work together in a unified pipeline. The classifier (an LLM call in `bridge/summarizer.py`) categorizes agent output and, when it detects a status update, also generates a coaching message in the same pass. The coach (`bridge/coach.py`) then selects the best available coaching message from a tiered fallback chain.
 
-## How It Works
+### Merged Classifier-Coach Design
 
-### Three-Tier Coaching
+The classifier prompt asks the LLM to do two things simultaneously:
 
-The coaching system (`bridge/coach.py`) builds messages based on context:
+1. **Classify** the agent output as `question`, `status`, `completion`, `blocker`, or `error`
+2. **Generate a coaching message** (for `status` classifications) explaining what the agent should do next
 
-1. **Rejection coaching** (highest priority) — When `was_rejected_completion=True`, the agent gets an explanation of why its completion wasn't accepted and what evidence to include next time.
+This eliminates the need for a separate hedging-detection pass. The LLM natively understands when an agent is hedging, stalling, or missing evidence, and produces a targeted coaching message as part of its classification response.
 
-2. **Skill-aware coaching** — When an SDLC skill is active:
-   - If a plan file has a `## Success Criteria` section that can be parsed with certainty, the criteria are quoted verbatim
-   - If the plan file exists but criteria can't be cleanly extracted, the coach points the agent to the file path (never guesses)
-   - If no plan file but a skill is detected from the message text, the coach uses the skill's `evidence_hint` from `SKILL_DETECTORS`
+The `ClassificationResult` dataclass carries both pieces:
 
-3. **Plain continue** (fallback) — Genuine status updates with no dev skill context get "continue" unchanged.
+```python
+@dataclass
+class ClassificationResult:
+    output_type: OutputType
+    confidence: float
+    reason: str
+    coaching_message: str | None = None  # LLM-generated coaching, if applicable
+    was_rejected_completion: bool = False  # True when coaching_message present on status
+```
+
+## Coaching Tiers
+
+The `build_coaching_message()` function in `bridge/coach.py` resolves coaching through a tiered fallback chain:
+
+| Tier | Source | Description |
+|------|--------|-------------|
+| **Tier 1** | LLM coaching | Uses `classification.coaching_message` from the merged classifier pass. Prefixed with `[System Coach]`. |
+| **Tier 1b** | Heuristic rejection coaching | Static templates from `_build_heuristic_rejection_coaching()` when no LLM coaching is available but `was_rejected_completion=True`. |
+| **Tier 2** | Skill-aware coaching | Matches the agent output against known skills/commands and suggests relevant evidence. |
+| **Tier 3** | Plain continue | Falls back to a simple "continue" message when no richer coaching is available. |
+
+The first tier that produces a non-None result wins.
 
 ### Skill Detection
 
@@ -38,15 +57,30 @@ Detection works two ways (OR logic):
 
 To add a future skill, add an entry to `SKILL_DETECTORS` — the coach picks it up automatically.
 
-### Duplicate Message Fix
+## Flow
 
-The system also fixes a bug where `BackgroundTask._run_work()` would re-send SDK results through `send_to_chat` after auto-continue already handled them. Setting `_completion_sent=True` in the auto-continue path prevents this.
+```
+Agent Output
+    |
+    v
+Classifier (LLM) --- produces {type, confidence, reason, coaching_message}
+    |
+    v
+build_coaching_message()
+    |-- Tier 1:  coaching_message from classifier (if present)
+    |-- Tier 1b: heuristic rejection templates (if was_rejected but no LLM coaching)
+    |-- Tier 2:  skill-aware coaching (plan criteria or skill evidence hints)
+    +-- Tier 3:  plain "continue"
+    |
+    v
+[System Coach] message sent to agent
+```
 
 ## Error-Classified Output Bypass (Crash Guard)
 
 When the SDK crashes or returns an error, the output classifier labels it as `ERROR`. Error-classified outputs **skip auto-continue entirely** and are sent directly to chat. This prevents the system from endlessly re-enqueuing continuation jobs for a session that will keep crashing.
 
-### Flow
+### Crash Guard Flow
 
 1. SDK session crashes or returns an error message
 2. Output classifier labels the result as `OutputType.ERROR`
@@ -54,50 +88,41 @@ When the SDK crashes or returns an error, the output classifier labels it as `ER
 4. Because the type is `ERROR`, auto-continue logic is bypassed completely
 5. The error message is sent to chat so the user sees what happened
 6. Session cleanup in `agent/sdk_client.py` marks the session as `failed` in Redis
-7. The session watchdog (`monitoring/session_watchdog.py`) handles any stale sessions left behind by crashes, including those with unique constraint violations from duplicate session IDs
-
-### Why This Matters
-
-Without this guard, an SDK crash would produce output classified as a status update (since error messages are short and lack completion evidence). The auto-continue system would then re-enqueue the job, which would crash again, creating an infinite crash loop consuming resources and flooding logs.
+7. The session watchdog (`monitoring/session_watchdog.py`) handles any stale sessions left behind by crashes
 
 ### Related Guards
 
-- **Session cleanup on SDK error**: `agent/sdk_client.py` marks sessions as `failed` in the `except` block, preventing the watchdog from trying to interact with dead sessions
-- **Unique constraint handling**: `monitoring/session_watchdog.py` catches `Unique constraint violated` errors from stale sessions and marks them as `failed` to break the watchdog loop
+- **Session cleanup on SDK error**: `agent/sdk_client.py` marks sessions as `failed` in the `except` block
+- **Unique constraint handling**: `monitoring/session_watchdog.py` catches stale session errors and marks them as `failed`
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `bridge/coach.py` | Coaching message builder with three tiers and `SKILL_DETECTORS` mapping |
-| `bridge/summarizer.py` | `ClassificationResult.was_rejected_completion` flag |
+| `bridge/summarizer.py` | LLM classifier that produces `ClassificationResult` with optional `coaching_message` |
+| `bridge/coach.py` | Tiered coaching resolution via `build_coaching_message()` |
 | `agent/job_queue.py` | Auto-continue wiring, WorkflowState resolution, duplicate suppression |
-| `tests/test_coach.py` | Coach module tests (skill detection, criteria extraction, coaching tiers) |
 | `agent/sdk_client.py` | Session cleanup on SDK errors (marks sessions as `failed`) |
 | `monitoring/session_watchdog.py` | Stale session detection with unique constraint handling |
+| `tests/test_coach.py` | Coach module tests (skill detection, criteria extraction, coaching tiers) |
+| `tests/test_summarizer.py` | Classifier tests including coaching_message extraction |
 | `tests/test_auto_continue.py` | Auto-continue duplicate suppression tests |
 
 ## Tuning Guide
 
-### Coaching Message Templates
+### Coaching via Classifier Prompt
 
-All coaching messages are static templates in `bridge/coach.py`. To adjust:
+The classifier prompt in `CLASSIFIER_SYSTEM_PROMPT` (`bridge/summarizer.py`) includes few-shot examples showing what coaching messages to generate. To adjust coaching quality, edit the examples in the prompt.
 
-- **Rejection coaching**: Edit `_build_rejection_coaching()` — explain what happened and what to include
-- **Skill coaching with criteria**: Edit `_build_skill_coaching_with_criteria()` — how quoted criteria are presented
-- **Skill coaching with file pointer**: Edit `_build_skill_coaching_with_file_pointer()` — fallback when criteria can't be parsed
-- **Generic skill coaching**: Edit `_build_generic_skill_coaching()` — uses `evidence_hint` from `SKILL_DETECTORS`
+### Heuristic Fallback
 
-### Hedging Detection Patterns
+The `_build_heuristic_rejection_coaching()` function in `bridge/coach.py` provides a static template used when the LLM classifier doesn't provide a `coaching_message`. This covers cases like permission errors, auth failures, and rate limiting.
 
-In `bridge/summarizer.py`, the `_parse_classification_response()` function checks the classifier's reason for hedging patterns:
+### Skill-Specific Coaching
 
-```python
-hedging_patterns = ["hedg", "no evidence", "no proof", "without verification",
-                    "unverified", "not verified", "no test", "no command output"]
-```
-
-Add patterns here to catch more rejection reasons.
+- **With plan criteria**: Edit `_build_skill_coaching_with_criteria()` — how quoted criteria are presented
+- **With file pointer**: Edit `_build_skill_coaching_with_file_pointer()` — fallback when criteria can't be parsed
+- **Generic skill**: Edit `_build_generic_skill_coaching()` — uses `evidence_hint` from `SKILL_DETECTORS`
 
 ### Plan Success Criteria Extraction
 
@@ -106,3 +131,12 @@ Add patterns here to catch more rejection reasons.
 ## Coaching Message Prefix
 
 All coaching messages (except plain "continue") are prefixed with `[System Coach]` so the agent can distinguish coaching from user messages.
+
+## Design Rationale
+
+Merging classification and coaching into a single LLM pass provides two benefits:
+
+1. **Fewer API calls** — one call instead of two (classify then coach separately)
+2. **Better coherence** — the same LLM context that decides "this is a status update" also explains what the agent should do about it, avoiding information loss from piping a classification label into a separate coaching prompt
+
+The previous approach used regex-based hedging pattern detection (matching keywords like "hedg", "no evidence", "no proof" in the classifier's reason text) followed by static coaching templates. The merged design replaces the brittle pattern matching with native LLM understanding while keeping heuristic fallbacks for reliability.
