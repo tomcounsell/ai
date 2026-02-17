@@ -110,6 +110,7 @@ For each existing test directory/group, create a Task:
 ```
 Task({
   description: "Run [suite-name] tests",
+  subagent_type: "test-engineer",
   prompt: "Run the following test command and report results:
 
     cd [CWD]
@@ -126,6 +127,7 @@ If lint is enabled, dispatch a lint agent in parallel too:
 ```
 Task({
   description: "Run lint checks",
+  subagent_type: "validator",
   prompt: "Run lint checks in [CWD]:
 
     cd [CWD]
