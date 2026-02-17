@@ -278,6 +278,28 @@ class TestClassificationResult:
         assert result.confidence == 0.95
         assert result.reason == "Direct question detected"
 
+    def test_coaching_message_default_none(self):
+        """coaching_message defaults to None when not provided."""
+        result = ClassificationResult(
+            output_type=OutputType.STATUS_UPDATE,
+            confidence=0.9,
+            reason="Test",
+        )
+        assert result.coaching_message is None
+
+    def test_coaching_message_set(self):
+        """coaching_message can be set explicitly."""
+        result = ClassificationResult(
+            output_type=OutputType.STATUS_UPDATE,
+            confidence=0.9,
+            reason="Test",
+            coaching_message="You said 'should work' but didn't show test output.",
+        )
+        assert (
+            result.coaching_message
+            == "You said 'should work' but didn't show test output."
+        )
+
     def test_confidence_range(self):
         """Confidence is a float between 0.0 and 1.0."""
         result = ClassificationResult(
@@ -371,6 +393,55 @@ class TestParseClassificationResponse:
         assert result is not None
         assert result.confidence == 0.5
 
+    def test_coaching_message_extracted(self):
+        """coaching_message is extracted from LLM JSON response."""
+        raw = (
+            '{"type": "status", "confidence": 0.92, '
+            '"reason": "hedging language", '
+            '"coaching_message": "You said \'should work\' — run the tests and share output."}'
+        )
+        result = _parse_classification_response(raw)
+        assert result is not None
+        assert (
+            result.coaching_message
+            == "You said 'should work' — run the tests and share output."
+        )
+
+    def test_coaching_message_absent_defaults_none(self):
+        """When coaching_message is missing from JSON, it defaults to None."""
+        raw = '{"type": "completion", "confidence": 0.95, "reason": "done"}'
+        result = _parse_classification_response(raw)
+        assert result is not None
+        assert result.coaching_message is None
+
+    def test_hedging_patterns_not_used_for_was_rejected(self):
+        """was_rejected_completion is NOT set by hedging pattern matching.
+
+        The old code scanned reason text for patterns like 'hedg', 'no evidence'.
+        This has been removed — was_rejected_completion should only be set
+        when coaching_message is present (indicating the LLM flagged it).
+        """
+        raw = (
+            '{"type": "status", "confidence": 0.90, '
+            '"reason": "hedging language detected, no evidence provided"}'
+        )
+        result = _parse_classification_response(raw)
+        assert result is not None
+        # Without coaching_message, was_rejected_completion should be False
+        assert result.was_rejected_completion is False
+
+    def test_was_rejected_set_when_coaching_message_present(self):
+        """was_rejected_completion is True when coaching_message is present on status."""
+        raw = (
+            '{"type": "status", "confidence": 0.90, '
+            '"reason": "completion downgraded", '
+            '"coaching_message": "Include test output next time."}'
+        )
+        result = _parse_classification_response(raw)
+        assert result is not None
+        assert result.was_rejected_completion is True
+        assert result.coaching_message == "Include test output next time."
+
     def test_not_a_dict(self):
         assert _parse_classification_response("[1, 2, 3]") is None
 
@@ -462,6 +533,28 @@ class TestClassifyWithHeuristics:
     def test_status_running_tests(self):
         result = _classify_with_heuristics("Running tests now...")
         assert result.output_type == OutputType.STATUS_UPDATE
+
+    def test_heuristics_always_return_coaching_message_none(self):
+        """All heuristic paths return coaching_message=None."""
+        # Question path
+        result = _classify_with_heuristics("Should I proceed?")
+        assert result.coaching_message is None
+
+        # Error path
+        result = _classify_with_heuristics("Error: something broke")
+        assert result.coaching_message is None
+
+        # Blocker path
+        result = _classify_with_heuristics("Blocked on API access")
+        assert result.coaching_message is None
+
+        # Completion path
+        result = _classify_with_heuristics("Done. All committed.")
+        assert result.coaching_message is None
+
+        # Default status path
+        result = _classify_with_heuristics("Working on it now")
+        assert result.coaching_message is None
 
     def test_empty_text(self):
         """Empty text still returns a valid classification."""
