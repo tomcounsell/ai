@@ -90,12 +90,24 @@ async def check_all_sessions() -> None:
                         ", ".join(assessment["issues"]),
                     )
         except Exception as e:
-            logger.error(
-                "[watchdog] Error handling session %s: %s",
-                session.session_id,
-                e,
-                exc_info=True,
-            )
+            if "Unique constraint violated" in str(e):
+                # Stale session from a crash — mark as failed to stop the loop
+                try:
+                    session.status = "failed"
+                    session.save()
+                    logger.warning(
+                        "[watchdog] Marked stale session %s as failed (unique constraint)",
+                        session.session_id,
+                    )
+                except Exception:
+                    pass
+            else:
+                logger.error(
+                    "[watchdog] Error handling session %s: %s",
+                    session.session_id,
+                    e,
+                    exc_info=True,
+                )
 
     if fixed_count > 0:
         logger.info(
