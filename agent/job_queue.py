@@ -1112,9 +1112,31 @@ def _session_branch_name(session_id: str) -> str:
 
 # === Revival Detection ===
 
-# Cooldown: {chat_id: timestamp} — one revival prompt per chat per 24h
-_revival_cooldowns: dict[str, float] = {}
 REVIVAL_COOLDOWN_SECONDS = 86400
+_COOLDOWN_FILE = Path(__file__).parent.parent / "data" / "revival_cooldowns.json"
+
+
+def _load_cooldowns() -> dict[str, float]:
+    """Load revival cooldowns from disk."""
+    try:
+        if _COOLDOWN_FILE.exists():
+            import json
+
+            return json.loads(_COOLDOWN_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _save_cooldowns(cooldowns: dict[str, float]) -> None:
+    """Persist revival cooldowns to disk."""
+    try:
+        import json
+
+        _COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _COOLDOWN_FILE.write_text(json.dumps(cooldowns))
+    except Exception:
+        pass
 
 
 def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | None:
@@ -1125,8 +1147,9 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
     """
     wd = Path(working_dir)
 
-    # Check cooldown
-    last_notified = _revival_cooldowns.get(chat_id, 0)
+    # Check cooldown (persisted to disk so it survives restarts)
+    cooldowns = _load_cooldowns()
+    last_notified = cooldowns.get(chat_id, 0)
     if time.time() - last_notified < REVIVAL_COOLDOWN_SECONDS:
         return None
 
@@ -1170,7 +1193,9 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
 
 def record_revival_cooldown(chat_id: str) -> None:
     """Record that we sent a revival notification so we don't spam."""
-    _revival_cooldowns[chat_id] = time.time()
+    cooldowns = _load_cooldowns()
+    cooldowns[chat_id] = time.time()
+    _save_cooldowns(cooldowns)
 
 
 async def queue_revival_job(

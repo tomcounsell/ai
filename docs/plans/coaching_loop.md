@@ -1,5 +1,5 @@
 ---
-status: Approved
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -74,12 +74,24 @@ No prerequisites — this work uses existing infrastructure (classifier, job que
 
 2. **Build coaching messages** in new `bridge/coach.py`:
    - Function `build_coaching_message(classification, workflow_context) -> str`
+   - **Tone: Explanatory and supportive.** Tell the agent what it needs to confirm next time it stops. Not directive commands — supportive instruction.
    - Three tiers:
-     - **Rejection coaching** (was_rejected_completion=True): Tell the agent exactly what was wrong and what evidence to include
-     - **Skill-aware coaching** (workflow phase known): Reference success criteria from plan doc
+     - **Rejection coaching** (was_rejected_completion=True): Explain why the completion wasn't accepted and what evidence to include next time
+     - **Skill-aware coaching** (workflow phase known): Reference success criteria from plan doc or skill file
      - **Plain continue** (fallback): Just `"continue"`
-   - Plan doc reading: If workflow_state has `plan_file`, read the `## Success Criteria` section
+   - **Success criteria quoting**: Quote criteria verbatim ONLY if we can read them from the plan file with certainty. If the file is missing, malformed, or the section can't be cleanly parsed, point the agent to the file path instead. Never guess or hallucinate criteria. It's better to say little or nothing than to accidentally coach in the wrong direction. In uncertainty, let it pass and bubble up to chat.
+   - **Philosophy**: The coach is here to help, not to be a supervisor. When unsure, degrade gracefully to plain "continue" rather than risk misdirection.
+   - Plan doc reading: If workflow_state has `plan_file`, read the `## Success Criteria` section via simple regex
    - Keep it simple — no LLM call for coaching messages. Use templates.
+   - **Skill detection heuristics** (documented inline in coach.py):
+     - Currently supports four SDLC skills: `/do-plan`, `/do-build`, `/do-test`, `/do-docs`
+     - Detection method: Check `job.message_text` for skill invocation patterns AND check `workflow_state.phase` for active phase
+     - `/do-plan` → phase="plan" or message contains "do-plan" → coach can reference plan template structure
+     - `/do-build` → phase="build" or message contains "do-build" → coach references plan's `## Success Criteria`
+     - `/do-test` → phase="test" or message contains "do-test" → coach references test pass/fail evidence
+     - `/do-docs` → phase="document" or message contains "do-docs" → coach references documentation checklist
+     - Non-SDLC messages (general chat, Q&A, exploration) → no skill detected → plain "continue"
+     - Future skills can be added by extending the `SKILL_DETECTORS` mapping (documented inline for easy extension)
 
 3. **Wire into auto-continue** in `agent/job_queue.py:891`:
    - Replace `message_text="continue"` with `message_text=coaching_message`
@@ -101,7 +113,7 @@ No prerequisites — this work uses existing infrastructure (classifier, job que
 
 ### Risk 1: Coaching messages confuse the agent
 **Impact:** Agent misinterprets coaching as user instructions and changes direction
-**Mitigation:** Prefix coaching with clear `[System Coach]` marker. Keep messages short and directive. Test with real agent sessions.
+**Mitigation:** Prefix coaching with clear `[System Coach]` marker. Keep messages explanatory and supportive. Test with real agent sessions.
 
 ### Risk 2: Plan file reading fails or is slow
 **Impact:** Coaching degrades to plain "continue" (acceptable fallback)
@@ -198,8 +210,11 @@ No agent integration required — coaching messages flow through the existing au
 - **Parallel**: false
 - Create `bridge/coach.py` with `build_coaching_message(classification, workflow_state, job_message_text) -> str`
 - Implement three tiers: rejection coaching, skill-aware coaching, plain continue
-- Add plan success criteria extraction (regex for `## Success Criteria` section)
-- Add skill detection from message text patterns (`/do-plan`, `/do-build`, `/do-test`, `/do-docs`)
+- Tone: explanatory and supportive — tell the agent what it needs to confirm next time, not commands
+- Add plan success criteria extraction (regex for `## Success Criteria` section) — quote verbatim only when parsed with certainty, otherwise point to file path
+- Add `SKILL_DETECTORS` mapping for the four SDLC skills with inline docs explaining detection heuristics and how to add future skills
+- Add skill detection from message text patterns (`/do-plan`, `/do-build`, `/do-test`, `/do-docs`) and workflow phase
+- Graceful degradation: when uncertain about context, fall back to plain "continue" rather than risk misdirection
 
 ### 4. Wire coaching into auto-continue path
 - **Task ID**: build-wiring
@@ -255,10 +270,4 @@ No agent integration required — coaching messages flow through the existing au
 
 ---
 
-## Open Questions
-
-1. **Coaching message tone**: Should coaching messages be directive ("Run your tests and paste output") or explanatory ("Your completion was rejected because it contained hedging language. To complete successfully, include...")? The issue example uses explanatory — confirm this is preferred.
-
-2. **Success criteria depth**: When referencing plan success criteria, should the coach quote the full criteria list or just remind the agent to check the plan file? Full quoting adds context but lengthens the message; a pointer keeps it short but requires the agent to re-read the file.
-
-3. **Skill detection scope**: The issue mentions detecting `/do-plan`, `/do-build`, `/do-test`, `/do-docs`. Should we also detect other skills (e.g., `/commit`, `/review-pr`) or keep it strictly to the SDLC skills that have plan docs?
+*Open questions resolved 2026-02-17: Tone is explanatory/supportive. Quote criteria only when certain, otherwise point to file. Stick to four SDLC skills with extensible design.*
