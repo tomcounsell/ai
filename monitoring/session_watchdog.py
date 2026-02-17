@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from popoto.exceptions import ModelException
+
 from models.sessions import AgentSession
 
 logger = logging.getLogger(__name__)
@@ -89,29 +91,30 @@ async def check_all_sessions() -> None:
                         session.session_id,
                         ", ".join(assessment["issues"]),
                     )
-        except Exception as e:
-            if "Unique constraint violated" in str(e):
-                # CRASH GUARD: Stale sessions left behind by SDK crashes can have
-                # duplicate Redis keys. When the watchdog tries to save/update them,
-                # popoto raises "Unique constraint violated". We catch this and mark
-                # the session as failed to prevent the watchdog from looping on it
-                # every cycle. See docs/features/coaching-loop.md "Related Guards".
-                try:
-                    session.status = "failed"
-                    session.save()
-                    logger.warning(
-                        "[watchdog] Marked stale session %s as failed (unique constraint)",
-                        session.session_id,
-                    )
-                except Exception:
-                    pass
-            else:
-                logger.error(
-                    "[watchdog] Error handling session %s: %s",
+        except ModelException as e:
+            # CRASH GUARD: Stale sessions left behind by SDK crashes can have
+            # duplicate Redis keys or corrupted state. When the watchdog tries
+            # to save/update them, popoto raises ModelException (e.g. unique
+            # constraint violations). We catch all ModelException variants and
+            # mark the session as failed to prevent the watchdog from looping
+            # on it every cycle. See docs/features/coaching-loop.md "Related Guards".
+            try:
+                session.status = "failed"
+                session.save()
+                logger.warning(
+                    "[watchdog] Marked stale session %s as failed (%s)",
                     session.session_id,
                     e,
-                    exc_info=True,
                 )
+            except Exception:
+                pass
+        except Exception as e:
+            logger.error(
+                "[watchdog] Error handling session %s: %s",
+                session.session_id,
+                e,
+                exc_info=True,
+            )
 
     if fixed_count > 0:
         logger.info(
