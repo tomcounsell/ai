@@ -97,7 +97,7 @@ async def _handle_update_command(tg_client, event):
     if not script_path.exists():
         await tg_client.send_message(
             event.chat_id,
-            f"[{machine}] scripts/remote-update.sh not found.",
+            f"{machine} - scripts/remote-update.sh not found",
             reply_to=event.message.id,
         )
         return
@@ -118,7 +118,7 @@ async def _handle_update_command(tg_client, event):
         output += sessions_notice
 
         # Prepend machine name for multi-instance identification
-        output = f"[{machine}] {output}"
+        output = f"{machine} - {output}"
 
         # Send via send_response_with_files so <<FILE:>> markers get
         # parsed and the log file is uploaded as an attachment
@@ -132,14 +132,14 @@ async def _handle_update_command(tg_client, event):
     except subprocess.TimeoutExpired:
         await tg_client.send_message(
             event.chat_id,
-            f"[{machine}] Update timed out after 120s",
+            f"{machine} - update timed out after 120s",
             reply_to=event.message.id,
         )
     except Exception as e:
         logger.error(f"[bridge] /update command failed: {e}")
         await tg_client.send_message(
             event.chat_id,
-            f"[{machine}] Update failed: {e}",
+            f"{machine} - update failed: {e}",
             reply_to=event.message.id,
         )
 
@@ -212,7 +212,7 @@ async def _handle_force_update_command(tg_client, event):
     # Just report what happened
     steps.append("Bridge restarted")
 
-    summary = f"[{machine}] Force update complete:\n" + "\n".join(
+    summary = f"{machine} - force update complete:\n" + "\n".join(
         f"  • {s}" for s in steps
     )
     await send_response_with_files(

@@ -458,29 +458,30 @@ def main() -> int:
 
     # Output for telegram mode: clean summary + log file
     if args.cron and _log_buffer:
-        log_file = args.project_dir / "data" / "update.log"
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        log_file.write_text("\n".join(_log_buffer) + "\n")
-
         # Build summary
         sha = git.get_short_sha(args.project_dir) if result.git_result else "unknown"
         commits = result.git_result.commit_count if result.git_result else 0
 
         if not result.success:
-            status = f"Update failed at {sha}"
+            status = f"update failed at {sha}"
             for err in result.errors:
                 status += f"\n  - {err}"
-        elif commits > 0:
-            status = f"Updated to {sha} ({commits} commit{'s' if commits != 1 else ''})"
-            if result.warnings:
-                status += f" with {len(result.warnings)} warning{'s' if len(result.warnings) != 1 else ''}"
+        elif result.warnings:
+            detail = f"updated to {sha}" if commits > 0 else f"up to date at {sha}"
+            status = f"{detail} ({len(result.warnings)} warning{'s' if len(result.warnings) != 1 else ''})"
         else:
-            status = f"Already up to date at {sha}"
-            if result.warnings:
-                status += f" ({len(result.warnings)} warning{'s' if len(result.warnings) != 1 else ''})"
+            status = "update successful"
 
-        print(status)
-        print(f"<<FILE:{log_file}>>")
+        # Only attach log file if there were problems; clean success = simple message
+        if not result.success or result.warnings:
+            log_file = args.project_dir / "data" / "update.txt"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("\n".join(_log_buffer) + "\n")
+            print(status)
+            print(f"<<FILE:{log_file}>>")
+        else:
+            print(status)
+
         return 0 if result.success else 1
 
     # Output for JSON mode
