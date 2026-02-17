@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -50,16 +50,20 @@ No prerequisites — this work has no external dependencies. The test infrastruc
 **User invokes /do-test** → Skill parses arguments → Detects changed files (if no args) → Dispatches test suites to parallel agents → Agents run tests → Results aggregated → Summary reported
 
 Argument patterns:
-- `/do-test` — run all tests
-- `/do-test unit` — run only unit tests
-- `/do-test tests/unit/test_bridge_logic.py` — run specific file
-- `/do-test --changed` — run tests related to changed files only
+- `/do-test` — run all tests + lint checks
+- `/do-test unit` — run only unit tests + lint
+- `/do-test tests/unit/test_bridge_logic.py` — run specific file + lint
+- `/do-test --changed` — run tests related to changed files only (auto-detects branch comparison base)
+- `/do-test --no-lint` — run tests without ruff/black checks
+- `/do-test unit --no-lint` — combinable flags
 
 ### Technical Approach
 
 - The skill is a **Claude Code slash command** (`.claude/commands/do-test.md`) backed by a **skill definition** (`.claude/skills/do-test/SKILL.md`)
 - The skill orchestrates using `Task` tool calls with `test-engineer` and `validator` subagent types
+- **CWD-relative execution**: The skill runs all commands relative to the current working directory. When invoked from `/do-build`, the SDK client sets `cwd` to the worktree path (`.worktrees/{slug}/`) via `ClaudeAgentOptions`. When invoked directly in a Claude Code session, CWD is the main repo. No worktree detection needed — it just works in whatever directory it's given.
 - Changed-file detection uses `git diff --name-only` to find modified files, then maps them to relevant test files using path conventions (`tests/unit/test_{module}.py`, `tests/tools/test_{tool}.py`, etc.)
+- **Smart branch comparison for `--changed`**: Auto-detect the comparison base. If on a `session/*` or non-main branch, diff against `main` (all changes in the feature branch). If on `main`, diff against `HEAD~1` (last commit only). This handles both `/do-build` worktree contexts and direct Claude Code sessions without flags.
 - Test types map to existing directory structure:
   - `unit` → `tests/unit/`
   - `integration` → `tests/integration/`
@@ -67,7 +71,7 @@ Argument patterns:
   - `performance` → `tests/performance/`
   - `tools` → `tests/tools/`
   - `all` → `tests/` (root-level tests + all subdirs)
-- Lint checks (`ruff check .`, `black --check .`) run as a separate parallel agent
+- **Lint checks run by default** with `--no-lint` opt-out flag. The `/do-build` Definition of Done requires both tests and quality checks, so a single `/do-test` invocation must cover both. Users running quick iterations can skip lint with `--no-lint`.
 - Each agent returns structured output: pass/fail, test count, failure details
 - The orchestrator aggregates results into a summary table
 
@@ -170,7 +174,7 @@ Used: `builder`, `validator`, `documentarian`
 - **Parallel**: true
 - Replace `.claude/skills/do-test/SKILL.md` stub with full skill definition
 - Update `.claude/commands/do-test.md` to reference the skill properly
-- Implement argument parsing: no args (all), type name (unit/integration/e2e/performance/tools), file path, `--changed` flag
+- Implement argument parsing: no args (all), type name (unit/integration/e2e/performance/tools), file path, `--changed` flag, `--no-lint` flag
 - Implement changed-file detection using `git diff --name-only` with test file mapping
 - Implement parallel dispatch logic using Task tool with test-engineer agents
 - Implement result aggregation into summary table format
@@ -221,10 +225,10 @@ Used: `builder`, `validator`, `documentarian`
 
 ---
 
-## Open Questions
+## Resolved Design Decisions
 
-1. **Should `/do-test` run lint checks by default, or only when explicitly requested?** The current stub includes `ruff check .` and `black --check .`. Keeping them as default seems right since `/do-build` needs a single command that validates everything.
+1. **Lint checks run by default** with `--no-lint` opt-out. The `/do-build` Definition of Done requires both tests and quality checks pass, so the default must cover both. Quick iteration users can opt out.
 
-2. **What's the desired behavior when running inside a worktree?** The `/do-build` workflow runs in `.worktrees/{slug}/`. Should `/do-test` auto-detect it's in a worktree and adjust paths, or assume CWD is always correct?
+2. **CWD-relative, no worktree detection needed.** The SDK client sets `cwd` via `ClaudeAgentOptions` — when invoked from `/do-build` it's the worktree path, when invoked directly it's the main repo. The skill just runs commands in whatever directory it's given. This was confirmed by reviewing `agent/sdk_client.py`.
 
-3. **Should the `--changed` flag compare against `main` or `HEAD~1`?** For feature branches, `main` makes more sense (test everything changed in the branch). For quick iterations, `HEAD~1` might be more useful. Leaning toward `main` as default with an optional `--since HEAD~1` override.
+3. **Smart branch auto-detection for `--changed`.** If `git rev-parse --abbrev-ref HEAD` returns `main`, diff against `HEAD~1`. Otherwise (e.g., `session/{slug}` branches), diff against `main`. This handles both contexts — `/do-build` worktrees on feature branches and direct Claude Code sessions on main — without requiring explicit flags.
