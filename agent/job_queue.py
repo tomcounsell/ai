@@ -35,6 +35,16 @@ logger = logging.getLogger(__name__)
 MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent input
 MAX_AUTO_CONTINUES = 3  # Max status updates to auto-continue before sending to chat
 
+# Job health check constants
+JOB_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
+JOB_TIMEOUT_DEFAULT = 2700  # 45 minutes for standard jobs
+JOB_TIMEOUT_BUILD = (
+    9000  # 2.5 hours for build jobs (detected by /do-build in message_text)
+)
+JOB_HEALTH_MIN_RUNNING = (
+    300  # Don't recover jobs running less than 5 min (race condition guard)
+)
+
 
 class RedisJob(Model):
     """A queued unit of work, persisted atomically in Redis via popoto."""
@@ -68,6 +78,7 @@ class RedisJob(Model):
     auto_continue_count = Field(
         type=int, default=0
     )  # Persisted across re-enqueued jobs
+    started_at = Field(type=float, null=True)  # Set when job transitions to running
 
 
 class Job:
@@ -200,6 +211,7 @@ _REDIS_JOB_FIELDS = [
     "chat_id_for_enrichment",
     "classification_type",
     "auto_continue_count",
+    "started_at",
 ]
 
 
@@ -296,6 +308,7 @@ async def _pop_job(project_key: str) -> Job | None:
     fields = _extract_job_fields(chosen)
     await chosen.async_delete()
     fields["status"] = "running"
+    fields["started_at"] = time.time()
     new_job = await RedisJob.async_create(**fields)
     return Job(new_job)
 
@@ -477,6 +490,149 @@ def _recover_orphaned_jobs(project_key: str) -> int:
             f"[{project_key}] Recovered {recovered} orphaned job(s) from index corruption"
         )
     return recovered
+
+
+# === Job Health Monitor ===
+
+
+def _get_job_timeout(job) -> int:
+    """Return the timeout in seconds for a job based on its message_text.
+
+    Build jobs (containing '/do-build') get a longer timeout since they
+    involve full SDLC cycles. All other jobs get the standard timeout.
+    """
+    message_text = getattr(job, "message_text", "") or ""
+    if "/do-build" in message_text:
+        return JOB_TIMEOUT_BUILD
+    return JOB_TIMEOUT_DEFAULT
+
+
+async def _job_health_check() -> None:
+    """Check all running jobs for liveness and timeout, recovering stuck ones.
+
+    For each running RedisJob:
+    1. If the worker asyncio.Task is dead/missing AND the job has been running
+       longer than JOB_HEALTH_MIN_RUNNING seconds, recover it.
+    2. If the job has exceeded its timeout (from started_at), recover it
+       regardless of worker state.
+    3. Legacy jobs without started_at and no worker are also recovered.
+
+    Recovery follows the same delete-and-recreate pattern as
+    _recover_interrupted_jobs(): delete the stuck RedisJob, create a new
+    one as pending with high priority, then ensure a worker is running.
+    """
+    running_jobs = list(RedisJob.query.filter(status="running"))
+    if not running_jobs:
+        logger.debug("[job-health] No running jobs found")
+        return
+
+    now = time.time()
+    checked = 0
+    recovered = 0
+
+    for job in running_jobs:
+        checked += 1
+        project_key = job.project_key
+
+        # Check if the worker for this project is alive
+        worker = _active_workers.get(project_key)
+        worker_alive = worker is not None and not worker.done()
+
+        started_at = getattr(job, "started_at", None)
+        running_seconds = (now - started_at) if started_at else None
+
+        # Determine if this job should be recovered
+        should_recover = False
+        reason = ""
+
+        if not worker_alive:
+            if started_at is None:
+                # Legacy job without started_at and no worker -- recover
+                should_recover = True
+                reason = "worker dead/missing, no started_at (legacy job)"
+            elif (
+                running_seconds is not None and running_seconds > JOB_HEALTH_MIN_RUNNING
+            ):
+                should_recover = True
+                reason = (
+                    f"worker dead/missing, running for "
+                    f"{int(running_seconds)}s (>{JOB_HEALTH_MIN_RUNNING}s guard)"
+                )
+            else:
+                # Worker is dead but job started recently -- race condition guard
+                logger.debug(
+                    "[job-health] Skipping job %s (project=%s) - worker dead but "
+                    "running only %ss (under %ss guard)",
+                    job.job_id,
+                    project_key,
+                    int(running_seconds) if running_seconds else "?",
+                    JOB_HEALTH_MIN_RUNNING,
+                )
+        elif started_at is not None:
+            # Worker is alive, but check for timeout
+            timeout = _get_job_timeout(job)
+            if running_seconds is not None and running_seconds > timeout:
+                should_recover = True
+                reason = f"exceeded timeout ({int(running_seconds)}s > {timeout}s)"
+
+        if should_recover:
+            logger.warning(
+                "[job-health] Recovering stuck job %s (project=%s, session=%s): %s",
+                job.job_id,
+                project_key,
+                job.session_id,
+                reason,
+            )
+            # Delete-and-recreate as pending (same pattern as _recover_interrupted_jobs)
+            fields = _extract_job_fields(job)
+            job.delete()
+            fields["status"] = "pending"
+            fields["priority"] = "high"
+            fields["started_at"] = None  # Reset started_at for re-processing
+            new_job = RedisJob.create(**fields)
+            logger.info(
+                "[job-health] Recovered job %s -> %s (project=%s)",
+                job.job_id,
+                new_job.job_id,
+                project_key,
+            )
+            _ensure_worker(project_key)
+            recovered += 1
+
+    logger.info(
+        "[job-health] Health check complete: %d job(s) checked, %d recovered",
+        checked,
+        recovered,
+    )
+
+
+async def _job_health_loop() -> None:
+    """Periodically check running jobs for liveness and timeout."""
+    logger.info(
+        "[job-health] Job health monitor started (interval=%ds)",
+        JOB_HEALTH_CHECK_INTERVAL,
+    )
+    while True:
+        try:
+            await _job_health_check()
+        except Exception as e:
+            logger.error("[job-health] Error in health check: %s", e, exc_info=True)
+        await asyncio.sleep(JOB_HEALTH_CHECK_INTERVAL)
+
+
+# === CLI Helpers ===
+
+
+def format_duration(seconds) -> str:
+    """Format seconds into human-readable duration."""
+    if seconds is None:
+        return "N/A"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes}m"
+    hours = minutes // 60
+    remaining_mins = minutes % 60
+    return f"{hours}h{remaining_mins}m"
 
 
 # === Per-project worker ===
@@ -840,7 +996,8 @@ async def _execute_job(job: Job) -> None:
         # The work is done — further messages are noise that spams the chat.
         if _completion_sent:
             logger.info(
-                f"[{job.project_key}] Dropping post-completion output "
+                f"[{job.project_key}] Dropping suppressed output "
+                f"(completion sent or auto-continued) "
                 f"({len(msg)} chars): {msg[:100]!r}"
             )
             return
@@ -877,8 +1034,35 @@ async def _execute_job(job: Job) -> None:
                     "confidence": classification.confidence,
                     "reason": classification.reason,
                     "message_preview": msg[:200],
+                    "coaching_context": "pending",  # Updated below after coaching builds
                 },
                 working_dir=str(working_dir),
+            )
+
+            # Build context-aware coaching message instead of bare "continue"
+            from bridge.coach import build_coaching_message
+
+            # Resolve plan_file from WorkflowState if available
+            _plan_file = None
+            if job.workflow_id:
+                try:
+                    from agent.workflow_state import WorkflowState
+
+                    ws = WorkflowState.load(job.workflow_id)
+                    if ws.data and ws.data.plan_file:
+                        _plan_file = ws.data.plan_file
+                except Exception:
+                    pass  # Degrade gracefully — coach without plan context
+
+            coaching_message = build_coaching_message(
+                classification=classification,
+                plan_file=_plan_file,
+                job_message_text=job.message_text,
+            )
+
+            logger.info(
+                f"[{job.project_key}] Coaching message "
+                f"({len(coaching_message)} chars): {coaching_message[:120]!r}"
             )
 
             # Re-enqueue a continuation job with the same session_id
@@ -888,7 +1072,7 @@ async def _execute_job(job: Job) -> None:
                 project_key=job.project_key,
                 session_id=job.session_id,
                 working_dir=job.working_dir,
-                message_text="continue",
+                message_text=coaching_message,
                 sender_name="System (auto-continue)",
                 chat_id=job.chat_id,
                 message_id=job.message_id,
@@ -897,6 +1081,12 @@ async def _execute_job(job: Job) -> None:
                 task_list_id=job.task_list_id,
                 auto_continue_count=auto_continue_count,
             )
+
+            # Suppress BackgroundTask's final messenger.send(result) call.
+            # Without this, _run_work() re-sends the SDK result through
+            # send_to_chat after we already auto-continued, causing duplicate
+            # messages in chat.
+            _completion_sent = True
 
             # Signal that this job should NOT set a reaction
             # (defer to the continuation job)
@@ -1095,9 +1285,31 @@ def _session_branch_name(session_id: str) -> str:
 
 # === Revival Detection ===
 
-# Cooldown: {chat_id: timestamp} — one revival prompt per chat per 24h
-_revival_cooldowns: dict[str, float] = {}
 REVIVAL_COOLDOWN_SECONDS = 86400
+_COOLDOWN_FILE = Path(__file__).parent.parent / "data" / "revival_cooldowns.json"
+
+
+def _load_cooldowns() -> dict[str, float]:
+    """Load revival cooldowns from disk."""
+    try:
+        if _COOLDOWN_FILE.exists():
+            import json
+
+            return json.loads(_COOLDOWN_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _save_cooldowns(cooldowns: dict[str, float]) -> None:
+    """Persist revival cooldowns to disk."""
+    try:
+        import json
+
+        _COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _COOLDOWN_FILE.write_text(json.dumps(cooldowns))
+    except Exception:
+        pass
 
 
 def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | None:
@@ -1108,8 +1320,9 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
     """
     wd = Path(working_dir)
 
-    # Check cooldown
-    last_notified = _revival_cooldowns.get(chat_id, 0)
+    # Check cooldown (persisted to disk so it survives restarts)
+    cooldowns = _load_cooldowns()
+    last_notified = cooldowns.get(chat_id, 0)
     if time.time() - last_notified < REVIVAL_COOLDOWN_SECONDS:
         return None
 
@@ -1153,7 +1366,9 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
 
 def record_revival_cooldown(chat_id: str) -> None:
     """Record that we sent a revival notification so we don't spam."""
-    _revival_cooldowns[chat_id] = time.time()
+    cooldowns = _load_cooldowns()
+    cooldowns[chat_id] = time.time()
+    _save_cooldowns(cooldowns)
 
 
 async def queue_revival_job(
@@ -1245,3 +1460,140 @@ async def cleanup_stale_branches(
         logger.error(f"Branch cleanup error: {e}")
 
     return cleaned
+
+
+# === CLI Entry Point ===
+
+
+def _cli_show_status() -> None:
+    """Show current queue state grouped by project and status."""
+    all_jobs = list(RedisJob.query.all())
+    if not all_jobs:
+        print("Queue is empty.")
+        return
+
+    # Group by project_key
+    by_project: dict[str, list] = {}
+    for job in all_jobs:
+        key = job.project_key
+        if key not in by_project:
+            by_project[key] = []
+        by_project[key].append(job)
+
+    now = time.time()
+    for project_key, jobs in sorted(by_project.items()):
+        print(f"\n=== {project_key} ===")
+        worker = _active_workers.get(project_key)
+        worker_status = "alive" if (worker and not worker.done()) else "DEAD/missing"
+        print(f"  Worker: {worker_status}")
+
+        for job in sorted(jobs, key=lambda j: j.created_at or 0):
+            duration = ""
+            started = getattr(job, "started_at", None)
+            if job.status == "running" and isinstance(started, int | float):
+                duration = f" (running {format_duration(now - started)})"
+            elif job.created_at:
+                duration = f" (queued {format_duration(now - job.created_at)})"
+
+            msg_preview = (job.message_text or "")[:60]
+            print(f"  [{job.status:>9}] {job.job_id}{duration} - {msg_preview}")
+
+    # Summary
+    status_counts: dict[str, int] = {}
+    for job in all_jobs:
+        status_counts[job.status] = status_counts.get(job.status, 0) + 1
+    summary = ", ".join(f"{v} {k}" for k, v in sorted(status_counts.items()))
+    print(f"\nTotal: {len(all_jobs)} jobs ({summary})")
+
+
+def _cli_flush_stuck() -> None:
+    """Find and recover all stuck running jobs with dead/missing workers."""
+    running = list(RedisJob.query.filter(status="running"))
+    if not running:
+        print("No running jobs found.")
+        return
+
+    recovered = 0
+    for job in running:
+        worker = _active_workers.get(job.project_key)
+        is_alive = worker and not worker.done()
+
+        if not is_alive:
+            print(f"Recovering orphaned job {job.job_id} (project={job.project_key})")
+            _cli_recover_single_job(job)
+            recovered += 1
+        else:
+            print(f"Skipping {job.job_id} - worker still alive")
+
+    print(f"\nRecovered {recovered}/{len(running)} running jobs.")
+
+
+def _cli_flush_job(job_id: str) -> None:
+    """Recover a specific job by ID."""
+    import sys
+
+    try:
+        job = RedisJob.query.get(job_id)
+    except Exception:
+        job = None
+
+    if not job:
+        print(f"Job {job_id} not found.")
+        sys.exit(1)
+
+    if job.status != "running":
+        print(f"Job {job_id} is '{job.status}', not 'running'. Nothing to recover.")
+        return
+
+    print(f"Recovering job {job_id} (project={job.project_key})")
+    _cli_recover_single_job(job)
+    print("Done.")
+
+
+def _cli_recover_single_job(job: RedisJob) -> None:
+    """Delete a stuck job and recreate as pending."""
+    fields = _extract_job_fields(job)
+
+    # Delete the stuck job
+    job.delete()
+
+    # Re-create as pending with high priority
+    fields["status"] = "pending"
+    fields["priority"] = "high"
+    fields["started_at"] = None
+    new_job = RedisJob.create(**fields)
+    print(f"  Re-enqueued as pending (new id: {new_job.job_id})")
+
+
+def _cli_main() -> None:
+    """CLI entry point for job queue management.
+
+    Usage:
+        python -m agent.job_queue --status          # Show queue state
+        python -m agent.job_queue --flush-stuck      # Recover all stuck running jobs
+        python -m agent.job_queue --flush-job ID     # Recover specific job
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Job queue management CLI")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--status", action="store_true", help="Show current queue state")
+    group.add_argument(
+        "--flush-stuck", action="store_true", help="Recover all stuck running jobs"
+    )
+    group.add_argument(
+        "--flush-job", metavar="JOB_ID", help="Recover a specific job by ID"
+    )
+
+    args = parser.parse_args()
+
+    if args.status:
+        _cli_show_status()
+    elif args.flush_stuck:
+        _cli_flush_stuck()
+    elif args.flush_job:
+        _cli_flush_job(args.flush_job)
+
+
+if __name__ == "__main__":
+    _cli_main()

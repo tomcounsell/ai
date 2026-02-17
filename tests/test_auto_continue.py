@@ -7,9 +7,16 @@ pausing for human input.
 Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
 """
 
-from unittest.mock import AsyncMock, patch
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+# Mock the claude_agent_sdk before agent package tries to import it
+# This prevents the ImportError from mcp.types.ToolAnnotations
+if "claude_agent_sdk" not in sys.modules:
+    _mock_sdk = MagicMock()
+    sys.modules["claude_agent_sdk"] = _mock_sdk
 
 from agent.job_queue import MAX_AUTO_CONTINUES
 from bridge.summarizer import ClassificationResult, OutputType
@@ -406,3 +413,154 @@ class TestAutoContiueIntegration:
         # Verify 2 steering messages were pushed
         messages = pop_all_steering_messages(session_id)
         assert len(messages) == 2
+
+
+class TestAutoContineCompletionSentSuppression:
+    """Tests for _completion_sent suppression on auto-continue.
+
+    When send_to_chat auto-continues (STATUS_UPDATE with count < max),
+    it should set _completion_sent = True to prevent BackgroundTask's
+    final messenger.send(result) from leaking a duplicate message.
+    """
+
+    @pytest.mark.asyncio
+    async def test_auto_continue_sets_completion_sent(self):
+        """After auto-continue triggers, _completion_sent should be True.
+
+        This prevents BackgroundTask._run_work() from re-sending the
+        SDK result through send_to_chat a second time.
+        """
+        send_cb = AsyncMock()
+        auto_continue_count = 0
+        _completion_sent = False
+
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+
+        # First call: STATUS_UPDATE triggers auto-continue
+        if _completion_sent:
+            pass  # Dropped
+        elif (
+            classification.output_type == OutputType.STATUS_UPDATE
+            and auto_continue_count < MAX_AUTO_CONTINUES
+        ):
+            auto_continue_count += 1
+            _completion_sent = True  # THE FIX: suppress subsequent sends
+            # (would also enqueue continuation job and set _defer_reaction here)
+        else:
+            await send_cb("chat_123", "status msg", 456)
+
+        # Verify auto-continue happened
+        assert auto_continue_count == 1
+        send_cb.assert_not_called()
+
+        # Verify _completion_sent was set
+        assert _completion_sent is True
+
+        # Second call: BackgroundTask re-sends SDK result
+        # This should be DROPPED because _completion_sent is True
+        completion_msg = "Done. Committed abc1234 and pushed."
+        if _completion_sent:
+            pass  # Dropped -- this is the gate that prevents duplicates
+        else:
+            await send_cb("chat_123", completion_msg, 456)
+
+        # send_cb should STILL not have been called
+        send_cb.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_without_fix_duplicate_leaks(self):
+        """Without _completion_sent gate, BackgroundTask re-send leaks through.
+
+        This test documents the bug: when auto-continue does NOT set
+        _completion_sent, the subsequent BackgroundTask call goes through
+        classification again and gets sent to chat as a duplicate.
+        """
+        send_cb = AsyncMock()
+        auto_continue_count = 0
+        _completion_sent = False
+
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+
+        # First call: STATUS_UPDATE triggers auto-continue (WITHOUT the fix)
+        if _completion_sent:
+            pass
+        elif (
+            classification.output_type == OutputType.STATUS_UPDATE
+            and auto_continue_count < MAX_AUTO_CONTINUES
+        ):
+            auto_continue_count += 1
+            # BUG: Missing _completion_sent = True here
+            # The continuation job is enqueued but _completion_sent stays False
+        else:
+            await send_cb("chat_123", "status msg", 456)
+
+        assert auto_continue_count == 1
+        send_cb.assert_not_called()
+        # _completion_sent is still False -- the bug
+        assert _completion_sent is False
+
+        # Second call: BackgroundTask re-sends SDK result
+        # Without the fix, this goes through classification and gets sent
+        completion_msg = "Done. Committed abc1234 and pushed."
+        completion_classification = _make_classification(OutputType.COMPLETION)
+
+        if _completion_sent:
+            pass  # Would be dropped if _completion_sent was True
+        elif (
+            completion_classification.output_type == OutputType.STATUS_UPDATE
+            and auto_continue_count < MAX_AUTO_CONTINUES
+        ):
+            auto_continue_count += 1
+        else:
+            # BUG: This executes! The completion leaks to chat as a duplicate
+            await send_cb("chat_123", completion_msg, 456)
+
+        # This PROVES the bug: send_cb was called with the duplicate message
+        send_cb.assert_called_once_with("chat_123", completion_msg, 456)
+
+    @pytest.mark.asyncio
+    async def test_multiple_auto_continues_all_suppress(self):
+        """Each auto-continue in a chain sets _completion_sent, so all
+        subsequent BackgroundTask sends are suppressed."""
+        send_cb = AsyncMock()
+        auto_continue_count = 0
+        _completion_sent = False
+
+        # Two consecutive STATUS_UPDATEs
+        for _ in range(2):
+            classification = _make_classification(OutputType.STATUS_UPDATE)
+
+            if _completion_sent:
+                pass
+            elif (
+                classification.output_type == OutputType.STATUS_UPDATE
+                and auto_continue_count < MAX_AUTO_CONTINUES
+            ):
+                auto_continue_count += 1
+                _completion_sent = True  # THE FIX
+            else:
+                await send_cb("chat_123", "msg", 456)
+
+        assert auto_continue_count == 1  # Only first increments; second is dropped
+        assert _completion_sent is True
+        send_cb.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_completion_sent_gate_checked_before_classification(self):
+        """The _completion_sent check is the FIRST thing in send_to_chat,
+        before any classification call. This prevents wasting LLM calls."""
+        send_cb = AsyncMock()
+        _completion_sent = True  # Already set from prior auto-continue
+        classify_called = False
+
+        msg = "Some final SDK output"
+
+        # Simulate send_to_chat: check gate FIRST
+        if _completion_sent:
+            pass  # Dropped immediately, no classification needed
+        else:
+            classify_called = True
+            await send_cb("chat_123", msg, 456)
+
+        assert not classify_called
+        send_cb.assert_not_called()

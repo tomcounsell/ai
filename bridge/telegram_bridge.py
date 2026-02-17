@@ -1208,6 +1208,16 @@ async def main():
     except Exception as e:
         logger.error(f"Failed to start session watchdog: {e}")
 
+    # Start job health monitor (detects stuck running jobs)
+    if USE_CLAUDE_SDK:
+        try:
+            from agent.job_queue import _job_health_loop
+
+            asyncio.create_task(_job_health_loop())
+            logger.info("Job health monitor started")
+        except Exception as e:
+            logger.error(f"Failed to start job health monitor: {e}")
+
     # Start message query polling loop
     async def message_query_loop():
         """Poll for message query requests every second."""

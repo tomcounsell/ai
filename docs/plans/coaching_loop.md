@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -20,12 +20,14 @@ Beyond rejected completions, the coach has no awareness of what the agent is act
 - No distinction between rejected completions and genuine mid-work status updates
 - No awareness of active skill/phase (plan, build, test, docs)
 - No access to plan success criteria during coaching
+- **Critical bug: final SDK result leaks to chat on auto-continued sessions** — When `send_to_chat` suppresses an output and re-enqueues, the `BackgroundTask._run_work()` (messenger.py:172) still calls `messenger.send(result)` with the SDK's return value. This second call bypasses the suppression because the SDK already returned. Each auto-continue cycle sends the final result to chat, producing duplicate messages (e.g., 3 identical completion messages during a /do-build).
 
 **Desired outcome:**
 - Rejected completions get specific coaching: why it was rejected + what evidence to include
 - When a skill is active, coaching references the plan doc or skill success criteria
 - Genuine mid-work status updates still get plain `"continue"`
 - The coaching surface is lightweight and easy to tune as models evolve
+- **Auto-continued sessions suppress the final SDK result** — when `_defer_reaction` is True (continuation job enqueued), the BackgroundTask's `send_result` path must be skipped to prevent duplicate messages
 
 ## Appetite
 
@@ -58,6 +60,13 @@ No prerequisites — this work uses existing infrastructure (classifier, job que
 
 ### Technical Approach
 
+0. **Fix duplicate message bug** in `agent/messenger.py` and `agent/job_queue.py`:
+   - Root cause: `BackgroundTask._run_work()` (messenger.py:172) always calls `messenger.send(result)` when the SDK returns, even if `send_to_chat` already auto-continued and re-enqueued. The auto-continue path sets `_defer_reaction = True` and returns early, but the SDK call still completes and BackgroundTask sends the final result to `send_to_chat` again — this second call gets classified independently (often as COMPLETION) and sent to chat.
+   - Fix: When `send_to_chat` auto-continues (sets `_defer_reaction = True`), also set a flag that tells BackgroundTask NOT to send the final result. Two options:
+     - **Option A (preferred)**: After the SDK call returns in `_execute_job`, check `_defer_reaction` — if True, skip `task.run(send_result=True)` or set `task._send_result = False`. But `task.run()` is called before the SDK runs, so this requires refactoring to pass `send_result` as a check at send-time rather than at run-time.
+     - **Option B (simpler)**: In `send_to_chat`, when auto-continuing, set `_completion_sent = True` (repurposing the existing gate). This prevents any subsequent calls to `send_to_chat` from reaching Telegram. The next continuation job will produce its own output. This is the cleanest fix — it uses the existing suppression mechanism.
+   - Real-world impact: Issue #119 build sent 3 duplicate completion messages to Tom because each auto-continue cycle leaked the final SDK result.
+
 1. **Enrich `ClassificationResult`** in `bridge/summarizer.py`:
    - Add `was_rejected_completion: bool = False` field
    - Classifier already provides `reason` — parse it to detect hedging/evidence-missing downgrades
@@ -65,12 +74,24 @@ No prerequisites — this work uses existing infrastructure (classifier, job que
 
 2. **Build coaching messages** in new `bridge/coach.py`:
    - Function `build_coaching_message(classification, workflow_context) -> str`
+   - **Tone: Explanatory and supportive.** Tell the agent what it needs to confirm next time it stops. Not directive commands — supportive instruction.
    - Three tiers:
-     - **Rejection coaching** (was_rejected_completion=True): Tell the agent exactly what was wrong and what evidence to include
-     - **Skill-aware coaching** (workflow phase known): Reference success criteria from plan doc
+     - **Rejection coaching** (was_rejected_completion=True): Explain why the completion wasn't accepted and what evidence to include next time
+     - **Skill-aware coaching** (workflow phase known): Reference success criteria from plan doc or skill file
      - **Plain continue** (fallback): Just `"continue"`
-   - Plan doc reading: If workflow_state has `plan_file`, read the `## Success Criteria` section
+   - **Success criteria quoting**: Quote criteria verbatim ONLY if we can read them from the plan file with certainty. If the file is missing, malformed, or the section can't be cleanly parsed, point the agent to the file path instead. Never guess or hallucinate criteria. It's better to say little or nothing than to accidentally coach in the wrong direction. In uncertainty, let it pass and bubble up to chat.
+   - **Philosophy**: The coach is here to help, not to be a supervisor. When unsure, degrade gracefully to plain "continue" rather than risk misdirection.
+   - Plan doc reading: If workflow_state has `plan_file`, read the `## Success Criteria` section via simple regex
    - Keep it simple — no LLM call for coaching messages. Use templates.
+   - **Skill detection heuristics** (documented inline in coach.py):
+     - Currently supports four SDLC skills: `/do-plan`, `/do-build`, `/do-test`, `/do-docs`
+     - Detection method: Check `job.message_text` for skill invocation patterns AND check `workflow_state.phase` for active phase
+     - `/do-plan` → phase="plan" or message contains "do-plan" → coach can reference plan template structure
+     - `/do-build` → phase="build" or message contains "do-build" → coach references plan's `## Success Criteria`
+     - `/do-test` → phase="test" or message contains "do-test" → coach references test pass/fail evidence
+     - `/do-docs` → phase="document" or message contains "do-docs" → coach references documentation checklist
+     - Non-SDLC messages (general chat, Q&A, exploration) → no skill detected → plain "continue"
+     - Future skills can be added by extending the `SKILL_DETECTORS` mapping (documented inline for easy extension)
 
 3. **Wire into auto-continue** in `agent/job_queue.py:891`:
    - Replace `message_text="continue"` with `message_text=coaching_message`
@@ -92,7 +113,7 @@ No prerequisites — this work uses existing infrastructure (classifier, job que
 
 ### Risk 1: Coaching messages confuse the agent
 **Impact:** Agent misinterprets coaching as user instructions and changes direction
-**Mitigation:** Prefix coaching with clear `[System Coach]` marker. Keep messages short and directive. Test with real agent sessions.
+**Mitigation:** Prefix coaching with clear `[System Coach]` marker. Keep messages explanatory and supportive. Test with real agent sessions.
 
 ### Risk 2: Plan file reading fails or is slow
 **Impact:** Coaching degrades to plain "continue" (acceptable fallback)
@@ -126,6 +147,7 @@ No agent integration required — coaching messages flow through the existing au
 
 ## Success Criteria
 
+- [ ] Auto-continued sessions do not leak duplicate SDK results to chat (fix for the BackgroundTask re-send bug)
 - [ ] Rejected completions (hedging/no evidence) produce specific coaching messages instead of bare "continue"
 - [ ] When a workflow is active with a plan file, coaching references the plan's success criteria
 - [ ] Genuine status updates still produce plain "continue" (no regression)
@@ -159,9 +181,20 @@ No agent integration required — coaching messages flow through the existing au
 
 ## Step by Step Tasks
 
-### 1. Add `was_rejected_completion` to ClassificationResult
-- **Task ID**: build-classification
+### 1. Fix duplicate message leak on auto-continue
+- **Task ID**: fix-duplicate-leak
 - **Depends On**: none
+- **Assigned To**: coach-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- In `agent/job_queue.py:send_to_chat`, when auto-continuing (after re-enqueue, before `return`), set `_completion_sent = True` to gate all subsequent `send_to_chat` calls for this job
+- This prevents `BackgroundTask._run_work()` from re-sending the SDK result after auto-continue already handled it
+- Add a test: mock an auto-continue scenario and verify only ONE message reaches the send callback
+- Verify existing tests still pass
+
+### 2. Add `was_rejected_completion` to ClassificationResult
+- **Task ID**: build-classification
+- **Depends On**: fix-duplicate-leak
 - **Assigned To**: coach-builder
 - **Agent Type**: builder
 - **Parallel**: true
@@ -169,7 +202,7 @@ No agent integration required — coaching messages flow through the existing au
 - In `classify_output()`, after LLM classification, detect if the reason indicates a rejected completion (hedging, no evidence patterns)
 - Set the flag when detected
 
-### 2. Create coaching message builder
+### 3. Create coaching message builder
 - **Task ID**: build-coach
 - **Depends On**: build-classification
 - **Assigned To**: coach-builder
@@ -177,10 +210,13 @@ No agent integration required — coaching messages flow through the existing au
 - **Parallel**: false
 - Create `bridge/coach.py` with `build_coaching_message(classification, workflow_state, job_message_text) -> str`
 - Implement three tiers: rejection coaching, skill-aware coaching, plain continue
-- Add plan success criteria extraction (regex for `## Success Criteria` section)
-- Add skill detection from message text patterns (`/do-plan`, `/do-build`, `/do-test`, `/do-docs`)
+- Tone: explanatory and supportive — tell the agent what it needs to confirm next time, not commands
+- Add plan success criteria extraction (regex for `## Success Criteria` section) — quote verbatim only when parsed with certainty, otherwise point to file path
+- Add `SKILL_DETECTORS` mapping for the four SDLC skills with inline docs explaining detection heuristics and how to add future skills
+- Add skill detection from message text patterns (`/do-plan`, `/do-build`, `/do-test`, `/do-docs`) and workflow phase
+- Graceful degradation: when uncertain about context, fall back to plain "continue" rather than risk misdirection
 
-### 3. Wire coaching into auto-continue path
+### 4. Wire coaching into auto-continue path
 - **Task ID**: build-wiring
 - **Depends On**: build-coach
 - **Assigned To**: coach-builder
@@ -191,7 +227,7 @@ No agent integration required — coaching messages flow through the existing au
 - Replace `message_text="continue"` (line ~891) with the coaching message
 - Log coaching message content in session snapshot
 
-### 4. Validate coaching integration
+### 5. Validate coaching integration
 - **Task ID**: validate-coach
 - **Depends On**: build-wiring
 - **Assigned To**: coach-validator
@@ -203,7 +239,7 @@ No agent integration required — coaching messages flow through the existing au
 - Verify plan success criteria extraction handles edge cases (missing file, no section, malformed markdown)
 - Verify `[System Coach]` prefix is present on coaching messages
 
-### 5. Documentation
+### 6. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-coach
 - **Assigned To**: coach-documentarian
@@ -213,7 +249,7 @@ No agent integration required — coaching messages flow through the existing au
 - Add entry to `docs/features/README.md` index table
 - Include coaching message templates and tuning guide
 
-### 6. Final Validation
+### 7. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: coach-validator
@@ -225,6 +261,7 @@ No agent integration required — coaching messages flow through the existing au
 
 ## Validation Commands
 
+- `pytest tests/ -k "auto_continue" -x` - auto-continue duplicate suppression test passes
 - `python -c "from bridge.coach import build_coaching_message; print('import ok')"` - coach module imports
 - `python -c "from bridge.summarizer import ClassificationResult; r = ClassificationResult(output_type='status', confidence=0.9, reason='test', was_rejected_completion=True); print(r)"` - enriched classification works
 - `pytest tests/ -x` - all tests pass
@@ -233,10 +270,4 @@ No agent integration required — coaching messages flow through the existing au
 
 ---
 
-## Open Questions
-
-1. **Coaching message tone**: Should coaching messages be directive ("Run your tests and paste output") or explanatory ("Your completion was rejected because it contained hedging language. To complete successfully, include...")? The issue example uses explanatory — confirm this is preferred.
-
-2. **Success criteria depth**: When referencing plan success criteria, should the coach quote the full criteria list or just remind the agent to check the plan file? Full quoting adds context but lengthens the message; a pointer keeps it short but requires the agent to re-read the file.
-
-3. **Skill detection scope**: The issue mentions detecting `/do-plan`, `/do-build`, `/do-test`, `/do-docs`. Should we also detect other skills (e.g., `/commit`, `/review-pr`) or keep it strictly to the SDLC skills that have plan docs?
+*Open questions resolved 2026-02-17: Tone is explanatory/supportive. Quote criteria only when certain, otherwise point to file. Stick to four SDLC skills with extensible design.*

@@ -1,291 +1,222 @@
 ---
-description: "Review PRs by validating implementations against specifications and capturing visual proof via screenshots using agent-browser"
-argument-hint: <PR-number or workflow_id>
+description: "Review pull requests by analyzing code changes, validating against plan requirements, and capturing visual proof via screenshots"
+argument-hint: <PR-number>
 ---
 
 # PR Review
 
-Validate implementations against specifications and capture visual proof via screenshots.
+Review a pull request by analyzing its changes against the plan, checking code quality, validating tests, and capturing screenshots of UI changes.
 
 ## When to Use
 
-- After completing feature implementation
-- Before creating a pull request
-- When validating UI changes visually
+- After `/do-build` creates a PR
+- When a PR needs thorough review before merge
+- To validate UI changes visually with screenshots
 - To generate structured review reports with issue severity classification
 
 ## Variables
 
-- `workflow_id` (optional): Unique identifier for this review session (defaults to branch name or timestamp)
-- `spec_file` (optional): Path to specification file (auto-detected from specs/*.md if not provided)
+- `pr_number` (required): The PR number to review (e.g., `42` or `#42`)
 
 ## Instructions
 
-Follow this review process to validate work against specifications:
+Follow this review process to validate a pull request:
 
-### 1. Context Gathering
+### 1. PR Context Gathering
 
-**Check current git branch:**
+**Fetch PR details:**
 ```bash
-git branch --show-current
+gh pr view {pr_number} --json title,body,headRefName,baseRefName,files,additions,deletions
 ```
 
-**Get changes since main:**
+**Get the full diff:**
 ```bash
-git diff origin/main --stat
-git diff origin/main
+gh pr diff {pr_number}
 ```
 
-**Identify workflow ID:**
-- If provided as argument, use it
-- Otherwise, derive from branch name (e.g., `feature/review-workflow` → `review-workflow`)
-- Fallback to timestamp if on main: `review-$(date +%Y%m%d-%H%M%S)`
-
-### 2. Spec File Discovery
-
-**Find matching spec file:**
+**Get changed files:**
 ```bash
-# Look for spec files matching branch/workflow name
-ls specs/*.md 2>/dev/null | grep -i "{workflow_id}" | head -1
-
-# If not found, list all specs for user to choose
-ls specs/*.md 2>/dev/null
+gh pr diff {pr_number} --name-only
 ```
 
-If no specs exist, ask user for requirements/acceptance criteria.
+**Find the associated plan (if any):**
+- Check PR body for `Closes #N` to find the tracking issue
+- Look for plan docs in `docs/plans/` that reference that issue
+- The plan contains acceptance criteria and requirements to validate against
 
-**Read spec requirements:**
-- Parse the spec file
-- Extract acceptance criteria, requirements, and expected behavior
-- Note any UI-specific requirements
+### 2. Code Review
+
+**Analyze the diff for:**
+
+- **Correctness**: Does the code do what the plan/PR description says?
+- **Security**: No secrets, injection vulnerabilities, or unsafe patterns
+- **Error handling**: Appropriate error handling at system boundaries
+- **Tests**: Are new features covered by tests? Do existing tests still pass?
+- **Code quality**: Follows project patterns, no unnecessary complexity
+- **Documentation**: Are docs updated for user-facing changes?
+
+**Check for common issues:**
+- Leftover debug code (`print()`, `console.log()`, `TODO`)
+- Missing error handling for external calls
+- Hardcoded values that should be configurable
+- Breaking changes without migration path
 
 ### 3. Screenshot Capture (if UI changes detected)
 
-**Prepare screenshot directory:**
-```bash
-mkdir -p generated_images/{workflow_id}
-```
-
 **Determine if screenshots needed:**
-- Check git diff for UI-related files: `*.html`, `*.jsx`, `*.tsx`, `*.vue`, `*.css`, `*.scss`
-- Check spec for UI requirements
-- Ask user if uncertain
+- Check diff for UI-related files: `*.html`, `*.jsx`, `*.tsx`, `*.vue`, `*.css`, `*.scss`, `*.py` (templates)
+- If no UI files changed, skip this step
 
 **If screenshots needed:**
 
-1. Use `/prepare_app` command to ensure app is running
-2. Use `agent-browser` to navigate and capture:
-
 ```bash
-# Open the application
+# Prepare screenshot directory
+mkdir -p generated_images/pr-{pr_number}
+
+# Checkout the PR branch locally
+gh pr checkout {pr_number}
+
+# Use /prepare_app to ensure app is running
+# Then capture with agent-browser:
 agent-browser open http://localhost:8000
-
-# Get interactive snapshot
 agent-browser snapshot -i
-
-# Navigate critical paths and capture screenshots
-# Name format: {workflow_id}_{nn}_{descriptive_name}.png
-agent-browser screenshot generated_images/{workflow_id}/01_main_view.png
-
-# Continue for each critical UI path (1-5 screenshots typical)
+agent-browser screenshot generated_images/pr-{pr_number}/01_main_view.png
 ```
 
 **Screenshot naming convention:**
-- `01_main_dashboard.png` - Primary view
-- `02_feature_in_action.png` - Core functionality
+- `01_main_view.png` - Primary affected view
+- `02_feature_demo.png` - New feature in action
 - `03_edge_case.png` - Edge case or error state
-- `04_responsive_mobile.png` - Mobile view if applicable
-- `05_final_state.png` - End state after user flow
 
-### 4. Implementation Analysis
+### 4. Plan Validation (if plan exists)
 
-**Compare implementation vs spec:**
+If a plan document was found in step 1:
 
-For each requirement in the spec:
-1. Locate corresponding implementation in code
-2. Verify behavior matches specification
-3. Check for edge cases handled
-4. Validate error handling
-5. Review code quality and patterns
-
-**Check for:**
-- ✅ All acceptance criteria met
-- ✅ Edge cases handled
-- ✅ Error states implemented
-- ✅ Tests written (if spec requires)
-- ✅ Documentation updated
-- ✅ No regressions introduced
+For each requirement/acceptance criterion in the plan:
+1. Locate the corresponding implementation in the PR diff
+2. Verify behavior matches the plan specification
+3. Check that edge cases mentioned in the plan are handled
+4. Verify any "No-Gos" from the plan are respected
 
 ### 5. Issue Identification & Classification
 
 **Severity Guidelines:**
 
-- **blocker**: Must fix before release
+- **blocker**: Must fix before merge
   - Breaks core functionality
   - Security vulnerability
   - Data loss risk
-  - Prevents users from completing critical tasks
+  - Missing tests for critical paths
   - Crashes or severe errors
 
-- **tech_debt**: Should fix but doesn't block release
+- **tech_debt**: Should fix but doesn't block merge
   - Code quality issues
-  - Missing tests
+  - Missing tests for edge cases
   - Performance improvements
   - Refactoring opportunities
-  - Minor bugs in edge cases
 
-- **skippable**: Nice to have, non-critical
-  - UI polish
-  - Minor text changes
-  - Non-essential features
+- **nit**: Nice to have, non-critical
+  - Style/formatting
+  - Minor naming improvements
+  - Documentation wording
   - Future enhancements
-  - Cosmetic improvements
 
 **For each issue found:**
-1. Assign issue number (sequential: 1, 2, 3...)
-2. Write clear description
-3. Suggest resolution steps
-4. Link to screenshot if visual issue
-5. Classify severity
+1. Reference the file and line number
+2. Write clear description of the problem
+3. Suggest a fix
+4. Classify severity
 
-### 6. Generate Review Report
+### 6. Post Review
 
-**Create report.json:**
-```json
-{
-  "workflow_id": "review-workflow",
-  "spec_file": "specs/review-workflow.md",
-  "branch": "feature/review-workflow",
-  "timestamp": "2026-02-04T15:00:00Z",
-  "success": true,
-  "review_summary": "Implementation meets all core requirements. Minor tech debt identified around error handling. UI screenshots captured showing proper functionality across critical paths.",
-  "review_issues": [
-    {
-      "issue_number": 1,
-      "screenshot_path": "generated_images/review-workflow/02_error_state.png",
-      "description": "Error message not displayed when user submits invalid input",
-      "resolution": "Add error state rendering in FormComponent.tsx line 45",
-      "severity": "blocker"
-    },
-    {
-      "issue_number": 2,
-      "screenshot_path": null,
-      "description": "Missing unit tests for validation logic",
-      "resolution": "Add tests for validateInput() function",
-      "severity": "tech_debt"
-    }
-  ],
-  "screenshots": [
-    "generated_images/review-workflow/01_main_dashboard.png",
-    "generated_images/review-workflow/02_error_state.png",
-    "generated_images/review-workflow/03_success_flow.png"
-  ],
-  "metrics": {
-    "total_issues": 2,
-    "blockers": 1,
-    "tech_debt": 1,
-    "skippable": 0,
-    "screenshots_captured": 3,
-    "acceptance_criteria_met": "4/5"
-  }
-}
+**If blockers found:**
+```bash
+gh pr review {pr_number} --request-changes --body "$(cat <<'EOF'
+## Review: Changes Requested
+
+[summary of blockers]
+
+### Blockers
+- [ ] [blocker 1 with file:line reference]
+- [ ] [blocker 2 with file:line reference]
+
+### Tech Debt (non-blocking)
+- [tech debt items]
+
+### Screenshots
+[screenshot references if captured]
+EOF
+)"
 ```
 
-**Save report:**
+**If no blockers:**
 ```bash
-# Save to agents/{workflow_id}/review/report.json
-cat > agents/{workflow_id}/review/report.json << 'EOF'
-{...json content...}
+gh pr review {pr_number} --approve --body "$(cat <<'EOF'
+## Review: Approved
+
+[summary of review]
+
+### Verified
+- [x] Code correctness
+- [x] Test coverage
+- [x] Security (no vulnerabilities found)
+- [x] Plan requirements met
+
+### Tech Debt (optional follow-ups)
+- [any non-blocking items]
+
+### Screenshots
+[screenshot references if captured]
 EOF
+)"
 ```
 
 ### 7. Output Summary
 
-**Present review summary to user:**
+**Present review summary:**
 
 ```
-🔍 Review Complete: {workflow_id}
+Review Complete: PR #{pr_number}
 
-📋 Spec: {spec_file}
-🌿 Branch: {branch_name}
+Branch: {head_branch} -> {base_branch}
+Plan: {plan_file or "none"}
 
-✅ Success: {success}
+Result: {Approved | Changes Requested}
 
-📊 Summary:
-{review_summary}
+Issues Found: {total}
+  - Blockers: {count}
+  - Tech Debt: {count}
+  - Nits: {count}
 
-🚨 Issues Found: {total_issues}
-  - Blockers: {blockers}
-  - Tech Debt: {tech_debt}
-  - Skippable: {skippable}
-
-📸 Screenshots: {screenshot_count} captured
-  → generated_images/{workflow_id}/
-
-📝 Full report: agents/{workflow_id}/review/report.json
+Screenshots: {count} captured
+  -> generated_images/pr-{pr_number}/
 ```
-
-**If blockers found:**
-- List each blocker with issue number and description
-- Recommend fixing before merge
-
-**If only tech_debt/skippable:**
-- Note that work can proceed
-- Create tech debt issues if needed
 
 ## Integration Notes
 
 **Works with:**
+- `/do-build` - Reviews PRs created by the build workflow
 - `/prepare_app` - Ensures app is running before screenshots
-- `agent-browser` - Handles all browser automation and screenshot capture
-- Git workflow - Uses branch context for workflow identification
-- Spec files - Located in `specs/*.md`
+- `agent-browser` - Handles browser automation and screenshot capture
+- `gh` CLI - Fetches PR data and posts reviews
 
 **Screenshot storage:**
-- Saved to `generated_images/{workflow_id}/` directory
-- Automatically detected and sent via Telegram bridge (same as valor-image-gen)
-- Organized by workflow ID for easy tracking
+- Saved to `generated_images/pr-{pr_number}/` directory
+- Auto-detected and sent via Telegram bridge
 - Bridge uses RELATIVE_PATH_PATTERN to auto-detect generated_images/ files
-
-**Report schema:**
-- Machine-readable JSON
-- Human-readable summary
-- Severity-classified issues
-- Screenshot references
 
 ## Example Usage
 
 ```bash
-# Auto-detect workflow from branch
-/do-pr-review
-
-# Specify workflow ID
-/do-pr-review my-feature
-
-# Specify both workflow and spec
-/do-pr-review my-feature specs/my-feature.md
+# Review PR by number
+/do-pr-review 42
+/do-pr-review #42
 ```
-
-## Output Artifacts
-
-1. **Review report**: `agents/{workflow_id}/review/report.json`
-2. **Screenshots**: `generated_images/{workflow_id}/*.png`
-   - Auto-sent via Telegram when paths mentioned in response
-   - Same detection pattern as valor-image-gen output
-3. **Console summary**: Immediate feedback on review status
 
 ## Best Practices
 
-1. **Run review before creating PR**: Catch issues early
-2. **Capture key UI paths**: Focus on critical user flows, not every pixel
-3. **Be specific in issue descriptions**: Make resolution clear
-4. **Classify severity honestly**: Don't downgrade blockers to ship faster
-5. **Keep screenshots focused**: 1-5 screenshots typical, avoid excessive captures
-6. **Document edge cases**: If spec doesn't cover it, note in tech_debt
-
-## Notes
-
-- App must be running for UI screenshot capture
-- Spec files are optional but recommended for thorough review
-- Screenshots stored locally; future enhancement for cloud upload
-- Review reports are versioned by timestamp for historical tracking
+1. **Always read the plan first**: The plan is the source of truth for what should have been built
+2. **Focus on correctness over style**: Don't nitpick formatting if the code works
+3. **Be specific in issue descriptions**: Include file paths and line numbers
+4. **Classify severity honestly**: Don't mark blockers as tech debt to speed up merge
+5. **Capture key UI paths**: 1-3 screenshots typical, focus on changed functionality

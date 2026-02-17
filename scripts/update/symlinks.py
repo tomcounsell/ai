@@ -7,6 +7,18 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Old names that were renamed. The update system removes these from ~/.claude/
+# if the old name is still present. Add entries here when renaming skills or commands.
+# Format: list of (kind, old_name) where kind is "commands" or "skills".
+RENAMED_REMOVALS: list[tuple[str, str]] = [
+    ("commands", "build.md"),
+    ("commands", "make-plan.md"),
+    ("commands", "update-docs.md"),
+    ("skills", "build"),
+    ("skills", "make-plan"),
+    ("skills", "update-docs"),
+]
+
 
 @dataclass
 class LinkAction:
@@ -50,6 +62,9 @@ def sync_claude_dirs(project_dir: Path) -> SymlinkSyncResult:
     _sync_commands(
         project_dir / ".claude" / "commands", user_claude / "commands", result
     )
+
+    # Remove explicitly renamed commands/skills (by name, not inode)
+    _cleanup_renamed(user_claude, result)
 
     # Clean up stale hardlinks that no longer have a source
     _cleanup_stale_commands(
@@ -145,6 +160,26 @@ def _is_hardlinked_to_project(dst_file: Path, src_dir: Path) -> bool:
             except OSError:
                 continue
     return False
+
+
+def _cleanup_renamed(user_claude: Path, result: SymlinkSyncResult) -> None:
+    """Remove old-name commands/skills listed in RENAMED_REMOVALS."""
+    for kind, old_name in RENAMED_REMOVALS:
+        target = user_claude / kind / old_name
+        if not target.exists():
+            continue
+
+        rel = str(target).replace(str(Path.home()), "~")
+        try:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+            result.actions.append(LinkAction("", rel, "removed"))
+            result.removed += 1
+        except OSError as e:
+            result.actions.append(LinkAction("", rel, "error", str(e)))
+            result.errors += 1
 
 
 def _cleanup_stale_commands(

@@ -433,7 +433,22 @@ def mark_work_done(working_dir: Path, branch_name: str) -> bool:
             logger.info(f"Marked work as done: {branch_name}")
 
         # Return to main
-        return return_to_main(working_dir)
+        switched = return_to_main(working_dir)
+
+        # Delete the session branch locally so it doesn't re-trigger revival
+        if switched and branch_name.startswith("session/"):
+            try:
+                subprocess.run(
+                    ["git", "branch", "-d", branch_name],
+                    cwd=working_dir,
+                    capture_output=True,
+                    timeout=10,
+                )
+                logger.info(f"Deleted local branch: {branch_name}")
+            except Exception as e:
+                logger.warning(f"Failed to delete branch {branch_name}: {e}")
+
+        return switched
 
     except Exception as e:
         logger.error(f"Failed to mark work as done: {e}")
