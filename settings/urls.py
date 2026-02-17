@@ -3,7 +3,7 @@ import os
 from django.contrib import admin
 from django.http import Http404, HttpResponse, JsonResponse
 from django.urls import include, path
-from django.views.generic import RedirectView, TemplateView
+from django.views.generic import RedirectView
 
 from apps.ai.views import MCPOAuthMetadataView
 from apps.api.views.health_views import deep_health_check, health_check
@@ -132,7 +132,7 @@ urlpatterns = [
     # Serve Markdown documentation directly - supports docs/FILENAME and nested paths
     path("docs/<path:filename>", serve_markdown_file, name="serve_markdown"),
     # API URLs - Removed
-    # path('api/', include('apps.api.urls')),
+    path("api/", include("apps.api.urls")),
     # API Schema and Documentation - Removed
     # path('api/schema/', get_schema_view(...), name='openapi-schema'),
     # path('api/docs/', TemplateView.as_view(...), name='swagger-ui'),

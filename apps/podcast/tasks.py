@@ -432,12 +432,14 @@ def step_episode_planning(episode_id: int) -> None:
 
 @task
 def step_audio_generation(episode_id: int) -> None:
-    """Generate audio via NotebookLM API."""
+    """Pause workflow for local audio worker to pick up."""
     _acquire_step_lock(episode_id, "Audio Generation")
     try:
-        audio.generate_audio(episode_id)
-        workflow.advance_step(episode_id, "Audio Generation")
-        step_transcribe_audio.enqueue(episode_id=episode_id)
+        workflow.pause_for_human(episode_id, "audio_generation")
+        logger.info(
+            "step_audio_generation: paused for local worker, episode %d",
+            episode_id,
+        )
     except Exception as exc:
         workflow.fail_step(episode_id, "Audio Generation", str(exc))
         raise

@@ -93,7 +93,10 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_VERSION = os.environ.get("ANTHROPIC_VERSION", "2023-06-01")
 
 # MCP Server Settings
-MCP_SERVER_HOST = os.environ.get("MCP_SERVER_HOST", "0.0.0.0")
+MCP_SERVER_HOST = os.environ.get("MCP_SERVER_HOST", "0.0.0.0")  # nosec B104
 MCP_SERVER_PORT = int(os.environ.get("MCP_SERVER_PORT", "8080"))
 MCP_MAX_CONNECTIONS = int(os.environ.get("MCP_MAX_CONNECTIONS", "100"))
 MCP_AUTH_REQUIRED = os.environ.get("MCP_AUTH_REQUIRED", "True").lower() == "true"
+
+# Local Audio Worker
+LOCAL_WORKER_API_KEY = os.environ.get("LOCAL_WORKER_API_KEY", "")
