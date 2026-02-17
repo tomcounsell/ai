@@ -276,7 +276,24 @@ ls data/*.session
 
 If no session file appeared, something went wrong. Ask the user what happened and help debug.
 
-## Step 8: Start the Bridge
+## Step 8: Install Daydream Scheduler
+
+Install the daydream daily maintenance plist (runs at 6 AM Pacific):
+
+```bash
+cd /Users/valorengels/src/ai
+./scripts/install_daydream.sh
+```
+
+Verify it loaded:
+
+```bash
+launchctl list | grep com.valor.daydream
+```
+
+If the output shows the `com.valor.daydream` label, the scheduler is installed. It will run `scripts/daydream.py` daily at 6 AM, performing log review, session analysis, LLM reflection, and memory consolidation.
+
+## Step 9: Start the Bridge
 
 Ensure the logs directory exists, then start the bridge as a background process:
 
@@ -308,7 +325,7 @@ Also verify the process is running:
 pgrep -f telegram_bridge.py
 ```
 
-## Step 9: Final Verification
+## Step 10: Final Verification
 
 Run a comprehensive health check:
 
@@ -336,7 +353,7 @@ echo "=== Bridge Status ==="
 ./scripts/valor-service.sh status
 ```
 
-## Step 10: Confirm to User
+## Step 11: Confirm to User
 
 Report the final status to the user with:
 

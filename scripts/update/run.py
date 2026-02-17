@@ -322,6 +322,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         else:
             result.warnings.append("Update cron not installed")
 
+        # Install/reload daydream scheduler
+        if service.install_daydream(project_dir):
+            log("Daydream scheduler installed", v)
+        elif (project_dir / "com.valor.daydream.plist").exists():
+            result.warnings.append("Daydream plist install failed")
+
     elif result.git_result and result.git_result.commit_count > 0:
         # Cron mode: set restart flag instead of restarting
         log("Setting restart flag for graceful restart...", v, always=True)

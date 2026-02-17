@@ -47,6 +47,7 @@ The update system is modular. Each step is implemented in `scripts/update/`:
    - Verify SDK authentication status
    - Install/restart bridge and update cron services
    - Install caffeinate service (prevents sleep)
+   - Install/reload daydream scheduler (daily 6 AM maintenance)
    - Verify CLI tools are available
    - Set up global calendar hook if missing
    - Generate Google Calendar config

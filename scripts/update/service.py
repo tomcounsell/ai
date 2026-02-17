@@ -132,6 +132,41 @@ def restart_service(project_dir: Path) -> bool:
         return False
 
 
+def install_daydream(project_dir: Path) -> bool:
+    """Install/reload daydream plist. Returns True if successful."""
+    plist_src = project_dir / "com.valor.daydream.plist"
+    plist_dst = Path.home() / "Library" / "LaunchAgents" / "com.valor.daydream.plist"
+    label = "com.valor.daydream"
+
+    if not plist_src.exists():
+        return False
+
+    try:
+        # Unload if currently loaded
+        result = run_cmd(["launchctl", "list"])
+        if label in result.stdout:
+            run_cmd(["launchctl", "unload", str(plist_dst)])
+
+        # Copy and load
+        plist_dst.parent.mkdir(parents=True, exist_ok=True)
+        import shutil
+
+        shutil.copy2(str(plist_src), str(plist_dst))
+        run_cmd(["launchctl", "load", str(plist_dst)])
+        return True
+    except Exception:
+        return False
+
+
+def is_daydream_installed() -> bool:
+    """Check if daydream scheduler is installed."""
+    try:
+        result = run_cmd(["launchctl", "list"])
+        return "com.valor.daydream" in result.stdout
+    except Exception:
+        return False
+
+
 def is_update_cron_installed() -> bool:
     """Check if update cron is installed."""
     try:
