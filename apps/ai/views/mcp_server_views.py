@@ -206,7 +206,7 @@ class CTOToolsMCPServerView(View):
     def post(self, request):
         """Handle MCP JSON-RPC requests."""
         # Validate Bearer token (auto-approve OAuth - just check presence)
-        auth_header = request.META.get("HTTP_AUTHORIZATION", "")
+        auth_header = request.headers.get("authorization", "")
         if not auth_header.startswith("Bearer "):
             return JsonResponse(
                 {

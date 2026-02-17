@@ -10,8 +10,6 @@ The exception hierarchy enables:
     - Detailed logging and monitoring of security events
 """
 
-from typing import Optional
-
 
 class CodeExecutionError(Exception):
     """
@@ -29,7 +27,7 @@ class CodeExecutionError(Exception):
     def __init__(
         self,
         message: str,
-        details: Optional[dict] = None,
+        details: dict | None = None,
         can_retry: bool = False,
     ):
         self.message = message
@@ -71,7 +69,7 @@ class ValidationError(CodeExecutionError):
     to be rewritten by the LLM.
     """
 
-    def __init__(self, message: str, details: Optional[dict] = None):
+    def __init__(self, message: str, details: dict | None = None):
         super().__init__(message, details, can_retry=True)
 
 
@@ -87,7 +85,7 @@ class SandboxError(CodeExecutionError):
     These errors indicate an infrastructure problem, not a code problem.
     """
 
-    def __init__(self, message: str, details: Optional[dict] = None):
+    def __init__(self, message: str, details: dict | None = None):
         super().__init__(message, details, can_retry=True)
 
 
@@ -106,7 +104,7 @@ class TimeoutError(CodeExecutionError):
     def __init__(
         self,
         message: str = "Code execution exceeded time limit",
-        timeout_seconds: Optional[float] = None,
+        timeout_seconds: float | None = None,
     ):
         details = {"timeout_seconds": timeout_seconds} if timeout_seconds else {}
         super().__init__(message, details, can_retry=True)
@@ -128,8 +126,8 @@ class ResourceLimitError(CodeExecutionError):
     def __init__(
         self,
         message: str,
-        limit_type: Optional[str] = None,
-        limit_value: Optional[any] = None,
+        limit_type: str | None = None,
+        limit_value: any | None = None,
     ):
         details = {}
         if limit_type:
@@ -160,8 +158,8 @@ class SecurityViolationError(CodeExecutionError):
     def __init__(
         self,
         message: str,
-        violation_type: Optional[str] = None,
-        attempted_operation: Optional[str] = None,
+        violation_type: str | None = None,
+        attempted_operation: str | None = None,
     ):
         details = {}
         if violation_type:
@@ -186,5 +184,5 @@ class OutputValidationError(CodeExecutionError):
         - Resource exhaustion via large outputs
     """
 
-    def __init__(self, message: str, details: Optional[dict] = None):
+    def __init__(self, message: str, details: dict | None = None):
         super().__init__(message, details, can_retry=False)

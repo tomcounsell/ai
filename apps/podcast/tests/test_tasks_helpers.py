@@ -5,11 +5,7 @@ from __future__ import annotations
 import pytest
 from django.test import TestCase
 
-from apps.podcast.models import (
-    Episode,
-    EpisodeArtifact,
-    Podcast,
-)
+from apps.podcast.models import Episode, EpisodeArtifact, Podcast
 from apps.podcast.tasks import _get_crafted_prompt
 
 

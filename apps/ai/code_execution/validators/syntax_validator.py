@@ -7,7 +7,6 @@ before attempting execution. This is the first line of defense.
 
 import ast
 from dataclasses import dataclass
-from typing import Optional
 
 from ..exceptions import ValidationError
 
@@ -17,9 +16,9 @@ class SyntaxValidationResult:
     """Result of syntax validation."""
 
     is_valid: bool
-    error_message: Optional[str] = None
-    line_number: Optional[int] = None
-    offset: Optional[int] = None
+    error_message: str | None = None
+    line_number: int | None = None
+    offset: int | None = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""

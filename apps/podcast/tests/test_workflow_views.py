@@ -111,7 +111,9 @@ class EpisodeWorkflowViewTestCase(TestCase):
     # 10. HTMX request returns partial (no DOCTYPE)
     def test_htmx_request_returns_partial(self):
         self.client.login(username="staff", password="pass")
-        response = self.client.get(self._workflow_url(step=1), HTTP_HX_REQUEST="true")
+        response = self.client.get(
+            self._workflow_url(step=1), headers={"hx-request": "true"}
+        )
         self.assertEqual(response.status_code, 200)
         content = response.content.decode("utf-8")
         self.assertNotIn("<!DOCTYPE html", content)
@@ -152,7 +154,7 @@ class EpisodeWorkflowViewTestCase(TestCase):
             author_email="author@example.com",
             is_public=False,
         )
-        private_episode = Episode.objects.create(
+        Episode.objects.create(
             podcast=private_podcast,
             title="Private Episode",
             slug="private-episode",

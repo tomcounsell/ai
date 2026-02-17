@@ -35,14 +35,12 @@ when using OS-level isolation.
 import signal
 import sys
 import time
+from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
-from typing import Any, Callable
+from typing import Any
 
-from ..exceptions import (
-    ResourceLimitError,
-    SecurityViolationError,
-)
+from ..exceptions import SecurityViolationError
 from ..exceptions import TimeoutError as ExecutionTimeoutError
 from .base import BaseSandbox, SandboxConfig, SandboxResult
 
@@ -167,7 +165,7 @@ class RestrictedPythonSandbox(BaseSandbox):
             # Redirect output
             with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
                 # Execute the code
-                exec(code, restricted_globals)
+                exec(code, restricted_globals)  # nosec B102
 
             execution_time = time.time() - start_time
 

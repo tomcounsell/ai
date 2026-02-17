@@ -4,11 +4,7 @@ from __future__ import annotations
 
 from django.test import TestCase
 
-from apps.podcast.models import (
-    Episode,
-    EpisodeArtifact,
-    Podcast,
-)
+from apps.podcast.models import Episode, EpisodeArtifact, Podcast
 from apps.podcast.signals import _check_targeted_research_complete
 
 

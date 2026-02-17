@@ -19,9 +19,8 @@ Use Cases:
 """
 
 import re
-import sys
 from dataclasses import dataclass
-from typing import List, Optional, Pattern
+from re import Pattern
 
 from ..exceptions import OutputValidationError
 
@@ -139,7 +138,7 @@ class OutputValidator:
     def __init__(
         self,
         max_output_bytes: int = 1_000_000,  # 1 MB default
-        patterns: Optional[List[SensitivePattern]] = None,
+        patterns: list[SensitivePattern] | None = None,
         redact: bool = False,
         strict: bool = False,
     ):
@@ -164,7 +163,7 @@ class OutputValidator:
         is_valid: bool
         original_output: str
         sanitized_output: str
-        violations: List[dict]
+        violations: list[dict]
         was_truncated: bool = False
         was_redacted: bool = False
 
@@ -247,9 +246,9 @@ class OutputValidator:
 
         # Determine validity
         is_valid = True
-        if self.strict and violations:
-            is_valid = False
-        elif any(v["severity"] == "high" for v in violations) and not self.redact:
+        if (self.strict and violations) or (
+            any(v["severity"] == "high" for v in violations) and not self.redact
+        ):
             is_valid = False
 
         return self.ValidationResult(

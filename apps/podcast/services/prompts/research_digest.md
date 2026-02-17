@@ -65,4 +65,3 @@ Different research tools have different strengths. Adjust your digest accordingl
 | Grok | Real-time/social | Practitioner perspectives, recent developments, public sentiment (mark as OPINION, not evidence) |
 
 **Important:** If the source is Grok/X-Twitter research, clearly mark all findings as OPINION/SENTIMENT, not factual evidence. These cannot be used to verify factual claims but provide valuable context on public discourse.
-

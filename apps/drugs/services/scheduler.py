@@ -8,7 +8,6 @@ Generates simple daily medication schedules based on:
 """
 
 from datetime import time
-from typing import Dict, List
 
 from apps.drugs.models import UserMealSchedule, UserMedication
 
@@ -20,8 +19,8 @@ class MedicationScheduler:
 
     @staticmethod
     def generate_daily_schedule(
-        user_medications: List[UserMedication], meal_schedule: UserMealSchedule = None
-    ) -> Dict:
+        user_medications: list[UserMedication], meal_schedule: UserMealSchedule = None
+    ) -> dict:
         """
         Generate a simple daily medication schedule.
 
@@ -153,7 +152,7 @@ class MedicationScheduler:
         return suggested_time.strftime("%-I:%M %p")  # "8:00 AM" format
 
     @staticmethod
-    def get_schedule_summary(schedule: Dict) -> List[Dict]:
+    def get_schedule_summary(schedule: dict) -> list[dict]:
         """
         Convert schedule dict into a flat list for display, sorted by time.
 

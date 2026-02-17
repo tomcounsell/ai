@@ -25,20 +25,15 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Type
+from typing import Any
 
-from ..exceptions import (
-    CodeExecutionError,
-    SandboxError,
-    ValidationError,
-)
 from ..sandboxes import (
     BaseSandbox,
     RestrictedPythonSandbox,
     SandboxConfig,
     SandboxResult,
 )
-from ..validators import ASTValidator, ASTViolation, OutputValidator, SyntaxValidator
+from ..validators import ASTValidator, OutputValidator, SyntaxValidator
 
 logger = logging.getLogger(__name__)
 
@@ -71,17 +66,17 @@ class ExecutionResult:
     stdout: str = ""
     stderr: str = ""
     return_value: Any = None
-    error_message: Optional[str] = None
-    error_type: Optional[str] = None
-    execution_time_seconds: Optional[float] = None
-    total_time_seconds: Optional[float] = None
-    validation_violations: List[Dict] = field(default_factory=list)
-    output_violations: List[Dict] = field(default_factory=list)
+    error_message: str | None = None
+    error_type: str | None = None
+    execution_time_seconds: float | None = None
+    total_time_seconds: float | None = None
+    validation_violations: list[dict] = field(default_factory=list)
+    output_violations: list[dict] = field(default_factory=list)
     was_output_redacted: bool = False
-    sandbox_metadata: Dict[str, Any] = field(default_factory=dict)
+    sandbox_metadata: dict[str, Any] = field(default_factory=dict)
     timestamp: datetime = field(default_factory=datetime.now)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """
         Convert to dictionary for JSON serialization.
 
@@ -153,9 +148,9 @@ class CodeExecutor:
 
     def __init__(
         self,
-        user_id: Optional[int] = None,
-        sandbox_type: Type[BaseSandbox] = RestrictedPythonSandbox,
-        sandbox_config: Optional[SandboxConfig] = None,
+        user_id: int | None = None,
+        sandbox_type: type[BaseSandbox] = RestrictedPythonSandbox,
+        sandbox_config: SandboxConfig | None = None,
         enable_syntax_validation: bool = True,
         enable_ast_validation: bool = True,
         enable_output_validation: bool = True,
@@ -213,7 +208,7 @@ class CodeExecutor:
     def execute(
         self,
         code: str,
-        context: Optional[Dict[str, Any]] = None,
+        context: dict[str, Any] | None = None,
     ) -> ExecutionResult:
         """
         Execute Python code with full security pipeline.
@@ -252,7 +247,7 @@ class CodeExecutor:
         # Log execution attempt
         if self.log_executions:
             logger.info(
-                f"Code execution requested",
+                "Code execution requested",
                 extra={
                     "user_id": self.user_id,
                     "code_length": len(code),
@@ -326,7 +321,7 @@ class CodeExecutor:
                 total_time_seconds=time.time() - start_time,
             )
 
-    def _validate_syntax(self, code: str) -> List[Dict]:
+    def _validate_syntax(self, code: str) -> list[dict]:
         """
         Validate code syntax.
 
@@ -346,7 +341,7 @@ class CodeExecutor:
             ]
         return []
 
-    def _validate_ast(self, code: str) -> List[Dict]:
+    def _validate_ast(self, code: str) -> list[dict]:
         """
         Perform AST security analysis.
 
@@ -359,7 +354,7 @@ class CodeExecutor:
     def _execute_in_sandbox(
         self,
         code: str,
-        context: Optional[Dict[str, Any]] = None,
+        context: dict[str, Any] | None = None,
     ) -> SandboxResult:
         """
         Execute code in configured sandbox.
@@ -391,7 +386,7 @@ class CodeExecutor:
 
     def _create_validation_failure_result(
         self,
-        violations: List[Dict],
+        violations: list[dict],
         total_time: float,
     ) -> ExecutionResult:
         """

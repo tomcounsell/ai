@@ -11,7 +11,7 @@ They should only be run in isolated test environments.
 import pytest
 
 from apps.ai.code_execution import CodeExecutor
-from apps.ai.code_execution.sandboxes import RestrictedPythonSandbox, SandboxConfig
+from apps.ai.code_execution.sandboxes import SandboxConfig
 from apps.ai.code_execution.validators import ASTValidator
 
 
@@ -140,10 +140,12 @@ class TestResourceExhaustion:
         executor = CodeExecutor(
             sandbox_config=SandboxConfig(timeout_seconds=2),
         )
-        result = executor.execute("""
+        result = executor.execute(
+            """
 while True:
     pass
-""")
+"""
+        )
 
         assert not result.success
         # Should timeout
@@ -151,14 +153,16 @@ while True:
     def test_memory_intensive_operation(self):
         """Should handle memory-intensive operations."""
         executor = CodeExecutor()
-        result = executor.execute("""
+        result = executor.execute(
+            """
 # Try to create a large list
 try:
     x = [0] * 1_000_000
     print('Created large list')
 except MemoryError:
     print('Memory limit reached')
-""")
+"""
+        )
 
         # Should complete (either successfully or with memory error)
         assert result.success or "Memory" in result.error_message
@@ -168,10 +172,12 @@ except MemoryError:
         executor = CodeExecutor(
             sandbox_config=SandboxConfig(max_output_bytes=1000),
         )
-        result = executor.execute("""
+        result = executor.execute(
+            """
 for i in range(1000):
     print('A' * 100)
-""")
+"""
+        )
 
         # Output should be truncated
         assert result.success
@@ -196,10 +202,12 @@ class TestDataExfiltration:
     def test_detect_api_key_in_output(self):
         """Should detect API keys in output."""
         executor = CodeExecutor(redact_sensitive_output=True)
-        result = executor.execute("""
+        result = executor.execute(
+            """
 api_key = "sk-abc123def456ghi789jkl012mno345pqr678stu901vwx234"
 print(f"API Key: {api_key}")
-""")
+"""
+        )
 
         assert result.success
         assert "sk-abc123" not in result.stdout  # Should be redacted
@@ -209,9 +217,11 @@ print(f"API Key: {api_key}")
     def test_detect_aws_key_in_output(self):
         """Should detect AWS access keys in output."""
         executor = CodeExecutor(redact_sensitive_output=True)
-        result = executor.execute("""
+        result = executor.execute(
+            """
 print("AWS Key: AKIAIOSFODNN7EXAMPLE")
-""")
+"""
+        )
 
         assert result.success
         assert "AKIAIOSFODNN7EXAMPLE" not in result.stdout
@@ -220,9 +230,11 @@ print("AWS Key: AKIAIOSFODNN7EXAMPLE")
     def test_detect_ssn_in_output(self):
         """Should detect Social Security Numbers in output."""
         executor = CodeExecutor(redact_sensitive_output=True)
-        result = executor.execute("""
+        result = executor.execute(
+            """
 print("SSN: 123-45-6789")
-""")
+"""
+        )
 
         assert result.success
         assert "123-45-6789" not in result.stdout
@@ -231,9 +243,11 @@ print("SSN: 123-45-6789")
     def test_detect_credit_card_in_output(self):
         """Should detect credit card numbers in output."""
         executor = CodeExecutor(redact_sensitive_output=True)
-        result = executor.execute("""
+        result = executor.execute(
+            """
 print("Card: 4532-1234-5678-9010")
-""")
+"""
+        )
 
         assert result.success
         assert "4532-1234-5678-9010" not in result.stdout
@@ -250,21 +264,25 @@ class TestEscapeAttempts:
     def test_escape_via_class_hierarchy(self):
         """Should block escape via class hierarchy navigation."""
         executor = CodeExecutor()
-        result = executor.execute("""
+        result = executor.execute(
+            """
 # Attempt to access object.__subclasses__()
 classes = object.__subclasses__()
 print(classes)
-""")
+"""
+        )
 
         assert not result.success or result.validation_violations
 
     def test_escape_via_frame_objects(self):
         """Should block escape via frame object access."""
         executor = CodeExecutor()
-        result = executor.execute("""
+        result = executor.execute(
+            """
 import sys
 frame = sys._getframe()
-""")
+"""
+        )
 
         # sys is blocked, so this should fail at import
         assert not result.success or result.validation_violations
@@ -272,22 +290,26 @@ frame = sys._getframe()
     def test_escape_via_code_objects(self):
         """Should block escape via code object manipulation."""
         executor = CodeExecutor()
-        result = executor.execute("""
+        result = executor.execute(
+            """
 def f():
     pass
 code = f.__code__
-""")
+"""
+        )
 
         assert not result.success or result.validation_violations
 
     def test_escape_via_getattr(self):
         """Should handle getattr-based obfuscation."""
         executor = CodeExecutor()
-        result = executor.execute("""
+        result = executor.execute(
+            """
 # Try to use getattr to access blocked functions
 import_func = getattr(__builtins__, '__import__')
 os = import_func('os')
-""")
+"""
+        )
 
         # May succeed but should not have access to __builtins__
         # or getattr might be blocked depending on configuration
@@ -305,10 +327,12 @@ class TestLegitimateCodeExecution:
     def test_simple_arithmetic(self):
         """Should execute simple arithmetic."""
         executor = CodeExecutor()
-        result = executor.execute("""
+        result = executor.execute(
+            """
 x = 1 + 1
 print(x)
-""")
+"""
+        )
 
         assert result.success
         assert "2" in result.stdout
@@ -316,11 +340,13 @@ print(x)
     def test_data_processing_with_loops(self):
         """Should execute data processing code."""
         executor = CodeExecutor()
-        result = executor.execute("""
+        result = executor.execute(
+            """
 data = [1, 2, 3, 4, 5]
 result = sum(x * 2 for x in data)
 print(result)
-""")
+"""
+        )
 
         assert result.success
         assert "30" in result.stdout
@@ -328,12 +354,14 @@ print(result)
     def test_json_processing(self):
         """Should execute JSON processing."""
         executor = CodeExecutor()
-        result = executor.execute("""
+        result = executor.execute(
+            """
 import json
 data = {"name": "Alice", "age": 30}
 json_str = json.dumps(data)
 print(json_str)
-""")
+"""
+        )
 
         assert result.success
         assert "Alice" in result.stdout
@@ -341,12 +369,14 @@ print(json_str)
     def test_math_operations(self):
         """Should execute mathematical operations."""
         executor = CodeExecutor()
-        result = executor.execute("""
+        result = executor.execute(
+            """
 import math
 radius = 5
 area = math.pi * radius ** 2
 print(f"Area: {area:.2f}")
-""")
+"""
+        )
 
         assert result.success
         assert "78.5" in result.stdout
@@ -368,12 +398,14 @@ print(f"Hello, {user['name']}!")
     def test_error_handling(self):
         """Should handle runtime errors gracefully."""
         executor = CodeExecutor()
-        result = executor.execute("""
+        result = executor.execute(
+            """
 try:
     x = 1 / 0
 except ZeroDivisionError:
     print("Caught division by zero")
-""")
+"""
+        )
 
         assert result.success
         assert "Caught division by zero" in result.stdout

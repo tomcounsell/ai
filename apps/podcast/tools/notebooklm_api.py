@@ -24,7 +24,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
 
 # Configuration
 ENDPOINT_PREFIX = "global"  # us, eu, or global
@@ -94,7 +93,7 @@ def api_request(
     request = urllib.request.Request(url, data=body, headers=req_headers, method=method)
 
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request) as response:  # nosec B310
             return json.loads(response.read().decode())
     except urllib.error.HTTPError as e:
         error_body = e.read().decode()
@@ -133,9 +132,6 @@ def upload_source_file(notebook_id: str, file_path: Path) -> dict:
         f"/upload/{API_VERSION}/projects/{project}/locations/{LOCATION}"
         f"/notebooks/{notebook_id}/sources:uploadFile"
     )
-
-    # Read file content
-    content = file_path.read_bytes()
 
     # Determine MIME type
     suffix = file_path.suffix.lower()
@@ -179,7 +175,7 @@ def create_audio_overview(
     notebook_id: str, episode_focus: str, language_code: str = "en"
 ) -> dict:
     """Create an audio overview for the notebook."""
-    print(f"Creating audio overview...")
+    print("Creating audio overview...")
     print(f"  Focus: {episode_focus[:100]}...")
 
     endpoint = f"/notebooks/{notebook_id}/audioOverviews"
@@ -287,7 +283,7 @@ def test_api_access() -> tuple[bool, str]:
         )
 
         # Quick timeout - if API isn't accessible, fail fast
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=10):  # nosec B310
             # 200 OK means we have access
             return True, ""
 
@@ -317,7 +313,8 @@ def test_api_access() -> tuple[bool, str]:
 
 def print_manual_fallback(episode_dir: Path) -> None:
     """Print manual NotebookLM instructions when API is unavailable."""
-    print(f"""
+    print(
+        f"""
 {'='*60}
 API UNAVAILABLE - USE MANUAL WORKFLOW
 {'='*60}
@@ -337,7 +334,8 @@ This will:
 Then paste into NotebookLM at: https://notebooklm.google.com/
 
 {'='*60}
-""")
+"""
+    )
 
 
 def generate_episode_focus(episode_title: str, series_name: str = "") -> str:
@@ -453,7 +451,7 @@ def main():
     episode_title = args.title or episode_slug.replace("-", " ").title()
 
     print(f"\n{'='*60}")
-    print(f"NotebookLM Enterprise API - Audio Generation")
+    print("NotebookLM Enterprise API - Audio Generation")
     print(f"{'='*60}")
     print(f"Episode: {episode_title}")
     if args.series:
@@ -503,7 +501,7 @@ def main():
         # 6. Get file info
         file_size = output_path.stat().st_size
         print(f"\n{'='*60}")
-        print(f"✅ Audio generated successfully!")
+        print("✅ Audio generated successfully!")
         print(f"   File: {output_path}")
         print(f"   Size: {file_size / 1024 / 1024:.1f} MB ({file_size:,} bytes)")
         print(f"{'='*60}")

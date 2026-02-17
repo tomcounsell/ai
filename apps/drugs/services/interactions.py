@@ -5,8 +5,6 @@ Checks for drug-drug interactions based on stored interaction data.
 For MVP, uses hardcoded JSON data from medication records.
 """
 
-from typing import Dict, List
-
 from apps.drugs.models import Medication, UserMedication
 
 
@@ -16,7 +14,7 @@ class InteractionChecker:
     """
 
     @staticmethod
-    def check_user_interactions(user_medications: List[UserMedication]) -> List[Dict]:
+    def check_user_interactions(user_medications: list[UserMedication]) -> list[dict]:
         """
         Check for interactions among a list of user medications.
 

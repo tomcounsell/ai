@@ -27,7 +27,6 @@ References:
 
 import ast
 from dataclasses import dataclass
-from typing import List, Optional, Set
 
 from ..exceptions import ValidationError
 
@@ -149,8 +148,8 @@ class ASTValidator:
 
     def __init__(
         self,
-        forbidden_imports: Optional[Set[str]] = None,
-        forbidden_functions: Optional[Set[str]] = None,
+        forbidden_imports: set[str] | None = None,
+        forbidden_functions: set[str] | None = None,
         max_operations: int = 10000,
         allow_getattr: bool = True,  # Less strict by default
         allow_setattr: bool = False,
@@ -179,7 +178,7 @@ class ASTValidator:
         if allow_setattr and "setattr" in self.forbidden_functions:
             self.forbidden_functions.remove("setattr")
 
-    def validate(self, code: str) -> List[ASTViolation]:
+    def validate(self, code: str) -> list[ASTViolation]:
         """
         Analyze code's AST for security violations.
 
@@ -201,7 +200,7 @@ class ASTValidator:
             # Don't duplicate error reporting
             return []
 
-        violations: List[ASTViolation] = []
+        violations: list[ASTViolation] = []
 
         # Check complexity first
         node_count = sum(1 for _ in ast.walk(tree))
@@ -276,7 +275,7 @@ class ASTValidator:
                 },
             )
 
-    def _check_import(self, node: ast.Import) -> List[ASTViolation]:
+    def _check_import(self, node: ast.Import) -> list[ASTViolation]:
         """Check import statements for forbidden modules."""
         violations = []
         for alias in node.names:
@@ -294,7 +293,7 @@ class ASTValidator:
                 )
         return violations
 
-    def _check_import_from(self, node: ast.ImportFrom) -> List[ASTViolation]:
+    def _check_import_from(self, node: ast.ImportFrom) -> list[ASTViolation]:
         """Check from...import statements for forbidden modules."""
         violations = []
         if node.module:
@@ -312,7 +311,7 @@ class ASTValidator:
                 )
         return violations
 
-    def _check_call(self, node: ast.Call) -> List[ASTViolation]:
+    def _check_call(self, node: ast.Call) -> list[ASTViolation]:
         """Check function calls for forbidden functions."""
         violations = []
 
@@ -337,7 +336,7 @@ class ASTValidator:
 
         return violations
 
-    def _check_attribute(self, node: ast.Attribute) -> List[ASTViolation]:
+    def _check_attribute(self, node: ast.Attribute) -> list[ASTViolation]:
         """Check attribute access for dangerous patterns."""
         violations = []
 

@@ -81,4 +81,3 @@ For each recommendation:
 4. **Default to all tools:** Most topics benefit from all four Phase 3 research tools. Only omit a tool if its focus area is genuinely not applicable to the topic. This should be rare.
 
 5. **Prioritize ruthlessly:** Not all gaps are equal. Focus recommendations on questions that will most improve the episode's depth, accuracy, and actionability.
-

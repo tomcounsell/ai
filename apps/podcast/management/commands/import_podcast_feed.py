@@ -2,7 +2,6 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
-from typing import Optional
 
 from django.core.management.base import BaseCommand
 from django.utils.text import slugify
@@ -13,7 +12,7 @@ ITUNES_NS = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 DEFAULT_FEED_URL = "https://research.yuda.me/podcast/feed.xml"
 
 
-def parse_duration(duration_str: Optional[str]) -> Optional[int]:
+def parse_duration(duration_str: str | None) -> int | None:
     """Parse iTunes duration format to seconds. Handles HH:MM:SS, MM:SS, or raw seconds."""
     if not duration_str:
         return None
@@ -50,7 +49,7 @@ def strip_html(html: str) -> str:
     return stripper.get_text()
 
 
-def _find_itunes(element: ET.Element, tag: str) -> Optional[ET.Element]:
+def _find_itunes(element: ET.Element, tag: str) -> ET.Element | None:
     """Find an iTunes-namespaced child element."""
     return element.find(f"{{{ITUNES_NS}}}{tag}")
 
@@ -60,7 +59,7 @@ def _find_itunes_all(element: ET.Element, tag: str) -> list[ET.Element]:
     return element.findall(f"{{{ITUNES_NS}}}{tag}")
 
 
-def _text(element: Optional[ET.Element]) -> str:
+def _text(element: ET.Element | None) -> str:
     """Safely extract text from an element, returning empty string if None."""
     if element is None:
         return ""
@@ -105,7 +104,7 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options) -> None:
         dry_run: bool = options["dry_run"]
-        file_path: Optional[str] = options.get("file")
+        file_path: str | None = options.get("file")
         url: str = options["url"]
 
         # Fetch or read the XML
@@ -115,7 +114,7 @@ class Command(BaseCommand):
 
         # Parse XML
         try:
-            root = ET.fromstring(xml_content)
+            root = ET.fromstring(xml_content)  # nosec B314
         except ET.ParseError as e:
             self.stderr.write(self.style.ERROR(f"Failed to parse XML: {e}"))
             return
@@ -133,29 +132,29 @@ class Command(BaseCommand):
         # Extract and create episodes
         self._process_items(channel, podcast, dry_run)
 
-    def _load_xml(self, url: str, file_path: Optional[str]) -> Optional[str]:
+    def _load_xml(self, url: str, file_path: str | None) -> str | None:
         """Load XML content from a URL or local file."""
         if file_path:
             self.stdout.write(f"Reading feed from file: {file_path}")
             try:
-                with open(file_path, "r", encoding="utf-8") as f:
+                with open(file_path, encoding="utf-8") as f:
                     return f.read()
             except FileNotFoundError:
                 self.stderr.write(self.style.ERROR(f"File not found: {file_path}"))
                 return None
-            except IOError as e:
+            except OSError as e:
                 self.stderr.write(self.style.ERROR(f"Error reading file: {e}"))
                 return None
         else:
             self.stdout.write(f"Fetching feed from URL: {url}")
             try:
-                with urllib.request.urlopen(url) as response:
+                with urllib.request.urlopen(url) as response:  # nosec B310
                     return response.read().decode("utf-8")
             except Exception as e:
                 self.stderr.write(self.style.ERROR(f"Error fetching URL: {e}"))
                 return None
 
-    def _process_channel(self, channel: ET.Element, dry_run: bool) -> Optional[Podcast]:
+    def _process_channel(self, channel: ET.Element, dry_run: bool) -> Podcast | None:
         """Extract channel-level metadata and create/update a Podcast record."""
         title = _text(channel.find("title"))
         if not title:
@@ -238,13 +237,13 @@ class Command(BaseCommand):
             return
 
         # Parse items with their pubDate for sorting
-        parsed_items: list[tuple[Optional[str], ET.Element]] = []
+        parsed_items: list[tuple[str | None, ET.Element]] = []
         for item in items:
             pub_date_text = _text(item.find("pubDate"))
             parsed_items.append((pub_date_text, item))
 
         # Sort by pubDate chronologically (oldest first)
-        def sort_key(pair: tuple[Optional[str], ET.Element]) -> str:
+        def sort_key(pair: tuple[str | None, ET.Element]) -> str:
             pub_date_text = pair[0]
             if pub_date_text:
                 try:
@@ -285,7 +284,7 @@ class Command(BaseCommand):
         item: ET.Element,
         podcast: Podcast,
         episode_number: int,
-        pub_date_text: Optional[str],
+        pub_date_text: str | None,
         dry_run: bool,
     ) -> str:
         """Process a single feed item. Returns 'imported', 'skipped', or 'warning'."""
@@ -304,10 +303,10 @@ class Command(BaseCommand):
             audio_url = enclosure.get("url", "")
             length_str = enclosure.get("length", "")
             if length_str:
-                try:
+                import contextlib
+
+                with contextlib.suppress(ValueError):
                     audio_file_size_bytes = int(length_str)
-                except ValueError:
-                    pass
 
         if not audio_url:
             self.stdout.write(
@@ -318,14 +317,17 @@ class Command(BaseCommand):
             return "warning"
 
         # Idempotency check: skip if audio_url already exists for this podcast
-        if not dry_run and audio_url:
-            if (
+        if (
+            not dry_run
+            and audio_url
+            and (
                 Episode.objects.filter(podcast=podcast, audio_url=audio_url)
                 .exclude(audio_url="")
                 .exists()
-            ):
-                self.stdout.write(f"  [{episode_number}] Skipped (exists): {title}")
-                return "skipped"
+            )
+        ):
+            self.stdout.write(f"  [{episode_number}] Skipped (exists): {title}")
+            return "skipped"
 
         # Description: raw HTML for show_notes, stripped for description
         raw_description = _text(item.find("description"))

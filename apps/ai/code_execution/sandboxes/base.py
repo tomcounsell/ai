@@ -13,8 +13,7 @@ Key Design Principles:
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -63,7 +62,7 @@ class SandboxConfig:
         "fractions",
     )
     execution_context: dict[str, Any] = field(default_factory=dict)
-    user_id: Optional[int] = None
+    user_id: int | None = None
 
     def __post_init__(self):
         """Validate configuration values."""
@@ -104,11 +103,11 @@ class SandboxResult:
     stdout: str = ""
     stderr: str = ""
     return_value: Any = None
-    error_message: Optional[str] = None
-    error_type: Optional[str] = None
-    execution_time_seconds: Optional[float] = None
-    memory_used_mb: Optional[float] = None
-    exit_code: Optional[int] = None
+    error_message: str | None = None
+    error_type: str | None = None
+    execution_time_seconds: float | None = None
+    memory_used_mb: float | None = None
+    exit_code: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -216,7 +215,7 @@ class BaseSandbox(ABC):
         """Clean up resources when exiting context."""
         self.cleanup()
 
-    def cleanup(self):
+    def cleanup(self):  # noqa: B027
         """
         Clean up any resources held by the sandbox.
 
@@ -245,7 +244,7 @@ class BaseSandbox(ABC):
     def _create_error_result(
         self,
         error: Exception,
-        execution_time: Optional[float] = None,
+        execution_time: float | None = None,
     ) -> SandboxResult:
         """
         Helper to create SandboxResult from an exception.

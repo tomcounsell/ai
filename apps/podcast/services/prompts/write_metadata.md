@@ -73,4 +73,3 @@ Write a natural-language CTA that hosts can voice at the end of the episode:
 ### Call-to-Action (Wave 4, Task C1.2)
 - Primary CTA gives listener a clear next step
 - Voiced CTA sounds natural when spoken aloud
-
