@@ -178,9 +178,7 @@ def run_gemini_research(episode_id: int, prompt: str) -> EpisodeArtifact:
     )
 
     # Call the existing Gemini tool
-    from apps.podcast.tools.gemini_deep_research import (
-        run_gemini_research as _gemini,
-    )
+    from apps.podcast.tools.gemini_deep_research import run_gemini_research as _gemini
 
     content_text = _gemini(
         prompt=full_prompt,
@@ -203,6 +201,63 @@ def run_gemini_research(episode_id: int, prompt: str) -> EpisodeArtifact:
 
     action = "Created" if created else "Updated"
     logger.info("%s p2-gemini artifact for episode %s", action, episode_id)
+    return artifact
+
+
+# ---------------------------------------------------------------------------
+# Together Open Deep Research
+# ---------------------------------------------------------------------------
+
+
+def run_together_research(episode_id: int, prompt: str) -> EpisodeArtifact:
+    """Call Together Open Deep Research and save results as ``p2-together``.
+
+    Uses :func:`apps.podcast.tools.together_deep_research.run_together_research`.
+
+    Args:
+        episode_id: Primary key of the target :class:`Episode`.
+        prompt: The research query to send to Together.
+
+    Returns:
+        The ``p2-together`` :class:`EpisodeArtifact`.
+    """
+    episode = Episode.objects.get(pk=episode_id)
+    context = _get_episode_context(episode)
+
+    full_prompt = (
+        f"Episode: {episode.title}\n\n"
+        f"Context:\n{context}\n\n"
+        f"Research query:\n{prompt}"
+    )
+
+    from apps.podcast.tools.together_deep_research import (
+        run_together_research as _together,
+    )
+
+    content_text, metadata = _together(
+        prompt=full_prompt,
+        verbose=False,
+    )
+
+    if content_text is None:
+        content_text = ""
+        logger.warning(
+            "Together research returned no content for episode %s", episode_id
+        )
+
+    artifact, created = EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="p2-together",
+        defaults={
+            "content": content_text,
+            "description": "Together Open Deep Research multi-hop output.",
+            "workflow_context": "Research Gathering",
+            "metadata": metadata,
+        },
+    )
+
+    action = "Created" if created else "Updated"
+    logger.info("%s p2-together artifact for episode %s", action, episode_id)
     return artifact
 
 

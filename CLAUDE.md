@@ -292,7 +292,7 @@ DB-backed service functions that read from and write to the database. Each funct
 | Module | Functions | Purpose |
 |--------|-----------|---------|
 | `setup.py` | `setup_episode` | Initialize workflow + p1-brief artifact |
-| `research.py` | `run_perplexity_research`, `run_gpt_researcher`, `run_gemini_research`, `add_manual_research` | External research, saved as p2-* artifacts |
+| `research.py` | `run_perplexity_research`, `run_gpt_researcher`, `run_gemini_research`, `run_together_research`, `add_manual_research` | External research, saved as p2-* artifacts |
 | `analysis.py` | `discover_questions`, `create_research_digest`, `cross_validate`, `write_briefing`, `craft_research_prompt`, `craft_targeted_research_prompts` | AI-powered analysis, saved as artifacts |
 | `synthesis.py` | `synthesize_report`, `plan_episode_content` | Report + content plan generation |
 | `audio.py` | `generate_audio`, `transcribe_audio`, `generate_episode_chapters` | NotebookLM + Whisper pipeline |
@@ -355,6 +355,7 @@ Standalone CLI scripts for external service integrations and file processing.
 | `perplexity_deep_research.py` | Perplexity research integration |
 | `gemini_deep_research.py` | Gemini research integration |
 | `gpt_researcher_run.py` | GPT Researcher integration |
+| `together_deep_research/` | Together Open Deep Research integration |
 
 ### Management Commands
 | Command | Purpose |

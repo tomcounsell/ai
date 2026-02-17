@@ -7,7 +7,7 @@
 - [ ] **Phase 1: Setup** → Episode directory and initial files created
 - [ ] **Phase 2: Research - Academic Foundation** → Perplexity research complete (30-120s)
 - [ ] **Phase 3: Research - Question Discovery** → Phase 2 analysis complete, targeted prompts ready
-- [ ] **Phase 4: Research - Targeted Followup** → Grok, GPT-Researcher, Gemini, Claude research complete
+- [ ] **Phase 4: Research - Targeted Followup** → Grok, GPT-Researcher, Gemini, Claude, Together research complete
 - [ ] **Phase 5: Cross-Validation** → Sources verified, contradictions identified
 - [ ] **Phase 6: Master Briefing** → research/p3-briefing.md created with organized findings
 - [ ] **Phase 7: Synthesis** → report.md created by podcast-synthesis-writer
@@ -174,21 +174,23 @@ This document tracks all prompts used during the creation of this episode for re
 - **Perplexity:** Academic & Official Sources (Phase 1 - always used, API-based)
 - **GPT-Researcher:** Industry & Technical Sources (Phase 3 - API-based, uses OpenAI GPT-5.2)
 - **Gemini Deep Research:** Strategic & Policy Sources (Phase 3 - API-based)
+- **Together:** Exploratory Multi-Hop Research (Phase 3 - API-based, uses DeepSeek-R1)
 
 **Manual tools (user runs these):**
 - **Claude:** Comprehensive Synthesis (Phase 3 - user pastes from https://claude.ai)
 - **Grok:** Real-Time & Regional Sources (Phase 3 - user pastes from https://x.com/i/grok)
 
-**🚨 DEFAULT APPROACH: USE ALL 5 TOOLS FOR EVERY EPISODE**
+**🚨 DEFAULT APPROACH: USE ALL 6 TOOLS FOR EVERY EPISODE**
 
-All episodes should use all 5 research sources by default:
+All episodes should use all 6 research sources by default:
 1. ✅ **Perplexity** - Academic foundation (always runs first)
 2. ✅ **GPT-Researcher** - Industry/technical analysis
 3. ✅ **Gemini** - Policy/regulatory frameworks
-4. ✅ **Claude** - Comprehensive cross-dimensional synthesis
-5. ✅ **Grok** - Real-time developments and practitioner perspectives
+4. ✅ **Together** - Exploratory multi-hop research
+5. ✅ **Claude** - Comprehensive cross-dimensional synthesis
+6. ✅ **Grok** - Real-time developments and practitioner perspectives
 
-**Omitting a tool should be rare** and only for a specific reason (e.g., "This topic has zero policy/regulatory angle, skipping Gemini"). When in doubt, use all 5 tools.
+**Omitting a tool should be rare** and only for a specific reason (e.g., "This topic has zero policy/regulatory angle, skipping Gemini"). When in doubt, use all 6 tools.
 
 ### Deep Research Prompts (Copy-Paste Ready)
 
@@ -384,6 +386,7 @@ For: podcast-synthesis-writer agent
 - Perplexity (Academic & Official - automated) → Evidence
 - GPT-Researcher (Industry & Technical - automated) → Evidence + Case Studies
 - Gemini Deep Research (Strategic & Policy - automated) → Evidence + Policy
+- Together Open Deep Research (Exploratory Multi-Hop - automated) → Evidence + Emerging Angles
 - Claude (Comprehensive Synthesis - manual) → Evidence synthesis
 - Grok (X/Twitter Discourse - manual) → **Opinion/Sentiment ONLY**
 
@@ -890,21 +893,23 @@ The skill will:
    - Critical gaps to address
    - Recommended tool allocation for Phase 3
 
-3. **Generate targeted Phase 3 prompts for ALL 4 TOOLS** based on the agent's gap analysis:
+3. **Generate targeted Phase 3 prompts for ALL 5 TOOLS** based on the agent's gap analysis:
    - **GPT-Researcher** - Industry analysis, case studies, implementation details, technical documentation, market dynamics (automated)
    - **Gemini** - Policy analysis, regulatory frameworks, comparative policy analysis, strategic context, official documents (automated)
+   - **Together** - Exploratory multi-hop, adjacent topics, contrarian views (automated)
    - **Claude** - Comprehensive synthesis across academic, industry, policy, and recent sources (manual)
    - **Grok** - Recent developments (last 12 months), practitioner perspectives, regional insights, real-time discussions (manual)
 
-   **🚨 DEFAULT: CREATE PROMPTS FOR ALL 4 PHASE 3 TOOLS**
+   **🚨 DEFAULT: CREATE PROMPTS FOR ALL 5 PHASE 3 TOOLS**
 
    Omitting a tool should be rare and only for a specific reason. Examples of valid reasons to skip:
    - Skip Gemini if topic truly has zero policy/regulatory/strategic angles
    - Skip GPT-Researcher if topic has no industry/technical implementation aspects
+   - Skip Together if topic has no exploratory or adjacent angles worth investigating
    - Skip Claude if other tools provide sufficient cross-dimensional coverage
    - Skip Grok if topic has no recent developments or practitioner perspectives
 
-   **In practice:** Most topics benefit from all perspectives. Use all 4 tools unless you have a specific reason not to.
+   **In practice:** Most topics benefit from all perspectives. Use all 5 tools unless you have a specific reason not to.
 
 4. **Display MANUAL prompts FIRST so user can start while automation runs**
 
@@ -959,14 +964,15 @@ Each file follows the standard template: header with date/focus, Research Output
 
 **Execution order:**
 1. Manual prompts (Claude, Grok) already displayed above - user submits while automation runs
-2. Launch GPT-Researcher and Gemini in parallel (automated)
-3. All 4 tools complete roughly together
+2. Launch GPT-Researcher, Gemini, and Together in parallel (automated)
+3. All 5 tools complete roughly together
 
 **Launch automated research skills in parallel:**
 
-Use the Skill tool to invoke both (these are long-running, so launch via Task tool with `run_in_background: true`):
+Use the Skill tool to invoke these (these are long-running, so launch via Task tool with `run_in_background: true`):
 - **GPT-Researcher:** Invoke `gpt-researcher` skill with the industry/technical prompt from prompts.md. Save results to research/p2-chatgpt.md.
 - **Gemini:** Invoke `gemini-deep-research` skill with the policy/strategic prompt from prompts.md. Save results to research/p2-gemini.md.
+- **Together:** Invoke together research with the exploratory prompt from prompts.md. Save results to research/p2-together.md.
 
 **Expected timeline:**
 - User submits Claude/Grok while reading this (~1-2 min)
@@ -1814,7 +1820,7 @@ Use WebFetch to verify the episode appears at `https://research.yuda.me/podcast/
 - **Phase 1:** Setup - Creating episode directory and initial files
 - **Phase 2:** Perplexity API automation for academic research (30-120 seconds)
 - **Phase 3:** Analyzing Perplexity results and conducting question discovery
-- **Phase 4:** Generating targeted prompts and running GPT-Researcher, Gemini research
+- **Phase 4:** Generating targeted prompts and running GPT-Researcher, Gemini, Together research
 - **Phase 5:** Cross-validation matrix creation across all research sources
 - **Phase 6:** Master research briefing compilation (research/p3-briefing.md)
 - **Phase 7:** **Invoking podcast-synthesis-writer agent** to create report.md
@@ -1839,7 +1845,7 @@ When user wants to create a new episode:
 4. **Phase 1:** Create episode directory and initial files (research/, logs/, tmp/, sources.md)
 5. **Phase 2:** Run Perplexity API for academic foundation (30-120 seconds)
 6. **Phase 3:** Analyze Perplexity results, conduct question discovery
-7. **Phase 4:** Run targeted research (GPT-Researcher, Gemini automated; Grok, Claude manual)
+7. **Phase 4:** Run targeted research (GPT-Researcher, Gemini, Together automated; Grok, Claude manual)
 8. **Phase 5:** Create cross-validation matrix across all sources
 9. **Phase 6:** Compile master briefing (research/p3-briefing.md organized by topic)
 10. **Phase 7:** Invoke podcast-synthesis-writer agent to create report.md

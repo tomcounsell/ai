@@ -1,13 +1,11 @@
 import uuid
-from typing import List, Optional
-
-from supabase import Client, create_client
 
 from django.conf import settings
+from supabase import Client, create_client
 
 
 class SupabaseStorageManager:
-    def __init__(self, bucket_name: Optional[str] = None):
+    def __init__(self, bucket_name: str | None = None):
         self.bucket_name = bucket_name or settings.SUPABASE_BUCKET_NAME
         self.client: Client = create_client(
             settings.SUPABASE_PROJECT_URL, settings.SUPABASE_SERVICE_ROLE_KEY
@@ -24,7 +22,7 @@ class SupabaseStorageManager:
     def upload(
         self,
         file_content: bytes,
-        path_prefixes: List[str] | None = None,
+        path_prefixes: list[str] | None = None,
         custom_filename: str | None = None,
         file_type: str = "application/pdf",
     ) -> str:

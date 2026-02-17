@@ -13,10 +13,7 @@ import urllib.request
 
 from apps.common.services.storage import store_file
 from apps.podcast.models import Episode, EpisodeArtifact
-from apps.podcast.services.generate_chapters import ChapterList
-from apps.podcast.services.generate_chapters import (
-    generate_chapters as _generate_chapters,
-)
+from apps.podcast.services import generate_chapters as _gen_chapters_mod
 from apps.podcast.tools.notebooklm_api import (
     create_audio_overview,
     create_notebook,
@@ -173,7 +170,7 @@ def transcribe_audio(episode_id: int) -> str:
 
     # Download audio bytes from URL (timeout after 5 minutes)
     req = urllib.request.Request(episode.audio_url)
-    with urllib.request.urlopen(req, timeout=300) as response:
+    with urllib.request.urlopen(req, timeout=300) as response:  # nosec B310
         audio_bytes = response.read()
 
     # Call OpenAI Whisper API
@@ -234,7 +231,7 @@ def generate_episode_chapters(episode_id: int) -> str:
 
     logger.info("generate_episode_chapters: episode=%s", episode.title)
 
-    result: ChapterList = _generate_chapters(
+    result: _gen_chapters_mod.ChapterList = _gen_chapters_mod.generate_chapters(
         transcript=episode.transcript,
         episode_title=episode.title,
     )

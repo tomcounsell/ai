@@ -155,9 +155,10 @@ def step_question_discovery(episode_id: int) -> None:
         # before advancing, so prompts are available as artifacts
         analysis.craft_targeted_research_prompts(episode_id)
         workflow.advance_step(episode_id, "Question Discovery")
-        # Fan-out: enqueue both targeted research steps in parallel
+        # Fan-out: enqueue all targeted research steps in parallel
         step_gpt_research.enqueue(episode_id=episode_id)
         step_gemini_research.enqueue(episode_id=episode_id)
+        step_together_research.enqueue(episode_id=episode_id)
     except Exception as exc:
         workflow.fail_step(episode_id, "Question Discovery", str(exc))
         raise
@@ -213,6 +214,31 @@ def step_gemini_research(episode_id: int) -> None:
         prompt = _get_crafted_prompt(episode_id, "prompt-gemini")
         research.run_gemini_research(episode_id, prompt=prompt)
         logger.info("step_gemini_research: completed for episode %d", episode_id)
+        # Do NOT enqueue next step -- signal handles fan-in
+    except Exception as exc:
+        workflow.fail_step(episode_id, "Targeted Research", str(exc))
+        raise
+
+
+@task
+def step_together_research(episode_id: int) -> None:
+    """Run Together Open Deep Research for exploratory multi-hop questions.
+
+    This is a parallel sub-step of "Targeted Research".  Does NOT enqueue
+    the next step -- the ``post_save`` signal handles fan-in once all
+    ``p2-*`` research artifacts have content.
+    """
+    # Skip strict step lock for parallel sub-steps
+    wf = EpisodeWorkflow.objects.get(episode_id=episode_id)
+    if wf.current_step != "Targeted Research":
+        raise ValueError(
+            f"Episode {episode_id} is at step '{wf.current_step}', "
+            f"not 'Targeted Research'"
+        )
+    try:
+        prompt = _get_crafted_prompt(episode_id, "prompt-together")
+        research.run_together_research(episode_id, prompt=prompt)
+        logger.info("step_together_research: completed for episode %d", episode_id)
         # Do NOT enqueue next step -- signal handles fan-in
     except Exception as exc:
         workflow.fail_step(episode_id, "Targeted Research", str(exc))

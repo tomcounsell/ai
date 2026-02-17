@@ -21,6 +21,7 @@ class ResearchPrompt(BaseModel):
 class TargetedResearchPrompts(BaseModel):
     gpt_prompt: str
     gemini_prompt: str
+    together_prompt: str
 
 
 # --- Agents ---
@@ -58,7 +59,7 @@ def craft_research_prompt(
     Args:
         episode_brief: Content of the p1-brief artifact.
         episode_title: Title of the episode (also used as topic).
-        research_type: One of ``"perplexity"``, ``"gpt"``, or ``"gemini"``.
+        research_type: One of ``"perplexity"``, ``"gpt"``, ``"gemini"``, or ``"together"``.
 
     Returns:
         ResearchPrompt with the crafted prompt string.
@@ -85,7 +86,7 @@ def craft_targeted_prompts(
     question_discovery: str,
     episode_title: str,
 ) -> TargetedResearchPrompts:
-    """Craft GPT-Researcher and Gemini prompts in a single call.
+    """Craft GPT-Researcher, Gemini, and Together prompts in a single call.
 
     Used after question discovery in Phase 3 to generate targeted
     research prompts for the parallel research sub-steps.
@@ -96,11 +97,11 @@ def craft_targeted_prompts(
         episode_title: Title of the episode (also used as topic).
 
     Returns:
-        TargetedResearchPrompts with gpt_prompt and gemini_prompt strings.
+        TargetedResearchPrompts with gpt_prompt, gemini_prompt, and together_prompt strings.
     """
     prompt = (
         f"Episode: {episode_title}\n"
-        f"Research type: batch (generate both GPT-Researcher and Gemini prompts)\n\n"
+        f"Research type: batch (generate GPT-Researcher, Gemini, and Together prompts)\n\n"
         f"Episode Brief:\n{episode_brief}\n\n"
         f"Question Discovery Analysis:\n{question_discovery}"
     )

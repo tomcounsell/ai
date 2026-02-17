@@ -59,6 +59,7 @@ Versioned content artifacts produced during the workflow. Each has `episode` (FK
 | `p2-perplexity` | `run_perplexity_research` | 2 |
 | `p2-chatgpt` | `run_gpt_researcher` | 4 |
 | `p2-gemini` | `run_gemini_research` | 4 |
+| `p2-together` | `run_together_research` | 4 |
 | `p2-{source}` | `add_manual_research` | 4 |
 | `question-discovery` | `discover_questions` | 3 |
 | `digest-{source}` | `create_research_digest` | 4-5 |
@@ -109,6 +110,11 @@ Calls GPT-Researcher multi-agent system via `asyncio.run`. Saves result as `p2-c
 run_gemini_research(episode_id: int, prompt: str) -> EpisodeArtifact
 ```
 Calls Gemini Deep Research. Saves result as `p2-gemini` artifact.
+
+```python
+run_together_research(episode_id: int, prompt: str) -> EpisodeArtifact
+```
+Calls Open Deep Research (LangGraph multi-hop, auto-detects LLM provider). Saves result as `p2-together` artifact.
 
 ```python
 add_manual_research(episode_id: int, title: str, content: str) -> EpisodeArtifact

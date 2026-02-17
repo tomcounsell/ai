@@ -391,9 +391,7 @@ def cross_validate(episode_id: int) -> EpisodeArtifact:
     Returns:
         The ``cross-validation`` :class:`EpisodeArtifact`.
     """
-    from apps.podcast.services.cross_validate import (
-        cross_validate as _cross_validate,
-    )
+    from apps.podcast.services.cross_validate import cross_validate as _cross_validate
 
     episode = Episode.objects.get(pk=episode_id)
 
@@ -449,9 +447,7 @@ def write_briefing(episode_id: int) -> EpisodeArtifact:
     Returns:
         The ``p3-briefing`` :class:`EpisodeArtifact`.
     """
-    from apps.podcast.services.write_briefing import (
-        write_briefing as _write_briefing,
-    )
+    from apps.podcast.services.write_briefing import write_briefing as _write_briefing
 
     episode = Episode.objects.get(pk=episode_id)
 
@@ -567,20 +563,21 @@ def craft_research_prompt(episode_id: int, research_type: str) -> EpisodeArtifac
 def craft_targeted_research_prompts(
     episode_id: int,
 ) -> dict[str, EpisodeArtifact]:
-    """Craft GPT-Researcher and Gemini prompts in a single AI call.
+    """Craft GPT-Researcher, Gemini, and Together prompts in a single AI call.
 
     Reads the ``p1-brief`` and ``question-discovery`` artifacts, calls the
     :func:`~apps.podcast.services.craft_research_prompt.craft_targeted_prompts`
-    Named AI Tool, saves the prompts as ``prompt-gpt`` and ``prompt-gemini``
-    artifacts, and creates empty placeholder ``p2-chatgpt`` / ``p2-gemini``
-    artifacts for the fan-in signal.
+    Named AI Tool, saves the prompts as ``prompt-gpt``, ``prompt-gemini``,
+    and ``prompt-together`` artifacts, and creates empty placeholder
+    ``p2-chatgpt`` / ``p2-gemini`` / ``p2-together`` artifacts for the
+    fan-in signal.
 
     Args:
         episode_id: Primary key of the target :class:`Episode`.
 
     Returns:
-        A dict mapping ``"prompt-gpt"`` and ``"prompt-gemini"`` to their
-        :class:`EpisodeArtifact` instances.
+        A dict mapping ``"prompt-gpt"``, ``"prompt-gemini"``, and
+        ``"prompt-together"`` to their :class:`EpisodeArtifact` instances.
     """
     from apps.podcast.services.craft_research_prompt import (
         craft_targeted_prompts as _craft_targeted_prompts,
@@ -629,6 +626,15 @@ def craft_targeted_research_prompts(
             "workflow_context": "Research Gathering",
         },
     )
+    together_artifact, _ = EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="prompt-together",
+        defaults={
+            "content": result.together_prompt,
+            "description": "AI-crafted Together research prompt.",
+            "workflow_context": "Research Gathering",
+        },
+    )
 
     # Create empty placeholder artifacts for the targeted research steps.
     # These are required for fan-in correctness: without them, if one
@@ -654,13 +660,23 @@ def craft_targeted_research_prompts(
             "workflow_context": "Research Gathering",
         },
     )
+    EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="p2-together",
+        defaults={
+            "content": "",
+            "description": "Together Open Deep Research (placeholder).",
+            "workflow_context": "Research Gathering",
+        },
+    )
 
     logger.info(
-        "craft_targeted_research_prompts: saved prompt-gpt + prompt-gemini "
-        "artifacts for episode %s",
+        "craft_targeted_research_prompts: saved prompt-gpt + prompt-gemini + "
+        "prompt-together artifacts for episode %s",
         episode_id,
     )
     return {
         "prompt-gpt": gpt_artifact,
         "prompt-gemini": gemini_artifact,
+        "prompt-together": together_artifact,
     }

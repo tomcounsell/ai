@@ -67,8 +67,8 @@ def compute_workflow_progress(
         Phase 3  (Question Disc.)   - Artifact contains "question-discovery" or
                                       "gap-analysis"
         Phase 4  (Targeted Research) - Artifacts containing p2-grok, p2-chatgpt,
-                                      p2-gemini, p2-claude, p2-manual (each a
-                                      separate sub-step)
+                                      p2-gemini, p2-claude, p2-together, p2-manual
+                                      (each a separate sub-step)
         Phase 5  (Cross-Validation) - Artifact contains "cross-validation"
         Phase 6  (Master Briefing)  - Artifact contains "p3-briefing"
         Phase 7  (Synthesis)        - episode.report_text is non-empty
@@ -142,6 +142,7 @@ def compute_workflow_progress(
         ("ChatGPT research", "p2-chatgpt"),
         ("Gemini research", "p2-gemini"),
         ("Claude research", "p2-claude"),
+        ("Together research", "p2-together"),
         ("Manual research", "p2-manual"),
     ]
     phase_4 = Phase(

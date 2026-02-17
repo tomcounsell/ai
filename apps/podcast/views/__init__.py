@@ -1,3 +1,5 @@
+from apps.podcast.workflow import EpisodeWorkflowView
+
 from .feed_views import PodcastFeedView
 from .podcast_views import (
     EpisodeDetailView,
@@ -6,8 +8,6 @@ from .podcast_views import (
     PodcastDetailView,
     PodcastListView,
 )
-
-from apps.podcast.workflow import EpisodeWorkflowView
 
 __all__ = [
     "EpisodeDetailView",

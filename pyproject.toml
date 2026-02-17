@@ -97,6 +97,10 @@ podcast = [
     "numpy>=2.0.0",
     "scipy>=1.14.0",
 ]
+together-research = [
+    "langchain>=1.2.10",
+    "open-deep-research",
+]
 
 [project.urls]
 Homepage = "https://github.com/tomcounsell/cuttlefish"

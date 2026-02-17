@@ -103,6 +103,7 @@ class TestCraftTargetedPrompts:
         expected = TargetedResearchPrompts(
             gpt_prompt="GPT: investigate industry adoption...",
             gemini_prompt="Gemini: analyze policy frameworks...",
+            together_prompt="Together: explore adjacent topics...",
         )
         mock_result = self._make_mock_result(expected)
 
@@ -120,11 +121,13 @@ class TestCraftTargetedPrompts:
         assert isinstance(result, TargetedResearchPrompts)
         assert "industry adoption" in result.gpt_prompt
         assert "policy frameworks" in result.gemini_prompt
+        assert "adjacent topics" in result.together_prompt
 
     def test_prompt_includes_question_discovery(self):
         expected = TargetedResearchPrompts(
             gpt_prompt="gpt prompt",
             gemini_prompt="gemini prompt",
+            together_prompt="together prompt",
         )
         mock_result = self._make_mock_result(expected)
 
@@ -149,6 +152,7 @@ class TestCraftTargetedPrompts:
         expected = TargetedResearchPrompts(
             gpt_prompt="gpt",
             gemini_prompt="gemini",
+            together_prompt="together",
         )
         mock_result = self._make_mock_result(expected)
 

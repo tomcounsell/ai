@@ -1,7 +1,7 @@
 # Together Open Deep Research — 5th Automated p2-* Source
 
 **Issue:** [#77](https://github.com/yudame/cuttlefish/issues/77)
-**Status:** Plan
+**Status:** Done
 
 ## Context
 

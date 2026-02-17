@@ -926,6 +926,10 @@ test = [
     { name = "pytest-django" },
     { name = "pytest-mock" },
 ]
+together-research = [
+    { name = "langchain" },
+    { name = "open-deep-research" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -973,10 +977,12 @@ requires-dist = [
     { name = "gunicorn" },
     { name = "ipython", marker = "extra == 'dev'" },
     { name = "isort", marker = "extra == 'dev'" },
+    { name = "langchain", marker = "extra == 'together-research'", specifier = ">=1.2.10" },
     { name = "langchain-openai", marker = "extra == 'podcast'", specifier = ">=0.3.0" },
     { name = "mcp", specifier = ">=1.23.0,<2.0.0" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "numpy", marker = "extra == 'podcast'", specifier = ">=2.0.0" },
+    { name = "open-deep-research", marker = "extra == 'together-research'" },
     { name = "openai", specifier = ">=1.107.2" },
     { name = "openai-whisper", marker = "extra == 'podcast'", specifier = ">=20250625" },
     { name = "pillow", specifier = ">=11.3.0" },
@@ -999,7 +1005,7 @@ requires-dist = [
     { name = "werkzeug", marker = "extra == 'dev'" },
     { name = "whitenoise" },
 ]
-provides-extras = ["dev", "test", "e2e", "podcast"]
+provides-extras = ["dev", "test", "e2e", "podcast", "together-research"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1458,6 +1464,24 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/fb/a3/cafafb4558fd638aadfe4121dc6cefb8d743368c085acb2f521df0f3d9d7/eval_type_backport-0.3.1.tar.gz", hash = "sha256:57e993f7b5b69d271e37482e62f74e76a0276c82490cf8e4f0dffeb6b332d5ed", size = 9445 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/cf/22/fdc2e30d43ff853720042fa15baa3e6122722be1a7950a98233ebb55cd71/eval_type_backport-0.3.1-py3-none-any.whl", hash = "sha256:279ab641905e9f11129f56a8a78f493518515b83402b860f6f06dd7c011fdfa8", size = 6063 },
+]
+
+[[package]]
+name = "exa-py"
+version = "2.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpcore" },
+    { name = "httpx" },
+    { name = "openai" },
+    { name = "pydantic" },
+    { name = "python-dotenv" },
+    { name = "requests" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/dc/84/f641b3bfb461dcb27a8c2637fdadde6a984fc18113a337f6f3014a0c039f/exa_py-2.4.0.tar.gz", hash = "sha256:d6fa0bb54d2395f529fe90a52f8c5786397515491691f43e2bc42cb3d298c33a", size = 48029 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/55/70/58e381b5eb95954c91ff82746273bc35bff1e21c42aef567f44d671f291e/exa_py-2.4.0-py3-none-any.whl", hash = "sha256:8522cdcf33832f86a4ba5f6aff7cf7c50dff5172f911bcb3e33c7076e4b27e05", size = 63078 },
 ]
 
 [[package]]
@@ -2165,7 +2189,7 @@ wheels = [
 
 [[package]]
 name = "groq"
-version = "1.0.0"
+version = "0.37.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -2175,9 +2199,9 @@ dependencies = [
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3f/12/f4099a141677fcd2ed79dcc1fcec431e60c52e0e90c9c5d935f0ffaf8c0e/groq-1.0.0.tar.gz", hash = "sha256:66cb7bb729e6eb644daac7ce8efe945e99e4eb33657f733ee6f13059ef0c25a9", size = 146068 }
+sdist = { url = "https://files.pythonhosted.org/packages/e9/78/18948a9056e1509c87e10ab8316a90ecce87035fbd53342dffdf97f4de00/groq-0.37.1.tar.gz", hash = "sha256:7353d6dfb60834fd7aacbb86af106e2dc2aeaff6d0edd65fb2fd0f16bd39314c", size = 145289 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/4a/88/3175759d2ef30406ea721f4d837bfa1ba4339fde3b81ba8c5640a96ed231/groq-1.0.0-py3-none-any.whl", hash = "sha256:6e22bf92ffad988f01d2d4df7729add66b8fd5dbfb2154b5bbf3af245b72c731", size = 138292 },
+    { url = "https://files.pythonhosted.org/packages/5f/d6/645a081750e43f858b7d09dce5d8e1e76cf11e7e4bdba81252e04f78963d/groq-0.37.1-py3-none-any.whl", hash = "sha256:b49f8c8898c55eaec9f71f1342f3fcacc9560d67a08ce5f35fbfb84e8dacd3da", size = 137494 },
 ]
 
 [[package]]
@@ -2877,6 +2901,20 @@ wheels = [
 ]
 
 [[package]]
+name = "langchain-anthropic"
+version = "1.3.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anthropic" },
+    { name = "langchain-core" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/58/48/cf217b3836099220737ff1f8fd07a554993080dfc9c0b4dd4af16ccb0604/langchain_anthropic-1.3.3.tar.gz", hash = "sha256:37198413c9bde5a9e9829f13c7b9ed4870d7085e7fba9fd803ef4d98ef8ea220", size = 686916 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8c/f1/cf56d47964b6fe080cdc54c3e32bc05e560927d549b2634b39d14aaf6e05/langchain_anthropic-1.3.3-py3-none-any.whl", hash = "sha256:8008ce5fb680268681673e09f93a9ac08eba9e304477101e5e138f06b5cd8710", size = 46831 },
+]
+
+[[package]]
 name = "langchain-classic"
 version = "1.0.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2934,6 +2972,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/12/17/1943cedfc118e04b8128e4c3e1dbf0fa0ea58eefddbb6198cfd699d19f01/langchain_core-1.2.11.tar.gz", hash = "sha256:f164bb36602dd74a3a50c1334fca75309ad5ed95767acdfdbb9fa95ce28a1e01", size = 831211 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/30/1f80e3fc674353cad975ed5294353d42512535d2094ef032c06454c2c873/langchain_core-1.2.11-py3-none-any.whl", hash = "sha256:ae11ceb8dda60d0b9d09e763116e592f1683327c17be5b715f350fd29aee65d3", size = 500062 },
+]
+
+[[package]]
+name = "langchain-groq"
+version = "1.1.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "groq" },
+    { name = "langchain-core" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3d/d9/bbaa43598fcaffb669c5aea4088d92c77a426c46d25a013c21c979772a54/langchain_groq-1.1.2.tar.gz", hash = "sha256:67d1d752fb6590be517735947ec49b4ab9ed9191c7cca79f105d227775c67ae5", size = 178337 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e8/11/71a35db3ed8ac2c7129eb69f0d590e4961be67ac84b6c470fc097d0dd7c8/langchain_groq-1.1.2-py3-none-any.whl", hash = "sha256:1f59f12233e8e6280c968bca6c40a7e5434e971e9a5387ad23c4c64ec776de10", size = 19450 },
 ]
 
 [[package]]
@@ -3123,6 +3174,19 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/22/f0/07fb6ab5c39a4ca9af3e37554f9d42f25c464829254d72e4ebbd81da351c/librt-0.7.8-cp314-cp314t-win32.whl", hash = "sha256:171ca3a0a06c643bd0a2f62a8944e1902c94aa8e5da4db1ea9a8daf872685365", size = 41173 },
     { url = "https://files.pythonhosted.org/packages/24/d4/7e4be20993dc6a782639625bd2f97f3c66125c7aa80c82426956811cfccf/librt-0.7.8-cp314-cp314t-win_amd64.whl", hash = "sha256:445b7304145e24c60288a2f172b5ce2ca35c0f81605f5299f3fa567e189d2e32", size = 47668 },
     { url = "https://files.pythonhosted.org/packages/fc/85/69f92b2a7b3c0f88ffe107c86b952b397004b5b8ea5a81da3d9c04c04422/librt-0.7.8-cp314-cp314t-win_arm64.whl", hash = "sha256:8766ece9de08527deabcd7cb1b4f1a967a385d26e33e536d6d8913db6ef74f06", size = 40550 },
+]
+
+[[package]]
+name = "linkup-sdk"
+version = "0.12.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cb/bd/3b7a03430b25e971cc75242725e44e90373b116926918939a2132c94fed2/linkup_sdk-0.12.0.tar.gz", hash = "sha256:1ae72141d9576ed7442770d2d4adf65e22351869e97f8efba1250ead5bbfd0a1", size = 76083 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/1c/52dfe0bf0cff747bbde6656293d1cf1eb9906a4b7dabf6fa5f2a994f25a6/linkup_sdk-0.12.0-py3-none-any.whl", hash = "sha256:8f675748ff6ab9ed62ee4e20377e8535f6f5c0bc3fba3b766b89ca0ad101c520", size = 11492 },
 ]
 
 [[package]]
@@ -4080,6 +4144,30 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/9d/5a/652dac4b7affc2b37b95386f8ae78f22808af09d720689e3d7a86b6ed98e/ollama-0.6.1.tar.gz", hash = "sha256:478c67546836430034b415ed64fa890fd3d1ff91781a9d548b3325274e69d7c6", size = 51620 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/47/4f/4a617ee93d8208d2bcf26b2d8b9402ceaed03e3853c754940e2290fed063/ollama-0.6.1-py3-none-any.whl", hash = "sha256:fc4c984b345735c5486faeee67d8a265214a31cbb828167782dc642ce0a2bf8c", size = 14354 },
+]
+
+[[package]]
+name = "open-deep-research"
+version = "0.0.10"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "arxiv" },
+    { name = "duckduckgo-search" },
+    { name = "exa-py" },
+    { name = "langchain-anthropic" },
+    { name = "langchain-community" },
+    { name = "langchain-groq" },
+    { name = "langchain-openai" },
+    { name = "langgraph" },
+    { name = "linkup-sdk" },
+    { name = "openai" },
+    { name = "pymupdf" },
+    { name = "tavily-python" },
+    { name = "xmltodict" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/8f/ae/71d1b829a3977dcb869e470a87fd3d2eb64713e2f4e5c7ee73bb79dfc72d/open_deep_research-0.0.10.tar.gz", hash = "sha256:6cce6b665d94bc592c7db412fbc6ad60f98b54811b217796f2a49fa708841274", size = 22155 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e7/99/9ac496c909aa7b527b897b77a835e057ac5061c7cccbc73035ca0e5f62a9/open_deep_research-0.0.10-py3-none-any.whl", hash = "sha256:08c20a8f4be5daef2046f2683cf33a1b963ff7de12356b4accc1a39c15e7caec", size = 23880 },
 ]
 
 [[package]]
@@ -9122,6 +9210,20 @@ wheels = [
 ]
 
 [[package]]
+name = "tavily-python"
+version = "0.7.21"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "requests" },
+    { name = "tiktoken" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ff/1f/9d5c4ca7034754d1fc232af64638b905162bdf3012e9629030e3d755856f/tavily_python-0.7.21.tar.gz", hash = "sha256:897bedf9b1c2fad8605be642e417d6c7ec1b79bf6199563477cf69c4313f824a", size = 21813 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3a/39/85e5be4e9a912022f86f38288d1f4dd2d100b60ec75ebf3da37ca0122375/tavily_python-0.7.21-py3-none-any.whl", hash = "sha256:acfb5b62f2d1053d56321b4fb1ddfd2e98bb975cc4446b86b3fe2d3dd0850288", size = 17957 },
+]
+
+[[package]]
 name = "temporalio"
 version = "1.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -9824,6 +9926,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/9e/66/1e0163eac090733d0ed0836a0cd3c14f5b59abeaa6fdba71c7b56b1916e4/xai_sdk-1.6.1.tar.gz", hash = "sha256:b55528df188f8c8448484021d735f75b0e7d71719ddeb432c5f187ac67e3c983", size = 388223 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/94/98/8b4019b35f2200295c5eec8176da4b779ec3a0fd60eba7196b618f437e1f/xai_sdk-1.6.1-py3-none-any.whl", hash = "sha256:f478dee9bd8839b8d341bd075277d0432aff5cd7120a4284547d25c6c9e7ab3b", size = 240917 },
+]
+
+[[package]]
+name = "xmltodict"
+version = "1.0.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a9/66/d1242ce8748c698e0036837dfbb530480e31f11d3ecf7101cd4e30d29913/xmltodict-1.0.3.tar.gz", hash = "sha256:3bf1f49c7836df34cf6d9cc7e690c4351f7dfff2ab0b8a1988bba4a9b9474909", size = 25170 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/82/df/5c50d5bfc886cf61e665f34925e70c7d5ab1d39db0bcc4a03f6fdae3cd76/xmltodict-1.0.3-py3-none-any.whl", hash = "sha256:35d65d5c08f2a1121df338a0c4e49ca638480fa7c1b899ded45e0759bf32e40e", size = 13295 },
 ]
 
 [[package]]
