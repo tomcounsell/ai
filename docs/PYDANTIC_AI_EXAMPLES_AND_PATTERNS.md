@@ -15,7 +15,7 @@ tasks and many tools.
 6. [Long-Running Task Execution](#long-running-task-execution)
 7. [Timeout and Progress Management](#timeout-and-progress-management)
 8. [Real-Time Streaming and Progress](#real-time-streaming-and-progress)
-9. [Model Fallback and Resilience](#model-fallback-and-resilience)
+9. [Model Configuration and Resilience](#model-configuration-and-resilience)
 10. [Self-Correcting Retry Loops](#self-correcting-retry-loops)
 11. [Message History Management](#message-history-management)
 12. [Usage Limits and Credit Tracking](#usage-limits-and-credit-tracking)
@@ -74,15 +74,19 @@ class ChatAgent:
         self._agent: Agent | None = None
         self._tools_loaded = False
 
-    def _create_agent(self) -> Agent[dict[str, Any], str]:
+    def _create_agent(self) -> Agent[dict[str, Any], ChatResponse]:
         self._ensure_tools_loaded()
 
-        model = FallbackModel("anthropic:claude-sonnet-4-5", "openai:gpt-5")
+        model = FallbackModel(
+            "anthropic:claude-sonnet-4-5",  # Primary
+            "openai:gpt-5",                # Fallback on HTTP errors
+        )
 
-        return Agent[dict[str, Any], str](
+        return Agent[dict[str, Any], ChatResponse](
             model=model,
             instructions=self._build_instructions(),
             tools=list(self._tools.values()),
+            output_type=ChatResponse,
         )
 
     def process_input(self, prompt: str) -> AgentResult:
@@ -107,6 +111,42 @@ class ChatAgent:
 - Lifecycle management (cleanup connections, track usage)
 - Separation of framework concerns from business logic
 
+### Structured Output Types
+
+Use `output_type` with a Pydantic model to get validated, typed responses
+instead of raw strings:
+
+```python
+from pydantic import BaseModel, Field, field_validator
+
+class ChatResponse(BaseModel):
+    html: str = Field(description="The HTML response content")
+    suggested_actions: list[str] | None = Field(
+        default=None,
+        description="2-3 follow-up action suggestions",
+    )
+
+    @field_validator("html")
+    @classmethod
+    def ensure_html_wrapped(cls, v: str) -> str:
+        v = v.strip()
+        if v and not v.startswith("<"):
+            return f"<p>{v}</p>"
+        return v
+
+agent = Agent[dict[str, Any], ChatResponse](
+    model=model,
+    output_type=ChatResponse,
+    instructions="...",
+)
+
+result = agent.run_sync(prompt, deps=deps)
+response: ChatResponse = result.output  # Validated, typed
+```
+
+Structured outputs eliminate regex-based extraction and prevent the model from
+leaking markdown or JSON fragments into prose responses.
+
 ### Instructions vs System Prompts
 
 Prefer `instructions` over `system_prompt` for content that should refresh on
@@ -128,6 +168,36 @@ def dynamic_instructions() -> str:
 # Use only for truly static context
 agent = Agent("anthropic:claude-sonnet-4-5", system_prompt="Be concise.")
 ```
+
+### Dynamic System Prompts via Decorator
+
+When you need multiple system prompt segments assembled at runtime (user
+context, tool descriptions, business metadata), register them after agent
+creation:
+
+```python
+agent = Agent[dict[str, Any], ChatResponse](
+    model=model,
+    instructions=static_instructions,
+    tools=tools,
+    output_type=ChatResponse,
+)
+
+# Each decorated function is called at run time and concatenated
+@agent.system_prompt
+def date_context(ctx: RunContext[dict[str, Any]]) -> str:
+    return f"Today is {date.today().isoformat()}."
+
+@agent.system_prompt
+def user_context(ctx: RunContext[dict[str, Any]]) -> str:
+    user = ctx.deps.get("user")
+    return f"The user's name is {user.name}." if user else ""
+
+# Also works without the decorator syntax
+agent.system_prompt(business_info_prompt)
+```
+
+This keeps each context segment in its own function, testable in isolation.
 
 ---
 
@@ -192,6 +262,8 @@ async def quick_query(request: QueryRequest):
 When your agent has a fixed set of dependencies, use a typed deps class:
 
 ```python
+from pydantic_ai.tools import RunContext
+
 @dataclass
 class AnalystDeps:
     db_connection: DatabaseConnection
@@ -201,6 +273,7 @@ class AnalystDeps:
 agent = Agent[AnalystDeps, AnalystOutput](
     "anthropic:claude-sonnet-4-5",
     deps_type=AnalystDeps,
+    output_type=AnalystOutput,
 )
 
 @agent.tool
@@ -329,7 +402,7 @@ PydanticAI `Tool` instances at runtime:
 
 ```python
 from pydantic import create_model
-from pydantic_ai import Tool
+from pydantic_ai.tools import Tool
 
 def create_tool_from_schema(
     name: str,
@@ -350,8 +423,18 @@ def create_tool_from_schema(
     def tool_function(input_data: InputModel) -> dict[str, Any]:
         return handler(name, input_data.model_dump())
 
-    return Tool(tool_function, name=name, description=description)
+    return Tool(
+        tool_function,
+        name=name,
+        description=description,
+        takes_ctx=False,  # Dynamic tools typically don't need RunContext
+    )
 ```
+
+The `takes_ctx` parameter tells PydanticAI whether to pass `RunContext` as the
+first argument. Static tools that need access to deps use `takes_ctx=True`
+(the default when using `@agent.tool`); dynamically generated tools from
+external schemas typically use `takes_ctx=False`.
 
 ### Tool Wrapping for Cross-Cutting Concerns
 
@@ -545,6 +628,36 @@ def research_data(ctx: RunContext[dict], query: str) -> dict:
     return results
 ```
 
+### Heartbeat Monitoring for run_sync
+
+`run_sync()` blocks the calling thread for the entire agent run. Add a
+heartbeat thread to detect hangs and log diagnostics:
+
+```python
+import threading
+import time
+
+def run_agent_with_heartbeat(agent, prompt, deps, **kwargs):
+    stop_event = threading.Event()
+    start_time = time.perf_counter()
+
+    def heartbeat():
+        while not stop_event.wait(30):  # Log every 30s
+            elapsed = time.perf_counter() - start_time
+            logger.info("Agent still running after %.0fs", elapsed)
+
+    heartbeat_thread = threading.Thread(target=heartbeat, daemon=True)
+    heartbeat_thread.start()
+    try:
+        return agent.run_sync(prompt, deps=deps, **kwargs)
+    finally:
+        stop_event.set()
+```
+
+This is especially useful in production where `run_sync()` calls can take
+2-5 minutes with complex tool chains. The heartbeat logs help distinguish
+between "working slowly" and "stuck".
+
 ---
 
 ## Real-Time Streaming and Progress
@@ -587,16 +700,40 @@ rather than using bulk update queries that bypass hooks:
 
 ```python
 # Good: triggers save hooks -> pub/sub -> SSE
-def safe_message_update(message_id: str, **fields) -> None:
+def safe_message_update(message_id: str, **fields) -> bool:
     message = Message.objects.get(id=message_id)
     for field, value in fields.items():
         setattr(message, field, value)
     message.save(update_fields=list(fields.keys()))
+    return True
 
 # Bad: bypasses save hooks, client never gets notified
 Message.objects.filter(id=message_id).update(status="complete")
 #  ^-- Django .update() skips signals
 #  Same issue: SQLAlchemy session.execute(update(...))
+```
+
+When multiple workers or threads might update the same record (e.g., progress
+updates from tools racing with status updates from the orchestrator), use
+row-level locking with retry:
+
+```python
+from django.db import transaction
+
+def safe_message_update(message_id: str, **fields) -> bool:
+    for attempt in range(3):
+        try:
+            with transaction.atomic():
+                message = Message.objects.select_for_update(
+                    nowait=True
+                ).get(id=message_id)
+                for field, value in fields.items():
+                    setattr(message, field, value)
+                message.save(update_fields=list(fields.keys()))
+                return True
+        except OperationalError:
+            time.sleep(0.1 * (2 ** attempt))  # Jittered backoff
+    return False
 ```
 
 ### Status Ownership
@@ -626,7 +763,83 @@ def analyze_data(ctx: RunContext, query: str) -> dict:
 
 ---
 
-## Model Fallback and Resilience
+## Model Configuration and Resilience
+
+### Lazy Model Loading
+
+Initialize models lazily to avoid import-time API key requirements, prevent
+C-extension conflicts between providers, and keep application startup fast:
+
+```python
+import httpx
+from pydantic_ai.models import Model
+from pydantic_ai.models.anthropic import AnthropicModel
+from pydantic_ai.providers.anthropic import AnthropicProvider
+
+class LazyModelLoader:
+    """Defers model initialization until first use."""
+
+    def __init__(self, provider: str, model_name: str, **kwargs):
+        self.provider = provider
+        self.model_name = model_name
+        self.kwargs = kwargs
+        self._model: Model | None = None
+        self._init_error: Exception | None = None
+
+    def get(self) -> Model:
+        if self._init_error:
+            raise self._init_error
+        if self._model is None:
+            try:
+                self._model = self._initialize()
+            except Exception as e:
+                self._init_error = e
+                raise
+        return self._model
+
+    def _initialize(self) -> Model:
+        if self.provider == "anthropic":
+            http_client = _create_anthropic_http_client()
+            provider = AnthropicProvider(
+                api_key=os.environ["ANTHROPIC_API_KEY"],
+                http_client=http_client,
+            )
+            return AnthropicModel(self.model_name, provider=provider)
+        # ... other providers
+        raise ValueError(f"Unknown provider: {self.provider}")
+
+# Module-level singletons - not initialized until .get() is called
+claude_opus = LazyModelLoader("anthropic", "claude-opus-4-5-20251101")
+claude_sonnet = LazyModelLoader("anthropic", "claude-sonnet-4-5-20250929")
+gpt_5 = LazyModelLoader("openai", "gpt-5")
+```
+
+Lazy loading is especially important when your application supports multiple
+providers. Importing Google/Vertex AI models alongside Anthropic can trigger
+protobuf C-extension conflicts at the module level — lazy loading sidesteps
+this entirely.
+
+### Connection Pooling in Background Workers
+
+When using `run_sync()` inside background workers (Celery, Django Q2,
+Dramatiq), disable httpx connection pool reuse. Each `run_sync()` call creates
+a fresh event loop, and pooled connections hold references to stale loops:
+
+```python
+import httpx
+
+def _create_anthropic_http_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(
+        limits=httpx.Limits(
+            max_keepalive_connections=0,  # Disable connection reuse
+            max_connections=100,          # Allow concurrent connections
+        ),
+        timeout=httpx.Timeout(600.0, connect=30.0),
+    )
+```
+
+Without this, you'll see intermittent "attached to a different event loop"
+errors, especially under load.
 
 ### FallbackModel
 
@@ -647,10 +860,39 @@ When the primary model returns an HTTP error, PydanticAI automatically retries
 with the fallback. The agent code is unaware of which model handled the
 request.
 
+Guard FallbackModel creation itself — if the primary provider's API key is
+missing or the model fails to initialize, fall back gracefully:
+
+```python
+try:
+    primary = claude_opus.get()
+    fallback = gpt_5.get()
+    model = FallbackModel(primary, fallback)
+except Exception as e:
+    logger.warning("FallbackModel setup failed, using primary only: %s", e)
+    model = claude_opus.get()
+```
+
 ### Handling FallbackExceptionGroup
 
-When both models fail, PydanticAI raises a `FallbackExceptionGroup`. Handle it
-explicitly:
+When both models fail, PydanticAI raises a `FallbackExceptionGroup`. In
+practice, direct import of this exception class can be fragile across
+versions. Use defensive detection:
+
+```python
+try:
+    result = agent.run_sync(prompt, deps=deps)
+except Exception as exc:
+    if "FallbackExceptionGroup" in type(exc).__name__:
+        # Both models failed - check sub-exceptions
+        for sub in getattr(exc, "exceptions", []):
+            logger.error("Model failure: %s", sub)
+        capture_exception(exc)
+        return error_response("All models unavailable")
+    raise
+```
+
+When possible, import the type directly for cleaner handling:
 
 ```python
 from pydantic_ai.models.fallback import FallbackExceptionGroup
@@ -658,40 +900,64 @@ from pydantic_ai.models.fallback import FallbackExceptionGroup
 try:
     result = agent.run_sync(prompt, deps=deps)
 except FallbackExceptionGroup as eg:
-    # Both models failed - log each error
-    for exc in eg.exceptions:
-        logger.error("Model failure: %s", exc)
+    for sub in eg.exceptions:
+        logger.error("Model failure: %s", sub)
     capture_exception(eg)
     return error_response("All models unavailable")
 ```
 
 ### Model-Specific Settings
 
-Different models support different features. Apply settings conditionally:
+Different models support different features. Apply settings at run time:
 
 ```python
-from pydantic_ai.settings import (
-    AnthropicModelSettings,
-    OpenAIResponsesModelSettings,
-)
+from pydantic_ai.settings import AnthropicModelSettings
 
 # Claude with extended thinking
-claude_settings = AnthropicModelSettings(
-    anthropic_thinking={"type": "enabled", "budget_tokens": 8192}
+model_settings = AnthropicModelSettings(
+    anthropic_thinking={
+        "type": "enabled",
+        "budget_tokens": 8192,
+    },
+    max_tokens=8192,
 )
 
-# GPT with reasoning controls
+result = agent.run_sync(
+    prompt,
+    deps=deps,
+    model_settings=model_settings,
+)
+```
+
+Use lower thinking budgets for simpler tasks like summarizing tool output:
+
+```python
+summarize_settings = AnthropicModelSettings(
+    anthropic_thinking={
+        "type": "enabled",
+        "budget_tokens": 2048,  # Less thinking depth needed
+    },
+    max_tokens=8192,
+)
+```
+
+For OpenAI reasoning models, configure effort and summary style:
+
+```python
+from pydantic_ai.models.openai import OpenAIResponsesModelSettings
+
 gpt_settings = OpenAIResponsesModelSettings(
     openai_reasoning_effort="low",
     openai_reasoning_summary="concise",
 )
+```
 
-# Apply at run time
-result = agent.run_sync(
-    prompt,
-    deps=deps,
-    model_settings=claude_settings,
-)
+Make these configurable via environment variables so you can tune them without
+redeploying:
+
+```python
+THINKING_BUDGET = int(os.getenv("AGENT_THINKING_BUDGET", "8192"))
+MAX_TOKENS = int(os.getenv("AGENT_MAX_TOKENS", "8192"))
 ```
 
 ---
@@ -776,6 +1042,26 @@ def run_with_retries(
 5. **Attempt telemetry**: Record every attempt for debugging and model
    evaluation
 
+### UsageLimits Inside Retry Loops
+
+Apply `UsageLimits` to each individual agent run within the retry loop. This
+prevents a single retry attempt from consuming unbounded tokens:
+
+```python
+from pydantic_ai import UsageLimits
+
+for attempt_num in range(1, MAX_RETRIES + 1):
+    result = agent.run_sync(
+        prompt,
+        deps=deps,
+        usage_limits=UsageLimits(request_limit=12),  # Per-attempt cap
+    )
+```
+
+A `request_limit` of 10-15 per attempt is reasonable for research agents that
+generate and execute code. The outer retry loop handles recovery; the inner
+limit prevents any single attempt from looping.
+
 ---
 
 ## Message History Management
@@ -858,6 +1144,20 @@ result = agent.run_sync(
         response_tokens_limit=16_000,  # Max output tokens
     ),
 )
+```
+
+Scale limits to the agent's role. A conversational agent with many tools needs
+more headroom than a focused research agent:
+
+```python
+# Conversational agent: many tools, multi-turn
+CHAT_LIMITS = UsageLimits(request_limit=25)
+
+# Research agent: focused code generation, fewer rounds
+RESEARCH_LIMITS = UsageLimits(request_limit=12)
+
+# Quick-query agent: single tool call expected
+QUERY_LIMITS = UsageLimits(request_limit=3)
 ```
 
 ### Application-Level Usage Tracking
@@ -966,7 +1266,7 @@ def process_input(self, prompt: str) -> AgentResult:
 ### Token Limit Errors
 
 LLM providers raise errors when prompts exceed context limits. These are not
-bugs - don't send them to error tracking:
+bugs — don't send them to error tracking:
 
 ```python
 TOKEN_LIMIT_MARKERS = [
@@ -974,11 +1274,21 @@ TOKEN_LIMIT_MARKERS = [
     "context length exceeded",
     "maximum context length",
     "token limit",
+    "tokens >",
+    "maximum tokens",
 ]
 
 def is_token_limit_error(exc: Exception) -> bool:
     msg = str(exc).lower()
-    return any(marker in msg for marker in TOKEN_LIMIT_MARKERS)
+    if any(marker in msg for marker in TOKEN_LIMIT_MARKERS):
+        return True
+
+    # Check inside FallbackExceptionGroup sub-exceptions
+    for sub in getattr(exc, "exceptions", []):
+        if any(marker in str(sub).lower() for marker in TOKEN_LIMIT_MARKERS):
+            return True
+
+    return False
 
 # In error handler
 except Exception as exc:
@@ -986,6 +1296,10 @@ except Exception as exc:
         capture_exception(exc)
     return AgentResult(status="error", output=friendly_error(exc))
 ```
+
+When using `FallbackModel`, token limit errors can be nested inside a
+`FallbackExceptionGroup`. Always check sub-exceptions before deciding to
+report the error.
 
 ### Capturing Messages on Error
 
@@ -1027,6 +1341,28 @@ logfire.instrument_pydantic_ai()
 # - Token usage per request and cumulative
 # - Latency for each operation
 # - Errors with full context
+```
+
+In production, activate Logfire conditionally rather than globally. This keeps
+costs down and lets you enable tracing per-request or per-tenant:
+
+```python
+import logfire
+
+def configure_logfire_if_needed(
+    debug: bool = False,
+    tenant_allows_debugging: bool = False,
+) -> None:
+    if not (debug or tenant_allows_debugging):
+        return
+    token = os.getenv("LOGFIRE_TOKEN")
+    if not token:
+        return
+    logfire.configure(
+        token=token,
+        environment=os.getenv("DEPLOYMENT_ENV", "local"),
+    )
+    logfire.instrument_pydantic_ai()
 ```
 
 ### Custom Telemetry
@@ -1103,7 +1439,7 @@ logger.error(
 One agent delegates to another by calling it as a tool:
 
 ```python
-analyst_agent = Agent(
+analyst_agent = Agent[dict[str, Any], AnalysisResult](
     "anthropic:claude-haiku-4-5",
     output_type=AnalysisResult,
     instructions="Analyze data and return structured results.",
@@ -1111,7 +1447,7 @@ analyst_agent = Agent(
 
 @chat_agent.tool
 async def run_analysis(
-    ctx: RunContext[dict], query: str
+    ctx: RunContext[dict[str, Any]], query: str
 ) -> str:
     result = await analyst_agent.run(
         query,
@@ -1329,3 +1665,37 @@ result = agent.run_sync(
     usage_limits=UsageLimits(request_limit=25, tool_calls_limit=50),
 )
 ```
+
+### TypeVar Keyword Arguments
+
+CPython 3.12 has a bug where passing `name` as a keyword argument to `TypeVar`
+triggers a C-level segmentation fault:
+
+```python
+# Bad: SIGSEGV on CPython 3.12.x
+T = TypeVar(name="T", bound=BaseModel)
+
+# Good: positional argument only
+T = TypeVar("T", bound=BaseModel)
+```
+
+This is particularly dangerous because it causes a hard crash (no Python
+traceback), and the failure may only appear in production on Linux while
+working fine locally on macOS. Always use positional arguments for TypeVar.
+
+### Using pydantic-ai Instead of pydantic-ai-slim
+
+The `pydantic-ai` meta-package pulls in every provider's dependencies. This
+causes C-extension conflicts when multiple providers are loaded in the same
+process (e.g., Google protobuf + Anthropic):
+
+```toml
+# Risky: pulls in all provider deps, potential C-extension conflicts
+"pydantic-ai==1.0.1"
+
+# Better: install only the extras you need
+"pydantic-ai-slim[anthropic,openai,logfire,mcp]==1.0.1"
+```
+
+If you need Google/Vertex providers, lazy-load them to avoid import-time
+conflicts with other protobuf-using libraries.
