@@ -49,47 +49,50 @@ No prerequisites — uses the same Anthropic API key and MODEL_FAST already in u
 
 ### Key Elements
 
-- **Single Haiku call with pass/fail branching**: One prompt, one call. The LLM classifies AND coaches in the same response. `coaching_message` is null on pass (majority case — output goes to summarizer), populated on fail (auto-continue with guidance).
-- **Structured output schema**: JSON response with `type`, `confidence`, `reason`, and `coaching_message` fields — no string matching needed. The `coaching_message` field being null vs populated IS the pass/fail signal.
-- **Coach simplification**: `build_coaching_message()` becomes a thin dispatcher that uses the LLM-generated coaching when available and keeps existing skill/plan-aware coaching as enrichment for the heuristic fallback path.
-- **Heuristic fallback preserved**: The existing `_classify_with_heuristics()` stays as fallback when LLM is unavailable, paired with existing static coach templates.
+- **Classification drives the decision, coaching is a secondary output**: Haiku's primary job is classifying into 5 types with a confidence score — same as today. The bridge applies the existing confidence threshold (0.80) to determine pass/fail. Coaching is just an extra field Haiku populates when it classifies as `status`. This prevents bias — Haiku isn't making a separate "should I coach?" judgment.
+- **Confidence threshold remains the safety net**: The existing threshold logic stays. Below 0.80 confidence → default to QUESTION (pause for human). This is tunable without touching the prompt. If Haiku starts over-rejecting, adjust the threshold — don't rewrite prompt engineering.
+- **Structured output with optional coaching**: JSON response adds a `coaching_message` field. Null on non-status types (the majority). Populated with specific guidance on status types. The bridge only reads `coaching_message` when it's already decided to auto-continue.
+- **Heuristic fallback preserved**: The existing `_classify_with_heuristics()` stays as the offline fallback. When active, the static coach templates in `coach.py` provide coaching — no LLM coaching available on this path.
 
 ### Flow
 
-**Agent output arrives** → `classify_output(text)` → single Haiku call → returns `ClassificationResult`:
-- **Pass (~60-70%):** `type` is completion/question/blocker/error → `coaching_message` is null → output flows to summarizer → delivered to Telegram
-- **Fail (~30-40%):** `type` is status (auto-continue needed) → `coaching_message` is populated with specific guidance → bridge uses it directly as the continuation prompt
+**Agent output arrives** → `classify_output(text)` → single Haiku call → returns `ClassificationResult` with `type`, `confidence`, `reason`, `coaching_message`:
 
-Same Haiku call, same JSON response. The `coaching_message` field is simply null when the output is approved and populated when it's rejected. No second LLM call, no string matching.
+1. **Confidence check**: If confidence < 0.80 → default to QUESTION (pause for human). Same as today.
+2. **Pass (~60-70%):** `type` is completion/question/blocker/error → `coaching_message` is null → output flows to summarizer → delivered to Telegram. Haiku didn't generate coaching because it wasn't asked to for non-status types.
+3. **Fail (~30-40%):** `type` is status → bridge decides to auto-continue → `coaching_message` contains specific guidance → bridge uses it as the continuation prompt.
+
+The pass/fail decision is made by the classification + threshold — not by whether coaching exists. Coaching is a consequence of the decision, not the driver.
 
 ### Technical Approach
 
 1. **Extend `ClassificationResult`** — add `coaching_message: str | None` field. Null on pass-through types (completion, question, blocker, error). Populated on status/auto-continue.
-2. **Merge the classifier prompt** — expand `CLASSIFIER_SYSTEM_PROMPT` to: "When classifying as `status`, also return a `coaching_message` explaining what the agent should do or fix. When classifying as any other type, set `coaching_message` to null." This is the key design: one prompt, two branches.
+2. **Expand classifier prompt** — add to `CLASSIFIER_SYSTEM_PROMPT`: "When classifying as `status`, also return a `coaching_message` explaining what the agent should do next or what evidence was missing. For all other types, set `coaching_message` to null." Haiku's primary task is still classification with confidence — coaching is a secondary output only on the status path.
 3. **Update JSON schema** — response becomes `{"type": "...", "confidence": 0.95, "reason": "...", "coaching_message": "..."|null}`. The majority of responses will have `coaching_message: null` since most output is approved.
-4. **Remove `was_rejected_completion` detection** — the hedging pattern matching in `_parse_classification_response()` (lines 418-432) is deleted. The LLM now explicitly returns coaching when it rejects — no need to reverse-engineer intent from the reason field.
+4. **Remove `was_rejected_completion` detection** — the hedging pattern matching in `_parse_classification_response()` (lines 418-432) is deleted. The LLM now explicitly returns coaching when it classifies as status — no need to reverse-engineer intent from the reason field.
 5. **Simplify `build_coaching_message()`** — check if `classification.coaching_message` exists first; if so, prefix with `[System Coach]` and return. Fall through to existing skill/plan-aware coaching only when no LLM coaching was provided (heuristic fallback path).
-6. **Pass context to classifier** — optionally pass plan file path and active skill info so the LLM can reference success criteria in its coaching when rejecting.
+6. **Pass context to classifier** — optionally pass plan file path and active skill info so the LLM can reference success criteria in its coaching when classifying as status.
 
 ## Rabbit Holes
 
+- **Separate pass/fail score** — Don't ask Haiku for a second judgment axis (e.g. `"pass": true/false`). This creates conflicting signals ("type: completion, pass: false" — what does that mean?). The classification type + confidence threshold IS the pass/fail mechanism. One axis of judgment, not two.
 - **Multi-turn coaching history** — Issue mentions seeing prior coaching messages. Defer this — it requires passing conversation history into the classifier, which is a separate concern. The single-pass merge is valuable on its own.
 - **Replacing the heuristic fallback** — Keep `_classify_with_heuristics()` as-is. It's the offline safety net and doesn't need to generate coaching messages (the static templates in `coach.py` cover that path).
 - **Changing the coach's skill-aware tiers** — Tier 2 (plan/skill coaching for status updates) works fine. Only Tier 1 (rejection coaching) needs to use LLM-generated messages. Don't refactor the whole coach.
 
 ## Risks
 
-### Risk 1: LLM generates poor coaching messages
+### Risk 1: Haiku develops bias toward rejecting (over-coaching)
+**Impact:** If Haiku finds generating coaching messages "interesting," it may drift toward classifying more output as `status` to get the chance to coach, reducing pass-through rate.
+**Mitigation:** Classification with confidence score is the decision mechanism — coaching is a secondary output. The confidence threshold (0.80) catches drift. If pass-through rate drops, tune the threshold up — no prompt changes needed. Monitor the status-vs-completion ratio in logs.
+
+### Risk 2: LLM generates poor coaching messages
 **Impact:** Agent gets unhelpful or confusing auto-continue messages
 **Mitigation:** Include few-shot examples in the prompt. Keep the static template as fallback — if `coaching_message` is empty/missing, fall back to existing behavior.
 
-### Risk 2: Increased token usage from longer prompt
+### Risk 3: Increased token usage from longer prompt
 **Impact:** Slightly higher cost per classification call
 **Mitigation:** The prompt grows by ~200 tokens (coaching instructions + examples). At Haiku pricing this is negligible. The coaching message output adds ~50 tokens. We're saving the information loss that causes wasted auto-continue cycles, which cost far more.
-
-### Risk 3: Structured output parsing becomes more complex
-**Impact:** More fields to validate in `_parse_classification_response()`
-**Mitigation:** `coaching_message` is optional — if missing or empty, fall through to existing coach logic. The parser already handles missing fields gracefully.
 
 ## No-Gos (Out of Scope)
 
