@@ -50,7 +50,6 @@ On timeout or failure, retries up to 3 times with progressive delays.
 **Retry delays**: 5s, 15s, 30s
 
 **Self-healing actions**:
-- Kill stuck clawdbot processes
 - Brief pause between retries
 
 **On final failure**: Creates `docs/plans/fix-bridge-failure-{timestamp}.md` instead of showing error to user.
@@ -82,7 +81,7 @@ When user asks status questions like "what are you working on?", injects recent 
 
 ### Working Directory Configuration ✅
 
-Added `working_directory` to project config and pass to clawdbot subprocess.
+Added `working_directory` to project config and pass to agent subprocess.
 
 **Location**: `config/projects.json` and `bridge/telegram_bridge.py:get_agent_response()`
 

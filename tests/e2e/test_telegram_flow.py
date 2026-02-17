@@ -4,7 +4,7 @@ E2E Telegram Flow Tests
 Tests the complete message flow through the system:
 1. Telegram message reception
 2. Bridge processing
-3. Clawdbot execution
+3. Agent execution
 4. Response delivery
 
 These are REAL integration tests using actual Telegram API.
@@ -143,57 +143,6 @@ class TestBridgeIntegration:
         # Bridge requires Telegram credentials
         # This test verifies the module structure
         assert bridge_module is not None
-
-
-class TestClawdbotIntegration:
-    """Tests for Clawdbot integration."""
-
-    @pytest.fixture
-    def clawdbot_available(self) -> bool:
-        """Check if clawdbot is available."""
-        import subprocess
-
-        result = subprocess.run(["which", "clawdbot"], capture_output=True)
-        return result.returncode == 0
-
-    def test_clawdbot_installed(self, clawdbot_available):
-        """Verify clawdbot is installed."""
-        assert clawdbot_available, "Clawdbot must be installed"
-
-    @pytest.mark.asyncio
-    async def test_clawdbot_version(self, clawdbot_available):
-        """Test clawdbot version command."""
-        if not clawdbot_available:
-            pytest.skip("Clawdbot not installed")
-
-        import subprocess
-
-        result = subprocess.run(
-            ["clawdbot", "--version"], capture_output=True, text=True
-        )
-        assert result.returncode == 0
-        # Version format: "2026.1.16-2" or "v1.2.3" or "clawdbot 1.2.3"
-        version_output = result.stdout.strip()
-        assert version_output, "Version output should not be empty"
-
-    @pytest.mark.asyncio
-    async def test_skills_directory_exists(self):
-        """Verify skills directory exists."""
-        skills_path = Path.home() / "clawd" / "skills"
-        assert skills_path.exists(), "Skills directory should exist"
-
-    @pytest.mark.asyncio
-    async def test_required_skills_present(self):
-        """Verify all required skills are installed."""
-        required_skills = ["sentry", "github", "linear", "notion", "stripe", "render"]
-        skills_path = Path.home() / "clawd" / "skills"
-
-        for skill in required_skills:
-            skill_path = skills_path / skill
-            assert skill_path.exists(), f"Skill {skill} should be installed"
-
-            manifest_path = skill_path / "manifest.json"
-            assert manifest_path.exists(), f"Skill {skill} should have manifest.json"
 
 
 class TestMessageProcessing:

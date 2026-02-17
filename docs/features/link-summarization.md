@@ -64,7 +64,7 @@ Format summaries for message context:
    developments in AI technology, covering three key trends...]"
     |
     v
-Enriched message passed to clawdbot
+Enriched message passed to agent
     |
     v
 Claude can discuss article content immediately

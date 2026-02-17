@@ -20,7 +20,7 @@
         "team": "VALOR"
       },
       "context": {
-        "tech_stack": ["Python", "Clawdbot", "Telethon", "Claude API"],
+        "tech_stack": ["Python", "Claude Agent SDK", "Telethon", "Claude API"],
         "description": "Focus on agentic systems, self-improvement, autonomous operation, Telegram integration"
       }
     },

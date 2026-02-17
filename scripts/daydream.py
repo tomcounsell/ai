@@ -4,11 +4,15 @@ Daydream - Autonomous Daily Maintenance System
 
 A long-running process that performs daily maintenance tasks:
 1. Clean up legacy code
-2. Review previous day's logs
-3. Check error logs via Sentry
-4. Clean up task management
+2. Review previous day's logs (with structured error extraction)
+3. Check error logs via Sentry (skips gracefully if MCP unavailable)
+4. Clean up task management (via gh CLI)
 5. Update documentation
-6. Produce daily report
+6. Produce daily report (local markdown)
+7. Session analysis (thrash ratio, user corrections)
+8. LLM reflection (Claude Haiku categorization)
+9. Memory consolidation (lessons_learned.jsonl)
+10. GitHub issue creation (via daydream_report module)
 
 This process is resumable - if interrupted, it picks up where it left off.
 """
@@ -18,11 +22,26 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+# Ensure project root is in sys.path for standalone execution
+_project_root = str(Path(__file__).parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+try:
+    import anthropic
+except ImportError:
+    anthropic = None  # type: ignore[assignment]
+
+from scripts.daydream_report import create_daydream_issue  # noqa: E402
 
 # Configure logging
 logging.basicConfig(
@@ -36,6 +55,313 @@ PROJECT_ROOT = Path(__file__).parent.parent
 LOGS_DIR = PROJECT_ROOT / "logs"
 DAYDREAM_DIR = LOGS_DIR / "daydream"
 STATE_FILE = DAYDREAM_DIR / "state.json"
+DATA_DIR = PROJECT_ROOT / "data"
+LESSONS_FILE = DATA_DIR / "lessons_learned.jsonl"
+SESSIONS_DIR = LOGS_DIR / "sessions"
+
+# Correction patterns in user messages
+CORRECTION_PATTERNS = [
+    re.compile(r"\bno,?\s+i\s+meant\b", re.IGNORECASE),
+    re.compile(r"\bthat'?s\s+wrong\b", re.IGNORECASE),
+    re.compile(r"\bactually,?\s+", re.IGNORECASE),
+    re.compile(r"\bnot\s+what\s+i\s+(asked|wanted|meant)\b", re.IGNORECASE),
+    re.compile(r"\bwrong\s+(file|dir|path|approach)\b", re.IGNORECASE),
+    re.compile(r"\bstop\b.*\binstead\b", re.IGNORECASE),
+    re.compile(r"\bi\s+said\b", re.IGNORECASE),
+    re.compile(r"\bplease\s+(don'?t|stop)\b", re.IGNORECASE),
+]
+
+# Thrash ratio threshold: above this is considered thrashing
+THRASH_RATIO_THRESHOLD = 0.5
+
+
+def analyze_sessions(sessions_dir: Path, target_date: str) -> dict[str, Any]:
+    """Analyze session snapshots for a given date.
+
+    Reads chat.json and tool_use.jsonl from session directories,
+    filters to the target date, and extracts:
+    - User corrections (patterns like "No, I meant...")
+    - Thrash ratio (tool calls / successful outcomes)
+
+    Args:
+        sessions_dir: Path to logs/sessions/ directory.
+        target_date: Date string (YYYY-MM-DD) to filter sessions.
+
+    Returns:
+        Dict with sessions_analyzed, corrections, thrash_sessions.
+    """
+    result: dict[str, Any] = {
+        "sessions_analyzed": 0,
+        "corrections": [],
+        "thrash_sessions": [],
+    }
+
+    if not sessions_dir.exists():
+        return result
+
+    # Collect all sessions for the target date
+    matching_sessions = []
+    for session_dir in sorted(sessions_dir.iterdir()):
+        if not session_dir.is_dir():
+            continue
+        chat_file = session_dir / "chat.json"
+        if not chat_file.exists():
+            continue
+        try:
+            chat_data = json.loads(chat_file.read_text())
+        except (json.JSONDecodeError, OSError):
+            logger.warning(f"Skipping malformed session: {session_dir.name}")
+            continue
+
+        started_at = chat_data.get("started_at", "")
+        if not started_at.startswith(target_date):
+            continue
+
+        matching_sessions.append((session_dir, chat_data))
+
+    # Cap at 10 most interesting (sort by message count descending for now)
+    matching_sessions.sort(key=lambda x: len(x[1].get("messages", [])), reverse=True)
+    matching_sessions = matching_sessions[:10]
+
+    for session_dir, chat_data in matching_sessions:
+        result["sessions_analyzed"] += 1
+        session_id = chat_data.get("session_id", session_dir.name)
+        messages = chat_data.get("messages", [])
+
+        # Detect user corrections
+        for msg in messages:
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content", "")
+            for pattern in CORRECTION_PATTERNS:
+                if pattern.search(content):
+                    result["corrections"].append(
+                        {
+                            "session_id": session_id,
+                            "message": content,
+                            "pattern": pattern.pattern,
+                        }
+                    )
+                    break  # One match per message is enough
+
+        # Compute thrash ratio from tool_use.jsonl
+        tool_file = session_dir / "tool_use.jsonl"
+        if tool_file.exists():
+            try:
+                tool_calls = 0
+                successes = 0
+                for line in tool_file.read_text().strip().split("\n"):
+                    if not line.strip():
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        tool_calls += 1
+                        if entry.get("success", False):
+                            successes += 1
+                    except json.JSONDecodeError:
+                        continue
+
+                if tool_calls > 0:
+                    failure_ratio = 1.0 - (successes / tool_calls)
+                    if failure_ratio > THRASH_RATIO_THRESHOLD:
+                        result["thrash_sessions"].append(
+                            {
+                                "session_id": session_id,
+                                "tool_calls": tool_calls,
+                                "successes": successes,
+                                "failure_ratio": round(failure_ratio, 2),
+                            }
+                        )
+            except OSError:
+                pass
+
+    return result
+
+
+def run_llm_reflection(
+    analysis: dict[str, Any],
+) -> list[dict[str, str]]:
+    """Run LLM reflection on session analysis using Claude Haiku.
+
+    Args:
+        analysis: Output from analyze_sessions().
+
+    Returns:
+        List of reflection dicts with category, summary, pattern,
+        prevention, source_session. Empty list on failure or skip.
+    """
+    # Skip if nothing interesting
+    if (
+        analysis.get("sessions_analyzed", 0) == 0
+        and not analysis.get("corrections")
+        and not analysis.get("thrash_sessions")
+    ):
+        logger.info("No session findings for reflection, skipping LLM call")
+        return []
+
+    # Skip if no API key
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.info("No ANTHROPIC_API_KEY set, skipping LLM reflection")
+        return []
+
+    if anthropic is None:
+        logger.info("anthropic package not installed, skipping LLM reflection")
+        return []
+
+    prompt = f"""Analyze these session findings and categorize any mistakes or issues.
+
+Session Analysis Data:
+{json.dumps(analysis, indent=2)}
+
+For each issue found, return a JSON array of objects with these fields:
+- category: one of (misunderstanding, code_bug, poor_planning,
+  tool_misuse, scope_creep, integration_failure)
+- summary: brief description of what went wrong
+- pattern: the recurring pattern that caused the issue
+- prevention: specific rule to prevent this in the future
+- source_session: the session_id where this was observed
+
+Return ONLY the JSON array, no other text. If no issues found, return [].
+"""
+
+    try:
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-haiku-4-20250414",
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        response_text = response.content[0].text.strip()
+        # Try to extract JSON from the response
+        try:
+            reflections = json.loads(response_text)
+            if isinstance(reflections, list):
+                return reflections
+        except json.JSONDecodeError:
+            # Try to find JSON array in the response
+            match = re.search(r"\[.*\]", response_text, re.DOTALL)
+            if match:
+                try:
+                    reflections = json.loads(match.group())
+                    if isinstance(reflections, list):
+                        return reflections
+                except json.JSONDecodeError:
+                    pass
+            logger.warning("LLM response was not valid JSON")
+            return []
+    except Exception as e:
+        logger.error(f"LLM reflection failed: {e}")
+        return []
+
+
+def consolidate_memory(
+    reflections: list[dict[str, str]],
+    date: str,
+    lessons_file: Path | None = None,
+) -> None:
+    """Append reflection output to lessons_learned.jsonl.
+
+    Deduplicates by pattern similarity and prunes entries older than 90 days.
+
+    Args:
+        reflections: List of reflection dicts from run_llm_reflection().
+        date: Date string (YYYY-MM-DD) for new entries.
+        lessons_file: Path to lessons_learned.jsonl (defaults to DATA_DIR).
+    """
+    if lessons_file is None:
+        lessons_file = LESSONS_FILE
+
+    # Ensure parent directory exists
+    lessons_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing entries
+    existing_entries: list[dict[str, Any]] = []
+    if lessons_file.exists():
+        for line in lessons_file.read_text().strip().split("\n"):
+            if not line.strip():
+                continue
+            try:
+                existing_entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    # Prune entries older than 90 days
+    cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+    existing_entries = [e for e in existing_entries if e.get("date", "") >= cutoff]
+
+    # Collect existing patterns for deduplication
+    existing_patterns = {e.get("pattern", "") for e in existing_entries}
+
+    # Add new entries (deduplicate by exact pattern match)
+    for reflection in reflections:
+        pattern = reflection.get("pattern", "")
+        if pattern and pattern in existing_patterns:
+            logger.info(f"Skipping duplicate pattern: {pattern}")
+            continue
+
+        entry = {
+            "date": date,
+            "category": reflection.get("category", "unknown"),
+            "summary": reflection.get("summary", ""),
+            "pattern": pattern,
+            "prevention": reflection.get("prevention", ""),
+            "source_session": reflection.get("source_session", ""),
+            "validated": 0,
+        }
+        existing_entries.append(entry)
+        existing_patterns.add(pattern)
+
+    # Write back
+    content = "\n".join(json.dumps(e) for e in existing_entries)
+    if content:
+        content += "\n"
+    lessons_file.write_text(content)
+
+
+def extract_structured_errors(log_file: Path) -> list[dict[str, str]]:
+    """Extract structured error information from a log file.
+
+    Args:
+        log_file: Path to a log file (e.g., bridge.log).
+
+    Returns:
+        List of dicts with timestamp, level, message, and context.
+    """
+    errors: list[dict[str, str]] = []
+    # Pattern: 2026-02-16 10:30:45,123 - module - ERROR - message
+    log_pattern = re.compile(
+        r"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})" r".*?(ERROR|CRITICAL)\s*[-:]\s*(.*)"
+    )
+
+    try:
+        with open(log_file) as f:
+            lines = f.readlines()[-1000:]
+
+        for i, line in enumerate(lines):
+            match = log_pattern.search(line)
+            if match:
+                timestamp, level, message = match.groups()
+                # Grab some context (next 2 lines)
+                context_lines = []
+                for j in range(i + 1, min(i + 3, len(lines))):
+                    stripped = lines[j].strip()
+                    if stripped and not log_pattern.search(lines[j]):
+                        context_lines.append(stripped)
+
+                errors.append(
+                    {
+                        "timestamp": timestamp,
+                        "level": level,
+                        "message": message.strip(),
+                        "context": " | ".join(context_lines),
+                    }
+                )
+    except Exception as e:
+        logger.warning(f"Could not extract errors from {log_file}: {e}")
+
+    return errors
 
 
 @dataclass
@@ -49,6 +375,8 @@ class DaydreamState:
     daily_report: list[str] = field(default_factory=list)
     date: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
     findings: dict[str, list[str]] = field(default_factory=dict)
+    session_analysis: dict[str, Any] = field(default_factory=dict)
+    reflections: list[dict[str, str]] = field(default_factory=list)
 
     @classmethod
     def load(cls) -> DaydreamState:
@@ -82,7 +410,7 @@ class DaydreamState:
 class DaydreamRunner:
     """Runs the daydream maintenance process."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.state = DaydreamState.load()
         self.steps = [
             (1, "Clean Up Legacy Code", self.step_clean_legacy),
@@ -90,13 +418,19 @@ class DaydreamRunner:
             (3, "Check Error Logs (Sentry)", self.step_check_sentry),
             (4, "Clean Up Task Management", self.step_clean_tasks),
             (5, "Update Documentation", self.step_update_docs),
-            (6, "Produce Daily Report", self.step_produce_report),
+            (6, "Session Analysis", self.step_session_analysis),
+            (7, "LLM Reflection", self.step_llm_reflection),
+            (8, "Memory Consolidation", self.step_memory_consolidation),
+            (9, "Produce Daily Report", self.step_produce_report),
+            (10, "GitHub Issue Creation", self.step_create_github_issue),
         ]
 
     async def run(self) -> None:
         """Run all daydream steps."""
         logger.info(f"Starting Daydream for {self.state.date}")
         logger.info(f"Resuming from step {self.state.current_step}")
+
+        DAYDREAM_DIR.mkdir(parents=True, exist_ok=True)
 
         for step_num, step_name, step_func in self.steps:
             if step_num in self.state.completed_steps:
@@ -123,7 +457,7 @@ class DaydreamRunner:
                 logger.error(f"Step {step_num} failed: {e}")
                 self.state.daily_report.append(f"Failed: {step_name} - {str(e)}")
                 self.state.save()
-                raise
+                continue
 
         logger.info("Daydream completed successfully")
 
@@ -135,11 +469,11 @@ class DaydreamRunner:
         cache_dirs = list(PROJECT_ROOT.rglob("__pycache__"))
         for cache_dir in cache_dirs:
             if cache_dir.is_dir():
-                # Count files
                 file_count = len(list(cache_dir.glob("*")))
                 if file_count > 0:
                     findings.append(
-                        f"Found {file_count} cached files in {cache_dir.relative_to(PROJECT_ROOT)}"
+                        f"Found {file_count} cached files in "
+                        f"{cache_dir.relative_to(PROJECT_ROOT)}"
                     )
 
         # Clean .pyc files
@@ -147,7 +481,7 @@ class DaydreamRunner:
         if pyc_files:
             findings.append(f"Found {len(pyc_files)} .pyc files")
 
-        # Look for TODO comments that might indicate legacy code
+        # Look for TODO comments
         try:
             result = subprocess.run(
                 ["grep", "-r", "TODO:", "--include=*.py", str(PROJECT_ROOT)],
@@ -172,7 +506,13 @@ class DaydreamRunner:
         for pattern in deprecated_patterns:
             try:
                 result = subprocess.run(
-                    ["grep", "-r", pattern, "--include=*.py", str(PROJECT_ROOT)],
+                    [
+                        "grep",
+                        "-r",
+                        pattern,
+                        "--include=*.py",
+                        str(PROJECT_ROOT),
+                    ],
                     capture_output=True,
                     text=True,
                     timeout=30,
@@ -180,7 +520,8 @@ class DaydreamRunner:
                 if result.stdout.strip():
                     count = len(result.stdout.strip().split("\n"))
                     findings.append(
-                        f"Found {count} instances of deprecated typing import: {pattern}"
+                        f"Found {count} instances of deprecated typing "
+                        f"import: {pattern}"
                     )
             except Exception:
                 pass
@@ -195,7 +536,7 @@ class DaydreamRunner:
         }
 
     async def step_review_logs(self) -> None:
-        """Step 2: Review previous day's logs."""
+        """Step 2: Review previous day's logs with structured error extraction."""
         findings = []
         log_files = list(LOGS_DIR.glob("*.log"))
 
@@ -204,34 +545,38 @@ class DaydreamRunner:
                 continue
 
             try:
-                # Check file age
                 mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
                 if mtime < datetime.now() - timedelta(days=7):
                     findings.append(f"Log file {log_file.name} is older than 7 days")
 
-                # Check file size
                 size_mb = log_file.stat().st_size / (1024 * 1024)
                 if size_mb > 10:
                     findings.append(
-                        f"Log file {log_file.name} is {size_mb:.1f}MB - consider rotation"
+                        f"Log file {log_file.name} is {size_mb:.1f}MB "
+                        f"- consider rotation"
                     )
 
-                # Look for errors in recent entries
-                with open(log_file) as f:
-                    lines = f.readlines()[-1000:]  # Last 1000 lines
-
-                error_count = sum(
-                    1 for line in lines if "ERROR" in line or "CRITICAL" in line
-                )
-                warning_count = sum(1 for line in lines if "WARNING" in line)
-
-                if error_count > 0:
+                # Extract structured errors
+                errors = extract_structured_errors(log_file)
+                if errors:
                     findings.append(
-                        f"{log_file.name}: {error_count} errors in recent logs"
+                        f"{log_file.name}: {len(errors)} structured errors "
+                        f"extracted"
                     )
+                    # Include up to 5 most recent errors in findings
+                    for error in errors[-5:]:
+                        msg = error["message"][:200]
+                        findings.append(
+                            f"  [{error['level']}] {error['timestamp']}: {msg}"
+                        )
+
+                # Also count warnings
+                with open(log_file) as f:
+                    lines = f.readlines()[-1000:]
+                warning_count = sum(1 for line in lines if "WARNING" in line)
                 if warning_count > 10:
                     findings.append(
-                        f"{log_file.name}: {warning_count} warnings in recent logs"
+                        f"{log_file.name}: {warning_count} warnings " f"in recent logs"
                     )
 
             except Exception as e:
@@ -246,67 +591,48 @@ class DaydreamRunner:
         }
 
     async def step_check_sentry(self) -> None:
-        """Step 3: Check error logs via Sentry."""
-        findings = []
+        """Step 3: Check error logs via Sentry.
 
-        # Try to call clawdbot sentry skill
-        try:
-            result = subprocess.run(
-                [
-                    "clawdbot",
-                    "skill",
-                    "sentry",
-                    "list_issues",
-                    "--status=unresolved",
-                    "--limit=10",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                findings.append(f"Sentry issues found: {result.stdout.strip()[:500]}")
-            elif result.returncode != 0:
-                findings.append("Could not query Sentry - check clawdbot configuration")
-        except FileNotFoundError:
-            findings.append("Clawdbot not available - skipping Sentry check")
-        except subprocess.TimeoutExpired:
-            findings.append("Sentry query timed out")
-        except Exception as e:
-            findings.append(f"Sentry check failed: {str(e)}")
-
-        for finding in findings:
-            self.state.add_finding("sentry", finding)
-
-        self.state.step_progress["check_sentry"] = {
-            "findings": len(findings),
-        }
+        Sentry integration requires MCP server which is not available
+        in standalone script mode. Skips gracefully with a log message.
+        """
+        self.state.add_finding(
+            "sentry",
+            "Sentry check skipped - MCP not available in standalone mode",
+        )
+        logger.info("Sentry check skipped - MCP not available in standalone mode")
+        self.state.step_progress["check_sentry"] = {"skipped": True}
 
     async def step_clean_tasks(self) -> None:
-        """Step 4: Clean up task management."""
+        """Step 4: Clean up task management via gh CLI."""
         findings = []
 
-        # Try to call clawdbot linear skill
+        # Check open bug issues via gh CLI
         try:
             result = subprocess.run(
                 [
-                    "clawdbot",
-                    "skill",
-                    "linear",
-                    "list_issues",
-                    "--status=backlog",
-                    "--limit=20",
+                    "gh",
+                    "issue",
+                    "list",
+                    "--state",
+                    "open",
+                    "--label",
+                    "bug",
                 ],
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=30,
             )
             if result.returncode == 0 and result.stdout.strip():
-                findings.append(f"Linear backlog items: {result.stdout.strip()[:500]}")
-        except FileNotFoundError:
-            findings.append("Clawdbot not available - skipping Linear check")
+                bug_lines = result.stdout.strip().split("\n")
+                findings.append(f"Found {len(bug_lines)} open bug issues on GitHub")
+                for line in bug_lines[:5]:
+                    findings.append(f"  Bug: {line.strip()}")
+            elif result.returncode == 0:
+                findings.append("No open bug issues on GitHub")
         except Exception as e:
-            findings.append(f"Linear check failed: {str(e)}")
+            logger.warning(f"Could not check GitHub issues: {e}")
+            findings.append(f"GitHub issue check failed: {e}")
 
         # Check local todo files
         todo_files = list(PROJECT_ROOT.glob("**/TODO.md")) + list(
@@ -316,10 +642,10 @@ class DaydreamRunner:
             try:
                 content = todo_file.read_text()
                 unchecked = content.count("[ ]")
-                checked = content.count("[x]")
                 if unchecked > 0:
                     findings.append(
-                        f"{todo_file.relative_to(PROJECT_ROOT)}: {unchecked} unchecked items"
+                        f"{todo_file.relative_to(PROJECT_ROOT)}: "
+                        f"{unchecked} unchecked items"
                     )
             except Exception:
                 pass
@@ -336,7 +662,6 @@ class DaydreamRunner:
         """Step 5: Update documentation."""
         findings = []
 
-        # Check for outdated documentation
         docs_dir = PROJECT_ROOT / "docs"
         if docs_dir.exists():
             doc_files = list(docs_dir.rglob("*.md"))
@@ -346,12 +671,12 @@ class DaydreamRunner:
                     age_days = (datetime.now() - mtime).days
                     if age_days > 30:
                         findings.append(
-                            f"{doc_file.relative_to(PROJECT_ROOT)} hasn't been updated in {age_days} days"
+                            f"{doc_file.relative_to(PROJECT_ROOT)} "
+                            f"hasn't been updated in {age_days} days"
                         )
                 except Exception:
                     pass
 
-        # Check CLAUDE.md is present and recent
         claude_md = PROJECT_ROOT / "CLAUDE.md"
         if claude_md.exists():
             mtime = datetime.fromtimestamp(claude_md.stat().st_mtime)
@@ -361,7 +686,6 @@ class DaydreamRunner:
         else:
             findings.append("CLAUDE.md not found")
 
-        # Check README.md
         readme = PROJECT_ROOT / "README.md"
         if not readme.exists():
             findings.append("README.md not found")
@@ -374,23 +698,61 @@ class DaydreamRunner:
         }
 
     async def step_produce_report(self) -> None:
-        """Step 6: Produce daily report."""
+        """Step 6: Produce daily report to local markdown file."""
+        total_steps = len(self.steps)
         report_lines = [
             f"# Daydream Report - {self.state.date}",
             "",
             "## Summary",
-            f"- Steps completed: {len(self.state.completed_steps)}/6",
+            f"- Steps completed: {len(self.state.completed_steps)}/{total_steps}",
             f"- Started: {self.state.step_started_at or 'N/A'}",
             "",
         ]
 
         # Add findings by category
-        for category, findings in self.state.findings.items():
-            if findings:
+        for category, cat_findings in self.state.findings.items():
+            if cat_findings:
                 report_lines.append(f"## {category.replace('_', ' ').title()}")
-                for finding in findings:
+                for finding in cat_findings:
                     report_lines.append(f"- {finding}")
                 report_lines.append("")
+
+        # Add session analysis if available
+        if self.state.session_analysis:
+            report_lines.append("## Session Analysis")
+            sa = self.state.session_analysis
+            report_lines.append(
+                f"- Sessions analyzed: {sa.get('sessions_analyzed', 0)}"
+            )
+            corrections = sa.get("corrections", [])
+            if corrections:
+                report_lines.append(f"- User corrections detected: {len(corrections)}")
+                for c in corrections[:5]:
+                    report_lines.append(
+                        f"  - [{c.get('session_id', '?')}] "
+                        f"{c.get('message', '')[:100]}"
+                    )
+            thrash = sa.get("thrash_sessions", [])
+            if thrash:
+                report_lines.append(f"- Thrashing sessions: {len(thrash)}")
+                for t in thrash:
+                    report_lines.append(
+                        f"  - [{t.get('session_id', '?')}] "
+                        f"{t.get('tool_calls', 0)} calls, "
+                        f"{t.get('successes', 0)} successes"
+                    )
+            report_lines.append("")
+
+        # Add reflections if available
+        if self.state.reflections:
+            report_lines.append("## LLM Reflections")
+            for r in self.state.reflections:
+                report_lines.append(
+                    f"- **{r.get('category', 'unknown')}**: " f"{r.get('summary', '')}"
+                )
+                report_lines.append(f"  - Pattern: {r.get('pattern', '')}")
+                report_lines.append(f"  - Prevention: {r.get('prevention', '')}")
+            report_lines.append("")
 
         # Add progress details
         report_lines.append("## Step Progress")
@@ -405,18 +767,85 @@ class DaydreamRunner:
 
         # Write report
         report_content = "\n".join(report_lines)
+        DAYDREAM_DIR.mkdir(parents=True, exist_ok=True)
         report_file = DAYDREAM_DIR / f"report_{self.state.date}.md"
         report_file.write_text(report_content)
 
         logger.info(f"Report written to {report_file}")
 
-        # Also print to stdout for visibility
         print("\n" + "=" * 60)
         print(report_content)
         print("=" * 60)
 
+    async def step_session_analysis(self) -> None:
+        """Step 7: Analyze yesterday's sessions."""
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-async def main():
+        analysis = analyze_sessions(SESSIONS_DIR, yesterday)
+        self.state.session_analysis = analysis
+
+        # Add findings
+        if analysis["corrections"]:
+            self.state.add_finding(
+                "session_analysis",
+                f"Detected {len(analysis['corrections'])} user corrections "
+                f"across {analysis['sessions_analyzed']} sessions",
+            )
+        if analysis["thrash_sessions"]:
+            self.state.add_finding(
+                "session_analysis",
+                f"Detected {len(analysis['thrash_sessions'])} thrashing "
+                f"sessions (high failure ratio)",
+            )
+
+        self.state.step_progress["session_analysis"] = {
+            "sessions_analyzed": analysis["sessions_analyzed"],
+            "corrections": len(analysis["corrections"]),
+            "thrash_sessions": len(analysis["thrash_sessions"]),
+        }
+
+    async def step_llm_reflection(self) -> None:
+        """Step 8: Run LLM reflection on session analysis."""
+        reflections = run_llm_reflection(self.state.session_analysis)
+        self.state.reflections = reflections
+
+        if reflections:
+            self.state.add_finding(
+                "llm_reflection",
+                f"Generated {len(reflections)} reflection entries",
+            )
+            for r in reflections:
+                self.state.add_finding(
+                    "llm_reflection",
+                    f"[{r.get('category', '?')}] {r.get('summary', '')}",
+                )
+
+        self.state.step_progress["llm_reflection"] = {
+            "reflections_generated": len(reflections),
+        }
+
+    async def step_memory_consolidation(self) -> None:
+        """Step 9: Consolidate lessons learned."""
+        consolidate_memory(self.state.reflections, self.state.date, LESSONS_FILE)
+
+        self.state.step_progress["memory_consolidation"] = {
+            "lessons_written": len(self.state.reflections),
+        }
+
+    async def step_create_github_issue(self) -> None:
+        """Step 10: Create GitHub issue with findings."""
+        # Only create issue when there are real findings
+        active_findings = {k: v for k, v in self.state.findings.items() if v}
+        if not active_findings:
+            logger.info("No findings to report, skipping GitHub issue creation")
+            self.state.step_progress["github_issue"] = {"created": False}
+            return
+
+        created = create_daydream_issue(active_findings, self.state.date)
+        self.state.step_progress["github_issue"] = {"created": created}
+
+
+async def main() -> None:
     """Main entry point."""
     runner = DaydreamRunner()
     await runner.run()

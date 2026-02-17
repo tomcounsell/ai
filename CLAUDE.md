@@ -14,6 +14,10 @@ Guidance for Claude Code when working with this repository.
 | `tail -f logs/bridge.log` | Stream bridge logs |
 | `pytest tests/` | Run all tests |
 | `black . && ruff check .` | Format and lint |
+| `python scripts/daydream.py` | Run daydream maintenance manually |
+| `./scripts/install_daydream.sh` | Install daydream launchd schedule |
+| `tail -f logs/daydream.log` | Stream daydream logs |
+| `cat data/lessons_learned.jsonl` | View institutional memory |
 
 ## Development Principles
 

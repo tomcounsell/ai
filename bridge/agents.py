@@ -1,22 +1,15 @@
 """Agent response routing, retry logic, self-healing, and tracked work detection."""
 
 import asyncio
-import json
 import logging
-import os
 import platform
 import re
 import subprocess
-import time
 from datetime import datetime
 from pathlib import Path
 
-# Feature flag for Claude Agent SDK migration
-USE_CLAUDE_SDK = os.getenv("USE_CLAUDE_SDK", "false").lower() == "true"
-
-if USE_CLAUDE_SDK:
-    from agent import get_agent_response_sdk
-    from agent.workflow_state import WorkflowState, generate_workflow_id
+from agent import get_agent_response_sdk
+from agent.workflow_state import WorkflowState, generate_workflow_id
 
 # Module-level config globals (set by telegram_bridge.py after config loading)
 CONFIG = {}
@@ -236,220 +229,6 @@ async def _handle_force_update_command(tg_client, event):
 # =============================================================================
 
 
-async def get_agent_response_clawdbot(
-    message: str,
-    session_id: str,
-    sender_name: str,
-    chat_title: str | None,
-    project: dict | None,
-    chat_id: str | None = None,
-    sender_id: int | None = None,
-) -> str:
-    """Call clawdbot agent and get response (legacy implementation)."""
-    # Import here to avoid circular dependency
-    from bridge.context import (
-        build_activity_context,
-        build_context_prefix,
-        is_status_question,
-    )
-    from bridge.telegram_bridge import log_event
-
-    start_time = time.time()
-    request_id = f"{session_id}_{int(start_time)}"
-
-    # CRITICAL: Determine working directory to prevent agent from wandering into wrong directories
-    if project:
-        working_dir = project.get(
-            "working_directory", DEFAULTS.get("working_directory")
-        )
-    else:
-        working_dir = DEFAULTS.get("working_directory")
-
-    # Fallback to current directory if not configured (shouldn't happen)
-    if not working_dir:
-        working_dir = str(Path(__file__).parent.parent)
-        logger.warning(
-            f"[{request_id}] No working_directory configured, using {working_dir}"
-        )
-
-    try:
-        # Build context-enriched message (includes user permission restrictions)
-        context = build_context_prefix(project, chat_title is None, sender_id)
-
-        # Note: Recent conversation history is NOT injected by default.
-        # The agent should use valor-history CLI to fetch relevant context
-        # when subtle cues suggest prior messages may be relevant.
-        # Users can also use Telegram's reply-to feature for explicit threading.
-
-        # Check if this is a status question - inject activity context
-        activity_context = ""
-        if is_status_question(message):
-            activity_context = build_activity_context(working_dir)
-            logger.debug(
-                f"[{request_id}] Status question detected, injecting activity context"
-            )
-
-        enriched_message = context
-        if activity_context:
-            enriched_message += f"\n\n{activity_context}"
-        enriched_message += f"\n\nFROM: {sender_name}"
-        if chat_title:
-            enriched_message += f" in {chat_title}"
-        enriched_message += f"\nMESSAGE: {message}"
-
-        project_name = project.get("name", "Valor") if project else "Valor"
-
-        # Use subprocess to call clawdbot agent
-        # Use --json to get clean output without tool execution logs mixed in
-        cmd = [
-            "clawdbot",
-            "agent",
-            "--local",
-            "--session-id",
-            session_id,
-            "--message",
-            enriched_message,
-            "--thinking",
-            "medium",
-            "--json",
-        ]
-
-        # Log full request details
-        logger.info(f"[{request_id}] Calling clawdbot agent for {project_name}")
-        logger.debug(f"[{request_id}] Session: {session_id}")
-        logger.debug(f"[{request_id}] Working directory: {working_dir}")
-        logger.debug(f"[{request_id}] Command: {' '.join(cmd[:6])}...")
-        logger.debug(f"[{request_id}] Enriched message:\n{enriched_message}")
-
-        # Log structured event
-        log_event(
-            "agent_request",
-            request_id=request_id,
-            session_id=session_id,
-            project=project_name,
-            working_dir=working_dir,
-            sender=sender_name,
-            chat=chat_title,
-            message_length=len(message),
-            enriched_length=len(enriched_message),
-        )
-
-        timeout = DEFAULTS.get("response", {}).get("timeout_seconds", 300)
-
-        # Run with timeout - CRITICAL: cwd ensures agent works in correct project directory
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=working_dir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env={**os.environ, "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", "")},
-        )
-
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=timeout,
-            )
-        except TimeoutError:
-            # Kill the process and try to capture partial output
-            elapsed = time.time() - start_time
-            logger.error(f"[{request_id}] Agent request timed out after {elapsed:.1f}s")
-
-            # Try to terminate gracefully first
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5)
-            except TimeoutError:
-                process.kill()
-
-            # Log structured timeout event
-            log_event(
-                "agent_timeout",
-                request_id=request_id,
-                session_id=session_id,
-                elapsed_seconds=elapsed,
-                timeout_seconds=timeout,
-            )
-
-            return "Request timed out. Please try again."
-
-        elapsed = time.time() - start_time
-
-        if process.returncode != 0:
-            stderr_text = stderr.decode()
-            logger.error(
-                f"[{request_id}] Clawdbot error (exit {process.returncode}) after {elapsed:.1f}s"
-            )
-            logger.error(f"[{request_id}] Stderr: {stderr_text[:500]}")
-
-            log_event(
-                "agent_error",
-                request_id=request_id,
-                session_id=session_id,
-                exit_code=process.returncode,
-                elapsed_seconds=elapsed,
-                stderr_preview=stderr_text[:200],
-            )
-
-            return f"Error processing request: {stderr_text[:200]}"
-
-        raw_output = stdout.decode().strip()
-        stderr_text = stderr.decode().strip()
-
-        # Parse JSON response from clawdbot --json mode
-        # Structure: {"payloads": [{"text": "...", "mediaUrl": null}], "meta": {...}}
-        try:
-            result = json.loads(raw_output)
-            payloads = result.get("payloads", [])
-            if payloads and payloads[0].get("text"):
-                response = payloads[0]["text"]
-            else:
-                # Fallback to raw output if JSON parsing succeeds but no text
-                response = raw_output
-                logger.warning(f"[{request_id}] JSON response had no text payload")
-        except json.JSONDecodeError:
-            # Fallback to raw output if not valid JSON (shouldn't happen with --json)
-            response = raw_output
-            logger.warning(
-                f"[{request_id}] Failed to parse JSON response, using raw output"
-            )
-
-        # Log success with timing
-        logger.info(
-            f"[{request_id}] Agent responded in {elapsed:.1f}s ({len(response)} chars)"
-        )
-        logger.debug(f"[{request_id}] Response preview: {response[:200]}...")
-        if stderr_text:
-            logger.debug(f"[{request_id}] Stderr: {stderr_text[:200]}")
-
-        log_event(
-            "agent_response",
-            request_id=request_id,
-            session_id=session_id,
-            elapsed_seconds=elapsed,
-            response_length=len(response),
-            has_stderr=bool(stderr_text),
-        )
-
-        return response
-
-    except Exception as e:
-        elapsed = time.time() - start_time
-        logger.error(f"[{request_id}] Error calling agent after {elapsed:.1f}s: {e}")
-        logger.exception(f"[{request_id}] Full traceback:")
-
-        log_event(
-            "agent_exception",
-            request_id=request_id,
-            session_id=session_id,
-            elapsed_seconds=elapsed,
-            error=str(e),
-            error_type=type(e).__name__,
-        )
-
-        return f"Error: {str(e)}"
-
-
 async def get_agent_response(
     message: str,
     session_id: str,
@@ -459,25 +238,15 @@ async def get_agent_response(
     chat_id: str | None = None,
     sender_id: int | None = None,
 ) -> str:
-    """
-    Route to appropriate agent backend based on USE_CLAUDE_SDK flag.
-
-    When USE_CLAUDE_SDK=true, uses the Claude Agent SDK directly.
-    Otherwise, uses the legacy clawdbot subprocess approach.
-    """
-    if USE_CLAUDE_SDK:
-        logger.debug(f"Using Claude Agent SDK for session {session_id}")
-        return await get_agent_response_sdk(
-            message, session_id, sender_name, chat_title, project, chat_id, sender_id
-        )
-    else:
-        return await get_agent_response_clawdbot(
-            message, session_id, sender_name, chat_title, project, chat_id, sender_id
-        )
+    """Route to Claude Agent SDK backend for processing."""
+    logger.debug(f"Using Claude Agent SDK for session {session_id}")
+    return await get_agent_response_sdk(
+        message, session_id, sender_name, chat_title, project, chat_id, sender_id
+    )
 
 
 # =============================================================================
-# Retry with Self-Healing (Legacy - for Clawdbot backend)
+# Retry with Self-Healing
 # =============================================================================
 
 # How long to wait before sending "I'm working on this" acknowledgment
@@ -500,21 +269,7 @@ async def attempt_self_healing(error: str, session_id: str) -> None:
     """
     logger.info(f"Attempting self-healing for session {session_id}: {error[:100]}")
 
-    try:
-        # Kill any stuck clawdbot processes
-        kill_result = await asyncio.create_subprocess_exec(
-            "pkill",
-            "-f",
-            "clawdbot agent",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await asyncio.wait_for(kill_result.wait(), timeout=5)
-        logger.debug("Killed stuck clawdbot processes")
-    except Exception as e:
-        logger.debug(f"No stuck processes to kill: {e}")
-
-    # Brief pause to let processes terminate
+    # Brief pause before retry
     await asyncio.sleep(1)
 
 
@@ -820,9 +575,6 @@ def create_workflow_for_tracked_work(
     Returns:
         workflow_id if workflow created, None otherwise
     """
-    if not USE_CLAUDE_SDK:
-        return None
-
     plan_file, tracking_url = detect_tracked_work(message_text, working_dir)
 
     if not plan_file or not tracking_url:

@@ -67,8 +67,8 @@ Skills in `.claude/commands/` define reusable workflows:
 ### /prime - Codebase Onboarding (NEW SESSIONS START HERE)
 
 Run `/prime` at the start of any session to understand:
-- Current architecture (Clawdbot + Python bridge)
-- Where things live (this repo vs ~/clawd/skills/)
+- Current architecture (Claude Agent SDK + Python bridge)
+- Where things live in this repo
 - How to add new features
 - Key files to read
 

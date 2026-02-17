@@ -223,7 +223,6 @@ All use `POPOTO_REDIS_DB` directly with `RPUSH`, `LPOP`, and `DEL` on key `steer
 - **Progress streaming** — No play-by-play updates to Telegram. Only meaningful communication.
 - **Multi-session steering** — Only one session runs per project at a time (enforced by job queue). No need to handle concurrent session steering.
 - **Non-reply steering** — Only reply-thread messages count as steering. A new mention always creates a new job.
-- **Legacy mode support** — Steering only applies to SDK mode (`USE_CLAUDE_SDK=true`). Legacy clawdbot mode is not modified.
 
 ## Success Criteria
 

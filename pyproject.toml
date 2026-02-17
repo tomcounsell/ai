@@ -1,7 +1,7 @@
 [project]
 name = "valor-bridge"
 version = "0.1.0"
-description = "Telegram-Clawdbot bridge for Valor AI"
+description = "Telegram bridge for Valor AI"
 requires-python = ">=3.11"
 dependencies = [
     "telethon==1.40.0", # CRITICAL — pin exact, upgrade via /update only

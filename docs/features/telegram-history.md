@@ -202,5 +202,5 @@ The test suite covers:
 - Automatic categorization with AI
 - Link health checking (detect dead links)
 - RSS feed generation
-- Clawdbot skill for link access (`/links`)
+- MCP tool for link access
 - AI summary on save using Perplexity

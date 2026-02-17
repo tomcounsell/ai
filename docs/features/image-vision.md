@@ -53,7 +53,7 @@ Creates enriched message:
    with Python code that defines a function called..."
     |
     v
-Passes to clawdbot with visual context
+Passes to agent with visual context
     |
     v
 Claude can discuss image content intelligently

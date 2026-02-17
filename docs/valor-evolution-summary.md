@@ -50,16 +50,14 @@ Attempted autonomous module generation:
 
 _Abandoned: Custom subagent framework, Module Builder auto-generation_
 
-### Phase 5: Clawdbot Migration (Jan 2026)
+### Phase 5: Skill System and Persona (Jan 2026)
 
-Unified under Clawdbot's skill system:
-
-- **Clawdbot gateway** - skills-based tool management
+- **Skills-based tool management** - modular capability system
 - **PR #9: Complete migration** - removed old implementation entirely
 - **SOUL.md persona** - formalized Valor's identity and operating principles
 - **Ollama** - local LLM for intent classification (llama3.2, llava for vision)
 
-_Technologies adopted: Clawdbot skills, Ollama for lightweight tasks_
+_Technologies adopted: Ollama for lightweight tasks_
 
 ### Phase 6: Claude Agent SDK (Jan-Feb 2026)
 

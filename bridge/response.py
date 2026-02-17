@@ -24,7 +24,7 @@ FILE_MARKER_PATTERN = re.compile(r"<<FILE:([^>]+)>>")
 # =============================================================================
 
 # Patterns for tool execution logs that should be filtered from responses
-# These are clawdbot internal logs that shouldn't be shown to users
+# These are internal logs that shouldn't be shown to users
 TOOL_LOG_PATTERNS = [
     re.compile(r"^🛠️\s*exec:", re.IGNORECASE),  # Bash execution
     re.compile(r"^📖\s*read:", re.IGNORECASE),  # File read
@@ -175,7 +175,7 @@ def filter_tool_logs(response: str) -> str:
     """
     Remove tool execution traces from response.
 
-    Clawdbot may include lines like "🛠️ exec: ls -la" in stdout.
+    Agent may include lines like "🛠️ exec: ls -la" in stdout.
     These are internal logs, not meant for the user.
 
     Returns:

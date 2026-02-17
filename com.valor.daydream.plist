@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.valor.daydream</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-c</string>
+        <string>set -a; source /Users/valorengels/src/ai/.env; set +a; exec /Users/valorengels/src/ai/.venv/bin/python /Users/valorengels/src/ai/scripts/daydream.py</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/valorengels/src/ai</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/valorengels</string>
+    </dict>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>6</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/valorengels/src/ai/logs/daydream.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/valorengels/src/ai/logs/daydream_error.log</string>
+</dict>
+</plist>

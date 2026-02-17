@@ -77,5 +77,5 @@ if ! ls data/*.session 2>/dev/null | grep -q .; then
 fi
 
 # Start the bridge
-echo "Starting Telegram-Clawdbot bridge..."
+echo "Starting Telegram bridge..."
 exec "$VENV/bin/python" bridge/telegram_bridge.py

@@ -11,9 +11,7 @@ Telegram App → Python Bridge (Telethon) → Claude Agent SDK → Claude API
            Response
 ```
 
-The system now supports two backends:
-- **Claude Agent SDK** (recommended) - Official SDK with Claude Code capabilities
-- **Clawdbot** (legacy) - Third-party tool, available for fallback
+The system uses the Claude Agent SDK as its agent backend, providing Claude Code capabilities.
 
 ## Prerequisites
 
@@ -118,13 +116,6 @@ Look for:
 ```
 
 ## Configuration Options
-
-### Agent Backend Selection
-
-| Setting | Backend | Use Case |
-|---------|---------|----------|
-| `USE_CLAUDE_SDK=true` | Claude Agent SDK | **Recommended** - Same capabilities as Claude Code CLI |
-| `USE_CLAUDE_SDK=false` | Clawdbot | Legacy fallback, requires separate Clawdbot installation |
 
 ### Multi-Project Configuration
 
@@ -256,13 +247,6 @@ The SDK isn't installed or not in the Python path. Fix:
 pip install claude-agent-sdk
 ```
 
-### "Agent backend: Clawdbot (legacy)" when SDK expected
-
-The `.env` file isn't being loaded before the flag check. Ensure `.env` exists and contains:
-```bash
-USE_CLAUDE_SDK=true
-```
-
 ### "Please enter the code you received"
 
 This appears on first run. Check your Telegram app for a verification code.
@@ -285,27 +269,6 @@ tail -f logs/bridge.log
 Test the SDK directly:
 ```python
 python3 -c "from agent import ValorAgent; print('SDK OK')"
-```
-
-## Legacy: Clawdbot Setup
-
-If you need the Clawdbot backend for fallback:
-
-```bash
-# Install Clawdbot
-npm install -g clawdbot@latest
-
-# Create workspace
-mkdir -p ~/clawd
-cp config/SOUL.md ~/clawd/SOUL.md
-
-# Configure
-mkdir -p ~/.clawdbot
-# Create ~/.clawdbot/clawdbot.json (see docs/CLAWDBOT_MIGRATION_PLAN.md)
-
-# Disable SDK
-# In .env:
-USE_CLAUDE_SDK=false
 ```
 
 ## Next Steps

@@ -40,17 +40,13 @@ from dotenv import load_dotenv  # noqa: E402
 env_path = Path(__file__).parent.parent / ".env"
 load_dotenv(env_path)
 
-# Feature flag for Claude Agent SDK migration
-# Set USE_CLAUDE_SDK=true in .env to use the new SDK instead of clawdbot
-USE_CLAUDE_SDK = os.getenv("USE_CLAUDE_SDK", "false").lower() == "true"
-
-# Import SDK client and messenger if enabled (lazy import to avoid loading if not used)
-if USE_CLAUDE_SDK:
-    from agent import get_agent_response_sdk  # noqa: F401
+# Feature flag for Claude Agent SDK (always true, kept for backward compatibility)
+USE_CLAUDE_SDK = os.getenv("USE_CLAUDE_SDK", "true").lower() == "true"
 
 # Local tool imports for message and link storage
 from telethon import TelegramClient, events  # noqa: E402
 
+from agent import get_agent_response_sdk  # noqa: F401, E402
 from bridge.context import (  # noqa: E402
     build_activity_context,  # noqa: F401
     build_context_prefix,  # noqa: F401
@@ -413,7 +409,6 @@ from bridge.agents import (  # noqa: E402
     create_workflow_for_tracked_work,
     detect_tracked_work,  # noqa: F401
     get_agent_response,  # noqa: F401
-    get_agent_response_clawdbot,  # noqa: F401
     get_agent_response_with_retry,
 )
 
@@ -512,9 +507,7 @@ async def main():
         sys.exit(1)
 
     logger.info("Starting Valor bridge")
-    logger.info(
-        f"Agent backend: {'Claude Agent SDK' if USE_CLAUDE_SDK else 'Clawdbot (legacy)'}"
-    )
+    logger.info("Agent backend: Claude Agent SDK")
     logger.info(f"Active projects: {ACTIVE_PROJECTS}")
     logger.info(f"Monitored groups: {ALL_MONITORED_GROUPS}")
     logger.info(f"Respond to DMs: {RESPOND_TO_DMS}")
