@@ -25,17 +25,23 @@ import logging
 import os
 import re
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+# Ensure project root is in sys.path for standalone execution
+_project_root = str(Path(__file__).parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
 
 try:
     import anthropic
 except ImportError:
     anthropic = None  # type: ignore[assignment]
 
-from scripts.daydream_report import create_daydream_issue
+from scripts.daydream_report import create_daydream_issue  # noqa: E402
 
 # Configure logging
 logging.basicConfig(
