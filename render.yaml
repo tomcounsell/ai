@@ -9,7 +9,7 @@ services:
     runtime: python
     buildCommand: ./build.sh
     startCommand: gunicorn settings.wsgi:application --bind 0.0.0.0:$PORT --timeout 180 --keep-alive 5 --worker-connections 1000 --preload
-    repo: https://github.com/tomcounsell/cuttlefish.git
+    repo: https://github.com/yudame/cuttlefish.git
     branch: main
     region: oregon
     plan: starter
@@ -32,7 +32,7 @@ services:
     runtime: python
     buildCommand: ./build.sh
     startCommand: python manage.py db_worker
-    repo: https://github.com/tomcounsell/cuttlefish.git
+    repo: https://github.com/yudame/cuttlefish.git
     branch: main
     region: oregon
     plan: starter

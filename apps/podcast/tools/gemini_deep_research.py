@@ -11,7 +11,7 @@ Usage:
     python gemini_deep_research.py --file prompt.txt --output results.md
 
 Requirements:
-    - GOOGLE_AI_API_KEY in .env file (get at https://aistudio.google.com/apikey)
+    - GEMINI_API_KEY in .env file (get at https://aistudio.google.com/apikey)
     - pip install requests python-dotenv
 
 API Documentation:
@@ -39,7 +39,7 @@ except ImportError:
 
 def get_api_key() -> str | None:
     """Get API key from environment or .env file."""
-    api_key = os.getenv("GOOGLE_AI_API_KEY")
+    api_key = os.getenv("GEMINI_API_KEY")
 
     if not api_key:
         # Try loading from .env in parent directories
@@ -48,7 +48,7 @@ def get_api_key() -> str | None:
             if env_file.exists():
                 with open(env_file) as f:
                     for line in f:
-                        if line.startswith("GOOGLE_AI_API_KEY="):
+                        if line.startswith("GEMINI_API_KEY="):
                             api_key = line.split("=", 1)[1].strip().strip("\"'")
                             break
                 if api_key:
@@ -164,7 +164,7 @@ def run_gemini_research(
     api_key = get_api_key()
 
     if not api_key:
-        print("ERROR: GOOGLE_AI_API_KEY not found")
+        print("ERROR: GEMINI_API_KEY not found")
         print("Set it in your environment or .env file")
         print("Get your API key at: https://aistudio.google.com/apikey")
         return None
@@ -279,7 +279,7 @@ def run_streaming_research(prompt: str) -> str | None:
     api_key = get_api_key()
 
     if not api_key:
-        print("ERROR: GOOGLE_AI_API_KEY not found")
+        print("ERROR: GEMINI_API_KEY not found")
         return None
 
     print("=" * 60)
@@ -379,7 +379,7 @@ Examples:
     %(prog)s --stream "Analyze market trends in AI"
 
 Environment:
-    GOOGLE_AI_API_KEY - Your Google AI API key (required)
+    GEMINI_API_KEY - Your Google AI API key (required)
                        Get one at: https://aistudio.google.com/apikey
         """,
     )

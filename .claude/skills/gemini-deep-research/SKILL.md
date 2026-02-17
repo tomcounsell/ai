@@ -37,14 +37,14 @@ The Gemini Deep Research API provides programmatic access to Google's multi-step
 **Check if API key exists:**
 
 ```bash
-grep GOOGLE_AI_API_KEY /Users/valorengels/.env
+grep GEMINI_API_KEY /Users/valorengels/.env
 ```
 
 If not found, add to global `.env` file:
 
 ```bash
 # API keys are stored in /Users/valorengels/.env (auto-loaded via ~/.zshenv)
-echo 'GOOGLE_AI_API_KEY=your-api-key-here' >> /Users/valorengels/.env
+echo 'GEMINI_API_KEY=your-api-key-here' >> /Users/valorengels/.env
 ```
 
 **Getting an API key:**
@@ -60,7 +60,7 @@ echo 'GOOGLE_AI_API_KEY=your-api-key-here' >> /Users/valorengels/.env
 Use Bash to check if the API key is configured:
 
 ```bash
-grep GOOGLE_AI_API_KEY .env
+grep GEMINI_API_KEY .env
 ```
 
 If not found, inform user to set up API key at https://aistudio.google.com/apikey
@@ -212,13 +212,13 @@ python gemini_deep_research.py --stream "Research prompt here"
 
 ### API Key Errors
 
-**Error:** `ERROR: GOOGLE_AI_API_KEY not found`
+**Error:** `ERROR: GEMINI_API_KEY not found`
 
 **Solution:**
 1. Check `.env` file exists in repository root
-2. Verify API key is set: `grep GOOGLE_AI_API_KEY .env`
+2. Verify API key is set: `grep GEMINI_API_KEY .env`
 3. Get API key from https://aistudio.google.com/apikey
-4. Add to `.env`: `GOOGLE_AI_API_KEY=your-key-here`
+4. Add to `.env`: `GEMINI_API_KEY=your-key-here`
 
 ### API Request Failures
 

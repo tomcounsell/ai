@@ -136,13 +136,13 @@ class TestGeminiDeepResearch:
 
     def test_get_api_key_from_env(self, monkeypatch):
         """Test API key retrieval from environment."""
-        monkeypatch.setenv("GOOGLE_AI_API_KEY", "test-key-456")
+        monkeypatch.setenv("GEMINI_API_KEY", "test-key-456")
         key = gemini_deep_research.get_api_key()
         assert key == "test-key-456"
 
     def test_get_api_key_missing(self, monkeypatch, tmp_path):
         """Test API key when not set."""
-        monkeypatch.delenv("GOOGLE_AI_API_KEY", raising=False)
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
         monkeypatch.chdir(tmp_path)  # Change to temp dir with no .env
         key = gemini_deep_research.get_api_key()
         assert key is None or key == ""

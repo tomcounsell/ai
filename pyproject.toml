@@ -118,7 +118,7 @@ line_length = 88
 multi_line_output = 3
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.13"
 plugins = ["mypy_django_plugin.main"]
 warn_return_any = true
 warn_unused_configs = true
