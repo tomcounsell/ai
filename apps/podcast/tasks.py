@@ -159,6 +159,7 @@ def step_question_discovery(episode_id: int) -> None:
         step_gpt_research.enqueue(episode_id=episode_id)
         step_gemini_research.enqueue(episode_id=episode_id)
         step_together_research.enqueue(episode_id=episode_id)
+        step_claude_research.enqueue(episode_id=episode_id)
     except Exception as exc:
         workflow.fail_step(episode_id, "Question Discovery", str(exc))
         raise
@@ -239,6 +240,30 @@ def step_together_research(episode_id: int) -> None:
         prompt = _get_crafted_prompt(episode_id, "prompt-together")
         research.run_together_research(episode_id, prompt=prompt)
         logger.info("step_together_research: completed for episode %d", episode_id)
+        # Do NOT enqueue next step -- signal handles fan-in
+    except Exception as exc:
+        workflow.fail_step(episode_id, "Targeted Research", str(exc))
+        raise
+
+
+@task
+def step_claude_research(episode_id: int) -> None:
+    """Run Claude deep research orchestrator.
+
+    This is a parallel sub-step of "Targeted Research".  Does NOT enqueue
+    the next step -- the ``post_save`` signal handles fan-in once all
+    ``p2-*`` research artifacts have content.
+    """
+    wf = EpisodeWorkflow.objects.get(episode_id=episode_id)
+    if wf.current_step != "Targeted Research":
+        raise ValueError(
+            f"Episode {episode_id} is at step '{wf.current_step}', "
+            f"not 'Targeted Research'"
+        )
+    try:
+        prompt = _get_crafted_prompt(episode_id, "prompt-claude")
+        research.run_claude_research(episode_id, prompt=prompt)
+        logger.info("step_claude_research: completed for episode %d", episode_id)
         # Do NOT enqueue next step -- signal handles fan-in
     except Exception as exc:
         workflow.fail_step(episode_id, "Targeted Research", str(exc))

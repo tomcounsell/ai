@@ -22,6 +22,7 @@ class TargetedResearchPrompts(BaseModel):
     gpt_prompt: str
     gemini_prompt: str
     together_prompt: str
+    claude_prompt: str
 
 
 # --- Agents ---
@@ -86,7 +87,7 @@ def craft_targeted_prompts(
     question_discovery: str,
     episode_title: str,
 ) -> TargetedResearchPrompts:
-    """Craft GPT-Researcher, Gemini, and Together prompts in a single call.
+    """Craft GPT-Researcher, Gemini, Together, and Claude prompts in a single call.
 
     Used after question discovery in Phase 3 to generate targeted
     research prompts for the parallel research sub-steps.
@@ -97,11 +98,12 @@ def craft_targeted_prompts(
         episode_title: Title of the episode (also used as topic).
 
     Returns:
-        TargetedResearchPrompts with gpt_prompt, gemini_prompt, and together_prompt strings.
+        TargetedResearchPrompts with gpt_prompt, gemini_prompt,
+        together_prompt, and claude_prompt strings.
     """
     prompt = (
         f"Episode: {episode_title}\n"
-        f"Research type: batch (generate GPT-Researcher, Gemini, and Together prompts)\n\n"
+        f"Research type: batch (generate GPT-Researcher, Gemini, Together, and Claude prompts)\n\n"
         f"Episode Brief:\n{episode_brief}\n\n"
         f"Question Discovery Analysis:\n{question_discovery}"
     )

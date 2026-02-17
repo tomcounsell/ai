@@ -262,6 +262,72 @@ def run_together_research(episode_id: int, prompt: str) -> EpisodeArtifact:
 
 
 # ---------------------------------------------------------------------------
+# Claude (multi-agent deep research)
+# ---------------------------------------------------------------------------
+
+
+def run_claude_research(episode_id: int, prompt: str) -> EpisodeArtifact:
+    """Call Claude deep research orchestrator and save results as ``p2-claude``.
+
+    Uses the multi-agent deep research pipeline
+    (:func:`~apps.podcast.services.claude_deep_research.deep_research`)
+    which plans subtasks, runs parallel Sonnet researchers, and synthesizes
+    findings into a comprehensive report.
+
+    Args:
+        episode_id: Primary key of the target :class:`Episode`.
+        prompt: The research command to send to the orchestrator.
+
+    Returns:
+        The ``p2-claude`` :class:`EpisodeArtifact`.
+    """
+    episode = Episode.objects.get(pk=episode_id)
+    context = _get_episode_context(episode)
+
+    full_prompt = (
+        f"Episode: {episode.title}\n\n"
+        f"Context:\n{context}\n\n"
+        f"Research query:\n{prompt}"
+    )
+
+    from apps.podcast.services.claude_deep_research import deep_research
+
+    report = deep_research(command=full_prompt)
+
+    # Format the report content as markdown
+    content_text = report.content
+    if report.key_findings:
+        content_text += "\n\n## Key Findings\n\n"
+        content_text += "\n".join(f"- {f}" for f in report.key_findings)
+    if report.gaps_remaining:
+        content_text += "\n\n## Gaps Remaining\n\n"
+        content_text += "\n".join(f"- {g}" for g in report.gaps_remaining)
+    content_text += f"\n\n## Confidence Assessment\n\n{report.confidence_assessment}"
+
+    metadata = {
+        "sources_cited": report.sources_cited,
+        "key_findings": report.key_findings,
+        "confidence_assessment": report.confidence_assessment,
+        "gaps_remaining": report.gaps_remaining,
+    }
+
+    artifact, created = EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="p2-claude",
+        defaults={
+            "content": content_text,
+            "description": "Claude multi-agent deep research output.",
+            "workflow_context": "Research Gathering",
+            "metadata": metadata,
+        },
+    )
+
+    action = "Created" if created else "Updated"
+    logger.info("%s p2-claude artifact for episode %s", action, episode_id)
+    return artifact
+
+
+# ---------------------------------------------------------------------------
 # Manual / human-pasted research
 # ---------------------------------------------------------------------------
 

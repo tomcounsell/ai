@@ -563,13 +563,14 @@ def craft_research_prompt(episode_id: int, research_type: str) -> EpisodeArtifac
 def craft_targeted_research_prompts(
     episode_id: int,
 ) -> dict[str, EpisodeArtifact]:
-    """Craft GPT-Researcher, Gemini, and Together prompts in a single AI call.
+    """Craft GPT-Researcher, Gemini, Together, and Claude prompts in a single AI call.
 
     Reads the ``p1-brief`` and ``question-discovery`` artifacts, calls the
     :func:`~apps.podcast.services.craft_research_prompt.craft_targeted_prompts`
     Named AI Tool, saves the prompts as ``prompt-gpt``, ``prompt-gemini``,
-    and ``prompt-together`` artifacts, and creates empty placeholder
-    ``p2-chatgpt`` / ``p2-gemini`` / ``p2-together`` artifacts for the
+    ``prompt-together``, and ``prompt-claude`` artifacts, and creates empty
+    placeholder ``p2-chatgpt`` / ``p2-gemini`` / ``p2-together`` / ``p2-claude``
+    artifacts for the
     fan-in signal.
 
     Args:
@@ -577,7 +578,8 @@ def craft_targeted_research_prompts(
 
     Returns:
         A dict mapping ``"prompt-gpt"``, ``"prompt-gemini"``, and
-        ``"prompt-together"`` to their :class:`EpisodeArtifact` instances.
+        ``"prompt-together"``, and ``"prompt-claude"`` to their
+        :class:`EpisodeArtifact` instances.
     """
     from apps.podcast.services.craft_research_prompt import (
         craft_targeted_prompts as _craft_targeted_prompts,
@@ -635,6 +637,15 @@ def craft_targeted_research_prompts(
             "workflow_context": "Research Gathering",
         },
     )
+    claude_artifact, _ = EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="prompt-claude",
+        defaults={
+            "content": result.claude_prompt,
+            "description": "AI-crafted Claude deep research prompt.",
+            "workflow_context": "Research Gathering",
+        },
+    )
 
     # Create empty placeholder artifacts for the targeted research steps.
     # These are required for fan-in correctness: without them, if one
@@ -669,14 +680,24 @@ def craft_targeted_research_prompts(
             "workflow_context": "Research Gathering",
         },
     )
+    EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="p2-claude",
+        defaults={
+            "content": "",
+            "description": "Claude deep research (placeholder).",
+            "workflow_context": "Research Gathering",
+        },
+    )
 
     logger.info(
         "craft_targeted_research_prompts: saved prompt-gpt + prompt-gemini + "
-        "prompt-together artifacts for episode %s",
+        "prompt-together + prompt-claude artifacts for episode %s",
         episode_id,
     )
     return {
         "prompt-gpt": gpt_artifact,
         "prompt-gemini": gemini_artifact,
         "prompt-together": together_artifact,
+        "prompt-claude": claude_artifact,
     }

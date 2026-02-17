@@ -60,6 +60,7 @@ Versioned content artifacts produced during the workflow. Each has `episode` (FK
 | `p2-chatgpt` | `run_gpt_researcher` | 4 |
 | `p2-gemini` | `run_gemini_research` | 4 |
 | `p2-together` | `run_together_research` | 4 |
+| `p2-claude` | `run_claude_research` | 4 |
 | `p2-{source}` | `add_manual_research` | 4 |
 | `question-discovery` | `discover_questions` | 3 |
 | `digest-{source}` | `create_research_digest` | 4-5 |
@@ -117,9 +118,14 @@ run_together_research(episode_id: int, prompt: str) -> EpisodeArtifact
 Calls Open Deep Research (LangGraph multi-hop, auto-detects LLM provider). Saves result as `p2-together` artifact.
 
 ```python
+run_claude_research(episode_id: int, prompt: str) -> EpisodeArtifact
+```
+Calls the multi-agent deep research orchestrator (`claude_deep_research.deep_research`). Plans subtasks, runs Sonnet researchers, synthesizes findings. Saves result as `p2-claude` artifact with structured metadata (sources, key findings, confidence assessment).
+
+```python
 add_manual_research(episode_id: int, title: str, content: str) -> EpisodeArtifact
 ```
-Stores human-pasted research as `p2-{title}` artifact. Used for Claude, Grok, expert interviews, or any manual source.
+Stores human-pasted research as `p2-{title}` artifact. Used for Grok, expert interviews, or any manual source.
 
 All research functions use `_get_episode_context()` to build prompts from the best available context (prefers `question-discovery` artifact, falls back to `p1-brief`, then `Episode.description`).
 
@@ -305,9 +311,11 @@ result = produce_episode.enqueue(episode_id=42)
 |------|------------|-----------|
 | `produce_episode` | `setup.setup_episode` | `step_perplexity_research` |
 | `step_perplexity_research` | `research.run_perplexity_research` | `step_question_discovery` |
-| `step_question_discovery` | `analysis.discover_questions` | `step_gpt_research` + `step_gemini_research` (parallel) |
+| `step_question_discovery` | `analysis.discover_questions` | `step_gpt_research` + `step_gemini_research` + `step_together_research` + `step_claude_research` (parallel) |
 | `step_gpt_research` | `research.run_gpt_researcher` | _(signal fan-in)_ |
 | `step_gemini_research` | `research.run_gemini_research` | _(signal fan-in)_ |
+| `step_together_research` | `research.run_together_research` | _(signal fan-in)_ |
+| `step_claude_research` | `research.run_claude_research` | _(signal fan-in)_ |
 | `step_research_digests` | `analysis.create_research_digest` (per artifact) | `step_cross_validation` |
 | `step_cross_validation` | `analysis.cross_validate` | `step_master_briefing` |
 | `step_master_briefing` | `analysis.write_briefing` | Quality Gate Wave 1 → `step_synthesis` |
