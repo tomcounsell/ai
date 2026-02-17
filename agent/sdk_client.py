@@ -667,7 +667,10 @@ async def get_agent_response_sdk(
     except Exception as e:
         elapsed = time.time() - start_time
         logger.error(f"[{request_id}] SDK error after {elapsed:.1f}s: {e}")
-        # Clean up session so watchdog doesn't loop on it
+        # CRASH GUARD: Mark session as failed so the watchdog doesn't try to
+        # interact with a dead session. Without this cleanup, the watchdog would
+        # find the session still "active" and potentially trigger further errors.
+        # See docs/features/coaching-loop.md "Error-Classified Output Bypass".
         try:
             from models.sessions import AgentSession
 

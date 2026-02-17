@@ -13,7 +13,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Bridge Workflow Gaps](bridge-workflow-gaps.md) | Auto-continue for status updates, output classification, and session log snapshots | Shipped |
 | [Build Session Reliability](build-session-reliability.md) | Logging propagation, commit-on-exit, worktree isolation, health monitoring | Shipped |
 | [Classification](classification.md) | Auto-classification of messages as bug/feature/chore with immutability and reclassify skill | Shipped |
-| [Coaching Loop](coaching-loop.md) | Context-aware auto-continue messages with rejection coaching and skill-aware guidance | Shipped |
+| [Coaching Loop](coaching-loop.md) | Context-aware auto-continue messages with rejection coaching, skill-aware guidance, and error crash guard | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
 | [Documentation Lifecycle](documentation-lifecycle.md) | Automated validation and migration system for plan documentation tasks | Shipped |
 | [Google Calendar Integration](google-calendar-integration.md) | Work session logging as Google Calendar events with segment rounding | Shipped |
