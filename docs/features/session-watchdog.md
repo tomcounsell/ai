@@ -65,9 +65,9 @@ Fires when `time.time() - session.started_at > DURATION_THRESHOLD`. Most tasks s
 - 1 issue detected: `warning`
 - 2+ issues detected: `critical`
 
-### Unique Constraint Handling (Crash Guard)
+### ModelException Handling (Crash Guard)
 
-When the watchdog encounters a `Unique constraint violated` error while processing a session, it marks that session as `failed` instead of logging the error and retrying every cycle. This prevents infinite retry loops caused by stale sessions left over from SDK crashes. See [Coaching Loop — Error Crash Guard](coaching-loop.md) for the full crash guard mechanism.
+When the watchdog encounters a `popoto.exceptions.ModelException` while processing a session (e.g. unique constraint violations from duplicate Redis keys, or other ORM errors from corrupted state), it marks that session as `failed` instead of logging the error and retrying every cycle. This prevents infinite retry loops caused by stale sessions left over from SDK crashes. See [Coaching Loop — Error Crash Guard](coaching-loop.md) for the full crash guard mechanism.
 
 ## Remediation
 
@@ -113,5 +113,5 @@ Runs for the lifetime of the bridge process. No separate service or process mana
 | `monitoring/session_watchdog.py` | Watchdog implementation (all detection + alerting) |
 | `monitoring/__init__.py` | Module exports |
 | `bridge/telegram_bridge.py` | Integration point (launches watchdog task) |
-| `tests/unit/test_session_watchdog.py` | 28 unit tests |
+| `tests/unit/test_session_watchdog.py` | 30 unit tests |
 | `docs/plans/session-watchdog.md` | Original plan document |

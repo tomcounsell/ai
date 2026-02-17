@@ -167,24 +167,63 @@ class TestAutoConinueRouting:
 
     @pytest.mark.asyncio
     async def test_error_sends_to_chat(self):
-        """ERROR output should be sent to chat normally."""
+        """ERROR output should hit the explicit ERROR guard, not fall to else.
+
+        This test mirrors the 3-branch routing in job_queue.py (lines 1014-1117):
+          1. if ERROR -> log crash-guard message, fall through to send
+          2. elif STATUS_UPDATE and count < max -> auto-continue
+          3. else -> send to chat
+
+        The error_guard_taken flag ensures the ERROR-specific branch executed.
+        If someone removes the ERROR guard from job_queue.py, this flag will
+        not be set and the assertion will fail -- even though the message
+        would still reach chat via the else branch.
+        """
+        from agent.steering import pop_steering_message
+
         send_cb = AsyncMock()
+        session_id = "test_auto_continue_error"
 
         classification = _make_classification(OutputType.ERROR)
         msg_text = "Error: ModuleNotFoundError: No module named 'foo'"
 
         auto_continue_count = 0
+        error_guard_taken = False
 
-        if (
+        # Mirror the 3-branch routing from job_queue.py
+        if classification.output_type == OutputType.ERROR:
+            # CRASH GUARD: Error-classified outputs bypass auto-continue entirely.
+            error_guard_taken = True
+            # Fall through to send error to chat (matches job_queue.py behavior)
+
+        elif (
             classification.output_type == OutputType.STATUS_UPDATE
             and auto_continue_count < MAX_AUTO_CONTINUES
         ):
             auto_continue_count += 1
-        else:
-            await send_cb("chat_123", msg_text, 456)
+            from agent.steering import push_steering_message
 
-        send_cb.assert_called_once()
+            push_steering_message(
+                session_id=session_id,
+                text="continue",
+                sender="System (auto-continue)",
+            )
+            return  # auto-continue path exits early
+
+        # For ERROR (fell through) and all other types, send to chat
+        await send_cb("chat_123", msg_text, 456)
+
+        # The ERROR-specific guard must have been taken
+        assert error_guard_taken, (
+            "ERROR must hit the explicit error guard, not fall to else. "
+            "If this fails, the OutputType.ERROR branch was removed from routing."
+        )
+        # No auto-continue happened
         assert auto_continue_count == 0
+        # Error message reached chat
+        send_cb.assert_called_once_with("chat_123", msg_text, 456)
+        # No steering message was pushed
+        assert pop_steering_message(session_id) is None
 
     @pytest.mark.asyncio
     async def test_max_auto_continues_causes_fallthrough(self):
