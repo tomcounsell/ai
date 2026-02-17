@@ -171,26 +171,29 @@ EOF
 )"
 ```
 
+**After posting the review, fetch the review comment URL:**
+```bash
+gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews --jq '.[-1].html_url'
+```
+Save this URL as `{review_url}` for the output summary.
+
 ### 7. Output Summary
 
 **Present review summary:**
 
-```
-Review Complete: PR #{pr_number}
+| | |
+|---|---|
+| **Branch** | `{head_branch}` -> `{base_branch}` |
+| **Plan** | `{plan_file}` or "none" |
+| **Result** | {Approved \| Changes Requested} |
+| **Review** | [{review_url}]({review_url}) |
 
-Branch: {head_branch} -> {base_branch}
-Plan: {plan_file or "none"}
+**Issues Found: {total}**
+- **Blockers: {count}**
+- **Tech Debt: {count}**
+- **Nits: {count}**
 
-Result: {Approved | Changes Requested}
-
-Issues Found: {total}
-  - Blockers: {count}
-  - Tech Debt: {count}
-  - Nits: {count}
-
-Screenshots: {count} captured
-  -> generated_images/pr-{pr_number}/
-```
+**Screenshots: {count}** captured -> `generated_images/pr-{pr_number}/`
 
 ## Integration Notes
 
