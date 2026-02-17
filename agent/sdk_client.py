@@ -667,6 +667,16 @@ async def get_agent_response_sdk(
     except Exception as e:
         elapsed = time.time() - start_time
         logger.error(f"[{request_id}] SDK error after {elapsed:.1f}s: {e}")
+        # Clean up session so watchdog doesn't loop on it
+        try:
+            from models.sessions import AgentSession
+
+            sessions = AgentSession.query.filter(session_id=session_id)
+            for s in sessions:
+                s.status = "failed"
+                s.save()
+        except Exception:
+            pass  # Best-effort cleanup
         return (
             "Sorry, I ran into an issue and couldn't recover. "
             "The error has been logged for investigation."
