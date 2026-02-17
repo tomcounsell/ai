@@ -46,9 +46,7 @@ class TestChunkMarkdown:
 
     def test_chunk_markdown_preserves_content(self):
         """Verify content is complete in each chunk."""
-        content = (
-            "## First\n\nParagraph A\nParagraph B\n\n" "## Second\n\nParagraph C\n"
-        )
+        content = "## First\n\nParagraph A\nParagraph B\n\n## Second\n\nParagraph C\n"
         chunks = chunk_markdown(content, "doc.md")
 
         assert len(chunks) == 2
@@ -342,7 +340,9 @@ class TestFullPipelineIntegration:
 
         # Step 1: Index docs with mocked embeddings
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
-            with patch("tools.doc_impact_finder._embed_openai", side_effect=fake_embed):
+            with patch(
+                "tools.impact_finder_core._embed_openai", side_effect=fake_embed
+            ):
                 index = index_docs(repo_root=tmp_path)
 
         assert index["version"] == 1
@@ -350,14 +350,16 @@ class TestFullPipelineIntegration:
         assert index["model"] == "text-embedding-3-small"
 
         # Step 2: Find affected docs with mocked embeddings + Haiku
-        # Mock the _rerank_single_candidate to avoid needing real anthropic import
-        def mock_rerank(client, change_summary, chunk):
+        # Mock the core reranker to avoid needing real anthropic import
+        def mock_rerank(client, prompt, chunk):
             return (8.0, "Auth change affects login docs", chunk)
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
-            with patch("tools.doc_impact_finder._embed_openai", side_effect=fake_embed):
+            with patch(
+                "tools.impact_finder_core._embed_openai", side_effect=fake_embed
+            ):
                 with patch(
-                    "tools.doc_impact_finder._rerank_single_candidate",
+                    "tools.impact_finder_core._rerank_single_candidate",
                     side_effect=mock_rerank,
                 ):
                     results = find_affected_docs(
@@ -389,7 +391,9 @@ class TestFullPipelineIntegration:
 
         # Step 1: Index
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
-            with patch("tools.doc_impact_finder._embed_openai", side_effect=fake_embed):
+            with patch(
+                "tools.impact_finder_core._embed_openai", side_effect=fake_embed
+            ):
                 index_docs(repo_root=tmp_path)
 
         # Step 2: Find with Haiku failing (falls back to embedding-only)
@@ -404,7 +408,9 @@ class TestFullPipelineIntegration:
             return original_import(name, *args, **kwargs)
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
-            with patch("tools.doc_impact_finder._embed_openai", side_effect=fake_embed):
+            with patch(
+                "tools.impact_finder_core._embed_openai", side_effect=fake_embed
+            ):
                 with patch("builtins.__import__", side_effect=mock_import):
                     results = find_affected_docs(
                         "Some change",

@@ -317,7 +317,7 @@ class TestIndexLifecycle:
         # First index: embeds all chunks
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake"}, clear=False):
             with patch(
-                "tools.doc_impact_finder._embed_openai", side_effect=counting_embed
+                "tools.impact_finder_core._embed_openai", side_effect=counting_embed
             ):
                 idx1 = index_docs(repo_root=tmp_path)
 
@@ -334,7 +334,7 @@ class TestIndexLifecycle:
         # Second index: should only re-embed the changed chunk
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake"}, clear=False):
             with patch(
-                "tools.doc_impact_finder._embed_openai", side_effect=counting_embed
+                "tools.impact_finder_core._embed_openai", side_effect=counting_embed
             ):
                 idx2 = index_docs(repo_root=tmp_path)
 
@@ -357,7 +357,7 @@ class TestIndexLifecycle:
             return [[0.5, 0.5, 0.5] for _ in texts]
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake"}, clear=False):
-            with patch("tools.doc_impact_finder._embed_openai", side_effect=fake_embed):
+            with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
                 index_docs(repo_root=tmp_path)
 
         # Verify file exists
@@ -427,14 +427,14 @@ class TestFullPipelineLive:
         # Build index
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake"}, clear=False):
             with patch(
-                "tools.doc_impact_finder._embed_openai", side_effect=smart_embed
+                "tools.impact_finder_core._embed_openai", side_effect=smart_embed
             ):
                 index_docs(repo_root=tmp_path)
 
         # Run full pipeline with REAL Haiku reranking
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake"}, clear=False):
             with patch(
-                "tools.doc_impact_finder._embed_openai", side_effect=smart_embed
+                "tools.impact_finder_core._embed_openai", side_effect=smart_embed
             ):
                 results = find_affected_docs(
                     "Refactored session isolation to use slug-based worktrees instead of thread IDs",
