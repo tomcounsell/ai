@@ -1011,7 +1011,13 @@ async def _execute_job(job: Job) -> None:
             f"(confidence={classification.confidence:.2f}): {classification.reason}"
         )
 
-        if (
+        if classification.output_type == OutputType.ERROR:
+            logger.info(
+                f"[{job.project_key}] Error classified — skipping auto-continue"
+            )
+            # Fall through to send error to chat
+
+        elif (
             classification.output_type == OutputType.STATUS_UPDATE
             and auto_continue_count < MAX_AUTO_CONTINUES
         ):
