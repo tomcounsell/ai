@@ -14,6 +14,7 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("commands", "build.md"),
     ("commands", "make-plan.md"),
     ("commands", "update-docs.md"),
+    ("commands", "review.md"),
     ("skills", "build"),
     ("skills", "make-plan"),
     ("skills", "update-docs"),
