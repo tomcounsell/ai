@@ -1,5 +1,5 @@
 ---
-description: Comprehensive onboarding guide for the Valor AI codebase, architecture, and development workflow
+description: "Comprehensive onboarding guide for the Valor AI codebase, architecture, and development workflow. Use when onboarding, understanding the system, or asking 'how does this work'."
 ---
 
 # Prime - Codebase Onboarding

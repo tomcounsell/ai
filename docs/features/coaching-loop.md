@@ -88,12 +88,16 @@ When the SDK crashes or returns an error, the output classifier labels it as `ER
 4. Because the type is `ERROR`, auto-continue logic is bypassed completely
 5. The error message is sent to chat so the user sees what happened
 6. Session cleanup in `agent/sdk_client.py` marks the session as `failed` in Redis
-7. The session watchdog (`monitoring/session_watchdog.py`) handles any stale sessions left behind by crashes
+7. The session watchdog (`monitoring/session_watchdog.py`) handles any stale sessions left behind by crashes by catching `popoto.exceptions.ModelException` (e.g. unique constraint violations from duplicate session IDs)
+
+### Why This Matters
+
+Without this guard, an SDK crash would produce output classified as a status update (since error messages are short and lack completion evidence). The auto-continue system would then re-enqueue the job, which would crash again, creating an infinite crash loop consuming resources and flooding logs.
 
 ### Related Guards
 
-- **Session cleanup on SDK error**: `agent/sdk_client.py` marks sessions as `failed` in the `except` block
-- **Unique constraint handling**: `monitoring/session_watchdog.py` catches stale session errors and marks them as `failed`
+- **Session cleanup on SDK error**: `agent/sdk_client.py` marks sessions as `failed` in the `except` block, preventing the watchdog from trying to interact with dead sessions
+- **ModelException handling**: `monitoring/session_watchdog.py` catches `popoto.exceptions.ModelException` from stale sessions (unique constraint violations, corrupted state) and marks them as `failed` to break the watchdog loop
 
 ## Key Files
 

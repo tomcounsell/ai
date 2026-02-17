@@ -1,5 +1,5 @@
 ---
-description: Autonomous software development lifecycle that executes Plan → Build → Test → Review → Ship phases with quality gates
+description: "Autonomous software development lifecycle that executes Plan → Build → Test → Review → Ship phases with quality gates. Use when the user wants end-to-end autonomous development or says 'ship this feature'."
 ---
 
 # AI Developer Workflow (SDLC)

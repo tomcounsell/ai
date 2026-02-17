@@ -7,9 +7,11 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from popoto.exceptions import ModelException
 
 from monitoring.session_watchdog import (
     assess_session_health,
+    check_all_sessions,
     detect_error_cascade,
     detect_repetition,
     read_recent_tool_calls,
@@ -324,3 +326,79 @@ class TestAssessSessionHealth:
         )
         result = assess_session_health(session)
         assert result["healthy"] is True
+
+
+# ===================================================================
+# check_all_sessions - ModelException handling
+# ===================================================================
+
+
+class TestCheckAllSessionsModelException:
+    """Verify that ModelException is caught by type, not string matching."""
+
+    @pytest.mark.asyncio
+    async def test_model_exception_marks_session_failed(self, monkeypatch):
+        """When assess_session_health raises ModelException, session is marked failed."""
+        session = _make_session()
+        session.status = "active"
+        save_calls = []
+
+        def fake_save(self_=None):
+            save_calls.append(session.status)
+
+        session.save = fake_save
+
+        # Patch query to return our fake session
+        monkeypatch.setattr(
+            "monitoring.session_watchdog.AgentSession.query",
+            SimpleNamespace(filter=lambda **kw: [session]),
+        )
+
+        # Patch assess_session_health to raise ModelException
+        def raise_model_exception(s):
+            raise ModelException("Unique constraint violated")
+
+        monkeypatch.setattr(
+            "monitoring.session_watchdog.assess_session_health",
+            raise_model_exception,
+        )
+
+        await check_all_sessions()
+
+        assert session.status == "failed"
+        assert "failed" in save_calls
+
+    @pytest.mark.asyncio
+    async def test_generic_exception_not_caught_as_model_exception(self, monkeypatch):
+        """A generic Exception should go to the else branch, not ModelException."""
+        session = _make_session()
+        session.status = "active"
+        logged_errors = []
+
+        monkeypatch.setattr(
+            "monitoring.session_watchdog.AgentSession.query",
+            SimpleNamespace(filter=lambda **kw: [session]),
+        )
+
+        def raise_generic(s):
+            raise RuntimeError("something else went wrong")
+
+        monkeypatch.setattr(
+            "monitoring.session_watchdog.assess_session_health",
+            raise_generic,
+        )
+
+        # Capture logger.error calls
+        import logging
+
+        def capture_error(self_, msg, *args, **kwargs):
+            logged_errors.append(msg % args if args else msg)
+
+        monkeypatch.setattr(logging.Logger, "error", capture_error)
+
+        await check_all_sessions()
+
+        # Session should NOT be marked as failed (that's the ModelException path)
+        assert session.status == "active"
+        # Error should have been logged
+        assert any("Error handling session" in e for e in logged_errors)

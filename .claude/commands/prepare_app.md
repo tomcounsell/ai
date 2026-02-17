@@ -1,5 +1,5 @@
 ---
-description: Prepare application for review by starting services and ensuring accessibility for testing
+description: "Prepare application for review by starting services and ensuring accessibility for testing. Use before PR review or when the user says 'start the app' or 'prepare for review'."
 ---
 
 # Prepare App
