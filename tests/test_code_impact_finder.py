@@ -293,7 +293,9 @@ class TestCodeFinderPipeline:
 
         # Step 1: Index code with mocked embeddings
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
-            with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
+            with patch(
+                "tools.impact_finder_core._embed_openai", side_effect=fake_embed
+            ):
                 index = index_code(repo_root=tmp_path)
 
         assert index["version"] == 1
@@ -302,7 +304,9 @@ class TestCodeFinderPipeline:
 
         # Step 2: Find affected code with mocked embeddings + reranker
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
-            with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
+            with patch(
+                "tools.impact_finder_core._embed_openai", side_effect=fake_embed
+            ):
                 with patch(
                     "tools.impact_finder_core._rerank_single_candidate",
                     side_effect=mock_rerank,

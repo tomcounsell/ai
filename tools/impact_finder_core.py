@@ -383,7 +383,9 @@ def _rerank_candidates(
     results: list[tuple[float, str, dict]] = []
 
     def _do_rerank(client, change_summary, chunk):
-        return _rerank_single_candidate(client, prompt_builder(change_summary, chunk), chunk)
+        return _rerank_single_candidate(
+            client, prompt_builder(change_summary, chunk), chunk
+        )
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         futures = {
@@ -488,7 +490,9 @@ def find_affected(
         # Fall back to embedding-only results
         return fallback_builder(candidates)
 
-    results = _rerank_candidates(client, change_summary, candidates, rerank_prompt_builder)
+    results = _rerank_candidates(
+        client, change_summary, candidates, rerank_prompt_builder
+    )
 
     return result_builder(results)
 

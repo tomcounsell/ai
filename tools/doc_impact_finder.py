@@ -46,7 +46,9 @@ class AffectedDoc(BaseModel):
     path: str  # docs/features/session-isolation.md
     relevance: float  # 0.0 - 1.0
     sections: list[str]  # ["## Tier 1 (thread-scoped)", "## Git worktrees"]
-    reason: str  # "Describes thread-scoped task lists; change alters thread ID derivation"
+    reason: (
+        str  # "Describes thread-scoped task lists; change alters thread ID derivation"
+    )
 
 
 # ---------------------------------------------------------------------------
