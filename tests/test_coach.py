@@ -5,7 +5,7 @@ from pathlib import Path
 
 from bridge.coach import (
     SKILL_DETECTORS,
-    _build_rejection_coaching,
+    _build_heuristic_rejection_coaching,
     _detect_active_skill,
     _extract_success_criteria,
     build_coaching_message,
@@ -14,24 +14,73 @@ from bridge.coach import (
 from bridge.summarizer import ClassificationResult, OutputType
 
 
-def _make_classification(output_type, confidence=0.95, reason="test", rejected=False):
+def _make_classification(
+    output_type,
+    confidence=0.95,
+    reason="test",
+    rejected=False,
+    coaching_message=None,
+):
     return ClassificationResult(
         output_type=output_type,
         confidence=confidence,
         reason=reason,
         was_rejected_completion=rejected,
+        coaching_message=coaching_message,
     )
 
 
 class TestBuildCoachingMessage:
     """Tests for the main build_coaching_message function."""
 
-    def test_rejected_completion_gets_coaching(self):
-        """Rejected completions produce [System Coach] messages."""
-        classification = _make_classification(OutputType.STATUS_UPDATE, rejected=True)
+    def test_llm_coaching_message_used_when_present(self):
+        """LLM-generated coaching_message is used as Tier 1 when available."""
+        classification = _make_classification(
+            OutputType.STATUS_UPDATE,
+            rejected=True,
+            coaching_message="Run pytest and paste the output.",
+        )
+        msg = build_coaching_message(classification)
+        assert msg.startswith("[System Coach]")
+        assert "Run pytest and paste the output." in msg
+
+    def test_llm_coaching_takes_priority_over_skill(self):
+        """LLM coaching takes priority over skill-aware coaching."""
+        classification = _make_classification(
+            OutputType.STATUS_UPDATE,
+            rejected=True,
+            coaching_message="Show the test results.",
+        )
+        msg = build_coaching_message(
+            classification, job_message_text="/do-build foo.md"
+        )
+        assert "Show the test results." in msg
+        assert "Implementing" not in msg
+
+    def test_llm_coaching_takes_priority_over_plan_file(self):
+        """LLM coaching takes priority even when plan file is available."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            f.write("# Plan\n\n## Success Criteria\n\n- [ ] Item 1\n\n## End\n")
+            f.flush()
+            classification = _make_classification(
+                OutputType.STATUS_UPDATE,
+                rejected=True,
+                coaching_message="Include commit hashes.",
+            )
+            msg = build_coaching_message(classification, plan_file=f.name)
+            assert "Include commit hashes." in msg
+            assert "Item 1" not in msg
+            Path(f.name).unlink()
+
+    def test_heuristic_fallback_when_no_coaching_message(self):
+        """Falls back to static rejection coaching when coaching_message is None."""
+        classification = _make_classification(
+            OutputType.STATUS_UPDATE, rejected=True, coaching_message=None
+        )
         msg = build_coaching_message(classification)
         assert msg.startswith("[System Coach]")
         assert "concrete proof" in msg
+        assert "wasn't accepted" in msg
 
     def test_non_rejected_status_gets_continue(self):
         """Genuine status updates produce plain 'continue'."""
@@ -83,27 +132,6 @@ class TestBuildCoachingMessage:
         )
         assert msg == "continue"
 
-    def test_rejection_takes_priority_over_skill(self):
-        """Rejection coaching takes priority over skill coaching."""
-        classification = _make_classification(OutputType.STATUS_UPDATE, rejected=True)
-        msg = build_coaching_message(
-            classification, job_message_text="/do-build foo.md"
-        )
-        assert "wasn't accepted" in msg
-
-    def test_rejection_takes_priority_over_plan_file(self):
-        """Rejection coaching takes priority even when plan file is available."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            f.write("# Plan\n\n## Success Criteria\n\n- [ ] Item 1\n\n## End\n")
-            f.flush()
-            classification = _make_classification(
-                OutputType.STATUS_UPDATE, rejected=True
-            )
-            msg = build_coaching_message(classification, plan_file=f.name)
-            assert "wasn't accepted" in msg
-            assert "Item 1" not in msg  # Rejection takes priority
-            Path(f.name).unlink()
-
     def test_nonexistent_plan_file_falls_through_to_skill(self):
         """Nonexistent plan file falls through to skill detection from message."""
         classification = _make_classification(OutputType.STATUS_UPDATE)
@@ -115,6 +143,14 @@ class TestBuildCoachingMessage:
         # Nonexistent file is ignored, falls through to /do-test skill coaching
         assert "[System Coach]" in msg
         assert "Running test suites" in msg
+
+    def test_empty_coaching_message_falls_through(self):
+        """Empty string coaching_message treated as absent, falls to heuristic."""
+        classification = _make_classification(
+            OutputType.STATUS_UPDATE, rejected=True, coaching_message=""
+        )
+        msg = build_coaching_message(classification)
+        assert "concrete proof" in msg  # Heuristic fallback
 
 
 class TestExtractSuccessCriteria:
@@ -238,19 +274,19 @@ class TestSkillDetectorsMapping:
             assert "evidence_hint" in info, f"{trigger} missing 'evidence_hint'"
 
 
-class TestRejectionCoaching:
-    """Tests for rejection coaching message content."""
+class TestHeuristicRejectionCoaching:
+    """Tests for the static/heuristic rejection coaching fallback."""
 
     def test_contains_system_coach_prefix(self):
-        msg = _build_rejection_coaching()
+        msg = _build_heuristic_rejection_coaching()
         assert msg.startswith("[System Coach]")
 
     def test_explanatory_tone(self):
         """Rejection coaching should explain what happened, not bark commands."""
-        msg = _build_rejection_coaching()
+        msg = _build_heuristic_rejection_coaching()
         assert "looked like a completion" in msg
         assert "wasn't accepted" in msg
 
     def test_contains_guidance(self):
-        msg = _build_rejection_coaching()
+        msg = _build_heuristic_rejection_coaching()
         assert "concrete proof" in msg

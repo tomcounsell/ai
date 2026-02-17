@@ -71,6 +71,9 @@ class ClassificationResult:
     was_rejected_completion: bool = (
         False  # True when COMPLETION → STATUS_UPDATE downgrade
     )
+    coaching_message: str | None = (
+        None  # LLM-generated coaching for rejected completions
+    )
 
 
 @dataclass
@@ -138,7 +141,13 @@ You classify developer agent output to determine if human input is needed.
 
 Respond with ONLY a JSON object — no markdown, no explanation, no extra text:
 {"type": "question|status|completion|blocker|error", \
-"confidence": 0.95, "reason": "brief explanation"}
+"confidence": 0.95, "reason": "brief explanation", "coaching_message": null}
+
+The coaching_message field is REQUIRED in your response. Set it to a helpful string \
+when you classify as "status" and the output LOOKS like a completion attempt but \
+lacks evidence (i.e., you are downgrading a completion to status). The coaching \
+message should explain what was missing and what the agent should include next time. \
+Set it to null for all other classifications.
 
 Classification rules:
 
@@ -168,7 +177,7 @@ COMPLETION — The work is done AND evidence is provided.
 "PR created: https://... — CI green", "ruff check: 0 errors, black: reformatted 3 files"
   Key signals: specific numbers, command output pasted, exit codes mentioned
 
-  NOT completion (classify as STATUS_UPDATE instead):
+  NOT completion (classify as STATUS_UPDATE instead, and provide a coaching_message):
   - "Done" or "Complete" without any evidence
   - "Should work now" (hedging = not verified)
   - "Committed and pushed" without test results
@@ -181,7 +190,27 @@ BLOCKER — The agent is stuck and needs human help to proceed.
 
 ERROR — Something failed or broke.
   Examples: "Error: ModuleNotFoundError", "Build failed with exit code 1", "Tests failing: 3 errors"
-  Key signals: "error:", "failed:", exception names, non-zero exit codes"""
+  Key signals: "error:", "failed:", exception names, non-zero exit codes
+
+Few-shot examples of coaching_message for downgraded completions:
+
+Input: "I think the bug is fixed now. Should work."
+Output: {"type": "status", "confidence": 0.92, "reason": "Hedging language without verification", \
+"coaching_message": "You used hedging language ('I think', 'should work') which signals \
+uncertainty. Run the reproduction steps or tests and share the actual output to confirm the fix."}
+
+Input: "All tests pass. Task complete."
+(but no test output shown)
+Output: {"type": "status", "confidence": 0.90, "reason": "Claims tests pass but shows no output", \
+"coaching_message": "You claimed tests pass but didn't include the test output. Run pytest and \
+paste the results showing pass/fail counts so completion can be verified."}
+
+Input: "Fixed the issue and committed. I believe everything is working correctly."
+Output: {"type": "status", "confidence": 0.91, \
+"reason": "Completion claim with hedging, no evidence", \
+"coaching_message": "You said 'I believe everything is working' — \
+that's hedging, not evidence. Show the commit hash, test output, \
+and any verification commands you ran."}"""
 
 # False question detection explained:
 # Many agent outputs contain question-like text that should NOT pause for human input:
@@ -408,28 +437,25 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
     except (TypeError, ValueError):
         confidence = 0.5
 
+    # Extract optional coaching_message from LLM response
+    coaching_message = data.get("coaching_message")
+    if coaching_message is not None:
+        coaching_message = str(coaching_message)
+        # Treat JSON null / empty string as None
+        if not coaching_message or coaching_message == "null":
+            coaching_message = None
+
     result = ClassificationResult(
         output_type=output_type,
         confidence=confidence,
         reason=str(reason),
+        coaching_message=coaching_message,
     )
 
-    # Detect rejected completions: classifier downgraded COMPLETION → STATUS_UPDATE
-    # due to hedging language or missing evidence
-    if result.output_type == OutputType.STATUS_UPDATE:
-        reason_lower = result.reason.lower()
-        hedging_patterns = [
-            "hedg",
-            "no evidence",
-            "no proof",
-            "without verification",
-            "unverified",
-            "not verified",
-            "no test",
-            "no command output",
-        ]
-        if any(p in reason_lower for p in hedging_patterns):
-            result.was_rejected_completion = True
+    # Detect rejected completions: LLM provided a coaching_message on a
+    # STATUS_UPDATE, meaning it downgraded a completion attempt
+    if result.output_type == OutputType.STATUS_UPDATE and result.coaching_message:
+        result.was_rejected_completion = True
 
     return result
 

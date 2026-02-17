@@ -9,7 +9,8 @@ than risk misdirecting the agent. It is better to say little or nothing
 than to accidentally coach in the wrong direction.
 
 Coaching tiers (in priority order):
-1. Rejection coaching - agent's completion was rejected (hedging/no evidence)
+1. LLM coaching - classifier provided a coaching_message (preferred)
+1b. Heuristic rejection coaching - static fallback when no LLM coaching available
 2. Skill-aware coaching - a /do-* skill is active with plan success criteria
 3. Plain continue - fallback for genuine status updates
 
@@ -96,9 +97,14 @@ def build_coaching_message(
         >>> build_coaching_message(status)
         'continue'
     """
-    # Tier 1: Rejection coaching — highest priority
+    # Tier 1: LLM-generated coaching — highest priority
+    coaching_msg = getattr(classification, "coaching_message", None)
+    if coaching_msg and coaching_msg.strip():
+        return f"[System Coach] {coaching_msg.strip()}"
+
+    # Tier 1b: Heuristic rejection coaching — fallback when LLM coaching absent
     if getattr(classification, "was_rejected_completion", False):
-        return _build_rejection_coaching()
+        return _build_heuristic_rejection_coaching()
 
     # Tier 2: Skill-aware coaching (plan file with extractable criteria)
     if plan_file and Path(plan_file).exists():
@@ -118,8 +124,12 @@ def build_coaching_message(
     return "continue"
 
 
-def _build_rejection_coaching() -> str:
-    """Build explanatory coaching for a rejected completion.
+def _build_heuristic_rejection_coaching() -> str:
+    """Build static coaching for a rejected completion (heuristic fallback).
+
+    Used when the LLM classifier did not provide a coaching_message,
+    e.g. when classification fell back to heuristics. Provides generic
+    but helpful guidance about what evidence to include.
 
     Tone: supportive and instructive. Explain what happened and what
     the agent should include next time it believes work is done.
