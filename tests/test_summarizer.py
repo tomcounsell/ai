@@ -442,6 +442,36 @@ class TestParseClassificationResponse:
         assert result.was_rejected_completion is True
         assert result.coaching_message == "Include test output next time."
 
+    def test_coaching_message_null_for_non_status_types(self):
+        """coaching_message should be None for completion, question, blocker, error."""
+        for type_str in ("completion", "question", "blocker", "error"):
+            raw = (
+                f'{{"type": "{type_str}", "confidence": 0.95, '
+                f'"reason": "test", "coaching_message": null}}'
+            )
+            result = _parse_classification_response(raw)
+            assert result is not None
+            assert (
+                result.coaching_message is None
+            ), f"coaching_message should be None for {type_str}"
+            assert (
+                result.was_rejected_completion is False
+            ), f"was_rejected_completion should be False for {type_str}"
+
+    def test_coaching_message_on_non_status_ignored_for_rejection(self):
+        """Even if LLM mistakenly sets coaching_message on completion, was_rejected stays False."""
+        raw = (
+            '{"type": "completion", "confidence": 0.95, '
+            '"reason": "done", '
+            '"coaching_message": "Some coaching text"}'
+        )
+        result = _parse_classification_response(raw)
+        assert result is not None
+        # coaching_message IS preserved (it's in the JSON)
+        assert result.coaching_message == "Some coaching text"
+        # But was_rejected_completion is only set for STATUS_UPDATE
+        assert result.was_rejected_completion is False
+
     def test_not_a_dict(self):
         assert _parse_classification_response("[1, 2, 3]") is None
 
@@ -703,6 +733,88 @@ class TestClassifyOutput:
         assert len(user_msg) < len(long_text)
         assert "[...truncated...]" in user_msg
         assert result.output_type == OutputType.STATUS_UPDATE
+
+    @pytest.mark.asyncio
+    async def test_llm_returns_coaching_for_hedging(self):
+        """LLM classifier returns specific coaching when hedging language detected."""
+        mock_response = AsyncMock()
+        mock_response.content = [
+            AsyncMock(
+                text='{"type": "status", "confidence": 0.92, '
+                '"reason": "Hedging language without verification", '
+                '"coaching_message": "You used hedging language. Run the tests."}'
+            )
+        ]
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
+        ):
+            result = await classify_output("I think the bug is fixed now. Should work.")
+
+        assert result.output_type == OutputType.STATUS_UPDATE
+        assert result.coaching_message == "You used hedging language. Run the tests."
+        assert result.was_rejected_completion is True
+
+    @pytest.mark.asyncio
+    async def test_llm_returns_coaching_for_missing_evidence(self):
+        """LLM classifier returns specific coaching when evidence is missing."""
+        mock_response = AsyncMock()
+        mock_response.content = [
+            AsyncMock(
+                text='{"type": "status", "confidence": 0.90, '
+                '"reason": "Claims tests pass but shows no output", '
+                '"coaching_message": "Paste the pytest output with pass/fail counts."}'
+            )
+        ]
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
+        ):
+            result = await classify_output("All tests pass. Task complete.")
+
+        assert result.output_type == OutputType.STATUS_UPDATE
+        assert (
+            result.coaching_message == "Paste the pytest output with pass/fail counts."
+        )
+        assert result.was_rejected_completion is True
+
+    @pytest.mark.asyncio
+    async def test_llm_no_coaching_for_genuine_completion(self):
+        """LLM returns null coaching_message for genuine completions with evidence."""
+        mock_response = AsyncMock()
+        mock_response.content = [
+            AsyncMock(
+                text='{"type": "completion", "confidence": 0.98, '
+                '"reason": "verified completion with evidence", '
+                '"coaching_message": null}'
+            )
+        ]
+        mock_client = AsyncMock()
+        mock_client.messages.create = AsyncMock(return_value=mock_response)
+
+        with (
+            patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
+        ):
+            result = await classify_output(
+                "All 42 tests passed. Committed abc1234. PR: https://github.com/org/repo/pull/99"
+            )
+
+        assert result.output_type == OutputType.COMPLETION
+        assert result.coaching_message is None
+        assert result.was_rejected_completion is False
 
     @pytest.mark.asyncio
     async def test_confidence_threshold_constant(self):
