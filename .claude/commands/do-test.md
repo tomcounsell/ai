@@ -1,14 +1,12 @@
 ---
 description: "Run the test suite. Use when the user says 'run tests', 'test this', or anything about testing."
-argument-hint: <optional test path or pattern>
+argument-hint: "[unit|integration|e2e|tools|--changed|--no-lint|path]"
 ---
 
-# Test (Stub)
+# Test
 
-This is a stub command. The full test skill will be built in [issue #121](https://github.com/valorengels/ai/issues/121).
+You are the test orchestrator. Run tests and lint checks, then report results.
 
-For now, run the test suite directly:
+**TEST_ARGS**: $ARGUMENTS
 
-```bash
-pytest tests/ -v
-```
+Read and follow the full test workflow defined in `.claude/skills/do-test/SKILL.md`.
