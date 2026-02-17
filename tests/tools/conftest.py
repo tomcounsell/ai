@@ -51,8 +51,7 @@ def openai_api_key():
 def temp_python_file(tmp_path):
     """Create a temporary Python file for testing."""
     test_file = tmp_path / "test_code.py"
-    test_file.write_text(
-        '''
+    test_file.write_text('''
 def add(a, b):
     """Add two numbers."""
     return a + b
@@ -66,8 +65,7 @@ class Calculator:
 
     def multiply(self, a, b):
         return a * b
-'''
-    )
+''')
     return test_file
 
 
@@ -75,8 +73,7 @@ class Calculator:
 def temp_markdown_file(tmp_path):
     """Create a temporary Markdown file for testing."""
     test_file = tmp_path / "test_doc.md"
-    test_file.write_text(
-        """# Test Documentation
+    test_file.write_text("""# Test Documentation
 
 This is a test document for knowledge search.
 
@@ -93,8 +90,7 @@ Run `pip install test-package` to install.
 ## Configuration
 
 Set the `API_KEY` environment variable.
-"""
-    )
+""")
     return test_file
 
 
@@ -104,8 +100,7 @@ def temp_docs_dir(tmp_path):
     docs_dir = tmp_path / "docs"
     docs_dir.mkdir()
 
-    (docs_dir / "getting-started.md").write_text(
-        """# Getting Started
+    (docs_dir / "getting-started.md").write_text("""# Getting Started
 
 Welcome to the documentation.
 
@@ -114,11 +109,9 @@ Welcome to the documentation.
 1. Install the package
 2. Configure settings
 3. Run the application
-"""
-    )
+""")
 
-    (docs_dir / "api-reference.md").write_text(
-        """# API Reference
+    (docs_dir / "api-reference.md").write_text("""# API Reference
 
 ## Endpoints
 
@@ -129,19 +122,16 @@ Returns a list of users.
 ### POST /users
 
 Creates a new user.
-"""
-    )
+""")
 
-    (docs_dir / "configuration.md").write_text(
-        """# Configuration
+    (docs_dir / "configuration.md").write_text("""# Configuration
 
 ## Environment Variables
 
 - `DATABASE_URL`: Database connection string
 - `API_KEY`: API authentication key
 - `DEBUG`: Enable debug mode
-"""
-    )
+""")
 
     return docs_dir
 

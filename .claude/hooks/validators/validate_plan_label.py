@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Validate that plan has a classification label in frontmatter."""
+
 import re
 import sys
 from pathlib import Path

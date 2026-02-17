@@ -5,6 +5,7 @@ Once a plan's status has moved to Ready, In Progress, or Complete, the type:
 field in frontmatter becomes immutable. This prevents accidental reclassification
 of approved plans. Use /reclassify during Planning status instead.
 """
+
 import re
 import subprocess
 import sys

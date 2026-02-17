@@ -143,9 +143,9 @@ class TestLiveHaikuReranking:
 
     def test_rerank_relevant_chunk_scores_high(self):
         """Haiku should score a clearly relevant doc section >= 5."""
-        from tools.doc_impact_finder import _rerank_single_candidate
-
         import anthropic
+
+        from tools.doc_impact_finder import _rerank_single_candidate
 
         client = anthropic.Anthropic()
         change = "Refactored session isolation to use slug-based worktrees instead of thread IDs"
@@ -168,9 +168,9 @@ class TestLiveHaikuReranking:
 
     def test_rerank_irrelevant_chunk_scores_low(self):
         """Haiku should score a clearly irrelevant doc section < 5."""
-        from tools.doc_impact_finder import _rerank_single_candidate
-
         import anthropic
+
+        from tools.doc_impact_finder import _rerank_single_candidate
 
         client = anthropic.Anthropic()
         change = "Refactored session isolation to use slug-based worktrees instead of thread IDs"
@@ -198,9 +198,9 @@ class TestLiveHaikuReranking:
         """Verify parallel reranking works with ThreadPoolExecutor."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        from tools.doc_impact_finder import _rerank_single_candidate
-
         import anthropic
+
+        from tools.doc_impact_finder import _rerank_single_candidate
 
         client = anthropic.Anthropic()
         change = "Added new CLI flag --verbose to bridge startup"
@@ -242,9 +242,9 @@ class TestLiveHaikuReranking:
 
     def test_json_fence_stripping(self):
         """Verify the code fence stripping fix works with real Haiku responses."""
-        from tools.doc_impact_finder import _rerank_single_candidate
-
         import anthropic
+
+        from tools.doc_impact_finder import _rerank_single_candidate
 
         client = anthropic.Anthropic()
         # Use a prompt that's clearly relevant to force a response
@@ -273,7 +273,7 @@ class TestIndexLifecycle:
 
     def test_index_builds_from_repo_docs(self, tmp_path):
         """Index discovers and chunks real doc files."""
-        from tools.doc_impact_finder import chunk_markdown, _discover_doc_files
+        from tools.doc_impact_finder import _discover_doc_files, chunk_markdown
 
         # Use the real repo to discover files
         files = _discover_doc_files(REPO_ROOT)
@@ -357,7 +357,9 @@ class TestIndexLifecycle:
             return [[0.5, 0.5, 0.5] for _ in texts]
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake"}, clear=False):
-            with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
+            with patch(
+                "tools.impact_finder_core._embed_openai", side_effect=fake_embed
+            ):
                 index_docs(repo_root=tmp_path)
 
         # Verify file exists

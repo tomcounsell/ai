@@ -251,7 +251,7 @@ def validate_docs_changed(
 
     # Dry-run: print expected paths and return early
     if dry_run:
-        print(f"[DRY-RUN] Expected documentation paths:")
+        print("[DRY-RUN] Expected documentation paths:")
         for p in expected_paths:
             print(f"  - {p}")
         return True, "[DRY-RUN] Would validate the above paths against git diff."

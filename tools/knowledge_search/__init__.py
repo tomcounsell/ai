@@ -36,8 +36,7 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
 
     # Create tables if needed
-    conn.execute(
-        """
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS documents (
             id TEXT PRIMARY KEY,
             path TEXT,
@@ -46,10 +45,8 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
             file_type TEXT,
             indexed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    """
-    )
-    conn.execute(
-        """
+    """)
+    conn.execute("""
         CREATE TABLE IF NOT EXISTS chunks (
             id TEXT PRIMARY KEY,
             document_id TEXT,
@@ -58,8 +55,7 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
             chunk_index INTEGER,
             FOREIGN KEY (document_id) REFERENCES documents(id)
         )
-    """
-    )
+    """)
     conn.commit()
 
     return conn
@@ -251,14 +247,12 @@ def search_knowledge(
             return {"error": "Failed to compute query embedding"}
 
         # Get all chunks with embeddings
-        cursor = conn.execute(
-            """
+        cursor = conn.execute("""
             SELECT c.id, c.document_id, c.content, c.embedding, d.path, d.file_type
             FROM chunks c
             JOIN documents d ON c.document_id = d.id
             WHERE c.embedding IS NOT NULL
-            """
-        )
+            """)
 
         scored_results = []
         for row in cursor:
@@ -319,13 +313,11 @@ def list_indexed_documents(db_path: Path | None = None) -> dict:
     """List all indexed documents."""
     conn = _get_db_connection(db_path)
 
-    cursor = conn.execute(
-        """
+    cursor = conn.execute("""
         SELECT id, path, file_type, indexed_at
         FROM documents
         ORDER BY indexed_at DESC
-        """
-    )
+        """)
 
     documents = [dict(row) for row in cursor]
     conn.close()
