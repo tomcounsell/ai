@@ -68,7 +68,9 @@ class ClassificationResult:
     output_type: OutputType
     confidence: float  # 0.0-1.0
     reason: str  # Brief explanation
-    was_rejected_completion: bool = False  # True when COMPLETION → STATUS_UPDATE downgrade
+    was_rejected_completion: bool = (
+        False  # True when COMPLETION → STATUS_UPDATE downgrade
+    )
 
 
 @dataclass
