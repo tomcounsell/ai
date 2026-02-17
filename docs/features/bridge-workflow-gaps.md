@@ -44,6 +44,7 @@ When output is classified as `STATUS_UPDATE`, the bridge suppresses it from Tele
 
 ### Safety Limits
 
+- **Error bypass (crash guard)** -- If output is classified as `ERROR`, auto-continue is skipped entirely and the error is sent straight to Telegram. This prevents cascading retry loops when the SDK crashes. See [Coaching Loop — Error Crash Guard](coaching-loop.md).
 - **MAX_AUTO_CONTINUES = 3** -- Prevents infinite loops where the agent generates only status updates. After 3 auto-continues, the next status update goes to Telegram so the human can see what is happening.
 - **Counter resets on human reply** -- When the human sends a new message to the session, the auto-continue counter resets to zero.
 - **Steering queue integration** -- Auto-continue uses the same steering queue mechanism as manual human input, so the agent sees it as a normal continuation signal.
