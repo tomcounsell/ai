@@ -104,11 +104,11 @@ uv run python gpt_researcher_run.py "prompt" --model openai:gpt-5.2-pro
 # Use GPT-5-Mini for cost-optimized research
 uv run python gpt_researcher_run.py "prompt" --model openai:gpt-5-mini
 
-# Use Anthropic Claude Opus 4
-uv run python gpt_researcher_run.py "prompt" --model anthropic:claude-opus-4
+# Use Anthropic Claude Opus 4.6
+uv run python gpt_researcher_run.py "prompt" --model anthropic:claude-opus-4-6
 
 # Use OpenRouter for any model
-uv run python gpt_researcher_run.py "prompt" --model openrouter/anthropic/claude-opus-4.5
+uv run python gpt_researcher_run.py "prompt" --model openrouter/anthropic/claude-opus-4-6
 ```
 
 ### Report Types
@@ -222,7 +222,7 @@ This makes it ideal for deep research compared to previous models.
 - **gpt-5.2:** Best for complex reasoning and comprehensive research
 - **gpt-5.2-pro:** Best for hardest problems requiring extended thinking
 - **gpt-5-mini:** Best for cost-optimized research
-- **claude-opus-4:** Best for synthesis and writing quality
+- **claude-opus-4-6:** Best for synthesis and writing quality
 
 ## Comparison: GPT-Researcher vs ChatGPT Deep Research
 
@@ -273,18 +273,18 @@ uv run python gpt_researcher_run.py "prompt" --model openai:gpt-5.2-pro      # H
 uv run python gpt_researcher_run.py "prompt" --model openai:gpt-5-mini       # Cost-optimized
 uv run python gpt_researcher_run.py "prompt" --model openai:gpt-5-nano       # High-throughput
 
-# Legacy OpenAI models
-uv run python gpt_researcher_run.py "prompt" --model openai:o1               # Legacy reasoning
-uv run python gpt_researcher_run.py "prompt" --model openai:gpt-4o           # Legacy multimodal
+# Reasoning models
+uv run python gpt_researcher_run.py "prompt" --model openai:o3               # Latest reasoning
+uv run python gpt_researcher_run.py "prompt" --model openai:o4-mini          # Fast reasoning
+uv run python gpt_researcher_run.py "prompt" --model openai:o3-pro           # Extended reasoning
 
 # Anthropic Claude
-uv run python gpt_researcher_run.py "prompt" --model anthropic:claude-opus-4
-uv run python gpt_researcher_run.py "prompt" --model anthropic:claude-sonnet-4
+uv run python gpt_researcher_run.py "prompt" --model anthropic:claude-opus-4-6
+uv run python gpt_researcher_run.py "prompt" --model anthropic:claude-sonnet-4-5
 
 # Via OpenRouter (single API key for all)
 uv run python gpt_researcher_run.py "prompt" --model openrouter/openai/gpt-5.2
-uv run python gpt_researcher_run.py "prompt" --model openrouter/anthropic/claude-opus-4.5
-uv run python gpt_researcher_run.py "prompt" --model openrouter/x-ai/grok-4
+uv run python gpt_researcher_run.py "prompt" --model openrouter/anthropic/claude-opus-4-6
 ```
 
 ## Troubleshooting
@@ -359,7 +359,7 @@ uv run python gpt_researcher_run.py \
 ```bash
 uv run python gpt_researcher_run.py \
   --file prompt.txt \
-  --model anthropic:claude-opus-4 \
+  --model anthropic:claude-opus-4-6 \
   --report-type detailed_report \
   --output results-comprehensive.md
 ```

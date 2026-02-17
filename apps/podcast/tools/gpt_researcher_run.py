@@ -9,8 +9,8 @@ Usage:
     uv run python gpt_researcher_run.py "Your research prompt here"
     uv run python gpt_researcher_run.py --file prompt.txt
     uv run python gpt_researcher_run.py --file prompt.txt --output results.md
-    uv run python gpt_researcher_run.py "prompt" --model openai:gpt-4o
-    uv run python gpt_researcher_run.py "prompt" --model anthropic:claude-opus-4
+    uv run python gpt_researcher_run.py "prompt" --model openai:gpt-5-mini
+    uv run python gpt_researcher_run.py "prompt" --model anthropic:claude-opus-4-6
 
 Requirements:
     - API keys in .env file (OPENAI_API_KEY, OPENROUTER_API_KEY, etc.)
@@ -19,8 +19,8 @@ Requirements:
 
 Configuration Options:
     - OpenAI (default): FAST_LLM=openai:gpt-5.2, SMART_LLM=openai:gpt-5.2
-    - OpenAI Alternatives: gpt-5.2-pro (harder thinking), gpt-5-mini (cost-optimized), o1 (legacy reasoning)
-    - Anthropic: FAST_LLM=anthropic:claude-opus-4, SMART_LLM=anthropic:claude-opus-4
+    - OpenAI Alternatives: gpt-5.2-pro (harder thinking), gpt-5-mini (cost-optimized), o3 (reasoning), o4-mini (fast reasoning)
+    - Anthropic: FAST_LLM=anthropic:claude-opus-4-6, SMART_LLM=anthropic:claude-opus-4-6
     - OpenRouter: Use any model via openrouter/ prefix
 
 Documentation:
@@ -41,13 +41,11 @@ try:
     # Load from current directory first
     load_dotenv()
     # Then try parent directories (up to 3 levels)
-    for i in range(1, 4):
+    for _i in range(1, 4):
         parent_env = find_dotenv(usecwd=True, raise_error_if_not_found=False)
         if parent_env:
             load_dotenv(parent_env, override=False)
     # Also try common parent locations
-    from pathlib import Path
-
     for parent in list(Path.cwd().parents)[:3]:
         env_file = parent / ".env"
         if env_file.exists():
@@ -58,14 +56,13 @@ except ImportError:
 
 def get_api_keys() -> dict:
     """Get API keys from environment or .env files."""
-    keys = {}
-
-    # Check environment first
-    keys["openai"] = os.getenv("OPENAI_API_KEY")
-    keys["anthropic"] = os.getenv("ANTHROPIC_API_KEY")
-    keys["openrouter"] = os.getenv("OPENROUTER_API_KEY")
-    keys["xai"] = os.getenv("XAI_API_KEY")
-    keys["tavily"] = os.getenv("TAVILY_API_KEY")
+    keys = {
+        "openai": os.getenv("OPENAI_API_KEY"),
+        "anthropic": os.getenv("ANTHROPIC_API_KEY"),
+        "openrouter": os.getenv("OPENROUTER_API_KEY"),
+        "xai": os.getenv("XAI_API_KEY"),
+        "tavily": os.getenv("TAVILY_API_KEY"),
+    }
 
     # Try loading from .env in current and parent directories
     if not any(keys.values()):
@@ -98,28 +95,29 @@ def configure_model(model_spec: str) -> tuple[str, str]:
     Configure LLM model from specification.
 
     Args:
-        model_spec: Model specification like "openai:gpt-4o" or "openrouter/anthropic/claude-opus-4.5"
+        model_spec: Model specification like "openai:gpt-5.2" or "openrouter/anthropic/claude-opus-4-6"
 
     Returns:
         Tuple of (FAST_LLM, SMART_LLM) environment variables
     """
-    # Handle openrouter/ prefix (e.g., "openrouter/anthropic/claude-opus-4.5")
+    # Handle openrouter/ prefix (e.g., "openrouter/anthropic/claude-opus-4-6")
     if model_spec.startswith("openrouter/"):
         # Extract model path after "openrouter/"
         model_path = model_spec.replace("openrouter/", "", 1)
         # GPT-Researcher expects format: "openrouter:provider/model"
         return f"openrouter:{model_path}", f"openrouter:{model_path}"
 
-    # Handle provider:model format (e.g., "openai:gpt-4o")
+    # Handle provider:model format (e.g., "openai:gpt-5.2")
     if ":" in model_spec:
         provider, model = model_spec.split(":", 1)
-
-        if provider == "openai":
-            return f"openai:{model}", f"openai:{model}"
-        elif provider == "anthropic":
-            return f"anthropic:{model}", f"anthropic:{model}"
-        elif provider == "xai":
-            return f"xai:{model}", f"xai:{model}"
+        provider_map = {
+            "openai": f"openai:{model}",
+            "anthropic": f"anthropic:{model}",
+            "xai": f"xai:{model}",
+        }
+        result = provider_map.get(provider)
+        if result:
+            return result, result
 
     # Default: use as-is
     return model_spec, model_spec
@@ -252,13 +250,13 @@ async def run_research(
             if len(prompt) > 200
             else f"\nPrompt: {prompt}"
         )
-        log(f"\nConfiguration:")
+        log("\nConfiguration:")
         log(f"  Fast LLM: {fast_llm}")
         log(f"  Smart LLM: {smart_llm}")
         log(f"  Report Type: {report_type}")
         log(f"  Search Provider: {os.environ.get('RETRIEVER', 'duckduckgo')}")
-        log(f"\nStarting multi-agent research...")
-        log(f"Expected time: 6-20 minutes")
+        log("\nStarting multi-agent research...")
+        log("Expected time: 6-20 minutes")
         log("-" * 60)
 
     try:
@@ -304,7 +302,7 @@ async def run_research(
             if verbose or log_file:
                 log("\n[Phase 1] Planning research strategy...")
 
-            report = await researcher.conduct_research()
+            await researcher.conduct_research()
 
             if verbose or log_file:
                 log("\n[Phase 2] Synthesizing findings...")
@@ -336,9 +334,9 @@ Examples:
     %(prog)s "Research early childhood educator burnout interventions"
     %(prog)s --file research_prompt.txt
     %(prog)s --file prompt.txt --output results.md
-    %(prog)s "prompt" --model openai:gpt-4o
-    %(prog)s "prompt" --model anthropic:claude-opus-4
-    %(prog)s "prompt" --model openrouter/anthropic/claude-opus-4.5
+    %(prog)s "prompt" --model openai:gpt-5-mini
+    %(prog)s "prompt" --model anthropic:claude-opus-4-6
+    %(prog)s "prompt" --model openrouter/anthropic/claude-opus-4-6
 
 Environment:
     OPENAI_API_KEY      - OpenAI API key (for GPT-4, etc.)
@@ -358,7 +356,7 @@ Environment:
         "--model",
         "-m",
         default="openai:gpt-5.2",
-        help="Model specification (default: openai:gpt-5.2). Examples: openai:gpt-5.2-pro, openai:gpt-5-mini, anthropic:claude-opus-4, openrouter/anthropic/claude-opus-4.5",
+        help="Model specification (default: openai:gpt-5.2). Examples: openai:gpt-5.2-pro, openai:gpt-5-mini, openai:o3, openai:o4-mini, anthropic:claude-opus-4-6",
     )
 
     parser.add_argument(
@@ -435,7 +433,7 @@ Environment:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = str(Path(log_dir) / f"gpt_researcher_output_{timestamp}.md")
         log_file = str(Path(log_dir) / f"gpt_researcher_log_{timestamp}.txt")
-        print(f"Auto-save enabled:")
+        print("Auto-save enabled:")
         print(f"  Output: {output_file}")
         print(f"  Log: {log_file}")
         print()
@@ -473,7 +471,7 @@ Environment:
         # Output to file or stdout
         if output_file:
             with open(output_file, "w") as f:
-                f.write(f"# GPT-Researcher Results\n\n")
+                f.write("# GPT-Researcher Results\n\n")
                 f.write(f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
                 f.write(f"**Model:** {args.model}\n\n")
                 f.write(f"**Prompt:** {prompt}\n\n")

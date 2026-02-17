@@ -969,7 +969,7 @@ requires-dist = [
     { name = "factory-boy", marker = "extra == 'test'" },
     { name = "flake8", marker = "extra == 'dev'" },
     { name = "google-genai", marker = "extra == 'podcast'", specifier = ">=0.5.0" },
-    { name = "gpt-researcher", marker = "extra == 'podcast'", specifier = ">=0.12.0" },
+    { name = "gpt-researcher", marker = "extra == 'podcast'", specifier = ">=0.14.6" },
     { name = "gunicorn" },
     { name = "ipython", marker = "extra == 'dev'" },
     { name = "isort", marker = "extra == 'dev'" },
