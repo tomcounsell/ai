@@ -76,6 +76,18 @@
     "reveal": "always"
   },
   {
+    "label": "Audio Worker",
+    "command": "uv run python manage.py local_audio_worker --base-url https://ai.yuda.me",
+    "env": {
+      "DJANGO_SETTINGS_MODULE": "settings",
+      "PYTHONUNBUFFERED": "1"
+    },
+    "use_new_terminal": true,
+    "allow_concurrent_runs": false,
+    "reveal": "always",
+    "tags": ["worker"]
+  },
+  {
     "label": "Dev (Server + Tailwind)",
     "command": "uv run python manage.py runserver & uv run python manage.py tailwind watch; wait",
     "env": {
