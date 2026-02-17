@@ -408,7 +408,7 @@ class TestBuildContextPrefix:
     def test_includes_tech_stack(self, valor_project):
         """Context should include tech stack."""
         result = build_context_prefix(valor_project, is_dm=False)
-        assert "TECH: Python, Clawdbot, Telethon" in result
+        assert "TECH: Python, Claude Agent SDK, Telethon" in result
 
     def test_includes_repo(self, valor_project):
         """Context should include GitHub repo."""

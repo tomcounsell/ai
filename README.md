@@ -10,9 +10,8 @@ Valor is an AI coworker - not an assistant, not a tool, but a colleague with its
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Claude Agent SDK | **Active** | Primary agent backend (v0.1.20) |
+| Claude Agent SDK | **Active** | Agent backend (v0.1.20) |
 | Telegram Integration | **Working** | User account via Telethon, responds to @valor mentions |
-| Clawdbot (Legacy) | **Available** | Fallback via `USE_CLAUDE_SDK=false` |
 | Self-Management | **Working** | Can restart himself, survives reboots |
 | MCP Skills | **Working** | Sentry, GitHub, Linear, Notion, Stripe, Render |
 | Daydream (Cron) | **Working** | Daily autonomous maintenance at 6 AM Pacific |
@@ -33,22 +32,17 @@ Valor is an AI coworker - not an assistant, not a tool, but a colleague with its
 │  • Telethon client (user account, not bot)                       │
 │  • Listens for @valor mentions and DMs                           │
 │  • Maintains session continuity per chat                         │
-│  • USE_CLAUDE_SDK flag routes to appropriate backend             │
 └─────────────────────────┬───────────────────────────────────────┘
                           │
-            ┌─────────────┴─────────────┐
-            │                           │
-            ▼                           ▼
-┌───────────────────────┐   ┌───────────────────────────┐
-│  Claude Agent SDK     │   │  Clawdbot (Legacy)        │
-│  (USE_CLAUDE_SDK=true)│   │  (USE_CLAUDE_SDK=false)   │
-│                       │   │                           │
-│  • agent/sdk_client.py│   │  • subprocess call        │
-│  • Same tools as      │   │  • ~/clawd/skills/        │
-│    Claude Code CLI    │   │                           │
-└───────────┬───────────┘   └───────────────────────────┘
-            │
-            ▼
+                          ▼
+┌───────────────────────────────────────┐
+│  Claude Agent SDK                     │
+│                                       │
+│  • agent/sdk_client.py                │
+│  • Same tools as Claude Code CLI      │
+└───────────────────┬───────────────────┘
+                    │
+                    ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                       Claude API                                 │
 │                  (anthropic/claude-sonnet-4)                     │
@@ -77,16 +71,9 @@ See [docs/setup.md](docs/setup.md) for detailed setup instructions.
 
 ## Configuration
 
-### Agent Backend Selection
+### Agent Backend
 
-The system supports two agent backends via the `USE_CLAUDE_SDK` environment variable:
-
-| Setting | Backend | Description |
-|---------|---------|-------------|
-| `USE_CLAUDE_SDK=true` | **Claude Agent SDK** | Official SDK with same capabilities as Claude Code CLI |
-| `USE_CLAUDE_SDK=false` | Clawdbot (Legacy) | Third-party tool, subprocess-based |
-
-The Claude Agent SDK is now the **recommended default**.
+The system uses the Claude Agent SDK as its agent backend, providing the same capabilities as Claude Code CLI.
 
 ### Key Files
 
@@ -141,21 +128,15 @@ ai/
 | [docs/setup.md](docs/setup.md) | Local setup guide |
 | [docs/plans/claude-agent-sdk-migration.md](docs/plans/claude-agent-sdk-migration.md) | SDK migration plan and status |
 
-## MCP Skills (via Clawdbot Legacy)
+## MCP Skills
 
-When using Clawdbot backend, these skills are available in `~/clawd/skills/`:
+Skills are available via MCP servers registered in `.mcp.json`:
 
-| Skill | Tools | Purpose |
-|-------|-------|---------|
-| Sentry | 8 | Error monitoring, performance analysis |
-| GitHub | 10 | Repository operations, PRs, issues |
-| Linear | 9 | Project management, issue tracking |
-| Notion | 8 | Knowledge base, documentation |
-| Stripe | 9 | Payment processing, subscriptions |
-| Render | 9 | Deployment, infrastructure |
-| Daydream | 6 steps | Daily autonomous maintenance |
-
-**Note**: Phase 2 of the SDK migration will rebuild these as standalone MCP servers usable by both Claude Code and Valor.
+| Skill | Purpose |
+|-------|---------|
+| Sentry | Error monitoring, performance analysis |
+| GitHub | Repository operations, PRs, issues |
+| Daydream | Daily autonomous maintenance |
 
 ## Daydream (Daily Maintenance)
 
@@ -180,18 +161,6 @@ pytest tests/ -v
 
 ```bash
 black . && ruff check . && mypy . --strict
-```
-
-### Switching Agent Backends
-
-To switch from SDK to Clawdbot (for debugging or rollback):
-
-```bash
-# In .env
-USE_CLAUDE_SDK=false
-
-# Restart bridge
-./scripts/valor-service.sh restart
 ```
 
 ## Contact

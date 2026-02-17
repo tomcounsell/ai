@@ -63,7 +63,7 @@ Transcribes via Whisper API
 [If >2000 chars] -> Summarizes with GPT-4o-mini
     |
     v
-Passes enriched message to clawdbot:
+Passes enriched message to agent:
   "Check this out https://youtube.com/watch?v=xxx
 
    [YouTube video - Title transcript summary: The video discusses...]"

@@ -240,38 +240,6 @@ class HealthChecker:
                 details={"error": str(e)},
             )
 
-    def check_clawdbot(self) -> HealthCheckResult:
-        """Check if clawdbot is available.
-
-        Returns:
-            HealthCheckResult for clawdbot.
-        """
-        try:
-            import subprocess
-
-            result = subprocess.run(
-                ["which", "clawdbot"], capture_output=True, text=True
-            )
-            if result.returncode == 0:
-                return HealthCheckResult(
-                    component="clawdbot",
-                    status=HealthStatus.HEALTHY,
-                    message="Clawdbot installed",
-                    details={"path": result.stdout.strip()},
-                )
-            return HealthCheckResult(
-                component="clawdbot",
-                status=HealthStatus.UNHEALTHY,
-                message="Clawdbot not found",
-            )
-        except Exception as e:
-            return HealthCheckResult(
-                component="clawdbot",
-                status=HealthStatus.UNKNOWN,
-                message=f"Could not check clawdbot: {str(e)}",
-                details={"error": str(e)},
-            )
-
     def get_overall_health(self) -> OverallHealth:
         """Run all health checks and return overall status.
 
@@ -284,7 +252,6 @@ class HealthChecker:
         checks.append(self.check_database())
         checks.append(self.check_telegram_connection())
         checks.append(self.check_disk_space())
-        checks.append(self.check_clawdbot())
 
         # Add API key checks
         api_results = self.check_api_keys()

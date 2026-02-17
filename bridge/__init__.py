@@ -1,1 +1,1 @@
-# Telegram-Clawdbot Bridge
+# Telegram Bridge

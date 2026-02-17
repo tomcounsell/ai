@@ -30,26 +30,24 @@ The architecture represents a **living codebase** where users interact directly 
 │  • Multi-project support                                             │
 └───────────────────────────────┬─────────────────────────────────────┘
                                 │
-              ┌─────────────────┴─────────────────┐
-              │                                   │
-              ▼                                   ▼
-┌─────────────────────────────┐   ┌─────────────────────────────────┐
-│   Claude Agent SDK          │   │   Clawdbot (Legacy Fallback)    │
-│   (USE_CLAUDE_SDK=true)     │   │   (USE_CLAUDE_SDK=false)        │
-│                             │   │                                 │
-│  • agent/sdk_client.py      │   │  • subprocess: clawdbot agent   │
-│  • Same tools as Claude Code│   │  • ~/clawd/skills/ (JS)         │
-│  • Native Python integration│   │  • Third-party dependency       │
-└──────────────┬──────────────┘   └─────────────────────────────────┘
-               │
-               ▼
+                                │
+                                ▼
+┌─────────────────────────────────────┐
+│   Claude Agent SDK                  │
+│                                     │
+│  • agent/sdk_client.py              │
+│  • Same tools as Claude Code        │
+│  • Native Python integration        │
+└────────────────┬────────────────────┘
+                 │
+                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         Claude API                                   │
 │                   (anthropic/claude-sonnet-4)                        │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-**Note**: The Claude Agent SDK is now the primary backend (January 2026). Clawdbot remains available for fallback.
+The Claude Agent SDK is the agent backend.
 
 ### Component Relationships
 

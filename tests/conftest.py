@@ -61,7 +61,7 @@ def sample_config():
                 },
                 "github": {"org": "tomcounsell", "repo": "ai"},
                 "context": {
-                    "tech_stack": ["Python", "Clawdbot", "Telethon"],
+                    "tech_stack": ["Python", "Claude Agent SDK", "Telethon"],
                     "description": "Focus on agentic systems",
                 },
             },

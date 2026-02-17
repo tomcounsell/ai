@@ -266,11 +266,10 @@ pytest tools/<name>/tests/ -v
 | Location | What belongs here |
 |----------|-------------------|
 | `tools/` | Tools we maintain, configure, and test |
-| `~/clawd/skills/` | Clawdbot-native skills (external, auto-updated) |
 | `.claude/skills/` | Claude Code skill definitions (prompts only) |
+| `mcp_servers/` | MCP servers exposing tools to the agent |
 
 ### Examples
 
 - **Browser automation** → `tools/browser/` (we configure and test it)
-- **GitHub API via Clawdbot** → `~/clawd/skills/github/` (Clawdbot manages it)
 - **Agent-browser skill prompt** → `.claude/skills/agent-browser/` (Claude Code uses it)

@@ -75,7 +75,7 @@ def filter_tool_logs(response: str) -> str:
     """
     Remove tool execution traces from response.
 
-    Clawdbot may include lines like "🛠️ exec: ls -la" in stdout.
+    Agent may include lines like "🛠️ exec: ls -la" in stdout.
     These are internal logs, not meant for the user.
 
     Returns:

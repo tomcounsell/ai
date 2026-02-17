@@ -249,31 +249,9 @@ class DaydreamRunner:
         """Step 3: Check error logs via Sentry."""
         findings = []
 
-        # Try to call clawdbot sentry skill
-        try:
-            result = subprocess.run(
-                [
-                    "clawdbot",
-                    "skill",
-                    "sentry",
-                    "list_issues",
-                    "--status=unresolved",
-                    "--limit=10",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                findings.append(f"Sentry issues found: {result.stdout.strip()[:500]}")
-            elif result.returncode != 0:
-                findings.append("Could not query Sentry - check clawdbot configuration")
-        except FileNotFoundError:
-            findings.append("Clawdbot not available - skipping Sentry check")
-        except subprocess.TimeoutExpired:
-            findings.append("Sentry query timed out")
-        except Exception as e:
-            findings.append(f"Sentry check failed: {str(e)}")
+        # Sentry check is handled via MCP server integration
+        # TODO: Integrate with Sentry MCP server for automated error checking
+        findings.append("Sentry check skipped - pending MCP server integration")
 
         for finding in findings:
             self.state.add_finding("sentry", finding)
@@ -286,27 +264,8 @@ class DaydreamRunner:
         """Step 4: Clean up task management."""
         findings = []
 
-        # Try to call clawdbot linear skill
-        try:
-            result = subprocess.run(
-                [
-                    "clawdbot",
-                    "skill",
-                    "linear",
-                    "list_issues",
-                    "--status=backlog",
-                    "--limit=20",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                findings.append(f"Linear backlog items: {result.stdout.strip()[:500]}")
-        except FileNotFoundError:
-            findings.append("Clawdbot not available - skipping Linear check")
-        except Exception as e:
-            findings.append(f"Linear check failed: {str(e)}")
+        # Linear check is handled via MCP server integration
+        # TODO: Integrate with Linear MCP server for automated task checking
 
         # Check local todo files
         todo_files = list(PROJECT_ROOT.glob("**/TODO.md")) + list(

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Valor Bridge Service Manager
-# Self-management script for the Telegram-Clawdbot bridge
+# Self-management script for the Telegram bridge
 # Can be called by Valor himself to restart his own process
 
 set -e
