@@ -230,5 +230,4 @@ See `/add-feature` skill for how to create new tools.
 ## See Also
 
 - Run `/add-feature` for creating new tools
-- See `docs/tools/tool-architecture.md` for architecture details
 - Check `~/clawd/skills/` for MCP skill implementations

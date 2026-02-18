@@ -11,14 +11,15 @@ Documentation for the Valor AI System - a unified conversational development env
 ## Quick Start
 
 ```bash
-# Start the system
-./scripts/start.sh
+# Start the Telegram bridge
+./scripts/start_bridge.sh
 
-# Start with Telegram interface
-./scripts/start.sh --telegram
+# Check status / restart
+./scripts/valor-service.sh status
+./scripts/valor-service.sh restart
 
 # View logs
-./scripts/logs.sh
+tail -f logs/bridge.log
 ```
 
 ## Documentation Index
@@ -29,8 +30,6 @@ Documentation for the Valor AI System - a unified conversational development env
 |----------|-------------|
 | [Consolidated Documentation](CONSOLIDATED_DOCUMENTATION.md) | **Primary reference** - complete system documentation |
 | [System Overview](architecture/system-overview.md) | High-level architecture and design principles |
-| [MCP Integration](architecture/mcp-integration.md) | Model Context Protocol tool integration |
-| [Codebase Context & RAG](architecture/codebase-context-rag.md) | Per-workspace indexing and retrieval strategy |
 
 ### Interface
 
@@ -43,7 +42,6 @@ Documentation for the Valor AI System - a unified conversational development env
 | Document | Description |
 |----------|-------------|
 | [Deployment](deployment.md) | Multi-instance deployment configuration |
-| [Monitoring](operations/monitoring.md) | System monitoring and health checks |
 | [Daydream System](operations/daydream-system.md) | Autonomous maintenance process |
 
 ### Features
@@ -57,16 +55,7 @@ Documentation for the Valor AI System - a unified conversational development env
 | Document | Description |
 |----------|-------------|
 | [Quality Standards](tools/quality-standards.md) | Tool quality standards and patterns |
-| [Testing Strategy](testing/testing-strategy.md) | Real integration testing approach |
-| [Tool Architecture](tools/tool-architecture.md) | Tool design patterns |
 | [Tools Reference](tools-reference.md) | Complete tool documentation |
-
-### Components
-
-| Document | Description |
-|----------|-------------|
-| [Message Processing](components/message-processing.md) | Telegram message handling pipeline |
-| [Resource Monitoring](components/resource-monitoring.md) | System resource management |
 
 ## Architecture Summary
 

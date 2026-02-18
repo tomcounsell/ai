@@ -602,8 +602,6 @@ git checkout HEAD~1 sops/routing/coding-agent-router.sop.md
 
 ### Related Architecture Docs
 - [Skills vs Subagents Analysis](./skills-vs-subagents-analysis.md)
-- [Gemini CLI Integration](./gemini-cli-integration-analysis.md)
-- [MCP Integration](./mcp-integration.md)
 - [Subagent System](./subagent-mcp-system.md)
 
 ### Implementation References
