@@ -16,6 +16,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Coaching Loop](coaching-loop.md) | Merged classifier-coach with LLM-generated coaching, tiered fallback, and error crash guard | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
 | [Daydream Reactivation](daydream-reactivation.md) | Autonomous 10-step daily maintenance: cleanup, log analysis, session quality, LLM reflection, institutional memory | Shipped |
+| [Daydream Multi-Repo](daydream-multi-repo.md) | Extends daydream to analyze multiple repos per machine via config/projects.json with per-project GitHub issues and Telegram posts | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, and structured reporting | Shipped |
 | [Documentation Lifecycle](documentation-lifecycle.md) | Automated validation and migration system for plan documentation tasks | Shipped |
 | [Google Calendar Integration](google-calendar-integration.md) | Work session logging as Google Calendar events with segment rounding | Shipped |
