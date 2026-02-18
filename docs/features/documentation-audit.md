@@ -45,7 +45,7 @@ Each audited document receives one of three verdicts:
 | Verdict | Meaning | Action taken |
 |---------|---------|-------------|
 | `KEEP` | All references verified; doc is accurate | No changes |
-| `UPDATE` | Some references are broken or outdated | Targeted corrections applied |
+| `UPDATE` | Some references are broken or no longer accurate | Targeted corrections applied |
 | `DELETE` | Too much of the doc is unverifiable | File deleted, index links swept |
 
 **Conservative threshold.** A document is marked `DELETE` only when more than 60% of its verifiable references cannot be confirmed against the codebase (`scripts/docs_auditor.py:L189`). Everything below that threshold gets `UPDATE`, giving a human or agent a chance to revise rather than lose content outright.

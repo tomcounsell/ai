@@ -6,7 +6,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 
 | Feature | Description | Status |
 |---------|-------------|--------|
-| [Agent-SOP Evaluation](agent-sop-evaluation.md) | Evaluation of the Agent-SOP framework; superseded by `.claude/skills/` | Archived |
+| [Agent-SOP Evaluation](agent-sop-evaluation.md) | Evaluation of the Agent-SOP framework; now implemented via `.claude/skills/` | Archived |
 | [Bridge Message Query](bridge-message-query.md) | CLI tool to fetch Telegram message history via file-based IPC with running bridge | Shipped |
 | [Bridge Module Architecture](bridge-module-architecture.md) | Sub-module organization of the Telegram bridge for maintainability | Shipped |
 | [Bridge Response Improvements](bridge-response-improvements.md) | Enhancements to how the Telegram bridge formats and delivers responses | Shipped |
