@@ -473,3 +473,50 @@ class TestGitHubIssueStep:
         runner.state.findings = {}
         await runner.step_create_github_issue()
         mock_create.assert_not_called()
+
+
+# --- Step 5 Audit Docs ---
+
+
+class TestStepAuditDocs:
+    """Tests for step_audit_docs registration and delegation to DocsAuditor."""
+
+    def test_step_audit_docs_is_registered(self):
+        """step_audit_docs is registered as step 5 in runner.steps."""
+        from scripts.daydream import DaydreamRunner
+
+        runner = DaydreamRunner()
+        assert (5, "Audit Documentation", runner.step_audit_docs) in runner.steps
+
+    @pytest.mark.asyncio
+    @patch("scripts.daydream.asyncio.to_thread")
+    @patch("scripts.daydream.DocsAuditor")
+    async def test_step_audit_docs_calls_docs_auditor(
+        self, mock_docs_auditor_cls, mock_to_thread
+    ):
+        """step_audit_docs instantiates DocsAuditor and delegates to run() via asyncio.to_thread."""
+        from unittest.mock import MagicMock
+
+        from scripts.daydream import DaydreamRunner
+
+        # Build a fake summary with the attributes step_audit_docs inspects
+        mock_summary = MagicMock()
+        mock_summary.skipped = False
+        mock_summary.skip_reason = ""
+        mock_summary.updated = []
+        mock_summary.deleted = []
+        mock_summary.kept = ["doc1.md"]
+
+        mock_to_thread.return_value = mock_summary
+
+        runner = DaydreamRunner()
+        runner.state.findings = {}
+        await runner.step_audit_docs()
+
+        # DocsAuditor should have been instantiated
+        mock_docs_auditor_cls.assert_called_once()
+
+        # asyncio.to_thread should have been called with the auditor's run method
+        mock_to_thread.assert_called_once()
+        call_args = mock_to_thread.call_args[0]
+        assert call_args[0] == mock_docs_auditor_cls.return_value.run

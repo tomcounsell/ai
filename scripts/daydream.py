@@ -515,8 +515,6 @@ class DaydreamRunner:
             self.state.add_finding("legacy_code", finding)
 
         self.state.step_progress["clean_legacy"] = {
-            "cache_dirs": len(cache_dirs),
-            "pyc_files": len(pyc_files),
             "findings": len(findings),
         }
 
