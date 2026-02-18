@@ -465,22 +465,6 @@ class DaydreamRunner:
         """Step 1: Clean up legacy code."""
         findings = []
 
-        # Clean __pycache__ directories
-        cache_dirs = list(PROJECT_ROOT.rglob("__pycache__"))
-        for cache_dir in cache_dirs:
-            if cache_dir.is_dir():
-                file_count = len(list(cache_dir.glob("*")))
-                if file_count > 0:
-                    findings.append(
-                        f"Found {file_count} cached files in "
-                        f"{cache_dir.relative_to(PROJECT_ROOT)}"
-                    )
-
-        # Clean .pyc files
-        pyc_files = list(PROJECT_ROOT.rglob("*.pyc"))
-        if pyc_files:
-            findings.append(f"Found {len(pyc_files)} .pyc files")
-
         # Look for TODO comments
         try:
             result = subprocess.run(
