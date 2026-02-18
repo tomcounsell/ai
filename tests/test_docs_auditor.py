@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -16,7 +16,6 @@ from scripts.docs_auditor import (
     _extract_references,
     _verify_references,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -48,7 +47,9 @@ def auditor(repo: Path) -> DocsAuditor:
 
 
 class TestEnumerateDocs:
-    def test_returns_md_files_under_docs(self, repo: Path, auditor: DocsAuditor) -> None:
+    def test_returns_md_files_under_docs(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
         (repo / "docs" / "foo.md").write_text("# Foo")
         (repo / "docs" / "bar.md").write_text("# Bar")
         docs = auditor.enumerate_docs()
@@ -111,23 +112,43 @@ class TestExtractReferences:
 class TestVerifyReferences:
     def test_existing_file_path_returns_true(self, repo: Path) -> None:
         (repo / "scripts" / "run.sh").write_text("#!/bin/bash")
-        refs: dict = {"file_paths": ["scripts/run.sh"], "env_vars": [], "backtick_tokens": [], "python_imports": []}
+        refs: dict = {
+            "file_paths": ["scripts/run.sh"],
+            "env_vars": [],
+            "backtick_tokens": [],
+            "python_imports": [],
+        }
         result = _verify_references(refs, repo)
         assert result["file_paths"]["scripts/run.sh"] is True
 
     def test_missing_file_path_returns_false(self, repo: Path) -> None:
-        refs: dict = {"file_paths": ["scripts/missing.sh"], "env_vars": [], "backtick_tokens": [], "python_imports": []}
+        refs: dict = {
+            "file_paths": ["scripts/missing.sh"],
+            "env_vars": [],
+            "backtick_tokens": [],
+            "python_imports": [],
+        }
         result = _verify_references(refs, repo)
         assert result["file_paths"]["scripts/missing.sh"] is False
 
     def test_env_var_found_in_pyproject(self, repo: Path) -> None:
         (repo / ".env.example").write_text("SOME_VAR=example\n")
-        refs: dict = {"file_paths": [], "env_vars": ["SOME_VAR"], "backtick_tokens": [], "python_imports": []}
+        refs: dict = {
+            "file_paths": [],
+            "env_vars": ["SOME_VAR"],
+            "backtick_tokens": [],
+            "python_imports": [],
+        }
         result = _verify_references(refs, repo)
         assert result["env_vars"]["SOME_VAR"] is True
 
     def test_package_in_pyproject_returns_true(self, repo: Path) -> None:
-        refs: dict = {"file_paths": [], "env_vars": [], "backtick_tokens": [], "python_imports": ["anthropic"]}
+        refs: dict = {
+            "file_paths": [],
+            "env_vars": [],
+            "backtick_tokens": [],
+            "python_imports": ["anthropic"],
+        }
         result = _verify_references(refs, repo)
         assert result["python_imports"]["anthropic"] is True
 
@@ -138,7 +159,9 @@ class TestVerifyReferences:
 
 
 class TestFrequencyGate:
-    def test_no_state_file_does_not_skip(self, repo: Path, auditor: DocsAuditor) -> None:
+    def test_no_state_file_does_not_skip(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
         assert auditor._should_skip() is False
 
     def test_recent_audit_skips(self, repo: Path, auditor: DocsAuditor) -> None:
@@ -152,7 +175,9 @@ class TestFrequencyGate:
         (repo / "data" / "daydream_state.json").write_text(json.dumps(state))
         assert auditor._should_skip() is False
 
-    def test_boundary_exactly_7_days_skips(self, repo: Path, auditor: DocsAuditor) -> None:
+    def test_boundary_exactly_7_days_skips(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
         # 6.9 days ago — still within window
         recent = (datetime.now() - timedelta(days=6, hours=23)).isoformat()
         state = {"last_audit_date": recent}
@@ -167,7 +192,10 @@ class TestFrequencyGate:
 
 class TestParseVerdict:
     def test_parses_keep(self, auditor: DocsAuditor) -> None:
-        text = "VERDICT: KEEP\nCONFIDENCE: HIGH\nRATIONALE: All references verified\nCORRECTIONS:\n- none"
+        text = (
+            "VERDICT: KEEP\nCONFIDENCE: HIGH\n"
+            "RATIONALE: All references verified\nCORRECTIONS:\n- none"
+        )
         v = auditor._parse_verdict(text)
         assert v.action == "KEEP"
         assert v.low_confidence is False
@@ -190,12 +218,17 @@ class TestParseVerdict:
         assert v.action == "DELETE"
 
     def test_low_confidence_flag(self, auditor: DocsAuditor) -> None:
-        text = "VERDICT: UPDATE\nCONFIDENCE: LOW\nRATIONALE: uncertain about this\nCORRECTIONS:\n- none"
+        text = (
+            "VERDICT: UPDATE\nCONFIDENCE: LOW\n"
+            "RATIONALE: uncertain about this\nCORRECTIONS:\n- none"
+        )
         v = auditor._parse_verdict(text)
         assert v.low_confidence is True
 
     def test_corrections_none_not_included(self, auditor: DocsAuditor) -> None:
-        text = "VERDICT: KEEP\nCONFIDENCE: HIGH\nRATIONALE: All good\nCORRECTIONS:\n- none"
+        text = (
+            "VERDICT: KEEP\nCONFIDENCE: HIGH\nRATIONALE: All good\nCORRECTIONS:\n- none"
+        )
         v = auditor._parse_verdict(text)
         assert v.corrections == []
 
@@ -206,7 +239,9 @@ class TestParseVerdict:
 
 
 class TestExecuteVerdict:
-    def test_dry_run_delete_does_not_remove_file(self, repo: Path, auditor: DocsAuditor) -> None:
+    def test_dry_run_delete_does_not_remove_file(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
         doc = repo / "docs" / "deleteme.md"
         doc.write_text("# Delete me")
         verdict = Verdict(action="DELETE", rationale="Feature gone")
@@ -255,7 +290,9 @@ class TestSweepIndexFiles:
         assert "gone-feature.md" not in content
         assert "alive-feature.md" in content
 
-    def test_dry_run_does_not_modify_index(self, repo: Path, auditor: DocsAuditor) -> None:
+    def test_dry_run_does_not_modify_index(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
         index = repo / "docs" / "README.md"
         original = "| [Gone](gone.md) | desc |\n"
         index.write_text(original)
@@ -296,8 +333,126 @@ class TestRunFrequencyGate:
         auditor = DocsAuditor(repo_root=repo, dry_run=True)
         mock_verdict = Verdict(action="KEEP", rationale="All good")
 
-        with patch.object(auditor, "analyze_doc", return_value=mock_verdict) as mock_analyze:
+        with patch.object(
+            auditor, "analyze_doc", return_value=mock_verdict
+        ) as mock_analyze:
             summary = auditor.run()
 
         assert mock_analyze.call_count == 2
         assert len(summary.kept) == 2
+
+
+# ---------------------------------------------------------------------------
+# _check_doc_location
+# ---------------------------------------------------------------------------
+
+
+class TestCheckDocLocation:
+    def test_canonical_features_returns_none(self, auditor: DocsAuditor) -> None:
+        """A doc already in docs/features/ should return None (no relocation needed)."""
+        path = Path("docs/features/some-feature.md")
+        assert auditor._check_doc_location(path) is None
+
+    def test_canonical_guides_returns_none(self, auditor: DocsAuditor) -> None:
+        path = Path("docs/guides/how-to-deploy.md")
+        assert auditor._check_doc_location(path) is None
+
+    def test_canonical_testing_returns_none(self, auditor: DocsAuditor) -> None:
+        path = Path("docs/testing/test-patterns.md")
+        assert auditor._check_doc_location(path) is None
+
+    def test_canonical_references_returns_none(self, auditor: DocsAuditor) -> None:
+        path = Path("docs/references/anthropic-api.md")
+        assert auditor._check_doc_location(path) is None
+
+    def test_canonical_operations_returns_none(self, auditor: DocsAuditor) -> None:
+        path = Path("docs/operations/runbook.md")
+        assert auditor._check_doc_location(path) is None
+
+    def test_canonical_plans_returns_none(self, auditor: DocsAuditor) -> None:
+        path = Path("docs/plans/my-plan.md")
+        assert auditor._check_doc_location(path) is None
+
+    def test_flat_doc_returns_none(self, auditor: DocsAuditor) -> None:
+        """A doc directly in docs/ (no subdir) should return None."""
+        path = Path("docs/cursor-lessons.md")
+        assert auditor._check_doc_location(path) is None
+
+    def test_noncanonical_architecture_returns_suggested_path(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
+        """A doc in docs/architecture/ (non-canonical) should get a suggested relocation."""
+        (repo / "docs" / "architecture").mkdir(parents=True, exist_ok=True)
+        (repo / "docs" / "architecture" / "system-overview.md").write_text(
+            "# System Overview\nSee `bridge/telegram_bridge.py` for details.\n"
+            "The `TelegramBridge` class handles routing.\n"
+            "```python\nfrom bridge.telegram_bridge import TelegramBridge\n```\n"
+        )
+        path = Path("docs/architecture/system-overview.md")
+        result = auditor._check_doc_location(path)
+        assert result is not None
+        assert "features" in str(result) or "docs" in str(result)
+
+    def test_noncanonical_experiments_returns_suggested_path(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
+        """A doc in docs/experiments/ (non-canonical) should get a suggested relocation."""
+        (repo / "docs" / "experiments").mkdir(parents=True, exist_ok=True)
+        (repo / "docs" / "experiments" / "task-isolation.md").write_text(
+            "# Experiment: Task Isolation\n"
+            "See `agent/sdk_client.py` for implementation.\n"
+            "The `ValorAgent` class handles this.\n"
+        )
+        path = Path("docs/experiments/task-isolation.md")
+        result = auditor._check_doc_location(path)
+        assert result is not None
+
+    def test_noncanonical_tools_how_to_suggests_guides(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
+        """A doc in docs/tools/ with 'how to' content should suggest docs/guides/."""
+        (repo / "docs" / "tools").mkdir(parents=True, exist_ok=True)
+        (repo / "docs" / "tools" / "quality-standards.md").write_text(
+            "# Quality Standards\n"
+            "This is a how-to guide for maintaining quality.\n"
+            "Step by step instructions for error handling.\n"
+        )
+        path = Path("docs/tools/quality-standards.md")
+        result = auditor._check_doc_location(path)
+        assert result is not None
+        assert "guides" in str(result)
+
+    def test_noncanonical_improvements_flat_doc_suggests_flat(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
+        """A doc in docs/improvements/ without strong classification should suggest flat docs/."""
+        (repo / "docs" / "improvements").mkdir(parents=True, exist_ok=True)
+        (repo / "docs" / "improvements" / "lessons.md").write_text(
+            "# Lessons Learned\n\nGeneral lessons from experiments.\n"
+            "No code references here, just observations.\n"
+        )
+        path = Path("docs/improvements/lessons.md")
+        result = auditor._check_doc_location(path)
+        assert result is not None
+        # Should suggest flat docs/ (no subdir) since content doesn't match other categories
+        assert str(result) == "docs/lessons.md"
+
+
+# ---------------------------------------------------------------------------
+# AuditSummary relocated_count
+# ---------------------------------------------------------------------------
+
+
+class TestAuditSummaryRelocated:
+    def test_audit_summary_has_relocated_field(self) -> None:
+        summary = AuditSummary()
+        assert hasattr(summary, "relocated")
+        assert isinstance(summary.relocated, list)
+
+    def test_audit_summary_str_includes_relocated(self) -> None:
+        summary = AuditSummary(
+            kept=["docs/a.md"],
+            relocated=["docs/architecture/b.md -> docs/features/b.md"],
+        )
+        text = str(summary)
+        assert "relocated" in text.lower() or "RELOCATED" in text

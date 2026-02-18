@@ -78,6 +78,7 @@ class AuditSummary:
     kept: list[str] = field(default_factory=list)
     updated: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
+    relocated: list[str] = field(default_factory=list)
     verdicts: dict[str, Verdict] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
@@ -86,12 +87,13 @@ class AuditSummary:
             return f"Docs audit skipped: {self.skip_reason}"
         lines = [
             "=== Docs Audit Summary ===",
-            f"KEPT    ({len(self.kept)}): {', '.join(self.kept) or 'none'}",
-            f"UPDATED ({len(self.updated)}): {', '.join(self.updated) or 'none'}",
-            f"DELETED ({len(self.deleted)}): {', '.join(self.deleted) or 'none'}",
+            f"KEPT     ({len(self.kept)}): {', '.join(self.kept) or 'none'}",
+            f"UPDATED  ({len(self.updated)}): {', '.join(self.updated) or 'none'}",
+            f"DELETED  ({len(self.deleted)}): {', '.join(self.deleted) or 'none'}",
+            f"RELOCATED({len(self.relocated)}): {', '.join(self.relocated) or 'none'}",
         ]
         if self.errors:
-            lines.append(f"ERRORS  ({len(self.errors)}): {'; '.join(self.errors)}")
+            lines.append(f"ERRORS   ({len(self.errors)}): {'; '.join(self.errors)}")
         return "\n".join(lines)
 
 
@@ -518,6 +520,15 @@ class DocsAuditor:
                 summary.errors.append(msg)
                 summary.kept.append(str(path))  # safe default: keep on error
 
+        # Check and record docs that are in non-canonical locations
+        for path in docs:
+            if str(path) not in summary.deleted:
+                suggested = self._check_doc_location(path)
+                if suggested is not None:
+                    relocation_note = f"{path} -> {suggested}"
+                    summary.relocated.append(relocation_note)
+                    logger.info("Doc in non-canonical location: %s", relocation_note)
+
         # Sweep index files for broken links caused by deletions
         deleted_paths = [Path(p) for p in summary.deleted]
         self.sweep_index_files(deleted_paths)
@@ -664,6 +675,132 @@ CORRECTIONS:
 
         if content != original:
             full_path.write_text(content, encoding="utf-8")
+
+    # ------------------------------------------------------------------
+    # Doc location enforcement
+    # ------------------------------------------------------------------
+
+    #: Subdirectories that are canonical; anything else is non-standard.
+    CANONICAL_SUBDIRS = frozenset(
+        {"plans", "features", "guides", "testing", "references", "operations"}
+    )
+
+    def _check_doc_location(self, path: Path) -> Path | None:
+        """Return the correct canonical path if the doc is in a non-canonical subdir.
+
+        Args:
+            path: Path relative to repo_root (e.g. ``docs/architecture/foo.md``).
+
+        Returns:
+            ``None`` if the doc is already in a canonical location or flat under
+            ``docs/``.  Returns the suggested canonical path (also relative to
+            repo_root) if the doc lives in a non-standard subdirectory.
+
+        Classification heuristic (no LLM, pure content-based):
+        - how-to / step-by-step / getting-started language  → ``docs/guides/``
+        - testing patterns / test strategies                 → ``docs/testing/``
+        - heavy external URL / package references            → ``docs/references/``
+        - code class/function references or code blocks      → ``docs/features/``
+        - otherwise                                          → flat ``docs/``
+
+        ``docs/plans/`` is never touched.
+        """
+        # path is relative to repo_root, e.g. "docs/architecture/foo.md"
+        try:
+            rel_to_docs = path.relative_to("docs")
+        except ValueError:
+            # Not under docs/ at all — skip
+            return None
+
+        parts = rel_to_docs.parts
+        # Flat doc directly under docs/ → OK
+        if len(parts) == 1:
+            return None
+
+        subdir = parts[0]
+
+        # Already in a canonical subdir → OK
+        if subdir in self.CANONICAL_SUBDIRS:
+            return None
+
+        # Non-canonical subdir: classify the content
+        full_path = self.repo_root / path
+        try:
+            content = full_path.read_text(encoding="utf-8", errors="replace").lower()
+        except Exception:
+            content = ""
+
+        filename = path.name
+        suggested_subdir = self._classify_doc_content(content)
+        return (
+            Path("docs") / suggested_subdir / filename
+            if suggested_subdir
+            else Path("docs") / filename
+        )
+
+    def _classify_doc_content(self, content_lower: str) -> str | None:
+        """Classify document content into a canonical subdir name.
+
+        Returns the subdir name (e.g. ``'guides'``) or ``None`` for flat ``docs/``.
+        """
+        # Guide signals: how-to, step-by-step, getting started, tutorial
+        guide_signals = [
+            "how to",
+            "how-to",
+            "step by step",
+            "step-by-step",
+            "getting started",
+            "tutorial",
+            "walkthrough",
+            "instructions for",
+        ]
+        if any(signal in content_lower for signal in guide_signals):
+            return "guides"
+
+        # Testing signals
+        testing_signals = [
+            "test pattern",
+            "test strategy",
+            "testing approach",
+            "testing pattern",
+            "test suite",
+            "pytest",
+            "unit test",
+            "integration test",
+        ]
+        if any(signal in content_lower for signal in testing_signals):
+            return "testing"
+
+        # Reference signals: heavy external URLs, external package docs
+        reference_signals = [
+            "https://docs.",
+            "https://api.",
+            "official documentation",
+            "third-party",
+            "external api",
+            "api reference",
+        ]
+        reference_count = sum(1 for s in reference_signals if s in content_lower)
+        if reference_count >= 2:
+            return "references"
+
+        # Feature signals: code class/function references or code blocks.
+        # Use specific Python/shell patterns to avoid false positives from
+        # common English words like "from" or "import" in prose.
+        code_indicators = [
+            "```python",
+            "```bash",
+            "```sh",
+            "class ",
+            "def ",
+            ".py`",
+            ".py:",
+        ]
+        if any(signal in content_lower for signal in code_indicators):
+            return "features"
+
+        # Default: stay flat under docs/
+        return None
 
     def _should_skip(self) -> bool:
         """Return True if the audit was run within the last 7 days."""

@@ -6,7 +6,7 @@ allowed-tools: Read, Write, Edit, Glob, Bash, Task
 
 # Documentation Audit Skill
 
-Systematically audits every documentation file in `docs/` against the actual codebase. Verifies concrete references (file paths, class names, function names, CLI commands, env vars, packages) exist in the codebase. Issues verdicts of KEEP, UPDATE, or DELETE for each file, applies the changes, sweeps index files for broken links, then commits with a detailed summary.
+Systematically audits every documentation file in `docs/` against the actual codebase. Verifies concrete references (file paths, class names, function names, CLI commands, env vars, packages) exist in the codebase. Issues verdicts of KEEP, UPDATE, or DELETE for each file, applies the changes, sweeps index files for broken links, enforces canonical directory structure, then commits with a detailed summary.
 
 ## When to Use
 
@@ -171,7 +171,70 @@ grep -l "{deleted_filename}" docs/README.md docs/features/README.md CLAUDE.md 2>
 
 ---
 
-## Step 6: Commit with Detailed Summary
+## Step 6: Enforce Doc Directory Structure
+
+After executing all verdicts and sweeping index files, check that every surviving doc lives in a canonical subdirectory.
+
+### Canonical subdirectories
+
+| Subdir | Purpose |
+|--------|---------|
+| `docs/features/` | Deep feature docs with code references |
+| `docs/guides/` | How-to guides and tutorials |
+| `docs/testing/` | Testing patterns and practices |
+| `docs/references/` | Thin copies of 3rd-party docs, just links |
+| `docs/operations/` | Operational runbooks |
+| `docs/plans/` | Plans — **never move anything here** |
+| `docs/` (flat) | Patterns, best practices, and extras |
+
+**Non-canonical subdirs** (anything not in the list above, e.g. `docs/architecture/`, `docs/experiments/`, `docs/improvements/`, `docs/tools/`) should have their docs relocated.
+
+### Classification heuristic
+
+For a doc in a non-canonical subdir, classify by content:
+
+1. Content contains "how to", "step by step", "getting started" → `docs/guides/`
+2. Content contains test patterns, testing strategy, pytest → `docs/testing/`
+3. Content has 2+ external reference signals (e.g. `https://docs.`, "official documentation") → `docs/references/`
+4. Content contains code blocks (` ```python `, ` ```bash `), `class `, `def `, `.py`` → `docs/features/`
+5. Otherwise → stays flat in `docs/`
+
+### Relocation steps
+
+For each doc that needs relocation:
+
+1. Use `git mv` to move the file:
+   ```bash
+   git mv docs/architecture/foo.md docs/features/foo.md
+   ```
+2. Update cross-references in:
+   - `docs/README.md`
+   - `docs/features/README.md`
+   - `CLAUDE.md`
+   - Any other docs that link to the moved file (use `grep -r`)
+3. After all relocations, remove any now-empty non-canonical subdirs:
+   ```bash
+   rmdir docs/architecture/ docs/experiments/ 2>/dev/null || true
+   ```
+
+### Summary reporting
+
+Include a **RELOCATED** count in the final output:
+
+```
+KEEP: N  UPDATE: N  DELETE: N  RELOCATED: N
+```
+
+List each relocated file:
+```
+#### Relocated
+- `docs/architecture/system-overview.md` → `docs/features/system-overview.md`
+- `docs/tools/quality-standards.md` → `docs/guides/quality-standards.md`
+```
+
+---
+
+## Step 7: Commit with Detailed Summary
 
 Stage all changes and commit with a message that lists each file's verdict and rationale:
 
@@ -182,8 +245,9 @@ Docs audit: remove stale, correct outdated references
 
 Results:
 {for each file: "- {VERDICT} {path}: {rationale}"}
+{for each relocation: "- RELOCATED {old} -> {new}"}
 
-Kept: {N} | Updated: {N} | Deleted: {N}
+Kept: {N} | Updated: {N} | Deleted: {N} | Relocated: {N}
 EOF
 )"
 ```
@@ -201,6 +265,7 @@ After committing, print the final audit report:
 **Kept**: {N} files — no changes needed
 **Updated**: {N} files — corrections applied
 **Deleted**: {N} files — described nonexistent things
+**Relocated**: {N} files — moved to canonical locations
 
 ### Changes Made
 
@@ -211,6 +276,9 @@ After committing, print the final audit report:
 - `docs/bar.md`
   - {correction 1}
   - {correction 2}
+
+#### Relocated
+- `docs/architecture/system-overview.md` → `docs/features/system-overview.md`
 
 ### Committed
 {commit SHA}
@@ -225,3 +293,4 @@ After committing, print the final audit report:
 3. **Verify before acting**: Every verdict is based on actual filesystem/codebase verification, not assumptions.
 4. **Index hygiene**: After deletions, always clean up index files to avoid dead links.
 5. **Transparent output**: Print the summary table before making changes so the human can see what's coming.
+6. **Structure enforcement**: After every audit, verify all docs are in canonical subdirs. Relocate misplaced docs and update cross-references.

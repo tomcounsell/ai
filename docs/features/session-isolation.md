@@ -54,7 +54,7 @@ The worktree manager provides four operations: `create_worktree()`, `remove_work
 Experiments validated the approach before implementation:
 
 1. **Worktree + SDK compatibility**: The Claude Code SDK v2.1.38 works in bare worktree directories with no modifications. Even with `.claude/` completely absent, the SDK no longer crashes. `settings.local.json` is copied for convenience (local settings), not for crash prevention.
-2. **`CLAUDE_CODE_TASK_LIST_ID` scoping**: The env var scopes sub-agent Task storage (`~/.claude/tasks/{id}/`) but does **not** affect TodoWrite, which is always scoped by session ID. See `docs/experiments/task-list-isolation.md` for detailed findings.
+2. **`CLAUDE_CODE_TASK_LIST_ID` scoping**: The env var scopes sub-agent Task storage (`~/.claude/tasks/{id}/`) but does **not** affect TodoWrite, which is always scoped by session ID. See `docs/features/task-list-isolation.md` for detailed findings.
 3. **Thread ID uniqueness**: Using `chat_id` + `root_message_id` provides per-conversation isolation within group chats, not just per-chat isolation.
 
 ## Relevant Files
@@ -65,8 +65,8 @@ Experiments validated the approach before implementation:
 | `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment |
 | `agent/job_queue.py` | Computes task list ID in `_execute_job()` and passes to SDK |
 | `models/sessions.py` | `AgentSession` model with `work_item_slug` field |
-| `docs/experiments/task-list-isolation.md` | Experiment results for CLAUDE_CODE_TASK_LIST_ID behavior |
-| `docs/experiments/worktree-sdk-compatibility.md` | Experiment results for SDK + worktree compatibility |
+| `docs/features/task-list-isolation.md` | Experiment results for CLAUDE_CODE_TASK_LIST_ID behavior |
+| `docs/features/worktree-sdk-compatibility.md` | Experiment results for SDK + worktree compatibility |
 
 ## Completion Signal
 
