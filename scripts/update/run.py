@@ -356,6 +356,13 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             log("  SDK auth: NOT CONFIGURED", v)
             result.warnings.append("SDK auth not configured")
 
+        # Report gitignore issues (un-gitignored embeddings, etc.)
+        if result.verification.gitignore_issues:
+            for issue in result.verification.gitignore_issues:
+                msg = f"{issue.repo}: {issue.file_path} ({issue.size_mb}MB) not in .gitignore"
+                log(f"  WARN: {msg}", v, always=True)
+                result.warnings.append(msg)
+
     # Step 7: Calendar integration
     if config.do_calendar:
         log("Checking calendar integration...", v)

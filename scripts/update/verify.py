@@ -20,6 +20,15 @@ class ToolCheck:
 
 
 @dataclass
+class GitignoreIssue:
+    """A file that should be gitignored but isn't."""
+
+    repo: str
+    file_path: str
+    size_mb: float
+
+
+@dataclass
 class VerificationResult:
     """Result of environment verification."""
 
@@ -30,6 +39,7 @@ class VerificationResult:
     ollama: ToolCheck | None = None
     sdk_auth: dict[str, bool] = field(default_factory=dict)
     mcp_servers: list[str] = field(default_factory=list)
+    gitignore_issues: list[GitignoreIssue] = field(default_factory=list)
 
 
 def run_cmd(
@@ -283,6 +293,54 @@ def check_mcp_servers() -> list[str]:
         return []
 
 
+def check_gitignore_issues() -> list[GitignoreIssue]:
+    """Check all repos under ~/src/ for files that should be gitignored."""
+    issues = []
+    src_dir = Path.home() / "src"
+    if not src_dir.is_dir():
+        return issues
+
+    # Patterns that should never be committed (large generated artifacts)
+    bad_patterns = ["*embedding*.json"]
+
+    skip_dirs = {".venv", ".mypy_cache", "node_modules", "__pycache__", ".git"}
+
+    for repo_dir in sorted(src_dir.iterdir()):
+        if not (repo_dir / ".git").is_dir():
+            continue
+
+        # Find matching files
+        for pattern in bad_patterns:
+            for match in repo_dir.rglob(pattern):
+                # Skip vendored/generated directories
+                if any(part in skip_dirs for part in match.parts):
+                    continue
+
+                rel_path = str(match.relative_to(repo_dir))
+
+                # Check if gitignored
+                result = run_cmd(
+                    ["git", "check-ignore", "-q", rel_path],
+                    cwd=repo_dir,
+                    timeout=5,
+                )
+                if result.returncode != 0:
+                    # Not gitignored
+                    try:
+                        size_mb = match.stat().st_size / (1024 * 1024)
+                    except OSError:
+                        size_mb = 0.0
+                    issues.append(
+                        GitignoreIssue(
+                            repo=repo_dir.name,
+                            file_path=rel_path,
+                            size_mb=round(size_mb, 1),
+                        )
+                    )
+
+    return issues
+
+
 def verify_environment(
     project_dir: Path, check_ollama_model: bool = True
 ) -> VerificationResult:
@@ -300,5 +358,6 @@ def verify_environment(
 
     result.sdk_auth = check_sdk_auth(project_dir)
     result.mcp_servers = check_mcp_servers()
+    result.gitignore_issues = check_gitignore_issues()
 
     return result
