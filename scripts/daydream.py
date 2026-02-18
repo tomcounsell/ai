@@ -4,15 +4,15 @@ Daydream - Autonomous Daily Maintenance System
 
 A long-running process that performs daily maintenance tasks:
 1. Clean up legacy code
-2. Review previous day's logs (with structured error extraction)
+2. Review previous day's logs (per-project, with structured error extraction)
 3. Check error logs via Sentry (skips gracefully if MCP unavailable)
-4. Clean up task management (via gh CLI)
+4. Clean up task management (per-project, via gh CLI)
 5. Update documentation
 6. Produce daily report (local markdown)
 7. Session analysis (thrash ratio, user corrections)
 8. LLM reflection (Claude Haiku categorization)
 9. Memory consolidation (lessons_learned.jsonl)
-10. GitHub issue creation (via daydream_report module)
+10. GitHub issue creation (per-project, via daydream_report module)
 
 This process is resumable - if interrupted, it picks up where it left off.
 """
@@ -50,8 +50,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("daydream")
 
-# Paths
+# Paths — resolved at import time so they stay absolute even if cwd changes
 PROJECT_ROOT = Path(__file__).parent.parent
+AI_ROOT = PROJECT_ROOT  # Preserved alias; do not reassign in production code
 LOGS_DIR = PROJECT_ROOT / "logs"
 DAYDREAM_DIR = LOGS_DIR / "daydream"
 STATE_FILE = DAYDREAM_DIR / "state.json"
@@ -73,6 +74,24 @@ CORRECTION_PATTERNS = [
 
 # Thrash ratio threshold: above this is considered thrashing
 THRASH_RATIO_THRESHOLD = 0.5
+
+
+def load_local_projects() -> list[dict]:
+    """Load projects from config/projects.json, filtered to those present on this machine.
+
+    Returns:
+        List of project dicts, each including a 'slug' key derived from the
+        projects.json key. Only projects whose working_directory exists on disk
+        are returned.
+    """
+    config_path = AI_ROOT / "config" / "projects.json"
+    data = json.loads(config_path.read_text())
+    projects = []
+    for slug, cfg in data.get("projects", {}).items():
+        wd = Path(cfg.get("working_directory", ""))
+        if wd.exists():
+            projects.append({"slug": slug, **cfg})
+    return projects
 
 
 def analyze_sessions(sessions_dir: Path, target_date: str) -> dict[str, Any]:
@@ -412,6 +431,7 @@ class DaydreamRunner:
 
     def __init__(self) -> None:
         self.state = DaydreamState.load()
+        self.projects = load_local_projects()
         self.steps = [
             (1, "Clean Up Legacy Code", self.step_clean_legacy),
             (2, "Review Previous Day's Logs", self.step_review_logs),
@@ -462,8 +482,10 @@ class DaydreamRunner:
         logger.info("Daydream completed successfully")
 
     async def step_clean_legacy(self) -> None:
-        """Step 1: Clean up legacy code."""
+        """Step 1: Clean up legacy code (ai-repo specific)."""
         findings = []
+        cache_dirs: list = []
+        pyc_files: list = []
 
         # Look for TODO comments
         try:
@@ -520,58 +542,81 @@ class DaydreamRunner:
         }
 
     async def step_review_logs(self) -> None:
-        """Step 2: Review previous day's logs with structured error extraction."""
-        findings = []
-        log_files = list(LOGS_DIR.glob("*.log"))
+        """Step 2: Review previous day's logs per project with structured error extraction.
 
-        for log_file in log_files:
-            if not log_file.is_file():
+        Iterates over each local project from config/projects.json and reviews
+        log files in <project>/logs/. Findings are namespaced as
+        '{slug}:log_review' to distinguish per-project results.
+        """
+        total_files_analyzed = 0
+        total_findings = 0
+
+        for project in self.projects:
+            slug = project["slug"]
+            project_dir = Path(project["working_directory"])
+            logs_dir = project_dir / "logs"
+
+            if not logs_dir.exists():
+                logger.info(f"No logs directory found for {slug}, skipping")
                 continue
 
-            try:
-                mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
-                if mtime < datetime.now() - timedelta(days=7):
-                    findings.append(f"Log file {log_file.name} is older than 7 days")
+            log_files = list(logs_dir.glob("*.log"))
+            findings = []
 
-                size_mb = log_file.stat().st_size / (1024 * 1024)
-                if size_mb > 10:
-                    findings.append(
-                        f"Log file {log_file.name} is {size_mb:.1f}MB "
-                        f"- consider rotation"
-                    )
+            for log_file in log_files:
+                if not log_file.is_file():
+                    continue
 
-                # Extract structured errors
-                errors = extract_structured_errors(log_file)
-                if errors:
-                    findings.append(
-                        f"{log_file.name}: {len(errors)} structured errors "
-                        f"extracted"
-                    )
-                    # Include up to 5 most recent errors in findings
-                    for error in errors[-5:]:
-                        msg = error["message"][:200]
+                try:
+                    mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
+                    if mtime < datetime.now() - timedelta(days=7):
                         findings.append(
-                            f"  [{error['level']}] {error['timestamp']}: {msg}"
+                            f"Log file {log_file.name} is older than 7 days"
                         )
 
-                # Also count warnings
-                with open(log_file) as f:
-                    lines = f.readlines()[-1000:]
-                warning_count = sum(1 for line in lines if "WARNING" in line)
-                if warning_count > 10:
-                    findings.append(
-                        f"{log_file.name}: {warning_count} warnings " f"in recent logs"
-                    )
+                    size_mb = log_file.stat().st_size / (1024 * 1024)
+                    if size_mb > 10:
+                        findings.append(
+                            f"Log file {log_file.name} is {size_mb:.1f}MB "
+                            f"- consider rotation"
+                        )
 
-            except Exception as e:
-                findings.append(f"Could not analyze {log_file.name}: {str(e)}")
+                    # Extract structured errors
+                    errors = extract_structured_errors(log_file)
+                    if errors:
+                        findings.append(
+                            f"{log_file.name}: {len(errors)} structured errors "
+                            f"extracted"
+                        )
+                        # Include up to 5 most recent errors in findings
+                        for error in errors[-5:]:
+                            msg = error["message"][:200]
+                            findings.append(
+                                f"  [{error['level']}] {error['timestamp']}: {msg}"
+                            )
 
-        for finding in findings:
-            self.state.add_finding("log_review", finding)
+                    # Also count warnings
+                    with open(log_file) as f:
+                        lines = f.readlines()[-1000:]
+                    warning_count = sum(1 for line in lines if "WARNING" in line)
+                    if warning_count > 10:
+                        findings.append(
+                            f"{log_file.name}: {warning_count} warnings "
+                            f"in recent logs"
+                        )
+
+                except Exception as e:
+                    findings.append(f"Could not analyze {log_file.name}: {str(e)}")
+
+            for finding in findings:
+                self.state.add_finding(f"{slug}:log_review", finding)
+
+            total_files_analyzed += len(log_files)
+            total_findings += len(findings)
 
         self.state.step_progress["review_logs"] = {
-            "files_analyzed": len(log_files),
-            "findings": len(findings),
+            "files_analyzed": total_files_analyzed,
+            "findings": total_findings,
         }
 
     async def step_check_sentry(self) -> None:
@@ -588,37 +633,58 @@ class DaydreamRunner:
         self.state.step_progress["check_sentry"] = {"skipped": True}
 
     async def step_clean_tasks(self) -> None:
-        """Step 4: Clean up task management via gh CLI."""
-        findings = []
+        """Step 4: Clean up task management per project via gh CLI.
 
-        # Check open bug issues via gh CLI
-        try:
-            result = subprocess.run(
-                [
-                    "gh",
-                    "issue",
-                    "list",
-                    "--state",
-                    "open",
-                    "--label",
-                    "bug",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                bug_lines = result.stdout.strip().split("\n")
-                findings.append(f"Found {len(bug_lines)} open bug issues on GitHub")
-                for line in bug_lines[:5]:
-                    findings.append(f"  Bug: {line.strip()}")
-            elif result.returncode == 0:
-                findings.append("No open bug issues on GitHub")
-        except Exception as e:
-            logger.warning(f"Could not check GitHub issues: {e}")
-            findings.append(f"GitHub issue check failed: {e}")
+        For each local project with a github config, runs gh issue list to
+        identify open bugs. Findings are namespaced as '{slug}:tasks'.
+        Projects without github config are skipped.
+        """
+        total_findings = 0
 
-        # Check local todo files
+        for project in self.projects:
+            slug = project["slug"]
+
+            # Skip projects without github config
+            if not project.get("github") or not project["github"].get("org"):
+                logger.info(f"No github config for {slug}, skipping task check")
+                continue
+
+            project_wd = project["working_directory"]
+            findings = []
+
+            try:
+                result = subprocess.run(
+                    [
+                        "gh",
+                        "issue",
+                        "list",
+                        "--state",
+                        "open",
+                        "--label",
+                        "bug",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    cwd=project_wd,
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    bug_lines = result.stdout.strip().split("\n")
+                    findings.append(f"Found {len(bug_lines)} open bug issues on GitHub")
+                    for line in bug_lines[:5]:
+                        findings.append(f"  Bug: {line.strip()}")
+                elif result.returncode == 0:
+                    findings.append("No open bug issues on GitHub")
+            except Exception as e:
+                logger.warning(f"Could not check GitHub issues for {slug}: {e}")
+                findings.append(f"GitHub issue check failed: {e}")
+
+            for finding in findings:
+                self.state.add_finding(f"{slug}:tasks", finding)
+
+            total_findings += len(findings)
+
+        # Also check local todo files in AI_ROOT
         todo_files = list(PROJECT_ROOT.glob("**/TODO.md")) + list(
             PROJECT_ROOT.glob("**/todo.md")
         )
@@ -627,23 +693,22 @@ class DaydreamRunner:
                 content = todo_file.read_text()
                 unchecked = content.count("[ ]")
                 if unchecked > 0:
-                    findings.append(
+                    self.state.add_finding(
+                        "tasks",
                         f"{todo_file.relative_to(PROJECT_ROOT)}: "
-                        f"{unchecked} unchecked items"
+                        f"{unchecked} unchecked items",
                     )
+                    total_findings += 1
             except Exception:
                 pass
 
-        for finding in findings:
-            self.state.add_finding("tasks", finding)
-
         self.state.step_progress["clean_tasks"] = {
             "todo_files": len(todo_files),
-            "findings": len(findings),
+            "findings": total_findings,
         }
 
     async def step_update_docs(self) -> None:
-        """Step 5: Update documentation."""
+        """Step 5: Update documentation (ai-repo specific)."""
         findings = []
 
         docs_dir = PROJECT_ROOT / "docs"
@@ -762,7 +827,7 @@ class DaydreamRunner:
         print("=" * 60)
 
     async def step_session_analysis(self) -> None:
-        """Step 7: Analyze yesterday's sessions."""
+        """Step 7: Analyze yesterday's sessions (ai-repo specific)."""
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
         analysis = analyze_sessions(SESSIONS_DIR, yesterday)
@@ -817,16 +882,112 @@ class DaydreamRunner:
         }
 
     async def step_create_github_issue(self) -> None:
-        """Step 10: Create GitHub issue with findings."""
-        # Only create issue when there are real findings
-        active_findings = {k: v for k, v in self.state.findings.items() if v}
-        if not active_findings:
-            logger.info("No findings to report, skipping GitHub issue creation")
-            self.state.step_progress["github_issue"] = {"created": False}
+        """Step 10: Create GitHub issues per project with findings.
+
+        For each local project with a github config, filters findings
+        namespaced to that project and creates a GitHub issue if findings
+        exist. Also calls step_post_to_telegram for each project.
+        """
+        projects_with_issues = 0
+
+        for project in self.projects:
+            slug = project["slug"]
+
+            # Skip projects without github config
+            if not project.get("github"):
+                logger.info(f"No github config for {slug}, skipping issue creation")
+                continue
+
+            # Gather findings for this project (namespaced and generic)
+            project_findings: dict[str, list[str]] = {}
+            for key, values in self.state.findings.items():
+                if key.startswith(f"{slug}:") and values:
+                    # Strip the slug prefix for cleaner issue formatting
+                    clean_key = key[len(f"{slug}:") :]
+                    project_findings[clean_key] = values
+
+            if not project_findings:
+                logger.info(f"No findings for {slug}, skipping issue creation")
+                continue
+
+            project_wd = project["working_directory"]
+            issue_url_or_bool = create_daydream_issue(
+                project_findings,
+                self.state.date,
+                cwd=project_wd,
+            )
+
+            issue_url = ""
+            if isinstance(issue_url_or_bool, str) and issue_url_or_bool:
+                issue_url = issue_url_or_bool
+                projects_with_issues += 1
+            elif issue_url_or_bool is True:
+                projects_with_issues += 1
+
+            await self.step_post_to_telegram(project, issue_url)
+
+        self.state.step_progress["github_issue"] = {
+            "created": projects_with_issues > 0,
+            "projects_with_issues": projects_with_issues,
+        }
+
+    async def step_post_to_telegram(self, project: dict, issue_url: str = "") -> None:
+        """Post daydream summary to project's Telegram chat.
+
+        Args:
+            project: Project dict from load_local_projects().
+            issue_url: Optional GitHub issue URL to include in message.
+        """
+        groups = project.get("telegram", {}).get("groups", [])
+        if not groups:
+            logger.info(
+                f"No telegram groups configured for {project['slug']}, skipping"
+            )
             return
 
-        created = create_daydream_issue(active_findings, self.state.date)
-        self.state.step_progress["github_issue"] = {"created": created}
+        session_file = AI_ROOT / "data" / "valor.session"
+        if not session_file.exists():
+            logger.info("No valor.session file found, skipping Telegram post")
+            return
+
+        try:
+            from telethon import TelegramClient  # type: ignore[import]
+
+            api_id = int(os.environ.get("TELEGRAM_API_ID", "0"))
+            api_hash = os.environ.get("TELEGRAM_API_HASH", "")
+
+            if not api_id or not api_hash:
+                logger.info("No Telegram credentials, skipping post")
+                return
+
+            # Build summary message
+            slug = project["slug"]
+            findings_count = sum(
+                len(v)
+                for k, v in self.state.findings.items()
+                if k.startswith(f"{slug}:")
+            )
+            msg_lines = [f"Daydream Report — {self.state.date}"]
+            msg_lines.append(f"Project: {project.get('name', slug)}")
+            if findings_count:
+                msg_lines.append(f"Findings: {findings_count} items")
+            else:
+                msg_lines.append("No significant findings today")
+            if issue_url:
+                msg_lines.append(f"GitHub: {issue_url}")
+            message = "\n".join(msg_lines)
+
+            async with TelegramClient(str(session_file), api_id, api_hash) as client:
+                for group_name in groups[:1]:  # only post to first group
+                    try:
+                        await client.send_message(group_name, message)
+                        logger.info(f"Posted daydream summary to {group_name}")
+                    except Exception as e:
+                        logger.warning(f"Could not post to {group_name}: {e}")
+        except ImportError:
+            logger.info("telethon not available, skipping Telegram post")
+        except Exception as e:
+            logger.warning(f"Telegram post failed for {project['slug']}: {e}")
 
 
 async def main() -> None:
