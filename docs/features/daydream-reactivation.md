@@ -12,7 +12,7 @@ The daydream runner (`scripts/daydream.py`) executes these steps sequentially. E
 | 2 | Log Review | Extracts structured errors from `logs/bridge.log` |
 | 3 | Sentry Check | Queries Sentry for unresolved issues (skips gracefully if MCP unavailable) |
 | 4 | Task Cleanup | Lists open bug issues via `gh issue list --label bug` |
-| 5 | Docs Check | Detects old TODOs and docs needing refresh |
+| 5 | Audit Documentation | Weekly LLM-powered accuracy audit of `docs/`; KEEP / UPDATE / DELETE verdicts (see [Documentation Audit](documentation-audit.md)) |
 | 6 | Report Generation | Writes local report to `logs/daydream/report_YYYY-MM-DD.md` |
 | 7 | Session Analysis | Reads session logs, computes thrash ratio, detects corrections |
 | 8 | LLM Reflection | Uses Claude Haiku via Anthropic SDK to categorize mistakes |
