@@ -42,6 +42,7 @@ except ImportError:
     anthropic = None  # type: ignore[assignment]
 
 from scripts.daydream_report import create_daydream_issue  # noqa: E402
+from scripts.docs_auditor import DocsAuditor  # noqa: E402
 
 # Configure logging
 logging.basicConfig(
@@ -417,7 +418,7 @@ class DaydreamRunner:
             (2, "Review Previous Day's Logs", self.step_review_logs),
             (3, "Check Error Logs (Sentry)", self.step_check_sentry),
             (4, "Clean Up Task Management", self.step_clean_tasks),
-            (5, "Update Documentation", self.step_update_docs),
+            (5, "Audit Documentation", self.step_audit_docs),
             (6, "Session Analysis", self.step_session_analysis),
             (7, "LLM Reflection", self.step_llm_reflection),
             (8, "Memory Consolidation", self.step_memory_consolidation),
@@ -642,43 +643,41 @@ class DaydreamRunner:
             "findings": len(findings),
         }
 
-    async def step_update_docs(self) -> None:
-        """Step 5: Update documentation."""
-        findings = []
+    async def step_audit_docs(self) -> None:
+        """Step 5: Audit documentation against codebase (replaces naive timestamp check)."""
+        auditor = DocsAuditor(repo_root=PROJECT_ROOT, dry_run=False)
+        summary = await asyncio.to_thread(auditor.run)
 
-        docs_dir = PROJECT_ROOT / "docs"
-        if docs_dir.exists():
-            doc_files = list(docs_dir.rglob("*.md"))
-            for doc_file in doc_files:
-                try:
-                    mtime = datetime.fromtimestamp(doc_file.stat().st_mtime)
-                    age_days = (datetime.now() - mtime).days
-                    if age_days > 30:
-                        findings.append(
-                            f"{doc_file.relative_to(PROJECT_ROOT)} "
-                            f"hasn't been updated in {age_days} days"
-                        )
-                except Exception:
-                    pass
-
-        claude_md = PROJECT_ROOT / "CLAUDE.md"
-        if claude_md.exists():
-            mtime = datetime.fromtimestamp(claude_md.stat().st_mtime)
-            age_days = (datetime.now() - mtime).days
-            if age_days > 7:
-                findings.append(f"CLAUDE.md hasn't been updated in {age_days} days")
+        # Record findings
+        if summary.skipped:
+            self.state.add_finding(
+                "documentation", f"Docs audit skipped: {summary.skip_reason}"
+            )
         else:
-            findings.append("CLAUDE.md not found")
+            if len(summary.updated) > 0:
+                self.state.add_finding(
+                    "documentation",
+                    f"Updated {len(summary.updated)} docs with corrections",
+                )
+            if len(summary.deleted) > 0:
+                self.state.add_finding(
+                    "documentation",
+                    f"Deleted {len(summary.deleted)} stale/inaccurate docs",
+                )
+            if (
+                len(summary.kept) > 0
+                and len(summary.updated) == 0
+                and len(summary.deleted) == 0
+            ):
+                self.state.add_finding(
+                    "documentation", f"All {len(summary.kept)} docs verified accurate"
+                )
 
-        readme = PROJECT_ROOT / "README.md"
-        if not readme.exists():
-            findings.append("README.md not found")
-
-        for finding in findings:
-            self.state.add_finding("documentation", finding)
-
-        self.state.step_progress["update_docs"] = {
-            "findings": len(findings),
+        self.state.step_progress["audit_docs"] = {
+            "kept": len(summary.kept),
+            "updated": len(summary.updated),
+            "deleted": len(summary.deleted),
+            "skipped": summary.skipped,
         }
 
     async def step_produce_report(self) -> None:
