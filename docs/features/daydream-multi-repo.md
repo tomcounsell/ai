@@ -22,7 +22,7 @@ Set to `PROJECT_ROOT` at module import time (before any `chdir`). Steps that mus
 
 | Step | Type | Behavior |
 |------|------|----------|
-| 1 — Prioritize and clean legacy | AI-only | Runs once from `AI_ROOT` |
+| 1 — Prioritize and clean code | AI-only | Runs once from `AI_ROOT` |
 | 2 — Review logs | Per-project | Iterates each project's `logs/` dir |
 | 3 — Sentry check | AI-only | Runs once (MCP skipped in standalone) |
 | 4 — Clean tasks | Per-project | `gh issue list` per project via `cwd=` |
