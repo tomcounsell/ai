@@ -456,3 +456,59 @@ class TestAuditSummaryRelocated:
         )
         text = str(summary)
         assert "relocated" in text.lower() or "RELOCATED" in text
+
+
+# ---------------------------------------------------------------------------
+# _normalize_filename
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeFilename:
+    def test_readme_returns_none(self, auditor: DocsAuditor) -> None:
+        """README.md must never be normalized — universal GitHub convention."""
+        path = Path("docs/README.md")
+        assert auditor._normalize_filename(path) is None
+
+    def test_uppercase_returns_lowercase(self, auditor: DocsAuditor) -> None:
+        """TELEGRAM.md should normalize to telegram.md."""
+        path = Path("docs/TELEGRAM.md")
+        result = auditor._normalize_filename(path)
+        assert result == Path("docs/telegram.md")
+
+    def test_underscore_replaced_with_hyphen(self, auditor: DocsAuditor) -> None:
+        """TOOL_REBUILD_REQUIREMENTS.md should normalize to tool-rebuild-requirements.md."""
+        path = Path("docs/TOOL_REBUILD_REQUIREMENTS.md")
+        result = auditor._normalize_filename(path)
+        assert result == Path("docs/tool-rebuild-requirements.md")
+
+    def test_mixed_case_normalized(self, auditor: DocsAuditor) -> None:
+        """MCP-Library-Requirements.md should normalize to mcp-library-requirements.md."""
+        path = Path("docs/MCP-Library-Requirements.md")
+        result = auditor._normalize_filename(path)
+        assert result == Path("docs/mcp-library-requirements.md")
+
+    def test_already_correct_returns_none(self, auditor: DocsAuditor) -> None:
+        """deployment.md is already lowercase-with-hyphens — should return None."""
+        path = Path("docs/deployment.md")
+        assert auditor._normalize_filename(path) is None
+
+    def test_changelog_returns_none(self, auditor: DocsAuditor) -> None:
+        """CHANGELOG.md is a standard project file — must be exempted."""
+        path = Path("CHANGELOG.md")
+        assert auditor._normalize_filename(path) is None
+
+    def test_license_returns_none(self, auditor: DocsAuditor) -> None:
+        """LICENSE.md is a standard project file — must be exempted."""
+        path = Path("LICENSE.md")
+        assert auditor._normalize_filename(path) is None
+
+    def test_contributing_returns_none(self, auditor: DocsAuditor) -> None:
+        """CONTRIBUTING.md is a standard project file — must be exempted."""
+        path = Path("CONTRIBUTING.md")
+        assert auditor._normalize_filename(path) is None
+
+    def test_nested_path_preserves_parent_dir(self, auditor: DocsAuditor) -> None:
+        """Normalization should only affect the filename, not parent directories."""
+        path = Path("docs/features/OLD_NAME.md")
+        result = auditor._normalize_filename(path)
+        assert result == Path("docs/features/old-name.md")

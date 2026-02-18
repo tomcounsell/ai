@@ -79,6 +79,7 @@ class AuditSummary:
     updated: list[str] = field(default_factory=list)
     deleted: list[str] = field(default_factory=list)
     relocated: list[str] = field(default_factory=list)
+    renamed: list[str] = field(default_factory=list)
     verdicts: dict[str, Verdict] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
 
@@ -91,6 +92,7 @@ class AuditSummary:
             f"UPDATED  ({len(self.updated)}): {', '.join(self.updated) or 'none'}",
             f"DELETED  ({len(self.deleted)}): {', '.join(self.deleted) or 'none'}",
             f"RELOCATED({len(self.relocated)}): {', '.join(self.relocated) or 'none'}",
+            f"RENAMED  ({len(self.renamed)}): {', '.join(self.renamed) or 'none'}",
         ]
         if self.errors:
             lines.append(f"ERRORS   ({len(self.errors)}): {'; '.join(self.errors)}")
@@ -520,6 +522,16 @@ class DocsAuditor:
                 summary.errors.append(msg)
                 summary.kept.append(str(path))  # safe default: keep on error
 
+        # Normalize filenames to lowercase-with-hyphens
+        for path in docs:
+            if str(path) not in summary.deleted:
+                normalized = self._normalize_filename(path)
+                if normalized is not None:
+                    rename_note = f"{path} → {normalized}"
+                    if self.rename_doc(path, normalized):
+                        summary.renamed.append(rename_note)
+                        logger.info("Normalized filename: %s", rename_note)
+
         # Check and record docs that are in non-canonical locations
         for path in docs:
             if str(path) not in summary.deleted:
@@ -737,6 +749,80 @@ CORRECTIONS:
             if suggested_subdir
             else Path("docs") / filename
         )
+
+    # ------------------------------------------------------------------
+    # Filename normalization
+    # ------------------------------------------------------------------
+
+    #: Filenames that must stay uppercase (universal conventions).
+    KEEP_UPPERCASE_FILENAMES = frozenset(
+        {"README.md", "CHANGELOG.md", "LICENSE.md", "CONTRIBUTING.md"}
+    )
+
+    def _normalize_filename(self, path: Path) -> Path | None:
+        """Return the normalized path if the filename needs renaming.
+
+        Rules:
+        - README.md, CHANGELOG.md, LICENSE.md, CONTRIBUTING.md: always keep as-is.
+        - Any other filename with uppercase letters or underscores: normalize to
+          lowercase with underscores replaced by hyphens.
+
+        Args:
+            path: Path relative to repo_root (e.g. ``docs/TELEGRAM.md``).
+
+        Returns:
+            The normalized path (same parent, new filename) if renaming is needed,
+            or ``None`` if the filename is already correct.
+
+        Examples::
+
+            _normalize_filename(Path("docs/TELEGRAM.md"))
+                → Path("docs/telegram.md")
+            _normalize_filename(Path("docs/TOOL_REBUILD_REQUIREMENTS.md"))
+                → Path("docs/tool-rebuild-requirements.md")
+            _normalize_filename(Path("docs/MCP-Library-Requirements.md"))
+                → Path("docs/mcp-library-requirements.md")
+            _normalize_filename(Path("docs/README.md"))
+                → None  (exempted)
+            _normalize_filename(Path("docs/deployment.md"))
+                → None  (already correct)
+        """
+        filename = path.name
+        if filename in self.KEEP_UPPERCASE_FILENAMES:
+            return None
+        normalized = filename.lower().replace("_", "-")
+        if normalized == filename:
+            return None  # already correct
+        return path.parent / normalized
+
+    def rename_doc(self, path: Path, normalized: Path) -> bool:
+        """Rename a doc file using ``git mv`` so git tracks the rename.
+
+        In dry-run mode, prints the rename without performing it.
+
+        Args:
+            path: Current path relative to repo_root.
+            normalized: Target path relative to repo_root.
+
+        Returns:
+            True if the rename succeeded (or would succeed in dry-run), False on error.
+        """
+        if self.dry_run:
+            print(f"[DRY RUN] RENAME {path} → {normalized}")
+            return True
+
+        try:
+            subprocess.run(
+                ["git", "mv", str(path), str(normalized)],
+                cwd=self.repo_root,
+                check=True,
+                capture_output=True,
+            )
+            logger.info("Renamed %s → %s", path, normalized)
+            return True
+        except subprocess.CalledProcessError as e:
+            logger.error("git mv failed for %s → %s: %s", path, normalized, e)
+            return False
 
     def _classify_doc_content(self, content_lower: str) -> str | None:
         """Classify document content into a canonical subdir name.

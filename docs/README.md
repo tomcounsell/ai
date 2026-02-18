@@ -35,7 +35,7 @@ tail -f logs/bridge.log
 
 | Document | Description |
 |----------|-------------|
-| [Telegram Integration](TELEGRAM.md) | Complete Telegram interface documentation |
+| [Telegram Integration](telegram.md) | Complete Telegram interface documentation |
 
 ### Operations
 
