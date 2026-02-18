@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Small
 owner: Valor Engels
@@ -23,10 +23,11 @@ The root cause is structural: `scripts/daydream.py` is hardcoded to analyze only
 
 **Desired outcome:**
 - Daydream iterates over each project in `config/projects.json` whose `working_directory` exists on the current machine
-- Log review, task cleanup, and issue creation are scoped per-project
-- Each project's GitHub issue is created in its own repo (`--repo org/repo`)
+- For each project, daydream `chdir`s into that project's `working_directory` and runs analysis from there — logs, `gh` calls, and issue creation are all native to that repo's context
+- Each project's GitHub issue (`Daydream Report - {date}`) is created in its own repo — no project name in the title needed, the repo is the context
+- The daydream run ends with a short summary posted to the project's Telegram chat group (from `config/projects.json` → `telegram.groups[0]`)
 - The `ai`-specific steps (file cleanup, Sentry, docs check) run once, as before
-- No cross-machine deduplication code needed — each machine's local project set is its natural scope
+- No cross-machine deduplication needed — machine-to-repo assignment is ops-managed; each machine's active repos map to their Telegram chat groups
 
 ## Appetite
 
@@ -56,28 +57,43 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/daydream_multi
 ### Key Elements
 
 - **Project loader**: Reads `config/projects.json`, filters to projects whose `working_directory` exists on this machine. Called once at `DaydreamRunner.__init__`.
-- **Per-project log review** (step 2): For each project, look for `*.log` files in `{working_directory}/logs/`. Report errors per-project.
-- **Per-project task cleanup** (step 4): Run `gh issue list --repo {org}/{repo}` for each project's GitHub repo.
-- **Project-aware issue creation** (step 10): `create_daydream_issue()` gains an optional `repo` parameter, passed as `--repo` to all `gh` calls.
-- **LLM reflection** (step 7): Collects findings across all projects and reflects on cross-project patterns.
-- **Single-repo steps stay single-repo**: Steps 1 (file cleanup), 3 (Sentry), 5 (docs check) remain `ai`-repo scoped.
+- **Per-project runner**: For each local project, a `ProjectDaydreamRunner` (or equivalent loop) `os.chdir()`s into the project's `working_directory`, then runs the per-project steps using paths relative to that root.
+- **Per-project log review** (step 2): Runs from the project's root — `logs/*.log` relative to `working_directory`.
+- **Per-project task cleanup** (step 4): Runs `gh issue list` from inside the project's repo dir — `gh` auto-detects the remote.
+- **Per-project issue creation** (step 10): Runs `gh issue create` from inside the project's repo dir — no `--repo` flag needed; `gh` resolves it from the git remote.
+- **Per-project Telegram post** (new step 11): After creating the GitHub issue, posts a brief summary to `telegram.groups[0]` for that project using Telethon. The bridge session file is reused — no separate auth needed.
+- **LLM reflection** (step 7/8): Collects findings across all projects and reflects on cross-project patterns.
+- **Single-repo steps stay single-repo**: Steps 1 (file cleanup), 3 (Sentry), 5 (docs check) run once from the `ai` repo root, as before.
 
 ### Flow
 
-`DaydreamRunner.__init__` → `load_local_projects()` → filter by `working_directory` existence
-
-Steps 2, 4: loop per-project → collect per-project findings into `self.state.findings["{project_slug}:{category}"]`
-
-Step 10: loop per-project → `create_daydream_issue(findings, date, repo="{org}/{repo}")`
+```
+main()
+  → load_local_projects()          # filter config to locally-present repos
+  → steps 1, 3, 5                  # run once, ai-repo context (no chdir)
+  → for project in local_projects:
+      os.chdir(project.working_directory)
+      → step_review_logs()         # logs/*.log relative to project root
+      → step_clean_tasks()         # gh issue list (gh auto-detects remote)
+      → step_session_analysis()    # sessions in project's logs/sessions/
+      → step_create_github_issue() # gh issue create (gh auto-detects remote)
+      → step_post_to_telegram()    # post summary to telegram.groups[0]
+  → os.chdir(AI_ROOT)              # restore
+  → step_llm_reflection()          # cross-project patterns
+  → step_memory_consolidation()
+  → step_produce_report()
+```
 
 ### Technical Approach
 
 **`scripts/daydream.py`**
 
-Add a `load_local_projects()` helper at module level:
+Add `AI_ROOT = PROJECT_ROOT` constant at the top to preserve the `ai` repo path before any `chdir`.
+
+Add a `load_local_projects()` helper:
 ```python
 def load_local_projects() -> list[dict]:
-    config_path = PROJECT_ROOT / "config" / "projects.json"
+    config_path = AI_ROOT / "config" / "projects.json"
     data = json.loads(config_path.read_text())
     projects = []
     for slug, cfg in data.get("projects", {}).items():
@@ -87,21 +103,22 @@ def load_local_projects() -> list[dict]:
     return projects
 ```
 
-In `DaydreamRunner.__init__`, call `self.projects = load_local_projects()`.
-
-In `step_review_logs`: loop over `self.projects`, check `{wd}/logs/*.log` for each.
-
-In `step_clean_tasks`: loop over `self.projects`, run `gh issue list --repo {org}/{repo}` for each.
-
-In `step_create_github_issue`: loop over `self.projects`, call `create_daydream_issue(project_findings, date, repo=f"{org}/{repo}")`.
+Restructure `DaydreamRunner.run()` as a loop:
+1. Run ai-only steps (1, 3, 5) from `AI_ROOT`
+2. For each project: `os.chdir(project["working_directory"])`, run steps 2, 4, 6 (session analysis), 10
+3. Restore `os.chdir(AI_ROOT)`, run steps 7, 8, 9 (reflection, memory, report)
 
 **`scripts/daydream_report.py`**
 
-`issue_exists_for_date(date, repo=None)` — when `repo` is provided, add `["--repo", repo]` to the `gh issue list` call.
+No changes needed to function signatures — `gh` CLI auto-detects the repo from the current directory's git remote. `issue_exists_for_date()` and `create_daydream_issue()` work as-is when called from inside the project's `working_directory`.
 
-`create_daydream_issue(findings, date, repo=None)` — when `repo` is provided, add `["--repo", repo]` to both calls.
+**Step 11 — Telegram post**: After `step_create_github_issue()` for each project, call `step_post_to_telegram(project)`. This posts a short summary (issue count, key findings, link to GitHub issue) to `project["telegram"]["groups"][0]`. Use Telethon with the existing bridge session file (`data/valor.session`). Keep the message short — one paragraph, no raw data dumps.
 
-**Findings key strategy**: Use `"{project_slug}:{category}"` as the key in `state.findings` to namespace per-project findings while keeping existing structure. The report generation groups by project first.
+If a project has no `telegram.groups` configured, skip silently.
+
+**State file location**: Keep at `AI_ROOT / "logs/daydream/state.json"` — use `AI_ROOT` explicitly so the state persists across `chdir` calls.
+
+**Findings namespacing**: Use `"{project_slug}:{category}"` as the key in `state.findings` to keep per-project findings distinct in the consolidated report.
 
 ## Rabbit Holes
 
@@ -112,11 +129,7 @@ In `step_create_github_issue`: loop over `self.projects`, call `create_daydream_
 
 ## Risks
 
-### Risk 1: `ai` repo duplication persists
-**Impact:** All machines run daydream from `/Users/valorengels/src/ai` — it's where the script lives. So `valor` will appear in every machine's local projects list. The race condition for the `ai`/`valor` repo issue is not fully eliminated.
-**Mitigation:** The `issue_exists_for_date()` check catches all-but-simultaneous runs. For true simultaneous runs: document as known limitation; the practical frequency (4 machines all within ~30 seconds) is low and the noise is tolerable until a per-project machine assignment config exists.
-
-### Risk 2: Projects without GitHub config
+### Risk 1: Projects without GitHub config
 **Impact:** Some projects in `config/projects.json` may lack a `github` key. Daydream would crash or silently skip.
 **Mitigation:** In `step_create_github_issue`, skip projects without a `github.org` + `github.repo`. Log a warning. Same check in `step_clean_tasks` for `gh issue list`.
 
@@ -155,7 +168,8 @@ No agent integration required — daydream runs as a standalone script via launc
 - [ ] Step 4 (task cleanup) runs `gh issue list --repo {org}/{repo}` per project
 - [ ] Step 10 (GitHub issue) creates issue in each project's own repo (`--repo` flag)
 - [ ] `ai`-specific steps (1, 3, 5) run once, unchanged
-- [ ] Projects without `github` config or `logs/` dir are skipped gracefully
+- [ ] Each project run ends with a Telegram post to `telegram.groups[0]`
+- [ ] Projects without `telegram.groups` or `github` config are skipped gracefully
 - [ ] `pytest tests/` passes
 - [ ] Documentation updated
 
@@ -193,8 +207,9 @@ No agent integration required — daydream runs as a standalone script via launc
 - Wire `self.projects` into `DaydreamRunner.__init__`
 - Update `step_review_logs` to iterate over local projects' log dirs
 - Update `step_clean_tasks` to run `gh issue list --repo` per project
-- Update `step_create_github_issue` to call `create_daydream_issue` per project
-- Add optional `repo` parameter to `issue_exists_for_date()` and `create_daydream_issue()` in `scripts/daydream_report.py`
+- Update `step_create_github_issue` to call `create_daydream_issue` per project (from inside project's `working_directory`)
+- Add `step_post_to_telegram(project)` — post summary to `project["telegram"]["groups"][0]` via Telethon using `data/valor.session`
+- No changes needed to `scripts/daydream_report.py` — `gh` auto-detects repo from cwd
 
 ### 2. Validate implementation
 - **Task ID**: validate-daydream-multi-repo
@@ -236,10 +251,3 @@ No agent integration required — daydream runs as a standalone script via launc
 - `pytest tests/` — full test suite
 - `black . && ruff check .` — linting
 
----
-
-## Open Questions
-
-1. **Issue title format per project**: Should the GitHub issue title be `Daydream Report - {date}` (same as now, but in the project's own repo) or include the project name, e.g., `Daydream Report - {date} - Popoto`? The latter is more readable when viewing issues across repos. Leaning toward including project name.
-
-2. **`valor`/`ai` duplication**: All machines will include `valor` in their local projects (daydream lives there). Should we accept the occasional duplicate for the `ai` repo, or add a `primary_machine` flag to `projects.json` to designate which machine creates the `ai` report? The current dedup check handles non-simultaneous runs.
