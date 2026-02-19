@@ -322,8 +322,7 @@ def test_api_access() -> tuple[bool, str]:
 
 def print_manual_fallback(episode_dir: Path) -> None:
     """Print manual NotebookLM instructions when API is unavailable."""
-    print(
-        f"""
+    print(f"""
 {'='*60}
 API UNAVAILABLE - USE MANUAL WORKFLOW
 {'='*60}
@@ -343,8 +342,7 @@ This will:
 Then paste into NotebookLM at: https://notebooklm.google.com/
 
 {'='*60}
-"""
-    )
+""")
 
 
 def generate_episode_focus(episode_title: str, series_name: str = "") -> str:
