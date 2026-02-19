@@ -675,6 +675,8 @@ class DaydreamRunner:
             "kept": len(summary.kept),
             "updated": len(summary.updated),
             "deleted": len(summary.deleted),
+            "renamed": len(summary.renamed),
+            "relocated": len(summary.relocated),
             "skipped": summary.skipped,
         }
 

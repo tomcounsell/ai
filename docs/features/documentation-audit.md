@@ -16,13 +16,13 @@ To preview what would happen without making changes:
 python scripts/docs_auditor.py --dry-run
 ```
 
-The `--dry-run` flag prints verdicts and reasons to stdout without writing, deleting, or committing anything (`scripts/docs_auditor.py:L295`).
+The `--dry-run` flag prints verdicts and reasons to stdout without writing, deleting, or committing anything (see `argparse` setup in `scripts/docs_auditor.py`, or the `dry_run` parameter on `DocsAuditor.__init__`).
 
 ## Automatic Execution via Daydream
 
 The audit is integrated into daydream as step 5 (`step_audit_docs`) in `scripts/daydream.py:L644`. It replaces the older `step_update_docs` approach, which used a 30-day timestamp check — a mechanism that was actively harmful (a freshly-written doc describing an unbuilt feature would pass; an accurate 60-day-old doc would be flagged).
 
-**Frequency gating.** The step reads `last_audit_date` from `data/daydream_state.json`. If that date is fewer than 7 days ago, the step is skipped (`scripts/docs_auditor.py:L891`). This prevents redundant full-corpus scans during daily daydream runs while ensuring the audit runs at least weekly.
+**Frequency gating.** The step reads `last_audit_date` from `data/daydream_state.json`. If that date is fewer than 7 days ago, the step is skipped (`DocsAuditor._should_skip()`, `scripts/docs_auditor.py:L901`). This prevents redundant full-corpus scans during daily daydream runs while ensuring the audit runs at least weekly.
 
 After a successful run, daydream records findings and writes back to state:
 
@@ -33,6 +33,8 @@ After a successful run, daydream records findings and writes back to state:
     "kept": 12,
     "updated": 3,
     "deleted": 1,
+    "renamed": 2,
+    "relocated": 1,
     "skipped": false
   }
 }
@@ -48,7 +50,7 @@ Each audited document receives one of three verdicts:
 | `UPDATE` | Some references are broken or no longer accurate | Targeted corrections applied |
 | `DELETE` | Too much of the doc is unverifiable | File deleted, index links swept |
 
-**Conservative threshold.** A document is marked `DELETE` only when more than 60% of its verifiable references cannot be confirmed against the codebase (`scripts/docs_auditor.py:L189`). Everything below that threshold gets `UPDATE`, giving a human or agent a chance to revise rather than lose content outright.
+**Conservative threshold.** The `DELETE` verdict is the LLM's judgment call, not a hardcoded numeric threshold.  `DocsAuditor.analyze_doc()` builds a verification report of broken vs. verified references and passes it to `_call_llm_for_verdict()`, which instructs the LLM to prefer `UPDATE` over `DELETE` when uncertain and to only `DELETE` when the primary subject of the document is verifiably absent from the codebase.  A rough 60% guideline is communicated to the LLM in the prompt as a heuristic, but there is no code that enforces a numeric cutoff.
 
 ## What References Are Checked
 
@@ -67,7 +69,7 @@ References are extracted from Markdown prose and code blocks using regex pattern
 
 ## Directory Structure Standards
 
-The auditor enforces placement conventions in addition to content accuracy. Each subdirectory has a defined purpose (`scripts/docs_auditor.py:L700`):
+The auditor enforces placement conventions in addition to content accuracy. Each subdirectory has a defined purpose (`DocsAuditor._check_doc_location()`, `scripts/docs_auditor.py:L710`):
 
 | Directory | Purpose |
 |-----------|---------|
@@ -79,13 +81,13 @@ The auditor enforces placement conventions in addition to content accuracy. Each
 | `docs/plans/` | Plans for new work items — **not audited** against codebase content |
 | `docs/` (flat) | Extra docs, patterns, and best practices that don't fit a subdirectory |
 
-Documents found in non-canonical subdirectories are flagged in the audit report with a suggested canonical path. The `/do-docs-audit` skill also performs physical relocation as part of its run.
+Documents found in non-canonical subdirectories are flagged in the audit report with a suggested canonical path and recorded in `AuditSummary.relocated`.  `DocsAuditor.run()` does *not* move any files — relocation detection is advisory only.  The `/do-docs-audit` skill (SKILL.md Step 6) reads the relocation suggestions and performs actual physical moves via Claude Code after the audit completes.
 
 Non-canonical subdirectories that have been collapsed into the above structure: `docs/architecture/`, `docs/experiments/`, `docs/improvements/`, `docs/tools/`.
 
 ## Filename Convention
 
-All documentation files use lowercase-with-hyphens naming (`scripts/docs_auditor.py:L762`):
+All documentation files use lowercase-with-hyphens naming (`DocsAuditor._normalize_filename()`, `scripts/docs_auditor.py:L772`):
 
 ```
 my-feature.md          # correct
@@ -98,7 +100,7 @@ Exempt from renaming: `README.md`, `CHANGELOG.md`, `LICENSE.md`, `CONTRIBUTING.m
 
 ## DocsAuditor Class
 
-`scripts/docs_auditor.py` is both a CLI script and an importable module (`scripts/docs_auditor.py:L284`).
+`scripts/docs_auditor.py` is both a CLI script and an importable module (`class DocsAuditor`, `scripts/docs_auditor.py:L284`).
 
 ```python
 from scripts.docs_auditor import DocsAuditor
@@ -139,7 +141,7 @@ class AuditSummary:
 
 ## LLM Usage
 
-The auditor uses two models for analysis (`scripts/docs_auditor.py:L561`):
+The auditor uses two models for analysis (`DocsAuditor._call_llm_for_verdict()`, `scripts/docs_auditor.py:L579`):
 
 1. `claude-haiku-4-5-20251001` — fast, cheap; handles reference extraction and initial verdict
 2. `claude-sonnet-4-6` — escalated to when Haiku confidence is low (unclear verdicts)

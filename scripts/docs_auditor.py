@@ -282,7 +282,14 @@ def _build_verification_report(
 
 
 class DocsAuditor:
-    """Audit documentation files against the actual codebase."""
+    """Audit documentation files against the actual codebase.
+
+    Note on relocation: ``run()`` detects non-canonical doc locations and records
+    them in ``AuditSummary.relocated``, but does *not* move any files.  Relocation
+    detection here is advisory only — the ``/do-docs-audit`` skill (SKILL.md Step 6)
+    handles actual physical relocation via Claude Code after the audit report is
+    produced.
+    """
 
     STATE_FILE = Path("data/daydream_state.json")
     AUDIT_FREQUENCY_DAYS = 7
@@ -532,7 +539,10 @@ class DocsAuditor:
                         summary.renamed.append(rename_note)
                         logger.info("Normalized filename: %s", rename_note)
 
-        # Check and record docs that are in non-canonical locations
+        # Check and record docs that are in non-canonical locations.
+        # NOTE: This is advisory only — no files are moved here.  The
+        # /do-docs-audit skill (SKILL.md Step 6) reads summary.relocated and
+        # performs the actual relocation via Claude Code.
         for path in docs:
             if str(path) not in summary.deleted:
                 suggested = self._check_doc_location(path)
