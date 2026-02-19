@@ -54,7 +54,7 @@ class ChatSession(BaseModel):
 
 # Create the chat agent with tools (defer model to avoid OpenAI client init at import time)
 chat_agent = Agent(
-    "openai:gpt-4.1",
+    "openai:gpt-5.2",
     deps_type=ChatDependencies,
     tools=[run_python],
     system_prompt=(
