@@ -28,11 +28,13 @@ Parse `TEST_ARGS` to determine what to run:
 | `--no-lint` | Skip ruff/black checks (combinable with any above) |
 | `unit --no-lint` | Run `tests/unit/` without lint |
 | `--changed --no-lint` | Changed-file tests without lint |
+| `frontend <url> "<scenario>"` | Run a browser-based UI test via `frontend-tester` subagent |
 
 **Parsing rules:**
 1. Extract flags: `--changed`, `--no-lint`
-2. Whatever remains is the **target**: a test type name (`unit`, `integration`, `e2e`, `tools`, `performance`) or a file/directory path
-3. If no target and no `--changed`, target is "all"
+2. If target is `frontend`, route to **Frontend Testing** (see below) — do not run pytest
+3. Whatever remains is the **target**: a test type name (`unit`, `integration`, `e2e`, `tools`, `performance`) or a file/directory path
+4. If no target and no `--changed`, target is "all"
 
 ## Changed-File Detection (`--changed`)
 
@@ -168,6 +170,59 @@ AssertionError: Expected 401, got 200
 **Final verdict:**
 - If ALL suites pass: report `ALL TESTS PASSED`
 - If ANY suite fails: report `TESTS FAILED` with failure details prominently displayed
+
+## Frontend Testing (`frontend` target)
+
+When `TEST_ARGS` starts with `frontend`, route to the `frontend-tester` subagent. Do **not** run pytest.
+
+**Input format:**
+```
+/do-test frontend https://myapp.com "Login form submits and shows dashboard"
+/do-test frontend https://myapp.com "Checkout flow completes successfully" -- steps: click add-to-cart, click checkout, fill address, submit
+```
+
+**Dispatch a single `frontend-tester` subagent:**
+
+```
+Task({
+  description: "Frontend test: <scenario>",
+  subagent_type: "frontend-tester",
+  prompt: "
+URL: <url>
+Scenario: <scenario>
+Steps:
+  <extracted steps if provided, otherwise infer from scenario>
+Expected: <inferred from scenario>
+  "
+})
+```
+
+The `frontend-tester` agent owns all `agent-browser` interaction — the skill never calls `agent-browser` directly.
+
+**When running all tests** (no target) and a `tests/frontend/` directory exists with `.json` or `.yaml` scenario files, dispatch one `frontend-tester` subagent per scenario file in parallel alongside the pytest agents.
+
+**Scenario file format** (for `tests/frontend/`):
+```json
+{
+  "url": "https://myapp.com/login",
+  "scenario": "Login with valid credentials shows dashboard",
+  "steps": [
+    "Fill email field with test@example.com",
+    "Fill password field with password123",
+    "Click Login button"
+  ],
+  "expected": "Dashboard page loads with user name visible"
+}
+```
+
+**Result aggregation:** Include frontend results in the summary table alongside pytest suites:
+
+```
+| Suite           | Status | Passed | Failed | Screenshot |
+|-----------------|--------|--------|--------|------------|
+| frontend/login  | PASS   | 1      | 0      | /tmp/...   |
+| frontend/checkout | FAIL | 0      | 1      | /tmp/...   |
+```
 
 ## CWD-Relative Execution
 
