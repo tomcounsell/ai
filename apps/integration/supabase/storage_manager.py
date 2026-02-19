@@ -6,7 +6,7 @@ from supabase import Client, create_client
 
 class SupabaseStorageManager:
     def __init__(self, bucket_name: str | None = None):
-        self.bucket_name = bucket_name or settings.SUPABASE_BUCKET_NAME
+        self.bucket_name = bucket_name or settings.SUPABASE_PUBLIC_BUCKET_NAME
         self.client: Client = create_client(
             settings.SUPABASE_PROJECT_URL, settings.SUPABASE_SERVICE_ROLE_KEY
         )
@@ -85,6 +85,22 @@ class SupabaseStorageManager:
             return public_url
         except Exception as e:
             raise ValueError(f"Error getting public URL: {str(e)}")
+
+    def create_signed_url(self, file_path: str, expires_in: int = 86400) -> str:
+        """Create a signed URL with expiration for private file access.
+
+        Args:
+            file_path: Path of the file in the storage.
+            expires_in: URL expiration time in seconds (default: 24 hours).
+
+        Returns:
+            Signed URL with time-limited access.
+        """
+        try:
+            result = self.storage_client.create_signed_url(file_path, expires_in)
+            return result.get("signedURL", "")
+        except Exception as e:
+            raise ValueError(f"Error creating signed URL: {str(e)}")
 
     def download(self, file_path: str) -> bytes:
         """

@@ -488,3 +488,95 @@ class EpisodeArtifactModelTestCase(TestCase):
         self.assertEqual(EpisodeArtifact.objects.count(), 1)
         self.episode.delete()
         self.assertEqual(EpisodeArtifact.objects.count(), 0)
+
+
+class PodcastImmutabilityTestCase(TestCase):
+    """Tests for Podcast.is_public immutability after creation."""
+
+    def test_create_public_podcast(self):
+        """Creating a podcast with is_public=True works."""
+        podcast = Podcast.objects.create(
+            title="Public Podcast",
+            slug="public-immut",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=True,
+        )
+        podcast.refresh_from_db()
+        self.assertTrue(podcast.is_public)
+
+    def test_create_private_podcast(self):
+        """Creating a podcast with is_public=False works."""
+        podcast = Podcast.objects.create(
+            title="Private Podcast",
+            slug="private-immut",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+        )
+        podcast.refresh_from_db()
+        self.assertFalse(podcast.is_public)
+
+    def test_cannot_change_public_to_private(self):
+        """Changing is_public from True to False raises ValueError."""
+        podcast = Podcast.objects.create(
+            title="Was Public",
+            slug="was-public",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=True,
+        )
+        podcast.is_public = False
+        with self.assertRaises(ValueError) as ctx:
+            podcast.save()
+        self.assertIn("cannot be changed", str(ctx.exception))
+
+    def test_cannot_change_private_to_public(self):
+        """Changing is_public from False to True raises ValueError."""
+        podcast = Podcast.objects.create(
+            title="Was Private",
+            slug="was-private",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+        )
+        podcast.is_public = True
+        with self.assertRaises(ValueError) as ctx:
+            podcast.save()
+        self.assertIn("cannot be changed", str(ctx.exception))
+
+    def test_save_same_visibility_works(self):
+        """Saving with same is_public value does not raise."""
+        podcast = Podcast.objects.create(
+            title="Same Vis",
+            slug="same-vis",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=True,
+        )
+        podcast.title = "Updated Title"
+        podcast.save()  # Should not raise
+        podcast.refresh_from_db()
+        self.assertEqual(podcast.title, "Updated Title")
+        self.assertTrue(podcast.is_public)
+
+    def test_save_private_same_visibility_works(self):
+        """Saving private podcast with same is_public=False does not raise."""
+        podcast = Podcast.objects.create(
+            title="Private Same",
+            slug="private-same",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+        )
+        podcast.description = "Updated description"
+        podcast.save()  # Should not raise
+        podcast.refresh_from_db()
+        self.assertEqual(podcast.description, "Updated description")
+        self.assertFalse(podcast.is_public)

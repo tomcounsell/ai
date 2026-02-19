@@ -62,8 +62,14 @@ def generate_cover_art(episode_id: int) -> str:
     # Once image_bytes are available:
     #
     #   storage_key = f"podcast/{episode.podcast.slug}/{episode.slug}/cover.png"
-    #   cover_url = store_file(storage_key, image_bytes, "image/png")
-    #   episode.cover_image_url = cover_url
+    #   is_public = episode.podcast.is_public
+    #   cover_url = store_file(storage_key, image_bytes, "image/png", public=is_public)
+    #   if is_public:
+    #       episode.cover_image_url = cover_url
+    #   else:
+    #       # For private podcasts, store the storage key instead of the URL.
+    #       # Fresh signed URLs are generated on-demand in the feed view.
+    #       episode.cover_image_url = storage_key
     #   episode.save(update_fields=["cover_image_url"])
     #   return cover_url
 

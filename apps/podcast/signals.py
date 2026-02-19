@@ -172,10 +172,42 @@ def check_workflow_progression(sender, instance, **kwargs):
 
     current_step = wf.current_step
 
-    if current_step == "Targeted Research":
-        if _check_targeted_research_complete(episode.id):
-            _try_enqueue_next_step(episode.id, current_step)
+    # noqa: SIM114 - Keep if/elif for clarity over combined logical or
+    if current_step == "Targeted Research" and _check_targeted_research_complete(
+        episode.id
+    ):
+        _try_enqueue_next_step(episode.id, current_step)
+    elif current_step == "Publishing Assets" and _check_publishing_assets_complete(
+        episode.id
+    ):
+        _try_enqueue_next_step(episode.id, current_step)
 
-    elif current_step == "Publishing Assets":
-        if _check_publishing_assets_complete(episode.id):
-            _try_enqueue_next_step(episode.id, current_step)
+
+# ---------------------------------------------------------------------------
+# Feed cache invalidation
+# ---------------------------------------------------------------------------
+
+
+@receiver(post_save, sender="podcast.Episode")
+def invalidate_feed_cache_on_episode_change(sender, instance, **kwargs):
+    """Invalidate the podcast feed cache when an episode's publish status changes.
+
+    This ensures the RSS feed is regenerated when episodes are published or
+    unpublished, rather than relying solely on the 5-minute TTL.
+    """
+    from django.core.cache import cache
+
+    # Only invalidate if the episode has a podcast (should always be true)
+    if not instance.podcast_id:
+        return
+
+    # Build cache key for the podcast feed
+    # This matches the cache key used by PodcastFeedView
+    cache_key = f"podcast_feed_{instance.podcast.slug}"
+    cache.delete(cache_key)
+
+    logger.debug(
+        "Feed cache invalidated for podcast %s (episode %s changed)",
+        instance.podcast.slug,
+        instance.slug,
+    )

@@ -1,10 +1,12 @@
 ---
-status: Ready
+status: Done
 type: feature
 appetite: Small
 owner: Valor
 created: 2026-02-14
+completed: 2026-02-19
 tracking: https://github.com/yudame/cuttlefish/issues/61
+implementation: https://github.com/yudame/cuttlefish/pull/87
 ---
 
 # File Storage Service: Abstract Interface for Binary File Storage
@@ -13,11 +15,22 @@ tracking: https://github.com/yudame/cuttlefish/issues/61
 
 The podcast workflow (and future features) need to store and retrieve binary files (audio MP3s, cover art images, PDFs). Currently, file handling would be tightly coupled to a specific storage provider. The workflow code should not know or care whether files are on Supabase, S3, local disk, or elsewhere.
 
-**Current behavior:**
-No abstraction exists. Any file storage would require direct calls to a specific provider's API.
+**Prior state:**
+No abstraction existed. Any file storage would require direct calls to a specific provider's API.
 
-**Desired outcome:**
-A thin storage abstraction that lets callers store/retrieve files by logical key, with the underlying provider configured via Django settings. Ships with Supabase as the production default (already proven in PsyOptimal) and local filesystem for dev.
+**Implemented outcome:**
+A thin storage abstraction that lets callers store/retrieve files by logical key, with the underlying provider configured via Django settings. Ships with Supabase dual-bucket support for public/private files, local filesystem for dev, and S3-compatible backend for alternative production deployments.
+
+## Implementation Notes
+
+**Dual-bucket support added in PR #87:**
+- Public files: permanent URLs from `SUPABASE_PUBLIC_BUCKET_NAME`
+- Private files: signed URLs (24h TTL) from `SUPABASE_PRIVATE_BUCKET_NAME`
+- `public` parameter added to all storage API functions (defaults to `True`)
+- Podcast audio/cover art routes to correct bucket based on `Podcast.is_public`
+- Feed cache invalidation via Django signals
+
+See `docs/features/file-storage-service.md` for complete implementation details.
 
 ## Appetite
 
@@ -62,19 +75,19 @@ logger = logging.getLogger(__name__)
 
 class StorageBackend(ABC):
     @abstractmethod
-    def store(self, key: str, content: bytes, content_type: str = "") -> str:
-        """Store content, return public URL."""
+    def store(self, key: str, content: bytes, content_type: str = "", public: bool = True) -> str:
+        """Store content, return URL."""
 
     @abstractmethod
-    def get_url(self, key: str) -> str:
-        """Get public URL for key."""
+    def get_url(self, key: str, public: bool = True) -> str:
+        """Get URL for key. Public=permanent URL, private=signed URL."""
 
     @abstractmethod
-    def get_content(self, key: str) -> bytes:
+    def get_content(self, key: str, public: bool = True) -> bytes:
         """Retrieve content by key."""
 
     @abstractmethod
-    def delete(self, key: str) -> None:
+    def delete(self, key: str, public: bool = True) -> None:
         """Delete file by key."""
 
     @classmethod
@@ -105,13 +118,24 @@ class LocalFileStorage(StorageBackend):
 
 
 class SupabaseStorage(StorageBackend):
-    """Supabase Storage backend. Default for production."""
+    """Supabase Storage backend with dual-bucket support. Default for production."""
 
     def __init__(self):
         from apps.integration.supabase.storage_manager import SupabaseStorageManager
-        self._manager = SupabaseStorageManager()
+        self._public_manager = SupabaseStorageManager(settings.SUPABASE_PUBLIC_BUCKET_NAME)
+        self._private_manager = (
+            SupabaseStorageManager(settings.SUPABASE_PRIVATE_BUCKET_NAME)
+            if settings.SUPABASE_PRIVATE_BUCKET_NAME
+            else None
+        )
 
-    def store(self, key: str, content: bytes, content_type: str = "") -> str:
+    def _manager(self, public: bool = True):
+        """Return the appropriate storage manager based on access level."""
+        if public or self._private_manager is None:
+            return self._public_manager
+        return self._private_manager
+
+    def store(self, key: str, content: bytes, content_type: str = "", public: bool = True) -> str:
         # Split key into path parts and filename
         parts = key.rsplit("/", 1)
         if len(parts) == 2:
@@ -120,26 +144,28 @@ class SupabaseStorage(StorageBackend):
         else:
             path_prefixes = []
             filename = parts[0]
-        return self._manager.upload(
+        return self._manager(public).upload(
             file_content=content,
             path_prefixes=path_prefixes,
             custom_filename=filename,
             file_type=content_type or "application/octet-stream",
         )
 
-    def get_url(self, key: str) -> str:
-        return self._manager.get_public_url(key)
+    def get_url(self, key: str, public: bool = True) -> str:
+        if public:
+            return self._manager(True).get_public_url(key)
+        return self._manager(False).create_signed_url(key, expires_in=86400)
 
-    def get_content(self, key: str) -> bytes:
-        return self._manager.download(key)
+    def get_content(self, key: str, public: bool = True) -> bytes:
+        return self._manager(public).download(key)
 
-    def delete(self, key: str) -> None:
-        self._manager.delete(key)
+    def delete(self, key: str, public: bool = True) -> None:
+        self._manager(public).delete(key)
 
     @classmethod
     def check_config(cls) -> list[str]:
         missing = []
-        for key in ("SUPABASE_PROJECT_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_BUCKET_NAME"):
+        for key in ("SUPABASE_PROJECT_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_PUBLIC_BUCKET_NAME"):
             if not getattr(settings, key, None):
                 missing.append(key)
         return missing
@@ -214,24 +240,24 @@ def _get_backend() -> StorageBackend:
 
 
 # Public API
-def store_file(key: str, content: bytes, content_type: str = "") -> str:
-    """Store binary content, return a public URL."""
-    return _get_backend().store(key, content, content_type)
+def store_file(key: str, content: bytes, content_type: str = "", public: bool = True) -> str:
+    """Store binary content, return a URL. public=True for permanent URLs, False for signed."""
+    return _get_backend().store(key, content, content_type, public=public)
 
 
-def get_file_url(key: str) -> str:
-    """Get the public URL for a stored file."""
-    return _get_backend().get_url(key)
+def get_file_url(key: str, public: bool = True) -> str:
+    """Get URL for a stored file. public=True for permanent URLs, False for signed (24h TTL)."""
+    return _get_backend().get_url(key, public=public)
 
 
-def get_file_content(key: str) -> bytes:
+def get_file_content(key: str, public: bool = True) -> bytes:
     """Retrieve file content by key."""
-    return _get_backend().get_content(key)
+    return _get_backend().get_content(key, public=public)
 
 
-def delete_file(key: str) -> None:
+def delete_file(key: str, public: bool = True) -> None:
     """Remove a stored file."""
-    return _get_backend().delete(key)
+    return _get_backend().delete(key, public=public)
 
 
 def check_storage_config() -> dict:
@@ -303,10 +329,12 @@ This lets you run `uv run python manage.py check_storage` locally **and** via Re
 # settings/base.py — add near bottom
 STORAGE_BACKEND = "local"  # Options: "local", "supabase", "s3"
 
-# Supabase Storage (default production backend)
+# Supabase Storage (dual-bucket support for public/private files)
 SUPABASE_PROJECT_URL = os.environ.get("SUPABASE_PROJECT_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-SUPABASE_BUCKET_NAME = os.environ.get("SUPABASE_BUCKET_NAME", "")
+SUPABASE_PUBLIC_BUCKET_NAME = os.environ.get("SUPABASE_PUBLIC_BUCKET_NAME", "") or os.environ.get("SUPABASE_BUCKET_NAME", "")
+SUPABASE_PRIVATE_BUCKET_NAME = os.environ.get("SUPABASE_PRIVATE_BUCKET_NAME", "")
+SUPABASE_USER_ACCESS_TOKEN = os.environ.get("SUPABASE_USER_ACCESS_TOKEN", "")
 
 # settings/production.py — add
 STORAGE_BACKEND = "supabase"
@@ -431,14 +459,18 @@ delete_file("podcast/my-show/ep1/audio.mp3")
 ### Production Setup (Supabase)
 
 1. Create a Supabase project at [supabase.com](https://supabase.com)
-2. Create a storage bucket (public, for serving podcast audio over RSS)
+2. Create two storage buckets:
+   - Public bucket (for serving public podcast audio over RSS)
+   - Private bucket (for private podcast audio with signed URLs)
 3. Add environment variables on Render:
 
 ```
 STORAGE_BACKEND=supabase
 SUPABASE_PROJECT_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=eyJ...
-SUPABASE_BUCKET_NAME=your-bucket
+SUPABASE_PUBLIC_BUCKET_NAME=public-podcasts
+SUPABASE_PRIVATE_BUCKET_NAME=private-podcasts  # optional
+SUPABASE_USER_ACCESS_TOKEN=your-secret-token   # for private feed auth
 ```
 
 4. Verify it works:
@@ -450,6 +482,8 @@ uv run python manage.py check_storage
 # On Render (via shell)
 python manage.py check_storage
 ```
+
+See `docs/features/file-storage-service.md` for migration guide from single-bucket to dual-bucket setup.
 
 ### Graceful Fallback
 
@@ -488,11 +522,14 @@ Then run `uv add boto3` and `python manage.py check_storage`.
 
 ## Acceptance Criteria
 
-- [ ] Module importable: `from apps.common.services.storage import store_file, get_file_url`
-- [ ] Three backends: local filesystem (dev), Supabase (prod default), S3-compatible (alt)
-- [ ] Backend selected by Django settings (`STORAGE_BACKEND`)
-- [ ] Graceful fallback to local storage when configured backend's keys are missing
-- [ ] `check_storage` management command verifies config + connectivity
-- [ ] Tests pass with local backend (no external services needed in CI)
-- [ ] No podcast-specific code — general-purpose utility
-- [ ] Supabase integration client in `apps/integration/supabase/` (already committed)
+- [x] Module importable: `from apps.common.services.storage import store_file, get_file_url`
+- [x] Three backends: local filesystem (dev), Supabase (prod default), S3-compatible (alt)
+- [x] Backend selected by Django settings (`STORAGE_BACKEND`)
+- [x] Graceful fallback to local storage when configured backend's keys are missing
+- [x] `check_storage` management command verifies config + connectivity
+- [x] Tests pass with local backend (no external services needed in CI)
+- [x] No podcast-specific code — general-purpose utility
+- [x] Supabase integration client in `apps/integration/supabase/` (already committed)
+- [x] **Dual-bucket support** for public/private files (added in PR #87)
+- [x] **Signed URL generation** for private files with 24h TTL (added in PR #87)
+- [x] **Feed cache invalidation** on episode publish/unpublish (added in PR #87)

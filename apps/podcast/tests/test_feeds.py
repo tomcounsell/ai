@@ -1,4 +1,6 @@
-from django.test import TestCase
+from unittest.mock import patch
+
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from apps.podcast.models import Episode, Podcast
@@ -99,8 +101,8 @@ class PodcastFeedTestCase(TestCase):
         content = response.content.decode("utf-8")
         self.assertNotIn("Draft Episode", content)
 
-    def test_feed_404_for_private_podcast(self):
-        """Podcast with is_public=False returns 404."""
+    def test_feed_403_for_private_podcast_without_token(self):
+        """Private podcast without token returns 403."""
         private_podcast = Podcast.objects.create(
             title="Private Podcast",
             slug="private-podcast",
@@ -110,7 +112,12 @@ class PodcastFeedTestCase(TestCase):
             is_public=False,
         )
         response = self.client.get(f"/podcast/{private_podcast.slug}/feed.xml")
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 403)
+
+    def test_public_feed_has_cache_control(self):
+        """Public feed has Cache-Control: public, max-age=300."""
+        response = self.client.get(f"/podcast/{self.podcast.slug}/feed.xml")
+        self.assertEqual(response["Cache-Control"], "public, max-age=300")
 
     def test_feed_404_for_nonexistent_slug(self):
         """Returns 404 for a nonexistent podcast slug."""
@@ -160,3 +167,161 @@ class PodcastFeedTestCase(TestCase):
         response = self.client.get(f"/podcast/{self.podcast.slug}/feed.xml")
         content = response.content.decode("utf-8")
         self.assertNotIn("Draft No Publish", content)
+
+
+@override_settings(SUPABASE_USER_ACCESS_TOKEN="valid-test-token")
+class PrivateFeedTestCase(TestCase):
+    """Tests for private podcast feed with token auth."""
+
+    def setUp(self):
+        self.private_podcast = Podcast.objects.create(
+            title="Private Podcast",
+            slug="private-test-podcast",
+            description="A private podcast for testing.",
+            author_name="Private Author",
+            author_email="private@example.com",
+            cover_image_url="https://example.com/private-cover.jpg",
+            language="en",
+            is_public=False,
+            categories=["Business"],
+            website_url="https://example.com/private",
+        )
+        self.episode = Episode.objects.create(
+            podcast=self.private_podcast,
+            title="Private Episode One",
+            slug="private-episode-one",
+            episode_number=1,
+            description="A private episode.",
+            audio_url="podcast/private-test-podcast/ep1/audio.mp3",
+            audio_duration_seconds=600,
+            audio_file_size_bytes=900000,
+            published_at=timezone.now() - timezone.timedelta(days=1),
+        )
+
+    def test_private_feed_requires_token(self):
+        """Private feed without ?token= returns 403."""
+        response = self.client.get(f"/podcast/{self.private_podcast.slug}/feed.xml")
+        self.assertEqual(response.status_code, 403)
+
+    def test_private_feed_rejects_wrong_token(self):
+        """Private feed with incorrect token returns 403."""
+        response = self.client.get(
+            f"/podcast/{self.private_podcast.slug}/feed.xml?token=wrong-token"
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_private_feed_rejects_empty_token(self):
+        """Private feed with empty token returns 403."""
+        response = self.client.get(
+            f"/podcast/{self.private_podcast.slug}/feed.xml?token="
+        )
+        self.assertEqual(response.status_code, 403)
+
+    @patch("apps.podcast.views.feed_views.get_file_url")
+    def test_private_feed_accepts_valid_token(self, mock_get_file_url):
+        """Private feed with correct token returns 200."""
+        mock_get_file_url.side_effect = lambda key, **kw: f"https://signed.url/{key}"
+        response = self.client.get(
+            f"/podcast/{self.private_podcast.slug}/feed.xml?token=valid-test-token"
+        )
+        self.assertEqual(response.status_code, 200)
+
+    @patch("apps.podcast.views.feed_views.get_file_url")
+    def test_private_feed_content_type(self, mock_get_file_url):
+        """Private feed has application/rss+xml content type."""
+        mock_get_file_url.side_effect = lambda key, **kw: f"https://signed.url/{key}"
+        response = self.client.get(
+            f"/podcast/{self.private_podcast.slug}/feed.xml?token=valid-test-token"
+        )
+        self.assertIn("application/rss+xml", response["Content-Type"])
+
+    @patch("apps.podcast.views.feed_views.get_file_url")
+    def test_private_feed_no_cache(self, mock_get_file_url):
+        """Private feed has Cache-Control: no-store."""
+        mock_get_file_url.side_effect = lambda key, **kw: f"https://signed.url/{key}"
+        response = self.client.get(
+            f"/podcast/{self.private_podcast.slug}/feed.xml?token=valid-test-token"
+        )
+        self.assertEqual(response["Cache-Control"], "no-store")
+
+    @patch("apps.podcast.views.feed_views.get_file_url")
+    def test_private_feed_contains_podcast_title(self, mock_get_file_url):
+        """Private feed XML contains the podcast title."""
+        mock_get_file_url.side_effect = lambda key, **kw: f"https://signed.url/{key}"
+        response = self.client.get(
+            f"/podcast/{self.private_podcast.slug}/feed.xml?token=valid-test-token"
+        )
+        content = response.content.decode("utf-8")
+        self.assertIn("Private Podcast", content)
+
+    @patch("apps.podcast.views.feed_views.get_file_url")
+    def test_private_feed_contains_episode_title(self, mock_get_file_url):
+        """Private feed XML contains episode titles."""
+        mock_get_file_url.side_effect = lambda key, **kw: f"https://signed.url/{key}"
+        response = self.client.get(
+            f"/podcast/{self.private_podcast.slug}/feed.xml?token=valid-test-token"
+        )
+        content = response.content.decode("utf-8")
+        self.assertIn("Private Episode One", content)
+
+    @patch("apps.podcast.views.feed_views.get_file_url")
+    def test_private_feed_generates_signed_urls(self, mock_get_file_url):
+        """Private feed replaces audio_url with signed URLs."""
+        mock_get_file_url.return_value = (
+            "https://test.supabase.co/storage/v1/object/sign/"
+            "private-bucket/audio.mp3?token=signed123"
+        )
+        response = self.client.get(
+            f"/podcast/{self.private_podcast.slug}/feed.xml?token=valid-test-token"
+        )
+        self.assertEqual(response.status_code, 200)
+
+        # Verify get_file_url was called with public=False for the audio_url
+        mock_get_file_url.assert_any_call(
+            "podcast/private-test-podcast/ep1/audio.mp3", public=False
+        )
+
+        # Verify the signed URL appears in the response
+        content = response.content.decode("utf-8")
+        self.assertIn("signed123", content)
+
+    @patch("apps.podcast.views.feed_views.get_file_url")
+    def test_private_feed_signs_cover_image_url(self, mock_get_file_url):
+        """Private feed also signs episode cover image URLs."""
+        Episode.objects.create(
+            podcast=self.private_podcast,
+            title="Cover Episode",
+            slug="cover-episode",
+            episode_number=2,
+            description="Has its own cover.",
+            audio_url="podcast/private-test-podcast/ep2/audio.mp3",
+            cover_image_url="podcast/private-test-podcast/ep2/cover.jpg",
+            audio_duration_seconds=300,
+            audio_file_size_bytes=500000,
+            published_at=timezone.now() - timezone.timedelta(hours=6),
+        )
+
+        def fake_signed_url(key, public=True):
+            return f"https://signed.url/{key}?token=signed"
+
+        mock_get_file_url.side_effect = fake_signed_url
+
+        response = self.client.get(
+            f"/podcast/{self.private_podcast.slug}/feed.xml?token=valid-test-token"
+        )
+        self.assertEqual(response.status_code, 200)
+
+        # Both audio and cover should have been signed
+        calls = mock_get_file_url.call_args_list
+        audio_calls = [c for c in calls if "audio" in str(c)]
+        cover_calls = [c for c in calls if "cover" in str(c)]
+        self.assertTrue(len(audio_calls) > 0, "Audio URL should be signed")
+        self.assertTrue(len(cover_calls) > 0, "Cover URL should be signed")
+
+    @override_settings(SUPABASE_USER_ACCESS_TOKEN="")
+    def test_private_feed_no_configured_token_returns_403(self):
+        """If server has no SUPABASE_USER_ACCESS_TOKEN configured, returns 403."""
+        response = self.client.get(
+            f"/podcast/{self.private_podcast.slug}/feed.xml?token=anything"
+        )
+        self.assertEqual(response.status_code, 403)

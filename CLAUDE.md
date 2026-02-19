@@ -258,7 +258,16 @@ DATABASE_URL=postgres://$(whoami)@localhost:5432/cuttlefish
 DEPLOYMENT_TYPE=LOCAL
 SECRET_KEY=your-secret-key
 DEBUG=True
+
+# Supabase Storage (dual-bucket support for public/private podcasts)
+SUPABASE_PROJECT_URL=https://xxx.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=xxx
+SUPABASE_PUBLIC_BUCKET_NAME=public-podcasts
+SUPABASE_PRIVATE_BUCKET_NAME=private-podcasts  # optional
+SUPABASE_USER_ACCESS_TOKEN=xxx                 # for private feed auth
 ```
+
+See `docs/features/file-storage-service.md` for complete storage documentation.
 ## Podcast Production System
 
 The podcast production system uses a **12-phase, database-backed workflow** for episode production. All state is stored in `Episode`, `EpisodeArtifact`, and `EpisodeWorkflow` models. Episodes are created using NotebookLM for two-host AI audio generation.

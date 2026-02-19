@@ -74,13 +74,17 @@ These are needed by both the web service and the worker. Using the env group mea
 ### 4. Configure Supabase storage (infra, ties to #85)
 
 Production already sets `STORAGE_BACKEND = "supabase"` in `settings/production.py`. Two buckets exist:
-- `cuttlefish-public` — podcast audio, cover art (public access)
-- `cuttlefish-private` — internal artifacts
+- `cuttlefish-public` — public podcast audio, cover art (permanent URLs)
+- `cuttlefish-private` — private podcast audio (signed URLs)
 
 Ensure the `cuttlefish` env group has:
 - `SUPABASE_PROJECT_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `SUPABASE_BUCKET_NAME` = `cuttlefish-public` (for podcast audio/images)
+- `SUPABASE_PUBLIC_BUCKET_NAME` = `cuttlefish-public`
+- `SUPABASE_PRIVATE_BUCKET_NAME` = `cuttlefish-private` (optional, for private podcasts)
+- `SUPABASE_USER_ACCESS_TOKEN` = secret token (for private feed auth)
+
+**Note:** Old `SUPABASE_BUCKET_NAME` setting still works as a fallback for `SUPABASE_PUBLIC_BUCKET_NAME`.
 
 Verify by calling `check_storage_config()` from a production shell.
 
@@ -228,8 +232,9 @@ No other documentation changes needed until the MVP is validated.
 - **Assigned To**: render-deployer
 - **Agent Type**: integration-specialist
 - **Parallel**: true
-- Add SUPABASE_PROJECT_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_BUCKET_NAME to env group
+- Add SUPABASE_PROJECT_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_PUBLIC_BUCKET_NAME, SUPABASE_PRIVATE_BUCKET_NAME (optional), SUPABASE_USER_ACCESS_TOKEN (optional) to env group
 - Verify via production health check or shell: `check_storage_config()` returns `{"ok": true}`
+- Note: Old SUPABASE_BUCKET_NAME setting is backwards compatible with SUPABASE_PUBLIC_BUCKET_NAME
 
 ### 6. End-to-end validation
 - **Task ID**: validate-e2e

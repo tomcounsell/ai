@@ -41,3 +41,14 @@ It should contain only the settings that differ from the defaults.
 # Custom app settings
 # For example:
 # MY_CUSTOM_SETTING = 'custom value'
+
+# Auto-enable Supabase storage when credentials are available
+# import os
+# if (
+#     os.environ.get("SUPABASE_PROJECT_URL")
+#     and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+#     and os.environ.get(
+#         "SUPABASE_PUBLIC_BUCKET_NAME", os.environ.get("SUPABASE_BUCKET_NAME")
+#     )
+# ):
+#     STORAGE_BACKEND = "supabase"

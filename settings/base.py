@@ -255,7 +255,11 @@ STORAGE_BACKEND = "local"
 # Supabase Storage (default production backend)
 SUPABASE_PROJECT_URL = os.environ.get("SUPABASE_PROJECT_URL", "")
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
-SUPABASE_BUCKET_NAME = os.environ.get("SUPABASE_BUCKET_NAME", "")
+SUPABASE_PUBLIC_BUCKET_NAME = os.environ.get(
+    "SUPABASE_PUBLIC_BUCKET_NAME", ""
+) or os.environ.get("SUPABASE_BUCKET_NAME", "")
+SUPABASE_PRIVATE_BUCKET_NAME = os.environ.get("SUPABASE_PRIVATE_BUCKET_NAME", "")
+SUPABASE_USER_ACCESS_TOKEN = os.environ.get("SUPABASE_USER_ACCESS_TOKEN", "")
 
 # S3-compatible storage (alternative production backend)
 S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "")

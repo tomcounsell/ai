@@ -165,6 +165,7 @@ class Command(BaseCommand):
         title = episode_data.get("title", "unknown")
         slug = episode_data.get("slug", f"episode-{episode_id}")
         podcast_slug = episode_data.get("podcast_slug", "podcast")
+        is_public = episode_data.get("is_public", True)
         sources = episode_data.get("sources", {})
 
         logger.info("Processing episode %d: %s", episode_id, title)
@@ -183,9 +184,11 @@ class Command(BaseCommand):
             # Read the audio bytes
             audio_bytes = output_path.read_bytes()
 
-            # Upload to storage
+            # Upload to storage (public or private based on podcast visibility)
             storage_key = f"podcast/{podcast_slug}/{slug}/audio.mp3"
-            audio_url = store_file(storage_key, audio_bytes, "audio/mpeg")
+            audio_url = store_file(
+                storage_key, audio_bytes, "audio/mpeg", public=is_public
+            )
             logger.info("Uploaded audio for episode %d: %s", episode_id, audio_url)
 
             # Callback to production
