@@ -16,5 +16,3 @@ services:
     envVars:
       - key: DEPLOYMENT_TYPE
         value: PRODUCTION
-      - key: PYTHON_VERSION
-        value: "3.13"
