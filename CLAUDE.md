@@ -15,6 +15,8 @@ Guidance for Claude Code when working with this repository.
 | `pytest tests/` | Run all tests |
 | `black . && ruff check .` | Format and lint |
 | `python scripts/daydream.py` | Run daydream maintenance manually |
+| `python scripts/daydream.py --dry-run` | Test daydream without side effects |
+| `python scripts/daydream.py --ignore "pattern"` | Silence a bug pattern for 14 days |
 | `./scripts/install_daydream.sh` | Install daydream launchd schedule |
 | `tail -f logs/daydream.log` | Stream daydream logs |
 | `cat data/lessons_learned.jsonl` | View institutional memory |
