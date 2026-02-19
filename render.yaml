@@ -18,9 +18,3 @@ services:
         value: PRODUCTION
       - key: PYTHON_VERSION
         value: "3.13"
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: cuttlefish-keyvalue
-          property: connectionString
-      - fromGroup: cuttlefish
