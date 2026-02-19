@@ -649,6 +649,15 @@ async def get_agent_response_sdk(
         enriched_message += f" in {chat_title}"
     if workflow_id:
         enriched_message += f"\nWORKFLOW_ID: {workflow_id}"
+    enriched_message += f"\nSESSION_ID: {session_id}"
+    if task_list_id:
+        enriched_message += f"\nTASK_SCOPE: {task_list_id}"
+    enriched_message += (
+        "\nSCOPE: This session is scoped to the message below from this sender. "
+        "When reporting completion or summarizing work, only reference tasks and "
+        "work initiated in this specific session. Do not include work, PRs, or "
+        "requests from other sessions, other senders, or prior conversation threads."
+    )
     enriched_message += f"\nMESSAGE: {message}"
 
     try:

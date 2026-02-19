@@ -1088,7 +1088,7 @@ async def _execute_job(job: Job) -> None:
                 message_id=job.message_id,
                 priority="high",
                 work_item_slug=job.work_item_slug,
-                task_list_id=job.task_list_id,
+                task_list_id=task_list_id,
                 auto_continue_count=auto_continue_count,
             )
 
