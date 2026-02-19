@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Small
 owner: Tom
@@ -17,7 +17,7 @@ Staff currently have to use Django admin or the management command `start_episod
 Staff visit `/podcast/{slug}/`, see the episode list, then must navigate to `/admin/podcast/episode/add/` or run a CLI command to create a new episode.
 
 **Desired outcome:**
-A "New Episode" button on the podcast detail page (visible only to staff) leads to a simple form that creates a draft Episode and redirects to the episode workflow view at step 1.
+A "New Episode" button on the podcast detail page (visible only to staff) creates a bare draft Episode with a UUID slug and redirects to the episode workflow view at step 1, where title and details get filled in later.
 
 ## Appetite
 
@@ -37,44 +37,40 @@ No prerequisites — this work has no external dependencies.
 
 ### Key Elements
 
-- **Staff-only button**: A "New Episode" button on `podcast_detail.html`, conditionally rendered when `request.user.is_staff`
-- **Create Episode view**: A new `EpisodeCreateView` in `podcast_views.py` — staff-only, handles GET (form) and POST (create + redirect)
-- **Create Episode template**: A minimal form template collecting title and description (slug auto-generated, episode_number auto-assigned by model `save()`)
-- **URL route**: `<slug:slug>/new/` mounted before the `<slug:episode_slug>/` catch-all
+- **Staff-only button**: A "New Episode" button on `podcast_detail.html`, rendered as a POST form (CSRF-protected), conditionally shown when `request.user.is_staff`
+- **Create Episode view**: A new `EpisodeCreateView` in `podcast_views.py` — staff-only, POST-only. Creates a bare draft Episode with a UUID slug and auto-assigned episode number, then redirects to workflow step 1.
+- **No form template needed**: The button itself is the entire UI — one click creates and redirects.
 
 ### Flow
 
-**Podcast detail page** → Click "New Episode" → **Create form** (title + description) → Submit → **Episode workflow view** (step 1, ready to start pipeline)
+**Podcast detail page** → Click "New Episode" (POST) → Draft Episode created with UUID slug → **Redirect to episode workflow view** (step 1)
 
 ### Technical Approach
 
-- **View**: `EpisodeCreateView(LoginRequiredMixin, UserPassesTestMixin, MainContentView)` — same auth pattern as `EpisodeWorkflowView`
-- **Form handling**: Use a plain Django form (no ModelForm needed — only 2 fields). On POST, create the Episode with `status="draft"`, auto-slug from title via `django.utils.text.slugify`, auto-increment `episode_number` (already handled by `Episode.save()`)
-- **Redirect**: After creation, redirect to `podcast:episode_workflow` at step 1
-- **Template**: Reuse the existing breadcrumb pattern + brand button styles
-- **URL ordering**: Place `<slug:slug>/new/` before `<slug:slug>/<slug:episode_slug>/` in `urls.py` to avoid "new" being captured as an episode slug
+- **View**: `EpisodeCreateView(LoginRequiredMixin, UserPassesTestMixin, View)` — same auth pattern as `EpisodeWorkflowView`. POST-only; GET redirects back to podcast detail.
+- **Episode creation**: `Episode.objects.create(podcast=podcast, title="", slug=uuid4().hex[:12], status="draft")`. Episode number auto-assigned by `Episode.save()`. Title and description left empty — filled in later through the workflow or admin.
+- **Slug**: Short UUID hex (`uuid4().hex[:12]`) — unique enough, valid as a Django slug, and gets replaced when the title is finalized.
+- **Redirect**: After creation, redirect to `podcast:episode_workflow` at step 1.
+- **Button style**: Match the existing RSS Feed button (inline-flex, font-mono, outlined border style).
+- **URL**: `<slug:slug>/new/` placed before the `<slug:episode_slug>/` catch-all in `urls.py`.
 
 ## Rabbit Holes
 
-- **Full ModelForm with every field** — Only title and description are needed at creation time; everything else gets populated by the workflow pipeline
-- **HTMX form submission** — Standard form POST + redirect is fine for a creation action
-- **Auto-starting the pipeline on create** — Out of scope; the workflow view already has a "Start Pipeline" button
+- **Building a full form page** — No form needed; just create a bare episode and let the workflow handle details.
+- **Auto-starting the pipeline on create** — Out of scope; the workflow view already has a "Start Pipeline" button.
+- **Title/slug refinement UX** — Future concern; for now the UUID slug is functional.
 
 ## Risks
 
-### Risk 1: URL slug collision
-**Impact:** If a podcast has an episode with slug "new", the new URL `<slug>/new/` would shadow it
-**Mitigation:** Place the `new/` route before the `<slug:episode_slug>/` route in `urls.py`. Django matches top-to-bottom, so `new/` wins. Extremely unlikely anyone names an episode "new".
-
-### Risk 2: Duplicate slug creation
-**Impact:** Creating two episodes with the same title would produce duplicate slugs, violating the unique constraint
-**Mitigation:** Append episode number or handle `IntegrityError` with a validation message
+### Risk 1: URL slug collision with "new"
+**Impact:** If an episode has slug "new", the `<slug>/new/` route would shadow it.
+**Mitigation:** Place the `new/` route before `<slug:episode_slug>/` in `urls.py`. Django matches top-to-bottom.
 
 ## No-Gos (Out of Scope)
 
 - Auto-starting the production pipeline after creation
 - Editing existing episodes from the frontend
-- Topic/description AI generation
+- Title/slug editing UI
 - Bulk episode creation
 
 ## Update System
@@ -83,7 +79,7 @@ No update system changes required — this is a web UI feature only.
 
 ## Agent Integration
 
-No agent integration required — this is a staff-facing web form.
+No agent integration required — this is a staff-facing web button.
 
 ## Documentation
 
@@ -96,11 +92,8 @@ No external documentation changes needed — this is a minor staff-facing UI add
 
 - [ ] "New Episode" button visible on `/podcast/{slug}/` for staff users only
 - [ ] Button not visible to anonymous or non-staff users
-- [ ] Form at `/podcast/{slug}/new/` collects title and description
-- [ ] Slug auto-generated from title
-- [ ] Episode number auto-assigned
-- [ ] On submit, creates draft Episode and redirects to workflow step 1
-- [ ] Duplicate slug handled gracefully
+- [ ] Clicking button creates a draft Episode with UUID slug and auto-assigned episode number
+- [ ] Redirects to workflow step 1 after creation
 - [ ] Tests pass (`/do-test`)
 
 ## Team Orchestration
@@ -109,7 +102,7 @@ No external documentation changes needed — this is a minor staff-facing UI add
 
 - **Builder (create-episode)**
   - Name: episode-builder
-  - Role: Implement view, template, URL, and button
+  - Role: Implement view, URL, button, and tests
   - Agent Type: builder
   - Resume: true
 
@@ -121,64 +114,31 @@ No external documentation changes needed — this is a minor staff-facing UI add
 
 ## Step by Step Tasks
 
-### 1. Add URL route
-- **Task ID**: build-url
+### 1. Implement EpisodeCreateView and wire up URL + button
+- **Task ID**: build-all
 - **Depends On**: none
 - **Assigned To**: episode-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `path("<slug:slug>/new/", EpisodeCreateView.as_view(), name="episode_create")` to `apps/podcast/urls.py`
-- Place BEFORE the `<slug:episode_slug>/` route
-- Add `EpisodeCreateView` to imports in `apps/podcast/views/__init__.py`
+- Add `EpisodeCreateView` to `apps/podcast/views/podcast_views.py` — `LoginRequiredMixin` + `UserPassesTestMixin` (is_staff), POST creates Episode with UUID slug, redirects to workflow step 1, GET redirects to podcast detail
+- Add URL `path("<slug:slug>/new/", ...)` to `apps/podcast/urls.py` BEFORE the `<slug:episode_slug>/` route
+- Update `apps/podcast/views/__init__.py` exports
+- Add staff-only POST form button to `apps/public/templates/podcast/podcast_detail.html` matching RSS button style
 
-### 2. Implement EpisodeCreateView
-- **Task ID**: build-view
-- **Depends On**: none
-- **Assigned To**: episode-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- Add `EpisodeCreateView` to `apps/podcast/views/podcast_views.py`
-- `LoginRequiredMixin` + `UserPassesTestMixin` (test_func: `is_staff`)
-- GET: render form template with podcast context
-- POST: validate title + description, create Episode (draft, auto-slug, auto-number), redirect to workflow step 1
-- Handle `IntegrityError` on duplicate slug by appending episode number
-
-### 3. Create form template
-- **Task ID**: build-template
-- **Depends On**: none
-- **Assigned To**: episode-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- Create `apps/public/templates/podcast/episode_create.html`
-- Breadcrumb: Podcasts / {podcast.title} / New Episode
-- Simple form with title input, description textarea, submit button using `btn-brand` class
-- CSRF token included
-
-### 4. Add button to podcast detail template
-- **Task ID**: build-button
-- **Depends On**: none
-- **Assigned To**: episode-builder
-- **Agent Type**: builder
-- **Parallel**: true
-- Add "New Episode" button to `podcast_detail.html` header, next to RSS Feed button
-- Wrap in `{% if request.user.is_staff %}` conditional
-- Use existing button styling pattern (match RSS button style or use `btn-brand`)
-
-### 5. Write tests
+### 2. Write tests
 - **Task ID**: build-tests
-- **Depends On**: build-view
+- **Depends On**: build-all
 - **Assigned To**: episode-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Add `EpisodeCreateViewTestCase` to `apps/podcast/tests/test_views.py`
-- Test: anonymous user gets redirected (302)
-- Test: non-staff user gets 403
-- Test: staff user sees form (200)
-- Test: staff POST creates episode and redirects
+- Test: anonymous user POST gets redirected (302 to login)
+- Test: non-staff user POST gets 403
+- Test: staff POST creates episode and redirects to workflow
 - Test: button visible to staff on detail page
 - Test: button hidden from non-staff on detail page
 
-### 6. Final Validation
+### 3. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: build-tests
 - **Assigned To**: episode-validator
@@ -186,17 +146,8 @@ No external documentation changes needed — this is a minor staff-facing UI add
 - **Parallel**: false
 - Run `DJANGO_SETTINGS_MODULE=settings pytest apps/podcast/tests/test_views.py -v`
 - Verify all success criteria met
-- Check button visibility for staff vs non-staff
 
 ## Validation Commands
 
 - `DJANGO_SETTINGS_MODULE=settings pytest apps/podcast/tests/test_views.py -v` - all view tests pass
 - `uv run pre-commit run --all-files` - code quality checks pass
-
----
-
-## Open Questions
-
-1. Should the "New Episode" button use the brand accent style (`btn-brand-accent`) to stand out, or match the RSS button's outlined style for visual consistency?
-2. After creating the episode, should we redirect to the workflow view (step 1) or to the episode detail page?
-3. Should the form also allow setting a custom slug, or always auto-generate from title?
