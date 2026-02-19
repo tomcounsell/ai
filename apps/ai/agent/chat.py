@@ -52,9 +52,9 @@ class ChatSession(BaseModel):
         return [{"role": msg.role, "content": msg.content} for msg in self.messages]
 
 
-# Create the chat agent with tools
+# Create the chat agent with tools (defer model to avoid OpenAI client init at import time)
 chat_agent = Agent(
-    "openai:gpt-4.1",  # Using GPT-4.1 for best tool use and agentic capabilities
+    "openai:gpt-4.1",
     deps_type=ChatDependencies,
     tools=[run_python],
     system_prompt=(
@@ -64,6 +64,7 @@ chat_agent = Agent(
         "When asked to perform calculations or demonstrate concepts, use the run_python tool "
         "to execute Python code and show the results."
     ),
+    defer_model_check=True,
 )
 
 
