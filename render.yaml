@@ -4,10 +4,16 @@ previews:
 
 services:
   # Background worker for Django 6.0 @task framework (django-tasks-db)
+  # IMPORTANT: This worker must share the same environment variables as the web service.
+  # Configure these manually in Render dashboard or use an environment group:
+  #   - DATABASE_URL (from cuttlefish PostgreSQL database)
+  #   - SECRET_KEY (same as web service)
+  #   - All API keys (ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.)
+  #   - All other production settings from the web service
   - type: worker
     name: cuttlefish-worker
     runtime: python
-    buildCommand: ./build.sh
+    buildCommand: ./build_worker.sh
     startCommand: python manage.py db_worker
     repo: https://github.com/yudame/cuttlefish.git
     branch: main
