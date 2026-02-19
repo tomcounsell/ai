@@ -71,9 +71,7 @@ def sync_claude_dirs(project_dir: Path) -> SymlinkSyncResult:
     # so they are available regardless of which repo Claude Code is running in.
     # Project-specific agents that should NOT be shared belong in a project's own
     # .claude/agents/ directory outside this repo.
-    _sync_commands(
-        project_dir / ".claude" / "agents", user_claude / "agents", result
-    )
+    _sync_commands(project_dir / ".claude" / "agents", user_claude / "agents", result)
 
     # Remove explicitly renamed commands/skills (by name, not inode)
     _cleanup_renamed(user_claude, result)
