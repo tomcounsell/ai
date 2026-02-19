@@ -8,11 +8,12 @@ A long-running process that performs daily maintenance tasks:
 3. Check error logs via Sentry (skips gracefully if MCP unavailable)
 4. Clean up task management (per-project, via gh CLI)
 5. Update documentation
-6. Produce daily report (local markdown)
-7. Session analysis (thrash ratio, user corrections)
-8. LLM reflection (Claude Haiku categorization)
+6. Session analysis (thrash ratio, user corrections)
+7. LLM reflection (Claude Haiku categorization)
+8. Auto-fix high-confidence code bugs via plan-build-PR
 9. Memory consolidation (lessons_learned.jsonl)
-10. GitHub issue creation (per-project, via daydream_report module)
+10. Produce daily report (local markdown)
+11. GitHub issue creation (per-project, via daydream_report module)
 
 This process is resumable - if interrupted, it picks up where it left off.
 """
@@ -60,6 +61,86 @@ STATE_FILE = DAYDREAM_DIR / "state.json"
 DATA_DIR = PROJECT_ROOT / "data"
 LESSONS_FILE = DATA_DIR / "lessons_learned.jsonl"
 SESSIONS_DIR = LOGS_DIR / "sessions"
+IGNORE_LOG_FILE = DATA_DIR / "daydream_ignore.jsonl"
+
+
+def load_ignore_log() -> list[dict]:
+    """Load active (non-expired) ignore log entries."""
+    if not IGNORE_LOG_FILE.exists():
+        return []
+    today = datetime.now().date().isoformat()
+    entries = []
+    for line in IGNORE_LOG_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            if entry.get("ignored_until", "") >= today:
+                entries.append(entry)
+        except json.JSONDecodeError:
+            pass
+    return entries
+
+
+def prune_ignore_log() -> None:
+    """Remove expired entries from the ignore log."""
+    if not IGNORE_LOG_FILE.exists():
+        return
+    today = datetime.now().date().isoformat()
+    active = []
+    for line in IGNORE_LOG_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            if entry.get("ignored_until", "") >= today:
+                active.append(json.dumps(entry))
+        except json.JSONDecodeError:
+            pass
+    IGNORE_LOG_FILE.write_text("\n".join(active) + ("\n" if active else ""))
+
+
+def is_ignored(pattern: str, ignore_entries: list[dict]) -> bool:
+    """Check if a pattern matches any active ignore entry."""
+    pattern_lower = pattern.lower()
+    for entry in ignore_entries:
+        entry_pattern = entry.get("pattern", "").lower()
+        if entry_pattern and (
+            entry_pattern in pattern_lower or pattern_lower in entry_pattern
+        ):
+            return True
+    return False
+
+
+def is_high_confidence(reflection: dict) -> bool:
+    """Check if a reflection meets the 2-of-3 confidence criteria for auto-fix."""
+    criteria = [
+        reflection.get("category") == "code_bug",
+        bool(reflection.get("prevention", "").strip()),
+        len(reflection.get("pattern", "")) >= 10,
+    ]
+    return sum(criteria) >= 2
+
+
+def has_existing_github_work(pattern: str, cwd: str) -> bool:
+    """Check if there's already an open issue or PR for this bug pattern."""
+    search_term = pattern[:50]  # Truncate for search query
+    for cmd in [
+        ["gh", "issue", "list", "--state", "open", "--search", search_term],
+        ["gh", "pr", "list", "--state", "open", "--search", search_term],
+    ]:
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=15, cwd=cwd
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return True
+        except Exception:
+            pass
+    return False
+
 
 # Correction patterns in user messages
 CORRECTION_PATTERNS = [
@@ -397,6 +478,7 @@ class DaydreamState:
     findings: dict[str, list[str]] = field(default_factory=dict)
     session_analysis: dict[str, Any] = field(default_factory=dict)
     reflections: list[dict[str, str]] = field(default_factory=list)
+    auto_fix_attempts: list[dict] = field(default_factory=list)
 
     @classmethod
     def load(cls) -> DaydreamState:
@@ -441,9 +523,10 @@ class DaydreamRunner:
             (5, "Audit Documentation", self.step_audit_docs),
             (6, "Session Analysis", self.step_session_analysis),
             (7, "LLM Reflection", self.step_llm_reflection),
-            (8, "Memory Consolidation", self.step_memory_consolidation),
-            (9, "Produce Daily Report", self.step_produce_report),
-            (10, "GitHub Issue Creation", self.step_create_github_issue),
+            (8, "Auto-Fix Bugs", self.step_auto_fix_bugs),
+            (9, "Memory Consolidation", self.step_memory_consolidation),
+            (10, "Produce Daily Report", self.step_produce_report),
+            (11, "GitHub Issue Creation", self.step_create_github_issue),
         ]
 
     async def run(self) -> None:
@@ -744,7 +827,7 @@ class DaydreamRunner:
         }
 
     async def step_produce_report(self) -> None:
-        """Step 6: Produce daily report to local markdown file."""
+        """Step 10: Produce daily report to local markdown file."""
         total_steps = len(self.steps)
         report_lines = [
             f"# Daydream Report - {self.state.date}",
@@ -824,7 +907,7 @@ class DaydreamRunner:
         print("=" * 60)
 
     async def step_session_analysis(self) -> None:
-        """Step 7: Analyze yesterday's sessions (ai-repo specific)."""
+        """Step 6: Analyze yesterday's sessions (ai-repo specific)."""
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
         analysis = analyze_sessions(SESSIONS_DIR, yesterday)
@@ -851,7 +934,7 @@ class DaydreamRunner:
         }
 
     async def step_llm_reflection(self) -> None:
-        """Step 8: Run LLM reflection on session analysis."""
+        """Step 7: Run LLM reflection on session analysis."""
         reflections = run_llm_reflection(self.state.session_analysis)
         self.state.reflections = reflections
 
@@ -870,8 +953,131 @@ class DaydreamRunner:
             "reflections_generated": len(reflections),
         }
 
+    async def step_auto_fix_bugs(self) -> None:
+        """Step 8: Auto-fix high-confidence code bugs via plan-build-PR."""
+        enabled = os.environ.get("DAYDREAM_AUTO_FIX_ENABLED", "true").lower()
+        if enabled not in ("true", "1", "yes"):
+            logger.info("DAYDREAM_AUTO_FIX_ENABLED is false, skipping auto-fix step")
+            self.state.step_progress["auto_fix_bugs"] = {
+                "skipped": True,
+                "reason": "disabled",
+            }
+            return
+
+        dry_run = getattr(self.state, "_dry_run", False)
+
+        prune_ignore_log()
+        ignore_entries = load_ignore_log()
+
+        reflections = self.state.reflections
+        candidates = [r for r in reflections if is_high_confidence(r)]
+
+        logger.info(
+            f"Auto-fix: {len(candidates)} candidate(s) from {len(reflections)} reflection(s)"
+        )
+
+        attempts = []
+        for r in candidates:
+            pattern = r.get("pattern", "")
+            summary = r.get("summary", "")
+            prevention = r.get("prevention", "")
+
+            if is_ignored(pattern, ignore_entries):
+                logger.info(f"Auto-fix: skipping ignored pattern: {pattern[:60]}")
+                attempts.append({"pattern": pattern, "status": "ignored"})
+                self.state.add_finding(
+                    "auto_fix", f"Ignored (in ignore log): {summary[:80]}"
+                )
+                continue
+
+            # Check for existing GitHub work (use first project with github config)
+            project_wd = None
+            for project in self.projects:
+                if project.get("github"):
+                    project_wd = project["working_directory"]
+                    break
+
+            if project_wd and has_existing_github_work(pattern, project_wd):
+                logger.info(f"Auto-fix: duplicate found for pattern: {pattern[:60]}")
+                attempts.append({"pattern": pattern, "status": "duplicate"})
+                self.state.add_finding(
+                    "auto_fix", f"Skipped (existing PR/issue): {summary[:80]}"
+                )
+                continue
+
+            if dry_run:
+                logger.info(f"Auto-fix: [DRY RUN] would trigger for: {summary[:80]}")
+                attempts.append({"pattern": pattern, "status": "dry_run"})
+                self.state.add_finding(
+                    "auto_fix", f"[DRY RUN] Would auto-fix: {summary[:80]}"
+                )
+                continue
+
+            # Trigger auto-fix
+            prompt = (
+                f"Fix the following bug in the codebase. "
+                f"Use /do-plan to create a plan doc, then /do-build to implement it as a PR.\n\n"
+                f"Bug summary: {summary}\n"
+                f"Pattern: {pattern}\n"
+                f"Prevention: {prevention}"
+            )
+            logger.info(f"Auto-fix: triggering for: {summary[:80]}")
+
+            try:
+                result = subprocess.run(
+                    ["claude", "--print", "--dangerously-skip-permissions", prompt],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                    cwd=str(PROJECT_ROOT),
+                )
+                status = "success" if result.returncode == 0 else "failed"
+                output_snippet = (result.stdout or result.stderr or "")[:200]
+                attempts.append(
+                    {"pattern": pattern, "status": status, "output": output_snippet}
+                )
+
+                if status == "success":
+                    self.state.add_finding(
+                        "auto_fix", f"Auto-fix triggered: {summary[:80]}"
+                    )
+                    # Try to extract PR URL from output and post to Telegram
+                    pr_match = re.search(
+                        r"https://github\.com/\S+/pull/\d+", result.stdout
+                    )
+                    if pr_match and self.projects:
+                        for project in self.projects:
+                            if project.get("github"):
+                                await self.step_post_to_telegram(
+                                    project, pr_match.group()
+                                )
+                                break
+                else:
+                    logger.warning(f"Auto-fix subprocess failed: {output_snippet}")
+                    self.state.add_finding(
+                        "auto_fix", f"Auto-fix failed: {summary[:80]}"
+                    )
+            except subprocess.TimeoutExpired:
+                logger.warning(f"Auto-fix timed out for: {summary[:80]}")
+                attempts.append({"pattern": pattern, "status": "timeout"})
+                self.state.add_finding(
+                    "auto_fix", f"Auto-fix timed out: {summary[:80]}"
+                )
+            except Exception as e:
+                logger.warning(f"Auto-fix error: {e}")
+                attempts.append(
+                    {"pattern": pattern, "status": "error", "error": str(e)}
+                )
+
+        self.state.auto_fix_attempts = attempts
+        self.state.step_progress["auto_fix_bugs"] = {
+            "candidates": len(candidates),
+            "attempts": len(attempts),
+            "dry_run": dry_run,
+        }
+
     async def step_memory_consolidation(self) -> None:
-        """Step 9: Consolidate lessons learned."""
+        """Step 9: Consolidate lessons learned (was step 8)."""
         consolidate_memory(self.state.reflections, self.state.date, LESSONS_FILE)
 
         self.state.step_progress["memory_consolidation"] = {
@@ -879,7 +1085,7 @@ class DaydreamRunner:
         }
 
     async def step_create_github_issue(self) -> None:
-        """Step 10: Create GitHub issues per project with findings.
+        """Step 11: Create GitHub issues per project with findings.
 
         For each local project with a github config, filters findings
         namespaced to that project and creates a GitHub issue if findings
@@ -989,7 +1195,44 @@ class DaydreamRunner:
 
 async def main() -> None:
     """Main entry point."""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Daydream autonomous maintenance")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show what would trigger without acting",
+    )
+    parser.add_argument(
+        "--ignore",
+        metavar="PATTERN",
+        help="Add a pattern to the ignore log for 14 days",
+    )
+    parser.add_argument(
+        "--reason",
+        metavar="REASON",
+        default="",
+        help="Reason for ignoring (used with --ignore)",
+    )
+    args = parser.parse_args()
+
+    if args.ignore:
+        ignored_until = (datetime.now() + timedelta(days=14)).date().isoformat()
+        entry = {
+            "pattern": args.ignore,
+            "ignored_until": ignored_until,
+            "reason": args.reason,
+        }
+        IGNORE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with IGNORE_LOG_FILE.open("a") as f:
+            f.write(json.dumps(entry) + "\n")
+        print(f"Added ignore entry: {args.ignore!r} (until {ignored_until})")
+        return
+
     runner = DaydreamRunner()
+    if args.dry_run:
+        runner.state._dry_run = True
+        logger.info("DRY RUN mode — no side effects will be triggered")
     await runner.run()
 
 
