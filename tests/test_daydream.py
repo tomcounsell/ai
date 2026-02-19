@@ -535,3 +535,393 @@ class TestStepAuditDocs:
         mock_to_thread.assert_called_once()
         call_args = mock_to_thread.call_args[0]
         assert call_args[0] == mock_docs_auditor_cls.return_value.run
+
+
+# --- Step 8 Auto-Fix Bugs ---
+
+
+class TestIgnoreLog:
+    """Tests for ignore log helpers."""
+
+    def test_load_ignore_log_empty_when_file_missing(self, tmp_path):
+        """load_ignore_log returns empty list when file doesn't exist."""
+        from scripts.daydream import load_ignore_log, IGNORE_LOG_FILE
+        import scripts.daydream as daydream_mod
+
+        original = daydream_mod.IGNORE_LOG_FILE
+        daydream_mod.IGNORE_LOG_FILE = tmp_path / "daydream_ignore.jsonl"
+        try:
+            result = load_ignore_log()
+            assert result == []
+        finally:
+            daydream_mod.IGNORE_LOG_FILE = original
+
+    def test_load_ignore_log_filters_expired(self, tmp_path):
+        """load_ignore_log excludes entries past their ignored_until date."""
+        import json
+        from datetime import date, timedelta
+        import scripts.daydream as daydream_mod
+
+        ignore_file = tmp_path / "daydream_ignore.jsonl"
+        today = date.today().isoformat()
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+        entries = [
+            {"pattern": "expired", "ignored_until": yesterday, "reason": ""},
+            {"pattern": "active", "ignored_until": tomorrow, "reason": ""},
+            {"pattern": "today", "ignored_until": today, "reason": ""},
+        ]
+        ignore_file.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+        original = daydream_mod.IGNORE_LOG_FILE
+        daydream_mod.IGNORE_LOG_FILE = ignore_file
+        try:
+            result = daydream_mod.load_ignore_log()
+            patterns = [e["pattern"] for e in result]
+            assert "expired" not in patterns
+            assert "active" in patterns
+            assert "today" in patterns
+        finally:
+            daydream_mod.IGNORE_LOG_FILE = original
+
+    def test_prune_ignore_log_removes_expired(self, tmp_path):
+        """prune_ignore_log removes expired entries and keeps active ones."""
+        import json
+        from datetime import date, timedelta
+        import scripts.daydream as daydream_mod
+
+        ignore_file = tmp_path / "daydream_ignore.jsonl"
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+        entries = [
+            {"pattern": "expired", "ignored_until": yesterday},
+            {"pattern": "active", "ignored_until": tomorrow},
+        ]
+        ignore_file.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+
+        original = daydream_mod.IGNORE_LOG_FILE
+        daydream_mod.IGNORE_LOG_FILE = ignore_file
+        try:
+            daydream_mod.prune_ignore_log()
+            remaining = [json.loads(l) for l in ignore_file.read_text().splitlines() if l.strip()]
+            patterns = [e["pattern"] for e in remaining]
+            assert "expired" not in patterns
+            assert "active" in patterns
+        finally:
+            daydream_mod.IGNORE_LOG_FILE = original
+
+    def test_is_ignored_matches_substring(self):
+        """is_ignored returns True when entry_pattern is a substring of pattern."""
+        from scripts.daydream import is_ignored
+
+        entries = [{"pattern": "null pointer"}]
+        assert is_ignored("causes null pointer dereference", entries) is True
+        assert is_ignored("unrelated bug", entries) is False
+
+    def test_is_ignored_case_insensitive(self):
+        """is_ignored does case-insensitive matching."""
+        from scripts.daydream import is_ignored
+
+        entries = [{"pattern": "NULL POINTER"}]
+        assert is_ignored("null pointer error", entries) is True
+
+
+class TestConfidenceScorer:
+    """Tests for is_high_confidence helper."""
+
+    def test_high_confidence_all_three_criteria(self):
+        """Returns True when all three criteria are met."""
+        from scripts.daydream import is_high_confidence
+
+        r = {
+            "category": "code_bug",
+            "prevention": "Always validate input",
+            "pattern": "Missing null check before dereferencing",
+        }
+        assert is_high_confidence(r) is True
+
+    def test_high_confidence_two_of_three(self):
+        """Returns True when exactly two criteria are met."""
+        from scripts.daydream import is_high_confidence
+
+        # code_bug + long pattern, no prevention
+        r = {
+            "category": "code_bug",
+            "prevention": "",
+            "pattern": "Missing null check before dereferencing pointer",
+        }
+        assert is_high_confidence(r) is True
+
+    def test_not_high_confidence_one_criterion(self):
+        """Returns False when only one criterion is met."""
+        from scripts.daydream import is_high_confidence
+
+        r = {
+            "category": "misunderstanding",
+            "prevention": "",
+            "pattern": "short",
+        }
+        assert is_high_confidence(r) is False
+
+    def test_not_high_confidence_all_missing(self):
+        """Returns False when no criteria are met."""
+        from scripts.daydream import is_high_confidence
+
+        r = {"category": "misunderstanding", "prevention": "", "pattern": ""}
+        assert is_high_confidence(r) is False
+
+
+class TestAutoFixStep:
+    """Tests for step_auto_fix_bugs."""
+
+    @pytest.mark.asyncio
+    async def test_auto_fix_disabled_by_env(self, monkeypatch):
+        """step_auto_fix_bugs skips when DAYDREAM_AUTO_FIX_ENABLED=false."""
+        monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "false")
+        from scripts.daydream import DaydreamRunner
+
+        runner = DaydreamRunner()
+        runner.state.reflections = [
+            {
+                "category": "code_bug",
+                "summary": "A bug",
+                "pattern": "null pointer dereference in loop",
+                "prevention": "Always check for None",
+            }
+        ]
+        await runner.step_auto_fix_bugs()
+        progress = runner.state.step_progress.get("auto_fix_bugs", {})
+        assert progress.get("skipped") is True
+
+    @pytest.mark.asyncio
+    async def test_auto_fix_dry_run_does_not_invoke_claude(self, monkeypatch):
+        """Dry run logs intent without calling claude subprocess."""
+        monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "true")
+        from unittest.mock import patch, MagicMock
+        from scripts.daydream import DaydreamRunner
+
+        runner = DaydreamRunner()
+        runner.state._dry_run = True
+        runner.state.reflections = [
+            {
+                "category": "code_bug",
+                "summary": "Null pointer in loop",
+                "pattern": "null pointer dereference in loop body",
+                "prevention": "Always validate before use",
+            }
+        ]
+
+        with patch("scripts.daydream.subprocess.run") as mock_run, \
+             patch("scripts.daydream.has_existing_github_work", return_value=False), \
+             patch("scripts.daydream.load_ignore_log", return_value=[]), \
+             patch("scripts.daydream.prune_ignore_log"):
+            await runner.step_auto_fix_bugs()
+            # subprocess.run should NOT have been called for the fix (only gh dedup checks)
+            claude_calls = [
+                c for c in mock_run.call_args_list
+                if c[0][0] and c[0][0][0] == "claude"
+            ]
+            assert len(claude_calls) == 0
+
+        attempts = runner.state.auto_fix_attempts
+        assert len(attempts) == 1
+        assert attempts[0]["status"] == "dry_run"
+
+    @pytest.mark.asyncio
+    async def test_auto_fix_skips_ignored_pattern(self, monkeypatch):
+        """Skips a reflection whose pattern is in the ignore log."""
+        monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "true")
+        from unittest.mock import patch
+        from scripts.daydream import DaydreamRunner
+
+        runner = DaydreamRunner()
+        runner.state._dry_run = False
+        runner.state.reflections = [
+            {
+                "category": "code_bug",
+                "summary": "Known ignored bug",
+                "pattern": "null pointer dereference in loop body",
+                "prevention": "Always validate before use",
+            }
+        ]
+
+        ignore_entries = [{"pattern": "null pointer", "ignored_until": "2099-01-01"}]
+
+        with patch("scripts.daydream.load_ignore_log", return_value=ignore_entries), \
+             patch("scripts.daydream.prune_ignore_log"), \
+             patch("scripts.daydream.subprocess.run") as mock_run:
+            await runner.step_auto_fix_bugs()
+            # subprocess.run should NOT be called with claude
+            claude_calls = [
+                c for c in mock_run.call_args_list
+                if c[0][0] and c[0][0][0] == "claude"
+            ]
+            assert len(claude_calls) == 0
+
+        attempts = runner.state.auto_fix_attempts
+        assert len(attempts) == 1
+        assert attempts[0]["status"] == "ignored"
+
+    @pytest.mark.asyncio
+    async def test_auto_fix_skips_low_confidence(self, monkeypatch):
+        """Skips reflections that don't meet the 2-of-3 confidence criteria."""
+        monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "true")
+        from unittest.mock import patch
+        from scripts.daydream import DaydreamRunner
+
+        runner = DaydreamRunner()
+        runner.state._dry_run = True
+        runner.state.reflections = [
+            {
+                "category": "misunderstanding",  # not code_bug
+                "summary": "User misunderstood",
+                "pattern": "short",  # too short
+                "prevention": "",  # no prevention
+            }
+        ]
+
+        with patch("scripts.daydream.load_ignore_log", return_value=[]), \
+             patch("scripts.daydream.prune_ignore_log"):
+            await runner.step_auto_fix_bugs()
+
+        # No attempts because no candidates passed confidence filter
+        assert runner.state.auto_fix_attempts == []
+        progress = runner.state.step_progress.get("auto_fix_bugs", {})
+        assert progress.get("candidates") == 0
+
+    @pytest.mark.asyncio
+    async def test_auto_fix_step_registered_as_step_8(self):
+        """step_auto_fix_bugs is registered as step 8."""
+        from scripts.daydream import DaydreamRunner
+
+        runner = DaydreamRunner()
+        step_nums = [s[0] for s in runner.steps]
+        step_names = {s[0]: s[1] for s in runner.steps}
+        assert 8 in step_nums
+        assert step_names[8] == "Auto-Fix Bugs"
+
+    @pytest.mark.asyncio
+    async def test_steps_renumbered_correctly(self):
+        """Memory Consolidation is step 9, Produce Daily Report is 10, GitHub is 11."""
+        from scripts.daydream import DaydreamRunner
+
+        runner = DaydreamRunner()
+        step_names = {s[0]: s[1] for s in runner.steps}
+        assert step_names.get(9) == "Memory Consolidation"
+        assert step_names.get(10) == "Produce Daily Report"
+        assert step_names.get(11) == "GitHub Issue Creation"
+
+    @pytest.mark.asyncio
+    async def test_auto_fix_skips_duplicate_github_work(self, monkeypatch):
+        """Skips patterns with an existing open issue or PR."""
+        monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "true")
+        from unittest.mock import patch
+        from scripts.daydream import DaydreamRunner
+
+        runner = DaydreamRunner()
+        runner.state._dry_run = False
+        runner.state.reflections = [
+            {
+                "category": "code_bug",
+                "summary": "Already tracked",
+                "pattern": "null pointer dereference in loop body",
+                "prevention": "Always validate before use",
+            }
+        ]
+        runner.projects = [
+            {
+                "slug": "ai",
+                "working_directory": "/tmp",
+                "github": {"org": "org", "repo": "repo"},
+            }
+        ]
+
+        with patch("scripts.daydream.load_ignore_log", return_value=[]), \
+             patch("scripts.daydream.prune_ignore_log"), \
+             patch("scripts.daydream.has_existing_github_work", return_value=True), \
+             patch("scripts.daydream.subprocess.run") as mock_run:
+            await runner.step_auto_fix_bugs()
+            claude_calls = [
+                c for c in mock_run.call_args_list
+                if c[0][0] and c[0][0][0] == "claude"
+            ]
+            assert len(claude_calls) == 0
+
+        attempts = runner.state.auto_fix_attempts
+        assert len(attempts) == 1
+        assert attempts[0]["status"] == "duplicate"
+
+
+class TestDaydreamStateAutoFixField:
+    """Tests for new auto_fix_attempts field on DaydreamState."""
+
+    def test_auto_fix_attempts_defaults_to_empty_list(self):
+        """DaydreamState.auto_fix_attempts defaults to []."""
+        from scripts.daydream import DaydreamState
+
+        state = DaydreamState()
+        assert state.auto_fix_attempts == []
+
+    def test_auto_fix_attempts_persisted_in_serialization(self):
+        """auto_fix_attempts survives asdict round-trip."""
+        from dataclasses import asdict
+        from scripts.daydream import DaydreamState
+
+        state = DaydreamState()
+        state.auto_fix_attempts = [{"pattern": "foo", "status": "dry_run"}]
+        d = asdict(state)
+        assert d["auto_fix_attempts"] == [{"pattern": "foo", "status": "dry_run"}]
+
+
+class TestCLIFlags:
+    """Tests for CLI --dry-run and --ignore flags."""
+
+    def test_ignore_flag_appends_to_ignore_log(self, tmp_path, monkeypatch):
+        """--ignore appends a new entry to IGNORE_LOG_FILE."""
+        import json
+        import sys
+        import scripts.daydream as daydream_mod
+
+        ignore_file = tmp_path / "daydream_ignore.jsonl"
+        monkeypatch.setattr(daydream_mod, "IGNORE_LOG_FILE", ignore_file)
+
+        # Simulate CLI: python daydream.py --ignore "some bug pattern" --reason "known issue"
+        monkeypatch.setattr(sys, "argv", [
+            "daydream.py",
+            "--ignore", "some bug pattern",
+            "--reason", "known issue",
+        ])
+
+        import asyncio
+        asyncio.run(daydream_mod.main())
+
+        assert ignore_file.exists()
+        lines = [l for l in ignore_file.read_text().splitlines() if l.strip()]
+        assert len(lines) == 1
+        entry = json.loads(lines[0])
+        assert entry["pattern"] == "some bug pattern"
+        assert entry["reason"] == "known issue"
+        assert "ignored_until" in entry
+
+    def test_dry_run_flag_sets_state(self, tmp_path, monkeypatch):
+        """--dry-run sets runner.state._dry_run = True."""
+        import sys
+        import asyncio
+        from unittest.mock import patch, AsyncMock
+        import scripts.daydream as daydream_mod
+
+        monkeypatch.setattr(sys, "argv", ["daydream.py", "--dry-run"])
+
+        captured_runner = {}
+
+        original_run = daydream_mod.DaydreamRunner.run
+
+        async def fake_run(self):
+            captured_runner["instance"] = self
+
+        with patch.object(daydream_mod.DaydreamRunner, "run", fake_run):
+            asyncio.run(daydream_mod.main())
+
+        assert captured_runner["instance"].state._dry_run is True
