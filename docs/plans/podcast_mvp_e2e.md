@@ -73,10 +73,14 @@ These are needed by both the web service and the worker. Using the env group mea
 
 ### 4. Configure Supabase storage (infra, ties to #85)
 
-Production already sets `STORAGE_BACKEND = "supabase"` in `settings/production.py`. The storage backend gracefully falls back to local if config is missing. Add to the `cuttlefish` env group:
+Production already sets `STORAGE_BACKEND = "supabase"` in `settings/production.py`. Two buckets exist:
+- `cuttlefish-public` — podcast audio, cover art (public access)
+- `cuttlefish-private` — internal artifacts
+
+Ensure the `cuttlefish` env group has:
 - `SUPABASE_PROJECT_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
-- `SUPABASE_BUCKET_NAME`
+- `SUPABASE_BUCKET_NAME` = `cuttlefish-public` (for podcast audio/images)
 
 Verify by calling `check_storage_config()` from a production shell.
 
@@ -260,6 +264,4 @@ No other documentation changes needed until the MVP is validated.
 
 ## Open Questions
 
-1. **API key provisioning** — Do all required keys (ANTHROPIC, OPENAI, PERPLEXITY, GEMINI) already exist in the Render env group, or do they need to be added? This determines whether step 4 is a no-op or requires Tom's credentials.
-
-2. **Supabase bucket** — Does the `cuttlefish` Supabase project already have a public storage bucket created for podcast assets, or does that need to be set up first?
+1. **API key provisioning** — Do all required keys (ANTHROPIC, OPENAI, PERPLEXITY, GEMINI) already exist in the Render env group, or do they need to be added? The Render MCP doesn't expose env var listing, so this needs manual verification via the dashboard.
