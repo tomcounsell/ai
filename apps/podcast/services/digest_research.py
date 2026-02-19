@@ -32,7 +32,7 @@ class ResearchDigest(BaseModel):
     topics: list[str]  # searchable keywords
     questions_answered: list[str]
     questions_unanswered: list[str]
-    contradictions: list[str]
+    contradictions: list[str] = []
 
 
 # --- Agent ---

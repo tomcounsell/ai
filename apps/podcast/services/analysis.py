@@ -327,6 +327,10 @@ def create_research_digest(episode_id: int, artifact_title: str) -> EpisodeArtif
     the input artifact title (e.g. ``p2-perplexity`` becomes
     ``digest-perplexity``).
 
+    If the AI call fails due to quota errors (HTTP 429) or usage limit exceeded,
+    this function logs a warning and creates a "skipped" digest artifact. The
+    pipeline continues, falling back to raw research artifacts for briefing.
+
     Args:
         episode_id: Primary key of the target :class:`Episode`.
         artifact_title: Exact title of the research artifact to digest
@@ -335,6 +339,8 @@ def create_research_digest(episode_id: int, artifact_title: str) -> EpisodeArtif
     Returns:
         The digest :class:`EpisodeArtifact`.
     """
+    from pydantic_ai.exceptions import ModelHTTPError, UsageLimitExceeded
+
     from apps.podcast.services.digest_research import (
         digest_research as _digest_research,
     )
@@ -349,33 +355,77 @@ def create_research_digest(episode_id: int, artifact_title: str) -> EpisodeArtif
             f"Artifact '{artifact_title}' for episode {episode_id} has no content."
         )
 
-    result = _digest_research(
-        research_text=research_artifact.content,
-        episode_topic=episode.title,
-    )
-
-    content_text = _format_research_digest(result)
-
     # Derive digest title: "p2-perplexity" -> "digest-perplexity"
     suffix = artifact_title
     if suffix.startswith("p2-"):
         suffix = suffix[3:]
     digest_title = f"digest-{suffix}"
 
-    artifact, created = EpisodeArtifact.objects.update_or_create(
-        episode=episode,
-        title=digest_title,
-        defaults={
-            "content": content_text,
-            "description": f"Structured digest of {artifact_title}.",
-            "workflow_context": "Research Gathering",
-            "metadata": result.model_dump(),
-        },
-    )
+    try:
+        result = _digest_research(
+            research_text=research_artifact.content,
+            episode_topic=episode.title,
+        )
 
-    action = "Created" if created else "Updated"
-    logger.info("%s %s artifact for episode %s", action, digest_title, episode_id)
-    return artifact
+        content_text = _format_research_digest(result)
+
+        artifact, created = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title=digest_title,
+            defaults={
+                "content": content_text,
+                "description": f"Structured digest of {artifact_title}.",
+                "workflow_context": "Research Gathering",
+                "metadata": result.model_dump(),
+            },
+        )
+
+        action = "Created" if created else "Updated"
+        logger.info("%s %s artifact for episode %s", action, digest_title, episode_id)
+        return artifact
+
+    except (UsageLimitExceeded, ModelHTTPError) as exc:
+        # Check if it's a quota/rate limit error (HTTP 429)
+        is_quota_error = False
+        if isinstance(exc, ModelHTTPError):
+            is_quota_error = exc.response.status_code == 429
+        elif isinstance(exc, UsageLimitExceeded):
+            is_quota_error = True
+
+        if is_quota_error:
+            logger.warning(
+                "AI quota exceeded when creating digest for %s (episode %s). "
+                "Skipping digest - briefing will use raw research instead. "
+                "Error: %s",
+                artifact_title,
+                episode_id,
+                str(exc),
+            )
+
+            # Create a skipped artifact so the pipeline knows this step completed
+            artifact, created = EpisodeArtifact.objects.update_or_create(
+                episode=episode,
+                title=digest_title,
+                defaults={
+                    "content": f"[SKIPPED: AI quota exceeded]\n\n"
+                    f"Raw research available in {artifact_title}.",
+                    "description": f"Digest of {artifact_title} (skipped - quota exceeded).",
+                    "workflow_context": "Research Gathering",
+                    "metadata": {"skipped": True, "reason": "quota_exceeded"},
+                },
+            )
+
+            action = "Created" if created else "Updated"
+            logger.info(
+                "%s skipped %s artifact for episode %s",
+                action,
+                digest_title,
+                episode_id,
+            )
+            return artifact
+        else:
+            # Re-raise non-quota errors
+            raise
 
 
 def cross_validate(episode_id: int) -> EpisodeArtifact:
@@ -467,13 +517,34 @@ def write_briefing(episode_id: int) -> EpisodeArtifact:
         episode=episode, title__startswith="digest-"
     )
     research_digests: dict[str, str] = {}
+    skipped_digests: set[str] = set()
+
     for art in digest_artifacts:
         if art.content:
             tool_name = art.title.replace("digest-", "", 1)
-            research_digests[tool_name] = art.content
+            # Check if digest was skipped due to quota errors
+            if art.content.startswith("[SKIPPED:"):
+                skipped_digests.add(tool_name)
+            else:
+                research_digests[tool_name] = art.content
+
+    # For skipped digests, use raw research instead
+    if skipped_digests:
+        logger.info(
+            "Using raw research for skipped digests: %s (episode %s)",
+            ", ".join(sorted(skipped_digests)),
+            episode_id,
+        )
+        for art in EpisodeArtifact.objects.filter(
+            episode=episode, title__startswith="p2-"
+        ):
+            if art.content:
+                tool_name = art.title[3:] if art.title.startswith("p2-") else art.title
+                if tool_name in skipped_digests:
+                    research_digests[tool_name] = art.content
 
     if not research_digests:
-        # Fall back to raw p2-* artifacts
+        # Fall back to raw p2-* artifacts if no digests were created at all
         for art in EpisodeArtifact.objects.filter(
             episode=episode, title__startswith="p2-"
         ):
