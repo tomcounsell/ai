@@ -44,11 +44,10 @@ class SymlinkSyncResult:
 
 
 def sync_claude_dirs(project_dir: Path) -> SymlinkSyncResult:
-    """Hardlink project .claude/{skills,commands} files to ~/.claude/.
+    """Hardlink project .claude/{skills,commands,agents} files to ~/.claude/.
 
-    Skills (directories with SKILL.md) and commands (.md files) are
-    shared cross-repo via hardlinks at the user level. Agents are
-    repo-specific and are NOT synced.
+    Skills (directories with SKILL.md), commands (.md files), and agents
+    (.md files) are shared cross-repo via hardlinks at the user level.
 
     Also cleans up stale hardlinks in ~/.claude/ that no longer have
     a corresponding source in the project directory.
@@ -64,6 +63,11 @@ def sync_claude_dirs(project_dir: Path) -> SymlinkSyncResult:
         project_dir / ".claude" / "commands", user_claude / "commands", result
     )
 
+    # Sync agents: each is a .md file
+    _sync_commands(
+        project_dir / ".claude" / "agents", user_claude / "agents", result
+    )
+
     # Remove explicitly renamed commands/skills (by name, not inode)
     _cleanup_renamed(user_claude, result)
 
@@ -73,6 +77,9 @@ def sync_claude_dirs(project_dir: Path) -> SymlinkSyncResult:
     )
     _cleanup_stale_skills(
         project_dir / ".claude" / "skills", user_claude / "skills", result
+    )
+    _cleanup_stale_commands(
+        project_dir / ".claude" / "agents", user_claude / "agents", result
     )
 
     if result.errors > 0:
