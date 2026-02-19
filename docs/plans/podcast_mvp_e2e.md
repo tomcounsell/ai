@@ -37,7 +37,7 @@ One real episode successfully published through the full pipeline, appearing in 
 | `OPENAI_API_KEY` in `.env.local` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env.local').get('OPENAI_API_KEY')"` | Whisper transcription |
 | `PERPLEXITY_API_KEY` in `.env.local` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env.local').get('PERPLEXITY_API_KEY')"` | Perplexity research |
 | `GEMINI_API_KEY` in `.env.local` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env.local').get('GEMINI_API_KEY')"` | Gemini research |
-| Google Cloud auth for NotebookLM | `gcloud auth print-access-token >/dev/null 2>&1 && echo OK` | NotebookLM Enterprise API |
+| `notebooklm-mcp-cli` installed locally | `python -c "import notebooklm_mcp" 2>/dev/null && echo OK || pip show notebooklm-mcp-cli` | Local audio worker |
 | Supabase credentials | `python -c "from dotenv import dotenv_values; e=dotenv_values('.env.local'); assert e.get('SUPABASE_PROJECT_URL') and e.get('SUPABASE_SERVICE_ROLE_KEY')"` | File storage |
 
 ## Solution
@@ -80,15 +80,11 @@ Production already sets `STORAGE_BACKEND = "supabase"` in `settings/production.p
 
 Verify by calling `check_storage_config()` from a production shell.
 
-### 5. Verify NotebookLM audio generation path (operational)
+### 5. Audio generation via local worker (operational)
 
-Two paths exist — pick whichever works:
+The task pipeline pauses at step 9 (`pause_for_human("audio_generation")`). A local machine runs `manage.py local_audio_worker`, which polls the API, generates audio via `notebooklm-mcp-cli`, uploads it, and resumes the workflow.
 
-**Path A: Enterprise API (production)** — `generate_audio()` in `services/audio.py` calls NotebookLM directly. Requires Google Cloud project with Discovery Engine API + NotebookLM Enterprise subscription. The task pipeline calls this when `step_audio_generation` runs.
-
-**Path B: Local audio worker** — `manage.py local_audio_worker` polls an API endpoint, generates audio via `notebooklm-mcp-cli` locally, and callbacks. The task pipeline pauses at step 9 (`pause_for_human("audio_generation")`) and the worker resumes it.
-
-For MVP, either path works. Path B is more pragmatic if Enterprise API access isn't ready.
+This is the MVP path. Enterprise API (Path A) is a future upgrade — no action needed for it now.
 
 ### Flow
 
@@ -103,9 +99,9 @@ For MVP, either path works. Path B is more pragmatic if Enterprise API access is
 
 ## Risks
 
-### Risk 1: NotebookLM Enterprise API access
-**Impact:** Audio generation fails, pipeline stalls at phase 9.
-**Mitigation:** Fall back to Path B (local audio worker). The pipeline is designed to pause and resume.
+### Risk 1: Local audio worker availability
+**Impact:** No one running `local_audio_worker` means pipeline stalls at phase 9 indefinitely.
+**Mitigation:** The workflow UI shows `paused_for_human` status clearly. Worker can be started anytime — no data loss from the pause.
 
 ### Risk 2: Supabase storage misconfiguration
 **Impact:** Audio upload fails after successful generation — wasted API credits.
@@ -264,8 +260,6 @@ No other documentation changes needed until the MVP is validated.
 
 ## Open Questions
 
-1. **Which NotebookLM path for MVP?** Path A (Enterprise API, fully automated) requires a Google Cloud project with Discovery Engine API. Path B (local audio worker) works without it but needs someone to run `manage.py local_audio_worker` on a machine with NotebookLM CLI access. Which do we have access to today?
+1. **API key provisioning** — Do all required keys (ANTHROPIC, OPENAI, PERPLEXITY, GEMINI) already exist in the Render env group, or do they need to be added? This determines whether step 4 is a no-op or requires Tom's credentials.
 
-2. **API key provisioning** — Do all required keys (ANTHROPIC, OPENAI, PERPLEXITY, GEMINI) already exist in the Render env group, or do they need to be added? This determines whether step 4 is a no-op or requires Tom's credentials.
-
-3. **Supabase bucket** — Does the `cuttlefish` Supabase project already have a public storage bucket created for podcast assets, or does that need to be set up first?
+2. **Supabase bucket** — Does the `cuttlefish` Supabase project already have a public storage bucket created for podcast assets, or does that need to be set up first?
