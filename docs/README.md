@@ -29,13 +29,13 @@ tail -f logs/bridge.log
 | Document | Description |
 |----------|-------------|
 | [Consolidated Documentation](CONSOLIDATED_DOCUMENTATION.md) | **Primary reference** - complete system documentation |
-| [System Overview](architecture/system-overview.md) | High-level architecture and design principles |
+| [System Overview](features/system-overview.md) | High-level architecture and design principles |
 
 ### Interface
 
 | Document | Description |
 |----------|-------------|
-| [Telegram Integration](TELEGRAM.md) | Complete Telegram interface documentation |
+| [Telegram Integration](telegram.md) | Complete Telegram interface documentation |
 
 ### Operations
 
@@ -54,7 +54,7 @@ tail -f logs/bridge.log
 
 | Document | Description |
 |----------|-------------|
-| [Quality Standards](tools/quality-standards.md) | Tool quality standards and patterns |
+| [Quality Standards](guides/quality-standards.md) | Tool quality standards and patterns |
 | [Tools Reference](tools-reference.md) | Complete tool documentation |
 
 ## Architecture Summary
