@@ -1,9 +1,24 @@
 ---
 name: notebooklm-enterprise-api
-description: Generate podcast audio using NotebookLM Enterprise API via Google Cloud. Automates the manual NotebookLM workflow - creates notebook, uploads sources, generates audio with custom focus prompt. Requires Google Cloud project with Discovery Engine API enabled.
+description: "[DEPRECATED - NOT IN USE] Generate podcast audio using NotebookLM Enterprise API via Google Cloud. The team decided against using this approach. Use notebooklm-audio skill (manual workflow) or local_audio_worker instead."
+user-invocable: false
 ---
 
 # NotebookLM Enterprise API Audio Generation
+
+**STATUS: DEPRECATED - NOT CURRENTLY IN USE**
+
+**Date Deprecated:** 2026-02-19
+
+**Reason:** The team decided against using the NotebookLM Enterprise API for podcast audio generation.
+
+**Current Approach:** The podcast production pipeline uses local audio generation via `notebooklm-mcp-cli` and the `local_audio_worker` management command. See `apps/podcast/tasks.py::step_audio_generation` for implementation details.
+
+**Fallback Option:** For manual workflow, use the `notebooklm-audio` skill (web interface approach).
+
+---
+
+## Original Documentation (Archived)
 
 Generate podcast audio using the NotebookLM Enterprise API. This automates the manual NotebookLM web workflow:
 

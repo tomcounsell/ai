@@ -49,6 +49,7 @@ def _create_researcher_agent(
         system_prompt=_SYSTEM_PROMPT,
         builtin_tools=[web_search],
         defer_model_check=True,
+        retries=3,
     )
 
     @agent.tool

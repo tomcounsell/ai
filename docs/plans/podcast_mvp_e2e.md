@@ -92,7 +92,7 @@ Verify by calling `check_storage_config()` from a production shell.
 
 The task pipeline pauses at step 9 (`pause_for_human("audio_generation")`). A local machine runs `manage.py local_audio_worker`, which polls the API, generates audio via `notebooklm-mcp-cli`, uploads it, and resumes the workflow.
 
-This is the MVP path. Enterprise API (Path A) is a future upgrade — no action needed for it now.
+This is the MVP path. Enterprise API integration exists in the codebase (`apps/podcast/tools/notebooklm_api.py` and `apps/podcast/services/audio.py::generate_audio()`) but is **NOT being used** — the team decided against this approach as of 2026-02-19. No action needed on the Enterprise API for this MVP.
 
 ### Flow
 

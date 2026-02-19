@@ -1,12 +1,16 @@
 ---
 name: notebooklm-audio
-description: "LEGACY SKILL - Manual NotebookLM web interface workflow. The primary workflow now uses notebooklm-enterprise-api for automated audio generation. Use this skill only when the API is unavailable."
+description: "Manual NotebookLM web interface workflow. This is the fallback approach when the automated local_audio_worker is not available. The NotebookLM Enterprise API is NOT being used."
 user-invocable: false
 ---
 
 # NotebookLM Audio Generation (Manual Fallback)
 
-**Status:** Manual fallback - Use when NotebookLM Enterprise API is unavailable.
+**Status:** Manual fallback workflow for podcast audio generation.
+
+**Primary Method:** The automated pipeline uses `local_audio_worker` with `notebooklm-mcp-cli`.
+
+**Use This When:** The local audio worker is unavailable and you need to generate audio manually.
 
 ---
 

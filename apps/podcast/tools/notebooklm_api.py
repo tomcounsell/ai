@@ -2,6 +2,15 @@
 """
 NotebookLM Enterprise API - Audio Overview Generation
 
+NOTE: This NotebookLM Enterprise API integration exists but is NOT currently in use.
+The team decided against using this approach for now. [Date: 2026-02-19]
+
+Alternative: The podcast production pipeline uses local audio generation via
+notebooklm-mcp-cli instead. See apps/podcast/tasks.py::step_audio_generation
+and the local_audio_worker management command for the current approach.
+
+===== ARCHIVED IMPLEMENTATION BELOW =====
+
 Uses the Discovery Engine API to:
 1. Create a notebook
 2. Upload source files (p1-brief.md, report.md, p3-briefing.md, sources.md)

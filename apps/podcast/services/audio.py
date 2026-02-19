@@ -30,6 +30,14 @@ logger = logging.getLogger(__name__)
 def generate_audio(episode_id: int) -> str:
     """Call NotebookLM API to generate audio and upload to storage.
 
+    NOTE: This NotebookLM Enterprise API integration exists but is NOT currently in use.
+    The team decided against using this approach for now. [Date: 2026-02-19]
+
+    The actual podcast production uses local audio generation (notebooklm-mcp-cli)
+    via the local_audio_worker instead. See apps/podcast/tasks.py::step_audio_generation.
+
+    ===== ARCHIVED IMPLEMENTATION BELOW =====
+
     This is a long-running operation. It:
         1. Creates a NotebookLM notebook.
         2. Uploads relevant episode artifacts (report, briefing, content plan,
@@ -150,8 +158,9 @@ def transcribe_audio(episode_id: int) -> str:
     Steps:
         1. Load Episode and read ``audio_url``.
         2. Download the audio bytes from the URL.
-        3. Send to OpenAI Whisper API for transcription.
-        4. Save transcript to ``Episode.transcript``.
+        3. Calculate audio duration using pydub.
+        4. Send to OpenAI Whisper API for transcription.
+        5. Save transcript and duration to Episode.
 
     Args:
         episode_id: Primary key of the :class:`Episode`.
@@ -164,6 +173,7 @@ def transcribe_audio(episode_id: int) -> str:
         ValueError: If ``Episode.audio_url`` is empty.
     """
     import openai
+    from pydub import AudioSegment
 
     episode = Episode.objects.get(pk=episode_id)
 
@@ -178,6 +188,15 @@ def transcribe_audio(episode_id: int) -> str:
     req = urllib.request.Request(episode.audio_url)
     with urllib.request.urlopen(req, timeout=300) as response:  # nosec B310
         audio_bytes = response.read()
+
+    # Calculate audio duration
+    audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format="mp3")
+    duration_seconds = int(audio.duration_seconds)
+
+    logger.info(
+        "transcribe_audio: calculated duration=%d seconds",
+        duration_seconds,
+    )
 
     # Call OpenAI Whisper API
     client = openai.OpenAI()
@@ -196,13 +215,15 @@ def transcribe_audio(episode_id: int) -> str:
 
     transcript = transcription.text
 
-    # Save to episode
+    # Save transcript and duration to episode
     episode.transcript = transcript
-    episode.save(update_fields=["transcript"])
+    episode.audio_duration_seconds = duration_seconds
+    episode.save(update_fields=["transcript", "audio_duration_seconds"])
 
     logger.info(
-        "transcribe_audio: saved transcript (%d chars) for episode=%s",
+        "transcribe_audio: saved transcript (%d chars) and duration (%d sec) for episode=%s",
         len(transcript),
+        duration_seconds,
         episode.title,
     )
     return transcript

@@ -188,14 +188,43 @@ def run_gemini_research(episode_id: int, prompt: str) -> EpisodeArtifact:
 
     Uses :func:`apps.podcast.tools.gemini_deep_research.run_gemini_research`.
 
+    If the ``GEMINI_API_KEY`` environment variable is missing or if the API
+    returns an error (e.g., quota exceeded), this function logs a warning and
+    creates a "skipped" artifact. The pipeline continues with other research
+    sources.
+
     Args:
         episode_id: Primary key of the target :class:`Episode`.
         prompt: The research query to send to Gemini.
 
     Returns:
-        The ``p2-gemini`` :class:`EpisodeArtifact`.
+        The ``p2-gemini`` :class:`EpisodeArtifact` (either with research
+        results or a "skipped" message).
     """
+    import os
+
     episode = Episode.objects.get(pk=episode_id)
+
+    # Check for API key before attempting research
+    if not os.getenv("GEMINI_API_KEY"):
+        logger.warning(
+            "GEMINI_API_KEY not found in environment. Skipping Gemini "
+            "research for episode %s. This is optional and the pipeline will "
+            "continue with other research sources.",
+            episode_id,
+        )
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-gemini",
+            defaults={
+                "content": "[SKIPPED: GEMINI_API_KEY not configured]",
+                "description": "Gemini Deep Research (skipped - API key missing).",
+                "workflow_context": "Research Gathering",
+                "metadata": {"skipped": True, "reason": "API key not configured"},
+            },
+        )
+        return artifact
+
     context = _get_episode_context(episode)
 
     full_prompt = (
@@ -212,9 +241,25 @@ def run_gemini_research(episode_id: int, prompt: str) -> EpisodeArtifact:
         verbose=False,
     )
 
+    # Handle None response (API error, quota exceeded, etc.)
     if content_text is None:
-        content_text = ""
-        logger.warning("Gemini research returned no content for episode %s", episode_id)
+        logger.warning(
+            "Gemini research returned no content for episode %s (likely quota "
+            "exceeded or API error). Skipping Gemini research. This is optional "
+            "and the pipeline will continue with other research sources.",
+            episode_id,
+        )
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-gemini",
+            defaults={
+                "content": "[SKIPPED: Gemini API error or quota exceeded]",
+                "description": "Gemini Deep Research (skipped - API error).",
+                "workflow_context": "Research Gathering",
+                "metadata": {"skipped": True, "reason": "API error or quota exceeded"},
+            },
+        )
+        return artifact
 
     artifact, created = EpisodeArtifact.objects.update_or_create(
         episode=episode,

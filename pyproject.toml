@@ -93,6 +93,7 @@ podcast = [
     "pillow>=12.0.0",
     "gpt-researcher>=0.14.6",
     "langchain-openai>=0.3.0",
+    "langchain-mcp-adapters>=0.1.0",
     "google-genai>=0.5.0",
     "pydub>=0.25.1",
     "numpy>=2.0.0",

@@ -1310,26 +1310,28 @@ Return to content_plan.md and complete the missing sections.
 ✓ research/p3-briefing.md exists
 ✓ sources.md exists
 
-**Primary Method: NotebookLM Enterprise API**
+**NOTE: NotebookLM Enterprise API NOT IN USE (as of 2026-02-19)**
 
-Uses the Discovery Engine API to automate the NotebookLM workflow:
-- Two-host conversational "Deep Dive" format
-- Uploads 4 source files automatically
-- Custom episodeFocus prompt for Yudame Research branding
-- Typical output: 20-40 minute episodes
+The team decided against using the Enterprise API approach. The code exists in `apps/podcast/tools/notebooklm_api.py` but is archived and not actively used.
 
----
+**Current Approach: Local Audio Worker**
 
-### Generate Audio with NotebookLM API
+The automated pipeline pauses at Phase 9 and waits for a local machine to run:
 
-**Verify source files exist:**
-
-Use Glob to confirm all 5 source files exist in the episode directory:
-`research/p1-brief.md`, `report.md`, `research/p3-briefing.md`, `sources.md`, `content_plan.md`
-
-**Run the API script:**
 ```bash
-uv run python ~/src/cuttlefish/apps/podcast/tools/notebooklm_api.py apps/podcast/pending-episodes/YYYY-MM-DD-slug/ --series "Series Name" --cleanup
+# On a local machine with notebooklm-mcp-cli installed
+uv run python manage.py local_audio_worker
+```
+
+The worker polls for episodes awaiting audio, generates audio via `notebooklm-mcp-cli`, uploads to storage, and resumes the workflow.
+
+**Fallback: Manual NotebookLM Workflow**
+
+If the local audio worker is unavailable, use the manual workflow:
+
+```bash
+# Generate the NotebookLM prompt (auto-detects episode info)
+uv run python ~/src/cuttlefish/apps/podcast/tools/notebooklm_prompt.py apps/podcast/pending-episodes/YYYY-MM-DD-slug/ --copy
 ```
 
 **Arguments:**
