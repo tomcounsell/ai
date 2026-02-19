@@ -76,7 +76,9 @@ def issue_exists_for_date(date: str) -> bool:
         return False
 
 
-def create_daydream_issue(findings: dict[str, list[str]], date: str) -> bool:
+def create_daydream_issue(
+    findings: dict[str, list[str]], date: str, cwd: str | None = None
+) -> str | bool:
     """Create a GitHub issue with daydream findings.
 
     Skips creation if:
@@ -86,9 +88,11 @@ def create_daydream_issue(findings: dict[str, list[str]], date: str) -> bool:
     Args:
         findings: Dict mapping category names to lists of finding strings.
         date: The date string (YYYY-MM-DD) for the report.
+        cwd: Optional working directory for the gh CLI subprocess. Useful
+            for multi-repo support where each project has its own gh context.
 
     Returns:
-        True if issue was created, False if skipped or failed.
+        Issue URL string if issue was created, False if skipped or failed.
     """
     # Skip if no real findings
     active_findings = {k: v for k, v in findings.items() if v}
@@ -121,11 +125,12 @@ def create_daydream_issue(findings: dict[str, list[str]], date: str) -> bool:
             capture_output=True,
             text=True,
             timeout=30,
+            cwd=cwd,
         )
         if result.returncode == 0:
             issue_url = result.stdout.strip()
             logger.info(f"Created daydream issue: {issue_url}")
-            return True
+            return issue_url
         else:
             logger.error(f"Failed to create issue: {result.stderr}")
             return False

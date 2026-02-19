@@ -18,6 +18,7 @@ The daydream runner (`scripts/daydream.py`) executes these steps sequentially. E
 | 8 | LLM Reflection | Uses Claude Haiku via Anthropic SDK to categorize mistakes |
 | 9 | Memory Consolidation | Appends lessons to `data/lessons_learned.jsonl`, deduplicates, prunes >90 days |
 | 10 | GitHub Issue Creation | Posts daily digest issue via `gh` CLI (skips if no findings) |
+| 11 | Telegram Post | Posts brief summary to project's Telegram group (per-project, added 2026-02-18) |
 
 ## Session Analysis (Step 7)
 
@@ -106,3 +107,7 @@ Install: `./scripts/install_daydream.sh`
 | `cat data/lessons_learned.jsonl` | View institutional memory |
 | `launchctl list \| grep daydream` | Check launchd status |
 | `./scripts/install_daydream.sh` | Reinstall after plist changes |
+
+## Multi-Repo Support
+
+As of 2026-02-18, daydream supports analyzing multiple repositories per machine. It reads `config/projects.json`, filters to repos whose `working_directory` exists locally, and runs per-project analysis (log review, task cleanup, GitHub issue creation, Telegram posting) for each one. AI-only steps run once as before. See `docs/features/daydream-multi-repo.md` for the full architecture and configuration reference.

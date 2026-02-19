@@ -453,14 +453,29 @@ class TestGitHubIssueStep:
 
     @pytest.mark.asyncio
     @patch("scripts.daydream.create_daydream_issue")
-    async def test_creates_issue_with_findings(self, mock_create):
-        """Step 10 creates GitHub issue when there are findings."""
+    async def test_creates_issue_per_project_with_findings(self, mock_create):
+        """Step 10 creates GitHub issue for each project that has namespaced findings."""
+        from unittest.mock import AsyncMock
+
         from scripts.daydream import DaydreamRunner
 
-        mock_create.return_value = True
+        mock_create.return_value = "https://github.com/org/repo/issues/1"
         runner = DaydreamRunner()
-        runner.state.findings = {"test": ["finding 1"]}
-        await runner.step_create_github_issue()
+
+        # Inject a fake project with github config
+        runner.projects = [
+            {
+                "slug": "my-proj",
+                "working_directory": "/tmp",
+                "github": {"org": "org", "repo": "repo"},
+            }
+        ]
+        # Findings must be namespaced to match the project slug
+        runner.state.findings = {"my-proj:log_review": ["finding 1"]}
+
+        with patch.object(runner, "step_post_to_telegram", new=AsyncMock()):
+            await runner.step_create_github_issue()
+
         mock_create.assert_called_once()
 
     @pytest.mark.asyncio
