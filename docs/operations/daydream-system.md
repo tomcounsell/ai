@@ -4,7 +4,7 @@ Operational runbook for the daydream autonomous maintenance system.
 
 ## Overview
 
-The daydream system runs daily at 6 AM Pacific via macOS launchd. It performs a 10-step maintenance cycle covering cleanup, analysis, reflection, and reporting.
+The daydream system runs daily at 6 AM Pacific via macOS launchd. It performs an 11-step maintenance cycle covering cleanup, analysis, reflection, reporting, and per-project Telegram notifications.
 
 For the full feature description, see [Daydream Reactivation](../features/daydream-reactivation.md).
 
@@ -18,20 +18,21 @@ For the full feature description, see [Daydream Reactivation](../features/daydre
 | `cat data/lessons_learned.jsonl` | View institutional memory |
 | `launchctl list \| grep daydream` | Check launchd status |
 
-## 10-Step Pipeline
+## 11-Step Pipeline
 
 | Step | Name | Failure Mode |
 |------|------|-------------|
 | 1 | File Cleanup | Non-blocking. Logs warning, continues. |
-| 2 | Log Review | Non-blocking. Skips if `logs/bridge.log` missing. |
+| 2 | Log Review | Non-blocking. Per-project. Skips if `logs/bridge.log` missing. |
 | 3 | Sentry Check | Non-blocking. Skips if MCP unavailable. |
-| 4 | Task Cleanup | Non-blocking. Requires `gh` CLI authentication. |
+| 4 | Task Cleanup | Non-blocking. Per-project via `gh` CLI. Requires `gh` auth. |
 | 5 | Audit Documentation | Non-blocking. Weekly gate: skips if run within last 7 days. Requires `ANTHROPIC_API_KEY`. |
 | 6 | Report Generation | Non-blocking. Writes to `logs/daydream/`. |
 | 7 | Session Analysis | Non-blocking. Skips if no session logs exist. |
 | 8 | LLM Reflection | Non-blocking. Requires `ANTHROPIC_API_KEY`. |
 | 9 | Memory Consolidation | Non-blocking. Appends to `data/lessons_learned.jsonl`. |
-| 10 | GitHub Issue Creation | Non-blocking. Skips if no findings. Requires `gh` auth. |
+| 10 | GitHub Issue Creation | Non-blocking. Per-project. Skips if no findings. Requires `gh` auth. |
+| 11 | Telegram Post | Non-blocking. Per-project. Skips if `telegram.groups` absent or Telethon credentials missing. |
 
 ### Step 5: Documentation Audit
 
@@ -106,6 +107,9 @@ launchctl list | grep daydream
 | Sentry MCP | Step 3 | No (skips gracefully) |
 | `logs/bridge.log` | Step 2 | No (skips if missing) |
 | `logs/sessions/*/chat.json` | Step 7 | No (skips if empty) |
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Step 11 | No (skips if missing) |
+| `data/valor.session` | Step 11 | No (skips if missing) |
+| `config/projects.json` `telegram.groups` | Step 11 | No (skips per-project if absent) |
 
 ## Troubleshooting
 

@@ -1,8 +1,8 @@
 # Daydream Reactivation
 
-The daydream system is an autonomous maintenance and self-reflection process that runs daily at 6 AM Pacific. It performs cleanup, log analysis, session quality assessment, LLM-powered reflection, and institutional memory management, then publishes a digest to GitHub Issues.
+The daydream system is an autonomous maintenance and self-reflection process that runs daily at 6 AM Pacific. It performs cleanup, log analysis, session quality assessment, LLM-powered reflection, and institutional memory management, then publishes per-project digests to GitHub Issues and Telegram.
 
-## 10-Step Process
+## 11-Step Process
 
 The daydream runner (`scripts/daydream.py`) executes these steps sequentially. Each step is independently failable -- a failure in one step does not block subsequent steps.
 
