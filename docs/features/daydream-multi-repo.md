@@ -22,17 +22,17 @@ Set to `PROJECT_ROOT` at module import time (before any `chdir`). Steps that mus
 
 | Step | Type | Behavior |
 |------|------|----------|
-| 1 — Prioritize and clean code | AI-only | Runs once from `AI_ROOT` |
+| 1 — File cleanup | AI-only | Runs once from `AI_ROOT` |
 | 2 — Review logs | Per-project | Iterates each project's `logs/` dir |
 | 3 — Sentry check | AI-only | Runs once (MCP skipped in standalone) |
 | 4 — Clean tasks | Per-project | `gh issue list` per project via `cwd=` |
-| 5 — Update docs | AI-only | Runs once from `AI_ROOT` |
-| 6 — Produce report | AI-only | Single report for all findings |
-| 7 — Session analysis | AI-only | Analyzes `AI_ROOT/logs/sessions/` |
-| 8 — LLM reflection | AI-only | Reflects on combined session findings |
+| 5 — Audit docs | AI-only | Runs once from `AI_ROOT` |
+| 6 — Session analysis | AI-only | Analyzes `AI_ROOT/logs/sessions/` |
+| 7 — LLM reflection | AI-only | Reflects on combined session findings |
+| 8 — Auto-fix bugs | AI-only | Spawns plan+build for high-confidence `code_bug` reflections |
 | 9 — Memory consolidation | AI-only | Appends to `AI_ROOT/data/lessons_learned.jsonl` |
-| 10 — GitHub issue creation | Per-project | Issue in each project's own repo |
-| 11 — Telegram post | Per-project | Posts summary to `telegram.groups[0]` |
+| 10 — Report generation | AI-only | Single report for all findings |
+| 11 — GitHub issue creation | Per-project | Issue in each project's own repo; also posts to Telegram |
 
 ### `subprocess` `cwd=` vs `os.chdir`
 
@@ -66,14 +66,14 @@ Each project entry in `config/projects.json`:
 | Field | Required for daydream | Notes |
 |-------|----------------------|-------|
 | `working_directory` | Yes | Must exist on disk to be included |
-| `github.org` | For issues/tasks | Steps 4 and 10 skip if absent |
-| `github.repo` | For issues/tasks | Steps 4 and 10 skip if absent |
+| `github.org` | For issues/tasks | Steps 4 and 11 skip if absent |
+| `github.repo` | For issues/tasks | Steps 4 and 11 skip if absent |
 | `telegram.groups` | No | Step 11 skips if absent or empty |
 
 ## Graceful fallbacks
 
 - `working_directory` absent from disk → project excluded from `load_local_projects()`
-- `github` key missing → steps 4 and 10 log a warning and skip that project
+- `github` key missing → steps 4 and 11 log a warning and skip that project
 - `telegram.groups` missing or empty → step 11 logs and skips
 - `data/valor.session` missing → step 11 skips silently
 - `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` not set → step 11 skips silently

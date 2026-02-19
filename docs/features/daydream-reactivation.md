@@ -13,14 +13,14 @@ The daydream runner (`scripts/daydream.py`) executes these steps sequentially. E
 | 3 | Sentry Check | Queries Sentry for unresolved issues (skips gracefully if MCP unavailable) |
 | 4 | Task Cleanup | Lists open bug issues via `gh issue list --label bug` |
 | 5 | Audit Documentation | Weekly LLM-powered accuracy audit of `docs/`; KEEP / UPDATE / DELETE verdicts (see [Documentation Audit](documentation-audit.md)) |
-| 6 | Report Generation | Writes local report to `logs/daydream/report_YYYY-MM-DD.md` |
-| 7 | Session Analysis | Reads session logs, computes thrash ratio, detects corrections |
-| 8 | LLM Reflection | Uses Claude Haiku via Anthropic SDK to categorize mistakes |
+| 6 | Session Analysis | Reads session logs, computes thrash ratio, detects corrections |
+| 7 | LLM Reflection | Uses Claude Haiku via Anthropic SDK to categorize mistakes |
+| 8 | Auto-Fix Bugs | For high-confidence `code_bug` reflections, spawns `/do-plan` + `/do-build` to open a fix PR (see [Daydream Auto-Fix](daydream-auto-fix.md)) |
 | 9 | Memory Consolidation | Appends lessons to `data/lessons_learned.jsonl`, deduplicates, prunes >90 days |
-| 10 | GitHub Issue Creation | Posts daily digest issue via `gh` CLI (skips if no findings) |
-| 11 | Telegram Post | Posts brief summary to project's Telegram group (per-project, added 2026-02-18) |
+| 10 | Report Generation | Writes local report to `logs/daydream/report_YYYY-MM-DD.md` |
+| 11 | GitHub Issue Creation | Posts daily digest issue via `gh` CLI per project; also posts summary to Telegram (skips if no findings) |
 
-## Session Analysis (Step 7)
+## Session Analysis (Step 6)
 
 Session analysis reads chat logs from `logs/sessions/*/chat.json` and `tool_use.jsonl`, filtered to yesterday's sessions (capped at 10 most interesting).
 
@@ -41,7 +41,7 @@ Scans session transcripts for patterns indicating the human corrected the agent:
 - Redirections ("actually", "instead")
 - Repeated instructions
 
-## LLM Reflection (Step 8)
+## LLM Reflection (Step 7)
 
 Flagged sessions are sent to Claude Haiku (via `anthropic` Python SDK) for categorization into:
 
@@ -56,6 +56,10 @@ Flagged sessions are sent to Claude Haiku (via `anthropic` Python SDK) for categ
 
 Each reflection includes category, summary, pattern, and prevention rule.
 
+## Auto-Fix Bugs (Step 8)
+
+When a reflection is categorized as `code_bug` and meets the confidence threshold (2-of-3 criteria), daydream automatically spawns `/do-plan` + `/do-build` to open a fix PR. See [Daydream Auto-Fix](daydream-auto-fix.md) for confidence criteria, the ignore log, and dry-run mode.
+
 ## Institutional Memory (Step 9)
 
 Lessons are stored in `data/lessons_learned.jsonl`:
@@ -68,7 +72,7 @@ Lessons are stored in `data/lessons_learned.jsonl`:
 
 **Pruning**: Entries older than 90 days are removed during each run.
 
-## GitHub Issue Digest (Step 10)
+## GitHub Issue Digest (Step 11)
 
 When findings exist, a daily digest issue is created via `gh issue create --label daydream`. Format:
 
