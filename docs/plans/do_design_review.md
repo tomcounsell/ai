@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Small
 owner: Valor Engels
@@ -17,7 +17,7 @@ There's a build-time frontend design skill (`/frontend-design`) that helps gener
 After building UI with `/frontend-design`, there's no automated way to evaluate the result. Review is manual and ad-hoc.
 
 **Desired outcome:**
-A `/do-design-review` skill that screenshots existing pages (local or deployed) and evaluates them against a structured set of premium design criteria, producing a severity-rated report with specific, actionable recommendations.
+A `/do-design-review` skill that accepts a starting URL and a test goal, then actively navigates the interface using real interactions (clicks, form fills, etc.) to evaluate the design against premium criteria — producing a severity-rated report with specific, actionable recommendations. The agent handles authentication if it encounters a login wall, then continues to the specified starting point.
 
 ## Appetite
 
@@ -40,26 +40,36 @@ No prerequisites — this work has no external dependencies. `agent-browser` is 
 ### Key Elements
 
 - **SKILL.md**: Prompt that defines the evaluation rubric, workflow, and output format — the entire skill lives here
-- **Reference criteria**: Premium design dimensions drawn from frontend-design's reference docs, rephrased as evaluative questions
-- **agent-browser integration**: Navigate to URL, screenshot key pages (desktop + mobile viewports)
-- **Vision-based evaluation**: Claude analyzes screenshots against the rubric and assigns severity ratings
+- **Two required inputs**: A starting URL (where to begin, assuming the user is logged in) and a test goal (what to evaluate, as specific as needed)
+- **Active navigation**: Agent uses real interactions — clicks, form fills, navigation — to traverse the UI toward the test goal, not just passive screenshotting
+- **Auth handling**: If the agent encounters a login wall en route, it figures out credentials and authenticates before continuing
+- **Vision-based evaluation**: Claude screenshots and analyzes at each meaningful state, evaluating against the rubric as it goes
 - **Structured output**: Table of categories with ratings, plus Top 3 prioritized recommendations
 
 ### Flow
 
-User invokes `/do-design-review http://localhost:8000`
-→ Skill opens URL in agent-browser
-→ Screenshots key pages at desktop and mobile viewports
-→ Claude vision evaluates each screenshot against rubric
-→ Produces structured report with severity ratings + Top 3 improvements
+```
+User: /do-design-review http://localhost:8000/dashboard "evaluate the project creation flow end-to-end"
+
+→ Agent opens starting URL
+→ If login wall encountered → agent authenticates, returns to starting URL
+→ Agent takes initial screenshot, begins evaluation
+→ Agent navigates using actions/buttons toward the test goal
+→ Screenshot + evaluate at each meaningful interaction point
+→ Complete the test goal or exhaust navigable paths
+→ Produce structured report: severity table + Top 3 improvements
+```
+
+The starting URL is where evaluation begins (assumed accessible). The test goal defines what the agent is trying to accomplish — it can be narrow ("evaluate the settings page layout") or broad ("walk through signup and first-run experience").
 
 ### Technical Approach
 
 - Skill lives entirely in `.claude/skills/do-design-review/SKILL.md`
 - Optional: `reference/criteria.md` with the full evaluation rubric (keeps SKILL.md lean)
-- Uses `agent-browser open <url>` → `agent-browser screenshot` for captures
-- Mobile viewport via `agent-browser open <url> --viewport 390x844` (or equivalent flag)
-- Evaluation rubric mirrors `/frontend-design` dimensions, rephrased as review criteria
+- Uses `agent-browser open <url>` → `agent-browser snapshot -i` → `agent-browser click` / `fill` for active navigation
+- Screenshots at each meaningful state with `agent-browser screenshot`
+- Desktop viewport only (v1)
+- Evaluation rubric mirrors `/frontend-design` dimensions, rephrased as diagnostic questions
 - Output format: markdown table + prose recommendations
 
 ### Evaluation Dimensions
@@ -74,7 +84,7 @@ Ten premium design dimensions (from issue 143 and the frontend-design reference 
 6. **Micro-interactions** — Hover states, transitions, feedback cues (inferred from structure)
 7. **Consistency** — Repeated patterns, component reuse, visual rhythm
 8. **Trust signals** — Professional feel, polish, attention to detail
-9. **Mobile responsiveness** — Layout integrity across breakpoints
+9. **Interaction quality** — Do actions feel responsive and intentional? Are affordances clear?
 10. **AI Slop Check** — Does it look templated/generic? Would someone ask "which AI made this?"
 
 ### Rating Scale
@@ -89,12 +99,14 @@ Ten premium design dimensions (from issue 143 and the frontend-design reference 
 - **Before/after comparison** — Useful but complex; can be a v2 enhancement
 - **Reference site comparison** — Comparing against inspiration sites is a great idea but adds scope; defer
 - **Annotation overlays** — Drawing on screenshots to mark issues is impressive but overkill for a skill; prose descriptions are sufficient
+- **Mobile viewport** — Deferred to v2; desktop-only is sufficient for v1
+- **Multi-path crawling** — The agent follows one goal-driven path, not a full sitemap crawl
 
 ## Risks
 
-### Risk 1: agent-browser screenshot flags unknown
-**Impact:** Can't capture mobile viewport or full-page screenshots
-**Mitigation:** Check `agent-browser --help` during implementation to find correct flags; fall back to desktop-only if mobile flags aren't available
+### Risk 1: Auth credentials unknown
+**Impact:** Agent hits login wall and can't proceed to starting URL
+**Mitigation:** Skill instructs agent to look for credentials in `.env`, ask the user if not found, or attempt common dev defaults (admin/admin, etc.) on local instances
 
 ### Risk 2: Vision evaluation quality varies
 **Impact:** Shallow or generic feedback that doesn't catch real issues
@@ -105,7 +117,8 @@ Ten premium design dimensions (from issue 143 and the frontend-design reference 
 - Lighthouse / performance scores
 - Before/after comparison runs
 - Screenshot annotation / overlays
-- Multi-page crawling beyond what the user specifies
+- Sitemap crawling — one goal-driven path per invocation
+- Mobile viewport (v1 — desktop only)
 - Saving reports to disk (output to chat is sufficient)
 - Integration into `/do-pr-review` (could be added later as opt-in)
 
@@ -124,9 +137,12 @@ No agent integration required — this is a user-invocable skill, not a tool exp
 
 ## Success Criteria
 
-- [ ] `/do-design-review <url>` opens the URL, captures screenshots, and produces a structured report
+- [ ] Skill accepts two inputs: starting URL and test goal description
+- [ ] Agent actively navigates using real interactions (clicks, form fills) to pursue the test goal
+- [ ] Agent handles auth if it encounters a login wall before reaching the starting URL
+- [ ] Screenshots are captured at each meaningful state during navigation
 - [ ] Report covers all 10 evaluation dimensions with severity ratings
-- [ ] Report includes specific, actionable Top 3 recommendations
+- [ ] Report includes specific, actionable Top 3 recommendations tied to observed UI states
 - [ ] Works with both local (`localhost`) and deployed URLs
 - [ ] Skill description in `SKILL.md` frontmatter correctly triggers from Claude Code session
 
@@ -160,7 +176,7 @@ No agent integration required — this is a user-invocable skill, not a tool exp
 - **Assigned To**: skill-writer
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `.claude/skills/do-design-review/SKILL.md` with YAML frontmatter, evaluation rubric (10 dimensions), step-by-step workflow using agent-browser, and structured output format
+- Create `.claude/skills/do-design-review/SKILL.md` with YAML frontmatter, evaluation rubric (10 dimensions), active navigation workflow using agent-browser (open → snapshot → interact → screenshot → evaluate loop), auth handling instructions, and structured output format
 - Optionally create `reference/criteria.md` if rubric is too long to inline
 
 ### 2. Validate the skill
@@ -200,9 +216,3 @@ No agent integration required — this is a user-invocable skill, not a tool exp
 - `ls docs/features/do-design-review.md` — feature doc exists
 - `grep 'do-design-review' docs/features/README.md` — index entry present
 
----
-
-## Open Questions
-
-1. Does `agent-browser` support a mobile viewport flag? If not, is desktop-only sufficient for v1?
-2. Should the skill accept `--pages` to specify which paths to screenshot, or always default to just the root URL?
