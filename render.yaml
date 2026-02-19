@@ -1,56 +1,67 @@
-# Schema documented at https://render.com/docs/yaml-spec
+# Schema documented at https://render.com/docs/blueprint-spec
 previews:
   generation: manual
 
-services:
-  # Production web service
-  - type: web
-    name: cuttlefish
-    runtime: python
-    buildCommand: ./build.sh
-    startCommand: gunicorn settings.wsgi:application --bind 0.0.0.0:$PORT --timeout 180 --keep-alive 5 --worker-connections 1000 --preload
-    repo: https://github.com/yudame/cuttlefish.git
-    branch: main
-    region: oregon
-    plan: starter
-    healthCheckPath: /health/
-    envVars:
-      - key: PORT
-        value: 8000
-      - key: DEPLOYMENT_TYPE
-        value: PRODUCTION
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: cuttlefish-keyvalue
-          property: connectionString
-      - fromGroup: cuttlefish
+projects:
+  - name: cuttlefish
+    environments:
+      - name: production
+        envVarGroups:
+          - name: cuttlefish
 
-  # Background worker for Django 6.0 @task framework (django-tasks-db)
-  - type: worker
-    name: cuttlefish-worker
-    runtime: python
-    buildCommand: ./build.sh
-    startCommand: python manage.py db_worker
-    repo: https://github.com/yudame/cuttlefish.git
-    branch: main
-    region: oregon
-    plan: starter
-    envVars:
-      - key: DEPLOYMENT_TYPE
-        value: PRODUCTION
-      - key: REDIS_URL
-        fromService:
-          type: keyvalue
-          name: cuttlefish-keyvalue
-          property: connectionString
-      - fromGroup: cuttlefish
+        services:
+          # Production web service
+          - type: web
+            name: cuttlefish
+            runtime: python
+            buildCommand: ./build.sh
+            startCommand: gunicorn settings.wsgi:application --bind 0.0.0.0:$PORT --timeout 180 --keep-alive 5 --worker-connections 1000 --preload
+            repo: https://github.com/yudame/cuttlefish.git
+            branch: main
+            region: oregon
+            plan: starter
+            healthCheckPath: /health/
+            envVars:
+              - key: PORT
+                value: 8000
+              - key: DEPLOYMENT_TYPE
+                value: PRODUCTION
+              - key: PYTHON_VERSION
+                value: "3.13"
+              - key: REDIS_URL
+                fromService:
+                  type: keyvalue
+                  name: cuttlefish-keyvalue
+                  property: connectionString
+              - fromGroup: cuttlefish
 
-  - type: keyvalue
-    name: cuttlefish-keyvalue
-    region: oregon
-    ipAllowList:
-      - source: 0.0.0.0/0
-        description: allow-all
-    plan: free
-    maxmemoryPolicy: allkeys-lru
+          # Background worker for Django 6.0 @task framework (django-tasks-db)
+          - type: worker
+            name: cuttlefish-worker
+            runtime: python
+            buildCommand: ./build.sh
+            startCommand: python manage.py db_worker
+            repo: https://github.com/yudame/cuttlefish.git
+            branch: main
+            region: oregon
+            plan: starter
+            envVars:
+              - key: DEPLOYMENT_TYPE
+                value: PRODUCTION
+              - key: PYTHON_VERSION
+                value: "3.13"
+              - key: REDIS_URL
+                fromService:
+                  type: keyvalue
+                  name: cuttlefish-keyvalue
+                  property: connectionString
+              - fromGroup: cuttlefish
+
+          - type: keyvalue
+            name: cuttlefish-keyvalue
+            region: oregon
+            ipAllowList:
+              - source: 0.0.0.0/0
+                description: allow-all
+            plan: free
+            maxmemoryPolicy: allkeys-lru
