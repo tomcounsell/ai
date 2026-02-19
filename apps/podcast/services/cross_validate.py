@@ -57,7 +57,7 @@ _PROMPT_FILE = Path(__file__).parent / "prompts" / "cross_validate.md"
 _SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 
 agent = Agent(
-    "anthropic:claude-sonnet-4-5-20250929",
+    "anthropic:claude-sonnet-4-6",
     output_type=CrossValidation,
     system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,

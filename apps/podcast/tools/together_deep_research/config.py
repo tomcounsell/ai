@@ -66,9 +66,9 @@ def resolve_provider(keys: dict[str, str | None]) -> tuple[str, str]:
         Tuple of (provider_name, model_name) for open_deep_research Configuration.
     """
     if keys.get("ANTHROPIC_API_KEY"):
-        return "anthropic", "claude-sonnet-4-5-20250929"
+        return "anthropic", "claude-sonnet-4-6"
     if keys.get("OPENAI_API_KEY"):
-        return "openai", "gpt-4o"
+        return "openai", "gpt-5.2"
     if keys.get("OPENROUTER_API_KEY"):
         return "openai", "deepseek/deepseek-r1"
     return "", ""

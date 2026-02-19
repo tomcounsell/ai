@@ -95,7 +95,7 @@ class TestWriteBriefing:
 
         with patch("apps.podcast.services.write_briefing.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = write_briefing(
                 cross_validation="Cross-validation JSON here",
                 research_digests={"perplexity": "Digest A"},
@@ -120,7 +120,7 @@ class TestWriteBriefing:
 
         with patch("apps.podcast.services.write_briefing.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             write_briefing(
                 cross_validation="Validated claims data",
                 research_digests=digests,
@@ -141,7 +141,7 @@ class TestWriteBriefing:
 
         with patch("apps.podcast.services.write_briefing.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
 
             with caplog.at_level(logging.INFO):
                 write_briefing(
@@ -169,7 +169,7 @@ class TestWriteBriefing:
 
         with patch("apps.podcast.services.write_briefing.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = write_briefing(
                 cross_validation="minimal",
                 research_digests={},

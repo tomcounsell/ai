@@ -85,7 +85,7 @@ class TestCrossValidate:
 
         with patch("apps.podcast.services.cross_validate.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = cross_validate(
                 {"perplexity": "Research A", "gemini": "Research B"},
                 "Exercise and Mental Health",
@@ -109,7 +109,7 @@ class TestCrossValidate:
 
         with patch("apps.podcast.services.cross_validate.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             cross_validate(sources, "Test Topic")
 
             call_args = mock_agent.run_sync.call_args[0][0]
@@ -127,7 +127,7 @@ class TestCrossValidate:
 
         with patch("apps.podcast.services.cross_validate.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
 
             with caplog.at_level(logging.INFO):
                 cross_validate({"perplexity": "data"}, "Topic")
@@ -149,7 +149,7 @@ class TestCrossValidate:
 
         with patch("apps.podcast.services.cross_validate.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = cross_validate({"perplexity": "minimal data"}, "Sparse Topic")
 
         assert isinstance(result, CrossValidation)

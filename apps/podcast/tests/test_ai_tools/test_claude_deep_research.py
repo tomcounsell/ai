@@ -150,7 +150,7 @@ class TestResearchSubtask:
         findings = _mock_findings()
         mock_agent = MagicMock()
         mock_agent.run_sync.return_value = _make_mock_result(findings)
-        mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+        mock_agent.model = "anthropic:claude-sonnet-4-6"
         mock_factory.return_value = mock_agent
 
         result = research_subtask(
@@ -172,7 +172,7 @@ class TestResearchSubtask:
     def test_passes_allowed_domains(self, mock_factory):
         mock_agent = MagicMock()
         mock_agent.run_sync.return_value = _make_mock_result(_mock_findings())
-        mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+        mock_agent.model = "anthropic:claude-sonnet-4-6"
         mock_factory.return_value = mock_agent
 
         research_subtask(
@@ -193,7 +193,7 @@ class TestResearchSubtask:
     def test_none_domains_when_empty(self, mock_factory):
         mock_agent = MagicMock()
         mock_agent.run_sync.return_value = _make_mock_result(_mock_findings())
-        mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+        mock_agent.model = "anthropic:claude-sonnet-4-6"
         mock_factory.return_value = mock_agent
 
         research_subtask(

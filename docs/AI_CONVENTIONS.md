@@ -901,7 +901,7 @@ class ChapterList(BaseModel):
 # --- Agent ---
 
 agent = Agent(
-    "anthropic:claude-sonnet-4-5-20250929",
+    "anthropic:claude-sonnet-4-6",
     output_type=ChapterList,
     system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
@@ -947,7 +947,7 @@ def test_returns_expected_output():
 
     with patch("apps.podcast.services.generate_chapters.agent") as mock_agent:
         mock_agent.run_sync.return_value = mock_result
-        mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+        mock_agent.model = "anthropic:claude-sonnet-4-6"
         result = generate_chapters("transcript", "Episode Title")
 
     assert isinstance(result, ChapterList)

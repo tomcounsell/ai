@@ -147,7 +147,7 @@ class ChatSendMessageView(HTMXView):
             # Update assistant message
             assistant_message.content = response
             assistant_message.is_processed = True
-            assistant_message.metadata = {"status": "completed", "model": "gpt-4.1"}
+            assistant_message.metadata = {"status": "completed", "model": "gpt-5.2"}
             assistant_message.save()
 
             # Auto-generate title if this is the first message

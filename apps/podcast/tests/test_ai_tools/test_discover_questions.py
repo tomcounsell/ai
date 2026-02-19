@@ -52,7 +52,7 @@ class TestDiscoverQuestions:
 
         with patch("apps.podcast.services.discover_questions.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = discover_questions("Some research digest", "Sleep Science")
 
         assert isinstance(result, QuestionDiscovery)
@@ -67,7 +67,7 @@ class TestDiscoverQuestions:
 
         with patch("apps.podcast.services.discover_questions.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             discover_questions("My research digest", "My Topic")
 
             call_args = mock_agent.run_sync.call_args[0][0]
@@ -79,7 +79,7 @@ class TestDiscoverQuestions:
 
         with patch("apps.podcast.services.discover_questions.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
 
             with caplog.at_level(logging.INFO):
                 discover_questions("research digest", "Topic")
@@ -103,7 +103,7 @@ class TestDiscoverQuestions:
 
         with patch("apps.podcast.services.discover_questions.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = discover_questions("Short digest", "Topic")
 
         assert isinstance(result, QuestionDiscovery)

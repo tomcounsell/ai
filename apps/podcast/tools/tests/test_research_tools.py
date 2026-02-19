@@ -207,9 +207,9 @@ class TestGPTResearcher:
 
     def test_configure_model_openai(self):
         """Test model configuration for OpenAI."""
-        fast, smart = gpt_researcher_run.configure_model("openai:gpt-4o")
-        assert fast == "openai:gpt-4o"
-        assert smart == "openai:gpt-4o"
+        fast, smart = gpt_researcher_run.configure_model("openai:gpt-5.2")
+        assert fast == "openai:gpt-5.2"
+        assert smart == "openai:gpt-5.2"
 
     def test_configure_model_anthropic(self):
         """Test model configuration for Anthropic."""

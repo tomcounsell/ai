@@ -78,7 +78,7 @@ class ChatAgent:
         self._ensure_tools_loaded()
 
         model = FallbackModel(
-            "anthropic:claude-sonnet-4-5",  # Primary
+            "anthropic:claude-sonnet-4-6",  # Primary
             "openai:gpt-5",                # Fallback on HTTP errors
         )
 
@@ -155,7 +155,7 @@ every run. System prompts persist in message history; instructions do not:
 ```python
 # Good: instructions refresh each run, no history bloat
 agent = Agent(
-    "anthropic:claude-sonnet-4-5",
+    "anthropic:claude-sonnet-4-6",
     instructions="You are a data analyst. Today is 2026-02-17.",
 )
 
@@ -166,7 +166,7 @@ def dynamic_instructions() -> str:
 
 # Caution: system_prompt persists in message history
 # Use only for truly static context
-agent = Agent("anthropic:claude-sonnet-4-5", system_prompt="Be concise.")
+agent = Agent("anthropic:claude-sonnet-4-6", system_prompt="Be concise.")
 ```
 
 ### Dynamic System Prompts via Decorator
@@ -271,7 +271,7 @@ class AnalystDeps:
     tenant_id: str
 
 agent = Agent[AnalystDeps, AnalystOutput](
-    "anthropic:claude-sonnet-4-5",
+    "anthropic:claude-sonnet-4-6",
     deps_type=AnalystDeps,
     output_type=AnalystOutput,
 )
@@ -810,7 +810,7 @@ class LazyModelLoader:
 
 # Module-level singletons - not initialized until .get() is called
 claude_opus = LazyModelLoader("anthropic", "claude-opus-4-5-20251101")
-claude_sonnet = LazyModelLoader("anthropic", "claude-sonnet-4-5-20250929")
+claude_sonnet = LazyModelLoader("anthropic", "claude-sonnet-4-6-20250929")
 gpt_5 = LazyModelLoader("openai", "gpt-5")
 ```
 
@@ -849,7 +849,7 @@ Use `FallbackModel` to automatically try a backup model when the primary fails:
 from pydantic_ai.models.fallback import FallbackModel
 
 model = FallbackModel(
-    "anthropic:claude-sonnet-4-5",  # Primary
+    "anthropic:claude-sonnet-4-6",  # Primary
     "openai:gpt-5",                # Fallback on 4xx/5xx
 )
 
@@ -1525,7 +1525,7 @@ PydanticAI's Temporal integration:
 from pydantic_ai import Agent
 from pydantic_ai.durable_exec.temporal import TemporalAgent
 
-agent = Agent("anthropic:claude-sonnet-4-5", name="data-analyst")
+agent = Agent("anthropic:claude-sonnet-4-6", name="data-analyst")
 temporal_agent = TemporalAgent(agent)
 
 @workflow.defn

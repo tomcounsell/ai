@@ -57,7 +57,7 @@ class TestWriteMetadata:
 
         with patch("apps.podcast.services.write_metadata.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = write_metadata(
                 "Episode report", "Transcript text", "[]", "Sleep Science"
             )
@@ -75,7 +75,7 @@ class TestWriteMetadata:
 
         with patch("apps.podcast.services.write_metadata.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             write_metadata("My report", "My transcript", '{"chapters": []}', "My Title")
 
             call_args = mock_agent.run_sync.call_args[0][0]
@@ -89,7 +89,7 @@ class TestWriteMetadata:
 
         with patch("apps.podcast.services.write_metadata.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
 
             with caplog.at_level(logging.INFO):
                 write_metadata("report", "transcript", "[]", "Episode")
@@ -112,7 +112,7 @@ class TestWriteMetadata:
 
         with patch("apps.podcast.services.write_metadata.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = write_metadata("report", "transcript", "[]", "Episode")
 
         assert isinstance(result, EpisodeMetadata)

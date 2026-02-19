@@ -271,4 +271,4 @@ S3_PUBLIC_URL = os.environ.get("S3_PUBLIC_URL", "")
 # ============================================================================
 # Podcast Production Settings
 # ============================================================================
-PODCAST_DEFAULT_MODEL = "claude-sonnet-4-20250514"
+PODCAST_DEFAULT_MODEL = "claude-sonnet-4-6"

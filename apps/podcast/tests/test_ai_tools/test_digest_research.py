@@ -55,7 +55,7 @@ class TestDigestResearch:
 
         with patch("apps.podcast.services.digest_research.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = digest_research("Some research text", "Sleep Science")
 
         assert isinstance(result, ResearchDigest)
@@ -70,7 +70,7 @@ class TestDigestResearch:
 
         with patch("apps.podcast.services.digest_research.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             digest_research("My research text", "My Topic")
 
             call_args = mock_agent.run_sync.call_args[0][0]
@@ -82,7 +82,7 @@ class TestDigestResearch:
 
         with patch("apps.podcast.services.digest_research.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             digest_research("My research text")
 
             call_args = mock_agent.run_sync.call_args[0][0]
@@ -93,7 +93,7 @@ class TestDigestResearch:
 
         with patch("apps.podcast.services.digest_research.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
 
             with caplog.at_level(logging.INFO):
                 digest_research("research text", "Topic")
@@ -117,7 +117,7 @@ class TestDigestResearch:
 
         with patch("apps.podcast.services.digest_research.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = digest_research("Short text")
 
         assert isinstance(result, ResearchDigest)

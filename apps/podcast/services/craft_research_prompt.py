@@ -31,14 +31,14 @@ _PROMPT_FILE = Path(__file__).parent / "prompts" / "craft_research_prompt.md"
 _SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 
 single_agent = Agent(
-    "anthropic:claude-sonnet-4-5-20250929",
+    "anthropic:claude-sonnet-4-6",
     output_type=ResearchPrompt,
     system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,
 )
 
 targeted_agent = Agent(
-    "anthropic:claude-sonnet-4-5-20250929",
+    "anthropic:claude-sonnet-4-6",
     output_type=TargetedResearchPrompts,
     system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,

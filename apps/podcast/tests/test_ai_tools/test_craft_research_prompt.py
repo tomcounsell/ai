@@ -34,7 +34,7 @@ class TestCraftResearchPrompt:
             "apps.podcast.services.craft_research_prompt.single_agent"
         ) as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = craft_research_prompt(
                 episode_brief="Brief about sleep science",
                 episode_title="Sleep Science Deep Dive",
@@ -52,7 +52,7 @@ class TestCraftResearchPrompt:
             "apps.podcast.services.craft_research_prompt.single_agent"
         ) as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             craft_research_prompt(
                 episode_brief="A brief about AI regulation",
                 episode_title="AI Regulation Today",
@@ -72,7 +72,7 @@ class TestCraftResearchPrompt:
             "apps.podcast.services.craft_research_prompt.single_agent"
         ) as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
 
             with caplog.at_level(logging.INFO):
                 craft_research_prompt(
@@ -111,7 +111,7 @@ class TestCraftTargetedPrompts:
             "apps.podcast.services.craft_research_prompt.targeted_agent"
         ) as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = craft_targeted_prompts(
                 episode_brief="Brief about renewable energy",
                 question_discovery="Gaps: grid storage economics",
@@ -135,7 +135,7 @@ class TestCraftTargetedPrompts:
             "apps.podcast.services.craft_research_prompt.targeted_agent"
         ) as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             craft_targeted_prompts(
                 episode_brief="Brief content",
                 question_discovery="Gap: missing data on long-term outcomes",
@@ -160,7 +160,7 @@ class TestCraftTargetedPrompts:
             "apps.podcast.services.craft_research_prompt.targeted_agent"
         ) as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
 
             with caplog.at_level(logging.INFO):
                 craft_targeted_prompts(

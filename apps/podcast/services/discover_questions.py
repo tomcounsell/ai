@@ -40,7 +40,7 @@ _PROMPT_FILE = Path(__file__).parent / "prompts" / "discover_questions.md"
 _SYSTEM_PROMPT = _PROMPT_FILE.read_text()
 
 agent = Agent(
-    "anthropic:claude-sonnet-4-5-20250929",
+    "anthropic:claude-sonnet-4-6",
     output_type=QuestionDiscovery,
     system_prompt=_SYSTEM_PROMPT,
     defer_model_check=True,

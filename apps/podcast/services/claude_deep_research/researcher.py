@@ -44,7 +44,7 @@ def _create_researcher_agent(
     )
 
     agent = Agent(
-        "anthropic:claude-sonnet-4-5-20250929",
+        "anthropic:claude-sonnet-4-6",
         output_type=SubagentFindings,
         system_prompt=_SYSTEM_PROMPT,
         builtin_tools=[web_search],

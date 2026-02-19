@@ -43,7 +43,7 @@ class TestGenerateChapters:
 
         with patch("apps.podcast.services.generate_chapters.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = generate_chapters("Some transcript", "Test Episode")
 
         assert isinstance(result, ChapterList)
@@ -56,7 +56,7 @@ class TestGenerateChapters:
 
         with patch("apps.podcast.services.generate_chapters.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             generate_chapters("My transcript text", "My Episode Title")
 
             call_args = mock_agent.run_sync.call_args[0][0]
@@ -77,7 +77,7 @@ class TestGenerateChapters:
 
         with patch("apps.podcast.services.generate_chapters.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
 
             with caplog.at_level(logging.INFO):
                 generate_chapters("transcript", "Episode")
@@ -91,7 +91,7 @@ class TestGenerateChapters:
 
         with patch("apps.podcast.services.generate_chapters.agent") as mock_agent:
             mock_agent.run_sync.return_value = mock_result
-            mock_agent.model = "anthropic:claude-sonnet-4-5-20250929"
+            mock_agent.model = "anthropic:claude-sonnet-4-6"
             result = generate_chapters("Short transcript", "Short Episode")
 
         assert isinstance(result, ChapterList)

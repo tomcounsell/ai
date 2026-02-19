@@ -215,7 +215,7 @@ class AIModelProviderTestCase(TestCase):
         """Test getting OpenAI model with environment key."""
         from apps.ai.llm.providers import get_openai_model
 
-        model = get_openai_model("gpt-4o-mini")
+        model = get_openai_model("gpt-5.2")
         self.assertIsNotNone(model)
 
     def test_get_openai_model_with_explicit_key(self):
@@ -223,6 +223,6 @@ class AIModelProviderTestCase(TestCase):
         from apps.ai.llm.providers import get_openai_model
 
         with patch.dict(os.environ, {}, clear=True):
-            model = get_openai_model("gpt-4o", api_key="explicit-key")
+            model = get_openai_model("gpt-5.2", api_key="explicit-key")
             self.assertIsNotNone(model)
             self.assertEqual(os.environ.get("OPENAI_API_KEY"), "explicit-key")

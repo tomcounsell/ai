@@ -37,7 +37,7 @@ class ChatMessageFactory(DjangoModelFactory):
     metadata = factory.Dict(
         {
             "tokens": factory.Faker("random_int", min=10, max=500),
-            "model": "gpt-4o-mini",
+            "model": "gpt-5.2",
         }
     )
 
@@ -82,7 +82,7 @@ class AssistantMessageFactory(ChatMessageFactory):
     content = factory.Faker("paragraph", nb_sentences=5)
     metadata = factory.Dict(
         {
-            "model": "gpt-4o-mini",
+            "model": "gpt-5.2",
             "tokens": factory.Faker("random_int", min=50, max=500),
             "response_time_ms": factory.Faker("random_int", min=100, max=2000),
         }
