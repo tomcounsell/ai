@@ -334,7 +334,12 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ### Phase 2.5: Link or Create Tracking Issue
 
-After writing the plan document, link it to an existing issue OR create a new tracking issue.
+After writing the plan document, **push it to main first**, then link it to an existing issue OR create a new tracking issue. The GitHub link is only useful if the file is actually reachable — always push before adding the URL anywhere.
+
+```bash
+# Push plan to main before linking (the URL is pointless if the file isn't there)
+git add docs/plans/{slug}.md && git commit -m "Plan: {Feature Name}" && git push
+```
 
 **IMPORTANT: Check for existing issue first!**
 
@@ -427,7 +432,7 @@ After writing the initial plan:
 3. **Enumerate questions** - List all questions needing supervisor input
 4. **Add questions to plan** - Append to "Open Questions" section
 5. **Pre-send checklist** - Verify before replying:
-   - [ ] Plan committed to `main`
+   - [ ] Plan committed AND pushed to `main` (must happen before issue linking)
    - [ ] GitHub issue has `**Plan:** https://github.com/{org}/{repo}/blob/main/docs/plans/{slug}.md`
    - [ ] Plan frontmatter has `tracking:` set to the issue URL
 6. **Send reply** - Notify user that plan draft is ready for review
