@@ -88,7 +88,8 @@ class TestCreateDaydreamIssue:
         )
         findings = {"legacy_code": ["Found 5 TODOs"]}
         result = create_daydream_issue(findings, "2026-02-17")
-        assert result is True
+        # Returns the issue URL string on success
+        assert result == "https://github.com/org/repo/issues/42"
         mock_run.assert_called_once()
         call_args = mock_run.call_args[0][0]
         assert "gh" in call_args
