@@ -47,26 +47,49 @@ def _acquire_step_lock(episode_id: int, expected_step: str) -> None:
     conditions.  The lock scope is intentionally narrow -- it covers only
     the status check, not the entire step execution.
 
+    The normal flow is:
+    1. advance_step(prev_step) creates a "started" entry for expected_step
+    2. Task runs and calls _acquire_step_lock(expected_step)
+    3. Task completes and calls advance_step(expected_step), marking it "completed"
+
+    This function allows step 2 to proceed. It only blocks if the step was
+    already completed (duplicate task) or if the workflow is paused/failed.
+
     Raises:
-        ValueError: If the workflow is already running the expected step
-            or is at a different step entirely.
+        ValueError: If the workflow is at a different step, or if trying
+            to re-run a completed step, or if workflow is paused/failed.
         EpisodeWorkflow.DoesNotExist: If no workflow record exists.
     """
     with transaction.atomic():
         wf = EpisodeWorkflow.objects.select_for_update().get(episode_id=episode_id)
-        if wf.status == "running" and wf.current_step == expected_step:
-            # Check history to see if step was already started by another task
-            for entry in reversed(wf.history):
-                if entry["step"] == expected_step and entry["status"] == "started":
-                    raise ValueError(
-                        f"Step '{expected_step}' already running "
-                        f"for episode {episode_id}"
-                    )
+
+        # First, verify we're at the expected step
         if wf.current_step != expected_step:
             raise ValueError(
                 f"Episode {episode_id} is at step '{wf.current_step}', "
                 f"not '{expected_step}'"
             )
+
+        # Check the most recent history entry for this step
+        for entry in reversed(wf.history):
+            if entry["step"] == expected_step:
+                # If the step was already completed or failed, this is a duplicate task
+                if entry["status"] in ("completed", "failed"):
+                    raise ValueError(
+                        f"Step '{expected_step}' already {entry['status']} "
+                        f"for episode {episode_id}"
+                    )
+                # If status is "started" and workflow is running, this is the
+                # expected first run - allow it to proceed
+                elif entry["status"] == "started" and wf.status == "running":
+                    return  # Normal case - allow execution
+                # If status is "started" but workflow is not running, something is wrong
+                elif entry["status"] == "started":
+                    raise ValueError(
+                        f"Step '{expected_step}' has started entry but workflow "
+                        f"status is '{wf.status}' for episode {episode_id}"
+                    )
+                break
 
 
 def _get_crafted_prompt(episode_id: int, artifact_title: str) -> str:
