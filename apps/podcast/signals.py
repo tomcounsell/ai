@@ -55,6 +55,10 @@ def _check_targeted_research_complete(episode_id: int) -> bool:
     which is created in an earlier phase) to have content. The set of
     expected artifacts is determined by the placeholder artifacts created
     during question discovery.
+
+    Artifacts with content (even "[SKIPPED: ...]" messages) count as
+    complete, allowing the pipeline to progress when optional research
+    services have missing API keys.
     """
     targeted_artifacts = EpisodeArtifact.objects.filter(
         episode_id=episode_id,
@@ -64,7 +68,8 @@ def _check_targeted_research_complete(episode_id: int) -> bool:
     if not targeted_artifacts.exists():
         return False
 
-    # All targeted artifacts must have content
+    # All targeted artifacts must have content (including skipped markers).
+    # Empty string means the task hasn't run yet.
     return not targeted_artifacts.filter(content="").exists()
 
 
@@ -172,13 +177,12 @@ def check_workflow_progression(sender, instance, **kwargs):
 
     current_step = wf.current_step
 
-    # noqa: SIM114 - Keep if/elif for clarity over combined logical or
-    if current_step == "Targeted Research" and _check_targeted_research_complete(
-        episode.id
-    ):
-        _try_enqueue_next_step(episode.id, current_step)
-    elif current_step == "Publishing Assets" and _check_publishing_assets_complete(
-        episode.id
+    if (
+        current_step == "Targeted Research"
+        and _check_targeted_research_complete(episode.id)
+    ) or (
+        current_step == "Publishing Assets"
+        and _check_publishing_assets_complete(episode.id)
     ):
         _try_enqueue_next_step(episode.id, current_step)
 

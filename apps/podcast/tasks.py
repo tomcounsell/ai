@@ -146,11 +146,29 @@ def produce_episode(episode_id: int) -> None:
 
 @task
 def step_perplexity_research(episode_id: int) -> None:
-    """Run Perplexity Deep Research and enqueue question discovery."""
+    """Run Perplexity Deep Research and enqueue question discovery.
+
+    If the Perplexity API key is missing, this step is skipped gracefully
+    (a "skipped" artifact is created) and the pipeline continues to question
+    discovery.
+    """
     _acquire_step_lock(episode_id, "Perplexity Research")
     try:
         artifact = analysis.craft_research_prompt(episode_id, "perplexity")
-        research.run_perplexity_research(episode_id, prompt=artifact.content)
+        result = research.run_perplexity_research(episode_id, prompt=artifact.content)
+
+        # Check if research was skipped (metadata.skipped == True)
+        if result.metadata.get("skipped"):
+            logger.info(
+                "step_perplexity_research: skipped for episode %d (%s)",
+                episode_id,
+                result.metadata.get("reason", "unknown"),
+            )
+        else:
+            logger.info(
+                "step_perplexity_research: completed for episode %d", episode_id
+            )
+
         workflow.advance_step(episode_id, "Perplexity Research")
         step_question_discovery.enqueue(episode_id=episode_id)
     except Exception as exc:
@@ -251,6 +269,10 @@ def step_together_research(episode_id: int) -> None:
     This is a parallel sub-step of "Targeted Research".  Does NOT enqueue
     the next step -- the ``post_save`` signal handles fan-in once all
     ``p2-*`` research artifacts have content.
+
+    If the required API keys are missing, this step is skipped gracefully
+    (a "skipped" artifact is created) and the pipeline continues with other
+    research sources.
     """
     # Skip strict step lock for parallel sub-steps
     wf = EpisodeWorkflow.objects.get(episode_id=episode_id)
@@ -261,8 +283,17 @@ def step_together_research(episode_id: int) -> None:
         )
     try:
         prompt = _get_crafted_prompt(episode_id, "prompt-together")
-        research.run_together_research(episode_id, prompt=prompt)
-        logger.info("step_together_research: completed for episode %d", episode_id)
+        result = research.run_together_research(episode_id, prompt=prompt)
+
+        # Check if research was skipped (metadata.skipped == True)
+        if result.metadata.get("skipped"):
+            logger.info(
+                "step_together_research: skipped for episode %d (%s)",
+                episode_id,
+                result.metadata.get("reason", "unknown"),
+            )
+        else:
+            logger.info("step_together_research: completed for episode %d", episode_id)
         # Do NOT enqueue next step -- signal handles fan-in
     except Exception as exc:
         workflow.fail_step(episode_id, "Targeted Research", str(exc))

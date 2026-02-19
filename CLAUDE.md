@@ -283,8 +283,7 @@ The podcast production system uses a **12-phase, database-backed workflow** for 
 |-------|---------|
 | `new-podcast-episode.md` | Complete 12-phase episode workflow |
 | `podcast-episode-planner/` | Episode planner v4.0 with structural design |
-| `notebooklm-enterprise-api/` | NotebookLM Enterprise API integration |
-| `notebooklm-audio/` | NotebookLM audio generation |
+| `notebooklm-audio/` | Manual NotebookLM workflow (fallback) |
 | `podcast-audio-processing/` | Audio processing and handling |
 | `podcast-feed-validator/` | RSS feed validation |
 | `podcast-quality-scorecard/` | 10-dimension quality assessment |
@@ -292,7 +291,8 @@ The podcast production system uses a **12-phase, database-backed workflow** for 
 | `perplexity-deep-research/` | Academic/peer-reviewed research |
 | `gemini-deep-research/` | Policy/regulatory research |
 | `gpt-researcher/` | GPT-based deep research |
-| `chatgpt-deep-research/` | ChatGPT deep research |
+
+**Note:** `notebooklm-enterprise-api` skill exists but is NOT in use. The production pipeline uses `local_audio_worker` with `notebooklm-mcp-cli` for automated audio generation.
 
 ### Service Layer (`apps/podcast/services/`)
 
@@ -337,6 +337,8 @@ Django `@task`-per-step pipeline for autonomous episode production.
 
 **Entry point:** `produce_episode.enqueue(episode_id=42)`
 
+**Graceful degradation:** Perplexity and Together AI research steps are optional. If their API keys are missing (`PERPLEXITY_API_KEY`, `TAVILY_API_KEY`, or LLM provider keys), the pipeline logs a warning, creates a "[SKIPPED: ...]" artifact, and continues with other research sources. Claude, OpenAI, and Gemini are required.
+
 ### Models
 
 | Model | Purpose |
@@ -376,11 +378,22 @@ Standalone CLI scripts for external service integrations and file processing.
 
 ### Podcast Environment Variables
 Add to `.env.local` for podcast tools:
+
+**Required:**
 ```
-ANTHROPIC_API_KEY=your_key
-OPENAI_API_KEY=your_key
-OPENROUTER_API_KEY=your_key
+ANTHROPIC_API_KEY=your_key     # Claude research + AI tools
+OPENAI_API_KEY=your_key        # GPT-Researcher + Whisper transcription
+GOOGLE_API_KEY=your_key        # Gemini research
 ```
+
+**Optional (graceful degradation if missing):**
+```
+PERPLEXITY_API_KEY=your_key    # Perplexity Deep Research (Phase 2)
+TAVILY_API_KEY=your_key        # Together Open Deep Research (web search)
+OPENROUTER_API_KEY=your_key    # Alternative LLM provider
+```
+
+If optional keys are missing, the pipeline logs a warning, creates a "[SKIPPED: ...]" artifact, and continues with other research sources.
 
 ## Render Infrastructure
 

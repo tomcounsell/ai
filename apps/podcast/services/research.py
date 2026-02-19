@@ -41,14 +41,41 @@ def run_perplexity_research(episode_id: int, prompt: str) -> EpisodeArtifact:
     The ``prompt`` is sent to the Perplexity *sonar-deep-research* model via
     :func:`apps.podcast.tools.perplexity_deep_research.run_perplexity_research`.
 
+    If the ``PERPLEXITY_API_KEY`` environment variable is missing, this function
+    logs a warning and creates a "skipped" artifact. The pipeline continues with
+    other research sources.
+
     Args:
         episode_id: Primary key of the target :class:`Episode`.
         prompt: The research query to send to Perplexity.
 
     Returns:
-        The ``p2-perplexity`` :class:`EpisodeArtifact`.
+        The ``p2-perplexity`` :class:`EpisodeArtifact` (either with research
+        results or a "skipped" message).
     """
+    import os
+
     episode = Episode.objects.get(pk=episode_id)
+
+    # Check for API key before attempting research
+    if not os.getenv("PERPLEXITY_API_KEY"):
+        logger.warning(
+            "PERPLEXITY_API_KEY not found in environment. Skipping Perplexity "
+            "research for episode %s. This is optional and the pipeline will "
+            "continue with other research sources.",
+            episode_id,
+        )
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-perplexity",
+            defaults={
+                "content": "[SKIPPED: PERPLEXITY_API_KEY not configured]",
+                "description": "Perplexity Deep Research (skipped - API key missing).",
+                "workflow_context": "Research Gathering",
+                "metadata": {"skipped": True, "reason": "API key not configured"},
+            },
+        )
+        return artifact
     context = _get_episode_context(episode)
 
     full_prompt = (
@@ -214,14 +241,64 @@ def run_together_research(episode_id: int, prompt: str) -> EpisodeArtifact:
 
     Uses :func:`apps.podcast.tools.together_deep_research.run_together_research`.
 
+    If the required API keys (``TAVILY_API_KEY`` and one of
+    ``ANTHROPIC_API_KEY``, ``OPENAI_API_KEY``, or ``OPENROUTER_API_KEY``) are
+    missing, this function logs a warning and creates a "skipped" artifact. The
+    pipeline continues with other research sources.
+
     Args:
         episode_id: Primary key of the target :class:`Episode`.
         prompt: The research query to send to Together.
 
     Returns:
-        The ``p2-together`` :class:`EpisodeArtifact`.
+        The ``p2-together`` :class:`EpisodeArtifact` (either with research
+        results or a "skipped" message).
     """
+    import os
+
     episode = Episode.objects.get(pk=episode_id)
+
+    # Check for required API keys before attempting research
+    tavily_key = os.getenv("TAVILY_API_KEY")
+    has_llm_key = any(
+        [
+            os.getenv("ANTHROPIC_API_KEY"),
+            os.getenv("OPENAI_API_KEY"),
+            os.getenv("OPENROUTER_API_KEY"),
+        ]
+    )
+
+    if not tavily_key or not has_llm_key:
+        missing = []
+        if not tavily_key:
+            missing.append("TAVILY_API_KEY")
+        if not has_llm_key:
+            missing.append(
+                "one of ANTHROPIC_API_KEY, OPENAI_API_KEY, or OPENROUTER_API_KEY"
+            )
+
+        logger.warning(
+            "Missing required API keys for Together research: %s. Skipping "
+            "Together research for episode %s. This is optional and the pipeline "
+            "will continue with other research sources.",
+            ", ".join(missing),
+            episode_id,
+        )
+
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-together",
+            defaults={
+                "content": f"[SKIPPED: Missing API keys - {', '.join(missing)}]",
+                "description": "Together Open Deep Research (skipped - API keys missing).",
+                "workflow_context": "Research Gathering",
+                "metadata": {
+                    "skipped": True,
+                    "reason": f"Missing API keys: {', '.join(missing)}",
+                },
+            },
+        )
+        return artifact
     context = _get_episode_context(episode)
 
     full_prompt = (
