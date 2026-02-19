@@ -55,15 +55,22 @@ def sync_claude_dirs(project_dir: Path) -> SymlinkSyncResult:
     result = SymlinkSyncResult()
     user_claude = Path.home() / ".claude"
 
-    # Sync skills: each is a directory containing SKILL.md
+    # Sync skills: each is a directory containing SKILL.md.
+    # Skills are cross-repo tools (do-test, do-plan, etc.) — always shared.
     _sync_skills(project_dir / ".claude" / "skills", user_claude / "skills", result)
 
-    # Sync commands: each is a .md file
+    # Sync commands: each is a .md file.
+    # Commands are slash-command aliases — always shared.
     _sync_commands(
         project_dir / ".claude" / "commands", user_claude / "commands", result
     )
 
-    # Sync agents: each is a .md file
+    # Sync agents: each is a .md file.
+    # Agents defined here are general-purpose subagents used across all projects
+    # (e.g. frontend-tester, builder, validator). They are shared to ~/.claude/agents/
+    # so they are available regardless of which repo Claude Code is running in.
+    # Project-specific agents that should NOT be shared belong in a project's own
+    # .claude/agents/ directory outside this repo.
     _sync_commands(
         project_dir / ".claude" / "agents", user_claude / "agents", result
     )
