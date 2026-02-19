@@ -4,7 +4,7 @@ type: feature
 appetite: Medium
 owner: Valor Engels
 created: 2026-02-19
-tracking: https://github.com/valorengels/ai/issues/139
+tracking: https://github.com/tomcounsell/ai/issues/139
 ---
 
 # Daydream v2: Auto-Fix Critical Bugs via Plan-Build-PR
