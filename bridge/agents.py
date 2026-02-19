@@ -26,7 +26,9 @@ def _get_machine_name() -> str:
     try:
         result = subprocess.run(
             ["scutil", "--get", "ComputerName"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()

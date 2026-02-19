@@ -17,7 +17,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Completion Tracking](completion-tracking.md) | Branch-based work tracking and completion token system | Archived |
 | [Coaching Loop](coaching-loop.md) | Merged classifier-coach with LLM-generated coaching, tiered fallback, and error crash guard | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
-| [Daydream Reactivation](daydream-reactivation.md) | Autonomous 10-step daily maintenance: cleanup, log analysis, session quality, LLM reflection, institutional memory | Shipped |
+| [Daydream Reactivation](daydream-reactivation.md) | Autonomous 11-step daily maintenance: cleanup, log analysis, session quality, LLM reflection, institutional memory, Telegram notifications | Shipped |
 | [Daydream Multi-Repo](daydream-multi-repo.md) | Extends daydream to analyze multiple repos per machine via config/projects.json with per-project GitHub issues and Telegram posts | Shipped |
 | [Documentation Audit](documentation-audit.md) | Weekly LLM-powered audit of docs/ accuracy against codebase; KEEP / UPDATE / DELETE verdicts, directory and filename enforcement | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, and structured reporting | Shipped |

@@ -91,7 +91,7 @@ Install: `./scripts/install_daydream.sh`
 
 | File | Purpose |
 |------|---------|
-| `scripts/daydream.py` | Main 10-step runner |
+| `scripts/daydream.py` | Main 11-step runner |
 | `scripts/daydream_report.py` | GitHub issue creation module |
 | `scripts/install_daydream.sh` | launchd installation |
 | `com.valor.daydream.plist` | Schedule definition |

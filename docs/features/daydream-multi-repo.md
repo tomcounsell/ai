@@ -81,7 +81,7 @@ Each project entry in `config/projects.json`:
 
 ## See Also
 
-- `docs/features/daydream-reactivation.md` — core 10-step process and architecture
+- `docs/features/daydream-reactivation.md` — core 11-step process and architecture
 - `config/projects.json` — live project registry
 - `scripts/daydream.py` — implementation
 - `scripts/daydream_report.py` — `create_daydream_issue(findings, date, cwd=None)`
