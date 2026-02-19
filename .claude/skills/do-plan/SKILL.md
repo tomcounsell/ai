@@ -337,6 +337,10 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 After writing the plan document, **push it to main first**, then link it to an existing issue OR create a new tracking issue. The GitHub link is only useful if the file is actually reachable — always push before adding the URL anywhere.
 
 ```bash
+# Resolve the actual repo identity from git — never guess from directory names or usernames
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+# → e.g. "tomcounsell/ai"
+
 # Push plan to main before linking (the URL is pointless if the file isn't there)
 git add docs/plans/{slug}.md && git commit -m "Plan: {Feature Name}" && git push
 ```
@@ -355,13 +359,13 @@ EXISTING_ISSUE=42  # Set this if plan was created from an existing issue
 # Add plan label and prepend plan link to the top of the issue body
 gh issue edit $EXISTING_ISSUE --add-label "plan"
 EXISTING_BODY=$(gh issue view $EXISTING_ISSUE --json body -q .body)
-PLAN_LINK="https://github.com/{org}/{repo}/blob/main/docs/plans/{slug}.md"
+PLAN_LINK="https://github.com/${REPO}/blob/main/docs/plans/{slug}.md"
 gh issue edit $EXISTING_ISSUE --body "**Plan:** ${PLAN_LINK}
 
 ${EXISTING_BODY}"
 
 # Use this URL in the plan's tracking: field
-echo "https://github.com/{org}/{repo}/issues/$EXISTING_ISSUE"
+echo "https://github.com/${REPO}/issues/$EXISTING_ISSUE"
 ```
 
 **Only create a NEW issue if:**
@@ -392,12 +396,12 @@ fi
 
 # Create issue with both plan and type labels
 gh issue create \
-  --repo {org}/{repo} \
+  --repo ${REPO} \
   --title "[Plan] {Feature Name}" \
   --label "plan" \
   --label "$TYPE" \
   --body "$(cat <<EOF
-**Plan:** https://github.com/{org}/{repo}/blob/main/docs/plans/{slug}.md
+**Plan:** https://github.com/${REPO}/blob/main/docs/plans/{slug}.md
 
 **Type:** {type} | **Appetite:** {appetite} | **Status:** Planning
 
@@ -433,7 +437,7 @@ After writing the initial plan:
 4. **Add questions to plan** - Append to "Open Questions" section
 5. **Pre-send checklist** - Verify before replying:
    - [ ] Plan committed AND pushed to `main` (must happen before issue linking)
-   - [ ] GitHub issue has `**Plan:** https://github.com/{org}/{repo}/blob/main/docs/plans/{slug}.md`
+   - [ ] GitHub issue has `**Plan:** https://github.com/${REPO}/blob/main/docs/plans/{slug}.md`
    - [ ] Plan frontmatter has `tracking:` set to the issue URL
 6. **Send reply** - Notify user that plan draft is ready for review
 
