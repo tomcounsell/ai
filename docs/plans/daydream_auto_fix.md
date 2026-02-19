@@ -19,7 +19,7 @@ For bugs where daydream has high-confidence root cause analysis (e.g., a `code_b
 Daydream identifies `code_bug` patterns in step 7 (LLM reflection), writes them to `lessons_learned.jsonl`, and includes them in the daily GitHub issue — then stops. Human reads the issue, manually plans, manually builds.
 
 **Desired outcome:**
-After reflection, daydream evaluates whether any `code_bug` findings are high-confidence. For those that are, it spawns a `/do-plan` + `/do-build` sequence scoped to the specific bug, then posts the resulting PR link to the project's Telegram group. Human still reviews and merges — but the groundwork is done automatically.
+After reflection, daydream evaluates whether any `code_bug` findings are actionable (confidence check + ignore log check). For those that pass, it spawns a `/do-plan` + `/do-build` sequence scoped to the specific bug, then posts the resulting PR link to the project's Telegram group. Human still reviews and merges — but the groundwork is done automatically.
 
 ## Appetite
 
@@ -28,7 +28,7 @@ After reflection, daydream evaluates whether any `code_bug` findings are high-co
 **Team:** Solo dev + PM
 
 **Interactions:**
-- PM check-ins: 1–2 (scope alignment — specifically what "high confidence" means, and budget cap mechanics)
+- PM check-ins: 1–2 (scope alignment on confidence criteria and ignore log UX)
 - Review rounds: 1 (code review before merge)
 
 Solo dev work is fast — the bottleneck is alignment and review. Appetite measures communication overhead, not coding time.
@@ -48,96 +48,149 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/daydream_auto_
 
 ### Key Elements
 
-- **Confidence scorer**: After LLM reflection, evaluate each `code_bug` reflection against a rubric (category match, pattern specificity, presence of a clear prevention rule, no existing open PR for the same pattern)
-- **Auto-fix trigger**: A new daydream step (step 8, inserted between current step 7 LLM reflection and step 8 memory consolidation) that invokes Claude Code with the do-plan and do-build skills for qualifying bugs
-- **Budget cap**: Each auto-fix attempt is bounded by a token/cost limit; exceeded attempts are logged and skipped
-- **Deduplication guard**: Before triggering, check GitHub for any open PR or issue referencing the same bug pattern to avoid redundant work
-- **PR notification**: After a PR is opened, post the PR link to the project's configured Telegram group (reusing existing Telegram posting logic in step 10)
+- **Confidence scorer**: After LLM reflection, evaluate each `code_bug` reflection against a loose rubric — passes if any two of three criteria are met (see Technical Approach). Intentionally permissive; the ignore log handles false positives.
+- **Ignore log**: A flat JSONL file (`data/daydream_ignore.jsonl`) where patterns can be silenced for 14 days. Added via `python scripts/daydream.py --ignore "pattern"`. Daydream auto-prunes expired entries each run.
+- **Auto-fix trigger**: A new daydream step (step 8, inserted between LLM reflection and memory consolidation) that invokes Claude Code with do-plan + do-build for qualifying bugs.
+- **Deduplication guard**: Before triggering, check GitHub for any open PR or issue referencing the same bug pattern.
+- **Dry-run mode**: `python scripts/daydream.py --dry-run` shows what would trigger auto-fix without actually running it. Use this when testing changes to daydream itself.
+- **PR notification**: After a PR is opened, post the PR link to the project's configured Telegram group.
 
 ### Flow
 
-Daydream step 7 (LLM reflection) → **confidence scorer** → [low confidence: skip] → [high confidence: dedup check] → [duplicate found: skip] → **spawn Claude Code with do-plan + do-build** → PR opened → **post PR link to Telegram group**
+```
+Step 7 (LLM reflection)
+  → confidence scorer (any 2 of 3 criteria)
+    → [fails: skip]
+    → [passes: check ignore log]
+      → [ignored: log + skip]
+      → [not ignored: dedup check on GitHub]
+        → [duplicate PR/issue found: skip]
+        → [clear: spawn Claude Code with do-plan + do-build]
+          → PR opened
+          → post PR link to Telegram group
+```
+
+### Ignore Log Design
+
+**File:** `data/daydream_ignore.jsonl`
+
+**Entry format:**
+```json
+{"pattern": "bridge crashes on reconnect", "ignored_until": "2026-03-05", "reason": "already being tracked in issue #142"}
+```
+
+**CLI to add an entry:**
+```bash
+python scripts/daydream.py --ignore "pattern string"
+# Optional: python scripts/daydream.py --ignore "pattern" --reason "tracking separately"
+```
+
+This appends an entry with `ignored_until` set to today + 14 days. Daydream auto-prunes entries where `ignored_until < today` at the start of the auto-fix step. The file can also be edited by hand.
+
+### Dry-Run Mode
+
+```bash
+python scripts/daydream.py --dry-run
+```
+
+Runs all daydream steps but skips any action that modifies state: no Claude Code subprocess, no GitHub PR, no Telegram post, no lessons written. Prints what *would* have happened. **Use this when testing changes to daydream** — it's the safe way to validate new confidence criteria or step logic without triggering real side effects.
+
+Note: `--dry-run` and `--ignore` are CLI flags on the existing script entry point, not separate scripts.
+
+### Confidence Criteria (Loose — Any 2 of 3)
+
+1. `category == "code_bug"` — reflection is categorized as a code bug
+2. `prevention` field is non-empty — there's a concrete fix direction
+3. `pattern` is ≥ 10 chars — pattern is specific enough to be actionable (lowered from 20)
+
+This is intentionally permissive. Some false positives are fine — the ignore log handles anything that keeps coming up that we don't want to fix yet.
 
 ### Technical Approach
 
-- Add a `step_auto_fix_bugs()` method to `DaydreamRunner`, registered as step 8 (shifting current steps 8–10 to 9–11)
-- Confidence scoring is rule-based (no extra LLM call): a reflection qualifies if `category == "code_bug"` AND `prevention` field is non-empty AND `pattern` is at least 20 chars (specific enough to be actionable)
-- Spawn Claude Code as a subprocess: `claude --print --dangerously-skip-permissions "Implement the bug fix described below. Use /do-plan to create a plan, then /do-build to implement it as a PR. Bug: {summary}. Pattern: {pattern}. Prevention: {prevention}."`
-- Budget cap: `DAYDREAM_AUTO_FIX_BUDGET_USD` env var (default: `$2.00`), checked against Anthropic usage API or estimated from model pricing
-- Skip if any open GitHub issue or PR body contains the pattern string (substring match via `gh issue list --search`)
-- State tracking: `auto_fix_attempts` list on `DaydreamState`, persisted in `state.json`
+- Add `auto_fix_attempts: list[dict]` field to `DaydreamState` dataclass (default_factory=list, so old state files load cleanly)
+- Add `step_auto_fix_bugs()` to `DaydreamRunner`, registered as step 8; shift current steps 8–10 to 9–11
+- Implement `load_ignore_log()` and `prune_ignore_log()` helpers in `scripts/daydream.py`
+- Spawn Claude Code: `claude --print --dangerously-skip-permissions "..."` with 10-minute timeout
+- No budget cap — API usage caps are already enforced at the account level
+- Skip if any open GitHub issue or PR body contains the pattern string (via `gh issue list --search` + `gh pr list --search`)
+- State tracking: `auto_fix_attempts` list on `DaydreamState` (for the daily report)
+- Add CLI arg parsing: `--dry-run` and `--ignore "pattern"` flags to `main()`
 
 ## Rabbit Holes
 
-- **Multi-step confidence scoring with its own LLM call** — Rule-based scoring is sufficient and avoids compounding costs. Don't add another Haiku call just to score confidence.
-- **Automated merging of the PR** — Auto-fix always stops at PR creation. Merging is always human. Don't add auto-merge logic.
-- **Cross-machine coordination** — Each machine operates on its own repos per `config/projects.json`. No need for cross-machine dedup; just check the project's own GitHub.
-- **Fixing bugs in external dependencies** — Auto-fix only applies to this codebase's own code. External service bugs (e.g., Telegram API quirks) are out of scope.
-- **Retry logic for failed auto-fix attempts** — If the Claude Code subprocess fails, log it and move on. Don't retry in the same daydream run.
+- **Confidence scoring with its own LLM call** — The 2-of-3 rule-based check is sufficient. No extra Haiku call.
+- **Automated merging of the PR** — Always stops at PR creation. Merging is always human.
+- **Cross-machine ignore log syncing** — Each machine has its own `data/daydream_ignore.jsonl`. No syncing needed.
+- **Fixing bugs in external dependencies** — Only applies to this codebase's own code.
+- **Retry logic for failed auto-fix attempts** — Log it, move on. No retry in the same run.
+- **A UI for the ignore log** — The JSONL file + CLI flag is the UI. Don't build anything fancier.
 
 ## Risks
 
-### Risk 1: Runaway API costs
-**Impact:** A badly-calibrated confidence scorer triggers auto-fix on every daydream run, burning API budget.
-**Mitigation:** Hard budget cap via `DAYDREAM_AUTO_FIX_BUDGET_USD` (default $2.00). Log every triggered attempt with cost estimate. Add a `--dry-run` flag to daydream that shows what would be auto-fixed without actually triggering.
+### Risk 1: Loose confidence triggers too many auto-fixes
+**Impact:** Redundant PRs that require cleanup.
+**Mitigation:** The ignore log is specifically designed for this. If a pattern keeps triggering and you don't want it to, `--ignore` it. The 14-day expiry means ignored things will surface again eventually in case circumstances change.
 
 ### Risk 2: Claude Code subprocess hangs
-**Impact:** Daydream blocks indefinitely waiting for `do-plan` + `do-build` to finish.
-**Mitigation:** Set a timeout on the subprocess (default: 10 minutes via `subprocess.run(..., timeout=600)`). If timeout exceeded, log and continue to next daydream step.
+**Impact:** Daydream blocks indefinitely waiting for do-plan + do-build to finish.
+**Mitigation:** 10-minute subprocess timeout. If exceeded, log and continue to next step.
 
-### Risk 3: Auto-fix creates bad PRs that pollute the repo
-**Impact:** Low-quality auto-generated PRs that don't actually fix the bug, requiring cleanup.
-**Mitigation:** Confidence criteria are strict — only `code_bug` category with a specific `prevention` rule. The PR always requires human review before merge. We can also add a `DAYDREAM_AUTO_FIX_ENABLED=false` env var to disable globally.
-
-### Risk 4: Dedup check misses duplicate PRs
-**Impact:** Multiple PRs for the same bug pattern accumulate.
-**Mitigation:** Check both open issues AND open PRs via `gh pr list --search`. Use the `pattern` field as the search key, which is specific enough to catch duplicates.
+### Risk 3: Dedup check misses duplicate PRs
+**Impact:** Multiple PRs for the same bug pattern.
+**Mitigation:** Check both `gh issue list --search` and `gh pr list --search`. Pattern field is specific enough to catch duplicates in most cases.
 
 ## No-Gos (Out of Scope)
 
+- Budget cap — not needed, API usage caps are enforced at the account level
 - Auto-merging PRs — always human review before merge
+- Cross-machine ignore log coordination
 - Fixing bugs in external services or dependencies
 - Retry logic within a single daydream run
-- Cross-machine coordination for dedup
-- Handling non-`code_bug` reflection categories (misunderstanding, poor_planning, etc.)
-- Sentry-triggered auto-fix (Sentry is currently skipped in standalone mode; that's a separate effort)
+- Non-`code_bug` reflection categories (misunderstanding, poor_planning, etc.)
+- Sentry-triggered auto-fix (Sentry is skipped in standalone mode; separate effort)
 
 ## Update System
 
-The `DAYDREAM_AUTO_FIX_ENABLED` and `DAYDREAM_AUTO_FIX_BUDGET_USD` env vars need to be documented in `.env.example`. The update skill (`scripts/remote-update.sh`) should remind operators to set these if desired.
+Add `DAYDREAM_AUTO_FIX_ENABLED` to `.env.example` with a comment explaining how to disable. The update skill (`scripts/remote-update.sh`) should create `data/daydream_ignore.jsonl` if it doesn't exist (touch-safe).
 
-No schema migrations needed — `DaydreamState` uses a flexible `step_progress` dict. The new `auto_fix_attempts` field on `DaydreamState` should have a default in the dataclass so old state files load without error.
+No schema migrations needed — `DaydreamState` uses flexible dict-based `step_progress`. The new `auto_fix_attempts` field defaults to `[]` so old state files load without error.
 
 ## Agent Integration
 
-No new MCP server needed — daydream runs as a standalone script (`scripts/daydream.py`). The auto-fix step invokes Claude Code directly as a subprocess using `claude --print`. This is the same pattern used by the `/do-build` skill when it shells out.
+No new MCP server needed — daydream is a standalone script. The auto-fix step invokes Claude Code as a subprocess (`claude --print`).
 
-The auto-fix PR link is posted to Telegram via the existing `step_post_to_telegram` helper in `step_create_github_issue`. The new auto-fix step will call the same helper with the PR URL.
+PR links are posted to Telegram via the existing `step_post_to_telegram` helper.
 
-No `.mcp.json` changes needed. No bridge changes needed.
+No `.mcp.json` changes. No bridge changes.
 
-Integration test: `tests/test_daydream_auto_fix.py` — mock the Claude Code subprocess and verify that:
-1. High-confidence `code_bug` reflections trigger a subprocess call
-2. Low-confidence reflections are skipped
-3. Duplicate PR detection prevents re-triggering
-4. Budget cap stops triggering when threshold is reached
+Integration tests: `tests/test_daydream_auto_fix.py` — mock the Claude Code subprocess and verify:
+1. Reflections passing 2+ of 3 confidence criteria trigger subprocess
+2. Reflections passing only 1 criterion are skipped
+3. Ignored patterns are skipped (and not yet expired)
+4. Expired ignore entries are pruned and pattern re-triggers
+5. Duplicate PR detection prevents re-triggering
+6. `DAYDREAM_AUTO_FIX_ENABLED=false` disables step entirely
+7. `--dry-run` mode runs the step without calling subprocess
 
 ## Documentation
 
-- [ ] Create `docs/features/daydream-auto-fix.md` describing the auto-fix capability, confidence criteria, budget cap, and how to disable it
+- [ ] Create `docs/features/daydream-auto-fix.md` describing the auto-fix capability, confidence criteria, ignore log, dry-run mode, and how to disable it
 - [ ] Add entry to `docs/features/README.md` index table under Daydream
-- [ ] Update `docs/features/daydream.md` (if it exists) with the new step 8
-- [ ] Add `DAYDREAM_AUTO_FIX_ENABLED` and `DAYDREAM_AUTO_FIX_BUDGET_USD` to `.env.example` with comments
+- [ ] Update `docs/features/daydream.md` (if it exists) with the new step 8 and a note that **`--dry-run` should be used when testing changes to daydream**
+- [ ] Add `DAYDREAM_AUTO_FIX_ENABLED` to `.env.example` with comment
+- [ ] Update `CLAUDE.md` Quick Commands table to include `python scripts/daydream.py --dry-run` and `python scripts/daydream.py --ignore "pattern"`
 
 ## Success Criteria
 
 - [ ] New `step_auto_fix_bugs()` method in `DaydreamRunner` registered as step 8
-- [ ] Confidence scorer filters to only `code_bug` reflections with non-empty `prevention` and `pattern` ≥ 20 chars
+- [ ] Confidence scorer passes reflections matching any 2 of 3 criteria
+- [ ] Ignore log (`data/daydream_ignore.jsonl`) checked before triggering; expired entries pruned each run
+- [ ] `--ignore "pattern"` CLI flag appends a 14-day entry to the ignore log
+- [ ] `--dry-run` CLI flag skips all side effects, prints what would have triggered
 - [ ] Dedup check queries GitHub open PRs and issues before triggering
-- [ ] Claude Code subprocess called with do-plan + do-build instructions, with 10-minute timeout
-- [ ] Budget cap enforced via `DAYDREAM_AUTO_FIX_BUDGET_USD` env var
+- [ ] Claude Code subprocess invoked with 10-minute timeout
 - [ ] PR link posted to project's Telegram group after successful auto-fix
-- [ ] `auto_fix_attempts` tracked in `DaydreamState` and persisted to state.json
+- [ ] `auto_fix_attempts` tracked in `DaydreamState`
 - [ ] `DAYDREAM_AUTO_FIX_ENABLED=false` disables the feature
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -150,25 +203,25 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 - **Builder (auto-fix-step)**
   - Name: daydream-builder
-  - Role: Implement the auto-fix step in daydream.py — confidence scorer, dedup check, subprocess invocation, budget cap, Telegram notification
+  - Role: Implement the auto-fix step, confidence scorer, ignore log, dry-run mode, and CLI flags in daydream.py
   - Agent Type: builder
   - Resume: true
 
 - **Builder (tests)**
   - Name: test-builder
-  - Role: Write `tests/test_daydream_auto_fix.py` with mocked subprocess and scenario coverage
+  - Role: Write `tests/test_daydream_auto_fix.py` with mocked subprocess and full scenario coverage
   - Agent Type: test-engineer
   - Resume: true
 
-- **Validator (auto-fix-step)**
+- **Validator**
   - Name: daydream-validator
-  - Role: Verify the auto-fix implementation meets all success criteria and integrates cleanly with existing daydream steps
+  - Role: Verify implementation meets all success criteria and integrates cleanly with existing steps
   - Agent Type: validator
   - Resume: true
 
 - **Documentarian**
   - Name: daydream-docs
-  - Role: Create `docs/features/daydream-auto-fix.md` and update the README index and .env.example
+  - Role: Create `docs/features/daydream-auto-fix.md`, update README index, update CLAUDE.md quick commands
   - Agent Type: documentarian
   - Resume: true
 
@@ -185,15 +238,15 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Assigned To**: daydream-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Add `auto_fix_attempts: list[dict]` field to `DaydreamState` dataclass with default_factory
-- Add `step_auto_fix_bugs()` method to `DaydreamRunner`
-- Register as step 8, shift existing steps 8–10 to 9–11 (update step numbers and docstrings)
-- Implement confidence scorer: `code_bug` category + non-empty `prevention` + `pattern` >= 20 chars
+- Add `auto_fix_attempts: list[dict]` field to `DaydreamState` dataclass with `field(default_factory=list)`
+- Add `step_auto_fix_bugs()` to `DaydreamRunner`; register as step 8, shift steps 8–10 to 9–11
+- Implement confidence scorer: pass if any 2 of 3 criteria met (code_bug category, non-empty prevention, pattern ≥ 10 chars)
+- Implement `load_ignore_log()`, `prune_ignore_log()`, and `is_ignored()` helpers using `data/daydream_ignore.jsonl`
 - Implement dedup check via `gh issue list --search` and `gh pr list --search`
-- Implement subprocess invocation: `claude --print --dangerously-skip-permissions "..."` with 10-minute timeout
-- Implement budget cap from `DAYDREAM_AUTO_FIX_BUDGET_USD` env var (default `2.00`)
+- Implement subprocess invocation with 10-minute timeout
 - Implement `DAYDREAM_AUTO_FIX_ENABLED` env var guard (default `true`)
-- Post PR link to Telegram via `step_post_to_telegram` helper
+- Add `--dry-run` and `--ignore "pattern"` CLI flags to `main()`
+- Post PR link to Telegram via existing `step_post_to_telegram` helper
 
 ### 2. Write tests
 - **Task ID**: build-tests
@@ -203,13 +256,15 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Parallel**: true
 - Create `tests/test_daydream_auto_fix.py`
 - Mock subprocess to avoid real Claude Code calls
-- Test: high-confidence reflection triggers subprocess
-- Test: low-confidence reflection (wrong category, short pattern, no prevention) is skipped
-- Test: dedup check with matching open PR prevents trigger
-- Test: budget cap stops triggering
+- Test: 2-of-3 confidence passing triggers subprocess
+- Test: 1-of-3 confidence skips
+- Test: active ignore entry silences pattern
+- Test: expired ignore entry is pruned and re-triggers
+- Test: dedup check prevents duplicate PR
 - Test: `DAYDREAM_AUTO_FIX_ENABLED=false` disables step
+- Test: `--dry-run` mode runs step without subprocess call
 
-### 3. Validate auto-fix implementation
+### 3. Validate implementation
 - **Task ID**: validate-auto-fix
 - **Depends On**: build-auto-fix, build-tests
 - **Assigned To**: daydream-validator
@@ -217,9 +272,10 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Parallel**: false
 - Run `pytest tests/test_daydream_auto_fix.py -v`
 - Run `black scripts/daydream.py && ruff check scripts/daydream.py`
-- Verify step numbering is consistent (no gaps or duplicates)
-- Verify `DaydreamState` loads cleanly from old state.json without `auto_fix_attempts`
-- Check success criteria checklist
+- Verify step numbering has no gaps or duplicates
+- Verify `DaydreamState` loads from old state.json without `auto_fix_attempts`
+- Verify `python scripts/daydream.py --help` shows `--dry-run` and `--ignore`
+- Check all success criteria
 
 ### 4. Write documentation
 - **Task ID**: document-feature
@@ -229,7 +285,9 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Parallel**: false
 - Create `docs/features/daydream-auto-fix.md`
 - Add entry to `docs/features/README.md`
-- Update `.env.example` with `DAYDREAM_AUTO_FIX_ENABLED` and `DAYDREAM_AUTO_FIX_BUDGET_USD`
+- Update `docs/features/daydream.md` with step 8 and dry-run note
+- Update `CLAUDE.md` Quick Commands table with `--dry-run` and `--ignore` entries
+- Add `DAYDREAM_AUTO_FIX_ENABLED` to `.env.example`
 
 ### 5. Final validation
 - **Task ID**: validate-all
@@ -248,12 +306,5 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - `pytest tests/` — full test suite
 - `black scripts/daydream.py && ruff check scripts/daydream.py` — code quality
 - `python -c "from scripts.daydream import DaydreamState; s = DaydreamState(); print(s.auto_fix_attempts)"` — state loads cleanly
-- `python scripts/daydream.py --dry-run 2>&1 | grep auto_fix` — dry-run shows what would trigger
-
----
-
-## Open Questions
-
-1. **Budget cap mechanism**: Should the `DAYDREAM_AUTO_FIX_BUDGET_USD` cap be per-run (reset each daydream run) or cumulative across all runs (tracked in `state.json` or a separate file)? Per-run is simpler; cumulative gives better cost control long-term.
-2. **`--dry-run` flag**: Should a `--dry-run` flag be added to `daydream.py` (showing what would auto-fix without acting) as part of this plan, or deferred? It's useful for testing confidence criteria but adds scope.
-3. **Confidence threshold tuning**: The initial criteria (category=code_bug, non-empty prevention, pattern≥20 chars) may be too loose or too strict. Should we also require that the reflection's `source_session` is from the last 24h (to avoid acting on stale bugs)?
+- `python scripts/daydream.py --dry-run` — show what would trigger without acting
+- `python scripts/daydream.py --ignore "test pattern" && cat data/daydream_ignore.jsonl` — verify ignore log append
