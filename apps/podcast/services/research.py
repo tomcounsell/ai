@@ -396,12 +396,17 @@ def run_claude_research(episode_id: int, prompt: str) -> EpisodeArtifact:
     which plans subtasks, runs parallel Sonnet researchers, and synthesizes
     findings into a comprehensive report.
 
+    If the deep research call fails (e.g., validation errors, API issues), this
+    function logs a warning and creates a "skipped" artifact. The pipeline
+    continues with other research sources.
+
     Args:
         episode_id: Primary key of the target :class:`Episode`.
         prompt: The research command to send to the orchestrator.
 
     Returns:
-        The ``p2-claude`` :class:`EpisodeArtifact`.
+        The ``p2-claude`` :class:`EpisodeArtifact` (either with research
+        results or a "skipped" message).
     """
     episode = Episode.objects.get(pk=episode_id)
     context = _get_episode_context(episode)
@@ -412,41 +417,88 @@ def run_claude_research(episode_id: int, prompt: str) -> EpisodeArtifact:
         f"Research query:\n{prompt}"
     )
 
-    from apps.podcast.services.claude_deep_research import deep_research
+    try:
+        from apps.podcast.services.claude_deep_research import deep_research
 
-    report = deep_research(command=full_prompt)
+        report = deep_research(command=full_prompt)
 
-    # Format the report content as markdown
-    content_text = report.content
-    if report.key_findings:
-        content_text += "\n\n## Key Findings\n\n"
-        content_text += "\n".join(f"- {f}" for f in report.key_findings)
-    if report.gaps_remaining:
-        content_text += "\n\n## Gaps Remaining\n\n"
-        content_text += "\n".join(f"- {g}" for g in report.gaps_remaining)
-    content_text += f"\n\n## Confidence Assessment\n\n{report.confidence_assessment}"
+        # Check if report is None or invalid
+        if report is None:
+            logger.warning(
+                "Claude research returned no report for episode %s. Skipping "
+                "Claude research. This is optional and the pipeline will "
+                "continue with other research sources.",
+                episode_id,
+            )
+            artifact, _ = EpisodeArtifact.objects.update_or_create(
+                episode=episode,
+                title="p2-claude",
+                defaults={
+                    "content": "[SKIPPED: Claude research returned no report]",
+                    "description": "Claude multi-agent deep research (skipped - no report).",
+                    "workflow_context": "Research Gathering",
+                    "metadata": {"skipped": True, "reason": "No report returned"},
+                },
+            )
+            return artifact
 
-    metadata = {
-        "sources_cited": report.sources_cited,
-        "key_findings": report.key_findings,
-        "confidence_assessment": report.confidence_assessment,
-        "gaps_remaining": report.gaps_remaining,
-    }
+        # Format the report content as markdown
+        content_text = report.content
+        if report.key_findings:
+            content_text += "\n\n## Key Findings\n\n"
+            content_text += "\n".join(f"- {f}" for f in report.key_findings)
+        if report.gaps_remaining:
+            content_text += "\n\n## Gaps Remaining\n\n"
+            content_text += "\n".join(f"- {g}" for g in report.gaps_remaining)
+        content_text += (
+            f"\n\n## Confidence Assessment\n\n{report.confidence_assessment}"
+        )
 
-    artifact, created = EpisodeArtifact.objects.update_or_create(
-        episode=episode,
-        title="p2-claude",
-        defaults={
-            "content": content_text,
-            "description": "Claude multi-agent deep research output.",
-            "workflow_context": "Research Gathering",
-            "metadata": metadata,
-        },
-    )
+        metadata = {
+            "sources_cited": report.sources_cited,
+            "key_findings": report.key_findings,
+            "confidence_assessment": report.confidence_assessment,
+            "gaps_remaining": report.gaps_remaining,
+        }
 
-    action = "Created" if created else "Updated"
-    logger.info("%s p2-claude artifact for episode %s", action, episode_id)
-    return artifact
+        artifact, created = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-claude",
+            defaults={
+                "content": content_text,
+                "description": "Claude multi-agent deep research output.",
+                "workflow_context": "Research Gathering",
+                "metadata": metadata,
+            },
+        )
+
+        action = "Created" if created else "Updated"
+        logger.info("%s p2-claude artifact for episode %s", action, episode_id)
+        return artifact
+
+    except Exception as e:
+        logger.warning(
+            "Claude research failed for episode %s: %s. Skipping Claude "
+            "research. This is optional and the pipeline will continue with "
+            "other research sources.",
+            episode_id,
+            str(e),
+        )
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-claude",
+            defaults={
+                "content": f"[SKIPPED: Claude research failed - {str(e)}]",
+                "description": "Claude multi-agent deep research (skipped - error).",
+                "workflow_context": "Research Gathering",
+                "metadata": {
+                    "skipped": True,
+                    "reason": f"Exception raised: {str(e)}",
+                    "error_type": type(e).__name__,
+                },
+            },
+        )
+        return artifact
 
 
 # ---------------------------------------------------------------------------
