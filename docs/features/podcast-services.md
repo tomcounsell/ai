@@ -32,6 +32,18 @@ Named AI Tools    External Tools
 
 ## Models
 
+### Podcast
+Core podcast record. Key fields for navigation and access control:
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `owner` | FK to User (nullable) | Enables private podcast access for the owning user |
+| `is_public` | BooleanField | Controls visibility in list views and feed access |
+| `spotify_url` | URLField (blank) | External Spotify link, displayed on detail pages |
+| `apple_podcasts_url` | URLField (blank) | External Apple Podcasts link, displayed on detail pages |
+
+**View access control:** `PodcastListView` shows `is_public=True` podcasts plus the authenticated user's private podcasts. Detail views (`PodcastDetailView`, `EpisodeDetailView`, etc.) use `_get_accessible_podcast()` which returns 404 for private podcasts unless `request.user == podcast.owner`. `PodcastFeedView` allows authenticated owners to access private feeds without `?token=`.
+
 ### Episode
 Core episode record. Services read and write these fields:
 

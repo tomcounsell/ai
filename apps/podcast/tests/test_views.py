@@ -1,7 +1,10 @@
+from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from apps.podcast.models import Episode, Podcast
+
+User = get_user_model()
 
 SIMPLE_STORAGES = {
     "default": {
@@ -47,6 +50,41 @@ class PodcastListViewTestCase(TestCase):
         )
         response = self.client.get("/podcast/")
         self.assertNotContains(response, "Hidden Podcast")
+
+    def test_list_shows_owner_private_podcasts(self):
+        """Owner's private podcast appears in list when logged in."""
+        owner = User.objects.create_user(username="podowner", password="testpass123")
+        Podcast.objects.create(
+            title="My Private Show",
+            slug="my-private-show",
+            description="Private but mine.",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+            owner=owner,
+        )
+        self.client.login(username="podowner", password="testpass123")
+        response = self.client.get("/podcast/")
+        self.assertContains(response, "My Private Show")
+
+    def test_list_hides_others_private_podcasts(self):
+        """Another user's private podcast does not appear in list."""
+        other_user = User.objects.create_user(
+            username="otherowner", password="testpass123"
+        )
+        viewer = User.objects.create_user(username="viewer", password="testpass123")
+        Podcast.objects.create(
+            title="Not My Show",
+            slug="not-my-show",
+            description="Belongs to someone else.",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+            owner=other_user,
+        )
+        self.client.login(username="viewer", password="testpass123")
+        response = self.client.get("/podcast/")
+        self.assertNotContains(response, "Not My Show")
 
 
 @override_settings(STORAGES=SIMPLE_STORAGES)
@@ -107,6 +145,79 @@ class PodcastDetailViewTestCase(TestCase):
         response = self.client.get(f"/podcast/{private_podcast.slug}/")
         self.assertEqual(response.status_code, 404)
 
+    def test_detail_allows_owner_of_private_podcast(self):
+        """Owner of a private podcast can access the detail page."""
+        owner = User.objects.create_user(username="detailowner", password="testpass123")
+        private_podcast = Podcast.objects.create(
+            title="Owner Private Podcast",
+            slug="owner-private",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+            owner=owner,
+        )
+        self.client.login(username="detailowner", password="testpass123")
+        response = self.client.get(f"/podcast/{private_podcast.slug}/")
+        self.assertEqual(response.status_code, 200)
+
+    def test_detail_404_for_non_owner_of_private_podcast(self):
+        """Non-owner gets 404 for a private podcast."""
+        owner = User.objects.create_user(username="realowner", password="testpass123")
+        other = User.objects.create_user(username="stranger", password="testpass123")
+        private_podcast = Podcast.objects.create(
+            title="Not Yours",
+            slug="not-yours",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+            owner=owner,
+        )
+        self.client.login(username="stranger", password="testpass123")
+        response = self.client.get(f"/podcast/{private_podcast.slug}/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_detail_404_for_anonymous_on_private_podcast(self):
+        """Anonymous user gets 404 for a private podcast."""
+        owner = User.objects.create_user(username="anonowner", password="testpass123")
+        private_podcast = Podcast.objects.create(
+            title="Anon Private",
+            slug="anon-private",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+            owner=owner,
+        )
+        response = self.client.get(f"/podcast/{private_podcast.slug}/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_detail_shows_platform_links(self):
+        """Platform links appear when spotify_url and apple_podcasts_url are set."""
+        podcast_with_links = Podcast.objects.create(
+            title="Linked Podcast",
+            slug="linked-podcast",
+            description="Has platform links.",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=True,
+            spotify_url="https://open.spotify.com/show/test123",
+            apple_podcasts_url="https://podcasts.apple.com/us/podcast/test123",
+        )
+        response = self.client.get(f"/podcast/{podcast_with_links.slug}/")
+        self.assertContains(response, "Spotify")
+        self.assertContains(response, "Apple Podcasts")
+        self.assertContains(response, "https://open.spotify.com/show/test123")
+        self.assertContains(response, "https://podcasts.apple.com/us/podcast/test123")
+
+    def test_detail_hides_empty_platform_links(self):
+        """Platform links are hidden when URLs are empty, but RSS always shows."""
+        response = self.client.get(f"/podcast/{self.podcast.slug}/")
+        self.assertNotContains(response, "Spotify")
+        self.assertNotContains(response, "Apple Podcasts")
+        self.assertContains(response, "RSS Feed")
+
 
 @override_settings(STORAGES=SIMPLE_STORAGES)
 class EpisodeDetailViewTestCase(TestCase):
@@ -150,6 +261,57 @@ class EpisodeDetailViewTestCase(TestCase):
         response = self.client.get(
             f"/podcast/{self.podcast.slug}/{self.draft_episode.slug}/"
         )
+        self.assertEqual(response.status_code, 404)
+
+    def test_episode_detail_allows_owner_of_private_podcast(self):
+        """Owner can access episode detail on a private podcast."""
+        owner = User.objects.create_user(username="epowner", password="testpass123")
+        private_podcast = Podcast.objects.create(
+            title="Private Ep Podcast",
+            slug="private-ep-podcast",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+            owner=owner,
+        )
+        episode = Episode.objects.create(
+            podcast=private_podcast,
+            title="Private Episode",
+            slug="private-episode",
+            episode_number=1,
+            audio_url="https://example.com/ep.mp3",
+            published_at=timezone.now() - timezone.timedelta(hours=1),
+        )
+        self.client.login(username="epowner", password="testpass123")
+        response = self.client.get(f"/podcast/{private_podcast.slug}/{episode.slug}/")
+        self.assertEqual(response.status_code, 200)
+
+    def test_episode_detail_404_for_non_owner(self):
+        """Non-owner gets 404 for episode on private podcast."""
+        owner = User.objects.create_user(username="epowner2", password="testpass123")
+        non_owner = User.objects.create_user(
+            username="epstranger", password="testpass123"
+        )
+        private_podcast = Podcast.objects.create(
+            title="Stranger Ep Podcast",
+            slug="stranger-ep-podcast",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+            owner=owner,
+        )
+        episode = Episode.objects.create(
+            podcast=private_podcast,
+            title="Blocked Episode",
+            slug="blocked-episode",
+            episode_number=1,
+            audio_url="https://example.com/ep.mp3",
+            published_at=timezone.now() - timezone.timedelta(hours=1),
+        )
+        self.client.login(username="epstranger", password="testpass123")
+        response = self.client.get(f"/podcast/{private_podcast.slug}/{episode.slug}/")
         self.assertEqual(response.status_code, 404)
 
 
@@ -203,6 +365,94 @@ class EpisodeReportViewTestCase(TestCase):
         )
         self.assertEqual(response.status_code, 404)
 
+    def test_report_allows_owner_of_private_podcast(self):
+        """Owner can access report on a private podcast."""
+        owner = User.objects.create_user(username="reportowner", password="testpass123")
+        private_podcast = Podcast.objects.create(
+            title="Private Report Podcast",
+            slug="private-report-podcast",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+            owner=owner,
+        )
+        episode = Episode.objects.create(
+            podcast=private_podcast,
+            title="Private Report Episode",
+            slug="private-report-ep",
+            episode_number=1,
+            audio_url="https://example.com/ep.mp3",
+            report_text="Private report content.",
+            published_at=timezone.now() - timezone.timedelta(hours=1),
+        )
+        self.client.login(username="reportowner", password="testpass123")
+        response = self.client.get(
+            f"/podcast/{private_podcast.slug}/{episode.slug}/report/"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content.decode("utf-8"), "Private report content.")
+
+    def test_report_404_for_non_owner_of_private_podcast(self):
+        """Non-owner gets 404 for report on a private podcast."""
+        owner = User.objects.create_user(
+            username="reportowner2", password="testpass123"
+        )
+        non_owner = User.objects.create_user(
+            username="reportstranger", password="testpass123"
+        )
+        private_podcast = Podcast.objects.create(
+            title="Blocked Report Podcast",
+            slug="blocked-report-podcast",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+            owner=owner,
+        )
+        Episode.objects.create(
+            podcast=private_podcast,
+            title="Blocked Report Episode",
+            slug="blocked-report-ep",
+            episode_number=1,
+            audio_url="https://example.com/ep.mp3",
+            report_text="Should not see this.",
+            published_at=timezone.now() - timezone.timedelta(hours=1),
+        )
+        self.client.login(username="reportstranger", password="testpass123")
+        response = self.client.get(
+            f"/podcast/{private_podcast.slug}/blocked-report-ep/report/"
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_report_404_for_anonymous_on_private_podcast(self):
+        """Anonymous user gets 404 for report on a private podcast."""
+        owner = User.objects.create_user(
+            username="reportowner3", password="testpass123"
+        )
+        private_podcast = Podcast.objects.create(
+            title="Anon Report Podcast",
+            slug="anon-report-podcast",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+            owner=owner,
+        )
+        Episode.objects.create(
+            podcast=private_podcast,
+            title="Anon Report Episode",
+            slug="anon-report-ep",
+            episode_number=1,
+            audio_url="https://example.com/ep.mp3",
+            report_text="Should not see this either.",
+            published_at=timezone.now() - timezone.timedelta(hours=1),
+        )
+        response = self.client.get(
+            f"/podcast/{private_podcast.slug}/anon-report-ep/report/"
+        )
+        self.assertEqual(response.status_code, 404)
+
 
 class EpisodeSourcesViewTestCase(TestCase):
     """Tests for the episode sources text view."""
@@ -251,5 +501,97 @@ class EpisodeSourcesViewTestCase(TestCase):
         """Episode without sources_text returns 404."""
         response = self.client.get(
             f"/podcast/{self.podcast.slug}/{self.episode_without_sources.slug}/sources/"
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_sources_allows_owner_of_private_podcast(self):
+        """Owner can access sources on a private podcast."""
+        owner = User.objects.create_user(
+            username="sourcesowner", password="testpass123"
+        )
+        private_podcast = Podcast.objects.create(
+            title="Private Sources Podcast",
+            slug="private-sources-podcast",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+            owner=owner,
+        )
+        episode = Episode.objects.create(
+            podcast=private_podcast,
+            title="Private Sources Episode",
+            slug="private-sources-ep",
+            episode_number=1,
+            audio_url="https://example.com/ep.mp3",
+            sources_text="Private source 1\nPrivate source 2",
+            published_at=timezone.now() - timezone.timedelta(hours=1),
+        )
+        self.client.login(username="sourcesowner", password="testpass123")
+        response = self.client.get(
+            f"/podcast/{private_podcast.slug}/{episode.slug}/sources/"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.content.decode("utf-8"), "Private source 1\nPrivate source 2"
+        )
+
+    def test_sources_404_for_non_owner_of_private_podcast(self):
+        """Non-owner gets 404 for sources on a private podcast."""
+        owner = User.objects.create_user(
+            username="sourcesowner2", password="testpass123"
+        )
+        non_owner = User.objects.create_user(
+            username="sourcesstranger", password="testpass123"
+        )
+        private_podcast = Podcast.objects.create(
+            title="Blocked Sources Podcast",
+            slug="blocked-sources-podcast",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+            owner=owner,
+        )
+        Episode.objects.create(
+            podcast=private_podcast,
+            title="Blocked Sources Episode",
+            slug="blocked-sources-ep",
+            episode_number=1,
+            audio_url="https://example.com/ep.mp3",
+            sources_text="Should not see this.",
+            published_at=timezone.now() - timezone.timedelta(hours=1),
+        )
+        self.client.login(username="sourcesstranger", password="testpass123")
+        response = self.client.get(
+            f"/podcast/{private_podcast.slug}/blocked-sources-ep/sources/"
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_sources_404_for_anonymous_on_private_podcast(self):
+        """Anonymous user gets 404 for sources on a private podcast."""
+        owner = User.objects.create_user(
+            username="sourcesowner3", password="testpass123"
+        )
+        private_podcast = Podcast.objects.create(
+            title="Anon Sources Podcast",
+            slug="anon-sources-podcast",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+            owner=owner,
+        )
+        Episode.objects.create(
+            podcast=private_podcast,
+            title="Anon Sources Episode",
+            slug="anon-sources-ep",
+            episode_number=1,
+            audio_url="https://example.com/ep.mp3",
+            sources_text="Should not see this either.",
+            published_at=timezone.now() - timezone.timedelta(hours=1),
+        )
+        response = self.client.get(
+            f"/podcast/{private_podcast.slug}/anon-sources-ep/sources/"
         )
         self.assertEqual(response.status_code, 404)

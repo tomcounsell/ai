@@ -40,10 +40,20 @@ class EpisodeArtifactInline(TabularInline):
 
 @admin.register(Podcast)
 class PodcastAdmin(ModelAdmin):
-    list_display = ["title", "slug", "language", "is_public", "created_at"]
-    list_filter = ["is_public", "language"]
+    list_display = [
+        "title",
+        "slug",
+        "language",
+        "is_public",
+        "created_at",
+        "owner",
+        "spotify_url",
+        "apple_podcasts_url",
+    ]
+    list_filter = ["is_public", "language", "owner"]
     search_fields = ["title", "description"]
     prepopulated_fields = {"slug": ("title",)}
+    raw_id_fields = ["owner"]
     ordering = ["title"]
     inlines = [PodcastConfigInline, EpisodeInline]
 

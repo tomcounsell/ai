@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 
 from apps.common.behaviors import Timestampable
@@ -14,6 +15,15 @@ class Podcast(Timestampable):
     is_public = models.BooleanField(default=False)
     categories = models.JSONField(default=list, blank=True)
     website_url = models.URLField(blank=True)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="podcasts",
+    )
+    spotify_url = models.URLField(blank=True)
+    apple_podcasts_url = models.URLField(blank=True)
 
     class Meta:
         ordering = ["title"]

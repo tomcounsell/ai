@@ -46,11 +46,19 @@ class PodcastFeedView(View):
         return response
 
     def _serve_private_feed(self, request, podcast) -> HttpResponse:
-        # Validate access token
-        token = request.GET.get("token", "")
-        expected_token = getattr(settings, "SUPABASE_USER_ACCESS_TOKEN", "")
-        if not token or not expected_token or token != expected_token:
-            return HttpResponseForbidden("Invalid or missing access token.")
+        # Allow authenticated owner to access without token
+        is_owner = (
+            request.user.is_authenticated
+            and podcast.owner
+            and request.user == podcast.owner
+        )
+
+        if not is_owner:
+            # Validate access token
+            token = request.GET.get("token", "")
+            expected_token = getattr(settings, "SUPABASE_USER_ACCESS_TOKEN", "")
+            if not token or not expected_token or token != expected_token:
+                return HttpResponseForbidden("Invalid or missing access token.")
 
         episodes = list(self._published_episodes(podcast))
 

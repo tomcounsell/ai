@@ -60,6 +60,9 @@
          aria-labelledby="nav_user_menu_button"
          tabindex="-1">
       <!-- Menu items -->
+      <a href="{% url 'podcast:list' %}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" role="menuitem" tabindex="-1">
+        My Podcasts
+      </a>
       <a href="{% url 'public:account-settings' %}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" role="menuitem" tabindex="-1" id="user-menu-item-0">
         Account Settings
       </a>
