@@ -1,6 +1,10 @@
+from uuid import uuid4
+
+from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.db.models import F, Q
-from django.http import Http404, HttpResponse
+from django.http import Http404, HttpResponse, HttpResponseRedirect
 from django.shortcuts import get_object_or_404
+from django.urls import reverse
 from django.views import View
 
 from apps.podcast.models import Episode, Podcast
@@ -117,3 +121,28 @@ class EpisodeSourcesView(View):
         if not episode.sources_text:
             raise Http404("No sources available for this episode.")
         return HttpResponse(episode.sources_text, content_type="text/plain")
+
+
+class EpisodeCreateView(LoginRequiredMixin, UserPassesTestMixin, View):
+    """Create a bare draft Episode with UUID slug and redirect to workflow step 1."""
+
+    def test_func(self) -> bool:
+        return self.request.user.is_staff
+
+    def get(self, request, slug: str, *args, **kwargs) -> HttpResponseRedirect:
+        return HttpResponseRedirect(reverse("podcast:detail", kwargs={"slug": slug}))
+
+    def post(self, request, slug: str, *args, **kwargs) -> HttpResponseRedirect:
+        podcast = get_object_or_404(Podcast, slug=slug)
+        episode = Episode.objects.create(
+            podcast=podcast,
+            title="Untitled Episode",
+            slug=uuid4().hex[:12],
+            status="draft",
+        )
+        return HttpResponseRedirect(
+            reverse(
+                "podcast:episode_workflow",
+                kwargs={"slug": slug, "episode_slug": episode.slug, "step": 1},
+            )
+        )

@@ -72,7 +72,7 @@ class PodcastListViewTestCase(TestCase):
         other_user = User.objects.create_user(
             username="otherowner", password="testpass123"
         )
-        viewer = User.objects.create_user(username="viewer", password="testpass123")
+        User.objects.create_user(username="viewer", password="testpass123")
         Podcast.objects.create(
             title="Not My Show",
             slug="not-my-show",
@@ -164,7 +164,7 @@ class PodcastDetailViewTestCase(TestCase):
     def test_detail_404_for_non_owner_of_private_podcast(self):
         """Non-owner gets 404 for a private podcast."""
         owner = User.objects.create_user(username="realowner", password="testpass123")
-        other = User.objects.create_user(username="stranger", password="testpass123")
+        User.objects.create_user(username="stranger", password="testpass123")
         private_podcast = Podcast.objects.create(
             title="Not Yours",
             slug="not-yours",
@@ -290,9 +290,7 @@ class EpisodeDetailViewTestCase(TestCase):
     def test_episode_detail_404_for_non_owner(self):
         """Non-owner gets 404 for episode on private podcast."""
         owner = User.objects.create_user(username="epowner2", password="testpass123")
-        non_owner = User.objects.create_user(
-            username="epstranger", password="testpass123"
-        )
+        User.objects.create_user(username="epstranger", password="testpass123")
         private_podcast = Podcast.objects.create(
             title="Stranger Ep Podcast",
             slug="stranger-ep-podcast",
@@ -398,9 +396,7 @@ class EpisodeReportViewTestCase(TestCase):
         owner = User.objects.create_user(
             username="reportowner2", password="testpass123"
         )
-        non_owner = User.objects.create_user(
-            username="reportstranger", password="testpass123"
-        )
+        User.objects.create_user(username="reportstranger", password="testpass123")
         private_podcast = Podcast.objects.create(
             title="Blocked Report Podcast",
             slug="blocked-report-podcast",
@@ -541,9 +537,7 @@ class EpisodeSourcesViewTestCase(TestCase):
         owner = User.objects.create_user(
             username="sourcesowner2", password="testpass123"
         )
-        non_owner = User.objects.create_user(
-            username="sourcesstranger", password="testpass123"
-        )
+        User.objects.create_user(username="sourcesstranger", password="testpass123")
         private_podcast = Podcast.objects.create(
             title="Blocked Sources Podcast",
             slug="blocked-sources-podcast",
@@ -595,3 +589,91 @@ class EpisodeSourcesViewTestCase(TestCase):
             f"/podcast/{private_podcast.slug}/anon-sources-ep/sources/"
         )
         self.assertEqual(response.status_code, 404)
+
+
+@override_settings(STORAGES=SIMPLE_STORAGES)
+class EpisodeCreateViewTestCase(TestCase):
+    """Tests for the episode create view (staff-only POST to create draft episode)."""
+
+    def setUp(self):
+        self.podcast = Podcast.objects.create(
+            title="Create Test Podcast",
+            slug="create-test-podcast",
+            description="Podcast for episode creation tests.",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=True,
+        )
+        self.private_podcast = Podcast.objects.create(
+            title="Private Create Podcast",
+            slug="private-create-podcast",
+            description="Private podcast for creation tests.",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=False,
+        )
+        self.staff_user = User.objects.create_user(
+            "staffuser", "staff@test.com", "password", is_staff=True
+        )
+        self.regular_user = User.objects.create_user(
+            "regularuser", "regular@test.com", "password", is_staff=False
+        )
+
+    def test_anonymous_post_redirects(self):
+        """Anonymous user POSTing to /podcast/{slug}/new/ gets 302 redirect to login."""
+        response = self.client.post(f"/podcast/{self.podcast.slug}/new/")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/account/login", response.url)
+
+    def test_non_staff_post_forbidden(self):
+        """Logged-in non-staff user POSTing gets 403."""
+        self.client.login(username="regularuser", password="password")
+        response = self.client.post(f"/podcast/{self.podcast.slug}/new/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_staff_post_creates_episode(self):
+        """Staff user POSTing creates a draft Episode and redirects to workflow."""
+        self.client.login(username="staffuser", password="password")
+        response = self.client.post(f"/podcast/{self.podcast.slug}/new/")
+        self.assertEqual(response.status_code, 302)
+
+        episode = Episode.objects.get(podcast=self.podcast)
+        self.assertEqual(episode.status, "draft")
+        self.assertEqual(episode.title, "Untitled Episode")
+        self.assertTrue(len(episode.slug) > 0)
+        self.assertIsNotNone(episode.episode_number)
+        self.assertIn(
+            f"/podcast/{self.podcast.slug}/{episode.slug}/edit/1/", response.url
+        )
+
+    def test_staff_post_creates_episode_on_private_podcast(self):
+        """Staff user can create episodes on private podcasts."""
+        self.client.login(username="staffuser", password="password")
+        response = self.client.post(f"/podcast/{self.private_podcast.slug}/new/")
+        self.assertEqual(response.status_code, 302)
+
+        episode = Episode.objects.get(podcast=self.private_podcast)
+        self.assertEqual(episode.status, "draft")
+
+    def test_post_nonexistent_podcast_returns_404(self):
+        """POST to /podcast/nonexistent/new/ returns 404."""
+        self.client.login(username="staffuser", password="password")
+        response = self.client.post("/podcast/nonexistent/new/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_button_visible_to_staff(self):
+        """Staff user GETting the podcast detail page sees 'New Episode'."""
+        self.client.login(username="staffuser", password="password")
+        response = self.client.get(f"/podcast/{self.podcast.slug}/")
+        self.assertContains(response, "New Episode")
+
+    def test_button_hidden_from_anonymous(self):
+        """Anonymous user GETting the podcast detail page does NOT see 'New Episode'."""
+        response = self.client.get(f"/podcast/{self.podcast.slug}/")
+        self.assertNotContains(response, "New Episode")
+
+    def test_button_hidden_from_non_staff(self):
+        """Logged-in non-staff user does NOT see 'New Episode'."""
+        self.client.login(username="regularuser", password="password")
+        response = self.client.get(f"/podcast/{self.podcast.slug}/")
+        self.assertNotContains(response, "New Episode")

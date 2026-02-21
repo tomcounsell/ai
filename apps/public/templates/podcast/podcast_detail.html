@@ -14,10 +14,21 @@
     </nav>
     <h1 class="text-3xl font-bold tracking-tight text-gray-900">{{ podcast.title }}</h1>
   </div>
-  <a href="{% url 'podcast:feed' slug=podcast.slug %}"
-     class="inline-flex items-center gap-2 text-sm font-mono text-orange-600 hover:text-orange-700 border border-orange-300 px-3 py-1.5 hover:bg-orange-50 transition-colors self-start">
-    <i class="fas fa-rss"></i> RSS Feed
-  </a>
+  <div class="flex items-center gap-2 self-start">
+    <a href="{% url 'podcast:feed' slug=podcast.slug %}"
+       class="inline-flex items-center gap-2 text-sm font-mono text-orange-600 hover:text-orange-700 border border-orange-300 px-3 py-1.5 hover:bg-orange-50 transition-colors">
+      <i class="fas fa-rss"></i> RSS Feed
+    </a>
+    {% if request.user.is_staff %}
+    <form method="post" action="{% url 'podcast:episode_create' slug=podcast.slug %}">
+      {% csrf_token %}
+      <button type="submit"
+              class="inline-flex items-center gap-2 text-sm font-mono text-orange-600 hover:text-orange-700 border border-orange-300 px-3 py-1.5 hover:bg-orange-50 transition-colors">
+        <i class="fas fa-plus"></i> New Episode
+      </button>
+    </form>
+    {% endif %}
+  </div>
 </div>
 {% endblock %}
 
