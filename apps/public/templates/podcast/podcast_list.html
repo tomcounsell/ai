@@ -22,11 +22,22 @@
     <span class="text-xs text-gray-500 font-mono">
       <i class="fas fa-user mr-1"></i> {{ podcast.author_name }}
     </span>
+    {% if not podcast.is_public %}
+    <span class="text-xs text-gray-500 font-mono ml-2">
+      <i class="fas fa-lock mr-1"></i> Private
+    </span>
+    {% endif %}
   </a>
   {% empty %}
   <div class="col-span-full text-center py-12 text-gray-500">
     <i class="fas fa-podcast text-4xl mb-4 block"></i>
-    <p class="text-sm">No podcasts available yet.</p>
+    {% if user.is_authenticated %}
+    <p class="text-sm mb-2">No podcasts available yet.</p>
+    <p class="text-xs text-gray-400">Podcasts you own will appear here automatically.</p>
+    {% else %}
+    <p class="text-sm mb-2">No podcasts available yet.</p>
+    <p class="text-xs text-gray-400">Check back soon for new content.</p>
+    {% endif %}
   </div>
   {% endfor %}
 </div>

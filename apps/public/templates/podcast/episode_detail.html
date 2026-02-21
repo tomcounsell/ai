@@ -41,6 +41,26 @@
     {% endif %}
   </div>
 
+  <!-- Podcast Platform Links -->
+  <div class="flex flex-wrap gap-3 mb-6">
+    {% if podcast.spotify_url %}
+    <a href="{{ podcast.spotify_url }}" target="_blank" rel="noopener"
+       class="inline-flex items-center gap-2 border border-gray-300 px-3 py-1.5 text-xs font-mono text-gray-600 hover:bg-gray-50 transition-colors">
+      <i class="fab fa-spotify"></i> Spotify
+    </a>
+    {% endif %}
+    {% if podcast.apple_podcasts_url %}
+    <a href="{{ podcast.apple_podcasts_url }}" target="_blank" rel="noopener"
+       class="inline-flex items-center gap-2 border border-gray-300 px-3 py-1.5 text-xs font-mono text-gray-600 hover:bg-gray-50 transition-colors">
+      <i class="fab fa-apple"></i> Apple Podcasts
+    </a>
+    {% endif %}
+    <a href="{% url 'podcast:feed' slug=podcast.slug %}"
+       class="inline-flex items-center gap-2 border border-gray-300 px-3 py-1.5 text-xs font-mono text-gray-600 hover:bg-gray-50 transition-colors">
+      <i class="fas fa-rss"></i> RSS
+    </a>
+  </div>
+
   <!-- Cover Image -->
   {% if episode.effective_cover_image_url %}
   <img src="{{ episode.effective_cover_image_url }}" alt="{{ episode.title }}"

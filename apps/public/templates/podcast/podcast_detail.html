@@ -44,6 +44,26 @@
     </div>
   </div>
 
+  <!-- Platform Links -->
+  <div class="flex flex-wrap gap-3 mb-8">
+    {% if podcast.spotify_url %}
+    <a href="{{ podcast.spotify_url }}" target="_blank" rel="noopener"
+       class="inline-flex items-center gap-2 border border-gray-300 px-4 py-2 text-sm font-mono text-gray-700 hover:bg-gray-50 transition-colors">
+      <i class="fab fa-spotify"></i> Spotify
+    </a>
+    {% endif %}
+    {% if podcast.apple_podcasts_url %}
+    <a href="{{ podcast.apple_podcasts_url }}" target="_blank" rel="noopener"
+       class="inline-flex items-center gap-2 border border-gray-300 px-4 py-2 text-sm font-mono text-gray-700 hover:bg-gray-50 transition-colors">
+      <i class="fab fa-apple"></i> Apple Podcasts
+    </a>
+    {% endif %}
+    <a href="{% url 'podcast:feed' slug=podcast.slug %}"
+       class="inline-flex items-center gap-2 border border-gray-300 px-4 py-2 text-sm font-mono text-gray-700 hover:bg-gray-50 transition-colors">
+      <i class="fas fa-rss"></i> RSS Feed
+    </a>
+  </div>
+
   <!-- Episodes -->
   <div class="border-t border-gray-200 pt-6">
     <h2 class="font-mono text-sm font-semibold text-gray-500 uppercase tracking-wider mb-4">

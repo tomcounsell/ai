@@ -56,6 +56,11 @@ Provides links to important pages, legal information, and site metadata.
                   CTO Tools
                 </a>
               </li>
+              <li>
+                <a href="{% url 'podcast:list' %}" class="text-sm" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+                  Podcast
+                </a>
+              </li>
               {% if user.is_staff %}
               <li>
                 <a href="{% url 'admin:index' %}" class="text-sm" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">

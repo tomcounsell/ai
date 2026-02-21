@@ -50,6 +50,10 @@
             CTO Tools
           </a>
 
+          <a href="{% url 'podcast:list' %}" class="{% if active_section == 'podcast' %}active{% endif %}">
+            Podcast
+          </a>
+
           {% comment %}Temporarily hidden
           <a href="{% url 'public:pricing' %}" class="{% if active_section == 'pricing' %}active{% endif %}">
             Pricing
@@ -107,6 +111,10 @@
         CTO Tools
       </a>
 
+      <a href="{% url 'podcast:list' %}" class="block px-3 py-2 text-mono {% if active_section == 'podcast' %}active{% endif %}" style="font-size: 0.75rem;">
+        Podcast
+      </a>
+
       {% comment %}Temporarily hidden
       <a href="{% url 'public:pricing' %}" class="block px-3 py-2 text-mono {% if active_section == 'pricing' %}active{% endif %}" style="font-size: 0.75rem;">
         Pricing
@@ -136,6 +144,9 @@
           </div>
         </div>
         <div class="mt-3 space-y-1 px-2">
+          <a href="{% url 'podcast:list' %}" class="block rounded-xs px-3 py-2 text-base font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-800">
+            My Podcasts
+          </a>
           <a href="{% url 'public:account-settings' %}" class="block rounded-xs px-3 py-2 text-base font-medium text-gray-500 hover:bg-gray-50 hover:text-gray-800">
             Account Settings
           </a>

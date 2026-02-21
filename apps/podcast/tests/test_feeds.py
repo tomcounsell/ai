@@ -1,9 +1,12 @@
 from unittest.mock import patch
 
+from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from apps.podcast.models import Episode, Podcast
+
+User = get_user_model()
 
 
 class PodcastFeedTestCase(TestCase):
@@ -325,3 +328,42 @@ class PrivateFeedTestCase(TestCase):
             f"/podcast/{self.private_podcast.slug}/feed.xml?token=anything"
         )
         self.assertEqual(response.status_code, 403)
+
+    @patch("apps.podcast.views.feed_views.get_file_url")
+    def test_private_feed_allows_owner_without_token(self, mock_get_file_url):
+        """Owner can access private feed without ?token= query param."""
+        mock_get_file_url.side_effect = lambda key, **kw: f"https://signed.url/{key}"
+        owner = User.objects.create_user(username="feedowner", password="testpass123")
+        self.private_podcast.owner = owner
+        # Save without triggering is_public change check — use update()
+        Podcast.objects.filter(pk=self.private_podcast.pk).update(owner=owner)
+        self.private_podcast.refresh_from_db()
+
+        self.client.login(username="feedowner", password="testpass123")
+        response = self.client.get(f"/podcast/{self.private_podcast.slug}/feed.xml")
+        self.assertEqual(response.status_code, 200)
+
+    def test_private_feed_rejects_non_owner_without_token(self):
+        """Non-owner without token gets 403 on private feed."""
+        owner = User.objects.create_user(username="feedowner2", password="testpass123")
+        non_owner = User.objects.create_user(
+            username="feedstranger", password="testpass123"
+        )
+        Podcast.objects.filter(pk=self.private_podcast.pk).update(owner=owner)
+
+        self.client.login(username="feedstranger", password="testpass123")
+        response = self.client.get(f"/podcast/{self.private_podcast.slug}/feed.xml")
+        self.assertEqual(response.status_code, 403)
+
+    @patch("apps.podcast.views.feed_views.get_file_url")
+    def test_private_feed_still_allows_token_without_owner(self, mock_get_file_url):
+        """Token auth still works on a private podcast with no owner set."""
+        mock_get_file_url.side_effect = lambda key, **kw: f"https://signed.url/{key}"
+        # Ensure no owner is set
+        Podcast.objects.filter(pk=self.private_podcast.pk).update(owner=None)
+        self.private_podcast.refresh_from_db()
+
+        response = self.client.get(
+            f"/podcast/{self.private_podcast.slug}/feed.xml?token=valid-test-token"
+        )
+        self.assertEqual(response.status_code, 200)
