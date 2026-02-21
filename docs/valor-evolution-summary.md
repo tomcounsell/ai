@@ -33,7 +33,7 @@ _Key innovation: "Valor Engels" persona established - AI coworker, not assistant
 Major architectural shift to leverage Claude Code's native capabilities:
 
 - **Claude Code as orchestrator** - stopped building custom sub-agent systems
-- **MCP servers** - Sentry, GitHub, Linear, Notion, Stripe, Render integrations
+- **MCP servers** - Sentry, Notion integrations; GitHub via `gh` CLI
 - **Intelligent routing** - replaced keyword triggers with LLM-based intent recognition
 - **PR #3: CC/Valor Unification** - merged Claude Code and Valor into single system
 

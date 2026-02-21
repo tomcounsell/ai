@@ -1,18 +1,6 @@
 {
   "servers": [
     {
-      "mcp_id": "github",
-      "name": "GitHub",
-      "category": "development",
-      "capabilities": ["code", "issues", "prs", "commits", "reviews"],
-      "auth_status": "ready",
-      "auth_type": "token",
-      "env_var": "GITHUB_TOKEN",
-      "tools": ["list_prs", "get_pr", "create_pr", "merge_pr", "list_issues", "create_issue", "get_commits", "get_checks", "search_code", "get_file"],
-      "description": "Code repositories, PRs, issues, and development workflows via GitHub",
-      "setup_instructions": "1. Go to GitHub Settings > Developer settings > Personal access tokens\n2. Create a new token with repo and workflow scopes\n3. Set GITHUB_TOKEN in your .env file"
-    },
-    {
       "mcp_id": "sentry",
       "name": "Sentry",
       "category": "development",
@@ -134,7 +122,7 @@
     }
   ],
   "categories": {
-    "development": ["github", "sentry"],
+    "development": ["sentry"],
     "productivity": ["notion", "linear"],
     "infrastructure": ["render"],
     "business": ["stripe"],

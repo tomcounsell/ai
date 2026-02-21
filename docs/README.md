@@ -70,7 +70,7 @@ Claude Code - Orchestrates tools and subagents
     |
     v
 Tool Ecosystem
-    |-- MCP Servers (Stripe, Sentry, GitHub, etc.)
+    |-- MCP Servers (Sentry, Notion) + GitHub CLI (`gh`)
     |-- Development Tools (search, code, test)
     +-- Social Tools (Telegram integration)
 ```

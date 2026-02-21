@@ -21,7 +21,7 @@ Telegram → Python Bridge (Telethon) → Claude Agent SDK → Claude API
 **Key components:**
 - **Python Bridge** (`bridge/telegram_bridge.py`): Handles Telegram user account via Telethon
 - **Claude Agent SDK** (`agent/sdk_client.py`): AI orchestration, calls Claude API
-- **MCP Servers** (`.mcp.json`): Modular capabilities (Sentry, GitHub, etc.)
+- **MCP Servers** (`.mcp.json`): Modular capabilities (Sentry, Notion, etc.); GitHub via `gh` CLI
 - **SOUL.md** (`config/SOUL.md`): Valor's persona and philosophy
 
 ## Directory Layout

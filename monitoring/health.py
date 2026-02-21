@@ -175,7 +175,6 @@ class HealthChecker:
             "anthropic": "ANTHROPIC_API_KEY",
             "openrouter": "OPENROUTER_API_KEY",
             "perplexity": "PERPLEXITY_API_KEY",
-            "github": "GITHUB_TOKEN",
             "sentry": "SENTRY_API_KEY",
         }
 

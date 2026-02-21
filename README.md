@@ -13,7 +13,7 @@ Valor is an AI coworker - not an assistant, not a tool, but a colleague with its
 | Claude Agent SDK | **Active** | Agent backend (v0.1.20) |
 | Telegram Integration | **Working** | User account via Telethon, responds to @valor mentions |
 | Self-Management | **Working** | Can restart himself, survives reboots |
-| MCP Skills | **Working** | Sentry, GitHub, Linear, Notion, Stripe, Render |
+| MCP Skills | **Working** | Sentry, Notion (MCP); GitHub via `gh` CLI |
 | Daydream (Cron) | **Working** | Daily autonomous maintenance at 6 AM Pacific |
 
 ## Architecture

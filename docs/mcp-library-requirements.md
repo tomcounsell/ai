@@ -33,7 +33,7 @@ Pre-session task analysis using Agent SDK to intelligently select only relevant 
 Each MCP server entry must track:
 
 ```yaml
-mcp_id: string           # Unique identifier (e.g., "github")
+mcp_id: string           # Unique identifier (e.g., "sentry")
 name: string             # Display name
 category: string         # Category (development/social/productivity)
 capabilities: [string]   # List of capabilities (code/issues/calendar)
