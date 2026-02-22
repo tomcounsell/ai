@@ -144,7 +144,7 @@ MCP servers are in `apps/ai/mcp/` using FastMCP:
   - Monospace (IBM Plex Mono) for labels, headers, code
   - Sans-serif (Inter) for body text
   - Technical labeling: MCP_SERVER_01, TOOL_03, BENEFIT_01
-  - Warm minimalism with bronze accent (#D4A574)
+  - Warm minimalism with red accent (#B91C1C) for annotations and emphasis
 - **Documentation**: See `docs/BRANDING_BRIEF.md` for rationale and guidelines
 
 ### Background Tasks
