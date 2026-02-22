@@ -28,7 +28,6 @@ tail -f logs/bridge.log
 
 | Document | Description |
 |----------|-------------|
-| [Consolidated Documentation](CONSOLIDATED_DOCUMENTATION.md) | **Primary reference** - complete system documentation |
 | [System Overview](features/system-overview.md) | High-level architecture and design principles |
 
 ### Interface
