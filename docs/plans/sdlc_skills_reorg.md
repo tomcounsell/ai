@@ -129,11 +129,11 @@ Classify every skill by invocation pattern:
 | Skill | Model-Invocable | User-Invocable | Context | Rationale |
 |-------|----------------|----------------|---------|-----------|
 | do-plan | true | true | - | Both agent and user trigger planning |
-| do-build | false | true | fork | User-triggered, runs in subagent |
+| do-build | true | true | fork | Both agent and user trigger builds |
 | do-test | true | true | - | Both can trigger tests |
 | do-docs | true | true | - | Both can trigger doc updates |
-| do-pr-review | false | true | fork | User-triggered review |
-| do-docs-audit | false | true | fork | User-triggered audit |
+| do-pr-review | true | true | fork | Both can trigger PR review |
+| do-docs-audit | true | true | fork | Both can trigger doc audits |
 | update | false | true | - | User-only infrastructure |
 | setup | false | true | - | User-only infrastructure |
 | sdlc | true | true | - | Both can trigger SDLC |
@@ -142,7 +142,8 @@ Classify every skill by invocation pattern:
 | reading-sms | true | false | - | Background reference for agent |
 | checking-system-logs | true | false | - | Background reference for agent |
 | google-workspace | true | false | - | Background reference for agent |
-| new-valor-skill | false | true | - | User-only meta-skill |
+| new-skill | true | true | - | Generic skill creator, shared across repos |
+| new-valor-skill | true | true | - | Valor-flavored wrapper of new-skill with repo-specific defaults |
 | reclassify | false | true | - | User-only plan management |
 | frontend-design | true | true | - | Both can trigger design work |
 
@@ -207,9 +208,9 @@ Create `.claude/skills/README.md` (not loaded by Claude, for human reference):
 
 ## No-Gos (Out of Scope)
 
-- No content rewriting — structure only
+- No content rewriting — structure only (except new-skill extraction)
 - No agent reorganization beyond README updates
-- No new skills created (just existing content restructured)
+- Only one new skill created: `new-skill` (extracted from `new-valor-skill`)
 - No changes to hook validators or settings.json hooks
 - No changes to the bridge or agent SDK
 
@@ -280,14 +281,15 @@ No agent integration required — this is a restructuring of Claude Code configu
 
 ## Step by Step Tasks
 
-### 0. Save canonical SKILL.md template
-- **Task ID**: build-template
+### 0. Create generic new-skill and refactor new-valor-skill
+- **Task ID**: build-new-skill
 - **Depends On**: none
 - **Assigned To**: skill-splitter
 - **Agent Type**: builder
 - **Parallel**: true
-- Save the canonical template to `.claude/skills/new-valor-skill/SKILL_TEMPLATE.md`
-- Update `new-valor-skill/SKILL.md` to reference the template: "Use [SKILL_TEMPLATE.md](SKILL_TEMPLATE.md) as the starting point"
+- Create `.claude/skills/new-skill/SKILL.md` — a generic, repo-agnostic skill creator that works in any project. Contains the canonical SKILL.md template, description field rules, creation checklist, migration guide, and debugging tips. Can create both shared (`~/.claude/skills/`) and project-specific (`.claude/skills/`) skills.
+- Save the canonical template as `.claude/skills/new-skill/SKILL_TEMPLATE.md` (sub-file)
+- Refactor `.claude/skills/new-valor-skill/SKILL.md` to be a thin Valor-flavored wrapper: imports the generic template from `new-skill`, adds Valor-specific patterns (Telegram bridge integration, SOUL.md persona, `tools/` directory structure, CLAUDE.md documentation requirements, pyproject.toml CLI registration). References `new-skill/SKILL_TEMPLATE.md` for the base template.
 
 ### 1. Split oversized skills (using canonical template structure)
 - **Task ID**: build-split-skills
@@ -307,7 +309,7 @@ No agent integration required — this is a restructuring of Claude Code configu
 - **Assigned To**: skill-splitter
 - **Agent Type**: builder
 - **Parallel**: false
-- Add `disable-model-invocation: true` to: update, setup, new-valor-skill, reclassify, do-build, do-pr-review, do-docs-audit
+- Add `disable-model-invocation: true` to: update, setup, reclassify
 - Add `user-invocable: false` to: agent-browser, telegram, reading-sms, checking-system-logs, google-workspace
 - Add `context: fork` where appropriate (do-build, do-pr-review, do-docs-audit)
 - Verify all descriptions are < 1024 chars and written in third person
