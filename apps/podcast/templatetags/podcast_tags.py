@@ -1,5 +1,6 @@
 import json
 import logging
+from xml.sax.saxutils import escape as xml_escape_str
 
 import markdown as md
 from django import template
@@ -19,6 +20,14 @@ def duration_hhmmss(seconds: int | None) -> str:
     hours, remainder = divmod(total, 3600)
     minutes, secs = divmod(remainder, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+@register.filter(name="xml_escape")
+def xml_escape(value: str | None) -> str:
+    """Escape text for safe inclusion in XML elements (outside CDATA)."""
+    if not value:
+        return ""
+    return xml_escape_str(str(value))
 
 
 @register.filter

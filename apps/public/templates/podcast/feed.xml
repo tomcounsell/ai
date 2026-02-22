@@ -5,31 +5,31 @@
      xmlns:atom="http://www.w3.org/2005/Atom"
      xmlns:content="http://purl.org/rss/1.0/modules/content/">
   <channel>
-    <title>{{ podcast.title }}</title>
+    <title>{{ podcast.title|xml_escape }}</title>
     <link>{{ request.scheme }}://{{ request.get_host }}{% url 'podcast:detail' slug=podcast.slug %}</link>
-    <description>{{ podcast.description }}</description>
+    <description>{{ podcast.description|xml_escape }}</description>
     <language>{{ podcast.language }}</language>
-    <copyright>{{ podcast.author_name }}</copyright>
+    <copyright>{{ podcast.author_name|xml_escape }}</copyright>
     <lastBuildDate>{{ episodes.0.published_at|date:"D, d M Y H:i:s O" }}</lastBuildDate>
     <atom:link href="{{ request.build_absolute_uri }}" rel="self" type="application/rss+xml"/>
 
-    <itunes:author>{{ podcast.author_name }}</itunes:author>
-    <itunes:summary>{{ podcast.description }}</itunes:summary>
+    <itunes:author>{{ podcast.author_name|xml_escape }}</itunes:author>
+    <itunes:summary>{{ podcast.description|xml_escape }}</itunes:summary>
     {% if podcast.cover_image_url %}<itunes:image href="{{ podcast.cover_image_url }}"/>{% endif %}
     <itunes:explicit>false</itunes:explicit>
     {% for category in podcast.categories %}<itunes:category text="{{ category }}"/>
     {% endfor %}
     <itunes:owner>
-      <itunes:name>{{ podcast.author_name }}</itunes:name>
+      <itunes:name>{{ podcast.author_name|xml_escape }}</itunes:name>
       <itunes:email>{{ podcast.author_email }}</itunes:email>
     </itunes:owner>
 
     <podcast:locked>yes</podcast:locked>
 {% for episode in episodes %}
     <item>
-      <title>{{ episode.title }}</title>
+      <title>{{ episode.title|xml_escape }}</title>
       <link>{{ request.scheme }}://{{ request.get_host }}{% url 'podcast:episode_detail' slug=podcast.slug episode_slug=episode.slug %}</link>
-      <description>{{ episode.description }}</description>
+      <description>{{ episode.description|xml_escape }}</description>
       <pubDate>{{ episode.published_at|date:"D, d M Y H:i:s O" }}</pubDate>
       <guid isPermaLink="false">{{ episode.audio_url }}</guid>
       <enclosure url="{{ episode.audio_url }}" length="{{ episode.audio_file_size_bytes|default_zero }}" type="audio/mpeg"/>
@@ -38,7 +38,7 @@
       <itunes:episode>{{ episode.episode_number }}</itunes:episode>
       <itunes:explicit>{% if episode.is_explicit %}true{% else %}false{% endif %}</itunes:explicit>
       {% if episode.effective_cover_image_url %}<itunes:image href="{{ episode.effective_cover_image_url }}"/>{% endif %}
-      <itunes:summary>{{ episode.description }}</itunes:summary>
+      <itunes:summary>{{ episode.description|xml_escape }}</itunes:summary>
       <content:encoded><![CDATA[{% episode_show_notes episode %}]]></content:encoded>
     </item>
 {% endfor %}
