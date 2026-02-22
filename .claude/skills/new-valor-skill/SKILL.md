@@ -309,7 +309,15 @@ If validation fails, you'll receive specific instructions on what's missing.
 
 ---
 
-## Reference Implementations
+## Creating a Skill (not a tool)
+
+If you need to create a new **Claude Code skill** (`.claude/skills/*/SKILL.md`) rather than a Python tool, use the canonical template:
+
+→ Read [SKILL_TEMPLATE.md](SKILL_TEMPLATE.md) for the standard SKILL.md structure, field constraints, and creation checklist.
+
+---
+
+## Reference Implementations (Tools)
 
 Look at these tools for patterns:
 
