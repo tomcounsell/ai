@@ -90,14 +90,34 @@ def stash_pop(project_dir: Path) -> bool:
 
 
 def pull_ff_only(project_dir: Path) -> tuple[bool, str]:
-    """Pull with --ff-only. Returns (success, output)."""
+    """Pull with --ff-only, falling back to --rebase on divergence.
+
+    Returns (success, output).
+    """
     result = run_cmd(
         ["git", "pull", "--ff-only"],
         cwd=project_dir,
         check=False,
     )
     output = result.stdout + result.stderr
-    return result.returncode == 0, output.strip()
+
+    if result.returncode == 0:
+        return True, output.strip()
+
+    # If ff-only failed due to divergence, try rebase
+    if (
+        "diverging" in output.lower()
+        or "not possible to fast-forward" in output.lower()
+    ):
+        result = run_cmd(
+            ["git", "pull", "--rebase"],
+            cwd=project_dir,
+            check=False,
+        )
+        output = result.stdout + result.stderr
+        return result.returncode == 0, output.strip()
+
+    return False, output.strip()
 
 
 def get_commits_between(project_dir: Path, before: str, after: str) -> list[str]:
