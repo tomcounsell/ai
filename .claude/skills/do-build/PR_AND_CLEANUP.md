@@ -1,0 +1,161 @@
+# PR Creation, Cleanup, and Plan Migration
+
+Steps 6-9 of the build workflow: documentation gate, PR creation, worktree cleanup, documentation cascade, plan migration, and final reporting.
+
+## Step 6: Documentation Gate
+
+After all validation tasks pass, run the documentation lifecycle checks.
+
+**Execute each command below exactly as written, including the parentheses.** The `(...)` subshell syntax ensures the `cd` happens in a child process — the orchestrator's CWD stays in the main repo.
+
+### 6.1 Validate Documentation Changes
+
+Run the doc validation script to verify documentation was created/updated. This script runs `git diff` internally and needs the worktree as CWD to see the session branch changes.
+
+```bash
+(cd .worktrees/{slug} && python scripts/validate_docs_changed.py {PLAN_PATH})
+```
+
+- **Exit 0**: Documentation requirements met, proceed to next step
+- **Exit 1**: Documentation missing or insufficient, **STOP and report failure**
+- This check BLOCKS PR creation if it fails
+- The script checks that documentation matching the plan was created in `docs/features/` or `docs/`
+
+### 6.2 Scan for Related Documentation
+
+Collect all changed files from git and scan for related docs:
+
+```bash
+(cd .worktrees/{slug} && CHANGED_FILES=$(git diff --name-only main...HEAD | tr '\n' ' ') && python scripts/scan_related_docs.py --json $CHANGED_FILES > /tmp/related_docs.json)
+```
+
+This identifies existing documentation that may need updates based on code changes.
+
+### 6.3 Create Review Issues for Discrepancies
+
+Pipe the scan results to create GitHub issues for HIGH/MED-HIGH confidence matches:
+
+```bash
+cat /tmp/related_docs.json | python scripts/create_doc_review_issue.py
+```
+
+This creates tracking issues for documentation that should be reviewed for updates.
+
+## Step 7: Create Pull Request
+
+After documentation gate passes, push and create the PR:
+
+```bash
+git -C .worktrees/{slug} push -u origin session/{slug}
+gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
+## Summary
+[Brief description of what was built]
+
+## Changes
+- [List key changes made]
+
+## Testing
+- [x] Unit tests passing
+- [x] Integration tests passing
+- [x] Linting (ruff, black) passing
+
+## Documentation
+- [x] Docs created per plan requirements
+- [x] Related docs scanned for updates
+
+## Definition of Done
+- [x] Built: Code implemented and working
+- [x] Tested: All tests passing
+- [x] Documented: Docs created/updated
+- [x] Quality: Lint and format checks pass
+
+Closes #[issue-number]
+EOF
+)"
+```
+
+**Important**: The PR creation step is handled by the BUILD ORCHESTRATOR (this skill), NOT by individual builder agents. Builder agents focus on their assigned tasks, while the orchestrator creates the final PR after all tasks complete and gates pass.
+
+## Step 7.5: Worktree Cleanup
+
+After pushing and creating the PR, clean up the worktree using `worktree_manager.py` which handles CWD safely via `subprocess(cwd=repo_root)`:
+
+```bash
+python -c "
+from pathlib import Path
+from agent.worktree_manager import remove_worktree, prune_worktrees
+repo = Path('$(git rev-parse --show-toplevel)')
+remove_worktree(repo, '{slug}', delete_branch=False)
+prune_worktrees(repo)
+"
+```
+
+Note: `delete_branch=False` because the PR still references `session/{slug}`. The branch is cleaned up when the PR is merged.
+
+## Step 7.6: Documentation Cascade
+
+After the PR is created, run the `/do-docs` cascade to find and surgically update any existing documentation affected by the code changes in this build. Pass the PR number so the cascade can inspect the full diff:
+
+```
+/do-docs {PR-number}
+```
+
+This invokes the cascade skill defined in `.claude/skills/do-docs/SKILL.md`, which:
+- Launches parallel agents to explore the change diff and inventory all docs
+- Cross-references changes against every doc in the repo (triage questions)
+- Makes targeted surgical edits to affected docs (read before edit, preserve structure)
+- Creates GitHub issues for conflicts needing human review
+- Commits any doc updates to the PR branch before merge
+
+**Note**: The cascade is best-effort. If it finds nothing to update, that's fine — proceed to plan migration. If it makes edits, those are committed directly to the PR branch.
+
+## Step 8: Plan Migration
+
+After PR is successfully created and documentation cascade completes, clean up the completed plan:
+
+```bash
+cd $(git rev-parse --show-toplevel) && python scripts/migrate_completed_plan.py {PLAN_PATH}
+```
+
+This deletes the plan document and closes the tracking issue, completing the lifecycle.
+
+## Step 9: Report PR Link
+
+After plan migration completes, include the PR URL prominently in your final response. When running via Telegram bridge, the agent's response (containing the PR link) will be automatically sent back to the chat where the build was initiated. No special action required - just ensure the PR URL is visible in your completion report.
+
+### Report Format
+
+```
+## Plan Execution Complete
+
+**Plan**: [plan name]
+**Pull Request**: [PR URL]
+**Total Tasks**: [count]
+
+### Definition of Done
+- [x] Built: All code implemented and working
+- [x] Tested: Unit tests passing, integration tests passing
+- [x] Documented: Docs created per plan requirements (validated by docs gate)
+- [x] Quality: Ruff and Black checks pass
+- [x] Plans migrated: Plan moved from docs/plans/ to completed state
+
+### Task Summary
+| Task | Agent | Status | Test Iterations | Notes |
+|------|-------|--------|----------------|-------|
+| [name] | [agent] | Done | [N] | [brief note] |
+
+### Validation Results
+- [x] All build tasks completed
+- [x] All validators passed
+- [x] Documentation gate passed
+- [x] Documentation cascade completed (`/do-docs`)
+- [x] Success criteria met
+
+### Artifacts Created
+- [list of files created/modified]
+
+### Next Steps
+- Review and merge PR: [PR URL]
+- PR link has been sent to Telegram chat
+- [Any follow-up items or manual steps needed]
+```

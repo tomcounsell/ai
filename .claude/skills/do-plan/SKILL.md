@@ -1,12 +1,27 @@
 ---
 name: do-plan
-description: "Create or update feature plan documents. Use when the user says 'make a plan', 'plan this', 'flesh out the idea', or anything about planning work."
+description: "Use when creating or updating a feature plan document. Triggered by 'make a plan', 'plan this', 'flesh out the idea', or any request to scope and plan work before implementation."
 allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion
 ---
 
 # Make a Plan (Shape Up Methodology)
 
 Creates structured feature plans in `docs/plans/` following Shape Up principles: narrow the problem, set appetite, rough out the solution, identify rabbit holes, and define boundaries.
+
+## What this skill does
+
+1. Takes a vague or specific request and narrows it into a concrete plan
+2. Writes a structured plan document in `docs/plans/{slug}.md`
+3. Creates or links a GitHub issue for tracking
+4. Sends the plan for review with open questions
+
+## When to load sub-files
+
+| Sub-file | Load when... |
+|----------|-------------|
+| `PLAN_TEMPLATE.md` | Writing the plan document (copy the template into `docs/plans/{slug}.md`) |
+| `SCOPING.md` | The request is vague, a grab-bag, or needs narrowing before planning |
+| `EXAMPLES.md` | Deciding how to respond to a user request (vague vs. grab-bag vs. good) |
 
 ## When to Use
 
@@ -16,385 +31,78 @@ Creates structured feature plans in `docs/plans/` following Shape Up principles:
 - Scoping unclear or large requests
 - Before starting significant implementation work
 
-## Process
+## Quick Start Workflow
 
 ### Phase 1: Flesh Out at High Level
 
 1. **Understand the request** - What's being asked?
-2. **Narrow the problem** - Challenge vague requests:
-   - Not: "redesign the auth system"
-   - Yes: "login fails when users have 2FA enabled on certain providers"
-3. **Blast radius analysis** — If the change involves code modifications, run the code impact finder to surface coupled files:
+2. **Narrow the problem** - Challenge vague requests (see `SCOPING.md` if needed)
+3. **Blast radius analysis** - If the change involves code modifications, run the code impact finder:
    ```bash
    .venv/bin/python -m tools.code_impact_finder "PROBLEM_STATEMENT_HERE"
    ```
-
    Use results to inform plan sections:
-   - Files with `impact_type="modify"` → **Solution** section (code that needs changes)
-   - Files with `impact_type="dependency"` → **Risks** section (unexpected coupling)
-   - Files with `impact_type="test"` → **Success Criteria** section (tests to update)
-   - Files with `impact_type="config"` → **Solution** section (configs to adjust)
-   - Files with `impact_type="docs"` → **Documentation** section (docs covering affected areas)
-   - Tangentially coupled files scoring below 0.5 relevance → **Rabbit Holes** section (tempting but out of scope)
-
-   This step is advisory — use the output as input to your analysis, not as an automated plan writer. Skip if the change is purely documentation or process-related.
-4. **Set appetite** - Based on communication overhead, not dev time (solo coding is fast; alignment is the bottleneck):
-   - **Small**: Solo dev, no review. Ship it.
-   - **Medium**: Solo dev + PM. 1-2 check-ins to align on scope, 1 review round.
-   - **Large**: Solo dev + PM + reviewer(s). 2-3 PM check-ins, 2+ review rounds.
+   - `impact_type="modify"` -> **Solution** section
+   - `impact_type="dependency"` -> **Risks** section
+   - `impact_type="test"` -> **Success Criteria** section
+   - `impact_type="config"` -> **Solution** section
+   - `impact_type="docs"` -> **Documentation** section
+   - Tangentially coupled files (< 0.5 relevance) -> **Rabbit Holes** section
+   Skip if the change is purely documentation or process-related.
+4. **Set appetite** - Small / Medium / Large (see `SCOPING.md` for sizing guidance)
 5. **Rough out solution** - Key components and flow, stay abstract
 
 ### Phase 2: Write Initial Plan
 
-**IMPORTANT: Classification is Mandatory**
+**Classification is mandatory** - every plan MUST include a `type:` field (bug, feature, or chore).
 
-Every plan MUST include a `type:` field in the frontmatter. This classification is used for issue tracking and prioritization.
+**Auto-Classification**: When a message arrives via Telegram, the bridge auto-classifies it. Check if `classification_type` is available from the session context. If available, use it as the default `type:` value. The user can always override.
 
-**Classification Types:**
-- **bug** - Fixes broken functionality or resolves errors
-  - Something that should work but doesn't
-  - User-reported issues causing failures
-  - Incorrect behavior that needs correction
-
-- **feature** - Adds new capabilities or enhancements
-  - New functionality that didn't exist before
-  - Major improvements to existing features
-  - User-facing additions to the system
-
-- **chore** - Maintenance, refactoring, or infrastructure work
-  - Code cleanup without behavior changes
-  - Dependency updates
-  - Performance optimizations
-  - Documentation improvements
-  - Build/deploy process changes
-
-**During Planning Phase:**
-- Initial classification may be tentative
-- Can be reclassified based on discussion
-- Update the `type:` field in frontmatter if classification changes
-- Classification should be finalized before status changes to `Ready`
-
-**Auto-Classification Pre-Population:**
-- When a message arrives via Telegram, the bridge automatically classifies it as bug/feature/chore using the Haiku model
-- This classification is stored in session metadata (`classification_type` field on AgentSession and RedisJob)
-- When creating a plan, check if `classification_type` is available from the session context
-- If available, use it as the default `type:` value in the frontmatter template
-- The user can always override the auto-classification during drafting
-- If auto-classification is not available (e.g., local session, classification failed), fall back to manual classification
-
-Create `docs/plans/{slug}.md` with:
-
-```markdown
----
-status: Planning
-type: [bug | feature | chore]  # May be pre-populated from auto-classification
-appetite: [Small | Medium | Large]
-owner: [Name]
-created: [YYYY-MM-DD]
-tracking: [GitHub Issue URL or Notion page URL - added automatically]
----
-
-# [Feature Name]
-
-## Problem
-
-[Real scenario showing the pain. User perspective. Specific, not vague.]
-
-**Current behavior:**
-[What happens now that's broken/painful]
-
-**Desired outcome:**
-[What success looks like]
-
-## Appetite
-
-**Size:** [Small | Medium | Large]
-
-**Team:** [list roles involved, e.g., "Solo dev" or "Solo dev, PM" or "Solo dev, PM, code reviewer"]
-
-**Interactions:**
-- PM check-ins: [0 | 1-2 | 2-3] (scope alignment, requirement clarification)
-- Review rounds: [0 | 1 | 2+] (code review, design review, QA)
-
-Solo dev work is fast — the bottleneck is alignment and review. Appetite measures communication overhead, not coding time.
-
-## Prerequisites
-
-[Environment requirements that must be satisfied before building. Each requirement has a programmatic check command. If no prerequisites are needed, write "No prerequisites — this work has no external dependencies."]
-
-| Requirement | Check Command | Purpose |
-|-------------|---------------|---------|
-| Example: `EXAMPLE_API_KEY` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env').get('EXAMPLE_API_KEY')"` | Example service access |
-
-Run all checks: `python scripts/check_prerequisites.py docs/plans/{slug}.md`
-
-## Solution
-
-### Key Elements
-
-- **[Component 1]**: [What it does, not how]
-- **[Component 2]**: [What it does, not how]
-- **[Component 3]**: [What it does, not how]
-
-### Flow
-
-[Breadboard-style flow showing user journey]
-
-**Starting point** → [Action/affordance] → **Next place** → [Action/affordance] → **End state**
-
-Example:
-Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirmation → Back to settings (with 2FA enabled)
-
-### Technical Approach
-
-[High-level technical direction - stay abstract enough for implementation flexibility]
-
-- [Key decision 1]
-- [Key decision 2]
-- [Integration points]
-
-## Rabbit Holes
-
-[Areas that look tempting but will swallow disproportionate time. Call these out so the team deliberately avoids them.]
-
-- [Tempting but wasteful avenue to avoid]
-- [Complexity trap that seems important but isn't worth it]
-- [Tangent that should be a separate project]
-
-## Risks
-
-### Risk 1: [Description]
-**Impact:** [What breaks if this goes wrong]
-**Mitigation:** [How we'll handle it]
-
-### Risk 2: [Description]
-**Impact:** [What breaks if this goes wrong]
-**Mitigation:** [How we'll handle it]
-
-## No-Gos (Out of Scope)
-
-[Explicitly state what we're NOT doing. This is critical for scope control.]
-
-- [Feature deferred to later]
-- [Edge case we'll handle in v2]
-- [Related but separate concern]
-
-## Update System
-
-[This system is deployed across multiple machines via the `/update` skill. Consider whether the update process needs changes.]
-
-- Whether the update script or update skill needs changes
-- New dependencies or config files that must be propagated
-- Migration steps for existing installations
-- If no update changes are needed, state that explicitly (e.g., "No update system changes required — this feature is purely internal")
-
-## Agent Integration
-
-[The agent receives Telegram messages via the bridge and can only use tools exposed through MCP servers registered in `.mcp.json`. New Python functions in `tools/` are invisible to the agent unless wrapped.]
-
-- Whether a new or existing MCP server in `mcp_servers/` needs to expose this functionality
-- Changes to `.mcp.json` registration
-- Whether the bridge itself (`bridge/telegram_bridge.py`) needs to import/call the new code directly
-- Integration tests that verify the agent can actually invoke the new capability
-- If no agent integration is needed, state that explicitly (e.g., "No agent integration required — this is a bridge-internal change")
-
-## Documentation
-
-[What documentation needs to be created or updated when this work ships. Use the `documentarian` agent type for these tasks.]
-
-### Feature Documentation
-- [ ] Create/update `docs/features/[feature-name].md` describing the feature
-- [ ] Add entry to `docs/features/README.md` index table
-
-### External Documentation Site
-[If the repo uses Sphinx, Read the Docs, MkDocs, or similar:]
-- [ ] Update relevant pages in the documentation site
-- [ ] Verify docs build passes
-
-### Inline Documentation
-- [ ] Code comments on non-obvious logic
-- [ ] Updated docstrings for public APIs
-
-[If no documentation changes are needed, state that explicitly and explain why.]
-
-## Success Criteria
-
-[Measurable outcomes tied to the appetite. What does "done" look like?]
-
-- [ ] [Criterion 1]
-- [ ] [Criterion 2]
-- [ ] [Criterion 3]
-- [ ] Tests pass (`/do-test`)
-- [ ] Documentation updated (`/do-docs`)
-
-## Team Orchestration
-
-When this plan is executed, the lead agent orchestrates work using Task tools. The lead NEVER builds directly - they deploy team members and coordinate.
-
-### Team Members
-
-[List each team member needed. Name them uniquely so they can be referenced in tasks.]
-
-- **Builder ([component-name])**
-  - Name: [unique-name, e.g., "api-builder"]
-  - Role: [Single focused responsibility]
-  - Agent Type: [builder | designer | tool-developer | database-architect | etc.]
-  - Resume: true
-
-- **Validator ([component-name])**
-  - Name: [unique-name, e.g., "api-validator"]
-  - Role: [What they verify]
-  - Agent Type: validator
-  - Resume: true
-
-[Add more team members as needed. Pattern: builder + validator pairs for each major component.]
-
-### Available Agent Types
-
-**Builders:**
-- `builder` - General implementation (default for most work)
-- `designer` - UI/UX following design systems
-- `tool-developer` - High-quality tool creation
-- `database-architect` - Schema design, migrations
-- `agent-architect` - Agent systems, context management
-- `test-engineer` - Test implementation
-- `documentarian` - Documentation updates
-- `integration-specialist` - External service integration
-
-**Validators:**
-- `validator` - Read-only verification (no Write/Edit tools)
-- `code-reviewer` - Code review, security checks
-- `quality-auditor` - Standards compliance
-
-**Service Agents:**
-- `github`, `notion`, `linear`, `stripe`, `sentry`, `render`
-
-## Step by Step Tasks
-
-[Each task maps to a `TaskCreate` call. Execute top to bottom. Build tasks can run in parallel; validators wait for their builder.]
-
-### 1. [First Build Task]
-- **Task ID**: build-[component]
-- **Depends On**: none
-- **Assigned To**: [builder name from Team Members]
-- **Agent Type**: [agent type]
-- **Parallel**: true
-- [Specific action to complete]
-- [Specific action to complete]
-
-### 2. [Validation Task]
-- **Task ID**: validate-[component]
-- **Depends On**: build-[component]
-- **Assigned To**: [validator name from Team Members]
-- **Agent Type**: validator
-- **Parallel**: false
-- Verify implementation meets criteria
-- Run validation commands
-- Report pass/fail status
-
-[Continue pattern for each component...]
-
-### N-1. Documentation
-- **Task ID**: document-feature
-- **Depends On**: [final build/validate task IDs]
-- **Assigned To**: [documentarian name from Team Members]
-- **Agent Type**: documentarian
-- **Parallel**: false
-- Create/update feature docs in `docs/features/`
-- Add entry to documentation index
-- Update external docs site if applicable
-
-### N. Final Validation
-- **Task ID**: validate-all
-- **Depends On**: [all previous task IDs including document-feature]
-- **Assigned To**: [lead validator]
-- **Agent Type**: validator
-- **Parallel**: false
-- Run all validation commands
-- Verify all success criteria met (including documentation)
-- Generate final report
-
-## Validation Commands
-
-[Commands to verify the work is complete - used by validators]
-
-- `[command 1]` - [what it validates]
-- `[command 2]` - [what it validates]
-
----
-
-## Open Questions
-
-[Critical unknowns that need supervisor input before finalizing]
-
-1. [Question about scope/approach]
-2. [Question about priority/tradeoff]
-3. [Question about technical constraint]
-```
+Create `docs/plans/{slug}.md` using the template from `PLAN_TEMPLATE.md`.
 
 ### Phase 2.5: Link or Create Tracking Issue
 
-After writing the plan document, **push it to main first**, then link it to an existing issue OR create a new tracking issue. The GitHub link is only useful if the file is actually reachable — always push before adding the URL anywhere.
+After writing the plan, **push it to main first**, then link it to an existing issue OR create a new one.
 
 ```bash
-# Resolve the actual repo identity from git — never guess from directory names or usernames
+# Resolve repo identity from git
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
-# → e.g. "tomcounsell/ai"
 
-# Push plan to main before linking (the URL is pointless if the file isn't there)
+# Push plan to main before linking
 git add docs/plans/{slug}.md && git commit -m "Plan: {Feature Name}" && git push
 ```
 
-**IMPORTANT: Check for existing issue first!**
+**Check for existing issue first!** If the plan was created in response to an existing GitHub issue (e.g., "make a plan for issue #42"), do NOT create a new issue. Instead:
 
-If the plan was created in response to an existing GitHub issue or Notion task (e.g., user said "make a plan for issue #42" or shared a link to an issue), do NOT create a new issue. Instead:
-
-1. **Link to the existing issue** - Add the "plan" label and update the issue body
-2. **Update the plan frontmatter** - Set `tracking:` to the existing issue URL
+1. Add the "plan" label and prepend the plan link to the issue body
+2. Update the plan frontmatter `tracking:` field with the existing issue URL
 
 ```bash
-# If existing issue triggered this plan (e.g., issue #42):
-EXISTING_ISSUE=42  # Set this if plan was created from an existing issue
-
-# Add plan label and prepend plan link to the top of the issue body
+EXISTING_ISSUE=42
 gh issue edit $EXISTING_ISSUE --add-label "plan"
 EXISTING_BODY=$(gh issue view $EXISTING_ISSUE --json body -q .body)
 PLAN_LINK="https://github.com/${REPO}/blob/main/docs/plans/{slug}.md"
 gh issue edit $EXISTING_ISSUE --body "**Plan:** ${PLAN_LINK}
 
 ${EXISTING_BODY}"
-
-# Use this URL in the plan's tracking: field
-echo "https://github.com/${REPO}/issues/$EXISTING_ISSUE"
 ```
 
-**Only create a NEW issue if:**
-- The plan was initiated from scratch (not from an existing issue)
-- User explicitly requested a new feature/idea without referencing existing issues
+**Only create a NEW issue if** the plan was initiated from scratch (not from an existing issue).
 
----
+Before creating, check `config/projects.json` for the current project:
+- If `notion` key exists -> create a Notion task (use Notion MCP tools)
+- If only `github` key exists -> create a GitHub issue (use `gh` CLI)
+- If neither -> skip tracking, just use the plan doc
 
-**Creating a new GitHub Issue (only when no existing issue):**
-
-1. **Check `config/projects.json`** for the current project (match by `working_directory` or git remote)
-2. **Determine tracker** based on project config keys:
-   - If `notion` key exists → create a Notion task (use the Notion MCP tools)
-   - If only `github` key exists → create a GitHub issue (use `gh` CLI)
-   - If neither → skip tracking, just use the plan doc
-
-Before creating the issue, extract the `type:` field from the plan's YAML frontmatter. This field is MANDATORY and must be one of: bug, feature, or chore.
+Extract `type:` from plan frontmatter before creating:
 
 ```bash
-# Extract type from plan frontmatter
 TYPE=$(grep '^type:' docs/plans/{slug}.md | sed 's/type: *//' | tr -d ' ')
-
-# Validate type exists
 if [ -z "$TYPE" ]; then
   echo "ERROR: Plan must have a 'type:' field in frontmatter (bug, feature, or chore)"
   exit 1
 fi
 
-# Create issue with both plan and type labels
 gh issue create \
   --repo ${REPO} \
   --title "[Plan] {Feature Name}" \
@@ -411,37 +119,22 @@ EOF
 )"
 ```
 
-**Creating a new Notion Task (only when no existing task):**
+For Notion tasks, use MCP tools to create a page with Title, Status, Type, and link to the plan document.
 
-Before creating the task, extract the `type:` field from the plan's YAML frontmatter. This field is MANDATORY.
-
-Use the Notion MCP tools to create a page in the project's configured database with:
-- Title: `[Plan] {Feature Name}`
-- Status: Planning
-- Type: {type} (from plan frontmatter - must be set)
-- Link to the plan document in the page body
-
-Note: The "Type" property must exist in your Notion database schema. If it doesn't exist, create it first or skip setting this property.
-
-**After linking or creating the tracking issue:**
-- Update the plan's YAML frontmatter `tracking:` field with the issue URL (e.g., `https://github.com/org/repo/issues/14`) or Notion page URL
-- Commit the updated plan
+After linking or creating: update the plan's `tracking:` field and commit.
 
 ### Phase 3: Critique and Enumerate Questions
-
-After writing the initial plan:
 
 1. **Review assumptions** - What did I assume that might be wrong?
 2. **Identify gaps** - What's unclear or risky?
 3. **Enumerate questions** - List all questions needing supervisor input
 4. **Add questions to plan** - Append to "Open Questions" section
-5. **Pre-send checklist** - Verify before replying:
-   - [ ] Plan committed AND pushed to `main` (must happen before issue linking)
+5. **Pre-send checklist**:
+   - [ ] Plan committed AND pushed to `main`
    - [ ] GitHub issue has `**Plan:** https://github.com/${REPO}/blob/main/docs/plans/{slug}.md`
    - [ ] Plan frontmatter has `tracking:` set to the issue URL
-6. **Send reply** - Notify user that plan draft is ready for review
+6. **Send reply**:
 
-**Message format:**
 ```
 Plan draft created: docs/plans/{slug}.md
 
@@ -450,7 +143,6 @@ Tracking: {GitHub issue URL or Notion page URL}
 I've made the following key assumptions:
 - [Assumption 1]
 - [Assumption 2]
-- [Assumption 3]
 
 Please review the Open Questions section at the end of the plan and provide answers so I can finalize it.
 ```
@@ -461,9 +153,8 @@ After receiving answers:
 
 1. **Update plan** - Incorporate feedback, remove Open Questions section
 2. **Mark as finalized** - Update frontmatter: `status: Ready`
-3. **Suggest implementation prompt** - Provide a clear prompt for starting work
+3. **Suggest implementation prompt**:
 
-**Message format:**
 ```
 Plan finalized: docs/plans/{slug}.md
 
@@ -476,154 +167,32 @@ Follow the solution approach, stay within the appetite, and avoid the identified
 ---
 ```
 
-## Principles to Enforce
-
-### 1. Narrow the Problem
-**Bad:** "Improve the API"
-**Good:** "API responses take 3+ seconds when fetching user data with nested relationships"
-
-Push back on vague requests. Ask:
-- What specific pain are we solving?
-- Who's blocked and how?
-- What's the real breakdown?
-
-### 2. Avoid Grab-Bags
-**Bad:** "Redesign the dashboard"
-**Good:** "Dashboard takes too long to load; users can't find their recent projects"
-
-Multiple unrelated features = multiple plans.
-
-### 3. Set Appetite First
-Communication budget drives scope, not the other way around.
-
-Solo dev work is a rounding error — alignment is the real cost.
-Fixed interactions → variable scope = shipping
-Fixed scope → variable interactions = never shipping
-
-### 4. Walk Through Use Cases
-Validate the flow step by step:
-- Where does the user start?
-- What do they do?
-- Where do they end up?
-- What can go wrong?
-
-### 5. Surface Rabbit Holes
-Call out tempting but wasteful avenues:
-- "Don't try to support every auth provider — just Google and GitHub"
-- "Don't build a custom date picker — use the browser native one"
-- "Offline sync looks important but will triple the scope"
-
-### 6. Identify Technical Risks
-Call out things that could fail:
-- "Third-party API might be rate-limited"
-- "Database migration could fail on large datasets"
-- "Browser compatibility unknowns"
-
-### 7. Define Boundaries
-State what we're NOT doing:
-- "Not building a full calendar - just a day picker"
-- "Not handling offline mode in this iteration"
-- "Not supporting bulk operations yet"
-
-### 8. Good is Relative
-Success is relative to appetite:
-- Small appetite → ship without discussion
-- Medium appetite → align once, review once
-- Large appetite → iterate on alignment, multiple review rounds
-
-Don't pursue perfection beyond the communication budget.
-
-## Examples
-
-### Example: Vague Request
-
-**User:** "Make the auth better"
-
-**Response:**
-```
-I need to narrow this down. What specific problem are you trying to solve?
-
-- Is login failing for certain users?
-- Is the flow too complicated?
-- Is there a security concern?
-- Is it too slow?
-
-Or is there a specific story: "Users with [X situation] can't [Y action] because [Z breakdown]"?
-```
-
-### Example: Grab-Bag Request
-
-**User:** "Redesign the settings page - add dark mode, notification preferences, profile editing, and export functionality"
-
-**Response:**
-```
-This feels like multiple separate features bundled together. Each of these could be its own plan:
-
-1. Dark mode toggle
-2. Notification preferences
-3. Profile editing
-4. Data export
-
-Which one is most urgent? Or is there a single pain point driving all of these?
-```
-
-### Example: Good Request
-
-**User:** "Users can't reschedule meetings when the original attendee is offline. They have to wait for them to come back online to approve the change."
-
-**Response:**
-```
-Great - this is specific. I'll create a plan for async meeting rescheduling.
-
-Starting with Medium appetite — solo dev + PM. One check-in to align on notification behavior, one review round before shipping.
-```
-
-## Tips
-
-- **Stay abstract in solutions** - Don't specify exact UI or implementation details
-- **Use breadboarding** - Show flow as: Place → Affordance → Place
-- **Fat marker sketches** - Simple diagrams, avoid pixel-perfect mockups
-- **Challenge yourself** - Could this be simpler? What can we cut?
-- **Make tradeoffs explicit** - "We're choosing speed over completeness here"
-
-## Anti-Patterns to Avoid
-
-❌ **Over-specifying** - Don't write implementation details in the plan
-❌ **Estimation-first** - Don't start with "how long will this take?" — ask "how many people need to weigh in?"
-❌ **Kitchen sink** - Don't add "nice to haves" beyond the appetite
-❌ **Perfect solutions** - Don't design for every edge case
-❌ **Skipping risks** - Don't ignore technical unknowns
-❌ **Vague success** - Don't leave "done" undefined
-
 ## Output Location
 
 All plans go to: `docs/plans/{slug}.md`
 
-Use snake_case for slugs:
-- `async_meeting_reschedule.md`
-- `dark_mode_toggle.md`
-- `api_response_caching.md`
+Use snake_case for slugs: `async_meeting_reschedule.md`, `dark_mode_toggle.md`, `api_response_caching.md`
 
 ## Branch Workflow
 
-**Plans are written directly on the main branch.** The plan document itself is just a document — no feature branch needed.
+**Plans are written directly on the main branch.** The plan document itself is just a document -- no feature branch needed.
 
-When the plan is *executed* (via `/do-build`), the build skill creates a feature branch, does the work there, and opens a PR. See `.claude/skills/do-build/SKILL.md` for that workflow.
+When the plan is *executed* (via `/do-build`), the build skill creates a feature branch, does the work there, and opens a PR.
 
 ## Status Tracking
 
 Status and classification are tracked in the plan document's YAML frontmatter.
 
 **Required Frontmatter Fields:**
-- `status:` - Current state of the plan (see values below)
+- `status:` - Current state of the plan
 - `type:` - Classification (bug, feature, or chore) - **MANDATORY**
 
 **Status Values:**
-- `status: Planning` - Initial draft being created
-- `status: Ready` - Finalized and ready for implementation
-- `status: In Progress` - Being implemented
-- `status: Complete` - Shipped to production
-- `status: Cancelled` - Not pursuing this
+- `Planning` - Initial draft being created
+- `Ready` - Finalized and ready for implementation
+- `In Progress` - Being implemented
+- `Complete` - Shipped to production
+- `Cancelled` - Not pursuing this
 
 Update status as work progresses. Keep all tracking in the plan document itself.
 
