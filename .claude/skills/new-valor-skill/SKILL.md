@@ -1,6 +1,6 @@
 ---
 name: new-valor-skill
-description: Build a new Valor-specific tool following established patterns. Use when creating tools that integrate with Valor's Telegram bridge, use SOUL.md persona, or should be documented in CLAUDE.md. Guides through planning, implementation, testing, and documentation phases.
+description: Use when creating a Valor-specific tool that integrates with the Telegram bridge, uses SOUL.md persona, or needs CLAUDE.md documentation. Also use when the user says 'create a valor tool', 'new valor skill', or 'build a tool for this project'. Handles tool directory structure, CLI registration, bridge integration, and validation hooks.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion
 hooks:
   Stop:
@@ -17,64 +17,36 @@ hooks:
 
 # New Valor Skill
 
-Build a new Valor-specific tool following established patterns with validation.
+## What this skill does
 
-## When to Use
+Creates a new tool specifically for Valor's AI system, following established project patterns. This wraps the generic [new-skill](../new-skill/SKILL.md) with Valor-specific conventions: Telegram bridge integration, SOUL.md persona, `tools/` directory layout, CLAUDE.md documentation, pyproject.toml CLI registration, and automatic validation hooks.
 
-- Creating a tool unique to Valor (not shared across projects)
-- Building capabilities that integrate with Valor's Telegram bridge
-- Adding features that should be documented in CLAUDE.md
-- User says "create a new tool", "add a command", "build a valor tool"
+## When to load sub-files
 
-## Valor-Specific vs Shared
+- For the canonical SKILL.md template structure → read [../new-skill/SKILL_TEMPLATE.md](../new-skill/SKILL_TEMPLATE.md)
+- For generic skill creation rules (description format, field constraints, debugging) → read [../new-skill/SKILL.md](../new-skill/SKILL.md)
 
-| Valor-Specific | Shared/Generic |
-|----------------|----------------|
+## Valor-specific vs shared
+
+| Valor-Specific (use this skill) | Shared/Generic (use new-skill instead) |
+|---------------------------------|----------------------------------------|
 | Uses SOUL.md persona | Works in any Claude Code context |
 | Integrates with Telegram bridge | Standalone utility |
-| References `config/` files | No Valor dependencies |
-| Uses SDK client patterns | Generic Python module |
+| Lives in `tools/` directory | No Valor dependencies |
+| Registered in `pyproject.toml` | Self-contained package |
 | Documented in CLAUDE.md | Self-contained docs |
 
-**Valor-specific examples:** `valor-image-gen`, `valor-calendar`, Telegram history tools
-**Shared examples:** `agent-browser` (npm package), generic file utilities
+## Quick start
 
----
+### 1. Plan
 
-## Process
+Before writing code, answer:
+- What does this tool do?
+- Who uses it? (Valor via Telegram, developer via CLI, both?)
+- Does it need Telegram? External APIs? AI models?
+- Check `tools/` for similar patterns and `config/models.py` for available models
 
-### Phase 1: Planning (gather requirements first)
-
-Before writing any code, establish:
-
-1. **Define the capability**
-   - What does this tool do?
-   - Who is the user? (Valor via Telegram, developer via CLI, both?)
-   - What's the expected input/output?
-
-2. **Identify integration points**
-   - Does it need Telegram? (file sending, message formatting)
-   - Does it call external APIs? (which ones, auth required?)
-   - Does it use AI models? (check `config/models.py` for available models)
-
-3. **Check for existing patterns**
-   - Look at similar tools in `tools/` directory
-   - Check if there's a model constant in `config/models.py`
-   - Review `bridge/telegram_bridge.py` for file detection patterns
-
-4. **List dependencies**
-   - External APIs and their keys
-   - Python packages needed
-   - Environment variables required
-
-5. **Choose the interface**
-   - Python library only (`from tools.my_tool import func`)
-   - CLI command (`valor-my-tool`)
-   - Both (recommended)
-
-### Phase 2: Implementation
-
-Create the tool directory structure:
+### 2. Create the tool directory
 
 ```
 tools/<tool_name>/
@@ -86,7 +58,9 @@ tools/<tool_name>/
     └── test_<tool>.py
 ```
 
-#### __init__.py Template
+### 3. Implement
+
+The `__init__.py` must follow this pattern:
 
 ```python
 """
@@ -102,24 +76,11 @@ CLI:
 
 import argparse
 import sys
-from pathlib import Path
 
-# Import model constants if using AI
-# from config.models import MODEL_FAST, MODEL_REASONING
 
 def main_function(arg1: str, arg2: str | None = None) -> dict:
-    """
-    Main tool function.
-
-    Args:
-        arg1: Description
-        arg2: Optional description
-
-    Returns:
-        dict with 'result' key on success, 'error' key on failure
-    """
+    """Main tool function. Returns dict with 'result' or 'error' key."""
     try:
-        # Implementation
         result = do_work(arg1, arg2)
         return {"result": result}
     except Exception as e:
@@ -134,11 +95,9 @@ def main():
     args = parser.parse_args()
 
     result = main_function(args.arg1, args.arg2)
-
     if "error" in result:
         print(f"Error: {result['error']}", file=sys.stderr)
         sys.exit(1)
-
     print(result["result"])
 
 
@@ -146,43 +105,26 @@ if __name__ == "__main__":
     main()
 ```
 
-#### manifest.json Template
+### 4. Register CLI
 
-```json
-{
-  "name": "tool-name",
-  "version": "1.0.0",
-  "description": "What this tool does",
-  "type": "library",
-  "status": "beta",
-  "source": {"type": "internal"},
-  "capabilities": ["capability1", "capability2"],
-  "requires": {
-    "env": ["API_KEY_NAME"],
-    "python": ">=3.11"
-  }
-}
-```
-
-#### Register CLI in pyproject.toml
-
-Add to `[project.scripts]`:
+Add to `[project.scripts]` in `pyproject.toml`:
 
 ```toml
 valor-tool-name = "tools.tool_name:main"
 ```
 
-Then run:
+Then run: `pip install -e .`
 
-```bash
-pip install -e .
-```
+### 5. Integrate with bridge
 
-### Phase 3: Integration
+- Files are auto-detected by `extract_files_from_response()` in the bridge
+- For explicit file sending, use: `<<FILE:/path/to/file>>`
+- Check `ABSOLUTE_PATH_PATTERN` in `bridge/telegram_bridge.py` covers your file types
+- For AI models, import from `config/models.py`: `MODEL_FAST`, `MODEL_REASONING`, `MODEL_IMAGE_GEN`, `MODEL_VISION`
 
-#### Update CLAUDE.md
+### 6. Document in CLAUDE.md
 
-Add to the "Local Python Tools" or "Image Tools" section:
+Add to the appropriate tools section:
 
 ```markdown
 - **Tool Name** (`valor-tool-name`): Brief description
@@ -192,126 +134,30 @@ Add to the "Local Python Tools" or "Image Tools" section:
   ```
 ```
 
-#### Bridge Integration (if tool outputs files)
-
-Files are auto-detected by `extract_files_from_response()` in the bridge.
-
-For explicit file sending, use the marker:
-```
-<<FILE:/path/to/file>>
-```
-
-Check `ABSOLUTE_PATH_PATTERN` in `bridge/telegram_bridge.py` covers your file types.
-
-#### Model Configuration (if using AI)
-
-Import from `config/models.py`:
-- `MODEL_FAST` - Quick responses (haiku-class)
-- `MODEL_REASONING` - Complex tasks (sonnet-class)
-- `MODEL_IMAGE_GEN` - Image generation
-- `MODEL_VISION` - Image analysis
-
-Add new constants if needed for specialized models.
-
-### Phase 4: Testing
-
-Create test file at `tools/<tool_name>/tests/test_<tool>.py`:
-
-```python
-"""Tests for tool_name."""
-
-import os
-import pytest
-from tools.tool_name import main_function
-
-
-class TestToolName:
-    """Test suite for tool_name."""
-
-    def test_basic_functionality(self):
-        """Test happy path."""
-        result = main_function("test_input")
-        assert "error" not in result
-        assert "result" in result
-
-    @pytest.mark.skipif(
-        not os.environ.get("REQUIRED_API_KEY"),
-        reason="API key not set"
-    )
-    def test_real_api_call(self):
-        """Test with real API (requires key)."""
-        result = main_function("real_input")
-        assert "error" not in result
-
-    def test_error_handling(self):
-        """Test error cases."""
-        result = main_function("")
-        # Should handle gracefully
-        assert isinstance(result, dict)
-```
-
-Run tests:
+### 7. Test, lint, deploy
 
 ```bash
 pytest tools/<tool_name>/tests/ -v
-```
-
-Test CLI:
-
-```bash
-valor-tool-name --help
-valor-tool-name test_arg
-```
-
-### Phase 5: Documentation
-
-Ensure README.md contains:
-
-1. **Overview** - What the tool does
-2. **Installation** - Any extra dependencies
-3. **Usage** - Python and CLI examples
-4. **API Reference** - Main functions with parameters
-5. **Environment Variables** - Required keys
-
-### Phase 6: Deployment
-
-```bash
-# Format and lint
 black tools/<tool_name>/
 ruff check tools/<tool_name>/
-
-# Commit
 git add tools/<tool_name>/ pyproject.toml CLAUDE.md
 git commit -m "Add valor-<name> tool for <purpose>"
 git push
-
-# Reinstall to register CLI
 pip install -e .
-
-# Restart bridge if bridge-integrated
-pkill -f telegram_bridge.py
-./scripts/start_bridge.sh
-
-# Test in production
-# Send test message via Telegram
 ```
 
----
+If bridge-integrated, restart: `./scripts/valor-service.sh restart`
 
 ## Validation
 
-This skill has automatic validation hooks that check:
+This skill has automatic hooks that run on Stop events:
 
-1. **Tool structure** - Directory exists with `__init__.py` and `README.md`
-2. **CLAUDE.md updated** - Tool is documented for agent awareness
+1. **Tool structure** — Verifies `tools/<name>/` has `__init__.py` and `README.md`
+2. **CLAUDE.md updated** — Verifies the tool is documented for agent awareness
 
-If validation fails, you'll receive specific instructions on what's missing.
+If validation fails, you receive specific instructions on what is missing.
 
----
-
-## Reference Implementations
-
-Look at these tools for patterns:
+## Reference implementations
 
 | Tool | Pattern | Key Features |
 |------|---------|--------------|
@@ -320,11 +166,7 @@ Look at these tools for patterns:
 | `tools/sms_reader/` | System access | macOS database, CLI subcommands |
 | `tools/telegram_history/` | Database query | SQLite, search patterns |
 
----
-
 ## Checklist
-
-Use this to track progress:
 
 - [ ] **Planning**: Defined capability, integration points, dependencies
 - [ ] **Structure**: Created `tools/<name>/` with `__init__.py`, `README.md`
@@ -335,3 +177,8 @@ Use this to track progress:
 - [ ] **Lint**: `black` and `ruff` pass
 - [ ] **Committed**: Changes pushed to git
 - [ ] **Verified**: CLI works, tool functions correctly
+
+## Version history
+
+- v2.0.0 (2026-02-22): Refactored as thin Valor wrapper; generic content extracted to new-skill
+- v1.0.0: Original monolithic skill (337 lines)
