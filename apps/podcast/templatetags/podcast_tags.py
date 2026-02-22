@@ -1,7 +1,9 @@
 import json
 import logging
 
+import markdown as md
 from django import template
+from django.utils.safestring import mark_safe
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,30 @@ def default_zero(value: int | None) -> int:
     return value
 
 
+@register.filter(name="render_markdown")
+def render_markdown(text: str | None) -> str:
+    """Convert markdown text to safe HTML."""
+    if not text:
+        return ""
+    html = md.markdown(
+        text,
+        extensions=["tables", "fenced_code", "toc", "nl2br"],
+    )
+    return mark_safe(
+        html
+    )  # nosec B703 B308 — content is from our own DB, not user input
+
+
+def _seconds_to_timestamp(seconds: int | float) -> str:
+    """Convert seconds to MM:SS or HH:MM:SS format."""
+    total = int(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:d}:{secs:02d}"
+
+
 @register.inclusion_tag("podcast/_show_notes.html")
 def episode_show_notes(episode) -> dict:
     """Render rich HTML show notes from Episode fields.
@@ -43,8 +69,17 @@ def episode_show_notes(episode) -> dict:
     chapters = []
     if episode.chapters:
         try:
-            chapters = json.loads(episode.chapters)
-        except (json.JSONDecodeError, TypeError):
+            raw = json.loads(episode.chapters)
+            # Handle Podcasting 2.0 format: {"version": "...", "chapters": [...]}
+            chapter_list = raw.get("chapters", []) if isinstance(raw, dict) else raw
+            for ch in chapter_list:
+                start = ch.get("startTime", ch.get("start_time", 0))
+                title = ch.get("title", "")
+                if title:
+                    chapters.append(
+                        {"start_time": _seconds_to_timestamp(start), "title": title}
+                    )
+        except (json.JSONDecodeError, TypeError, AttributeError):
             logger.warning("Invalid chapters JSON for episode %s", episode.pk)
 
     return {

@@ -64,7 +64,8 @@
   <!-- Cover Image -->
   {% if episode.effective_cover_image_url %}
   <img src="{{ episode.effective_cover_image_url }}" alt="{{ episode.title }}"
-       class="w-full max-w-md h-auto mb-6">
+       class="w-full max-w-md h-auto mb-6"
+       onerror="this.style.display='none'">
   {% endif %}
 
   <!-- Audio Player -->

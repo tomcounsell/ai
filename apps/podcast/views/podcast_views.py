@@ -2,7 +2,7 @@ from uuid import uuid4
 
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.db.models import F, Q
-from django.http import Http404, HttpResponse, HttpResponseRedirect
+from django.http import Http404, HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.views import View
@@ -81,12 +81,12 @@ class EpisodeDetailView(MainContentView):
         return self.render(request)
 
 
-class EpisodeReportView(View):
-    """Return episode report_text as plain text."""
+class EpisodeReportView(MainContentView):
+    """Render episode report as formatted HTML page."""
 
-    def get(
-        self, request, slug: str, episode_slug: str, *args, **kwargs
-    ) -> HttpResponse:
+    template_name = "podcast/episode_report.html"
+
+    def get(self, request, slug: str, episode_slug: str, *args, **kwargs):
         podcast = _get_accessible_podcast(request, slug)
         episode = get_object_or_404(
             Episode.objects.filter(
@@ -99,15 +99,17 @@ class EpisodeReportView(View):
         )
         if not episode.report_text:
             raise Http404("No report available for this episode.")
-        return HttpResponse(episode.report_text, content_type="text/plain")
+        self.context["podcast"] = podcast
+        self.context["episode"] = episode
+        return self.render(request)
 
 
-class EpisodeSourcesView(View):
-    """Return episode sources_text as plain text."""
+class EpisodeSourcesView(MainContentView):
+    """Render episode sources as formatted HTML page."""
 
-    def get(
-        self, request, slug: str, episode_slug: str, *args, **kwargs
-    ) -> HttpResponse:
+    template_name = "podcast/episode_sources.html"
+
+    def get(self, request, slug: str, episode_slug: str, *args, **kwargs):
         podcast = _get_accessible_podcast(request, slug)
         episode = get_object_or_404(
             Episode.objects.filter(
@@ -120,7 +122,9 @@ class EpisodeSourcesView(View):
         )
         if not episode.sources_text:
             raise Http404("No sources available for this episode.")
-        return HttpResponse(episode.sources_text, content_type="text/plain")
+        self.context["podcast"] = podcast
+        self.context["episode"] = episode
+        return self.render(request)
 
 
 class EpisodeCreateView(LoginRequiredMixin, UserPassesTestMixin, View):

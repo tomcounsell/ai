@@ -1,3 +1,4 @@
+{% load podcast_tags %}
 <div class="episode-show-notes">
   {% if description %}
   <h3>Overview</h3>
@@ -15,6 +16,6 @@
 
   {% if sources_text %}
   <h3>Sources</h3>
-  <p>{{ sources_text|linebreaksbr }}</p>
+  {{ sources_text|render_markdown }}
   {% endif %}
 </div>

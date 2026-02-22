@@ -344,17 +344,14 @@ class EpisodeReportViewTestCase(TestCase):
             published_at=timezone.now() - timezone.timedelta(hours=1),
         )
 
-    def test_report_returns_text(self):
-        """Episode with report_text returns 200 text/plain."""
+    def test_report_returns_html(self):
+        """Episode with report_text returns 200 with rendered HTML."""
         response = self.client.get(
             f"/podcast/{self.podcast.slug}/{self.episode_with_report.slug}/report/"
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response["Content-Type"], "text/plain")
-        self.assertEqual(
-            response.content.decode("utf-8"),
-            "This is the episode report content.",
-        )
+        self.assertIn("text/html", response["Content-Type"])
+        self.assertContains(response, "This is the episode report content.")
 
     def test_report_404_when_empty(self):
         """Episode without report_text returns 404."""
@@ -389,7 +386,7 @@ class EpisodeReportViewTestCase(TestCase):
             f"/podcast/{private_podcast.slug}/{episode.slug}/report/"
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.content.decode("utf-8"), "Private report content.")
+        self.assertContains(response, "Private report content.")
 
     def test_report_404_for_non_owner_of_private_podcast(self):
         """Non-owner gets 404 for report on a private podcast."""
@@ -481,17 +478,14 @@ class EpisodeSourcesViewTestCase(TestCase):
             published_at=timezone.now() - timezone.timedelta(hours=1),
         )
 
-    def test_sources_returns_text(self):
-        """Episode with sources_text returns 200 text/plain."""
+    def test_sources_returns_html(self):
+        """Episode with sources_text returns 200 with rendered HTML."""
         response = self.client.get(
             f"/podcast/{self.podcast.slug}/{self.episode_with_sources.slug}/sources/"
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response["Content-Type"], "text/plain")
-        self.assertEqual(
-            response.content.decode("utf-8"),
-            "Source 1\nSource 2\nSource 3",
-        )
+        self.assertIn("text/html", response["Content-Type"])
+        self.assertContains(response, "Source 1")
 
     def test_sources_404_when_empty(self):
         """Episode without sources_text returns 404."""
@@ -528,9 +522,7 @@ class EpisodeSourcesViewTestCase(TestCase):
             f"/podcast/{private_podcast.slug}/{episode.slug}/sources/"
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.content.decode("utf-8"), "Private source 1\nPrivate source 2"
-        )
+        self.assertContains(response, "Private source 1")
 
     def test_sources_404_for_non_owner_of_private_podcast(self):
         """Non-owner gets 404 for sources on a private podcast."""
