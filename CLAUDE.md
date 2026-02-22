@@ -374,7 +374,7 @@ Standalone CLI scripts for external service integrations and file processing.
 |---------|---------|
 | `start_episode` | Pull draft Episode from DB, call `setup_episode()`, enqueue `produce_episode` task pipeline |
 | `publish_episode` | Call `services.publishing.publish_episode()` |
-| `backfill_episodes` | One-time import of existing episodes from research repo |
+| `backfill_episodes` | One-time import of existing episodes from research repo (see [Migration Guide](docs/operations/podcast-migration.md)) |
 
 ### Podcast Environment Variables
 Add to `.env.local` for podcast tools:
