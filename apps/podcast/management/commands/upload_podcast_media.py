@@ -2,31 +2,29 @@
 Upload podcast audio files and cover images to Supabase storage.
 
 Walks episodes in the database, finds matching local files in the source
-directory, uploads them to Supabase, and updates the Episode record with
-the new URL, file size, and audio duration.
+directory, uploads them directly to Supabase (bypassing STORAGE_BACKEND
+setting), and updates the Episode record with the new URL, file size,
+and audio duration.
 
 Usage:
     # Preview (no uploads)
     uv run python manage.py upload_podcast_media \\
         --source-dir /path/to/research/podcast/episodes --dry-run
 
-    # Upload for real
-    STORAGE_BACKEND=supabase \\
-    SUPABASE_PROJECT_URL=https://xxx.supabase.co \\
-    SUPABASE_SERVICE_ROLE_KEY=xxx \\
-    SUPABASE_PUBLIC_BUCKET_NAME=public-podcasts \\
+    # Upload for real (uses SUPABASE_* settings from Django config)
     uv run python manage.py upload_podcast_media \\
         --source-dir /path/to/research/podcast/episodes
 
     # Only upload audio (skip cover images)
     uv run python manage.py upload_podcast_media --source-dir ... --audio-only
 
-Idempotent: skips episodes that already have a working (non-research.yuda.me) URL.
+Idempotent: skips episodes that already have a Supabase URL.
 """
 
 import mimetypes
 from pathlib import Path
 
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 
 from apps.podcast.models import Podcast
@@ -84,10 +82,14 @@ def _get_audio_duration(file_path: Path) -> int | None:
 
 
 def _needs_upload(url: str | None) -> bool:
-    """Check if a URL points to the old broken host and needs re-uploading."""
+    """Check if a URL is missing, local, or points to the old broken host."""
     if not url:
         return True
-    return url.startswith(OLD_URL_PREFIX)
+    if url.startswith(OLD_URL_PREFIX):
+        return True
+    if url.startswith("/media/"):
+        return True
+    return False
 
 
 class Command(BaseCommand):
@@ -127,9 +129,25 @@ class Command(BaseCommand):
         if dry_run:
             self.stdout.write("[DRY RUN] No uploads will be made\n")
 
-        # Import storage only when actually uploading
+        # Validate Supabase config before starting
+        bucket_name = settings.SUPABASE_PUBLIC_BUCKET_NAME
         if not dry_run:
-            from apps.common.services.storage import store_file
+            for key in (
+                "SUPABASE_PROJECT_URL",
+                "SUPABASE_SERVICE_ROLE_KEY",
+                "SUPABASE_PUBLIC_BUCKET_NAME",
+            ):
+                if not getattr(settings, key, None):
+                    raise CommandError(f"Missing setting: {key}")
+
+            from supabase import create_client
+
+            supabase = create_client(
+                settings.SUPABASE_PROJECT_URL,
+                settings.SUPABASE_SERVICE_ROLE_KEY,
+            )
+            storage = supabase.storage.from_(bucket_name)
+            self.stdout.write(f"Using Supabase bucket: {bucket_name}")
 
         # Build a lookup: (series_dir, episode_slug) -> episode_dir path
         dir_lookup = self._build_dir_lookup(source_dir)
@@ -142,6 +160,7 @@ class Command(BaseCommand):
             "audio_not_found": 0,
             "cover_not_found": 0,
             "duration_populated": 0,
+            "errors": 0,
         }
 
         for podcast in Podcast.objects.all():
@@ -153,7 +172,6 @@ class Command(BaseCommand):
                 continue
 
             self.stdout.write(f"\n--- Podcast: {podcast.title} ({podcast.slug}) ---")
-            is_public = podcast.is_public
 
             for episode in podcast.episodes.order_by("episode_number"):
                 self.stdout.write(f"  Episode {episode.episode_number}: {episode.slug}")
@@ -194,24 +212,35 @@ class Command(BaseCommand):
                                 f"    Uploading audio: {audio_path.name} "
                                 f"({file_size / 1024 / 1024:.1f} MB)..."
                             )
-                            audio_bytes = audio_path.read_bytes()
-                            url = store_file(
-                                storage_key, audio_bytes, content_type, public=is_public
-                            )
-                            episode.audio_url = url
-                            episode.audio_file_size_bytes = file_size
-                            if duration:
-                                episode.audio_duration_seconds = duration
-                                stats["duration_populated"] += 1
-                            episode.save(
-                                update_fields=[
-                                    "audio_url",
-                                    "audio_file_size_bytes",
-                                    "audio_duration_seconds",
-                                    "modified_at",
-                                ]
-                            )
-                            self.stdout.write(f"    -> {url}")
+                            try:
+                                audio_bytes = audio_path.read_bytes()
+                                storage.upload(
+                                    storage_key,
+                                    file=audio_bytes,
+                                    file_options={
+                                        "content-type": content_type,
+                                        "upsert": "true",
+                                    },
+                                )
+                                url = storage.get_public_url(storage_key)
+                                episode.audio_url = url
+                                episode.audio_file_size_bytes = file_size
+                                if duration:
+                                    episode.audio_duration_seconds = duration
+                                    stats["duration_populated"] += 1
+                                episode.save(
+                                    update_fields=[
+                                        "audio_url",
+                                        "audio_file_size_bytes",
+                                        "audio_duration_seconds",
+                                        "modified_at",
+                                    ]
+                                )
+                                self.stdout.write(f"    -> {url}")
+                            except Exception as e:
+                                self.stderr.write(f"    ERROR uploading audio: {e}")
+                                stats["errors"] += 1
+                                continue
 
                         stats["audio_uploaded"] += 1
                     else:
@@ -240,18 +269,28 @@ class Command(BaseCommand):
                                     f"-> {storage_key}"
                                 )
                             else:
-                                cover_bytes = cover_path.read_bytes()
-                                url = store_file(
-                                    storage_key,
-                                    cover_bytes,
-                                    content_type,
-                                    public=is_public,
-                                )
-                                episode.cover_image_url = url
-                                episode.save(
-                                    update_fields=["cover_image_url", "modified_at"]
-                                )
-                                self.stdout.write(f"    Cover -> {url}")
+                                try:
+                                    cover_bytes = cover_path.read_bytes()
+                                    storage.upload(
+                                        storage_key,
+                                        file=cover_bytes,
+                                        file_options={
+                                            "content-type": content_type,
+                                            "upsert": "true",
+                                        },
+                                    )
+                                    url = storage.get_public_url(storage_key)
+                                    episode.cover_image_url = url
+                                    episode.save(
+                                        update_fields=[
+                                            "cover_image_url",
+                                            "modified_at",
+                                        ]
+                                    )
+                                    self.stdout.write(f"    Cover -> {url}")
+                                except Exception as e:
+                                    self.stderr.write(f"    ERROR uploading cover: {e}")
+                                    stats["errors"] += 1
 
                             stats["cover_uploaded"] += 1
                         else:
@@ -272,6 +311,8 @@ class Command(BaseCommand):
             f"{stats['cover_not_found']} not found"
         )
         self.stdout.write(f"Duration: {stats['duration_populated']} populated")
+        if stats["errors"]:
+            self.stderr.write(f"Errors:   {stats['errors']}")
         if dry_run:
             self.stdout.write("\n[DRY RUN] No changes were made")
 
