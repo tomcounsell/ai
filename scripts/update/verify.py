@@ -275,6 +275,85 @@ def check_sdk_auth(project_dir: Path) -> dict[str, bool]:
     return result
 
 
+def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
+    """Sync Claude OAuth token from Desktop claude_code dir to Claude Desktop config.
+
+    The source of truth for OAuth credentials is:
+        ~/Desktop/claude_code/claude_oauth_config.json
+    The target (where Claude CLI reads auth) is:
+        ~/Library/Application Support/Claude/config.json
+
+    This copies the oauth:tokenCache key from source to target, keeping
+    all other Claude Desktop settings intact.
+
+    Returns dict with: synced (bool), reason (str), refreshed_from_live (bool)
+    """
+    import json
+
+    source = Path.home() / "Desktop" / "claude_code" / "claude_oauth_config.json"
+    target = Path.home() / "Library" / "Application Support" / "Claude" / "config.json"
+
+    result: dict[str, str | bool] = {"synced": False, "reason": "", "refreshed_from_live": False}
+
+    if not source.exists():
+        result["reason"] = "No source credentials at ~/Desktop/claude_code/claude_oauth_config.json"
+        return result
+
+    try:
+        source_config = json.loads(source.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        result["reason"] = f"Failed to read source config: {e}"
+        return result
+
+    source_token = source_config.get("oauth:tokenCache")
+    if not source_token:
+        result["reason"] = "Source config has no oauth:tokenCache"
+        return result
+
+    # First check if CLI auth is already working
+    claude_bin = shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
+    try:
+        auth_result = run_cmd([claude_bin, "auth", "status"], timeout=10)
+        if auth_result.returncode == 0 and "loggedIn" in auth_result.stdout:
+            # Auth works — refresh the source from the live config (it may be newer)
+            if target.exists():
+                try:
+                    live_config = json.loads(target.read_text())
+                    live_token = live_config.get("oauth:tokenCache")
+                    if live_token and live_token != source_token:
+                        # Live token is different (refreshed) — update source
+                        source_config["oauth:tokenCache"] = live_token
+                        source.write_text(json.dumps(source_config, indent=2) + "\n")
+                        result["refreshed_from_live"] = True
+                except (json.JSONDecodeError, OSError):
+                    pass
+            result["synced"] = True
+            result["reason"] = "Auth already working"
+            return result
+    except Exception:
+        pass
+
+    # Auth not working — sync source token to target
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    target_config: dict = {}
+    if target.exists():
+        try:
+            target_config = json.loads(target.read_text())
+        except (json.JSONDecodeError, OSError):
+            target_config = {}
+
+    target_config["oauth:tokenCache"] = source_token
+    try:
+        target.write_text(json.dumps(target_config, indent=2) + "\n")
+        result["synced"] = True
+        result["reason"] = "Copied oauth:tokenCache to Claude Desktop config"
+    except OSError as e:
+        result["reason"] = f"Failed to write target config: {e}"
+
+    return result
+
+
 def check_mcp_servers() -> list[str]:
     """Get list of configured MCP servers."""
     try:

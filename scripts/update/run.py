@@ -346,6 +346,18 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             status = "OK" if tool.available else "MISSING"
             log(f"  {tool.name}: {status}", v)
 
+        # Sync Claude OAuth credentials
+        log("Syncing Claude OAuth credentials...", v)
+        oauth_sync = verify.sync_claude_oauth(project_dir)
+        if oauth_sync.get("synced"):
+            if oauth_sync.get("refreshed_from_live"):
+                log("  OAuth: refreshed source from live token", v)
+            else:
+                log(f"  OAuth: {oauth_sync.get('reason')}", v)
+        else:
+            log(f"  OAuth: {oauth_sync.get('reason')}", v)
+            result.warnings.append(f"OAuth sync: {oauth_sync.get('reason')}")
+
         # Report SDK auth
         auth = result.verification.sdk_auth
         if auth.get("claude_desktop_running"):
