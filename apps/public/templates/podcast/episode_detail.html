@@ -11,7 +11,7 @@
   <span class="mx-1">/</span>
   <a href="{% url 'podcast:detail' slug=podcast.slug %}" class="hover:text-gray-700">{{ podcast.title }}</a>
   <span class="mx-1">/</span>
-  <span class="text-gray-900">Episode {{ episode.episode_number }}</span>
+  <span class="text-gray-900">Ep. {{ episode.episode_number }}</span>
 </nav>
 <h1 class="text-3xl font-bold tracking-tight text-gray-900">{{ episode.title }}</h1>
 {% endblock %}
@@ -20,8 +20,13 @@
 <div class="max-w-4xl">
   <!-- Episode Meta -->
   <div class="flex flex-wrap items-center gap-4 text-sm text-gray-500 font-mono mb-6">
+    {% if episode.topic_series %}
     <span>
-      <i class="fas fa-hashtag mr-1"></i> Episode {{ episode.episode_number }}
+      <i class="fas fa-layer-group mr-1"></i> {{ episode.topic_series }}
+    </span>
+    {% endif %}
+    <span>
+      <i class="fas fa-hashtag mr-1"></i> Ep. {{ episode.episode_number }}
     </span>
     {% if episode.published_at %}
     <time datetime="{{ episode.published_at|date:'c' }}">
@@ -100,7 +105,7 @@
   {% endif %}
 
   <!-- Additional Resources -->
-  {% if episode.report_text or episode.sources_text %}
+  {% if episode.report_text or episode.has_meaningful_sources %}
   <div class="border-t border-gray-200 pt-6 mb-6">
     <h2 class="font-mono text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Resources</h2>
     <div class="flex flex-wrap gap-3">
@@ -110,7 +115,7 @@
         <i class="fas fa-file-alt"></i> View Report
       </a>
       {% endif %}
-      {% if episode.sources_text %}
+      {% if episode.has_meaningful_sources %}
       <a href="{% url 'podcast:episode_sources' slug=podcast.slug episode_slug=episode.slug %}"
          class="inline-flex items-center gap-2 border border-gray-300 px-4 py-2 text-sm font-mono text-gray-700 hover:bg-gray-50 transition-colors">
         <i class="fas fa-book"></i> View Sources

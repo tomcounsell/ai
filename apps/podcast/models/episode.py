@@ -19,6 +19,11 @@ class Episode(Timestampable, Publishable, Expirable):
     slug = models.SlugField()
     episode_number = models.PositiveIntegerField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
+    topic_series = models.CharField(
+        max_length=100,
+        blank=True,
+        help_text="Topic series name for grouping episodes (e.g. 'Cardiovascular Health')",
+    )
     description = models.TextField(blank=True)
     show_notes = models.TextField(blank=True)
 
@@ -41,7 +46,7 @@ class Episode(Timestampable, Publishable, Expirable):
     sources_text = models.TextField(blank=True)
 
     class Meta:
-        ordering = ["episode_number"]
+        ordering = ["topic_series", "episode_number"]
         indexes = [
             models.Index(fields=["slug"]),
         ]
@@ -67,3 +72,7 @@ class Episode(Timestampable, Publishable, Expirable):
     @property
     def effective_cover_image_url(self):
         return self.cover_image_url or self.podcast.cover_image_url
+
+    @property
+    def has_meaningful_sources(self) -> bool:
+        return bool(self.sources_text and self.sources_text.strip())

@@ -26,7 +26,15 @@ class PodcastConfigInline(TabularInline):
 
 class EpisodeInline(TabularInline):
     model = Episode
-    fields = ["episode_number", "title", "slug", "status", "published_at", "audio_url"]
+    fields = [
+        "episode_number",
+        "title",
+        "slug",
+        "topic_series",
+        "status",
+        "published_at",
+        "audio_url",
+    ]
     extra = 0
     ordering = ["episode_number"]
 
@@ -45,12 +53,13 @@ class PodcastAdmin(ModelAdmin):
         "slug",
         "language",
         "is_public",
+        "published_at",
         "created_at",
         "owner",
         "spotify_url",
         "apple_podcasts_url",
     ]
-    list_filter = ["is_public", "language", "owner"]
+    list_filter = ["is_public", "published_at", "language", "owner"]
     search_fields = ["title", "description"]
     prepopulated_fields = {"slug": ("title",)}
     raw_id_fields = ["owner"]
@@ -64,11 +73,12 @@ class EpisodeAdmin(ModelAdmin):
         "episode_number",
         "title",
         "podcast",
+        "topic_series",
         "status",
         "published_at",
         "is_explicit",
     ]
-    list_filter = ["podcast", "status", "is_explicit", "published_at"]
+    list_filter = ["podcast", "topic_series", "status", "is_explicit", "published_at"]
     search_fields = ["title", "description"]
     raw_id_fields = ["podcast"]
     ordering = ["-episode_number"]

@@ -95,6 +95,6 @@ def episode_show_notes(episode) -> dict:
         "episode": episode,
         "description": episode.description,
         "chapters": chapters,
-        "sources_text": episode.sources_text,
+        "sources_text": episode.sources_text if episode.has_meaningful_sources else "",
         "report_text": episode.report_text,
     }

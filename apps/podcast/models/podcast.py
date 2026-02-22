@@ -1,10 +1,10 @@
 from django.conf import settings
 from django.db import models
 
-from apps.common.behaviors import Timestampable
+from apps.common.behaviors import Publishable, Timestampable
 
 
-class Podcast(Timestampable):
+class Podcast(Timestampable, Publishable):
     title = models.CharField(max_length=200)
     slug = models.SlugField(unique=True)
     description = models.TextField()

@@ -231,7 +231,11 @@ class Command(BaseCommand):
                 )
                 continue
 
-            self.stdout.write(f"--- Series: {series_slug} -> {podcast_slug} ---")
+            # Derive human-readable topic series name from slug
+            topic_series = self._derive_topic_series(series_slug)
+            self.stdout.write(
+                f"--- Series: {series_slug} -> {podcast_slug} (topic: {topic_series}) ---"
+            )
 
             # Step 3: Walk episode directories (sorted for deterministic numbering)
             episode_dirs = sorted(
@@ -276,6 +280,7 @@ class Command(BaseCommand):
                         slug=episode_slug,
                         defaults={
                             "title": title,
+                            "topic_series": topic_series,
                         },
                     )
                     if created:
@@ -372,6 +377,23 @@ class Command(BaseCommand):
         # Convert hyphens to spaces and title case
         title = title.replace("-", " ").strip().title()
         return title
+
+    def _derive_topic_series(self, series_slug: str) -> str:
+        """Derive a human-readable topic series name from a series directory slug.
+
+        Strips common suffixes like '-series' and converts to title case.
+
+        Examples:
+            "cardiovascular-health" -> "Cardiovascular Health"
+            "active-recovery" -> "Active Recovery"
+            "stablecoin-series" -> "Stablecoin"
+            "kindergarten-first-principles" -> "Kindergarten First Principles"
+        """
+        name = series_slug
+        # Remove trailing "-series" suffix
+        name = re.sub(r"-series$", "", name)
+        # Convert hyphens to spaces and title case
+        return name.replace("-", " ").strip().title()
 
     def _get_published_at(self, episode_dir: Path) -> datetime.datetime:
         """Determine the published_at timestamp for an episode.

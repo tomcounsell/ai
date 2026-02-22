@@ -1,19 +1,19 @@
 
 /* Primary color utilities for modals and components */
 .bg-primary-600 {
-    background-color: #2563eb; /* Tailwind blue-600 */
+    background-color: #B91C1C;
 }
 
 .bg-primary-700 {
-    background-color: #1d4ed8; /* Tailwind blue-700 */
+    background-color: #7F1D1D;
 }
 
 .hover\:bg-primary-700:hover {
-    background-color: #1d4ed8;
+    background-color: #7F1D1D;
 }
 
 .focus\:ring-primary-500:focus {
-    --tw-ring-color: rgba(59, 130, 246, 0.5); /* Tailwind blue-500 */
+    --tw-ring-color: rgba(185, 28, 28, 0.3);
 }
 
 /* Smooth transitions */
@@ -37,38 +37,10 @@ tr {
 }
 
 /* Modal Size Variants */
-.max-w-sm {
-    max-width: 24rem;
-}
-
-/* 384px */
-.max-w-md {
-    max-width: 28rem;
-}
-
-/* 448px */
-.max-w-lg {
-    max-width: 32rem;
-}
-
-/* 512px */
-.max-w-xl {
-    max-width: 36rem;
-}
-
-/* 576px */
-.max-w-2xl {
-    max-width: 42rem;
-}
-
-/* 672px */
-.max-w-3xl {
-    max-width: 48rem;
-}
-
-/* 768px */
-.max-w-4xl {
-    max-width: 56rem;
-}
-
-/* 896px */
+.max-w-sm { max-width: 24rem; }
+.max-w-md { max-width: 28rem; }
+.max-w-lg { max-width: 32rem; }
+.max-w-xl { max-width: 36rem; }
+.max-w-2xl { max-width: 42rem; }
+.max-w-3xl { max-width: 48rem; }
+.max-w-4xl { max-width: 56rem; }

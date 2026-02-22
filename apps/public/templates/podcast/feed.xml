@@ -6,7 +6,7 @@
      xmlns:content="http://purl.org/rss/1.0/modules/content/">
   <channel>
     <title>{{ podcast.title|xml_escape }}</title>
-    <link>{{ request.scheme }}://{{ request.get_host }}{% url 'podcast:detail' slug=podcast.slug %}</link>
+    <link>{{ podcast_page_url }}</link>
     <description>{{ podcast.description|xml_escape }}</description>
     <language>{{ podcast.language }}</language>
     <copyright>{{ podcast.author_name|xml_escape }}</copyright>
@@ -28,7 +28,7 @@
 {% for episode in episodes %}
     <item>
       <title>{{ episode.title|xml_escape }}</title>
-      <link>{{ request.scheme }}://{{ request.get_host }}{% url 'podcast:episode_detail' slug=podcast.slug episode_slug=episode.slug %}</link>
+      <link>{{ episode.page_url }}</link>
       <description>{{ episode.description|xml_escape }}</description>
       <pubDate>{{ episode.published_at|date:"D, d M Y H:i:s O" }}</pubDate>
       <guid isPermaLink="false">{{ episode.audio_url }}</guid>

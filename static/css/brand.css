@@ -1,11 +1,10 @@
 /* ============================================
    CUTTLEFISH BRAND STYLES
-   Technical Elegance • Minimalist Design
+   Architectural Analyticism • Warm Minimalism
    ============================================ */
 
 /* === TYPOGRAPHY === */
 
-/* Import Fonts */
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&display=swap');
 
 :root {
@@ -13,7 +12,7 @@
     --font-mono: 'IBM Plex Mono', 'Courier New', monospace;
     --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
 
-    /* Color Palette - Monochromatic with warm neutrals */
+    /* Color Palette — Black on cream, red for annotations */
     --color-bg-cream: #FAF9F6;
     --color-bg-white: #FFFFFF;
     --color-bg-warm-gray: #F5F4F1;
@@ -27,14 +26,21 @@
     --color-border-medium: #C4C4C4;
     --color-border-light: #E5E5E5;
 
-    /* Optional accent */
-    --color-accent: #D4A574;
-    --color-accent-dark: #B8935F;
+    /* Red annotation accent — used like an architect's red pen */
+    --color-accent: #B91C1C;
+    --color-accent-light: #DC2626;
+    --color-accent-dark: #7F1D1D;
+    --color-accent-muted: #991B1B;
+    --color-accent-subtle: rgba(185, 28, 28, 0.08);
+
+    /* Secondary warmth — gold for quiet diagram lines */
+    --color-warm: #B8935F;
+    --color-warm-light: #D4A574;
 
     /* Technical grid */
     --grid-size: 8px;
 
-    /* Spacing scale */
+    /* Spacing scale (8px base) */
     --space-xs: calc(var(--grid-size) * 1);
     --space-sm: calc(var(--grid-size) * 2);
     --space-md: calc(var(--grid-size) * 3);
@@ -44,7 +50,8 @@
     --space-3xl: calc(var(--grid-size) * 12);
 }
 
-/* Base Typography */
+/* === BASE === */
+
 body {
     font-family: var(--font-sans);
     font-weight: 400;
@@ -53,14 +60,12 @@ body {
     line-height: 1.6;
 }
 
-/* Monospace elements */
 code, kbd, samp, pre {
     font-family: var(--font-mono);
 }
 
 /* === HEADINGS === */
 
-/* Small-caps treatment for headers */
 h1, h2, h3 {
     font-family: var(--font-sans);
     font-weight: 600;
@@ -70,7 +75,8 @@ h1, h2, h3 {
     color: var(--color-text-black);
 }
 
-/* Label styling - typewriter aesthetic */
+/* === LABELS === */
+
 label, .label {
     font-family: var(--font-mono);
     font-size: 0.75rem;
@@ -80,7 +86,18 @@ label, .label {
     color: var(--color-text-gray);
 }
 
-/* Receipt/dot-matrix aesthetic for data displays */
+/* Annotation label — red, used sparingly for emphasis */
+.label-annotation {
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-accent);
+}
+
+/* === DATA DISPLAYS === */
+
 .spec-sheet, .data-display {
     font-family: var(--font-mono);
     font-size: 0.875rem;
@@ -101,7 +118,7 @@ label, .label {
     background-size: var(--grid-size) var(--grid-size);
 }
 
-/* Connection lines and nodes */
+/* Connection lines with endpoint nodes */
 .connection-line {
     border-top: 1px solid var(--color-border-medium);
     position: relative;
@@ -119,15 +136,10 @@ label, .label {
     top: -3px;
 }
 
-.connection-line::before {
-    left: 0;
-}
+.connection-line::before { left: 0; }
+.connection-line::after { right: 0; }
 
-.connection-line::after {
-    right: 0;
-}
-
-/* Technical border styling */
+/* Technical double-border */
 .technical-border {
     border: 1px solid var(--color-border-dark);
     box-shadow:
@@ -135,7 +147,7 @@ label, .label {
         inset 0 0 0 4px var(--color-border-medium);
 }
 
-/* Blueprint-style containers */
+/* Blueprint container with inset border */
 .blueprint-box {
     position: relative;
     padding: var(--space-lg);
@@ -154,9 +166,23 @@ label, .label {
     pointer-events: none;
 }
 
+/* Red annotation overlay — structural emphasis line */
+.annotation-line {
+    border-top: 1.5px solid var(--color-accent);
+    position: relative;
+}
+
+/* Red annotation mark — used for axis markers, emphasis points */
+.annotation-mark {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    background: var(--color-accent);
+    border-radius: 50%;
+}
+
 /* === LAYOUT === */
 
-/* Generous negative space */
 .section {
     padding: var(--space-3xl) 0;
 }
@@ -189,15 +215,16 @@ label, .label {
     border-color: var(--color-text-black);
 }
 
+/* Accent button — red annotation style, for primary CTAs only */
 .btn-brand-accent {
-    background: var(--color-accent);
-    border-color: var(--color-accent-dark);
-    color: var(--color-text-black);
+    background: var(--color-bg-white);
+    border-color: var(--color-accent);
+    color: var(--color-accent);
 }
 
 .btn-brand-accent:hover {
-    background: var(--color-accent-dark);
-    border-color: var(--color-accent-dark);
+    background: var(--color-accent);
+    border-color: var(--color-accent);
     color: var(--color-bg-white);
 }
 
@@ -216,7 +243,7 @@ label, .label {
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
 }
 
-/* Technical specification box - for hero sections */
+/* Hero section spec box */
 .technical-spec-box {
     background: var(--color-bg-white);
     border: 2px solid var(--color-border-dark);
@@ -235,7 +262,7 @@ label, .label {
     pointer-events: none;
 }
 
-/* Server card - clean, minimal card for MCP servers */
+/* Server card */
 .server-card {
     background: var(--color-bg-white);
     border: 1px solid var(--color-border-medium);
@@ -247,7 +274,7 @@ label, .label {
     border-color: var(--color-border-dark);
 }
 
-/* Card with corner marks (technical drawing style) */
+/* Corner-mark card (architectural drawing style) */
 .card-corner-marks {
     position: relative;
     background: var(--color-bg-white);
@@ -302,7 +329,6 @@ label, .label {
 
 /* === TABLES === */
 
-/* Spec sheet table styling */
 .table-spec {
     width: 100%;
     font-family: var(--font-mono);
@@ -331,7 +357,6 @@ label, .label {
     background: var(--color-bg-warm-gray);
 }
 
-/* Inline spec table - minimal, for embedded specs */
 .spec-table-inline {
     font-family: var(--font-mono);
     font-size: 0.75rem;
@@ -397,35 +422,10 @@ pre.brand-code {
 }
 
 .status-offline {
-    background: #E53935;
+    background: var(--color-accent);
 }
 
-/* === UTILITY CLASSES === */
-
-.text-mono {
-    font-family: var(--font-mono);
-}
-
-.text-sans {
-    font-family: var(--font-sans);
-}
-
-.text-small-caps {
-    font-variant: small-caps;
-    letter-spacing: 0.05em;
-}
-
-.bg-cream {
-    background-color: var(--color-bg-cream);
-}
-
-.bg-warm-gray {
-    background-color: var(--color-bg-warm-gray);
-}
-
-.border-technical {
-    border: 1px solid var(--color-border-dark);
-}
+/* === DIVIDERS === */
 
 .divider-technical {
     height: 1px;
@@ -447,6 +447,21 @@ pre.brand-code {
     border-radius: 50%;
 }
 
+/* === UTILITY CLASSES === */
+
+.text-mono { font-family: var(--font-mono); }
+.text-sans { font-family: var(--font-sans); }
+.text-small-caps { font-variant: small-caps; letter-spacing: 0.05em; }
+.text-accent { color: var(--color-accent); }
+.text-warm { color: var(--color-warm); }
+
+.bg-cream { background-color: var(--color-bg-cream); }
+.bg-warm-gray { background-color: var(--color-bg-warm-gray); }
+.bg-accent-subtle { background-color: var(--color-accent-subtle); }
+
+.border-technical { border: 1px solid var(--color-border-dark); }
+.border-accent { border-color: var(--color-accent); }
+
 /* === RESPONSIVE === */
 
 @media (max-width: 768px) {
@@ -458,16 +473,15 @@ pre.brand-code {
 
 /* === ACCESSIBILITY === */
 
-/* Focus visible for keyboard navigation */
 *:focus-visible {
     outline: 2px solid var(--color-border-dark);
     outline-offset: 2px;
 }
 
-/* High contrast mode support */
 @media (prefers-contrast: high) {
     :root {
         --color-border-medium: #000000;
         --color-text-gray: #000000;
+        --color-accent: #B91C1C;
     }
 }

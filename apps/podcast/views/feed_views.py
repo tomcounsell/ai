@@ -4,6 +4,7 @@ from django.db.models import F, Q
 from django.http import HttpResponse, HttpResponseForbidden
 from django.shortcuts import get_object_or_404
 from django.template.loader import render_to_string
+from django.urls import reverse
 from django.views import View
 
 from apps.common.services.storage import get_file_url
@@ -24,6 +25,35 @@ class PodcastFeedView(View):
             return self._serve_private_feed(request, podcast)
         return self._serve_public_feed(request, podcast)
 
+    def _build_feed_context(self, request, podcast, episodes):
+        """Build the template context for the RSS feed.
+
+        Computes absolute URLs for the podcast page and each episode page
+        so the <link> elements are never empty.
+        """
+        podcast_page_url = request.build_absolute_uri(
+            reverse("podcast:detail", kwargs={"slug": podcast.slug})
+        )
+
+        # Annotate each episode with its absolute detail page URL
+        for episode in episodes:
+            episode.page_url = request.build_absolute_uri(
+                reverse(
+                    "podcast:episode_detail",
+                    kwargs={
+                        "slug": podcast.slug,
+                        "episode_slug": episode.slug,
+                    },
+                )
+            )
+
+        return {
+            "podcast": podcast,
+            "episodes": episodes,
+            "podcast_page_url": podcast_page_url,
+            "request": request,
+        }
+
     def _serve_public_feed(self, request, podcast) -> HttpResponse:
         # Check Django cache first (invalidated on episode publish/unpublish)
         cache_key = f"podcast_feed_{podcast.slug}"
@@ -31,11 +61,9 @@ class PodcastFeedView(View):
 
         if cached_xml is None:
             # Generate feed XML
-            episodes = self._published_episodes(podcast)
-            cached_xml = render_to_string(
-                "podcast/feed.xml",
-                {"podcast": podcast, "episodes": episodes, "request": request},
-            )
+            episodes = list(self._published_episodes(podcast))
+            context = self._build_feed_context(request, podcast, episodes)
+            cached_xml = render_to_string("podcast/feed.xml", context)
             # Cache for 5 minutes (matches HTTP Cache-Control header)
             cache.set(cache_key, cached_xml, 300)
 
@@ -73,10 +101,8 @@ class PodcastFeedView(View):
                     episode.cover_image_url, public=False
                 )
 
-        xml = render_to_string(
-            "podcast/feed.xml",
-            {"podcast": podcast, "episodes": episodes, "request": request},
-        )
+        context = self._build_feed_context(request, podcast, episodes)
+        xml = render_to_string("podcast/feed.xml", context)
         response = HttpResponse(xml, content_type="application/rss+xml; charset=utf-8")
         response["Cache-Control"] = "no-store"
         return response

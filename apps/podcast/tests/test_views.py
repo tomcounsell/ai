@@ -26,7 +26,7 @@ class PodcastListViewTestCase(TestCase):
         self.assertEqual(response.status_code, 200)
 
     def test_list_shows_public_podcasts(self):
-        """Public podcast appears in response."""
+        """Public and published podcast appears in response."""
         Podcast.objects.create(
             title="Public Podcast",
             slug="public-podcast",
@@ -34,9 +34,23 @@ class PodcastListViewTestCase(TestCase):
             author_name="Author",
             author_email="a@b.com",
             is_public=True,
+            published_at=timezone.now() - timezone.timedelta(hours=1),
         )
         response = self.client.get("/podcast/")
         self.assertContains(response, "Public Podcast")
+
+    def test_list_hides_unpublished_public_podcasts(self):
+        """Public but unpublished podcast does not appear."""
+        Podcast.objects.create(
+            title="Unpublished Public",
+            slug="unpublished-public",
+            description="Public but not yet published.",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=True,
+        )
+        response = self.client.get("/podcast/")
+        self.assertNotContains(response, "Unpublished Public")
 
     def test_list_hides_private_podcasts(self):
         """Private podcast doesn't appear."""
@@ -99,6 +113,7 @@ class PodcastDetailViewTestCase(TestCase):
             author_name="Author",
             author_email="a@b.com",
             is_public=True,
+            published_at=timezone.now() - timezone.timedelta(hours=1),
         )
         self.published_episode = Episode.objects.create(
             podcast=self.podcast,
@@ -143,6 +158,19 @@ class PodcastDetailViewTestCase(TestCase):
             is_public=False,
         )
         response = self.client.get(f"/podcast/{private_podcast.slug}/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_detail_404_for_unpublished(self):
+        """Public but unpublished podcast returns 404."""
+        unpublished = Podcast.objects.create(
+            title="Unpublished Podcast",
+            slug="unpublished-detail",
+            description="desc",
+            author_name="Author",
+            author_email="a@b.com",
+            is_public=True,
+        )
+        response = self.client.get(f"/podcast/{unpublished.slug}/")
         self.assertEqual(response.status_code, 404)
 
     def test_detail_allows_owner_of_private_podcast(self):
@@ -202,6 +230,7 @@ class PodcastDetailViewTestCase(TestCase):
             author_name="Author",
             author_email="a@b.com",
             is_public=True,
+            published_at=timezone.now() - timezone.timedelta(hours=1),
             spotify_url="https://open.spotify.com/show/test123",
             apple_podcasts_url="https://podcasts.apple.com/us/podcast/test123",
         )
@@ -231,6 +260,7 @@ class EpisodeDetailViewTestCase(TestCase):
             author_name="Author",
             author_email="a@b.com",
             is_public=True,
+            published_at=timezone.now() - timezone.timedelta(hours=1),
         )
         self.published_episode = Episode.objects.create(
             podcast=self.podcast,
@@ -324,6 +354,7 @@ class EpisodeReportViewTestCase(TestCase):
             author_name="Author",
             author_email="a@b.com",
             is_public=True,
+            published_at=timezone.now() - timezone.timedelta(hours=1),
         )
         self.episode_with_report = Episode.objects.create(
             podcast=self.podcast,
@@ -458,6 +489,7 @@ class EpisodeSourcesViewTestCase(TestCase):
             author_name="Author",
             author_email="a@b.com",
             is_public=True,
+            published_at=timezone.now() - timezone.timedelta(hours=1),
         )
         self.episode_with_sources = Episode.objects.create(
             podcast=self.podcast,
@@ -595,6 +627,7 @@ class EpisodeCreateViewTestCase(TestCase):
             author_name="Author",
             author_email="a@b.com",
             is_public=True,
+            published_at=timezone.now() - timezone.timedelta(hours=1),
         )
         self.private_podcast = Podcast.objects.create(
             title="Private Create Podcast",

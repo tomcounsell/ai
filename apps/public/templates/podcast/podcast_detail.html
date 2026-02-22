@@ -39,6 +39,10 @@
     {% if podcast.cover_image_url %}
     <img src="{{ podcast.cover_image_url }}" alt="{{ podcast.title }}"
          class="w-48 h-48 object-cover flex-shrink-0">
+    {% else %}
+    <div class="w-48 h-48 bg-gray-100 flex items-center justify-center flex-shrink-0">
+      <i class="fas fa-podcast text-5xl text-gray-300"></i>
+    </div>
     {% endif %}
     <div>
       <p class="text-gray-700 text-sm leading-relaxed mb-3">{{ podcast.description }}</p>
@@ -81,15 +85,44 @@
       Episodes ({{ episodes|length }})
     </h2>
 
-    <div class="space-y-3">
-      {% for episode in episodes %}
+    {% regroup episodes by topic_series as series_groups %}
+
+    {% for group in series_groups %}
+    {% if group.grouper %}
+    <!-- Series header with technical divider -->
+    <div class="{% if not forloop.first %}mt-10{% endif %} mb-4">
+      <div class="divider-technical"></div>
+      <h3 class="font-mono text-xs font-semibold text-gray-500 uppercase tracking-widest mt-4">
+        <i class="fas fa-layer-group mr-2 text-gray-400"></i>{{ group.grouper }}
+        <span class="text-gray-400 font-normal ml-1">({{ group.list|length }})</span>
+      </h3>
+    </div>
+    {% elif not forloop.first %}
+    <!-- Ungrouped episodes separator -->
+    <div class="mt-10 mb-4">
+      <div class="divider-technical"></div>
+      <h3 class="font-mono text-xs font-semibold text-gray-500 uppercase tracking-widest mt-4">
+        <i class="fas fa-layer-group mr-2 text-gray-400"></i>Other Episodes
+        <span class="text-gray-400 font-normal ml-1">({{ group.list|length }})</span>
+      </h3>
+    </div>
+    {% endif %}
+
+    <div class="space-y-3 {% if group.grouper %}mb-6{% endif %}">
+      {% for episode in group.list %}
       <a href="{% url 'podcast:episode_detail' slug=podcast.slug episode_slug=episode.slug %}"
          class="block bg-white border border-gray-200 p-4 hover:shadow-sm transition-shadow">
         <div class="flex items-start gap-4">
-          <span class="font-mono text-2xl text-gray-300 font-light w-10 text-right flex-shrink-0">
-            {{ episode.episode_number }}
-          </span>
+          {% if episode.effective_cover_image_url %}
+          <img src="{{ episode.effective_cover_image_url }}" alt="{{ episode.title }}"
+               class="w-16 h-16 object-cover flex-shrink-0">
+          {% else %}
+          <div class="w-16 h-16 bg-gray-100 flex items-center justify-center flex-shrink-0">
+            <span class="font-mono text-xl text-gray-300 font-light">{{ episode.episode_number }}</span>
+          </div>
+          {% endif %}
           <div class="flex-grow min-w-0">
+            <span class="font-mono text-xs text-gray-400">Ep. {{ episode.episode_number }}</span>
             <h3 class="font-semibold text-gray-900 mb-1">{{ episode.title }}</h3>
             {% if episode.description %}
             <p class="text-sm text-gray-600 truncate">{{ episode.description|truncatewords:25 }}</p>
@@ -110,13 +143,14 @@
           </div>
         </div>
       </a>
-      {% empty %}
-      <div class="text-center py-12 text-gray-500">
-        <i class="fas fa-microphone-slash text-3xl mb-3 block"></i>
-        <p class="text-sm">No episodes published yet.</p>
-      </div>
       {% endfor %}
     </div>
+    {% empty %}
+    <div class="text-center py-12 text-gray-500">
+      <i class="fas fa-microphone-slash text-3xl mb-3 block"></i>
+      <p class="text-sm">No episodes published yet.</p>
+    </div>
+    {% endfor %}
   </div>
 </div>
 {% endblock %}

@@ -12,31 +12,61 @@
 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
   {% for podcast in podcasts %}
   <a href="{% url 'podcast:detail' slug=podcast.slug %}"
-     class="block bg-white border border-gray-200 p-6 hover:shadow-md transition-shadow">
+     class="card-technical block group">
     {% if podcast.cover_image_url %}
     <img src="{{ podcast.cover_image_url }}" alt="{{ podcast.title }}"
          class="w-full h-48 object-cover mb-4">
+    {% else %}
+    <div class="w-full h-48 flex items-center justify-center mb-4"
+         style="background-color: var(--color-bg-warm-gray);">
+      <i class="fas fa-podcast text-5xl" style="color: var(--color-border-medium);"></i>
+    </div>
     {% endif %}
-    <h2 class="font-mono text-lg font-semibold mb-2 text-gray-900">{{ podcast.title }}</h2>
-    <p class="text-sm text-gray-600 mb-3">{{ podcast.description|truncatewords:30 }}</p>
-    <span class="text-xs text-gray-500 font-mono">
-      <i class="fas fa-user mr-1"></i> {{ podcast.author_name }}
-    </span>
-    {% if not podcast.is_public %}
-    <span class="text-xs text-gray-500 font-mono ml-2">
-      <i class="fas fa-lock mr-1"></i> Private
-    </span>
-    {% endif %}
+
+    <h2 class="text-lg font-semibold mb-2 leading-snug"
+        style="font-family: var(--font-sans); color: var(--color-text-black);">
+      {{ podcast.title }}
+    </h2>
+
+    <p class="text-sm leading-relaxed mb-4"
+       style="color: var(--color-text-gray);">
+      {{ podcast.description|truncatewords:30 }}
+    </p>
+
+    <div class="flex items-center justify-between pt-3"
+         style="border-top: 1px solid var(--color-border-light);">
+      <span class="label">
+        <i class="fas fa-user mr-1"></i> {{ podcast.author_name }}
+      </span>
+      <span class="flex items-center gap-2">
+        {% if not podcast.is_public %}
+        <span class="label">
+          <i class="fas fa-lock mr-1"></i> Private
+        </span>
+        {% endif %}
+        {% if podcast.episode_count %}
+        <span class="label">
+          {{ podcast.episode_count }} episode{{ podcast.episode_count|pluralize }}
+        </span>
+        {% endif %}
+        {% if podcast.latest_episode_at %}
+        <span class="label">
+          {{ podcast.latest_episode_at|date:"M j, Y" }}
+        </span>
+        {% endif %}
+      </span>
+    </div>
   </a>
   {% empty %}
-  <div class="col-span-full text-center py-12 text-gray-500">
-    <i class="fas fa-podcast text-4xl mb-4 block"></i>
+  <div class="col-span-full text-center py-16"
+       style="color: var(--color-text-light-gray);">
+    <i class="fas fa-podcast text-5xl mb-4 block"></i>
     {% if user.is_authenticated %}
     <p class="text-sm mb-2">No podcasts available yet.</p>
-    <p class="text-xs text-gray-400">Podcasts you own will appear here automatically.</p>
+    <p class="text-xs" style="color: var(--color-text-light-gray);">Podcasts you own will appear here automatically.</p>
     {% else %}
     <p class="text-sm mb-2">No podcasts available yet.</p>
-    <p class="text-xs text-gray-400">Check back soon for new content.</p>
+    <p class="text-xs" style="color: var(--color-text-light-gray);">Check back soon for new content.</p>
     {% endif %}
   </div>
   {% endfor %}
