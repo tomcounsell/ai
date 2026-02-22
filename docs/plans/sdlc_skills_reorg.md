@@ -4,7 +4,7 @@ type: chore
 appetite: Medium
 owner: Valor
 created: 2025-02-22
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/152
 ---
 
 # Skills & Agents Reorganization
