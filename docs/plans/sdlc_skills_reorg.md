@@ -57,11 +57,51 @@ No prerequisites — this is internal restructuring with no external dependencie
 
 ### Key Elements
 
+- **Adopt canonical SKILL.md template**: All skills must follow the standard template structure (see below)
 - **Split oversized skills**: Extract reference material and templates from do-plan, do-build, do-docs, and do-test into sub-files
 - **Add frontmatter fields**: Annotate all skills with `disable-model-invocation`, `user-invocable`, and `context` where appropriate
 - **Consolidate commands into skills**: Migrate command-only definitions into skill directories, retire the thin wrapper commands
 - **Add scripts/ where useful**: Move executable validation/check logic into skill scripts
 - **Update hardlink system**: Distinguish project-only vs. shared skills
+
+### Canonical SKILL.md Template
+
+All skills (new and restructured) must follow this standard structure:
+
+```markdown
+---
+name: skill-name
+description: Use when [specific trigger conditions]. Also use when [additional triggers]. Handles [sub-capability 1], [sub-capability 2], and [sub-capability 3].
+allowed-tools: Read, Grep, Glob, Bash
+---
+
+# Skill Name
+
+## What this skill does
+One paragraph. What problem does it solve? What does Claude do differently when this skill is active?
+
+## When to load sub-files
+- [Condition A] → read [SUB_FILE_A.md](SUB_FILE_A.md)
+- [Condition B] → read [SUB_FILE_B.md](SUB_FILE_B.md)
+
+## Workflow
+1. Step one
+2. Step two
+3. Step three
+
+## Examples
+[Concrete input/output examples]
+
+## Anti-patterns
+- Don't do X
+- Avoid Y
+```
+
+Key principles from the template:
+- **Description is trigger-oriented**: "Use when..." not "This skill..."
+- **Sub-file loading is conditional**: Only load reference files when specific conditions are met
+- **SKILL.md is a navigator**: Points to sub-files for detail, stays under 500 lines
+- Save this template to `.claude/skills/new-valor-skill/SKILL_TEMPLATE.md` as the canonical reference for creating new skills
 
 ### Flow
 
@@ -190,8 +230,10 @@ No agent integration required — this is a restructuring of Claude Code configu
 
 ## Success Criteria
 
+- [ ] Canonical SKILL.md template saved to `new-valor-skill/SKILL_TEMPLATE.md`
+- [ ] All restructured skills follow the canonical template structure
 - [ ] No SKILL.md exceeds 500 lines
-- [ ] All skills have `description` in frontmatter
+- [ ] All skills have trigger-oriented `description` in frontmatter ("Use when...")
 - [ ] Infrastructure skills (`update`, `setup`) have `disable-model-invocation: true`
 - [ ] Background reference skills have `user-invocable: false`
 - [ ] Thin wrapper commands (do-build.md, do-plan.md, etc.) retired
@@ -238,12 +280,22 @@ No agent integration required — this is a restructuring of Claude Code configu
 
 ## Step by Step Tasks
 
-### 1. Split oversized skills
-- **Task ID**: build-split-skills
+### 0. Save canonical SKILL.md template
+- **Task ID**: build-template
 - **Depends On**: none
 - **Assigned To**: skill-splitter
 - **Agent Type**: builder
 - **Parallel**: true
+- Save the canonical template to `.claude/skills/new-valor-skill/SKILL_TEMPLATE.md`
+- Update `new-valor-skill/SKILL.md` to reference the template: "Use [SKILL_TEMPLATE.md](SKILL_TEMPLATE.md) as the starting point"
+
+### 1. Split oversized skills (using canonical template structure)
+- **Task ID**: build-split-skills
+- **Depends On**: build-template
+- **Assigned To**: skill-splitter
+- **Agent Type**: builder
+- **Parallel**: true
+- Restructure each skill to match the canonical template: frontmatter → "What this skill does" → "When to load sub-files" → Workflow → Examples → Anti-patterns
 - Split `do-plan/SKILL.md` (633 lines): extract plan template, scoping guide, examples into sub-files
 - Split `do-build/SKILL.md` (405 lines): extract workflow details, troubleshooting into sub-files
 - Keep SKILL.md as concise navigator with links to sub-files
