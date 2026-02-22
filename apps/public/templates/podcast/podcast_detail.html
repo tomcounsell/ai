@@ -124,6 +124,13 @@
           <div class="flex-grow min-w-0">
             <span class="font-mono text-xs text-gray-400">Ep. {{ episode.episode_number }}</span>
             <h3 class="font-semibold text-gray-900 mb-1">{{ episode.title }}</h3>
+            {% if episode.tag_list %}
+            <div class="flex flex-wrap gap-1 mb-1">
+              {% for tag in episode.tag_list %}
+              <span class="text-xs font-mono text-gray-500">#{{ tag }}</span>
+              {% endfor %}
+            </div>
+            {% endif %}
             {% if episode.description %}
             <p class="text-sm text-gray-600 truncate">{{ episode.description|truncatewords:25 }}</p>
             {% endif %}

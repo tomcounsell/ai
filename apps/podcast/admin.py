@@ -30,7 +30,7 @@ class EpisodeInline(TabularInline):
         "episode_number",
         "title",
         "slug",
-        "topic_series",
+        "tags",
         "status",
         "published_at",
         "audio_url",
@@ -73,12 +73,12 @@ class EpisodeAdmin(ModelAdmin):
         "episode_number",
         "title",
         "podcast",
-        "topic_series",
+        "tags",
         "status",
         "published_at",
         "is_explicit",
     ]
-    list_filter = ["podcast", "topic_series", "status", "is_explicit", "published_at"]
+    list_filter = ["podcast", "status", "is_explicit", "published_at"]
     search_fields = ["title", "description"]
     raw_id_fields = ["podcast"]
     ordering = ["-episode_number"]

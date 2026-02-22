@@ -288,9 +288,34 @@ class EpisodeModelTestCase(TestCase):
             audio_url="https://example.com/ep2.mp3",
         )
         episodes = list(Episode.objects.filter(podcast=self.podcast))
-        self.assertEqual(episodes[0].episode_number, 1)
+        self.assertEqual(episodes[0].episode_number, 3)
         self.assertEqual(episodes[1].episode_number, 2)
-        self.assertEqual(episodes[2].episode_number, 3)
+        self.assertEqual(episodes[2].episode_number, 1)
+
+    def test_tag_list_splits_and_strips(self):
+        """tag_list splits comma-separated tags and strips whitespace."""
+        episode = Episode.objects.create(
+            podcast=self.podcast,
+            title="Tagged Episode",
+            slug="tagged-ep",
+            episode_number=1,
+            audio_url="https://example.com/ep1.mp3",
+            tags="Cardiovascular Health, Recovery, Exercise",
+        )
+        self.assertEqual(
+            episode.tag_list, ["Cardiovascular Health", "Recovery", "Exercise"]
+        )
+
+    def test_tag_list_empty_when_no_tags(self):
+        """tag_list returns empty list when tags is blank."""
+        episode = Episode.objects.create(
+            podcast=self.podcast,
+            title="Untagged Episode",
+            slug="untagged-ep",
+            episode_number=2,
+            audio_url="https://example.com/ep2.mp3",
+        )
+        self.assertEqual(episode.tag_list, [])
 
     def test_status_defaults_to_draft(self):
         """New episode has status='draft' by default."""

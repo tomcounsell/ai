@@ -68,7 +68,7 @@ class PodcastDetailView(MainContentView):
             .filter(
                 Q(unpublished_at__isnull=True) | Q(unpublished_at__lt=F("published_at"))
             )
-            .order_by("topic_series", "episode_number")
+            .order_by("-episode_number")
         )
         self.context["is_owner"] = (
             request.user.is_authenticated and podcast.owner == request.user

@@ -231,10 +231,9 @@ class Command(BaseCommand):
                 )
                 continue
 
-            # Derive human-readable topic series name from slug
-            topic_series = self._derive_topic_series(series_slug)
+            tag = self._derive_tag(series_slug)
             self.stdout.write(
-                f"--- Series: {series_slug} -> {podcast_slug} (topic: {topic_series}) ---"
+                f"--- Series: {series_slug} -> {podcast_slug} (tag: {tag}) ---"
             )
 
             # Step 3: Walk episode directories (sorted for deterministic numbering)
@@ -280,7 +279,7 @@ class Command(BaseCommand):
                         slug=episode_slug,
                         defaults={
                             "title": title,
-                            "topic_series": topic_series,
+                            "tags": tag,
                         },
                     )
                     if created:
@@ -378,21 +377,13 @@ class Command(BaseCommand):
         title = title.replace("-", " ").strip().title()
         return title
 
-    def _derive_topic_series(self, series_slug: str) -> str:
-        """Derive a human-readable topic series name from a series directory slug.
+    def _derive_tag(self, series_slug: str) -> str:
+        """Derive a tag from the series directory slug.
 
         Strips common suffixes like '-series' and converts to title case.
-
-        Examples:
-            "cardiovascular-health" -> "Cardiovascular Health"
-            "active-recovery" -> "Active Recovery"
-            "stablecoin-series" -> "Stablecoin"
-            "kindergarten-first-principles" -> "Kindergarten First Principles"
         """
         name = series_slug
-        # Remove trailing "-series" suffix
         name = re.sub(r"-series$", "", name)
-        # Convert hyphens to spaces and title case
         return name.replace("-", " ").strip().title()
 
     def _get_published_at(self, episode_dir: Path) -> datetime.datetime:

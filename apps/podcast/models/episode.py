@@ -19,10 +19,10 @@ class Episode(Timestampable, Publishable, Expirable):
     slug = models.SlugField()
     episode_number = models.PositiveIntegerField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="draft")
-    topic_series = models.CharField(
-        max_length=100,
+    tags = models.TextField(
         blank=True,
-        help_text="Topic series name for grouping episodes (e.g. 'Cardiovascular Health')",
+        default="",
+        help_text="Comma-separated tags for categorizing episodes",
     )
     description = models.TextField(blank=True)
     show_notes = models.TextField(blank=True)
@@ -46,7 +46,7 @@ class Episode(Timestampable, Publishable, Expirable):
     sources_text = models.TextField(blank=True)
 
     class Meta:
-        ordering = ["topic_series", "episode_number"]
+        ordering = ["-episode_number"]
         indexes = [
             models.Index(fields=["slug"]),
         ]
@@ -68,6 +68,13 @@ class Episode(Timestampable, Publishable, Expirable):
             )
             self.episode_number = max_num + 1
         super().save(*args, **kwargs)
+
+    @property
+    def tag_list(self) -> list[str]:
+        """Return tags as a list of stripped strings."""
+        if not self.tags:
+            return []
+        return [t.strip() for t in self.tags.split(",") if t.strip()]
 
     @property
     def effective_cover_image_url(self):

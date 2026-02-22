@@ -28,6 +28,11 @@
     <span>
       <i class="fas fa-hashtag mr-1"></i> Ep. {{ episode.episode_number }}
     </span>
+    {% for tag in episode.tag_list %}
+    <span class="inline-flex items-center px-2 py-0.5 text-xs font-mono text-gray-600 bg-gray-100">
+      #{{ tag }}
+    </span>
+    {% endfor %}
     {% if episode.published_at %}
     <time datetime="{{ episode.published_at|date:'c' }}">
       <i class="fas fa-calendar mr-1"></i> {{ episode.published_at|date:"F j, Y" }}
