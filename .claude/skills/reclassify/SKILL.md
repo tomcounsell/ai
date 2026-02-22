@@ -1,7 +1,8 @@
 ---
 name: reclassify
-description: Reclassify a plan's type (bug/feature/chore) during the Planning phase. Use when the initial classification was wrong or the scope changed. Only works before plan is approved (status must be Planning).
+description: "Use when reclassifying a plan's type (bug/feature/chore) during the Planning phase. Triggered when the initial classification was wrong or the scope changed. Only works before plan is approved (status must be Planning)."
 allowed-tools: Read, Edit, Glob, Bash
+disable-model-invocation: true
 ---
 
 # Reclassify Plan Type

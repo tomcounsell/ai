@@ -1,6 +1,7 @@
 ---
 name: do-pr-review
-description: "Review pull requests by analyzing code changes, validating against plan requirements, and capturing visual proof via screenshots. Use when the user says 'review this PR', 'check the pull request', 'do a PR review', or provides a PR URL for review."
+description: "Use when reviewing a pull request. Analyzes code changes, validates against plan requirements, and captures visual proof via screenshots. Triggered by 'review this PR', 'check the pull request', 'do a PR review', or a PR URL."
+context: fork
 ---
 
 # PR Review

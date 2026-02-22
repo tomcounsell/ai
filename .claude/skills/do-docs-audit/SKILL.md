@@ -1,7 +1,8 @@
 ---
 name: do-docs-audit
-description: "Audit all documentation files against the actual codebase, removing or correcting stale references. Use when the user says 'audit docs', 'clean up docs', 'check docs accuracy', or 'do-docs-audit'."
+description: "Use when auditing documentation files against the actual codebase. Removes or corrects stale references. Triggered by 'audit docs', 'clean up docs', 'check docs accuracy', or 'do-docs-audit'."
 allowed-tools: Read, Write, Edit, Glob, Bash, Task
+context: fork
 ---
 
 # Documentation Audit Skill

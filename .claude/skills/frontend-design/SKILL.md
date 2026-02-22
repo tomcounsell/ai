@@ -1,7 +1,7 @@
 ---
 name: frontend-design
 icon: 󰏘
-description: Create distinctive, production-grade frontend interfaces with high design quality. Use this skill when the user asks to build web components, pages, artifacts, posters, or applications. Generates creative, polished code that avoids generic AI aesthetics.
+description: "Use when creating distinctive, production-grade frontend interfaces with high design quality. Triggered by requests to build web components, pages, artifacts, posters, or applications. Generates creative, polished code that avoids generic AI aesthetics."
 license: Apache 2.0. Based on Anthropic's frontend-design skill. See NOTICE.md for attribution.
 ---
 
