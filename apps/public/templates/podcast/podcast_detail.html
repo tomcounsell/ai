@@ -85,31 +85,8 @@
       Episodes ({{ episodes|length }})
     </h2>
 
-    {% regroup episodes by topic_series as series_groups %}
-
-    {% for group in series_groups %}
-    {% if group.grouper %}
-    <!-- Series header with technical divider -->
-    <div class="{% if not forloop.first %}mt-10{% endif %} mb-4">
-      <div class="divider-technical"></div>
-      <h3 class="font-mono text-xs font-semibold text-gray-500 uppercase tracking-widest mt-4">
-        <i class="fas fa-layer-group mr-2 text-gray-400"></i>{{ group.grouper }}
-        <span class="text-gray-400 font-normal ml-1">({{ group.list|length }})</span>
-      </h3>
-    </div>
-    {% elif not forloop.first %}
-    <!-- Ungrouped episodes separator -->
-    <div class="mt-10 mb-4">
-      <div class="divider-technical"></div>
-      <h3 class="font-mono text-xs font-semibold text-gray-500 uppercase tracking-widest mt-4">
-        <i class="fas fa-layer-group mr-2 text-gray-400"></i>Other Episodes
-        <span class="text-gray-400 font-normal ml-1">({{ group.list|length }})</span>
-      </h3>
-    </div>
-    {% endif %}
-
-    <div class="space-y-3 {% if group.grouper %}mb-6{% endif %}">
-      {% for episode in group.list %}
+    <div class="space-y-3">
+      {% for episode in episodes %}
       <a href="{% url 'podcast:episode_detail' slug=podcast.slug episode_slug=episode.slug %}"
          class="block bg-white border border-gray-200 p-4 hover:shadow-sm transition-shadow">
         <div class="flex items-start gap-4">
@@ -150,14 +127,13 @@
           </div>
         </div>
       </a>
+      {% empty %}
+      <div class="text-center py-12 text-gray-500">
+        <i class="fas fa-microphone-slash text-3xl mb-3 block"></i>
+        <p class="text-sm">No episodes published yet.</p>
+      </div>
       {% endfor %}
     </div>
-    {% empty %}
-    <div class="text-center py-12 text-gray-500">
-      <i class="fas fa-microphone-slash text-3xl mb-3 block"></i>
-      <p class="text-sm">No episodes published yet.</p>
-    </div>
-    {% endfor %}
   </div>
 </div>
 {% endblock %}
