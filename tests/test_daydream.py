@@ -545,8 +545,8 @@ class TestIgnoreLog:
 
     def test_load_ignore_log_empty_when_file_missing(self, tmp_path):
         """load_ignore_log returns empty list when file doesn't exist."""
-        from scripts.daydream import load_ignore_log, IGNORE_LOG_FILE
         import scripts.daydream as daydream_mod
+        from scripts.daydream import load_ignore_log
 
         original = daydream_mod.IGNORE_LOG_FILE
         daydream_mod.IGNORE_LOG_FILE = tmp_path / "daydream_ignore.jsonl"
@@ -560,6 +560,7 @@ class TestIgnoreLog:
         """load_ignore_log excludes entries past their ignored_until date."""
         import json
         from datetime import date, timedelta
+
         import scripts.daydream as daydream_mod
 
         ignore_file = tmp_path / "daydream_ignore.jsonl"
@@ -589,6 +590,7 @@ class TestIgnoreLog:
         """prune_ignore_log removes expired entries and keeps active ones."""
         import json
         from datetime import date, timedelta
+
         import scripts.daydream as daydream_mod
 
         ignore_file = tmp_path / "daydream_ignore.jsonl"
@@ -605,7 +607,9 @@ class TestIgnoreLog:
         daydream_mod.IGNORE_LOG_FILE = ignore_file
         try:
             daydream_mod.prune_ignore_log()
-            remaining = [json.loads(l) for l in ignore_file.read_text().splitlines() if l.strip()]
+            remaining = [
+                json.loads(l) for l in ignore_file.read_text().splitlines() if l.strip()
+            ]
             patterns = [e["pattern"] for e in remaining]
             assert "expired" not in patterns
             assert "active" in patterns
@@ -699,7 +703,8 @@ class TestAutoFixStep:
     async def test_auto_fix_dry_run_does_not_invoke_claude(self, monkeypatch):
         """Dry run logs intent without calling claude subprocess."""
         monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "true")
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
+
         from scripts.daydream import DaydreamRunner
 
         runner = DaydreamRunner()
@@ -713,15 +718,16 @@ class TestAutoFixStep:
             }
         ]
 
-        with patch("scripts.daydream.subprocess.run") as mock_run, \
-             patch("scripts.daydream.has_existing_github_work", return_value=False), \
-             patch("scripts.daydream.load_ignore_log", return_value=[]), \
-             patch("scripts.daydream.prune_ignore_log"):
+        with (
+            patch("scripts.daydream.subprocess.run") as mock_run,
+            patch("scripts.daydream.has_existing_github_work", return_value=False),
+            patch("scripts.daydream.load_ignore_log", return_value=[]),
+            patch("scripts.daydream.prune_ignore_log"),
+        ):
             await runner.step_auto_fix_bugs()
             # subprocess.run should NOT have been called for the fix (only gh dedup checks)
             claude_calls = [
-                c for c in mock_run.call_args_list
-                if c[0][0] and c[0][0][0] == "claude"
+                c for c in mock_run.call_args_list if c[0][0] and c[0][0][0] == "claude"
             ]
             assert len(claude_calls) == 0
 
@@ -734,6 +740,7 @@ class TestAutoFixStep:
         """Skips a reflection whose pattern is in the ignore log."""
         monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "true")
         from unittest.mock import patch
+
         from scripts.daydream import DaydreamRunner
 
         runner = DaydreamRunner()
@@ -749,14 +756,15 @@ class TestAutoFixStep:
 
         ignore_entries = [{"pattern": "null pointer", "ignored_until": "2099-01-01"}]
 
-        with patch("scripts.daydream.load_ignore_log", return_value=ignore_entries), \
-             patch("scripts.daydream.prune_ignore_log"), \
-             patch("scripts.daydream.subprocess.run") as mock_run:
+        with (
+            patch("scripts.daydream.load_ignore_log", return_value=ignore_entries),
+            patch("scripts.daydream.prune_ignore_log"),
+            patch("scripts.daydream.subprocess.run") as mock_run,
+        ):
             await runner.step_auto_fix_bugs()
             # subprocess.run should NOT be called with claude
             claude_calls = [
-                c for c in mock_run.call_args_list
-                if c[0][0] and c[0][0][0] == "claude"
+                c for c in mock_run.call_args_list if c[0][0] and c[0][0][0] == "claude"
             ]
             assert len(claude_calls) == 0
 
@@ -769,6 +777,7 @@ class TestAutoFixStep:
         """Skips reflections that don't meet the 2-of-3 confidence criteria."""
         monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "true")
         from unittest.mock import patch
+
         from scripts.daydream import DaydreamRunner
 
         runner = DaydreamRunner()
@@ -782,8 +791,10 @@ class TestAutoFixStep:
             }
         ]
 
-        with patch("scripts.daydream.load_ignore_log", return_value=[]), \
-             patch("scripts.daydream.prune_ignore_log"):
+        with (
+            patch("scripts.daydream.load_ignore_log", return_value=[]),
+            patch("scripts.daydream.prune_ignore_log"),
+        ):
             await runner.step_auto_fix_bugs()
 
         # No attempts because no candidates passed confidence filter
@@ -818,6 +829,7 @@ class TestAutoFixStep:
         """Skips patterns with an existing open issue or PR."""
         monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "true")
         from unittest.mock import patch
+
         from scripts.daydream import DaydreamRunner
 
         runner = DaydreamRunner()
@@ -838,14 +850,15 @@ class TestAutoFixStep:
             }
         ]
 
-        with patch("scripts.daydream.load_ignore_log", return_value=[]), \
-             patch("scripts.daydream.prune_ignore_log"), \
-             patch("scripts.daydream.has_existing_github_work", return_value=True), \
-             patch("scripts.daydream.subprocess.run") as mock_run:
+        with (
+            patch("scripts.daydream.load_ignore_log", return_value=[]),
+            patch("scripts.daydream.prune_ignore_log"),
+            patch("scripts.daydream.has_existing_github_work", return_value=True),
+            patch("scripts.daydream.subprocess.run") as mock_run,
+        ):
             await runner.step_auto_fix_bugs()
             claude_calls = [
-                c for c in mock_run.call_args_list
-                if c[0][0] and c[0][0][0] == "claude"
+                c for c in mock_run.call_args_list if c[0][0] and c[0][0][0] == "claude"
             ]
             assert len(claude_calls) == 0
 
@@ -867,6 +880,7 @@ class TestDaydreamStateAutoFixField:
     def test_auto_fix_attempts_persisted_in_serialization(self):
         """auto_fix_attempts survives asdict round-trip."""
         from dataclasses import asdict
+
         from scripts.daydream import DaydreamState
 
         state = DaydreamState()
@@ -882,19 +896,27 @@ class TestCLIFlags:
         """--ignore appends a new entry to IGNORE_LOG_FILE."""
         import json
         import sys
+
         import scripts.daydream as daydream_mod
 
         ignore_file = tmp_path / "daydream_ignore.jsonl"
         monkeypatch.setattr(daydream_mod, "IGNORE_LOG_FILE", ignore_file)
 
         # Simulate CLI: python daydream.py --ignore "some bug pattern" --reason "known issue"
-        monkeypatch.setattr(sys, "argv", [
-            "daydream.py",
-            "--ignore", "some bug pattern",
-            "--reason", "known issue",
-        ])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "daydream.py",
+                "--ignore",
+                "some bug pattern",
+                "--reason",
+                "known issue",
+            ],
+        )
 
         import asyncio
+
         asyncio.run(daydream_mod.main())
 
         assert ignore_file.exists()
@@ -907,9 +929,10 @@ class TestCLIFlags:
 
     def test_dry_run_flag_sets_state(self, tmp_path, monkeypatch):
         """--dry-run sets runner.state._dry_run = True."""
-        import sys
         import asyncio
-        from unittest.mock import patch, AsyncMock
+        import sys
+        from unittest.mock import patch
+
         import scripts.daydream as daydream_mod
 
         monkeypatch.setattr(sys, "argv", ["daydream.py", "--dry-run"])
