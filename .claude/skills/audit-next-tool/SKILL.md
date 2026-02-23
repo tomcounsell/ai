@@ -1,5 +1,6 @@
 ---
-description: "Systematically audit new or modified tools for quality, architecture compliance, and integration patterns. Use after creating or modifying a tool to verify it meets standards."
+name: audit-next-tool
+description: "Use when auditing new or modified tools for quality, architecture compliance, and integration patterns. Triggered by 'audit this tool', 'review tool quality', or after creating/modifying a tool."
 ---
 
 # Tool Audit System
@@ -8,9 +9,9 @@ Comprehensive tool audit system for validating and maintaining code quality acro
 
 ## Current Status
 
-**All Audits Complete**: ✅ 12/12 standalone tools audited and approved  
-**System Health**: ✅ Production-ready and maintainable  
-**Architecture**: ✅ GOLD STANDARD patterns throughout  
+**All Audits Complete**: 12/12 standalone tools audited and approved
+**System Health**: Production-ready and maintainable
+**Architecture**: GOLD STANDARD patterns throughout
 
 **Audit Registry**: See `docs/plan/AUDITS.md` for complete audit history and results
 
@@ -56,28 +57,28 @@ When auditing new or modified tools, follow the 4-phase process:
 All audited tools must meet these standards:
 
 ### Architecture Requirements
-- ✅ **Clear separation of concerns**: Single responsibility principle
-- ✅ **Proper integration patterns**: Follow GOLD STANDARD MCP wrapper pattern
-- ✅ **Minimal dependencies**: Well-justified external dependencies
-- ✅ **Clean interfaces**: Typed parameters and consistent return types
+- **Clear separation of concerns**: Single responsibility principle
+- **Proper integration patterns**: Follow GOLD STANDARD MCP wrapper pattern
+- **Minimal dependencies**: Well-justified external dependencies
+- **Clean interfaces**: Typed parameters and consistent return types
 
-### Code Quality Standards  
-- ✅ **Comprehensive error handling**: Graceful failure and recovery
-- ✅ **Security best practices**: Input validation, safe API usage
-- ✅ **Performance considerations**: Reasonable response times, timeout handling
-- ✅ **Code style compliance**: PEP 8 and project conventions
+### Code Quality Standards
+- **Comprehensive error handling**: Graceful failure and recovery
+- **Security best practices**: Input validation, safe API usage
+- **Performance considerations**: Reasonable response times, timeout handling
+- **Code style compliance**: PEP 8 and project conventions
 
 ### Documentation Requirements
-- ✅ **Agent-friendly documentation**: Clear docstrings with examples
-- ✅ **Developer documentation**: Architecture notes and maintenance guidance
-- ✅ **Integration documentation**: Dependencies, configuration, error handling
-- ✅ **Usage examples**: Practical examples for common use cases
+- **Agent-friendly documentation**: Clear docstrings with examples
+- **Developer documentation**: Architecture notes and maintenance guidance
+- **Integration documentation**: Dependencies, configuration, error handling
+- **Usage examples**: Practical examples for common use cases
 
 ### Testing Standards
-- ✅ **Core functionality coverage**: Happy path and error conditions
-- ✅ **Integration testing**: Tool works within the ecosystem
-- ✅ **Performance validation**: Meets timing requirements
-- ✅ **Regression prevention**: Changes don't break existing functionality
+- **Core functionality coverage**: Happy path and error conditions
+- **Integration testing**: Tool works within the ecosystem
+- **Performance validation**: Meets timing requirements
+- **Regression prevention**: Changes don't break existing functionality
 
 ## Architecture Patterns
 
@@ -144,16 +145,16 @@ The audit system supports ongoing system health through:
 ## Historical Context
 
 **December 2024 Audit Program**:
-- ✅ **12 tools audited**: Comprehensive validation completed
-- ✅ **Architecture crisis resolved**: All duplications eliminated
-- ✅ **GOLD STANDARD patterns**: Established throughout codebase
-- ✅ **Quality improvements**: Enhanced testing, documentation, security
-- ✅ **System consolidation**: Clean, maintainable architecture achieved
+- **12 tools audited**: Comprehensive validation completed
+- **Architecture crisis resolved**: All duplications eliminated
+- **GOLD STANDARD patterns**: Established throughout codebase
+- **Quality improvements**: Enhanced testing, documentation, security
+- **System consolidation**: Clean, maintainable architecture achieved
 
 **Audit Registry**: Complete history available in `docs/plan/AUDITS.md`
 
 ---
 
-**Last Updated**: December 30, 2024  
-**All Current Tools**: ✅ Audited and approved  
-**System Status**: ✅ Production-ready and maintainable
+**Last Updated**: December 30, 2024
+**All Current Tools**: Audited and approved
+**System Status**: Production-ready and maintainable

@@ -1,5 +1,7 @@
 ---
-description: "Autonomous software development lifecycle that executes Plan → Build → Test → Review → Ship phases with quality gates. Use when the user wants end-to-end autonomous development or says 'ship this feature'."
+name: sdlc
+description: "Use when executing end-to-end autonomous development. Runs Plan → Build → Test → Review → Ship with quality gates. Triggered by 'ship this feature', 'sdlc', or 'full development cycle'."
+model-invocable: true
 ---
 
 # AI Developer Workflow (SDLC)

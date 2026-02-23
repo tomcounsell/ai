@@ -1,6 +1,7 @@
 ---
 name: update
-description: "Pull latest changes, sync dependencies, verify environment, and restart the bridge service. Use when deploying updates, after git pull, or when the bridge needs a fresh start."
+description: "Use when deploying updates to this machine. Pulls latest changes, syncs dependencies, verifies environment, and restarts the bridge service. Triggered by 'update', 'deploy', 'pull and restart', or after git pull."
+disable-model-invocation: true
 ---
 
 # Update & Restart

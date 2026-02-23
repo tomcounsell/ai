@@ -1,6 +1,6 @@
 ---
 name: do-test
-description: "Run the test suite. Use when the user says 'run tests', 'test this', or anything about testing."
+description: "Use when running the test suite. Parses arguments, dispatches test runners (potentially in parallel), and aggregates results. Triggered by 'run tests', 'test this', or any request about testing."
 ---
 
 # Do Test

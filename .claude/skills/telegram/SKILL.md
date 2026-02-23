@@ -1,7 +1,8 @@
 ---
 name: telegram
-description: Read and send Telegram messages. Use when the agent needs to check recent messages, search conversation history, or send messages/media to chats.
+description: "Use when reading or sending Telegram messages. Triggered by requests to check recent messages, search conversation history, or send messages/media to chats."
 allowed-tools: Bash
+user-invocable: false
 ---
 
 # Telegram

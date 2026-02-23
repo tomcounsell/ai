@@ -1,5 +1,6 @@
 ---
-description: "Guide for extending the Valor system with new skills, tools, and capabilities. Use when adding a new feature, skill, tool, or MCP server to the system."
+name: add-feature
+description: "Use when adding a new feature, skill, tool, or MCP server to the Valor system. Triggered by 'add a feature', 'create a new tool', 'extend the system', or 'how do I add...'."
 ---
 
 # Add Feature - Extension Guide

@@ -18,7 +18,26 @@ RENAMED_REMOVALS: list[tuple[str, str]] = [
     ("skills", "build"),
     ("skills", "make-plan"),
     ("skills", "update-docs"),
+    # Retired thin wrapper commands — consolidated into skills (issue #152)
+    ("commands", "do-build.md"),
+    ("commands", "do-plan.md"),
+    ("commands", "do-test.md"),
+    ("commands", "do-docs.md"),
+    ("commands", "do-pr-review.md"),
+    ("commands", "update.md"),
+    ("commands", "sdlc.md"),
 ]
+
+# Skills tightly coupled to this repo's infrastructure (Telegram bridge,
+# macOS Messages, system logs, Google Workspace). These are NOT synced to
+# ~/.claude/skills/ because they only work in the context of this project.
+# All other skills are shared cross-repo via hardlinks.
+PROJECT_ONLY_SKILLS: set[str] = {
+    "telegram",
+    "reading-sms-messages",
+    "checking-system-logs",
+    "google-workspace",
+}
 
 
 @dataclass
@@ -106,6 +125,10 @@ def _sync_skills(src_dir: Path, dst_dir: Path, result: SymlinkSyncResult) -> Non
 
         skill_file = skill_dir / "SKILL.md"
         if not skill_file.is_file():
+            continue
+
+        # Skip project-only skills — they only work in this repo's context
+        if skill_dir.name in PROJECT_ONLY_SKILLS:
             continue
 
         dst_skill_dir = dst_dir / skill_dir.name

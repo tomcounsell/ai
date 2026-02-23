@@ -1,6 +1,6 @@
 ---
 name: do-docs
-description: "Cascade documentation updates after code changes. Use when the user says 'update docs', 'sync the docs', or anything about documentation."
+description: "Use when cascading documentation updates after code changes. Finds every document referencing the changed area and makes targeted surgical updates. Triggered by 'update docs', 'sync the docs', or any request about documentation updates."
 ---
 
 # Update Docs — Cascade Skill

@@ -1,32 +1,38 @@
 ---
 name: do-build
-description: "Execute a plan document using team orchestration. Use when the user says 'build this', 'execute the plan', 'implement the plan', or anything about running/shipping a plan."
+description: "Use when executing a plan document to ship a feature. Triggered by 'build this', 'execute the plan', 'implement the plan', or any request to run/ship a plan."
+context: fork
 ---
 
 # Build (Plan Execution)
 
 You are the **team lead** executing a plan document. You orchestrate work using Task tools - you NEVER build directly.
 
-## Invocation Methods
+## What this skill does
 
-The build skill supports two invocation methods:
+1. Resolves a plan document (by path or issue number)
+2. Creates an isolated worktree for the build
+3. Deploys builder/validator agent teams to execute the plan
+4. Runs documentation gates and quality checks
+5. Opens a PR and migrates the completed plan
+
+## When to load sub-files
+
+| Sub-file | Load when... |
+|----------|-------------|
+| `WORKFLOW.md` | Starting execution (Steps 1-5: task creation, agent deployment, monitoring) |
+| `PR_AND_CLEANUP.md` | All build tasks complete and validated (Steps 6-9: docs gate, PR, cleanup, migration) |
+
+## Invocation Methods
 
 1. **By plan path**: `/do-build docs/plans/my-feature.md`
 2. **By issue number**: `/do-build #17` or `/do-build 17`
-
-When invoked with an issue number, the skill will:
-- Search all files in `docs/plans/*.md`
-- Find the plan with `tracking: https://github.com/{org}/{repo}/issues/{N}` in frontmatter
-- Use that plan for execution
-- Error if no match or multiple matches found
 
 ## Variables
 
 PLAN_ARG: $1
 
 ## Plan Resolution
-
-Before executing, resolve the plan path:
 
 **Step 1: Detect argument type**
 - If `PLAN_ARG` starts with `#` or is a pure number, treat as issue number
@@ -61,11 +67,7 @@ Before executing, resolve the plan path:
 4. **Run prerequisite validation** - `python scripts/check_prerequisites.py {PLAN_PATH}`. If any check fails, report the failures and stop. Do not proceed to task execution. If no Prerequisites section exists, this passes automatically.
 5. **Create an isolated worktree** - Create `.worktrees/{slug}/` with branch `session/{slug}`:
    ```bash
-   # Builds use session/{slug} branch convention — builds are just a skill invoked
-   # within a session. Planning and building can happen in the same session,
-   # so there's no reason for a separate build/ branch prefix.
    git worktree add .worktrees/{slug} -b session/{slug} main
-   # Copy settings that aren't tracked by git
    cp .claude/settings.local.json .worktrees/{slug}/.claude/settings.local.json 2>/dev/null || true
    ```
    All subsequent agent work happens inside `.worktrees/{slug}/`, NOT the main repo directory.

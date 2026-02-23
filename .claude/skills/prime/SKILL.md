@@ -1,5 +1,7 @@
 ---
-description: "Comprehensive onboarding guide for the Valor AI codebase, architecture, and development workflow. Use when onboarding, understanding the system, or asking 'how does this work'."
+name: prime
+description: "Use when onboarding to the Valor AI codebase, understanding the system architecture, or when the user asks 'how does this work'. Comprehensive codebase orientation guide."
+disable-model-invocation: true
 ---
 
 # Prime - Codebase Onboarding
