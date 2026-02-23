@@ -52,8 +52,14 @@ Before executing, resolve the plan path:
 
 1. **Resolve the plan path** using the Plan Resolution logic above
 2. **Read the plan** at `PLAN_PATH`
-3. **Run prerequisite validation** - `python scripts/check_prerequisites.py {PLAN_PATH}`. If any check fails, report the failures and stop. Do not proceed to task execution. If no Prerequisites section exists, this passes automatically.
-4. **Create an isolated worktree** - Create `.worktrees/{slug}/` with branch `session/{slug}`:
+3. **Check pipeline state** - After resolving the plan path, derive `{slug}` from the plan filename and check for existing state:
+   ```bash
+   python -c "from agent.pipeline_state import load; import json; s = load('{slug}'); print(json.dumps(s) if s else 'null')"
+   ```
+   - If state exists and `stage != "plan"`: resume from that stage, skip already-completed stages listed in `completed_stages`
+   - If no state (output is `null`): proceed normally — initialize state after worktree creation
+4. **Run prerequisite validation** - `python scripts/check_prerequisites.py {PLAN_PATH}`. If any check fails, report the failures and stop. Do not proceed to task execution. If no Prerequisites section exists, this passes automatically.
+5. **Create an isolated worktree** - Create `.worktrees/{slug}/` with branch `session/{slug}`:
    ```bash
    # Builds use session/{slug} branch convention — builds are just a skill invoked
    # within a session. Planning and building can happen in the same session,
@@ -62,17 +68,46 @@ Before executing, resolve the plan path:
    # Copy settings that aren't tracked by git
    cp .claude/settings.local.json .worktrees/{slug}/.claude/settings.local.json 2>/dev/null || true
    ```
-   All subsequent agent work happens inside `.worktrees/{slug}/`, NOT the main repo directory. Derive `{slug}` from the plan filename.
-5. **Parse the Team Members** and Step by Step Tasks sections
-6. **Create all tasks** using `TaskCreate` before starting execution
-7. **Deploy agents** in order, respecting dependencies and parallel flags (agents follow SDLC: Build → Test loop with up to 5 iterations)
-8. **Monitor progress** and handle any issues
-9. **Verify Definition of Done** - Ensure all tasks completed with: code working, tests passing, docs created, quality checks pass
-10. **Run documentation gate** - Validate docs changed, scan related docs, create review issues
-11. **Push and open a PR** - `git -C .worktrees/{slug} push -u origin session/{slug}` then `gh pr create`
-12. **Run documentation cascade** - Invoke `/do-docs {PR-number}` to surgically update affected docs
-13. **Migrate completed plan** - Delete plan file and close tracking issue
-14. **Report completion** with PR URL when all tasks are done
+   All subsequent agent work happens inside `.worktrees/{slug}/`, NOT the main repo directory.
+6. **Initialize pipeline state** - For fresh builds (no prior state), initialize now:
+   ```bash
+   python -c "from agent.pipeline_state import initialize; initialize('{slug}', 'session/{slug}', '.worktrees/{slug}')"
+   ```
+   Skip this step if state already existed from step 3.
+7. **Advance to branch stage** after worktree is ready:
+   ```bash
+   python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'branch')"
+   ```
+8. **Parse the Team Members** and Step by Step Tasks sections
+9. **Create all tasks** using `TaskCreate` before starting execution
+10. **Deploy agents** in order, respecting dependencies and parallel flags (agents follow SDLC: Build → Test loop with up to 5 iterations)
+11. **Advance to implement stage** before deploying builder agents:
+    ```bash
+    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'implement')"
+    ```
+12. **Monitor progress** and handle any issues
+13. **Advance to test stage** after implementation tasks complete:
+    ```bash
+    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'test')"
+    ```
+14. **Verify Definition of Done** - Ensure all tasks completed with: code working, tests passing, quality checks pass
+15. **Advance to review stage** after tests pass:
+    ```bash
+    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'review')"
+    ```
+16. **Advance to document stage** after review passes:
+    ```bash
+    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'document')"
+    ```
+17. **Run documentation gate** - Validate docs changed, scan related docs, create review issues
+18. **Advance to pr stage** after documentation gate passes:
+    ```bash
+    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'pr')"
+    ```
+19. **Push and open a PR** - `git -C .worktrees/{slug} push -u origin session/{slug}` then `gh pr create`
+20. **Run documentation cascade** - Invoke `/do-docs {PR-number}` to surgically update affected docs
+21. **Migrate completed plan** - Delete plan file and close tracking issue
+22. **Report completion** with PR URL when all tasks are done
 
 ## Critical Rules
 
@@ -83,8 +118,9 @@ Before executing, resolve the plan path:
 - **Validators wait for builders** - A `validate-*` task always waits for its corresponding `build-*` task
 - **No temporary files** - Agents must not create temporary documentation, test results, or scratch files in the repo. Use /tmp for any temporary work. Only create files that are part of the deliverable.
 - **Never cd into worktrees** - The orchestrator's CWD must stay in the main repo. Use `git -C .worktrees/{slug}` for git commands, subshells `(cd .worktrees/{slug} && ...)` when Python scripts need worktree CWD, and `--head session/{slug}` for `gh pr create`. Only subagents (Task tool) should have bare `cd` into worktrees — their shell sessions are independent and disposable. If the orchestrator's CWD ends up inside a worktree and that worktree is deleted, the shell breaks permanently and cannot recover.
-- **SDLC enforcement** - All builder agents follow Plan → Build → Test → Review → Ship with test failure loops (up to 5 iterations)
-- **Definition of Done** - Tasks are complete only when: Built (code working), Tested (tests pass), Documented (docs created), Quality (lint/format pass)
+- **SDLC enforcement** - All builder agents follow Plan → Branch → Implement → Test → Review → Document → PR with patch loops at Test and Review stages (up to 5 iterations)
+- **Definition of Done** - Tasks are complete only when: Built (code working), Tested (tests pass), Reviewed (review passes), Documented (docs created after review), Quality (lint/format pass)
+- **Commits at logical checkpoints** - Commits happen at logical checkpoints throughout Implement — not batched at end. The commit message hook enforces hygiene at each commit.
 
 ## Workflow
 
@@ -131,7 +167,9 @@ Plan context: [relevant plan sections]
 Your assignment:
 - [specific actions from task]
 
-When complete, commit your changes and update your task status.`,
+Commit at logical checkpoints as you work — not as one batch at the end. The commit message hook enforces hygiene at each commit.
+
+When complete, update your task status.`,
   subagent_type: "[agent type from task]",
   run_in_background: [true if Parallel: true]
 })
@@ -164,14 +202,21 @@ After deploying background agents, actively monitor their health:
 
 When the final `validate-all` task completes, verify Definition of Done criteria:
 
-**Definition of Done Checklist:**
+**Pipeline stage at this point:** `test` → advance to `review` before proceeding.
+
+```bash
+python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'review')"
+```
+
+**Definition of Done Checklist (pre-documentation):**
 - [x] **Built**: All code implemented and working
 - [x] **Tested**: All unit tests passing, integration tests passing
-- [x] **Documented**: Documentation created per plan's Documentation section
 - [x] **Quality**: Ruff and Black checks pass, no lint errors
-- [x] **Plans migrated**: Ready to migrate from docs/plans/ to docs/features/
+- [x] **Reviewed**: Review passes (no blocking issues)
 
-If any criterion is not met, report the issue and do NOT proceed to PR creation.
+If any criterion is not met, report the issue and do NOT proceed to the Document stage.
+
+**Note**: Documentation validation happens AFTER review passes — see Step 6. The canonical pipeline order is: Plan → Branch → Implement → Test → Review → Document → PR. The patch loop re-enters at Test (for test failures) or Review (for review failures).
 
 ### Step 5.5: CWD Safety Reset
 
@@ -185,7 +230,13 @@ The output should be the main repo path, NOT a `.worktrees/` path. If the CWD is
 
 ### Step 6: Documentation Gate
 
-After all validation tasks pass, run the documentation lifecycle checks:
+After review passes, advance to the `document` stage and run documentation lifecycle checks:
+
+```bash
+python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'document')"
+```
+
+This is the Document phase of the pipeline: `Plan → Branch → Implement → Test → Review → **Document** → PR`. Documentation is written and validated here, after implementation is reviewed — not interleaved with implementation.
 
 **6.1 Validate Documentation Changes**
 
@@ -224,7 +275,13 @@ This creates tracking issues for documentation that should be reviewed for updat
 
 ### Step 7: Create Pull Request
 
-After documentation gate passes, push and create the PR:
+After documentation gate passes, advance to the `pr` stage and push:
+
+```bash
+python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'pr')"
+```
+
+Then push and create the PR:
 
 ```bash
 git -C .worktrees/{slug} push -u origin session/{slug}
@@ -364,7 +421,8 @@ After all tasks complete:
 ### Definition of Done
 - [x] Built: All code implemented and working
 - [x] Tested: Unit tests passing, integration tests passing
-- [x] Documented: Docs created per plan requirements (validated by docs gate)
+- [x] Reviewed: Review passed (no blocking issues)
+- [x] Documented: Docs created after review (validated by docs gate)
 - [x] Quality: Ruff and Black checks pass
 - [x] Plans migrated: Plan moved from docs/plans/ to completed state
 

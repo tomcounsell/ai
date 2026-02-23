@@ -21,7 +21,9 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Daydream Auto-Fix](daydream-auto-fix.md) | Auto-opens PRs for high-confidence code bugs found during nightly reflection; includes ignore log and dry-run mode | Shipped |
 | [Documentation Audit](documentation-audit.md) | Weekly LLM-powered audit of docs/ accuracy against codebase; KEEP / UPDATE / DELETE verdicts, directory and filename enforcement | Shipped |
 | [Design Review](do-design-review.md) | Review web UI against 10 premium design criteria with severity ratings | Shipped |
+| [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; model-invocable by do-build | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, and structured reporting | Shipped |
+| [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: hooks, pipeline stage model, session classification, resume | Shipped |
 | [Documentation Lifecycle](documentation-lifecycle.md) | Automated validation and migration system for plan documentation tasks | Shipped |
 | [Google Calendar Integration](google-calendar-integration.md) | Work session logging as Google Calendar events with segment rounding | Shipped |
 | [Hooks & Session Logging](hooks-session-logging.md) | Claude Code hooks for session event capture and structured logging | Shipped |

@@ -22,6 +22,16 @@
             "timeout": 5
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_commit_message.py",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -47,6 +57,21 @@
             "type": "command",
             "command": "uv run \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_file_contains.py -d docs/plans -e .md --contains '## Success Criteria' --contains '## Update System' --contains '## Agent Integration'",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sdlc_reminder.py",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sdlc_reminder.py",
+            "timeout": 10
           }
         ]
       }
@@ -64,6 +89,11 @@
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/stop.py --chat || true",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_sdlc_on_stop.py",
+            "timeout": 15
           }
         ]
       }
