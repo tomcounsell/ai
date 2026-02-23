@@ -58,16 +58,58 @@ PLAN_ARG: $1
 
 1. **Resolve the plan path** using the Plan Resolution logic above
 2. **Read the plan** at `PLAN_PATH`
-3. **Run prerequisite validation** - `python scripts/check_prerequisites.py {PLAN_PATH}`. If any check fails, report the failures and stop. Do not proceed to task execution. If no Prerequisites section exists, this passes automatically.
-4. **Create an isolated worktree** - Create `.worktrees/{slug}/` with branch `session/{slug}`:
+3. **Check pipeline state** - After resolving the plan path, derive `{slug}` from the plan filename and check for existing state:
+   ```bash
+   python -c "from agent.pipeline_state import load; import json; s = load('{slug}'); print(json.dumps(s) if s else 'null')"
+   ```
+   - If state exists and `stage != "plan"`: resume from that stage, skip already-completed stages listed in `completed_stages`
+   - If no state (output is `null`): proceed normally — initialize state after worktree creation
+4. **Run prerequisite validation** - `python scripts/check_prerequisites.py {PLAN_PATH}`. If any check fails, report the failures and stop. Do not proceed to task execution. If no Prerequisites section exists, this passes automatically.
+5. **Create an isolated worktree** - Create `.worktrees/{slug}/` with branch `session/{slug}`:
    ```bash
    git worktree add .worktrees/{slug} -b session/{slug} main
    cp .claude/settings.local.json .worktrees/{slug}/.claude/settings.local.json 2>/dev/null || true
    ```
-   All subsequent agent work happens inside `.worktrees/{slug}/`, NOT the main repo directory. Derive `{slug}` from the plan filename.
-5. **Parse the Team Members** and Step by Step Tasks sections
-6. **Execute the workflow** - Load `WORKFLOW.md` for Steps 1-5 (task creation, deployment, monitoring, validation)
-7. **PR and cleanup** - Load `PR_AND_CLEANUP.md` for Steps 6-9 (docs gate, PR creation, worktree cleanup, plan migration)
+   All subsequent agent work happens inside `.worktrees/{slug}/`, NOT the main repo directory.
+6. **Initialize pipeline state** - For fresh builds (no prior state), initialize now:
+   ```bash
+   python -c "from agent.pipeline_state import initialize; initialize('{slug}', 'session/{slug}', '.worktrees/{slug}')"
+   ```
+   Skip this step if state already existed from step 3.
+7. **Advance to branch stage** after worktree is ready:
+   ```bash
+   python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'branch')"
+   ```
+8. **Parse the Team Members** and Step by Step Tasks sections
+9. **Create all tasks** using `TaskCreate` before starting execution
+10. **Deploy agents** in order, respecting dependencies and parallel flags (agents follow SDLC: Build → Test loop with up to 5 iterations)
+11. **Advance to implement stage** before deploying builder agents:
+    ```bash
+    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'implement')"
+    ```
+12. **Monitor progress** and handle any issues
+13. **Advance to test stage** after implementation tasks complete:
+    ```bash
+    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'test')"
+    ```
+14. **Verify Definition of Done** - Ensure all tasks completed with: code working, tests passing, quality checks pass
+15. **Advance to review stage** after tests pass:
+    ```bash
+    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'review')"
+    ```
+16. **Advance to document stage** after review passes:
+    ```bash
+    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'document')"
+    ```
+17. **Run documentation gate** - Validate docs changed, scan related docs, create review issues
+18. **Advance to pr stage** after documentation gate passes:
+    ```bash
+    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'pr')"
+    ```
+19. **Push and open a PR** - `git -C .worktrees/{slug} push -u origin session/{slug}` then `gh pr create`
+20. **Run documentation cascade** - Invoke `/do-docs {PR-number}` to surgically update affected docs
+21. **Migrate completed plan** - Delete plan file and close tracking issue
+22. **Report completion** with PR URL when all tasks are done
 
 ## Critical Rules
 
@@ -77,9 +119,258 @@ PLAN_ARG: $1
 - **Run parallel tasks together** - Tasks with `Parallel: true` and no blocking dependencies can run simultaneously
 - **Validators wait for builders** - A `validate-*` task always waits for its corresponding `build-*` task
 - **No temporary files** - Agents must not create temporary documentation, test results, or scratch files in the repo. Use /tmp for any temporary work. Only create files that are part of the deliverable.
-- **Never cd into worktrees** - The orchestrator's CWD must stay in the main repo. Use `git -C .worktrees/{slug}` for git commands, subshells `(cd .worktrees/{slug} && ...)` when Python scripts need worktree CWD, and `--head session/{slug}` for `gh pr create`. Only subagents (Task tool) should have bare `cd` into worktrees -- their shell sessions are independent and disposable. If the orchestrator's CWD ends up inside a worktree and that worktree is deleted, the shell breaks permanently and cannot recover.
-- **SDLC enforcement** - All builder agents follow Plan -> Build -> Test -> Review -> Ship with test failure loops (up to 5 iterations)
-- **Definition of Done** - Tasks are complete only when: Built (code working), Tested (tests pass), Documented (docs created), Quality (lint/format pass)
+- **Never cd into worktrees** - The orchestrator's CWD must stay in the main repo. Use `git -C .worktrees/{slug}` for git commands, subshells `(cd .worktrees/{slug} && ...)` when Python scripts need worktree CWD, and `--head session/{slug}` for `gh pr create`. Only subagents (Task tool) should have bare `cd` into worktrees — their shell sessions are independent and disposable. If the orchestrator's CWD ends up inside a worktree and that worktree is deleted, the shell breaks permanently and cannot recover.
+- **SDLC enforcement** - All builder agents follow Plan → Branch → Implement → Test → Review → Document → PR with patch loops at Test and Review stages (up to 5 iterations)
+- **Definition of Done** - Tasks are complete only when: Built (code working), Tested (tests pass), Reviewed (review passes), Documented (docs created after review), Quality (lint/format pass)
+- **Commits at logical checkpoints** - Commits happen at logical checkpoints throughout Implement — not batched at end. The commit message hook enforces hygiene at each commit.
+
+## Workflow
+
+### Step 1: Initialize Task List
+
+Read the plan and create tasks:
+
+```typescript
+// For each task in "Step by Step Tasks":
+TaskCreate({
+  subject: "[Task Name]",
+  description: "[Full task details from plan]",
+  activeForm: "[Description in progress form]"
+})
+// Note the returned taskId for dependency tracking
+```
+
+### Step 2: Set Dependencies
+
+After creating all tasks, set up the dependency chain:
+
+```typescript
+TaskUpdate({
+  taskId: "[task-id]",
+  addBlockedBy: ["dependency-task-id-1", "dependency-task-id-2"]
+})
+```
+
+### Step 3: Deploy Agents
+
+For each task, deploy the assigned agent:
+
+```typescript
+Task({
+  description: "[Task subject]",
+  prompt: `Execute task: [Task Name]
+
+IMPORTANT: You MUST work in the worktree directory: {absolute_path_to}/.worktrees/{slug}/
+Run \`cd {absolute_path_to}/.worktrees/{slug}/\` before doing any work.
+All file reads, writes, and commands should use this worktree path, not the main repo.
+
+Plan context: [relevant plan sections]
+
+Your assignment:
+- [specific actions from task]
+
+Commit at logical checkpoints as you work — not as one batch at the end. The commit message hook enforces hygiene at each commit.
+
+When complete, update your task status.`,
+  subagent_type: "[agent type from task]",
+  run_in_background: [true if Parallel: true]
+})
+```
+
+### Step 4: Monitor and Coordinate
+
+- Check `TaskList({})` to see overall progress
+- Use `TaskOutput({task_id, block: false})` to check on background agents
+- When a blocker completes, dependent tasks auto-unblock
+
+**Health Monitoring for Background Agents:**
+
+After deploying background agents, actively monitor their health:
+
+1. Poll `TaskOutput({task_id, block: false, timeout: 30000})` for each background agent when checking progress
+2. Check `TaskList` to see if tasks have moved to completed status
+3. If a background agent's TaskOutput returns completion but TaskList still shows `in_progress`, use `TaskUpdate` to mark it
+4. **Warning threshold (5 min):** If an agent has produced no new output for 5+ minutes, note this as a potential issue
+5. **Failure threshold (15 min):** If an agent has been completely silent for 15+ minutes:
+   - Attempt to resume the agent using its agentId
+   - If resume fails, mark the task as failed
+   - Report the failure prominently so the user is aware
+6. **On any agent failure:** Commit whatever work exists in the worktree as a safety net:
+   ```bash
+   git -C .worktrees/{slug} add -A && git -C .worktrees/{slug} commit -m "[WIP] partial work before agent failure" || true
+   ```
+
+### Step 5: Final Validation and Definition of Done
+
+When the final `validate-all` task completes, verify Definition of Done criteria:
+
+**Pipeline stage at this point:** `test` → advance to `review` before proceeding.
+
+```bash
+python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'review')"
+```
+
+**Definition of Done Checklist (pre-documentation):**
+- [x] **Built**: All code implemented and working
+- [x] **Tested**: All unit tests passing, integration tests passing
+- [x] **Quality**: Ruff and Black checks pass, no lint errors
+- [x] **Reviewed**: Review passes (no blocking issues)
+
+If any criterion is not met, report the issue and do NOT proceed to the Document stage.
+
+**Note**: Documentation validation happens AFTER review passes — see Step 6. The canonical pipeline order is: Plan → Branch → Implement → Test → Review → Document → PR. The patch loop re-enters at Test (for test failures) or Review (for review failures).
+
+### Step 5.5: CWD Safety Reset
+
+Before running any orchestrator bash commands, verify the shell CWD is the main repo root (not inside a worktree). Run this as a sanity check:
+
+```bash
+cd $(git rev-parse --show-toplevel) && pwd
+```
+
+The output should be the main repo path, NOT a `.worktrees/` path. If the CWD is somehow inside the worktree, this resets it. All subsequent orchestrator commands depend on CWD being the repo root.
+
+### Step 6: Documentation Gate
+
+After review passes, advance to the `document` stage and run documentation lifecycle checks:
+
+```bash
+python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'document')"
+```
+
+This is the Document phase of the pipeline: `Plan → Branch → Implement → Test → Review → **Document** → PR`. Documentation is written and validated here, after implementation is reviewed — not interleaved with implementation.
+
+**6.1 Validate Documentation Changes**
+
+Run the doc validation script to verify documentation was created/updated. This script runs `git diff` internally and needs the worktree as CWD to see the session branch changes.
+
+**Execute each command below exactly as written, including the parentheses.** The `(...)` subshell syntax ensures the `cd` happens in a child process — the orchestrator's CWD stays in the main repo.
+
+```bash
+(cd .worktrees/{slug} && python scripts/validate_docs_changed.py {PLAN_PATH})
+```
+
+- **Exit 0**: Documentation requirements met, proceed to next step
+- **Exit 1**: Documentation missing or insufficient, **STOP and report failure**
+- This check BLOCKS PR creation if it fails
+- The script checks that documentation matching the plan was created in `docs/features/` or `docs/`
+
+**6.2 Scan for Related Documentation**
+
+Collect all changed files from git and scan for related docs:
+
+```bash
+(cd .worktrees/{slug} && CHANGED_FILES=$(git diff --name-only main...HEAD | tr '\n' ' ') && python scripts/scan_related_docs.py --json $CHANGED_FILES > /tmp/related_docs.json)
+```
+
+This identifies existing documentation that may need updates based on code changes.
+
+**6.3 Create Review Issues for Discrepancies**
+
+Pipe the scan results to create GitHub issues for HIGH/MED-HIGH confidence matches:
+
+```bash
+cat /tmp/related_docs.json | python scripts/create_doc_review_issue.py
+```
+
+This creates tracking issues for documentation that should be reviewed for updates.
+
+### Step 7: Create Pull Request
+
+After documentation gate passes, advance to the `pr` stage and push:
+
+```bash
+python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'pr')"
+```
+
+Then push and create the PR:
+
+```bash
+git -C .worktrees/{slug} push -u origin session/{slug}
+gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
+## Summary
+[Brief description of what was built]
+
+## Changes
+- [List key changes made]
+
+## Testing
+- [x] Unit tests passing
+- [x] Integration tests passing
+- [x] Linting (ruff, black) passing
+
+## Documentation
+- [x] Docs created per plan requirements
+- [x] Related docs scanned for updates
+
+## Definition of Done
+- [x] Built: Code implemented and working
+- [x] Tested: All tests passing
+- [x] Documented: Docs created/updated
+- [x] Quality: Lint and format checks pass
+
+Closes #[issue-number]
+EOF
+)"
+```
+
+**Important**: The PR creation step is handled by the BUILD ORCHESTRATOR (this skill), NOT by individual builder agents. Builder agents focus on their assigned tasks, while the orchestrator creates the final PR after all tasks complete and gates pass.
+
+### Step 7.5: Worktree Cleanup
+
+After pushing and creating the PR, clean up the worktree using `worktree_manager.py` which handles CWD safely via `subprocess(cwd=repo_root)`:
+
+```bash
+python -c "
+from pathlib import Path
+from agent.worktree_manager import remove_worktree, prune_worktrees
+repo = Path('$(git rev-parse --show-toplevel)')
+remove_worktree(repo, '{slug}', delete_branch=False)
+prune_worktrees(repo)
+"
+```
+
+Note: `delete_branch=False` because the PR still references `session/{slug}`. The branch is cleaned up when the PR is merged.
+
+### Step 7.6: Documentation Cascade
+
+After the PR is created, run the `/do-docs` cascade to find and surgically update any existing documentation affected by the code changes in this build. Pass the PR number so the cascade can inspect the full diff:
+
+```
+/do-docs {PR-number}
+```
+
+This invokes the cascade skill defined in `.claude/skills/do-docs/SKILL.md`, which:
+- Launches parallel agents to explore the change diff and inventory all docs
+- Cross-references changes against every doc in the repo (triage questions)
+- Makes targeted surgical edits to affected docs (read before edit, preserve structure)
+- Creates GitHub issues for conflicts needing human review
+- Commits any doc updates to the PR branch before merge
+
+**Note**: The cascade is best-effort. If it finds nothing to update, that's fine — proceed to plan migration. If it makes edits, those are committed directly to the PR branch.
+
+### Step 8: Plan Migration
+
+After PR is successfully created and documentation cascade completes, clean up the completed plan:
+
+```bash
+cd $(git rev-parse --show-toplevel) && python scripts/migrate_completed_plan.py {PLAN_PATH}
+```
+
+This deletes the plan document and closes the tracking issue, completing the lifecycle.
+
+### Step 9: Report PR Link
+
+After plan migration completes, include the PR URL prominently in your final response. When running via Telegram bridge, the agent's response (containing the PR link) will be automatically sent back to the chat where the build was initiated. No special action required - just ensure the PR URL is visible in your completion report.
+
+## Agent Deployment Context
+
+When deploying an agent, include:
+1. The specific task actions from the plan
+2. Relevant file paths from the plan's "Relevant Files" section
+3. Success criteria from the plan
+4. Validation commands they should run (for validators)
+5. Reminder: No temporary files in repo - use /tmp for scratch work, only commit deliverables
 
 ## Example Invocations
 
@@ -97,6 +388,65 @@ PLAN_ARG: $1
 Both methods will execute the same plan if the plan file has:
 ```yaml
 tracking: https://github.com/valor-labs/ai/issues/42
+```
+
+## Example Execution
+
+Given a plan with tasks:
+```
+1. build-api (Parallel: true)
+2. build-frontend (Parallel: true)
+3. validate-api (Depends On: build-api)
+4. validate-frontend (Depends On: build-frontend)
+5. integration-test (Depends On: validate-api, validate-frontend)
+```
+
+Execution order:
+1. Create all 5 tasks
+2. Set dependencies
+3. Deploy build-api AND build-frontend simultaneously (both parallel, no deps)
+4. When build-api completes → validate-api starts
+5. When build-frontend completes → validate-frontend starts
+6. When BOTH validators complete → integration-test starts
+
+## Report Format
+
+After all tasks complete:
+
+```
+## Plan Execution Complete
+
+**Plan**: [plan name]
+**Pull Request**: [PR URL]
+**Total Tasks**: [count]
+
+### Definition of Done
+- [x] Built: All code implemented and working
+- [x] Tested: Unit tests passing, integration tests passing
+- [x] Reviewed: Review passed (no blocking issues)
+- [x] Documented: Docs created after review (validated by docs gate)
+- [x] Quality: Ruff and Black checks pass
+- [x] Plans migrated: Plan moved from docs/plans/ to completed state
+
+### Task Summary
+| Task | Agent | Status | Test Iterations | Notes |
+|------|-------|--------|----------------|-------|
+| [name] | [agent] | Done | [N] | [brief note] |
+
+### Validation Results
+- [x] All build tasks completed
+- [x] All validators passed
+- [x] Documentation gate passed
+- [x] Documentation cascade completed (`/do-docs`)
+- [x] Success criteria met
+
+### Artifacts Created
+- [list of files created/modified]
+
+### Next Steps
+- Review and merge PR: [PR URL]
+- PR link has been sent to Telegram chat
+- [Any follow-up items or manual steps needed]
 ```
 
 ## Error Handling

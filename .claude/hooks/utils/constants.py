@@ -16,6 +16,15 @@ def get_project_dir() -> Path:
     return Path(__file__).parent.parent.parent.parent
 
 
+def get_data_sessions_dir() -> Path:
+    """Return the data/sessions directory under the project root.
+
+    Used by SDLC hooks (post_tool_use.py, sdlc_reminder.py, validate_sdlc_on_stop.py)
+    to read/write session state files.
+    """
+    return get_project_dir() / "data" / "sessions"
+
+
 def get_session_id(hook_input: dict) -> str:
     """Extract session ID from hook input."""
     return hook_input.get("session_id", "unknown")
