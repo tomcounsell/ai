@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: In Progress
 type: chore
 appetite: Medium
 owner: Valor

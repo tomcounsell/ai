@@ -1,5 +1,7 @@
 ---
-description: "Scale compute by spawning multiple agents in parallel for independent tasks. Use when facing multiple independent tasks that can run concurrently."
+name: pthread
+description: "Use when facing multiple independent tasks that can run concurrently. Scales compute by spawning multiple agents in parallel. Triggered by 'parallelize', 'run these in parallel', or when independent subtasks are detected."
+context: fork
 ---
 
 # Parallel Thread Execution (P-Thread)
@@ -100,7 +102,7 @@ P-Threads should not stop until aggregation is complete:
 1. Spawn all parallel agents
 2. Wait for ALL to complete (no partial results)
 3. Aggregate findings
-4. If aggregation reveals gaps → spawn additional agents
+4. If aggregation reveals gaps -> spawn additional agents
 5. Only complete when unified result meets quality bar
 ```
 
@@ -109,7 +111,7 @@ P-Threads should not stop until aggregation is complete:
 ```markdown
 Input: "Review the authentication system"
 
-System Decision: This spans multiple files/concerns → parallelize
+System Decision: This spans multiple files/concerns -> parallelize
 
 Spawned Agents:
 - Agent 1: Security patterns (auth handlers, token validation)

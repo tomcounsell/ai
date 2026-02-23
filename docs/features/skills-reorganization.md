@@ -17,8 +17,9 @@ Every skill now has proper frontmatter fields:
 - `context: fork` on skills that spawn parallel work (do-build, do-pr-review, do-docs-audit)
 
 ### Commands Consolidated
-- **Thin wrapper commands deleted**: `do-build.md`, `do-plan.md`, `do-test.md`, `do-docs.md`, `do-pr-review.md`, `update.md`, `sdlc.md` — skills handle `/slash-command` invocation directly
-- **Substantial commands converted to skills**: `setup.md` → `.claude/skills/setup/`
+- **Thin wrapper commands deleted**: `do-build.md`, `do-plan.md`, `do-test.md`, `do-docs.md`, `do-pr-review.md`, `update.md` — skills handle `/slash-command` invocation directly
+- **Substantial commands converted to skills**: `setup.md`, `prepare_app.md`, `prime.md`, `add-feature.md`, `pthread.md`, `audit-next-tool.md`, `sdlc.md` — each now has a proper `.claude/skills/{name}/SKILL.md` with frontmatter
+- **`.claude/commands/` is now empty** — all functionality migrated to skills
 
 ### Generic New-Skill Extracted
 - Created `.claude/skills/new-skill/` — repo-agnostic skill creator

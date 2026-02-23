@@ -1,5 +1,6 @@
 ---
-description: "Prepare application for review by starting services and ensuring accessibility for testing. Use before PR review or when the user says 'start the app' or 'prepare for review'."
+name: prepare-app
+description: "Use when preparing an application for review by starting services and ensuring accessibility for testing. Triggered by 'start the app', 'prepare for review', 'prepare app', or before PR review with UI validation."
 ---
 
 # Prepare App
@@ -48,7 +49,7 @@ fi
 
 # Check if server is already running
 if lsof -i:8000 >/dev/null 2>&1; then
-    echo "✅ Django server already running on port 8000"
+    echo "Django server already running on port 8000"
 else
     # Start server in background
     python manage.py runserver --noreload &
@@ -60,10 +61,10 @@ else
 
     # Verify server is responding
     if curl -s http://localhost:8000/ >/dev/null; then
-        echo "✅ Django server ready at http://localhost:8000"
+        echo "Django server ready at http://localhost:8000"
         echo "PID: $SERVER_PID"
     else
-        echo "❌ Server failed to start"
+        echo "Server failed to start"
         kill $SERVER_PID 2>/dev/null
         exit 1
     fi
@@ -77,9 +78,9 @@ fi
 ```bash
 # Check if server is already running on common ports
 if lsof -i:3000 >/dev/null 2>&1; then
-    echo "✅ Server already running on port 3000"
+    echo "Server already running on port 3000"
 elif lsof -i:3001 >/dev/null 2>&1; then
-    echo "✅ Server already running on port 3001"
+    echo "Server already running on port 3001"
 else
     # Determine start command
     if grep -q "\"dev\":" package.json; then
@@ -87,7 +88,7 @@ else
     elif grep -q "\"start\":" package.json; then
         START_CMD="npm start"
     else
-        echo "❌ No start command found in package.json"
+        echo "No start command found in package.json"
         exit 1
     fi
 
@@ -101,13 +102,13 @@ else
 
     # Check common ports
     if curl -s http://localhost:3000/ >/dev/null; then
-        echo "✅ Server ready at http://localhost:3000"
+        echo "Server ready at http://localhost:3000"
         echo "PID: $SERVER_PID"
     elif curl -s http://localhost:3001/ >/dev/null; then
-        echo "✅ Server ready at http://localhost:3001"
+        echo "Server ready at http://localhost:3001"
         echo "PID: $SERVER_PID"
     else
-        echo "❌ Server failed to start"
+        echo "Server failed to start"
         kill $SERVER_PID 2>/dev/null
         exit 1
     fi
@@ -121,7 +122,7 @@ fi
 ```bash
 # Check if server is running
 if lsof -i:8080 >/dev/null 2>&1; then
-    echo "✅ Server already running on port 8080"
+    echo "Server already running on port 8080"
 else
     # Start server
     echo "Starting Go server..."
@@ -133,10 +134,10 @@ else
 
     # Verify
     if curl -s http://localhost:8080/ >/dev/null; then
-        echo "✅ Go server ready at http://localhost:8080"
+        echo "Go server ready at http://localhost:8080"
         echo "PID: $SERVER_PID"
     else
-        echo "❌ Server failed to start"
+        echo "Server failed to start"
         kill $SERVER_PID 2>/dev/null
         exit 1
     fi
@@ -151,13 +152,13 @@ fi
 # Check common development ports
 for port in 3000 3001 8000 8080 5000 4200; do
     if lsof -i:$port >/dev/null 2>&1; then
-        echo "✅ Server found running on port $port"
+        echo "Server found running on port $port"
         echo "URL: http://localhost:$port"
         exit 0
     fi
 done
 
-echo "❌ No running server detected on common ports"
+echo "No running server detected on common ports"
 echo "Please start your application manually or specify custom port"
 exit 1
 ```
@@ -170,27 +171,27 @@ exit 1
 # PostgreSQL
 if command -v pg_isready >/dev/null 2>&1; then
     if pg_isready -q; then
-        echo "✅ PostgreSQL is running"
+        echo "PostgreSQL is running"
     else
-        echo "⚠️  PostgreSQL not running. Start with: brew services start postgresql"
+        echo "PostgreSQL not running. Start with: brew services start postgresql"
     fi
 fi
 
 # Redis
 if command -v redis-cli >/dev/null 2>&1; then
     if redis-cli ping >/dev/null 2>&1; then
-        echo "✅ Redis is running"
+        echo "Redis is running"
     else
-        echo "⚠️  Redis not running. Start with: brew services start redis"
+        echo "Redis not running. Start with: brew services start redis"
     fi
 fi
 
 # MySQL
 if command -v mysql >/dev/null 2>&1; then
     if mysqladmin ping >/dev/null 2>&1; then
-        echo "✅ MySQL is running"
+        echo "MySQL is running"
     else
-        echo "⚠️  MySQL not running. Start with: brew services start mysql"
+        echo "MySQL not running. Start with: brew services start mysql"
     fi
 fi
 ```
@@ -202,18 +203,18 @@ fi
 ```bash
 # Check for .env file
 if [ -f .env ]; then
-    echo "✅ .env file found"
+    echo ".env file found"
 
     # Check for common required variables
     if grep -q "DATABASE_URL" .env; then
-        echo "  ✅ DATABASE_URL configured"
+        echo "  DATABASE_URL configured"
     fi
 
     if grep -q "SECRET_KEY" .env; then
-        echo "  ✅ SECRET_KEY configured"
+        echo "  SECRET_KEY configured"
     fi
 else
-    echo "⚠️  No .env file found. May need environment configuration."
+    echo "No .env file found. May need environment configuration."
 fi
 ```
 
@@ -222,7 +223,7 @@ fi
 **Report application status:**
 
 ```
-🚀 Application Preparation Summary
+Application Preparation Summary
 
 Project Type: {detected_type}
 Server Status: {running/started/failed}
@@ -236,7 +237,7 @@ Database Services:
 
 Environment: {configured/needs_setup}
 
-✅ Ready for review
+Ready for review
 ```
 
 ## Cleanup Instructions
@@ -283,7 +284,7 @@ lsof -ti:3000 | xargs kill
 
 ```bash
 # Auto-detect and prepare
-/prepare_app
+/prepare-app
 
 # Manual verification after
 curl http://localhost:8000/
