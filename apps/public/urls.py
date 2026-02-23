@@ -32,12 +32,6 @@ urlpatterns += [
 
 # Example pages
 urlpatterns += [
-    # Landing page
-    path(
-        "landing/",
-        pages.LandingView.as_view(),
-        name="landing",
-    ),
     # Pricing page
     path(
         "pricing/",

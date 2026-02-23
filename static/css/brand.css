@@ -187,6 +187,13 @@ label, .label {
     padding: var(--space-3xl) 0;
 }
 
+.section-hero {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: var(--space-3xl) var(--space-lg);
+    text-align: center;
+}
+
 .container-brand {
     max-width: 1200px;
     margin: 0 auto;
@@ -262,6 +269,35 @@ label, .label {
     pointer-events: none;
 }
 
+/* Product card — homepage multi-product cards */
+.product-card {
+    background: var(--color-bg-white);
+    border: 1px solid var(--color-border-medium);
+    padding: var(--space-lg);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.product-card:hover {
+    border-color: var(--color-border-dark);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+/* Episode card — podcast episode cards */
+.episode-card {
+    background: var(--color-bg-white);
+    border: 1px solid var(--color-border-medium);
+    padding: var(--space-lg);
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    display: block;
+    text-decoration: none;
+    color: inherit;
+}
+
+.episode-card:hover {
+    border-color: var(--color-border-dark);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
 /* Server card */
 .server-card {
     background: var(--color-bg-white);
@@ -324,6 +360,28 @@ label, .label {
 
 .nav-brand a:hover,
 .nav-brand a.active {
+    color: var(--color-text-black);
+}
+
+/* === FOOTER === */
+
+.footer-section-header {
+    font-family: var(--font-mono);
+    font-size: 0.688rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-gray);
+    margin-bottom: var(--space-md);
+}
+
+.footer-link {
+    color: var(--color-text-gray);
+    text-decoration: none;
+    transition: color 0.2s ease;
+}
+
+.footer-link:hover {
     color: var(--color-text-black);
 }
 
@@ -451,6 +509,14 @@ pre.brand-code {
 
 .text-mono { font-family: var(--font-mono); }
 .text-sans { font-family: var(--font-sans); }
+.text-technical-label {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-text-gray);
+}
 .text-small-caps { font-variant: small-caps; letter-spacing: 0.05em; }
 .text-accent { color: var(--color-accent); }
 .text-warm { color: var(--color-warm); }

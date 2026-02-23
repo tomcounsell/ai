@@ -1,53 +1,36 @@
 """
-Homepage view for Cuttlefish AI Integration Platform.
+Homepage view for Yudame platform.
 
-This module contains the main homepage view that showcases available
-MCP servers and provides setup instructions.
-
-HOMEPAGE STRUCTURE
-==================
-The homepage (templates/home.html) consists of four main sections:
-
-1. Hero Section
-   - Platform title and value proposition
-   - Uses technical-spec-box styling from brand.css
-
-2. Available MCP Servers
-   - Grid of server cards showing each MCP server
-   - Each card displays: name, description, specs, and documentation link
-   - Status indicators: green dot = live, orange dot = in development
-
-3. Protocol Overview
-   - Explains what MCP (Model Context Protocol) is
-   - Three-column benefit grid
-
-4. Quick Start Guide
-   - Step-by-step installation instructions
-   - Code snippets for Claude Desktop configuration
-   - Restart instructions
-
-MAINTENANCE
-===========
-- To add a new MCP server, duplicate a server-card div in the template
-- Update server count when adding new servers
-- Server documentation pages live at /mcp/{server-name}/
+The homepage leads with recent podcast episodes and provides secondary
+navigation to AI tools (MCP servers). Context includes the 3 most recently
+published episodes for the featured section.
 """
 
 from django.views.generic import TemplateView
 
+from apps.podcast.models import Episode
+
 
 class HomeView(TemplateView):
     """
-    Main homepage for the Cuttlefish AI Integration Platform.
+    Main homepage for the Yudame platform.
 
     Displays:
-    - Hero section with platform description
-    - Available MCP servers (Creative Juices, CTO Tools, etc.)
-    - Protocol overview explaining MCP
-    - Quick start installation guide
+    - Hero section with platform overview
+    - Latest published podcast episodes (up to 3)
+    - AI Tools section (Creative Juices, CTO Tools)
 
     Template: templates/home.html
     URL: / (root)
     """
 
     template_name = "home.html"
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["recent_episodes"] = (
+            Episode.objects.filter(published_at__isnull=False)
+            .select_related("podcast")
+            .order_by("-published_at")[:3]
+        )
+        return context

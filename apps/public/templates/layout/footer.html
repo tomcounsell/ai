@@ -16,24 +16,24 @@ Provides links to important pages, legal information, and site metadata.
       <div class="space-y-6">
         <div class="flex items-center">
           <span class="text-mono" style="font-size: 0.875rem; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase;">
-            YUDAME AI
+            Yudame
           </span>
         </div>
         <p class="text-balance text-sm" style="line-height: 1.6; color: var(--color-text-gray);">
-          AI integration platform providing Model Context Protocol servers for developers and technical leaders.
+          Multi-product platform — podcasts, AI tools, and more.
         </p>
 
         <!-- Social Links -->
         <div class="flex gap-x-4">
-          <a href="https://github.com/yudame/ai-skills" target="_blank" style="color: var(--color-text-gray); transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+          <a href="https://github.com/yudame/ai-skills" target="_blank" class="footer-link">
             <span class="sr-only">GitHub</span>
             <i class="fab fa-github"></i>
           </a>
-          <a href="https://x.com/tomcounsell" target="_blank" style="color: var(--color-text-gray); transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+          <a href="https://x.com/tomcounsell" target="_blank" class="footer-link">
             <span class="sr-only">X</span>
             <i class="fab fa-x-twitter"></i>
           </a>
-          <a href="https://www.linkedin.com/company/yudame/" target="_blank" style="color: var(--color-text-gray); transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+          <a href="https://www.linkedin.com/company/yudame/" target="_blank" class="footer-link">
             <span class="sr-only">LinkedIn</span>
             <i class="fab fa-linkedin"></i>
           </a>
@@ -43,34 +43,35 @@ Provides links to important pages, legal information, and site metadata.
       <!-- Footer Links -->
       <div class="mt-12 grid grid-cols-2 gap-8 xl:col-span-2 xl:mt-0">
         <div class="md:grid md:grid-cols-2 md:gap-8">
-          <!-- MCP Servers -->
+          <!-- Products -->
           <div>
+            <h3 class="footer-section-header">Products</h3>
             <ul role="list" class="space-y-3">
               <li>
-                <a href="https://ai.yuda.me/mcp/creative-juices" class="text-sm" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+                <a href="https://ai.yuda.me/mcp/creative-juices" class="footer-link text-sm">
                   Creative Juices
                 </a>
               </li>
               <li>
-                <a href="https://ai.yuda.me/mcp/cto-tools" class="text-sm" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+                <a href="https://ai.yuda.me/mcp/cto-tools" class="footer-link text-sm">
                   CTO Tools
                 </a>
               </li>
               <li>
-                <a href="{% url 'podcast:list' %}" class="text-sm" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+                <a href="{% url 'podcast:list' %}" class="footer-link text-sm">
                   Podcast
                 </a>
               </li>
               {% if user.is_staff %}
               <li>
-                <a href="{% url 'admin:index' %}" class="text-sm" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+                <a href="{% url 'admin:index' %}" class="footer-link text-sm">
                   Admin
                 </a>
               </li>
               {% endif %}
               {% if user.teams.exists %}
               <li>
-                <a href="{% url 'public:team-list' %}" class="text-sm" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+                <a href="{% url 'public:team-list' %}" class="footer-link text-sm">
                   Team
                 </a>
               </li>
@@ -80,19 +81,20 @@ Provides links to important pages, legal information, and site metadata.
 
           <!-- Resources -->
           <div class="mt-10 md:mt-0">
+            <h3 class="footer-section-header">Resources</h3>
             <ul role="list" class="space-y-3">
               <li>
-                <a href="https://github.com/yudame/ai-skills" target="_blank" class="text-sm" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+                <a href="https://github.com/yudame/ai-skills" target="_blank" class="footer-link text-sm">
                   Documentation
                 </a>
               </li>
               <li>
-                <a href="https://github.com/yudame/ai-skills" target="_blank" class="text-sm" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+                <a href="https://github.com/yudame/ai-skills" target="_blank" class="footer-link text-sm">
                   GitHub
                 </a>
               </li>
               <li>
-                <a href="https://modelcontextprotocol.io" target="_blank" class="text-sm" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+                <a href="https://modelcontextprotocol.io" target="_blank" class="footer-link text-sm">
                   MCP Protocol
                 </a>
               </li>
@@ -106,7 +108,7 @@ Provides links to important pages, legal information, and site metadata.
             <ul role="list" class="space-y-3">
               {% comment %}Temporarily hidden
               <li>
-                <a href="{% url 'public:pricing' %}" class="text-sm" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+                <a href="{% url 'public:pricing' %}" class="footer-link text-sm">
                   Pricing
                 </a>
               </li>
@@ -116,14 +118,15 @@ Provides links to important pages, legal information, and site metadata.
 
           <!-- Legal Links -->
           <div class="mt-10 md:mt-0">
+            <h3 class="footer-section-header">Legal</h3>
             <ul role="list" class="space-y-3">
               <li>
-                <a href="{% url 'public:privacy' %}" class="text-sm" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+                <a href="{% url 'public:privacy' %}" class="footer-link text-sm">
                   Privacy Policy
                 </a>
               </li>
               <li>
-                <a href="{% url 'public:terms' %}" class="text-sm" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+                <a href="{% url 'public:terms' %}" class="footer-link text-sm">
                   Terms of Service
                 </a>
               </li>
@@ -135,9 +138,9 @@ Provides links to important pages, legal information, and site metadata.
 
     <!-- Copyright Section -->
     <div class="mt-12 border-t pt-8 sm:mt-16 flex flex-col md:flex-row justify-between items-center" style="border-color: var(--color-border-light);">
-      <p class="text-sm text-mono" style="color: var(--color-text-light-gray);">&copy; {% now "Y" %} YUDAME AI</p>
+      <p class="text-sm text-mono" style="color: var(--color-text-light-gray);">&copy; {% now "Y" %} Yudame</p>
       <p class="text-sm mt-4 md:mt-0" style="color: var(--color-text-gray);">
-        <a href="https://tomcounsell.com" target="_blank" style="color: var(--color-text-gray); text-decoration: none; transition: color 0.2s;" onmouseover="this.style.color='var(--color-text-black)'" onmouseout="this.style.color='var(--color-text-gray)'">
+        <a href="https://tomcounsell.com" target="_blank" class="footer-link">
           Created by Tom Counsell
         </a>
       </p>

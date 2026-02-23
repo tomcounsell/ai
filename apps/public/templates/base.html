@@ -38,10 +38,10 @@ Block Structure:
     <link rel="stylesheet" href="{% static 'css/brand.css' %}?v=1"/>
 
     <!-- Title -->
-    <title>{% block title %}Django Project Template{% endblock %}{% if debug %} (DEBUG){% endif %}</title>
+    <title>{% block title %}Yudame{% endblock %}{% if debug %} (DEBUG){% endif %}</title>
 
     <!-- Meta Tags -->
-    <meta name="description" content="{% block meta_description %}A modern Django project template{% endblock %}">
+    <meta name="description" content="{% block meta_description %}Yudame — podcasts, AI tools, and more.{% endblock %}">
 
     {% block meta %}
     <!-- Open Graph / Social Meta Tags -->
@@ -132,30 +132,11 @@ Block Structure:
     <div class="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         <div class="grid grid-cols-1 md:grid-cols-12 gap-6">
             <!-- Main Content Area -->
-            <div class="md:col-span-8 md:col-span-9 md:col-span-10 md:col-span-12">
+            <div class="md:col-span-{% block content_width %}12{% endblock %}">
                 {% block content %}
                 <!-- Main content goes here -->
                 {% endblock %}
             </div>
-
-            <script>
-                // Apply the correct column span based on the content type
-                document.addEventListener('DOMContentLoaded', function () {
-                    const contentDiv = document.querySelector('main .md\\:col-span-8');
-                    const sidebarEnabled = { % block
-                    content_width %
-                }
-                    12
-                    {%
-                        endblock %
-                    }
-                    ;
-
-                    if (contentDiv) {
-                        contentDiv.className = contentDiv.className.replace(/md:col-span-\d+/g, `md:col-span-${sidebarEnabled}`);
-                    }
-                });
-            </script>
 
             <!-- Sidebar (if enabled) -->
             {% block sidebar_enabled %}{% endblock %}
@@ -178,7 +159,7 @@ Block Structure:
 </main>
 
 <!-- Footer -->
-<footer class="nav-brand mt-auto border-t"
+<footer class="nav-brand mt-auto border-t">
     {% block footer %}
     {% include "layout/footer.html" %}
     {% endblock %}

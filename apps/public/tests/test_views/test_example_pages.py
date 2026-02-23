@@ -1,5 +1,5 @@
 """
-Tests for the example pages (landing, pricing).
+Tests for the example pages (pricing).
 
 These tests verify that:
 - The example pages render correctly
@@ -17,23 +17,6 @@ class ExamplePagesTestCase(TestCase):
     def setUp(self):
         """Set up test data."""
         self.client = Client()
-
-    def test_landing_page_renders(self):
-        """Test that the landing page renders correctly with expected content."""
-        response = self.client.get(reverse("public:landing"))
-        self.assertEqual(response.status_code, 200)
-
-        # Check template
-        self.assertTemplateUsed(response, "pages/landing.html")
-
-        # Check content
-        content = response.content.decode("utf-8")
-        self.assertIn("Welcome to Our Platform", content)
-        self.assertIn("Get Started", content)
-
-        # Check blocks are rendered
-        self.assertIn("How it works", content)
-        self.assertIn("Features", content)
 
     def test_pricing_page_renders(self):
         """Test that the pricing page renders correctly with expected content."""

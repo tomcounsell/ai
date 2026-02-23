@@ -1,12 +1,12 @@
-# Branding Brief: Yudame Research / Cuttlefish
+# Branding Brief: Yudame / Cuttlefish
 
 ## The Vibe
 
-This is a brand for people who think in systems. It looks like the notebook of someone who reads architectural theory for pleasure and keeps their references organized by ontological category. The aesthetic is what happens when an INTJ designs a research platform — every element is there for a reason, nothing is decorative, and the restraint itself communicates confidence.
+This is a brand for people who think in systems. It looks like the notebook of someone who reads architectural theory for pleasure and keeps their references organized by ontological category. The aesthetic is what happens when an INTJ designs a multi-product platform — every element is there for a reason, nothing is decorative, and the restraint itself communicates confidence. Yudame spans podcasts, AI tools, and more. The homepage leads with podcast content. The architectural precision serves a broad audience without dumbing anything down.
 
 The dominant visual experience is **black ink on warm cream paper**. Not white — cream. The kind of off-white you find in a Moleskine or a university press monograph. Against this quiet backdrop, the only color that earns its place is **red** — used the way an architect uses a red pen on a site plan: to annotate, to emphasize structure, to mark what matters. Red doesn't fill surfaces. It draws lines, labels critical elements, and signals active states. Everything else is grayscale.
 
-The typography is precise without being cold. Monospace type (IBM Plex Mono) handles labels, data, and navigation — it says "this is a system built by someone who reads terminal output." Body text is clean sans-serif (Inter) that stays out of the way. Headers are uppercase, letter-spaced, understated. The overall feeling is a technical document that happens to be beautiful.
+The typography is precise without being cold. Headings use Inter (sans-serif) — clean, confident, and readable at every size. Monospace type (IBM Plex Mono) is reserved for labels, data, code, and technical metadata — it says "this is a system built by someone who reads terminal output." Body text is also Inter, staying out of the way. The `.text-technical-label` class provides opt-in UNDERSCORE_CASE labeling where the architectural voice is appropriate. The overall feeling is a well-designed platform that happens to be technically rigorous.
 
 The layout draws from architectural plan drawings: visible grids, generous white space used as structural negative space (not just emptiness), systematic numbering conventions, and information organized with the rigor of a site analysis diagram. Components have square corners. Borders are precise. The grid isn't hidden — it's celebrated as part of the design language.
 
@@ -55,33 +55,34 @@ Muted:      #991B1B   — Inline text emphasis
 Subtle:     rgba(185, 28, 28, 0.08) — Background tint (use rarely)
 ```
 
-**Secondary Warmth** — Gold for quiet diagram lines
+**Secondary Warmth** — Gold is reserved for the logo only
 ```
-Warm:       #B8935F   — Diagram lines, tertiary accents
-Warm Light: #D4A574   — Subtle warmth touches
+Warm:       #B8935F   — Logo accent only
+Warm Light: #D4A574   — Logo accent only
 ```
 
 Red is never a surface color. It annotates, marks, and highlights. The moment red fills a large area, the design has gone wrong.
 
 ### Typography
 
-**IBM Plex Mono** (300, 400, 500, 600)
-- Labels, navigation, data displays, code
-- Letter-spacing: 0.08em–0.15em for uppercase treatments
-- The "system" voice — technical, precise, trustworthy
-
 **Inter** (300, 400, 500, 600, 700)
-- Body text, descriptions, paragraphs
-- Clean, readable, stays out of the way
-- The "human" voice — warm, clear, unpretentious
+- Headings (h1, h2, h3), body text, descriptions, paragraphs
+- Clean, readable, confident at every scale
+- The primary voice — warm, clear, unpretentious
+
+**IBM Plex Mono** (300, 400, 500, 600)
+- Labels, data displays, code, technical metadata
+- Letter-spacing: 0.08em–0.15em for uppercase treatments
+- The "system" voice — reserved for technical contexts
 
 **Hierarchy**
 | Use | Font | Size | Weight | Transform |
 |-----|------|------|--------|-----------|
-| Page title | Inter | 2rem | 600 | uppercase, 0.05em |
-| Section header | Inter | 1.25rem | 600 | uppercase, 0.05em |
+| Page title (h1) | Inter | 2rem | 600 | normal or uppercase |
+| Section header (h2) | Inter | 1.25rem | 600 | normal or uppercase |
+| Subsection (h3) | Inter | 1.1rem | 600 | normal |
 | Body text | Inter | 0.875–0.95rem | 400 | normal |
-| Label | IBM Plex Mono | 0.75rem | 500 | uppercase, 0.08em |
+| Technical label | IBM Plex Mono | 0.75rem | 500 | uppercase, 0.08em |
 | Data/code | IBM Plex Mono | 0.75–0.875rem | 400 | normal |
 | Annotation label | IBM Plex Mono | 0.7rem | 500 | uppercase, 0.08em (red) |
 
@@ -114,12 +115,21 @@ XL:   48px   (6x)    — Between components
 - `card-technical`: 1px medium border, white background, darkens on hover
 - `technical-spec-box`: 2px dark border with 6px-inset inner border (hero sections)
 - `card-corner-marks`: No full border, just 16px L-shaped marks at top-left and bottom-right (blueprint aesthetic)
+- `product-card`: Homepage multi-product cards (white, medium border, hover shadow)
+- `episode-card`: Podcast episode cards (white, medium border, elevated hover state)
 
-**Labels**: Technical numbering convention — `MCP_SERVER_01`, `TOOL_03`, `BENEFIT_01`. Monospace, uppercase, gray. Annotation labels use red for emphasis.
+**Sections & Layout**
+- `section-hero`: Centered hero section with max-width and auto margins
+- `footer-section-header`: Monospace uppercase footer column headers
+- `footer-link`: Gray footer links that darken on hover
+
+**Labels**
+- Technical numbering convention — `MCP_SERVER_01`, `TOOL_03`, `BENEFIT_01`. Monospace, uppercase, gray. Annotation labels use red for emphasis.
+- `text-technical-label`: Opt-in monospace uppercase label class. Use this when a specific element needs the UNDERSCORE_CASE treatment without applying monospace globally.
 
 **Dividers**: 1px line with centered 6px circular node. Simple, architectural.
 
-**Status indicators**: 8px circles. Green (operational), orange (development), red (offline).
+**Status indicators**: 8px circles. Green (operational), red (offline).
 
 ### What This Brand Is Not
 
@@ -169,7 +179,7 @@ Minimalism works when every element carries weight. When a page has a title, thr
 The brand's authority posture ("we don't beg for clicks") easily produces hero sections that are inert title cards. Users bounce without a next step. **Guardrail:** Every top-of-page section must have a visible CTA or an obvious scroll affordance. "Get Started" linking to the install guide is the minimum. A one-line code snippet or architecture diagram is better.
 
 ### 3. Monospace overuse kills readability
-IBM Plex Mono is the brand's voice — but when everything is monospace, nothing is. Long-form copy in monospace is objectively harder to read. **Guardrail:** Monospace is for labels, navigation, data, and code. Body paragraphs, value propositions, and descriptions must be Inter. If a section is mostly monospace and mostly prose, something is wrong.
+IBM Plex Mono carries the brand's technical voice — but when everything is monospace, nothing is. Long-form copy in monospace is objectively harder to read. **Guardrail:** Monospace is for labels, data, code, and technical metadata. Headings, body paragraphs, value propositions, and descriptions use Inter. The `.text-technical-label` class provides opt-in monospace labeling where needed. If a section is mostly monospace and mostly prose, something is wrong.
 
 ### 4. Flat visual hierarchy
 When every section uses the same size, weight, and spacing, the page becomes a wall of equal-weight content. The brand's refusal to decorate makes this worse. **Guardrail:** Use size, spacing, and the red accent to create exactly two focal points per page. The hero and the primary content section should feel visibly dominant. Everything else recedes.

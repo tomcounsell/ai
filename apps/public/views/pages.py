@@ -1,5 +1,5 @@
 """
-Views for the example pages (landing, pricing, blog).
+Views for the example pages (pricing, blog).
 
 These views demonstrate best practices for rendering different types of pages,
 including authentication-optional pages and content-driven pages.
@@ -9,62 +9,6 @@ from django.http import Http404
 from django.utils import timezone
 
 from apps.public.views.helpers.main_content_view import MainContentView
-
-
-class LandingView(MainContentView):
-    """Landing page for the site."""
-
-    template_name = "pages/landing.html"
-    active_nav = "home"  # Use home as the active nav
-
-    def get(self, request, *args, **kwargs):
-        """Get method to load landing page context."""
-        self.context.update(self.get_context_data())
-        return self.render(request)
-
-    def get_context_data(self, **kwargs):
-        """Add additional context for the landing page."""
-        context = {}
-
-        # Features list for landing page
-        context["features"] = [
-            {
-                "title": "Powerful Tools",
-                "description": "Access a suite of powerful tools to boost your productivity.",
-                "icon": "tools",
-            },
-            {
-                "title": "Secure Platform",
-                "description": "Your data is safe with our enterprise-grade security.",
-                "icon": "shield-alt",
-            },
-            {
-                "title": "Seamless Integration",
-                "description": "Integrate with your favorite tools and services.",
-                "icon": "plug",
-            },
-        ]
-
-        # Steps for "How it works" section
-        context["steps"] = [
-            {
-                "number": 1,
-                "title": "Create an Account",
-                "description": "Sign up for free and get started in minutes.",
-            },
-            {
-                "number": 2,
-                "title": "Configure Your Settings",
-                "description": "Customize the platform to match your needs.",
-            },
-            {
-                "number": 3,
-                "title": "Start Building",
-                "description": "Use our tools to create amazing things.",
-            },
-        ]
-
-        return context
 
 
 class PricingView(MainContentView):

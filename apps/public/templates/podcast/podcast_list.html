@@ -9,6 +9,9 @@
 {% endblock %}
 
 {% block content %}
+<p class="text-sm mb-6" style="color: var(--color-text-gray); max-width: 600px;">
+    Explore our research-driven podcast series covering technology, policy, and global connectivity.
+</p>
 <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
   {% for podcast in podcasts %}
   <a href="{% url 'podcast:detail' slug=podcast.slug %}"

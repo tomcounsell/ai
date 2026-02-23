@@ -1,241 +1,263 @@
 {% extends "base.html" %}
 
-{% block title %}Design System Reference - Yudame AI{% endblock %}
+{% block title %}Design System Reference - Yudame{% endblock %}
 
 {% block main_header %}
-  <div style="max-width: 1000px; margin: 0 auto; padding-top: var(--space-2xl);">
-    <div class="technical-spec-box">
-      <div class="label" style="margin-bottom: var(--space-md);">DESIGN_SYSTEM_REFERENCE</div>
-      <h1 class="text-mono" style="font-size: 2rem; font-weight: 300; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: var(--space-lg);">
-        Component Library
-      </h1>
-      <p class="text-sans" style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal); max-width: 700px;">
-        Reference guide for all design components, typography rules, and brand patterns used throughout the Yudame AI platform.
-      </p>
-    </div>
+  <div class="section-hero">
+    <h1 class="text-4xl mb-4">Design System Reference</h1>
+    <p class="text-sans text-sm leading-relaxed max-w-2xl mx-auto" style="color: var(--color-text-charcoal);">
+      Living style guide for all design components, typography rules, color palette, and brand patterns
+      used throughout the Yudame platform.
+    </p>
   </div>
 {% endblock %}
 
 {% block content %}
-<div style="max-width: 1000px; margin: 0 auto;">
+<div class="container-brand">
 
-  <!-- TYPOGRAPHY SECTION -->
-  <section style="margin-bottom: var(--space-3xl);">
-    <div class="label" style="margin-bottom: var(--space-lg);">01_TYPOGRAPHY</div>
+  <!-- ============================================================
+       TYPOGRAPHY
+       ============================================================ -->
+  <section class="mb-24">
+    <h2 class="text-base mb-6">Typography</h2>
 
-    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg); margin-bottom: var(--space-lg);">
-      <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: var(--space-md);">
-        Font Families
-      </h2>
+    <!-- Font Families -->
+    <div class="card-technical mb-6 p-8">
+      <h3 class="text-sm mb-4">Font Families</h3>
 
-      <div style="display: grid; gap: var(--space-md);">
-        <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
-          <div class="text-mono" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: 4px;">PRIMARY_MONOSPACE</div>
-          <div class="text-mono" style="font-size: 1rem; margin-bottom: 4px;">IBM Plex Mono (300, 400, 500, 600)</div>
-          <div class="text-sans" style="font-size: 0.75rem; color: var(--color-text-gray);">Usage: Headers, labels, navigation, code blocks, technical specs</div>
+      <div class="grid gap-4">
+        <div class="border-l-2 border-gray-800 pl-4">
+          <div class="text-technical-label mb-1">Primary Sans-Serif (Headings + Body)</div>
+          <div class="text-sans text-base mb-1">Inter (300, 400, 500, 600, 700)</div>
+          <div class="text-sans text-xs" style="color: var(--color-text-gray);">Usage: h1-h3 headings, body copy, descriptions, paragraphs</div>
         </div>
 
-        <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
-          <div class="text-mono" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: 4px;">PRIMARY_SANS_SERIF</div>
-          <div class="text-sans" style="font-size: 1rem; margin-bottom: 4px;">Inter (300, 400, 500, 600, 700)</div>
-          <div class="text-sans" style="font-size: 0.75rem; color: var(--color-text-gray);">Usage: Body copy, descriptions, paragraphs</div>
+        <div class="border-l-2 border-gray-800 pl-4">
+          <div class="text-technical-label mb-1">Monospace (Labels, Code, Data)</div>
+          <div class="text-mono text-base mb-1">IBM Plex Mono (300, 400, 500, 600)</div>
+          <div class="text-sans text-xs" style="color: var(--color-text-gray);">Usage: Labels, navigation, code blocks, technical specs, data displays</div>
         </div>
       </div>
     </div>
 
-    <!-- Typography Scale -->
-    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg); margin-bottom: var(--space-lg);">
-      <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: var(--space-md);">
-        Type Scale & Hierarchy
-      </h2>
+    <!-- Type Scale -->
+    <div class="card-technical p-8">
+      <h3 class="text-sm mb-4">Type Scale and Hierarchy</h3>
 
-      <div style="display: grid; gap: var(--space-sm);">
-        <!-- Hero Title -->
-        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
-          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">HERO_TITLE (2.5rem / 40px)</div>
-          <h1 class="text-mono" style="font-size: 2.5rem; font-weight: 300; letter-spacing: 0.15em; text-transform: uppercase; line-height: 1;">
-            YUDAME AI
-          </h1>
-          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 2.5rem; font-weight: 300; letter-spacing: 0.15em;</code>
+      <div class="grid gap-2">
+        <!-- h1 -->
+        <div class="py-3 border-b" style="border-color: var(--color-border-light);">
+          <div class="text-technical-label mb-1">h1 — Page Title</div>
+          <h1 class="mb-2">Yudame Platform</h1>
+          <code class="text-mono text-xs px-2 py-0.5 bg-gray-100">font-sans, 600 weight, uppercase, 0.05em tracking (via brand.css h1-h3 rule)</code>
         </div>
 
-        <!-- Page Title -->
-        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
-          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">PAGE_TITLE (2rem / 32px)</div>
-          <h1 class="text-mono" style="font-size: 2rem; font-weight: 300; letter-spacing: 0.1em; text-transform: uppercase; line-height: 1.2;">
-            MCP Server Hub
-          </h1>
-          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 2rem; font-weight: 300; letter-spacing: 0.1em;</code>
+        <!-- h2 -->
+        <div class="py-3 border-b" style="border-color: var(--color-border-light);">
+          <div class="text-technical-label mb-1">h2 — Section Header</div>
+          <h2 class="mb-2">What is Model Context Protocol?</h2>
+          <code class="text-mono text-xs px-2 py-0.5 bg-gray-100">font-sans, 600 weight, uppercase, 0.05em tracking</code>
         </div>
 
-        <!-- Section Header -->
-        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
-          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">SECTION_HEADER (0.875rem / 14px)</div>
-          <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em;">
-            What is Model Context Protocol?
-          </h2>
-          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 0.875rem; font-weight: 600; letter-spacing: 0.08em;</code>
-        </div>
-
-        <!-- Component Title -->
-        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
-          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">COMPONENT_TITLE (1rem / 16px)</div>
-          <h3 class="text-mono" style="font-size: 1rem; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase;">
-            Creative Juices
-          </h3>
-          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 1rem; font-weight: 500; letter-spacing: 0.05em;</code>
+        <!-- h3 -->
+        <div class="py-3 border-b" style="border-color: var(--color-border-light);">
+          <div class="text-technical-label mb-1">h3 — Component Title</div>
+          <h3 class="mb-2">Creative Juices</h3>
+          <code class="text-mono text-xs px-2 py-0.5 bg-gray-100">font-sans, 600 weight, uppercase, 0.05em tracking</code>
         </div>
 
         <!-- Label -->
-        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
-          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">LABEL (0.75rem / 12px)</div>
-          <div class="label">MCP_SERVER_01</div>
-          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 0.75rem; font-weight: 500; letter-spacing: 0.08em; color: var(--color-text-gray);</code>
+        <div class="py-3 border-b" style="border-color: var(--color-border-light);">
+          <div class="text-technical-label mb-1">Label (monospace)</div>
+          <div class="label mb-2">MCP_SERVER_01</div>
+          <code class="text-mono text-xs px-2 py-0.5 bg-gray-100">.label — font-mono, 0.75rem, 500 weight, 0.08em tracking, uppercase, gray</code>
+        </div>
+
+        <!-- Annotation Label -->
+        <div class="py-3 border-b" style="border-color: var(--color-border-light);">
+          <div class="text-technical-label mb-1">Annotation Label (red)</div>
+          <div class="label-annotation mb-2">REQUIRED</div>
+          <code class="text-mono text-xs px-2 py-0.5 bg-gray-100">.label-annotation — font-mono, 0.7rem, red accent color</code>
+        </div>
+
+        <!-- Technical Label -->
+        <div class="py-3 border-b" style="border-color: var(--color-border-light);">
+          <div class="text-technical-label mb-1">Technical Label (utility class)</div>
+          <div class="text-technical-label mb-2">PROTOCOL_OVERVIEW</div>
+          <code class="text-mono text-xs px-2 py-0.5 bg-gray-100">.text-technical-label — font-mono, 0.75rem, 500 weight, 0.08em tracking, uppercase, gray</code>
         </div>
 
         <!-- Body Text -->
-        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
-          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">BODY_TEXT (0.875rem / 14px)</div>
-          <p class="text-sans" style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal);">
+        <div class="py-3 border-b" style="border-color: var(--color-border-light);">
+          <div class="text-technical-label mb-1">Body Text</div>
+          <p class="text-sans text-sm leading-relaxed mb-2" style="color: var(--color-text-charcoal);">
             MCP is an open protocol that standardizes how applications provide context to Large Language Models.
+            Think of it as a USB-C port for AI applications.
           </p>
-          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal);</code>
-        </div>
-
-        <!-- Small Body -->
-        <div style="padding: var(--space-sm); border-bottom: 1px solid var(--color-border-light);">
-          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">SMALL_BODY (0.813rem / 13px)</div>
-          <p class="text-sans" style="font-size: 0.813rem; line-height: 1.6; color: var(--color-text-gray);">
-            Randomness tools for divergent thinking. Breaks predictable AI patterns.
-          </p>
-          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 0.813rem; line-height: 1.6; color: var(--color-text-gray);</code>
+          <code class="text-mono text-xs px-2 py-0.5 bg-gray-100">.text-sans, 0.875rem, line-height: 1.8</code>
         </div>
 
         <!-- Button Text -->
-        <div style="padding: var(--space-sm);">
-          <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray); margin-bottom: 4px;">BUTTON_TEXT (0.688rem / 11px)</div>
-          <div style="font-size: 0.688rem;">VIEW DOCUMENTATION →</div>
-          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 2px 6px;">font-size: 0.688rem; text-transform: uppercase; letter-spacing: 0.1em;</code>
+        <div class="py-3">
+          <div class="text-technical-label mb-1">Button Text</div>
+          <span class="text-mono text-xs uppercase tracking-widest mb-2 inline-block">VIEW DOCUMENTATION</span>
+          <br>
+          <code class="text-mono text-xs px-2 py-0.5 bg-gray-100">font-mono, 0.75rem, uppercase, 0.1em letter-spacing</code>
         </div>
       </div>
     </div>
   </section>
 
   <!-- DIVIDER -->
-  <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+  <div class="divider-technical my-24"></div>
 
-  <!-- COLOR PALETTE SECTION -->
-  <section style="margin-bottom: var(--space-3xl);">
-    <div class="label" style="margin-bottom: var(--space-lg);">02_COLOR_PALETTE</div>
+  <!-- ============================================================
+       COLOR PALETTE
+       ============================================================ -->
+  <section class="mb-24">
+    <h2 class="text-base mb-6">Color Palette</h2>
 
-    <div style="display: grid; gap: var(--space-lg);">
+    <div class="grid gap-6">
 
       <!-- Background Colors -->
-      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-        <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-md);">Background Colors</h3>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-md);">
+      <div class="card-technical p-8">
+        <h3 class="text-sm mb-4">Background Colors</h3>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div>
-            <div style="height: 60px; background: #FAF9F6; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">--color-bg-cream</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#FAF9F6</div>
+            <div class="h-16 border mb-2" style="background: #FAF9F6; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-bg-cream</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#FAF9F6</div>
           </div>
           <div>
-            <div style="height: 60px; background: #FFFFFF; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">--color-bg-white</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#FFFFFF</div>
+            <div class="h-16 border mb-2" style="background: #FFFFFF; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-bg-white</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#FFFFFF</div>
           </div>
           <div>
-            <div style="height: 60px; background: #F5F4F1; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">--color-bg-warm-gray</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#F5F4F1</div>
+            <div class="h-16 border mb-2" style="background: #F5F4F1; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-bg-warm-gray</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#F5F4F1</div>
           </div>
         </div>
       </div>
 
       <!-- Text Colors -->
-      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-        <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-md);">Text Colors</h3>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-md);">
+      <div class="card-technical p-8">
+        <h3 class="text-sm mb-4">Text Colors</h3>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <div>
-            <div style="height: 60px; background: #1A1A1A; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">--color-text-black</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#1A1A1A</div>
+            <div class="h-16 border mb-2" style="background: #1A1A1A; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-text-black</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#1A1A1A</div>
           </div>
           <div>
-            <div style="height: 60px; background: #2D2D2D; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">--color-text-charcoal</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#2D2D2D</div>
+            <div class="h-16 border mb-2" style="background: #2D2D2D; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-text-charcoal</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#2D2D2D</div>
           </div>
           <div>
-            <div style="height: 60px; background: #5A5A5A; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">--color-text-gray</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#5A5A5A</div>
+            <div class="h-16 border mb-2" style="background: #5A5A5A; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-text-gray</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#5A5A5A</div>
           </div>
           <div>
-            <div style="height: 60px; background: #8A8A8A; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">--color-text-light-gray</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#8A8A8A</div>
+            <div class="h-16 border mb-2" style="background: #8A8A8A; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-text-light-gray</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#8A8A8A</div>
           </div>
         </div>
       </div>
 
       <!-- Border Colors -->
-      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-        <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-md);">Border Colors</h3>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-md);">
+      <div class="card-technical p-8">
+        <h3 class="text-sm mb-4">Border Colors</h3>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div>
-            <div style="height: 60px; background: #3A3A3A; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">--color-border-dark</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#3A3A3A</div>
+            <div class="h-16 border mb-2" style="background: #3A3A3A; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-border-dark</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#3A3A3A</div>
           </div>
           <div>
-            <div style="height: 60px; background: #C4C4C4; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">--color-border-medium</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#C4C4C4</div>
+            <div class="h-16 border mb-2" style="background: #C4C4C4; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-border-medium</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#C4C4C4</div>
           </div>
           <div>
-            <div style="height: 60px; background: #E5E5E5; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">--color-border-light</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#E5E5E5</div>
+            <div class="h-16 border mb-2" style="background: #E5E5E5; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-border-light</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#E5E5E5</div>
           </div>
         </div>
       </div>
 
-      <!-- Accent Colors -->
-      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-        <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-md);">Accent Colors</h3>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-md);">
+      <!-- Accent Colors (RED) -->
+      <div class="card-technical p-8">
+        <h3 class="text-sm mb-4">Accent Colors</h3>
+        <p class="text-sans text-xs mb-4" style="color: var(--color-text-gray);">
+          Red annotation accent, used like an architect's red pen. For emphasis, CTAs, and annotation marks.
+        </p>
+        <div class="grid grid-cols-2 sm:grid-cols-4 gap-4">
           <div>
-            <div style="height: 60px; background: #D4A574; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">--color-accent</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#D4A574</div>
+            <div class="h-16 border mb-2" style="background: #B91C1C; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-accent</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#B91C1C</div>
           </div>
           <div>
-            <div style="height: 60px; background: #B8935F; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">--color-accent-dark</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#B8935F</div>
+            <div class="h-16 border mb-2" style="background: #DC2626; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-accent-light</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#DC2626</div>
+          </div>
+          <div>
+            <div class="h-16 border mb-2" style="background: #7F1D1D; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-accent-dark</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#7F1D1D</div>
+          </div>
+          <div>
+            <div class="h-16 border mb-2" style="background: rgba(185, 28, 28, 0.08); border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-accent-subtle</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">rgba(185,28,28,0.08)</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Secondary Warm Colors -->
+      <div class="card-technical p-8">
+        <h3 class="text-sm mb-4">Secondary Warm Colors</h3>
+        <p class="text-sans text-xs mb-4" style="color: var(--color-text-gray);">
+          Gold warmth for quiet diagram lines and subtle decorative elements. Not for primary UI.
+        </p>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div>
+            <div class="h-16 border mb-2" style="background: #B8935F; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-warm</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#B8935F</div>
+          </div>
+          <div>
+            <div class="h-16 border mb-2" style="background: #D4A574; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">--color-warm-light</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#D4A574</div>
           </div>
         </div>
       </div>
 
       <!-- Status Colors -->
-      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-        <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-md);">Status Indicators</h3>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-md);">
+      <div class="card-technical p-8">
+        <h3 class="text-sm mb-4">Status Indicators</h3>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-4">
           <div>
-            <div style="height: 60px; background: #4CAF50; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">Operational</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#4CAF50</div>
+            <div class="h-16 border mb-2" style="background: #4CAF50; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">Operational</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#4CAF50</div>
           </div>
           <div>
-            <div style="height: 60px; background: #FFA726; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">Development</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#FFA726</div>
+            <div class="h-16 border mb-2" style="background: #FFA726; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">Development</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#FFA726</div>
           </div>
           <div>
-            <div style="height: 60px; background: #E53935; border: 1px solid var(--color-border-medium); margin-bottom: var(--space-xs);"></div>
-            <div class="text-mono" style="font-size: 0.688rem;">Offline</div>
-            <div class="text-mono" style="font-size: 0.688rem; color: var(--color-text-gray);">#E53935</div>
+            <div class="h-16 border mb-2" style="background: #E53935; border-color: var(--color-border-medium);"></div>
+            <div class="text-mono text-xs">Offline</div>
+            <div class="text-mono text-xs" style="color: var(--color-text-gray);">#E53935</div>
           </div>
         </div>
       </div>
@@ -243,403 +265,658 @@
   </section>
 
   <!-- DIVIDER -->
-  <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+  <div class="divider-technical my-24"></div>
 
-  <!-- SPACING SYSTEM SECTION -->
-  <section style="margin-bottom: var(--space-3xl);">
-    <div class="label" style="margin-bottom: var(--space-lg);">03_SPACING_SYSTEM</div>
+  <!-- ============================================================
+       SPACING SYSTEM
+       ============================================================ -->
+  <section class="mb-24">
+    <h2 class="text-base mb-6">Spacing System</h2>
 
-    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-      <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-md);">8px Base Grid</h3>
-      <p class="text-sans" style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal); margin-bottom: var(--space-lg);">
+    <div class="card-technical p-8">
+      <h3 class="text-sm mb-4">8px Base Grid</h3>
+      <p class="text-sans text-sm leading-relaxed mb-6" style="color: var(--color-text-charcoal);">
         All spacing values are multiples of 8px for mathematical harmony and consistent rhythm.
       </p>
 
-      <table class="spec-table-inline" style="width: 100%;">
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-xs</td>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">8px</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Micro-spacing, tight gaps</td>
-          <td><div style="height: 8px; width: 8px; background: var(--color-border-dark);"></div></td>
-        </tr>
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-sm</td>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">16px</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Within components</td>
-          <td><div style="height: 16px; width: 16px; background: var(--color-border-dark);"></div></td>
-        </tr>
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-md</td>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">24px</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Component spacing</td>
-          <td><div style="height: 24px; width: 24px; background: var(--color-border-dark);"></div></td>
-        </tr>
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-lg</td>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">32px</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Between components</td>
-          <td><div style="height: 32px; width: 32px; background: var(--color-border-dark);"></div></td>
-        </tr>
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-xl</td>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">48px</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Large gaps</td>
-          <td><div style="height: 48px; width: 48px; background: var(--color-border-dark);"></div></td>
-        </tr>
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-2xl</td>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">64px</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Section padding</td>
-          <td><div style="height: 64px; width: 64px; background: var(--color-border-dark);"></div></td>
-        </tr>
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">--space-3xl</td>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">96px</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">Between sections</td>
-          <td><div style="height: 96px; width: 96px; background: var(--color-border-dark);"></div></td>
-        </tr>
+      <table class="table-spec">
+        <thead>
+          <tr>
+            <th>Variable</th>
+            <th>Value</th>
+            <th>Usage</th>
+            <th>Preview</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>--space-xs</td>
+            <td>8px</td>
+            <td class="text-sans">Micro-spacing, tight gaps</td>
+            <td><div class="inline-block" style="height: 8px; width: 8px; background: var(--color-border-dark);"></div></td>
+          </tr>
+          <tr>
+            <td>--space-sm</td>
+            <td>16px</td>
+            <td class="text-sans">Within components</td>
+            <td><div class="inline-block" style="height: 16px; width: 16px; background: var(--color-border-dark);"></div></td>
+          </tr>
+          <tr>
+            <td>--space-md</td>
+            <td>24px</td>
+            <td class="text-sans">Component spacing</td>
+            <td><div class="inline-block" style="height: 24px; width: 24px; background: var(--color-border-dark);"></div></td>
+          </tr>
+          <tr>
+            <td>--space-lg</td>
+            <td>32px</td>
+            <td class="text-sans">Between components</td>
+            <td><div class="inline-block" style="height: 32px; width: 32px; background: var(--color-border-dark);"></div></td>
+          </tr>
+          <tr>
+            <td>--space-xl</td>
+            <td>48px</td>
+            <td class="text-sans">Large gaps</td>
+            <td><div class="inline-block" style="height: 48px; width: 48px; background: var(--color-border-dark);"></div></td>
+          </tr>
+          <tr>
+            <td>--space-2xl</td>
+            <td>64px</td>
+            <td class="text-sans">Section padding</td>
+            <td><div class="inline-block" style="height: 64px; width: 64px; background: var(--color-border-dark);"></div></td>
+          </tr>
+          <tr>
+            <td>--space-3xl</td>
+            <td>96px</td>
+            <td class="text-sans">Between sections</td>
+            <td><div class="inline-block" style="height: 96px; width: 96px; background: var(--color-border-dark);"></div></td>
+          </tr>
+        </tbody>
       </table>
     </div>
   </section>
 
   <!-- DIVIDER -->
-  <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+  <div class="divider-technical my-24"></div>
 
-  <!-- COMPONENTS SECTION -->
-  <section style="margin-bottom: var(--space-3xl);">
-    <div class="label" style="margin-bottom: var(--space-lg);">04_COMPONENTS</div>
+  <!-- ============================================================
+       BUTTONS
+       ============================================================ -->
+  <section class="mb-24">
+    <h2 class="text-base mb-6">Buttons</h2>
 
-    <!-- Technical Spec Box -->
-    <div style="margin-bottom: var(--space-lg);">
-      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_01: TECHNICAL_SPEC_BOX</div>
-      <div class="technical-spec-box">
-        <div class="label" style="margin-bottom: var(--space-sm);">EXAMPLE_LABEL</div>
-        <h2 class="text-mono" style="font-size: 1.5rem; font-weight: 300; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: var(--space-md);">
-          Hero Section Component
-        </h2>
-        <p class="text-sans" style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal);">
-          Double-border container for hero sections. 2px outer border with 6px inset inner border (pseudo-element). Square corners, generous padding.
-        </p>
+    <div class="card-technical p-8">
+      <div class="flex gap-6 items-center flex-wrap mb-6">
+        <button class="btn-brand">Primary Button</button>
+        <button class="btn-brand-accent">Accent Button</button>
+        <button class="btn-brand" disabled>Disabled Button</button>
       </div>
-      <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-sm);">
-        &lt;div class="technical-spec-box"&gt;...&lt;/div&gt;
-      </code>
-    </div>
 
-    <!-- Server Card -->
-    <div style="margin-bottom: var(--space-lg);">
-      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_02: SERVER_CARD</div>
-      <div class="server-card">
-        <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: var(--space-md);">
-          <div>
-            <div class="label" style="margin-bottom: var(--space-xs);">MCP_SERVER_01</div>
-            <h3 class="text-mono" style="font-size: 1rem; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase;">
-              Example Server
-            </h3>
-          </div>
-          <div style="width: 6px; height: 6px; background: #4CAF50; border-radius: 50%; margin-top: 8px;"></div>
-        </div>
+      <pre class="brand-code"><code>&lt;button class="btn-brand"&gt;Primary Button&lt;/button&gt;
+&lt;button class="btn-brand-accent"&gt;Accent Button&lt;/button&gt;
+&lt;button class="btn-brand" disabled&gt;Disabled Button&lt;/button&gt;</code></pre>
 
-        <p class="text-sans" style="font-size: 0.813rem; line-height: 1.6; color: var(--color-text-gray); margin-bottom: var(--space-md);">
-          Server card component with status indicator, spec sheet, and CTA button. Square corners with 1px border.
-        </p>
-
-        <div style="background: var(--color-bg-warm-gray); padding: var(--space-sm); margin-bottom: var(--space-md); font-family: var(--font-mono); font-size: 0.75rem; border-left: 2px solid var(--color-border-dark);">
-          <div style="display: grid; grid-template-columns: 80px 1fr; gap: var(--space-xs);">
-            <span style="color: var(--color-text-gray);">TOOLS:</span><span>3</span>
-            <span style="color: var(--color-text-gray);">AUTH:</span><span>None</span>
-            <span style="color: var(--color-text-gray);">PRIVACY:</span><span>Local Only</span>
-          </div>
-        </div>
-
-        <a href="#" class="btn-brand" style="text-decoration: none; display: inline-block; font-size: 0.688rem;">
-          VIEW DOCUMENTATION →
-        </a>
-      </div>
-      <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-sm);">
-        &lt;div class="server-card"&gt;...&lt;/div&gt;
-      </code>
-    </div>
-
-    <!-- Buttons -->
-    <div style="margin-bottom: var(--space-lg);">
-      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_03: BUTTONS</div>
-      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-        <div style="display: flex; gap: var(--space-md); align-items: center; flex-wrap: wrap;">
-          <button class="btn-brand">PRIMARY BUTTON</button>
-          <button class="btn-brand-accent">ACCENT BUTTON</button>
-          <button class="btn-brand" disabled style="opacity: 0.5; cursor: not-allowed;">DISABLED BUTTON</button>
-        </div>
-        <div style="margin-top: var(--space-md);">
-          <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block;">
-            &lt;button class="btn-brand"&gt;PRIMARY BUTTON&lt;/button&gt;<br>
-            &lt;button class="btn-brand-accent"&gt;ACCENT BUTTON&lt;/button&gt;
-          </code>
-        </div>
-      </div>
-    </div>
-
-    <!-- Technical Divider -->
-    <div style="margin-bottom: var(--space-lg);">
-      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_04: TECHNICAL_DIVIDER</div>
-      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-        <div class="divider-technical"></div>
-        <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-md);">
-          &lt;div class="divider-technical"&gt;&lt;/div&gt;
-        </code>
-      </div>
-    </div>
-
-    <!-- Spec Tables -->
-    <div style="margin-bottom: var(--space-lg);">
-      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_05: SPEC_TABLES</div>
-
-      <!-- Inline Spec Table -->
-      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg); margin-bottom: var(--space-md);">
-        <h4 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-sm);">Inline Spec Table</h4>
-        <table class="spec-table-inline" style="width: 100%;">
+      <div class="mt-6">
+        <h3 class="text-sm mb-3">Button Specifications</h3>
+        <table class="spec-table-inline w-full">
           <tr>
-            <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">TYPE</td>
-            <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">AI Integration Platform</td>
+            <td class="text-technical-label">.btn-brand</td>
+            <td class="text-sans text-xs">Dark border, white background. Inverts on hover.</td>
           </tr>
           <tr>
-            <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">PROTOCOL</td>
-            <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Model Context Protocol</td>
-          </tr>
-          <tr>
-            <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">STATUS</td>
-            <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Operational</td>
+            <td class="text-technical-label">.btn-brand-accent</td>
+            <td class="text-sans text-xs">Red border and text. Fills red on hover. Primary CTAs only.</td>
           </tr>
         </table>
-        <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-md);">
-          &lt;table class="spec-table-inline"&gt;...&lt;/table&gt;
-        </code>
+      </div>
+    </div>
+  </section>
+
+  <!-- DIVIDER -->
+  <div class="divider-technical my-24"></div>
+
+  <!-- ============================================================
+       CARDS
+       ============================================================ -->
+  <section class="mb-24">
+    <h2 class="text-base mb-6">Cards</h2>
+
+    <div class="grid gap-6">
+
+      <!-- Card: Technical -->
+      <div>
+        <div class="text-technical-label mb-3">.card-technical</div>
+        <div class="card-technical p-8">
+          <h3 class="mb-2">Technical Card</h3>
+          <p class="text-sans text-sm leading-relaxed" style="color: var(--color-text-charcoal);">
+            General-purpose card with hover border darkening and subtle shadow. Square corners, 1px medium border.
+          </p>
+        </div>
+        <pre class="brand-code mt-2"><code>&lt;div class="card-technical"&gt;...&lt;/div&gt;</code></pre>
+      </div>
+
+      <!-- Card: Technical Spec Box -->
+      <div>
+        <div class="text-technical-label mb-3">.technical-spec-box</div>
+        <div class="technical-spec-box">
+          <div class="label mb-2">EXAMPLE_LABEL</div>
+          <h2 class="mb-3">Hero Section Component</h2>
+          <p class="text-sans text-sm leading-relaxed" style="color: var(--color-text-charcoal);">
+            Double-border container for hero sections. 2px outer border with 6px inset inner border via pseudo-element. Square corners, generous padding.
+          </p>
+        </div>
+        <pre class="brand-code mt-2"><code>&lt;div class="technical-spec-box"&gt;...&lt;/div&gt;</code></pre>
+      </div>
+
+      <!-- Card: Section Hero -->
+      <div>
+        <div class="text-technical-label mb-3">.section-hero</div>
+        <div class="section-hero border" style="border-color: var(--color-border-light);">
+          <h1>Section Hero</h1>
+          <p class="text-sans text-sm leading-relaxed mt-2" style="color: var(--color-text-charcoal);">
+            Centered layout container for page hero areas. Max-width 1000px, auto margins, centered text.
+          </p>
+        </div>
+        <pre class="brand-code mt-2"><code>&lt;div class="section-hero"&gt;...&lt;/div&gt;</code></pre>
+      </div>
+
+      <!-- Card: Product Card -->
+      <div>
+        <div class="text-technical-label mb-3">.product-card</div>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div class="product-card">
+            <div class="label mb-2">PRODUCT</div>
+            <h3 class="mb-2">MCP Servers</h3>
+            <p class="text-sans text-sm leading-relaxed" style="color: var(--color-text-gray);">
+              AI integration tools for Claude Desktop and other LLM clients.
+            </p>
+          </div>
+          <div class="product-card">
+            <div class="label mb-2">PRODUCT</div>
+            <h3 class="mb-2">Podcast</h3>
+            <p class="text-sans text-sm leading-relaxed" style="color: var(--color-text-gray);">
+              AI-generated deep-dive episodes on technology and policy.
+            </p>
+          </div>
+        </div>
+        <pre class="brand-code mt-2"><code>&lt;div class="product-card"&gt;...&lt;/div&gt;</code></pre>
+      </div>
+
+      <!-- Card: Episode Card -->
+      <div>
+        <div class="text-technical-label mb-3">.episode-card</div>
+        <a href="#" class="episode-card">
+          <div class="label mb-2">Episode 12</div>
+          <h3 class="mb-2">The Future of AI Regulation</h3>
+          <p class="text-sans text-sm leading-relaxed" style="color: var(--color-text-gray);">
+            Deep dive into emerging regulatory frameworks and their impact on AI development.
+          </p>
+          <div class="text-mono text-xs mt-4" style="color: var(--color-text-light-gray);">42 min</div>
+        </a>
+        <pre class="brand-code mt-2"><code>&lt;a href="..." class="episode-card"&gt;...&lt;/a&gt;</code></pre>
+      </div>
+
+      <!-- Card: Server Card -->
+      <div>
+        <div class="text-technical-label mb-3">.server-card</div>
+        <div class="server-card">
+          <div class="flex justify-between items-start mb-4">
+            <div>
+              <div class="label mb-1">MCP_SERVER_01</div>
+              <h3>Creative Juices</h3>
+            </div>
+            <span class="status-indicator status-operational mt-2"></span>
+          </div>
+
+          <p class="text-sans text-sm leading-relaxed mb-4" style="color: var(--color-text-gray);">
+            Randomness tools for divergent thinking. Breaks predictable AI patterns.
+          </p>
+
+          <div class="bg-warm-gray p-4 mb-4 border-l-2" style="border-color: var(--color-border-dark);">
+            <div class="grid grid-cols-[80px_1fr] gap-1 text-mono text-xs">
+              <span style="color: var(--color-text-gray);">TOOLS:</span><span>3</span>
+              <span style="color: var(--color-text-gray);">AUTH:</span><span>None</span>
+              <span style="color: var(--color-text-gray);">PRIVACY:</span><span>Local Only</span>
+            </div>
+          </div>
+
+          <a href="#" class="btn-brand no-underline inline-block text-xs">
+            VIEW DOCUMENTATION
+          </a>
+        </div>
+        <pre class="brand-code mt-2"><code>&lt;div class="server-card"&gt;...&lt;/div&gt;</code></pre>
+      </div>
+
+      <!-- Card: Blueprint Box -->
+      <div>
+        <div class="text-technical-label mb-3">.blueprint-box</div>
+        <div class="blueprint-box">
+          <h3 class="mb-2">Blueprint Container</h3>
+          <p class="text-sans text-sm leading-relaxed" style="color: var(--color-text-charcoal);">
+            Architectural drawing style container with 2px outer border and inset inner border via pseudo-element. 8px offset.
+          </p>
+        </div>
+        <pre class="brand-code mt-2"><code>&lt;div class="blueprint-box"&gt;...&lt;/div&gt;</code></pre>
+      </div>
+
+      <!-- Card: Corner Marks -->
+      <div>
+        <div class="text-technical-label mb-3">.card-corner-marks</div>
+        <div class="card-corner-marks">
+          <h3 class="mb-2">Corner Mark Card</h3>
+          <p class="text-sans text-sm leading-relaxed" style="color: var(--color-text-charcoal);">
+            Architectural drawing style with corner registration marks instead of full borders.
+          </p>
+        </div>
+        <pre class="brand-code mt-2"><code>&lt;div class="card-corner-marks"&gt;...&lt;/div&gt;</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- DIVIDER -->
+  <div class="divider-technical my-24"></div>
+
+  <!-- ============================================================
+       DIVIDERS AND LINES
+       ============================================================ -->
+  <section class="mb-24">
+    <h2 class="text-base mb-6">Dividers and Lines</h2>
+
+    <div class="card-technical p-8">
+      <div class="mb-8">
+        <div class="text-technical-label mb-3">.divider-technical</div>
+        <div class="divider-technical my-4"></div>
+        <p class="text-sans text-xs mt-4" style="color: var(--color-text-gray);">1px line with centered diamond node. Used between major page sections.</p>
+      </div>
+
+      <div class="mb-8">
+        <div class="text-technical-label mb-3">.connection-line</div>
+        <div class="connection-line my-6"></div>
+        <p class="text-sans text-xs mt-4" style="color: var(--color-text-gray);">Line with endpoint nodes on both ends. For connecting related elements.</p>
+      </div>
+
+      <div>
+        <div class="text-technical-label mb-3">.annotation-line</div>
+        <div class="annotation-line my-6"></div>
+        <p class="text-sans text-xs mt-4" style="color: var(--color-text-gray);">Red accent line for structural emphasis. Used sparingly.</p>
+      </div>
+
+      <pre class="brand-code mt-6"><code>&lt;div class="divider-technical"&gt;&lt;/div&gt;
+&lt;div class="connection-line"&gt;&lt;/div&gt;
+&lt;div class="annotation-line"&gt;&lt;/div&gt;</code></pre>
+    </div>
+  </section>
+
+  <!-- DIVIDER -->
+  <div class="divider-technical my-24"></div>
+
+  <!-- ============================================================
+       STATUS INDICATORS
+       ============================================================ -->
+  <section class="mb-24">
+    <h2 class="text-base mb-6">Status Indicators</h2>
+
+    <div class="card-technical p-8">
+      <div class="flex gap-8 items-center flex-wrap mb-6">
+        <div class="flex items-center gap-2">
+          <span class="status-indicator status-operational"></span>
+          <span class="text-mono text-xs">Operational</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="status-indicator status-development"></span>
+          <span class="text-mono text-xs">Development</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="status-indicator status-offline"></span>
+          <span class="text-mono text-xs">Offline</span>
+        </div>
+        <div class="flex items-center gap-2">
+          <span class="annotation-mark"></span>
+          <span class="text-mono text-xs">Annotation Mark</span>
+        </div>
+      </div>
+
+      <pre class="brand-code"><code>&lt;span class="status-indicator status-operational"&gt;&lt;/span&gt;
+&lt;span class="status-indicator status-development"&gt;&lt;/span&gt;
+&lt;span class="status-indicator status-offline"&gt;&lt;/span&gt;
+&lt;span class="annotation-mark"&gt;&lt;/span&gt;</code></pre>
+    </div>
+  </section>
+
+  <!-- DIVIDER -->
+  <div class="divider-technical my-24"></div>
+
+  <!-- ============================================================
+       TABLES
+       ============================================================ -->
+  <section class="mb-24">
+    <h2 class="text-base mb-6">Tables</h2>
+
+    <div class="grid gap-6">
+
+      <!-- Inline Spec Table -->
+      <div>
+        <div class="text-technical-label mb-3">.spec-table-inline</div>
+        <div class="card-technical p-8">
+          <table class="spec-table-inline w-full">
+            <tr>
+              <td>TYPE</td>
+              <td>AI Integration Platform</td>
+            </tr>
+            <tr>
+              <td>PROTOCOL</td>
+              <td>Model Context Protocol</td>
+            </tr>
+            <tr>
+              <td>STATUS</td>
+              <td>Operational</td>
+            </tr>
+          </table>
+        </div>
+        <pre class="brand-code mt-2"><code>&lt;table class="spec-table-inline"&gt;...&lt;/table&gt;</code></pre>
       </div>
 
       <!-- Full Spec Table -->
-      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-        <h4 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-sm);">Full Spec Table</h4>
-        <table class="table-spec">
-          <thead>
-            <tr>
-              <th>COMPONENT</th>
-              <th>TYPE</th>
-              <th>STATUS</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Creative Juices</td>
-              <td>MCP Server</td>
-              <td>Active</td>
-            </tr>
-            <tr>
-              <td>CTO Tools</td>
-              <td>MCP Server</td>
-              <td>Active</td>
-            </tr>
-          </tbody>
-        </table>
-        <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-md);">
-          &lt;table class="table-spec"&gt;...&lt;/table&gt;
-        </code>
-      </div>
-    </div>
-
-    <!-- Status Indicators -->
-    <div style="margin-bottom: var(--space-lg);">
-      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_06: STATUS_INDICATORS</div>
-      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-        <div style="display: flex; gap: var(--space-lg); align-items: center; flex-wrap: wrap;">
-          <div style="display: flex; align-items: center; gap: var(--space-xs);">
-            <span style="display: inline-block; width: 6px; height: 6px; background: #4CAF50; border-radius: 50%;"></span>
-            <span class="text-mono" style="font-size: 0.75rem;">Operational</span>
-          </div>
-          <div style="display: flex; align-items: center; gap: var(--space-xs);">
-            <span style="display: inline-block; width: 6px; height: 6px; background: #FFA726; border-radius: 50%;"></span>
-            <span class="text-mono" style="font-size: 0.75rem;">Development</span>
-          </div>
-          <div style="display: flex; align-items: center; gap: var(--space-xs);">
-            <span style="display: inline-block; width: 6px; height: 6px; background: #E53935; border-radius: 50%;"></span>
-            <span class="text-mono" style="font-size: 0.75rem;">Offline</span>
-          </div>
+      <div>
+        <div class="text-technical-label mb-3">.table-spec</div>
+        <div class="card-technical p-8">
+          <table class="table-spec">
+            <thead>
+              <tr>
+                <th>Component</th>
+                <th>Type</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Creative Juices</td>
+                <td>MCP Server</td>
+                <td>Active</td>
+              </tr>
+              <tr>
+                <td>CTO Tools</td>
+                <td>MCP Server</td>
+                <td>Active</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-        <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-md);">
-          &lt;span style="width: 6px; height: 6px; background: #4CAF50; border-radius: 50%;"&gt;&lt;/span&gt;
-        </code>
+        <pre class="brand-code mt-2"><code>&lt;table class="table-spec"&gt;...&lt;/table&gt;</code></pre>
       </div>
     </div>
+  </section>
 
-    <!-- Code Block -->
-    <div style="margin-bottom: var(--space-lg);">
-      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_07: CODE_BLOCK</div>
+  <!-- DIVIDER -->
+  <div class="divider-technical my-24"></div>
+
+  <!-- ============================================================
+       CODE BLOCKS
+       ============================================================ -->
+  <section class="mb-24">
+    <h2 class="text-base mb-6">Code Blocks</h2>
+
+    <div class="card-technical p-8">
+      <div class="text-technical-label mb-3">.brand-code</div>
       <pre class="brand-code"><code>curl -LsSf https://astral.sh/uv/install.sh | sh
 
 uv add package-name
 
 git commit -m "Update implementation"</code></pre>
-      <code class="text-mono" style="font-size: 0.688rem; background: var(--color-bg-warm-gray); padding: 4px 8px; display: block; margin-top: var(--space-sm);">
-        &lt;pre class="brand-code"&gt;&lt;code&gt;...&lt;/code&gt;&lt;/pre&gt;
-      </code>
+      <pre class="brand-code mt-2"><code>&lt;pre class="brand-code"&gt;&lt;code&gt;...&lt;/code&gt;&lt;/pre&gt;</code></pre>
     </div>
-
-    <!-- Installation Guide Steps -->
-    <div style="margin-bottom: var(--space-lg);">
-      <div class="label" style="margin-bottom: var(--space-md);">COMPONENT_08: INSTALLATION_GUIDE</div>
-      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-        <div style="display: grid; gap: var(--space-lg);">
-
-          <!-- Step 1: Simple code example -->
-          <div style="display: grid; grid-template-columns: auto 1fr; gap: var(--space-md);">
-            <div style="border-right: 1px solid var(--color-border-light); padding-right: var(--space-md);">
-              <div class="text-mono" style="font-size: 1.5rem; color: var(--color-text-gray);">01</div>
-            </div>
-            <div>
-              <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-top: 0; margin-bottom: var(--space-sm);">Install uv (if needed)</h3>
-              <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-sm); font-family: var(--font-mono); font-size: 0.75rem; overflow-x: auto; white-space: pre; margin: 0;"><code>curl -LsSf https://astral.sh/uv/install.sh | sh</code></pre>
-            </div>
-          </div>
-
-          <!-- Step 2: Multi-line JSON example with smaller font -->
-          <div style="display: grid; grid-template-columns: auto 1fr; gap: var(--space-md);">
-            <div style="border-right: 1px solid var(--color-border-light); padding-right: var(--space-md);">
-              <div class="text-mono" style="font-size: 1.5rem; color: var(--color-text-gray);">02</div>
-            </div>
-            <div>
-              <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-top: 0; margin-bottom: var(--space-sm);">Add to Claude Desktop config</h3>
-              <p class="text-sans" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-sm);">
-                Edit: <code class="text-mono" style="background: var(--color-bg-warm-gray); padding: 2px 6px;">~/Library/Application Support/Claude/claude_desktop_config.json</code>
-              </p>
-              <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-sm); font-family: var(--font-mono); font-size: 0.688rem; overflow-x: auto; white-space: pre; margin: 0;"><code>{
-  "mcpServers": {
-    "server-name": {
-      "command": "uvx",
-      "args": ["run", "https://example.com/server.py"]
-    }
-  }
-}</code></pre>
-            </div>
-          </div>
-
-          <!-- Step 3: Text-only example -->
-          <div style="display: grid; grid-template-columns: auto 1fr; gap: var(--space-md);">
-            <div style="border-right: 1px solid var(--color-border-light); padding-right: var(--space-md);">
-              <div class="text-mono" style="font-size: 1.5rem; color: var(--color-text-gray);">03</div>
-            </div>
-            <div>
-              <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-top: 0; margin-bottom: var(--space-sm);">Restart Claude Desktop</h3>
-              <p class="text-sans" style="font-size: 0.75rem; line-height: 1.6; color: var(--color-text-charcoal);">
-                Completely quit Claude Desktop (Cmd+Q on macOS) and reopen. Look for the 🔌 icon in the bottom-right corner.
-              </p>
-            </div>
-          </div>
-
-        </div>
-      </div>
-      <div style="background: var(--color-bg-warm-gray); padding: var(--space-sm); margin-top: var(--space-sm); border-left: 2px solid var(--color-border-dark);">
-        <div class="text-mono" style="font-size: 0.688rem; font-weight: 600; margin-bottom: var(--space-xs);">CRITICAL SPECIFICATIONS:</div>
-        <div class="text-mono" style="font-size: 0.688rem; line-height: 1.6;">
-          • Step numbers: font-size: 1.5rem (NOT 1.75rem)<br>
-          • Grid gap: gap: var(--space-md) (NOT --space-lg)<br>
-          • Border padding: padding-right: var(--space-md) (NOT --space-lg)<br>
-          • Step 1 code: font-size: 0.75rem<br>
-          • Step 2 code: font-size: 0.688rem<br>
-          • Pre tag overflow: overflow-x: auto; white-space: pre; margin: 0;<br>
-          • Pre tag styling: background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-sm);
-        </div>
-      </div>
-    </div>
-
   </section>
 
   <!-- DIVIDER -->
-  <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+  <div class="divider-technical my-24"></div>
 
-  <!-- USAGE RULES SECTION -->
-  <section style="margin-bottom: var(--space-3xl);">
-    <div class="label" style="margin-bottom: var(--space-lg);">05_USAGE_RULES</div>
+  <!-- ============================================================
+       FORMS
+       ============================================================ -->
+  <section class="mb-24">
+    <h2 class="text-base mb-6">Form Inputs</h2>
 
-    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-      <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: var(--space-md);">
-        Border Radius Policy
-      </h2>
-      <div style="display: grid; gap: var(--space-md);">
-        <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
-          <div class="text-mono" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: 4px;">NO_BORDER_RADIUS</div>
-          <div class="text-sans" style="font-size: 0.75rem;">Containers, cards, sections, divs, code blocks</div>
+    <div class="card-technical p-8">
+      <div class="text-technical-label mb-3">.input-brand</div>
+      <div class="grid gap-4 max-w-md mb-6">
+        <div>
+          <label class="block mb-1">Email Address</label>
+          <input type="email" class="input-brand w-full" placeholder="name@example.com">
         </div>
-        <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
-          <div class="text-mono" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: 4px;">ALLOWED_BORDER_RADIUS</div>
-          <div class="text-sans" style="font-size: 0.75rem;">Buttons (subtle default rounding), status indicators (50% for circles)</div>
+        <div>
+          <label class="block mb-1">API Key</label>
+          <input type="text" class="input-brand w-full" placeholder="sk-...">
         </div>
       </div>
-    </div>
 
-    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg); margin-top: var(--space-lg);">
-      <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: var(--space-md);">
-        Typography Rules
-      </h2>
-      <table class="spec-table-inline" style="width: 100%;">
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray); width: 150px;">LABELS</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Monospace, uppercase, 0.75rem, 0.08em letter-spacing</td>
-        </tr>
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">HEADERS</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Sans-serif or monospace, uppercase, increased letter-spacing</td>
-        </tr>
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">BODY_TEXT</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Sans-serif, normal case, 0.875-0.95rem</td>
-        </tr>
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">CODE_DATA</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Monospace, normal case, 0.75-0.875rem</td>
-        </tr>
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">BUTTONS</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">Monospace, uppercase, 0.688rem, 0.1em letter-spacing</td>
-        </tr>
+      <pre class="brand-code"><code>&lt;label class="block mb-1"&gt;Email Address&lt;/label&gt;
+&lt;input type="email" class="input-brand w-full" placeholder="name@example.com"&gt;</code></pre>
+    </div>
+  </section>
+
+  <!-- DIVIDER -->
+  <div class="divider-technical my-24"></div>
+
+  <!-- ============================================================
+       NAVIGATION AND FOOTER
+       ============================================================ -->
+  <section class="mb-24">
+    <h2 class="text-base mb-6">Navigation and Footer</h2>
+
+    <div class="grid gap-6">
+
+      <!-- Nav Links -->
+      <div class="card-technical p-8">
+        <div class="text-technical-label mb-3">.nav-brand</div>
+        <div class="nav-brand p-4 border" style="border-color: var(--color-border-light);">
+          <div class="flex gap-6">
+            <a href="#" class="active">MCP Servers</a>
+            <a href="#">Podcast</a>
+            <a href="#">About</a>
+          </div>
+        </div>
+        <pre class="brand-code mt-2"><code>&lt;div class="nav-brand"&gt;
+  &lt;a href="#" class="active"&gt;MCP Servers&lt;/a&gt;
+  &lt;a href="#"&gt;Podcast&lt;/a&gt;
+&lt;/div&gt;</code></pre>
+      </div>
+
+      <!-- Footer Elements -->
+      <div class="card-technical p-8">
+        <div class="text-technical-label mb-3">.footer-section-header + .footer-link</div>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-8">
+          <div>
+            <div class="footer-section-header">Products</div>
+            <div class="flex flex-col gap-2">
+              <a href="#" class="footer-link text-sm">MCP Servers</a>
+              <a href="#" class="footer-link text-sm">Podcast</a>
+              <a href="#" class="footer-link text-sm">AI Tools</a>
+            </div>
+          </div>
+          <div>
+            <div class="footer-section-header">Resources</div>
+            <div class="flex flex-col gap-2">
+              <a href="#" class="footer-link text-sm">Documentation</a>
+              <a href="#" class="footer-link text-sm">Design System</a>
+            </div>
+          </div>
+          <div>
+            <div class="footer-section-header">Company</div>
+            <div class="flex flex-col gap-2">
+              <a href="#" class="footer-link text-sm">About</a>
+              <a href="#" class="footer-link text-sm">Contact</a>
+            </div>
+          </div>
+        </div>
+        <pre class="brand-code mt-6"><code>&lt;div class="footer-section-header"&gt;Products&lt;/div&gt;
+&lt;a href="#" class="footer-link"&gt;MCP Servers&lt;/a&gt;</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- DIVIDER -->
+  <div class="divider-technical my-24"></div>
+
+  <!-- ============================================================
+       UTILITY CLASSES
+       ============================================================ -->
+  <section class="mb-24">
+    <h2 class="text-base mb-6">Utility Classes</h2>
+
+    <div class="card-technical p-8">
+      <table class="table-spec">
+        <thead>
+          <tr>
+            <th>Class</th>
+            <th>Purpose</th>
+            <th>Example</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>.text-mono</td>
+            <td class="text-sans">IBM Plex Mono font family</td>
+            <td><span class="text-mono">Monospace text</span></td>
+          </tr>
+          <tr>
+            <td>.text-sans</td>
+            <td class="text-sans">Inter font family</td>
+            <td><span class="text-sans">Sans-serif text</span></td>
+          </tr>
+          <tr>
+            <td>.text-technical-label</td>
+            <td class="text-sans">Mono, uppercase, small, gray label</td>
+            <td><span class="text-technical-label">LABEL_TEXT</span></td>
+          </tr>
+          <tr>
+            <td>.text-accent</td>
+            <td class="text-sans">Red accent text color</td>
+            <td><span class="text-accent">Accent text</span></td>
+          </tr>
+          <tr>
+            <td>.text-warm</td>
+            <td class="text-sans">Gold warm text color</td>
+            <td><span class="text-warm">Warm text</span></td>
+          </tr>
+          <tr>
+            <td>.bg-cream</td>
+            <td class="text-sans">Cream background</td>
+            <td><span class="bg-cream px-2 py-1 border text-xs" style="border-color: var(--color-border-light);">Cream</span></td>
+          </tr>
+          <tr>
+            <td>.bg-warm-gray</td>
+            <td class="text-sans">Warm gray background</td>
+            <td><span class="bg-warm-gray px-2 py-1 border text-xs" style="border-color: var(--color-border-light);">Warm Gray</span></td>
+          </tr>
+          <tr>
+            <td>.bg-accent-subtle</td>
+            <td class="text-sans">Subtle red tinted background</td>
+            <td><span class="bg-accent-subtle px-2 py-1 border text-xs" style="border-color: var(--color-border-light);">Accent Subtle</span></td>
+          </tr>
+          <tr>
+            <td>.border-technical</td>
+            <td class="text-sans">1px dark border</td>
+            <td><span class="border-technical px-2 py-1 text-xs">Dark border</span></td>
+          </tr>
+          <tr>
+            <td>.border-accent</td>
+            <td class="text-sans">Red accent border</td>
+            <td><span class="border border-accent px-2 py-1 text-xs">Accent border</span></td>
+          </tr>
+        </tbody>
       </table>
     </div>
+  </section>
 
-    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg); margin-top: var(--space-lg);">
-      <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: var(--space-md);">
-        Spacing Guidelines
-      </h2>
-      <table class="spec-table-inline" style="width: 100%;">
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray); width: 150px;">BETWEEN_SECTIONS</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">--space-2xl (64px) or --space-3xl (96px)</td>
-        </tr>
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">BETWEEN_COMPONENTS</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">--space-lg (32px) or --space-xl (48px)</td>
-        </tr>
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">WITHIN_COMPONENTS</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">--space-sm (16px) or --space-md (24px)</td>
-        </tr>
-        <tr>
-          <td class="text-mono" style="font-size: 0.75rem; padding: var(--space-xs) 0; color: var(--color-text-gray);">MICRO_SPACING</td>
-          <td class="text-sans" style="font-size: 0.75rem; padding: var(--space-xs) 0;">--space-xs (8px)</td>
-        </tr>
-      </table>
-    </div>
+  <!-- DIVIDER -->
+  <div class="divider-technical my-24"></div>
 
-    <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg); margin-top: var(--space-lg);">
-      <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: var(--space-md);">
-        Label Naming Convention
-      </h2>
-      <p class="text-sans" style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal); margin-bottom: var(--space-md);">
-        Follow technical documentation pattern with underscores and zero-padded numbers:
-      </p>
-      <div style="display: grid; gap: var(--space-sm);">
-        <div class="label">MCP_SERVER_01</div>
-        <div class="label">TOOL_03</div>
-        <div class="label">BENEFIT_02</div>
-        <div class="label">INSTALLATION_GUIDE</div>
-        <div class="label">PROTOCOL_OVERVIEW</div>
+  <!-- ============================================================
+       DESIGN RULES
+       ============================================================ -->
+  <section class="mb-24">
+    <h2 class="text-base mb-6">Design Rules</h2>
+
+    <div class="grid gap-6">
+
+      <!-- Border Radius -->
+      <div class="card-technical p-8">
+        <h3 class="text-sm mb-4">Border Radius Policy</h3>
+        <div class="grid gap-4">
+          <div class="border-l-2 pl-4" style="border-color: var(--color-border-dark);">
+            <div class="text-technical-label mb-1">No border radius</div>
+            <div class="text-sans text-sm">Containers, cards, sections, divs, code blocks</div>
+          </div>
+          <div class="border-l-2 pl-4" style="border-color: var(--color-border-dark);">
+            <div class="text-technical-label mb-1">Allowed border radius</div>
+            <div class="text-sans text-sm">Buttons (subtle default rounding), status indicators (50% for circles)</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Typography Rules -->
+      <div class="card-technical p-8">
+        <h3 class="text-sm mb-4">Typography Rules</h3>
+        <table class="spec-table-inline w-full">
+          <tr>
+            <td>Headings (h1-h3)</td>
+            <td class="text-sans text-xs">Sans-serif (Inter), 600 weight, uppercase, 0.05em tracking</td>
+          </tr>
+          <tr>
+            <td>Labels</td>
+            <td class="text-sans text-xs">Monospace, uppercase, 0.75rem, 0.08em letter-spacing</td>
+          </tr>
+          <tr>
+            <td>Body text</td>
+            <td class="text-sans text-xs">Sans-serif, normal case, 0.875rem, 1.8 line-height</td>
+          </tr>
+          <tr>
+            <td>Code and data</td>
+            <td class="text-sans text-xs">Monospace, normal case, 0.75-0.875rem</td>
+          </tr>
+          <tr>
+            <td>Buttons</td>
+            <td class="text-sans text-xs">Monospace, uppercase, 0.75rem, 0.1em letter-spacing</td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- Spacing Guidelines -->
+      <div class="card-technical p-8">
+        <h3 class="text-sm mb-4">Spacing Guidelines</h3>
+        <table class="spec-table-inline w-full">
+          <tr>
+            <td>Between sections</td>
+            <td class="text-sans text-xs">--space-2xl (64px) or --space-3xl (96px)</td>
+          </tr>
+          <tr>
+            <td>Between components</td>
+            <td class="text-sans text-xs">--space-lg (32px) or --space-xl (48px)</td>
+          </tr>
+          <tr>
+            <td>Within components</td>
+            <td class="text-sans text-xs">--space-sm (16px) or --space-md (24px)</td>
+          </tr>
+          <tr>
+            <td>Micro-spacing</td>
+            <td class="text-sans text-xs">--space-xs (8px)</td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- Label Convention -->
+      <div class="card-technical p-8">
+        <h3 class="text-sm mb-4">Label Naming Convention</h3>
+        <p class="text-sans text-sm leading-relaxed mb-4" style="color: var(--color-text-charcoal);">
+          Technical documentation pattern with underscores and zero-padded numbers for data labels and identifiers:
+        </p>
+        <div class="flex flex-wrap gap-4">
+          <div class="label">MCP_SERVER_01</div>
+          <div class="label">TOOL_03</div>
+          <div class="label">BENEFIT_02</div>
+          <div class="label">INSTALLATION_GUIDE</div>
+          <div class="label">PROTOCOL_OVERVIEW</div>
+        </div>
       </div>
     </div>
   </section>

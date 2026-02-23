@@ -1,266 +1,117 @@
 {% extends "base.html" %}
 
-{% comment %}
-  Homepage - Yudame AI Integration Platform
-  ==========================================
+{% block title %}Yudame{% endblock %}
 
-  STRUCTURE:
-  1. Hero Section (lines 32-44)
-     - Platform title and description
-     - Technical elegance brand styling
-
-  2. Featured MCP Servers Section (lines 50-114)
-     - Grid of server cards
-     - Each card includes: name, description, specs, documentation link
-     - Status indicator (green = live, orange = development)
-
-  3. What is MCP? Section (lines 120-149)
-     - Protocol overview and benefits
-     - Three-column feature grid
-
-  4. Quick Start Installation Guide (lines 155-211)
-     - Step-by-step installation instructions
-     - Code snippets for setup
-     - Restart instructions
-
-  DESIGN SYSTEM:
-  - Uses custom CSS variables from static/css/brand.css
-  - Technical spec box styling for hero
-  - Server card component for MCP listings
-  - Monospace font for technical elements
-  - Sans-serif font for descriptions
-
-  MAINTENANCE:
-  - To add new MCP server: duplicate server-card div (lines 56-82)
-  - Update server count in hero section when adding servers
-  - Links point to /mcp/{server-name}/ for documentation pages
-{% endcomment %}
-
-{% block title %}Yudame AI{% endblock %}
-
-{% block meta_description %}Extend AI assistants with powerful MCP servers. Creative thinking tools, podcast production, and more for Claude and other AI platforms.{% endblock %}
+{% block meta_description %}Yudame builds podcasts and AI tools. Listen to the latest episodes or explore our MCP servers for Claude and other AI assistants.{% endblock %}
 
 {% block content_width %}12{% endblock %}
 
 {% block main_header %}
   <!-- Hero Section -->
-  <div style="max-width: 1000px; margin: 0 auto; padding-top: var(--space-2xl);">
-    <div class="technical-spec-box">
-      <div class="label" style="margin-bottom: var(--space-md);">AI_INTEGRATION_PLATFORM</div>
-      <h1 class="text-mono" style="font-size: 2rem; font-weight: 300; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: var(--space-lg);">
-        MCP Server Hub
-      </h1>
-      <p class="text-sans" style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal); max-width: 700px;">
-        Production-ready Model Context Protocol servers for Claude and other AI assistants. Local execution, no cloud dependencies, instant integration.
-      </p>
-    </div>
+  <div class="section-hero">
+    <h1 class="text-sans" style="font-size: 2.5rem; font-weight: 700; letter-spacing: -0.01em; text-transform: none; margin-bottom: var(--space-md);">
+      Yudame
+    </h1>
+    <p style="font-size: 1.125rem; line-height: 1.8; color: var(--color-text-charcoal); max-width: 640px; margin: 0 auto var(--space-xl);">
+      Podcasts driven by deep research and AI tools that extend what your assistant can do.
+    </p>
+    <a href="{% url 'podcast:list' %}" class="btn-brand btn-brand-accent" style="text-decoration: none; display: inline-block;">
+      Browse Podcasts
+    </a>
   </div>
 {% endblock %}
 
 {% block content %}
   <div style="max-width: 1000px; margin: 0 auto;">
 
-    <!-- Featured MCP Servers Section -->
-    <section id="servers" style="margin-bottom: var(--space-3xl);">
-      <div class="label" style="margin-bottom: var(--space-lg);">AVAILABLE_SERVERS</div>
+    <!-- Latest Episodes Section -->
+    <section style="margin-bottom: var(--space-3xl);">
+      <h2 style="font-size: 1.125rem; font-weight: 600; letter-spacing: 0.02em; text-transform: none; margin-bottom: var(--space-lg);">
+        Latest Episodes
+      </h2>
 
-      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--space-lg);">
+      {% if recent_episodes %}
+      <div style="display: grid; gap: var(--space-lg);">
+        {% for episode in recent_episodes %}
+        <a href="{% url 'podcast:episode_detail' slug=episode.podcast.slug episode_slug=episode.slug %}"
+           class="episode-card"
+           style="display: grid; grid-template-columns: 120px 1fr; gap: var(--space-lg); align-items: start;">
 
-        <!-- Creative Juices MCP -->
-        <div class="server-card">
-          <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: var(--space-md);">
-            <div>
-              <div class="label" style="margin-bottom: var(--space-xs);">MCP_SERVER_01</div>
-              <h3 class="text-mono" style="font-size: 1rem; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase;">
-                Creative Juices
-              </h3>
+          {% if episode.effective_cover_image_url %}
+          <img src="{{ episode.effective_cover_image_url }}"
+               alt="{{ episode.title }}"
+               style="width: 120px; height: 120px; object-fit: cover;">
+          {% else %}
+          <div style="width: 120px; height: 120px; background: var(--color-bg-warm-gray); border: 1px solid var(--color-border-light);"></div>
+          {% endif %}
+
+          <div>
+            <div class="text-technical-label" style="margin-bottom: var(--space-xs);">
+              {{ episode.podcast.title }}
+              {% if episode.published_at %}&middot; {{ episode.published_at|date:"M j, Y" }}{% endif %}
+              {% if episode.audio_duration_seconds %}&middot; {{ episode.audio_duration_seconds|floatformat:0 }}s{% endif %}
             </div>
-            <div style="width: 6px; height: 6px; background: #4CAF50; border-radius: 50%; margin-top: 8px;"></div>
-          </div>
 
-          <p class="text-sans" style="font-size: 0.813rem; line-height: 1.6; color: var(--color-text-gray); margin-bottom: var(--space-md);">
+            <h3 style="font-size: 1rem; font-weight: 600; letter-spacing: 0; text-transform: none; margin-bottom: var(--space-xs); color: var(--color-text-black);">
+              {{ episode.title }}
+            </h3>
+
+            {% if episode.description %}
+            <p style="font-size: 0.875rem; line-height: 1.7; color: var(--color-text-gray); margin: 0;">
+              {{ episode.description|truncatewords:30 }}
+            </p>
+            {% endif %}
+          </div>
+        </a>
+        {% endfor %}
+      </div>
+
+      <div style="margin-top: var(--space-lg); text-align: center;">
+        <a href="{% url 'podcast:list' %}" class="btn-brand" style="text-decoration: none; display: inline-block;">
+          View All Episodes
+        </a>
+      </div>
+
+      {% else %}
+      <p style="font-size: 0.875rem; color: var(--color-text-gray);">
+        No episodes published yet. Check back soon.
+      </p>
+      {% endif %}
+    </section>
+
+    <!-- Divider -->
+    <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
+
+    <!-- AI Tools Section -->
+    <section style="margin-bottom: var(--space-3xl);">
+      <h2 style="font-size: 1.125rem; font-weight: 600; letter-spacing: 0.02em; text-transform: none; margin-bottom: var(--space-lg);">
+        AI Tools
+      </h2>
+
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-lg);">
+
+        <!-- Creative Juices -->
+        <a href="/mcp/creative-juices/" class="product-card" style="text-decoration: none; color: inherit; display: block;">
+          <h3 style="font-size: 0.9rem; font-weight: 600; letter-spacing: 0.02em; text-transform: none; margin-bottom: var(--space-sm); color: var(--color-text-black);">
+            Creative Juices
+          </h3>
+          <p style="font-size: 0.85rem; line-height: 1.7; color: var(--color-text-gray); margin: 0;">
             Randomness tools for divergent thinking. Breaks predictable AI patterns with concrete metaphors and strategic frameworks.
           </p>
+        </a>
 
-          <div style="background: var(--color-bg-warm-gray); padding: var(--space-sm); margin-bottom: var(--space-md); font-family: var(--font-mono); font-size: 0.75rem; border-left: 2px solid var(--color-border-dark);">
-            <div style="display: grid; grid-template-columns: 80px 1fr; gap: var(--space-xs);">
-              <span style="color: var(--color-text-gray);">TOOLS:</span><span>3</span>
-              <span style="color: var(--color-text-gray);">AUTH:</span><span>None</span>
-              <span style="color: var(--color-text-gray);">PRIVACY:</span><span>Local Only</span>
-            </div>
-          </div>
-
-          <a href="/mcp/creative-juices/" class="btn-brand" style="text-decoration: none; display: inline-block; font-size: 0.688rem;">
-            VIEW DOCUMENTATION →
-          </a>
-        </div>
-
-        <!-- CTO Tools MCP -->
-        <div class="server-card">
-          <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: var(--space-md);">
-            <div>
-              <div class="label" style="margin-bottom: var(--space-xs);">MCP_SERVER_02</div>
-              <h3 class="text-mono" style="font-size: 1rem; font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase;">
-                CTO Tools
-              </h3>
-            </div>
-            <div style="width: 6px; height: 6px; background: #4CAF50; border-radius: 50%; margin-top: 8px;"></div>
-          </div>
-
-          <p class="text-sans" style="font-size: 0.813rem; line-height: 1.6; color: var(--color-text-gray); margin-bottom: var(--space-md);">
-            Engineering leadership frameworks. Structured approach to weekly reviews, team analysis, and strategic decisions.
+        <!-- CTO Tools -->
+        <a href="/mcp/cto-tools/" class="product-card" style="text-decoration: none; color: inherit; display: block;">
+          <h3 style="font-size: 0.9rem; font-weight: 600; letter-spacing: 0.02em; text-transform: none; margin-bottom: var(--space-sm); color: var(--color-text-black);">
+            CTO Tools
+          </h3>
+          <p style="font-size: 0.85rem; line-height: 1.7; color: var(--color-text-gray); margin: 0;">
+            Engineering leadership frameworks for structured weekly reviews, team analysis, and strategic decisions.
           </p>
+        </a>
 
-          <div style="background: var(--color-bg-warm-gray); padding: var(--space-sm); margin-bottom: var(--space-md); font-family: var(--font-mono); font-size: 0.75rem; border-left: 2px solid var(--color-border-dark);">
-            <div style="display: grid; grid-template-columns: 80px 1fr; gap: var(--space-xs);">
-              <span style="color: var(--color-text-gray);">TOOLS:</span><span>1</span>
-              <span style="color: var(--color-text-gray);">AUTH:</span><span>None</span>
-              <span style="color: var(--color-text-gray);">PRIVACY:</span><span>Local Only</span>
-            </div>
-          </div>
-
-          <a href="/mcp/cto-tools/" class="btn-brand" style="text-decoration: none; display: inline-block; font-size: 0.688rem;">
-            VIEW DOCUMENTATION →
-          </a>
-        </div>
-
-      </div>
-    </section>
-
-    <!-- Divider -->
-    <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
-
-    <!-- What is MCP Section -->
-    <section id="what-is-mcp" style="margin-bottom: var(--space-3xl);">
-      <div class="label" style="margin-bottom: var(--space-md);">PROTOCOL_OVERVIEW</div>
-
-      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-        <h2 class="text-mono" style="font-size: 0.875rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: var(--space-md); color: var(--color-text-black);">
-          What is Model Context Protocol?
-        </h2>
-
-        <p class="text-sans" style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal); margin-bottom: var(--space-md);">
-          MCP is an open protocol that standardizes how applications provide context to Large Language Models.
-          Think of it as a USB-C port for AI: a universal interface that lets any AI assistant connect to any tool,
-          regardless of implementation details.
-        </p>
-
-        <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--space-md); margin-top: var(--space-lg);">
-          <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
-            <div class="text-mono" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: 4px;">BENEFIT_01</div>
-            <div class="text-sans" style="font-size: 0.75rem; font-weight: 500;">Standardized Interface</div>
-          </div>
-          <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
-            <div class="text-mono" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: 4px;">BENEFIT_02</div>
-            <div class="text-sans" style="font-size: 0.75rem; font-weight: 500;">Secure Execution</div>
-          </div>
-          <div style="border-left: 2px solid var(--color-border-dark); padding-left: var(--space-sm);">
-            <div class="text-mono" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: 4px;">BENEFIT_03</div>
-            <div class="text-sans" style="font-size: 0.75rem; font-weight: 500;">Local Execution</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- Divider -->
-    <div class="divider-technical" style="margin: var(--space-3xl) 0;"></div>
-
-    <!-- Quick Start Section -->
-    <section id="quick-start" style="margin-bottom: var(--space-3xl);">
-      <div class="label" style="margin-bottom: var(--space-md);">INSTALLATION_GUIDE</div>
-
-      <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-        <div style="display: grid; gap: var(--space-lg);">
-
-          <!-- Step 1 -->
-          <div style="display: grid; grid-template-columns: auto 1fr; gap: var(--space-md);">
-            <div style="border-right: 1px solid var(--color-border-light); padding-right: var(--space-md);">
-              <div class="text-mono" style="font-size: 1.5rem; color: var(--color-text-gray);">01</div>
-            </div>
-            <div>
-              <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-sm);">Install uv (if needed)</h3>
-              <div style="position: relative;">
-                <button class="copy-btn" style="position: absolute; top: var(--space-xs); right: var(--space-xs); background: var(--color-border-medium); color: var(--color-text-black); border: none; padding: 4px 8px; font-family: var(--font-mono); font-size: 0.688rem; cursor: pointer; opacity: 0.7; transition: opacity 0.2s;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'">
-                  COPY
-                </button>
-                <pre class="brand-code" style="font-size: 0.75rem; padding: var(--space-sm);"><code>curl -LsSf https://astral.sh/uv/install.sh | sh</code></pre>
-              </div>
-            </div>
-          </div>
-
-          <!-- Step 2 -->
-          <div style="display: grid; grid-template-columns: auto 1fr; gap: var(--space-md);">
-            <div style="border-right: 1px solid var(--color-border-light); padding-right: var(--space-md);">
-              <div class="text-mono" style="font-size: 1.5rem; color: var(--color-text-gray);">02</div>
-            </div>
-            <div>
-              <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-sm);">Add to Claude Desktop config</h3>
-              <p class="text-sans" style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-sm);">
-                Edit: <code class="text-mono" style="background: var(--color-bg-warm-gray); padding: 2px 6px;">~/Library/Application Support/Claude/claude_desktop_config.json</code>
-              </p>
-              <div style="position: relative;">
-                <button class="copy-btn" style="position: absolute; top: var(--space-xs); right: var(--space-xs); background: var(--color-border-medium); color: var(--color-text-black); border: none; padding: 4px 8px; font-family: var(--font-mono); font-size: 0.688rem; cursor: pointer; opacity: 0.7; transition: opacity 0.2s;" onmouseover="this.style.opacity='1'" onmouseout="this.style.opacity='0.7'">
-                  COPY
-                </button>
-                <pre class="brand-code" style="font-size: 0.688rem; padding: var(--space-sm);"><code>{
-  "mcpServers": {
-    "creative-juices": {
-      "command": "uvx",
-      "args": [
-        "run",
-        "--with", "mcp",
-        "--with", "httpx",
-        "https://ai.yuda.me/mcp/creative-juices/client.py"
-      ]
-    }
-  }
-}</code></pre>
-              </div>
-            </div>
-          </div>
-
-          <!-- Step 3 -->
-          <div style="display: grid; grid-template-columns: auto 1fr; gap: var(--space-md);">
-            <div style="border-right: 1px solid var(--color-border-light); padding-right: var(--space-md);">
-              <div class="text-mono" style="font-size: 1.5rem; color: var(--color-text-gray);">03</div>
-            </div>
-            <div>
-              <h3 class="text-mono" style="font-size: 0.75rem; font-weight: 600; text-transform: uppercase; margin-bottom: var(--space-sm);">Restart Claude Desktop</h3>
-              <p class="text-sans" style="font-size: 0.75rem; line-height: 1.6; color: var(--color-text-charcoal);">
-                Completely quit Claude Desktop (Cmd+Q on macOS) and reopen. Look for the 🔌 icon in the bottom-right corner.
-              </p>
-            </div>
-          </div>
-
-        </div>
       </div>
     </section>
 
   </div>
 {% endblock content %}
-
-{% block scripts %}
-<script>
-// Copy button functionality for code blocks
-document.querySelectorAll('.copy-btn').forEach(button => {
-  button.addEventListener('click', function() {
-    const pre = this.nextElementSibling;
-    const code = pre.querySelector('code');
-    const text = code.textContent;
-
-    navigator.clipboard.writeText(text).then(() => {
-      const originalText = this.textContent;
-      this.textContent = 'COPIED!';
-      this.style.background = 'var(--color-text-black)';
-      this.style.color = 'var(--color-bg-cream)';
-
-      setTimeout(() => {
-        this.textContent = originalText;
-        this.style.background = 'var(--color-border-medium)';
-        this.style.color = 'var(--color-text-black)';
-      }, 2000);
-    });
-  });
-});
-</script>
-{% endblock %}
