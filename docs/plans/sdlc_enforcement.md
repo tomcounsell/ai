@@ -230,6 +230,16 @@ A new skill at `.claude/skills/do-patch/SKILL.md`, invoked as `/do-patch`. Follo
 **Impact:** Agent runs `pytest` with no test files, or `ruff check` on an empty directory, to satisfy the gate
 **Mitigation:** Phase 2 concern. For now, checking that the commands were invoked is sufficient. Trust but verify.
 
+### Risk 5: Session classification is inadequate
+**Impact:** A session type not covered by the file-extension heuristic slips through (e.g., code written via a tool not yet tracked, or a non-code session incorrectly flagged)
+**Mitigation:** If inadequate classification is discovered during testing or live observation, the validator or observer must open a GitHub issue on this repo with:
+- The session type that failed classification
+- What tool use occurred (tool name, file path or command)
+- Whether it was a false positive (non-code session blocked) or false negative (code session not gated)
+- Any relevant Stop hook output or `sdlc_state.json` contents
+
+Do not attempt to patch the classification inline. File the issue and let it be addressed as a follow-up improvement to `post_tool_use.py`.
+
 ## No-Gos (Out of Scope)
 
 - No coverage enforcement (just test execution)
@@ -453,6 +463,7 @@ No agent integration required -- these are Claude Code hooks that fire automatic
 - Verify pipeline state resume: create a mock state file at `stage: test`, invoke `/do-build`, confirm it skips Plan/Branch/Implement and resumes at Test
 - Verify `/do-patch` applies a targeted fix without touching commit/PR steps
 - Run existing tests to ensure no regressions
+- If any classification test produces an unexpected result, open a GitHub issue on this repo (title: "SDLC classification gap: [description]") with the tool use details, expected vs. actual classification, and any relevant state file contents — do not patch inline
 
 ### 10. Documentation
 - **Task ID**: document-feature
