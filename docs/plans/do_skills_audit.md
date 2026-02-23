@@ -11,7 +11,12 @@ tracking: https://github.com/tomcounsell/ai/issues/153
 
 ## Problem
 
-After the skills reorganization (#152), we have 24 skills following a canonical SKILL.md template with specific frontmatter, line count, naming, and progressive disclosure requirements. There is no automated way to verify all skills stay compliant as the repo evolves. Manual auditing is tedious and will inevitably be forgotten, letting standards drift.
+After the skills reorganization (#152/#156) and SDLC enforcement (#154), we have **25 skills** following a canonical SKILL.md template with specific frontmatter, line count, naming, and progressive disclosure requirements. There is no automated way to verify all skills stay compliant as the repo evolves. Manual auditing is tedious and will inevitably be forgotten, letting standards drift.
+
+**Context from recent PRs:**
+- PR #156 added 8 skills (add-feature, prepare-app, prime, pthread, audit-next-tool, sdlc, new-skill, new-valor-skill restructured) and split do-plan into sub-files (SKILL.md + PLAN_TEMPLATE.md + SCOPING.md + EXAMPLES.md)
+- PR #154 added do-patch skill and hooks infrastructure
+- Issue #155 (pending) will delete 26 unused agent files and trim the do-plan template agent type list to 6 — the `test-engineer` agent type used in this plan will no longer have a backing file
 
 **Current behavior:**
 
@@ -35,11 +40,13 @@ A `/do-skills-audit` skill that:
 - PM check-ins: 0
 - Review rounds: 1
 
-This is a straightforward validation tool. The rules are already defined by #152. Implementation is mechanical — read files, check rules, report results.
+This is a straightforward validation tool. The rules are already defined by #152/#156. Implementation is mechanical — read files, check rules, report results.
 
 ## Prerequisites
 
-No prerequisites — this skill reads local files and applies deterministic checks. No external services or API keys needed.
+- ✅ #152/#156 (Skills & Agents Reorganization) — merged. Canonical template established, 25 skills in place.
+- ✅ #154 (SDLC Enforcement) — merged. do-patch skill added, hooks infrastructure in place.
+- ⚠️ #155 (Condense Context Overhead) — pending. Will delete unused agent files and trim do-plan template. Not a blocker — this plan works regardless of agent file count.
 
 ## Solution
 
@@ -47,7 +54,7 @@ No prerequisites — this skill reads local files and applies deterministic chec
 
 - **Skill directory**: `.claude/skills/do-skills-audit/SKILL.md` — the audit skill itself
 - **Validation script**: `.claude/skills/do-skills-audit/scripts/audit_skills.py` — standalone Python script that runs all checks and outputs structured results
-- **Rule set**: Hardcoded checks matching the standards established in #152
+- **Rule set**: Hardcoded checks matching the standards established in #152/#156
 
 ### Flow
 
@@ -57,7 +64,7 @@ No prerequisites — this skill reads local files and applies deterministic chec
 
 #### Validation Rules
 
-Each SKILL.md is checked against these rules (derived from the canonical template and #152 decisions):
+Each SKILL.md is checked against these rules (derived from the canonical template and #152/#156 decisions):
 
 **Structural rules:**
 1. **Line count**: SKILL.md must be <= 500 lines (FAIL if exceeded)
@@ -67,12 +74,12 @@ Each SKILL.md is checked against these rules (derived from the canonical templat
 5. **Description length**: Must be <= 1024 characters (WARN if exceeded)
 
 **Classification rules:**
-6. **Infrastructure skills** (`update`, `setup`, `reclassify`, `new-skill`, `prime`): Must have `disable-model-invocation: true` (WARN if missing)
+6. **Infrastructure skills** (`update`, `setup`, `reclassify`, `new-skill`, `new-valor-skill`, `prime`): Must have `disable-model-invocation: true` (WARN if missing)
 7. **Background reference skills** (`agent-browser`, `telegram`, `reading-sms-messages`, `checking-system-logs`, `google-workspace`): Must have `user-invocable: false` (WARN if missing)
-8. **Fork skills** (`do-build`, `do-pr-review`, `do-docs-audit`, `pthread`, `do-design-review`): Should have `context: fork` (WARN if missing)
+8. **Fork skills** (`do-build`, `do-pr-review`, `do-docs-audit`, `pthread`, `do-design-review`, `sdlc`): Should have `context: fork` (WARN if missing)
 
 **Content rules:**
-9. **Sub-file references**: Any `[text](file.md)` link must point to a file that exists in the skill directory (FAIL if broken)
+9. **Sub-file references**: Any `[text](file.md)` link must point to a file that exists in the skill directory (FAIL if broken). This is critical now that PR #156 introduced sub-files — do-plan has 3 sub-files (PLAN_TEMPLATE.md, SCOPING.md, EXAMPLES.md) and do-build has 2 (WORKFLOW.md, PR_AND_CLEANUP.md).
 10. **No duplicate descriptions**: No two skills should have identical or near-identical description fields (WARN if found)
 
 #### Script Design
@@ -109,6 +116,8 @@ The skill can also accept arguments:
 - **Don't enforce content structure beyond frontmatter**: Checking for specific sections (## Workflow, ## Examples, etc.) is too rigid. Skills have different needs. Only enforce frontmatter and structural constraints.
 - **Don't auto-fix content issues**: Auto-fix should only handle mechanical problems (missing name field, whitespace). Never rewrite descriptions or restructure content.
 - **Don't build a watch mode**: A one-shot audit is sufficient. CI integration or file watchers would be over-engineering.
+- **Don't audit hooks**: PR #154 added `.claude/hooks/` with validators and post-tool-use hooks. These follow different patterns than skills and are out of scope.
+- **Don't audit agent files**: Issue #155 will trim agents to 6. Agent files have no canonical template — auditing them adds no value.
 
 ## Risks
 
@@ -120,9 +129,14 @@ The skill can also accept arguments:
 **Impact:** When new skills are added, the hardcoded lists of "infrastructure skills" and "background reference skills" may not include them, causing false negatives
 **Mitigation:** The script reads the classification from frontmatter fields rather than maintaining a separate list. The only hardcoded check is "if `disable-model-invocation: true` is set, verify it's appropriate" — not the reverse. New skills without classification get a WARN suggesting they add one.
 
+### Risk 3: Sub-file link validation across do-plan split
+**Impact:** PR #156 split do-plan into SKILL.md + 3 sub-files. Sub-file references use relative paths like `[template](PLAN_TEMPLATE.md)`. If the audit resolves these incorrectly, it'll report false FAILs.
+**Mitigation:** Resolve sub-file links relative to the skill directory (parent of SKILL.md), not the repo root.
+
 ## No-Gos (Out of Scope)
 
-- No agent directory auditing — only skills are in scope
+- No agent directory auditing — only skills are in scope (issue #155 handles agent cleanup separately)
+- No hooks auditing — `.claude/hooks/` (from PR #154) follows different patterns
 - No content quality assessment — this is structural validation only
 - No automated PR creation for fixes — the `--fix` flag edits in place, user commits
 - No integration with CI/CD — this is a manual invocation skill
@@ -144,8 +158,9 @@ No agent integration required — this is a Claude Code skill invoked via `/do-s
 
 ## Success Criteria
 
-- [ ] `/do-skills-audit` runs and produces a structured report for all skills
+- [ ] `/do-skills-audit` runs and produces a structured report for all 25 skills
 - [ ] All 10 validation rules implemented and tested
+- [ ] Sub-file link validation works for multi-file skills (do-plan with 3 sub-files, do-build with 2)
 - [ ] Current skills all pass (no FAILs) — confirms rules match the standards we already enforce
 - [ ] `--fix` flag auto-fixes trivial issues (missing name field)
 - [ ] `--json` flag outputs machine-readable results
@@ -167,7 +182,7 @@ No agent integration required — this is a Claude Code skill invoked via `/do-s
 - **Builder (test-writer)**
   - Name: test-writer
   - Role: Write unit tests for all validation rules
-  - Agent Type: test-engineer
+  - Agent Type: builder
   - Resume: true
 
 - **Validator (audit-validator)**
@@ -199,7 +214,7 @@ No agent integration required — this is a Claude Code skill invoked via `/do-s
 - **Task ID**: build-tests
 - **Depends On**: build-skill
 - **Assigned To**: test-writer
-- **Agent Type**: test-engineer
+- **Agent Type**: builder
 - **Parallel**: false
 - Create `tests/unit/test_skills_audit.py`
 - Test each validation rule with passing and failing fixtures
@@ -246,4 +261,4 @@ No agent integration required — this is a Claude Code skill invoked via `/do-s
 
 ## Open Questions
 
-None — the requirements are well-defined by issue #153 and the standards from #152.
+None — the requirements are well-defined by issue #153 and the standards from #152/#156. The skill count (currently 25) and classification lists reflect the post-PR-154/156 state. If issue #155 ships first, no changes needed here — the audit dynamically discovers skills from the filesystem.
