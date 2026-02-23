@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Hook: Stop validator — enforce SDLC quality gates at session end.
+
+Reads the session's sdlc_state.json. If code was modified this session,
+all three quality commands (pytest, ruff, black) must have been run.
+
+Exit codes:
+  0 — pass (non-code session, or all gates satisfied)
+  2 — block (code modified but quality gates not all run)
+
+Escape hatch:
+  Set SKIP_SDLC=1 to bypass enforcement. A warning is logged to stderr.
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# Path helpers (mirrors post_tool_use.py conventions)
+# ---------------------------------------------------------------------------
+
+# Add hooks dir to path so utils.constants is importable when run directly
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+def get_data_sessions_dir() -> Path:
+    """Return the data/sessions directory under the project root."""
+    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+    if project_dir:
+        return Path(project_dir) / "data" / "sessions"
+    # Fallback: validators live in .claude/hooks/validators/; root is 4 levels up
+    return Path(__file__).resolve().parent.parent.parent.parent / "data" / "sessions"
+
+
+def get_sdlc_state_path(session_id: str) -> Path:
+    """Return the path to the SDLC state file for a given session."""
+    return get_data_sessions_dir() / session_id / "sdlc_state.json"
+
+
+# ---------------------------------------------------------------------------
+# Quality gate logic
+# ---------------------------------------------------------------------------
+
+_QUALITY_RUN_HINTS = {
+    "pytest": "pytest tests/",
+    "ruff": "ruff check .",
+    "black": "black --check .",
+}
+
+_ERROR_TEMPLATE = """\
+SDLC Quality Gate: Code was modified this session but not all quality checks were run.
+
+Missing:
+{missing_lines}
+Please run the missing checks before completing this session.
+Set SKIP_SDLC=1 to bypass in genuine emergencies (logs warning).
+"""
+
+
+def check_sdlc_quality_gate(session_id: str) -> str | None:
+    """Check SDLC quality gates for the given session.
+
+    Returns:
+        None   — all good, session may complete (exit 0)
+        str    — error message describing what's missing (exit 2)
+
+    The SKIP_SDLC=1 escape hatch is handled here: if set, always return None
+    but emit a warning to stderr.
+    """
+    # Fast path: non-code session — no state file means nothing to enforce
+    state_path = get_sdlc_state_path(session_id)
+    if not state_path.exists():
+        return None
+
+    # Load state
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        # Corrupt/unreadable state — fail open to avoid blocking the session
+        return None
+
+    # No code modified → no enforcement needed
+    if not state.get("code_modified", False):
+        return None
+
+    # Determine which quality commands are missing
+    quality_commands = state.get("quality_commands", {})
+    missing = [
+        cmd
+        for cmd in ("pytest", "ruff", "black")
+        if not quality_commands.get(cmd, False)
+    ]
+
+    if not missing:
+        return None  # All gates passed
+
+    # Handle SKIP_SDLC escape hatch
+    if os.environ.get("SKIP_SDLC") == "1":
+        print(
+            f"WARNING: SKIP_SDLC=1 set — bypassing SDLC quality gate for session "
+            f"'{session_id}'. Missing: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+        return None
+
+    # Build human-readable error listing missing checks with run hints
+    missing_lines = "\n".join(
+        f"  - {cmd} (run: {_QUALITY_RUN_HINTS[cmd]})" for cmd in missing
+    )
+    return _ERROR_TEMPLATE.format(missing_lines=missing_lines)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+
+def read_session_id_from_stdin() -> str:
+    """Read the session_id from stdin JSON (Stop hook protocol)."""
+    try:
+        raw = sys.stdin.read()
+        if raw.strip():
+            data = json.loads(raw)
+            return data.get("session_id", "unknown")
+    except (json.JSONDecodeError, OSError):
+        pass
+    return "unknown"
+
+
+def main() -> None:
+    session_id = read_session_id_from_stdin()
+    error_message = check_sdlc_quality_gate(session_id)
+
+    if error_message is None:
+        sys.exit(0)
+    else:
+        print(error_message, file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
