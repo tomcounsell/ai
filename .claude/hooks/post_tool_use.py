@@ -2,7 +2,7 @@
 """Hook: PostToolUse - Log after tool execution and track SDLC session state."""
 
 import json
-import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -13,6 +13,7 @@ sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 from utils.constants import (
     append_to_log,
     ensure_session_log_dir,
+    get_data_sessions_dir,
     get_session_id,
     read_hook_input,
 )
@@ -30,15 +31,6 @@ CODE_EXTENSIONS = {".py", ".js", ".ts"}
 
 # Quality commands to track in the SDLC state
 QUALITY_COMMANDS = ("pytest", "ruff", "black")
-
-
-def get_data_sessions_dir() -> Path:
-    """Return the data/sessions directory under the project root."""
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project_dir:
-        return Path(project_dir) / "data" / "sessions"
-    # Fallback: hooks live in .claude/hooks/, project root is four levels up
-    return Path(__file__).parent.parent.parent / "data" / "sessions"
 
 
 def is_code_file(file_path: str) -> bool:
@@ -79,11 +71,21 @@ def load_sdlc_state(session_id: str) -> dict:
 
 
 def save_sdlc_state(session_id: str, state: dict) -> None:
-    """Persist the SDLC state for a session, creating parent dirs as needed."""
+    """Persist the SDLC state for a session, creating parent dirs as needed.
+
+    Uses atomic write (tmp + rename) to avoid partial writes on crash.
+    """
     state_path = get_sdlc_state_path(session_id)
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(state_path, "w") as f:
-        json.dump(state, f, indent=2)
+    tmp_path = state_path.with_suffix(".json.tmp")
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(state, f, indent=2)
+        tmp_path.rename(state_path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
 
 
 def update_sdlc_state_for_file_write(hook_input: dict) -> None:
@@ -124,10 +126,12 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
     tool_input = hook_input.get("tool_input", {})
     command = tool_input.get("command", "")
 
-    # Check if this command runs any quality tool
+    # Check if this command runs any quality tool.
+    # Use regex word boundary to avoid false positives like `echo "pytest"` or
+    # `grep pytest` matching as if pytest was actually run.
     matched_command = None
     for cmd in QUALITY_COMMANDS:
-        if cmd in command:
+        if re.search(r"(?:^|&&|\|\||;|\s)" + re.escape(cmd) + r"\b", command):
             matched_command = cmd
             break
 

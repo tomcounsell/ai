@@ -9,14 +9,13 @@ This hook always exits 0 — it is purely advisory and never blocks tool executi
 """
 
 import json
-import os
 import sys
 from pathlib import Path
 
 # Add the hooks directory to sys.path so utils can be imported
 sys.path.insert(0, str(Path(__file__).parent))
 
-from utils.constants import read_hook_input  # noqa: E402
+from utils.constants import get_data_sessions_dir, read_hook_input  # noqa: E402
 
 # Code file extensions that warrant the SDLC reminder
 CODE_EXTENSIONS = {".py", ".js", ".ts"}
@@ -26,15 +25,6 @@ SDLC_REMINDER_MESSAGE = (
     "SDLC: Remember to run tests and linting before completing this task "
     "(pytest tests/ && ruff check . && black .)"
 )
-
-
-def get_data_sessions_dir() -> Path:
-    """Return the data/sessions directory under the project root."""
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project_dir:
-        return Path(project_dir) / "data" / "sessions"
-    # Fallback: hooks live in .claude/hooks/, project root is two levels up
-    return Path(__file__).parent.parent.parent / "data" / "sessions"
 
 
 def get_reminder_state_path(session_id: str) -> Path:
@@ -74,8 +64,15 @@ def mark_reminder_sent(session_id: str) -> None:
             existing = {}
 
     existing["reminder_sent"] = True
-    with open(state_path, "w") as f:
-        json.dump(existing, f, indent=2)
+    tmp_path = state_path.with_suffix(".json.tmp")
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(existing, f, indent=2)
+        tmp_path.rename(state_path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
 
 
 def emit_reminder_if_needed(hook_input: dict) -> None:

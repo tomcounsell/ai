@@ -18,20 +18,13 @@ import sys
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# Path helpers (mirrors post_tool_use.py conventions)
+# Path helpers
 # ---------------------------------------------------------------------------
 
 # Add hooks dir to path so utils.constants is importable when run directly
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-
-def get_data_sessions_dir() -> Path:
-    """Return the data/sessions directory under the project root."""
-    project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-    if project_dir:
-        return Path(project_dir) / "data" / "sessions"
-    # Fallback: validators live in .claude/hooks/validators/; root is 4 levels up
-    return Path(__file__).resolve().parent.parent.parent.parent / "data" / "sessions"
+from utils.constants import get_data_sessions_dir  # noqa: E402
 
 
 def get_sdlc_state_path(session_id: str) -> Path:

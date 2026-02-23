@@ -138,6 +138,6 @@ Should not happen — the first check is a file existence test. If slow, verify 
 ## Related
 
 - [do-patch Skill](do-patch-skill.md) — repair loop invoked on test failure or review blockers
-- [Commit Validation](commit-validation.md) — more detail on the commit message hook
+- `.claude/hooks/validators/validate_commit_message.py` — commit message validation (blocks co-author trailers and empty messages)
 - `agent/pipeline_state.py` — pipeline state read/write module
 - `.claude/hooks/validators/validate_sdlc_on_stop.py` — stop hook source
