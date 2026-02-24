@@ -7,6 +7,7 @@ from .podcast_views import (
     EpisodeReportView,
     EpisodeSourcesView,
     PodcastDetailView,
+    PodcastEditView,
     PodcastListView,
 )
 
@@ -17,6 +18,7 @@ __all__ = [
     "EpisodeSourcesView",
     "EpisodeWorkflowView",
     "PodcastDetailView",
+    "PodcastEditView",
     "PodcastFeedView",
     "PodcastListView",
 ]

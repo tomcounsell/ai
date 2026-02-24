@@ -1,5 +1,6 @@
 from uuid import uuid4
 
+from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.db.models import Count, F, Max, Q
 from django.db.models.functions import Now
@@ -7,7 +8,9 @@ from django.http import Http404, HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.views import View
+from django.views.generic.edit import UpdateView
 
+from apps.common.services.storage import store_file
 from apps.podcast.models import Episode, Podcast
 from apps.public.views.helpers.main_content_view import MainContentView
 
@@ -168,6 +171,63 @@ class EpisodeSourcesView(MainContentView):
         self.context["podcast"] = podcast
         self.context["episode"] = episode
         return self.render(request)
+
+
+class PodcastEditView(LoginRequiredMixin, MainContentView, UpdateView):
+    """Edit podcast metadata and upload cover art. Owner-only access."""
+
+    model = Podcast
+    template_name = "podcast/podcast_edit.html"
+    fields = [
+        "title",
+        "description",
+        "author_name",
+        "author_email",
+        "language",
+        "website_url",
+        "spotify_url",
+        "apple_podcasts_url",
+    ]
+
+    MAX_COVER_SIZE = 5 * 1024 * 1024  # 5MB
+
+    def get_queryset(self):
+        """Scope to podcasts owned by the current user — returns 404 for non-owners."""
+        return Podcast.objects.filter(owner=self.request.user)
+
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        context["title"] = f"Edit: {self.object.title}"
+        context["podcast"] = self.object
+        return context
+
+    def form_valid(self, form):
+        """Handle form submission including optional cover image upload."""
+        cover_file = self.request.FILES.get("cover_image")
+        if cover_file:
+            if cover_file.size > self.MAX_COVER_SIZE:
+                form.add_error(None, "Cover image must be 5MB or smaller.")
+                return self.form_invalid(form)
+            self._upload_cover(form.instance, cover_file)
+
+        response = super().form_valid(form)
+        messages.success(self.request, "Podcast updated.")
+        return response
+
+    def _upload_cover(self, podcast, cover_file):
+        """Upload cover image to Supabase and set cover_image_url."""
+        storage_key = f"podcast/{podcast.slug}/cover.png"
+        image_bytes = cover_file.read()
+        content_type = cover_file.content_type or "image/png"
+        is_private = podcast.uses_private_bucket
+        url = store_file(storage_key, image_bytes, content_type, public=not is_private)
+        if is_private:
+            podcast.cover_image_url = storage_key
+        else:
+            podcast.cover_image_url = url
+
+    def get_success_url(self):
+        return reverse("podcast:detail", kwargs={"slug": self.object.slug})
 
 
 class EpisodeCreateView(LoginRequiredMixin, UserPassesTestMixin, View):

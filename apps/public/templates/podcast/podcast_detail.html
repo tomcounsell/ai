@@ -19,6 +19,12 @@
        class="inline-flex items-center gap-2 text-sm font-mono text-red-700 hover:text-red-800 border border-red-300 px-3 py-1.5 hover:bg-red-50 transition-colors">
       <i class="fas fa-rss"></i> RSS Feed
     </a>
+    {% if is_owner %}
+    <a href="{% url 'podcast:edit' slug=podcast.slug %}"
+       class="inline-flex items-center gap-2 text-sm font-mono text-red-700 hover:text-red-800 border border-red-300 px-3 py-1.5 hover:bg-red-50 transition-colors">
+      <i class="fas fa-pencil-alt"></i> Edit
+    </a>
+    {% endif %}
     {% if request.user.is_staff %}
     <form method="post" action="{% url 'podcast:episode_create' slug=podcast.slug %}">
       {% csrf_token %}

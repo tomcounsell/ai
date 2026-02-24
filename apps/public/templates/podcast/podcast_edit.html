@@ -1,0 +1,133 @@
+{% extends base_template %}
+
+{% block title %}Edit: {{ podcast.title }}{% endblock %}
+
+{% block content_width %}8{% endblock %}
+
+{% block main_header %}
+<div>
+  <nav class="text-sm text-gray-500 mb-2 font-mono">
+    <a href="{% url 'podcast:list' %}" class="hover:text-gray-700">Podcasts</a>
+    <span class="mx-1">/</span>
+    <a href="{% url 'podcast:detail' slug=podcast.slug %}" class="hover:text-gray-700">{{ podcast.title }}</a>
+    <span class="mx-1">/</span>
+    <span class="text-gray-900">Edit</span>
+  </nav>
+  <h1 class="text-3xl font-bold tracking-tight text-gray-900">Edit Podcast</h1>
+</div>
+{% endblock %}
+
+{% block content %}
+<form method="post" enctype="multipart/form-data" class="max-w-2xl">
+  {% csrf_token %}
+
+  {% if form.non_field_errors %}
+  <div class="bg-red-50 border border-red-300 p-4 mb-6">
+    <p class="text-sm text-red-800 font-medium">Please correct the errors below:</p>
+    <ul class="mt-1 text-sm text-red-700 list-disc list-inside">
+      {% for error in form.non_field_errors %}
+      <li>{{ error }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  <!-- Cover Art -->
+  <div class="mb-8 border border-gray-200 p-6">
+    <h2 class="font-mono text-sm font-semibold text-gray-500 uppercase tracking-wider mb-4">Cover Art</h2>
+    <div class="flex items-start gap-6">
+      {% if podcast.cover_image_url %}
+      <img src="{{ podcast.cover_image_url }}" alt="{{ podcast.title }}"
+           class="w-32 h-32 object-cover flex-shrink-0" id="cover-preview">
+      {% else %}
+      <div class="w-32 h-32 bg-gray-100 flex items-center justify-center flex-shrink-0" id="cover-preview">
+        <i class="fas fa-podcast text-4xl text-gray-300"></i>
+      </div>
+      {% endif %}
+      <div>
+        <label for="id_cover_image" class="block text-sm font-medium text-gray-700 mb-1">Upload new cover</label>
+        <input type="file" name="cover_image" id="id_cover_image" accept="image/*"
+               class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:border file:border-gray-300 file:text-sm file:font-mono file:bg-white file:text-gray-700 hover:file:bg-gray-50">
+        <p class="text-xs text-gray-400 font-mono mt-2">Max 5MB. Recommended: 3000x3000 PNG or JPG.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Metadata -->
+  <div class="space-y-6 mb-8">
+    <h2 class="font-mono text-sm font-semibold text-gray-500 uppercase tracking-wider">Podcast Details</h2>
+
+    <div>
+      <label for="{{ form.title.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">Title</label>
+      <input type="text" name="title" id="{{ form.title.id_for_label }}" value="{{ form.title.value|default:'' }}"
+             class="input-brand w-full" required maxlength="{{ form.title.field.max_length|default:'255' }}">
+      {% if form.title.errors %}<p class="text-red-600 text-sm mt-1">{{ form.title.errors.0 }}</p>{% endif %}
+    </div>
+
+    <div>
+      <label for="{{ form.description.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+      <textarea name="description" id="{{ form.description.id_for_label }}" rows="4"
+                class="input-brand w-full">{{ form.description.value|default:'' }}</textarea>
+      {% if form.description.errors %}<p class="text-red-600 text-sm mt-1">{{ form.description.errors.0 }}</p>{% endif %}
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+      <div>
+        <label for="{{ form.author_name.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">Author Name</label>
+        <input type="text" name="author_name" id="{{ form.author_name.id_for_label }}" value="{{ form.author_name.value|default:'' }}"
+               class="input-brand w-full">
+        {% if form.author_name.errors %}<p class="text-red-600 text-sm mt-1">{{ form.author_name.errors.0 }}</p>{% endif %}
+      </div>
+      <div>
+        <label for="{{ form.author_email.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">Author Email</label>
+        <input type="email" name="author_email" id="{{ form.author_email.id_for_label }}" value="{{ form.author_email.value|default:'' }}"
+               class="input-brand w-full">
+        {% if form.author_email.errors %}<p class="text-red-600 text-sm mt-1">{{ form.author_email.errors.0 }}</p>{% endif %}
+      </div>
+    </div>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+      <div>
+        <label for="{{ form.language.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">Language</label>
+        <input type="text" name="language" id="{{ form.language.id_for_label }}" value="{{ form.language.value|default:'' }}"
+               class="input-brand w-full" placeholder="en">
+        {% if form.language.errors %}<p class="text-red-600 text-sm mt-1">{{ form.language.errors.0 }}</p>{% endif %}
+      </div>
+      <div>
+        <label for="{{ form.website_url.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">Website URL</label>
+        <input type="url" name="website_url" id="{{ form.website_url.id_for_label }}" value="{{ form.website_url.value|default:'' }}"
+               class="input-brand w-full" placeholder="https://">
+        {% if form.website_url.errors %}<p class="text-red-600 text-sm mt-1">{{ form.website_url.errors.0 }}</p>{% endif %}
+      </div>
+    </div>
+
+    <h2 class="font-mono text-sm font-semibold text-gray-500 uppercase tracking-wider pt-4">Platform Links</h2>
+
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-6">
+      <div>
+        <label for="{{ form.spotify_url.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">
+          <i class="fab fa-spotify mr-1"></i> Spotify URL
+        </label>
+        <input type="url" name="spotify_url" id="{{ form.spotify_url.id_for_label }}" value="{{ form.spotify_url.value|default:'' }}"
+               class="input-brand w-full" placeholder="https://open.spotify.com/show/...">
+        {% if form.spotify_url.errors %}<p class="text-red-600 text-sm mt-1">{{ form.spotify_url.errors.0 }}</p>{% endif %}
+      </div>
+      <div>
+        <label for="{{ form.apple_podcasts_url.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">
+          <i class="fab fa-apple mr-1"></i> Apple Podcasts URL
+        </label>
+        <input type="url" name="apple_podcasts_url" id="{{ form.apple_podcasts_url.id_for_label }}" value="{{ form.apple_podcasts_url.value|default:'' }}"
+               class="input-brand w-full" placeholder="https://podcasts.apple.com/...">
+        {% if form.apple_podcasts_url.errors %}<p class="text-red-600 text-sm mt-1">{{ form.apple_podcasts_url.errors.0 }}</p>{% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div class="flex items-center justify-between border-t border-gray-200 pt-6">
+    <a href="{% url 'podcast:detail' slug=podcast.slug %}"
+       class="text-sm font-mono text-gray-600 hover:text-gray-800">Cancel</a>
+    <button type="submit" class="btn-brand">Save Changes</button>
+  </div>
+</form>
+{% endblock %}

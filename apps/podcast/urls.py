@@ -7,6 +7,7 @@ from apps.podcast.views import (
     EpisodeSourcesView,
     EpisodeWorkflowView,
     PodcastDetailView,
+    PodcastEditView,
     PodcastFeedView,
     PodcastListView,
 )
@@ -16,6 +17,7 @@ app_name = "podcast"
 urlpatterns = [
     path("", PodcastListView.as_view(), name="list"),
     path("<slug:slug>/", PodcastDetailView.as_view(), name="detail"),
+    path("<slug:slug>/edit/", PodcastEditView.as_view(), name="edit"),
     path("<slug:slug>/feed.xml", PodcastFeedView.as_view(), name="feed"),
     path("<slug:slug>/new/", EpisodeCreateView.as_view(), name="episode_create"),
     path(

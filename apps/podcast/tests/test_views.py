@@ -702,3 +702,133 @@ class EpisodeCreateViewTestCase(TestCase):
         self.client.login(username="regularuser", password="password")
         response = self.client.get(f"/podcast/{self.podcast.slug}/")
         self.assertNotContains(response, "New Episode")
+
+
+@override_settings(STORAGES=SIMPLE_STORAGES)
+class PodcastEditViewTestCase(TestCase):
+    """Tests for the podcast edit view (owner-only access)."""
+
+    def setUp(self):
+        self.owner = User.objects.create_user(
+            username="editowner", password="testpass123"
+        )
+        self.other_user = User.objects.create_user(
+            username="editother", password="testpass123"
+        )
+        self.podcast = Podcast.objects.create(
+            title="Editable Podcast",
+            slug="editable-podcast",
+            description="A podcast for edit tests.",
+            author_name="Author",
+            author_email="a@b.com",
+            privacy=Podcast.Privacy.PUBLIC,
+            published_at=timezone.now() - timezone.timedelta(hours=1),
+            owner=self.owner,
+        )
+
+    def test_edit_requires_login(self):
+        """Anonymous user is redirected to login."""
+        response = self.client.get(f"/podcast/{self.podcast.slug}/edit/")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/account/login", response.url)
+
+    def test_edit_returns_200_for_owner(self):
+        """Owner can access the edit page."""
+        self.client.login(username="editowner", password="testpass123")
+        response = self.client.get(f"/podcast/{self.podcast.slug}/edit/")
+        self.assertEqual(response.status_code, 200)
+
+    def test_edit_returns_404_for_non_owner(self):
+        """Non-owner gets 404 on edit page."""
+        self.client.login(username="editother", password="testpass123")
+        response = self.client.get(f"/podcast/{self.podcast.slug}/edit/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_edit_contains_form(self):
+        """Edit page contains form with podcast fields."""
+        self.client.login(username="editowner", password="testpass123")
+        response = self.client.get(f"/podcast/{self.podcast.slug}/edit/")
+        self.assertContains(response, 'enctype="multipart/form-data"')
+        self.assertContains(response, "Editable Podcast")
+
+    def test_edit_post_updates_title(self):
+        """POST with valid data updates the podcast title."""
+        self.client.login(username="editowner", password="testpass123")
+        response = self.client.post(
+            f"/podcast/{self.podcast.slug}/edit/",
+            {
+                "title": "Updated Podcast Title",
+                "description": "Updated description.",
+                "author_name": "New Author",
+                "author_email": "new@example.com",
+                "language": "en",
+                "website_url": "",
+                "spotify_url": "",
+                "apple_podcasts_url": "",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.podcast.refresh_from_db()
+        self.assertEqual(self.podcast.title, "Updated Podcast Title")
+        self.assertEqual(self.podcast.description, "Updated description.")
+        self.assertEqual(self.podcast.author_name, "New Author")
+
+    def test_edit_post_redirects_to_detail(self):
+        """Successful POST redirects to podcast detail page."""
+        self.client.login(username="editowner", password="testpass123")
+        response = self.client.post(
+            f"/podcast/{self.podcast.slug}/edit/",
+            {
+                "title": "Redirect Test",
+                "description": "desc",
+                "author_name": "Author",
+                "author_email": "a@b.com",
+                "language": "en",
+                "website_url": "",
+                "spotify_url": "",
+                "apple_podcasts_url": "",
+            },
+        )
+        self.assertRedirects(
+            response,
+            f"/podcast/{self.podcast.slug}/",
+            fetch_redirect_response=False,
+        )
+
+    def test_edit_post_rejected_for_non_owner(self):
+        """Non-owner POST returns 404."""
+        self.client.login(username="editother", password="testpass123")
+        response = self.client.post(
+            f"/podcast/{self.podcast.slug}/edit/",
+            {
+                "title": "Hacked Title",
+                "description": "desc",
+                "author_name": "Author",
+                "author_email": "a@b.com",
+                "language": "en",
+                "website_url": "",
+                "spotify_url": "",
+                "apple_podcasts_url": "",
+            },
+        )
+        self.assertEqual(response.status_code, 404)
+        self.podcast.refresh_from_db()
+        self.assertEqual(self.podcast.title, "Editable Podcast")
+
+    def test_edit_button_visible_to_owner(self):
+        """Owner sees Edit button on detail page."""
+        self.client.login(username="editowner", password="testpass123")
+        response = self.client.get(f"/podcast/{self.podcast.slug}/")
+        self.assertContains(response, "Edit")
+        self.assertContains(response, f"/podcast/{self.podcast.slug}/edit/")
+
+    def test_edit_button_hidden_from_non_owner(self):
+        """Non-owner does not see Edit button on detail page."""
+        self.client.login(username="editother", password="testpass123")
+        response = self.client.get(f"/podcast/{self.podcast.slug}/")
+        self.assertNotContains(response, f"/podcast/{self.podcast.slug}/edit/")
+
+    def test_edit_button_hidden_from_anonymous(self):
+        """Anonymous user does not see Edit button on detail page."""
+        response = self.client.get(f"/podcast/{self.podcast.slug}/")
+        self.assertNotContains(response, f"/podcast/{self.podcast.slug}/edit/")
