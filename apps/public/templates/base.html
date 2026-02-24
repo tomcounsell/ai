@@ -102,7 +102,7 @@ Block Structure:
     {% block extra_head %}{% endblock extra_head %}
 </head>
 
-<body class="min-h-screen flex flex-col bg-cream text-gray-900 antialiased"
+<body class="min-h-screen flex flex-col bg-cream antialiased {% block body_class %}{% endblock %}"
       {% if debug %}hx-ext="debug" {% endif %}
       onkeydown="if(event.key==='Escape'){const m=document.querySelector('#primary-modal-container .modal-overlay, #secondary-modal-container .modal-overlay');if(m)m.closest('.modal-container').innerHTML='';}"
 >

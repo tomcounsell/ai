@@ -348,7 +348,7 @@ label, .label {
 }
 
 .nav-brand a {
-    font-family: var(--font-mono);
+    font-family: var(--font-sans);
     font-size: 0.75rem;
     font-weight: 500;
     letter-spacing: 0.08em;
@@ -527,6 +527,88 @@ pre.brand-code {
 
 .border-technical { border: 1px solid var(--color-border-dark); }
 .border-accent { border-color: var(--color-accent); }
+
+/* === MCP PAGE LAYOUT === */
+
+/* Full-width MCP page layout override */
+.mcp-page #main_header { display: none; }
+.mcp-page main > div { max-width: 100% !important; padding: 0 !important; }
+
+.mcp-container {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: var(--space-2xl) var(--space-lg);
+}
+
+.mcp-header {
+    border: 2px solid var(--color-border-dark);
+    background: var(--color-bg-white);
+    padding: var(--space-2xl);
+    margin-bottom: var(--space-2xl);
+    position: relative;
+}
+
+.mcp-header::before {
+    content: '';
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    border: 1px solid var(--color-border-light);
+    pointer-events: none;
+}
+
+.install-note {
+    font-size: 0.75rem;
+    color: var(--color-text-gray);
+    background: var(--color-bg-warm-gray);
+    padding: var(--space-sm);
+    border-left: 2px solid var(--color-accent);
+    line-height: 1.6;
+}
+
+.details-accordion {
+    margin-bottom: var(--space-sm);
+    border: 1px solid var(--color-border-light);
+    background: var(--color-bg-cream);
+}
+
+.details-accordion summary {
+    padding: var(--space-md);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.details-accordion > div {
+    padding: var(--space-lg);
+    border-top: 1px solid var(--color-border-light);
+    background: var(--color-bg-white);
+}
+
+/* Copy button for code blocks */
+.copy-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: var(--color-border-medium);
+    color: var(--color-text-black);
+    border: none;
+    padding: 4px 8px;
+    font-family: var(--font-mono);
+    font-size: 0.688rem;
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+}
+
+.copy-btn:hover {
+    opacity: 1;
+}
 
 /* === RESPONSIVE === */
 
