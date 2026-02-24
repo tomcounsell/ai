@@ -24,7 +24,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -149,7 +149,7 @@ def local_files_age_days() -> int:
     try:
         meta = json.loads(METADATA_FILE.read_text(encoding="utf-8"))
         fetched = datetime.fromisoformat(meta["fetched_at"])
-        return (datetime.now(tz=datetime.UTC) - fetched).days
+        return (datetime.now(tz=UTC) - fetched).days
     except (json.JSONDecodeError, KeyError, ValueError):
         return 999
 
@@ -186,7 +186,7 @@ def save_local_docs(docs_text: str | None, creator_text: str | None) -> list[str
 
     # Always update metadata timestamp
     meta = {
-        "fetched_at": datetime.now(tz=datetime.UTC).isoformat(),
+        "fetched_at": datetime.now(tz=UTC).isoformat(),
         "sources": {
             "skills_docs": SKILLS_DOCS_URL,
             "skill_creator": SKILL_CREATOR_URL,
@@ -362,8 +362,9 @@ def format_report_human(report: dict, sync_status: dict | None = None) -> str:
 
     if sync_status:
         if sync_status.get("skipped"):
-            age = sync_status["age_days"]
-            lines.append(f"Local docs: FRESH ({age} days old) — skipped upstream check")
+            lines.append(
+                f"Local docs: FRESH ({sync_status['age_days']} days old) — skipped upstream check"
+            )
         else:
             changed = sync_status.get("changed", [])
             errors = sync_status.get("fetch_errors", [])
