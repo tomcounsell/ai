@@ -12,6 +12,8 @@ You are the **test orchestrator**. You parse arguments, dispatch test runners (p
 
 TEST_ARGS: $ARGUMENTS
 
+**If TEST_ARGS is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation — they invoked this as `/do-test <argument>`. Extract whatever follows `/do-test` as the value of TEST_ARGS. Do NOT stop or report an error; just use the argument from the message.
+
 ## Argument Parsing
 
 Parse `TEST_ARGS` to determine what to run:
