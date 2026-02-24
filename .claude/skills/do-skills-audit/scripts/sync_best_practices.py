@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
 """Sync against Anthropic's latest published skill best practices.
 
-Fetches official documentation, extracts best practices, compares against
-our current template/validator, and generates a delta report.
+Fetches official documentation, diffs against our local reference copies,
+updates local files when content has changed, and generates a delta report.
 
-Can be run standalone or called from audit_skills.py as part of default audit.
+Local reference files live at:
+  .claude/skills/do-skills-audit/references/
+    anthropic-skills-docs.txt     — stripped text from docs page
+    anthropic-skill-creator.md    — raw skill-creator SKILL.md
+    metadata.json                 — fetch timestamps and source URLs
+
+The audit always reads from local reference files (no live fetch needed).
+Run with no flags (or --sync) to check for upstream updates.
+
+Exit codes:
+  0 — success
+  1 — could not fetch and no local files exist
 """
 
 from __future__ import annotations
@@ -24,10 +35,15 @@ import yaml
 # Constants
 # ---------------------------------------------------------------------------
 
+SKILL_DIR = Path(__file__).resolve().parents[1]
+REFERENCES_DIR = SKILL_DIR / "references"
+DOCS_FILE = REFERENCES_DIR / "anthropic-skills-docs.txt"
+CREATOR_FILE = REFERENCES_DIR / "anthropic-skill-creator.md"
+METADATA_FILE = REFERENCES_DIR / "metadata.json"
+
 REPO_ROOT = Path(__file__).resolve().parents[4]
-DATA_DIR = REPO_ROOT / "data"
-CACHE_FILE = DATA_DIR / "best_practices_cache.json"
-CACHE_TTL_DAYS = 7
+OUR_TEMPLATE = REPO_ROOT / ".claude" / "skills" / "new-skill" / "SKILL_TEMPLATE.md"
+OUR_SKILL_DOCS = REPO_ROOT / ".claude" / "skills" / "new-skill" / "SKILL.md"
 
 SKILLS_DOCS_URL = "https://code.claude.com/docs/en/skills"
 SKILL_CREATOR_URL = (
@@ -35,8 +51,7 @@ SKILL_CREATOR_URL = (
     "skills/skill-creator/SKILL.md"
 )
 
-OUR_TEMPLATE = REPO_ROOT / ".claude" / "skills" / "new-skill" / "SKILL_TEMPLATE.md"
-OUR_SKILL_DOCS = REPO_ROOT / ".claude" / "skills" / "new-skill" / "SKILL.md"
+SYNC_TTL_DAYS = 7  # Only re-fetch if local files are older than this
 
 # Known frontmatter fields per Anthropic docs (Feb 2026)
 ANTHROPIC_KNOWN_FIELDS = {
@@ -52,7 +67,6 @@ ANTHROPIC_KNOWN_FIELDS = {
     "hooks": "Hooks scoped to this skill's lifecycle.",
 }
 
-# Key structural rules from Anthropic
 ANTHROPIC_RULES = {
     "line_limit": 500,
     "name_max_chars": 64,
@@ -71,7 +85,6 @@ ANTHROPIC_RULES = {
     "no_auxiliary_docs": "No README.md, CHANGELOG.md, etc. in skill directories",
 }
 
-# String substitutions documented by Anthropic
 ANTHROPIC_SUBSTITUTIONS = [
     "$ARGUMENTS",
     "$ARGUMENTS[N]",
@@ -81,17 +94,12 @@ ANTHROPIC_SUBSTITUTIONS = [
 
 
 # ---------------------------------------------------------------------------
-# Fetching and caching
+# SSL helpers
 # ---------------------------------------------------------------------------
 
 
 def _get_ssl_context():
-    """Get an SSL context with proper CA certificates.
-
-    Uses certifi's CA bundle to work around macOS Python installations
-    that ship without root certificates (SSL: CERTIFICATE_VERIFY_FAILED).
-    Falls back to default context if certifi is unavailable.
-    """
+    """Get an SSL context with proper CA certificates."""
     import ssl
 
     try:
@@ -116,84 +124,108 @@ def _fetch_url(url: str) -> str | None:
 
 def _strip_html(html: str) -> str:
     """Simple HTML to text conversion."""
-    # Remove script/style blocks
     text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL)
     text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL)
-    # Replace common block elements with newlines
     text = re.sub(r"<(?:p|div|br|h[1-6]|li|tr)[^>]*>", "\n", text, flags=re.I)
-    # Strip remaining tags
     text = re.sub(r"<[^>]+>", "", text)
-    # Collapse whitespace
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-def load_cache() -> dict | None:
-    """Load cached docs if fresh enough."""
-    if not CACHE_FILE.exists():
-        return None
+# ---------------------------------------------------------------------------
+# Local reference file management
+# ---------------------------------------------------------------------------
+
+
+def local_files_exist() -> bool:
+    """Return True if all reference files are present."""
+    return DOCS_FILE.exists() and CREATOR_FILE.exists()
+
+
+def local_files_age_days() -> int:
+    """Return age of local reference files in days (based on metadata)."""
+    if not METADATA_FILE.exists():
+        return 999
     try:
-        data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
-        fetched = datetime.fromisoformat(data["fetched_at"])
-        age_days = (datetime.now(tz=timezone.utc) - fetched).days
-        if age_days < CACHE_TTL_DAYS:
-            data["_cache_age_days"] = age_days
-            data["_cache_status"] = "FRESH"
-            return data
-        else:
-            data["_cache_age_days"] = age_days
-            data["_cache_status"] = "STALE"
-            return data
+        meta = json.loads(METADATA_FILE.read_text(encoding="utf-8"))
+        fetched = datetime.fromisoformat(meta["fetched_at"])
+        return (datetime.now(tz=timezone.utc) - fetched).days
     except (json.JSONDecodeError, KeyError, ValueError):
-        return None
+        return 999
 
 
-def save_cache(sources: dict[str, str]) -> None:
-    """Save fetched docs to cache."""
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    data = {
+def load_local_docs() -> dict[str, str]:
+    """Load the local reference files. Returns empty dict if missing."""
+    sources: dict[str, str] = {}
+    if DOCS_FILE.exists():
+        sources["skills_docs"] = DOCS_FILE.read_text(encoding="utf-8")
+    if CREATOR_FILE.exists():
+        sources["skill_creator"] = CREATOR_FILE.read_text(encoding="utf-8")
+    return sources
+
+
+def save_local_docs(docs_text: str | None, creator_text: str | None) -> list[str]:
+    """Write fetched content to local reference files. Returns list of changed files."""
+    REFERENCES_DIR.mkdir(parents=True, exist_ok=True)
+    changed = []
+
+    if docs_text is not None:
+        stripped = _strip_html(docs_text)
+        existing = DOCS_FILE.read_text(encoding="utf-8") if DOCS_FILE.exists() else ""
+        if stripped != existing:
+            DOCS_FILE.write_text(stripped, encoding="utf-8")
+            changed.append(DOCS_FILE.name)
+
+    if creator_text is not None:
+        existing = CREATOR_FILE.read_text(encoding="utf-8") if CREATOR_FILE.exists() else ""
+        if creator_text != existing:
+            CREATOR_FILE.write_text(creator_text, encoding="utf-8")
+            changed.append(CREATOR_FILE.name)
+
+    # Always update metadata timestamp
+    meta = {
         "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
-        "ttl_days": CACHE_TTL_DAYS,
-        "sources": sources,
+        "sources": {
+            "skills_docs": SKILLS_DOCS_URL,
+            "skill_creator": SKILL_CREATOR_URL,
+        },
+        "sync_ttl_days": SYNC_TTL_DAYS,
     }
-    CACHE_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    METADATA_FILE.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+
+    return changed
 
 
-def fetch_docs(force_refresh: bool = False) -> dict:
-    """Fetch Anthropic docs, using cache when appropriate."""
-    if not force_refresh:
-        cached = load_cache()
-        if cached and cached.get("_cache_status") == "FRESH":
-            return cached
+def sync_from_upstream(force: bool = False) -> dict:
+    """Fetch upstream docs and update local reference files if stale or forced.
 
-    sources = {}
+    Returns a status dict with keys:
+      skipped      — True if sync was skipped (fresh enough)
+      age_days     — age of local files
+      changed      — list of files that were updated
+      fetch_errors — list of URLs that failed
+    """
+    age = local_files_age_days()
+    if not force and local_files_exist() and age < SYNC_TTL_DAYS:
+        return {"skipped": True, "age_days": age, "changed": [], "fetch_errors": []}
 
-    # Fetch main skills doc
-    html = _fetch_url(SKILLS_DOCS_URL)
-    if html:
-        sources["skills_docs"] = _strip_html(html)
-    elif not force_refresh:
-        # Fall back to stale cache
-        cached = load_cache()
-        if cached:
-            sources["skills_docs"] = cached.get("sources", {}).get("skills_docs", "")
+    fetch_errors = []
+    docs_text = _fetch_url(SKILLS_DOCS_URL)
+    if docs_text is None:
+        fetch_errors.append(SKILLS_DOCS_URL)
 
-    # Fetch skill-creator (raw markdown, no HTML stripping needed)
-    raw = _fetch_url(SKILL_CREATOR_URL)
-    if raw:
-        sources["skill_creator"] = raw
-    elif not force_refresh:
-        cached = load_cache()
-        if cached:
-            sources["skill_creator"] = cached.get("sources", {}).get(
-                "skill_creator", ""
-            )
+    creator_text = _fetch_url(SKILL_CREATOR_URL)
+    if creator_text is None:
+        fetch_errors.append(SKILL_CREATOR_URL)
 
-    if sources:
-        save_cache(sources)
+    changed = save_local_docs(docs_text, creator_text)
 
-    cache_info = load_cache()
-    return cache_info or {"sources": sources, "_cache_status": "JUST_FETCHED"}
+    return {
+        "skipped": False,
+        "age_days": 0,
+        "changed": changed,
+        "fetch_errors": fetch_errors,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -203,9 +235,7 @@ def fetch_docs(force_refresh: bool = False) -> dict:
 
 def extract_fields_from_docs(text: str) -> set[str]:
     """Extract frontmatter field names mentioned in documentation."""
-    # Look for field names in tables, code blocks, and inline references
     fields = set()
-    # Match backtick-quoted field names
     for m in re.finditer(r"`([a-z][a-z-]+)`", text):
         candidate = m.group(1)
         if candidate in ANTHROPIC_KNOWN_FIELDS:
@@ -231,7 +261,6 @@ def extract_line_limit(text: str) -> int | None:
 
 
 def compare_fields(doc_fields: set[str], our_fields: set[str]) -> dict:
-    """Compare field sets."""
     return {
         "in_anthropic_not_ours": sorted(doc_fields - our_fields),
         "in_ours_not_anthropic": sorted(our_fields - doc_fields),
@@ -239,27 +268,7 @@ def compare_fields(doc_fields: set[str], our_fields: set[str]) -> dict:
     }
 
 
-def read_our_template() -> dict:
-    """Read our current template and extract what we support."""
-    our_fields: set[str] = set()
-    our_rules: dict[str, str] = {}
-
-    if OUR_TEMPLATE.exists():
-        text = OUR_TEMPLATE.read_text(encoding="utf-8")
-        fm, _ = _parse_fm(text)
-        our_fields.update(fm.keys())
-
-    if OUR_SKILL_DOCS.exists():
-        text = OUR_SKILL_DOCS.read_text(encoding="utf-8")
-        # Extract fields mentioned in the field constraints table
-        for m in re.finditer(r"\|\s*`([a-z][a-z-]+)`\s*\|", text):
-            our_fields.add(m.group(1))
-
-    return {"fields": our_fields, "rules": our_rules}
-
-
 def _parse_fm(text: str) -> tuple[dict, str]:
-    """Parse frontmatter from text."""
     match = re.match(r"^---\n(.*?)\n---\n?(.*)", text, re.DOTALL)
     if not match:
         return {}, text
@@ -270,35 +279,43 @@ def _parse_fm(text: str) -> tuple[dict, str]:
         return {}, text
 
 
+def read_our_template() -> dict:
+    our_fields: set[str] = set()
+
+    if OUR_TEMPLATE.exists():
+        text = OUR_TEMPLATE.read_text(encoding="utf-8")
+        fm, _ = _parse_fm(text)
+        our_fields.update(fm.keys())
+
+    if OUR_SKILL_DOCS.exists():
+        text = OUR_SKILL_DOCS.read_text(encoding="utf-8")
+        for m in re.finditer(r"\|\s*`([a-z][a-z-]+)`\s*\|", text):
+            our_fields.add(m.group(1))
+
+    return {"fields": our_fields}
+
+
 # ---------------------------------------------------------------------------
 # Report generation
 # ---------------------------------------------------------------------------
 
 
-def generate_report(docs: dict, our_state: dict) -> dict:
-    """Generate a delta report comparing Anthropic docs vs. our standards."""
+def generate_report(sources: dict[str, str], our_state: dict) -> dict:
+    all_text = " ".join(sources.values())
+
     report: dict = {
-        "cache_status": docs.get("_cache_status", "UNKNOWN"),
-        "cache_age_days": docs.get("_cache_age_days", -1),
-        "fetched_at": docs.get("fetched_at", "unknown"),
         "alignments": [],
         "drifts": [],
         "new_in_anthropic": [],
         "recommendations": [],
     }
 
-    sources = docs.get("sources", {})
-    all_text = " ".join(sources.values())
-
-    # Compare fields
     doc_fields = extract_fields_from_docs(all_text)
-    # Add all known Anthropic fields
     doc_fields.update(ANTHROPIC_KNOWN_FIELDS.keys())
     field_comparison = compare_fields(doc_fields, our_state["fields"])
 
     for f in field_comparison["aligned"]:
         report["alignments"].append(f"Field '{f}' documented in both")
-
     for f in field_comparison["in_anthropic_not_ours"]:
         report["new_in_anthropic"].append(
             f"Field '{f}': {ANTHROPIC_KNOWN_FIELDS.get(f, 'described in Anthropic docs')}"
@@ -306,13 +323,11 @@ def generate_report(docs: dict, our_state: dict) -> dict:
         report["recommendations"].append(
             f"Add '{f}' to SKILL_TEMPLATE.md and field constraints table"
         )
-
     for f in field_comparison["in_ours_not_anthropic"]:
         report["drifts"].append(
             f"Field '{f}' in our template but not in Anthropic docs (may be custom)"
         )
 
-    # Check line limit alignment
     doc_limit = extract_line_limit(all_text)
     if doc_limit and doc_limit != 500:
         report["drifts"].append(
@@ -325,32 +340,35 @@ def generate_report(docs: dict, our_state: dict) -> dict:
             "Line limit 500 — our standard (Anthropic says 'under 500 lines')"
         )
 
-    # Check for new substitution variables
     for sub in ANTHROPIC_SUBSTITUTIONS:
-        if (
-            sub.replace("$", "").replace("{", "").replace("}", "").lower()
-            in all_text.lower()
-        ):
+        if sub.replace("$", "").replace("{", "").replace("}", "").lower() in all_text.lower():
             report["alignments"].append(f"Substitution variable {sub} documented")
 
     return report
 
 
-def format_report_human(report: dict) -> str:
-    """Format delta report as human-readable text."""
+def format_report_human(report: dict, sync_status: dict | None = None) -> str:
     lines = [
         "",
         "Best Practices Sync Report",
         "═══════════════════════════",
         "",
-        (
-            f"Cache status: {report['cache_status']} "
-            f"({report['cache_age_days']} days old)"
-            if report["cache_age_days"] >= 0
-            else f"Cache status: {report['cache_status']}"
-        ),
-        "",
     ]
+
+    if sync_status:
+        if sync_status.get("skipped"):
+            lines.append(f"Local docs: FRESH ({sync_status['age_days']} days old) — skipped upstream check")
+        else:
+            changed = sync_status.get("changed", [])
+            errors = sync_status.get("fetch_errors", [])
+            if changed:
+                lines.append(f"Updated local reference files: {', '.join(changed)}")
+            else:
+                lines.append("Local reference files: up to date (no changes upstream)")
+            if errors:
+                for url in errors:
+                    lines.append(f"⚠️  Fetch failed: {url}")
+        lines.append("")
 
     if report["new_in_anthropic"]:
         lines.append("## New/Changed in Anthropic Docs")
@@ -377,17 +395,17 @@ def format_report_human(report: dict) -> str:
         lines.append("")
 
     if not report["new_in_anthropic"] and not report["drifts"]:
-        lines.append(
-            "✅ Fully aligned with Anthropic's latest published best practices."
-        )
+        lines.append("✅ Fully aligned with Anthropic's latest published best practices.")
         lines.append("")
 
     return "\n".join(lines)
 
 
-def format_report_json(report: dict) -> str:
-    """Format delta report as JSON."""
-    return json.dumps(report, indent=2)
+def format_report_json(report: dict, sync_status: dict | None = None) -> str:
+    data = dict(report)
+    if sync_status:
+        data["sync_status"] = sync_status
+    return json.dumps(data, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -396,33 +414,26 @@ def format_report_json(report: dict) -> str:
 
 
 def apply_updates(report: dict) -> list[str]:
-    """Apply recommended updates to template and skill docs."""
     changes = []
-
     if not OUR_SKILL_DOCS.exists():
         return ["⚠️  new-skill/SKILL.md not found — cannot apply"]
 
     text = OUR_SKILL_DOCS.read_text(encoding="utf-8")
 
-    # Check for fields mentioned in recommendations but missing from our docs
     for rec in report.get("recommendations", []):
         m = re.search(r"Add '([^']+)' to SKILL_TEMPLATE.md", rec)
         if m:
             field_name = m.group(1)
             if f"`{field_name}`" not in text:
                 desc = ANTHROPIC_KNOWN_FIELDS.get(field_name, "See Anthropic docs")
-                # Add to field constraints table if it exists
-                if "| Field " in text and f"`{field_name}`" not in text:
-                    # Find the last table row and add after it
+                if "| Field " in text:
                     table_pattern = r"(\| `[a-z-]+`\s*\|[^\n]+\n)(?=\n|$|\|)"
                     rows = list(re.finditer(table_pattern, text))
                     if rows:
                         last_row = rows[-1]
                         new_row = f"| `{field_name}` | No | {desc} |\n"
                         text = text[: last_row.end()] + new_row + text[last_row.end() :]
-                        changes.append(
-                            f"Added '{field_name}' to field constraints table"
-                        )
+                        changes.append(f"Added '{field_name}' to field constraints table")
 
     if changes:
         OUR_SKILL_DOCS.write_text(text, encoding="utf-8")
@@ -431,7 +442,6 @@ def apply_updates(report: dict) -> list[str]:
 
 
 def scan_skills_for_updates(report: dict) -> list[dict]:
-    """Scan existing skills and suggest updates based on new best practices."""
     suggestions = []
     skills_dir = REPO_ROOT / ".claude" / "skills"
 
@@ -441,12 +451,9 @@ def scan_skills_for_updates(report: dict) -> list[dict]:
         fm, body = _parse_fm(text)
 
         skill_suggestions = []
-
-        # Check if argument-hint is missing but $ARGUMENTS is used
         if re.search(r"\$ARGUMENTS|\$\d+", body) and "argument-hint" not in fm:
             skill_suggestions.append("Add 'argument-hint' field (uses $ARGUMENTS)")
 
-        # Check if description lacks trigger phrasing
         desc = str(fm.get("description", ""))
         if desc and not re.search(r"(?i)(use when|triggered by|also use when)", desc):
             skill_suggestions.append(
@@ -466,47 +473,54 @@ def scan_skills_for_updates(report: dict) -> list[dict]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Sync against Anthropic best practices"
+        description="Sync Anthropic skill best practices to local reference files"
     )
-    parser.add_argument("--apply", action="store_true", help="Apply updates")
     parser.add_argument(
-        "--update-skills", action="store_true", help="Update existing skills"
+        "--no-sync",
+        action="store_true",
+        help="Skip upstream check, read from local files only",
     )
-    parser.add_argument("--force-refresh", action="store_true", help="Bypass cache")
+    parser.add_argument("--force-refresh", action="store_true", help="Force upstream fetch")
+    parser.add_argument("--apply", action="store_true", help="Apply updates to our template")
+    parser.add_argument("--update-skills", action="store_true", help="Suggest skill updates")
     parser.add_argument("--json", action="store_true", help="JSON output")
     args = parser.parse_args()
 
-    # Fetch docs
-    docs = fetch_docs(force_refresh=args.force_refresh)
-    if not docs.get("sources"):
-        msg = "⚠️  Could not fetch Anthropic docs and no cache available"
+    # Step 1: Sync upstream → local files (unless --no-sync)
+    sync_status = None
+    if not args.no_sync:
+        sync_status = sync_from_upstream(force=args.force_refresh)
+
+    # Step 2: Load from local reference files
+    sources = load_local_docs()
+    if not sources:
+        msg = (
+            "⚠️  No local reference files found. "
+            "Run without --no-sync to fetch from upstream."
+        )
         if args.json:
             print(json.dumps({"error": msg}))
         else:
             print(msg)
-        return 0  # Non-fatal
+        return 1
 
-    # Read our current state
+    # Step 3: Compare against our template
     our_state = read_our_template()
+    report = generate_report(sources, our_state)
 
-    # Generate report
-    report = generate_report(docs, our_state)
-
-    # Apply if requested
+    # Step 4: Apply if requested
     if args.apply:
         changes = apply_updates(report)
         report["applied_changes"] = changes
 
-    # Scan skills for updates if requested
     if args.update_skills:
-        suggestions = scan_skills_for_updates(report)
-        report["skill_suggestions"] = suggestions
+        report["skill_suggestions"] = scan_skills_for_updates(report)
 
-    # Output
+    # Step 5: Output
     if args.json:
-        print(format_report_json(report))
+        print(format_report_json(report, sync_status))
     else:
-        print(format_report_human(report))
+        print(format_report_human(report, sync_status))
 
     return 0
 
