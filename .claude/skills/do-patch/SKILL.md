@@ -25,6 +25,8 @@ Users may also invoke directly:
 PATCH_ARG: $ARGUMENTS
 ITERATION_CAP: 3  (default; caller may override by appending e.g. `--max-iterations 5`)
 
+**If PATCH_ARG is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation — they invoked this as `/do-patch <argument>`. Extract whatever follows `/do-patch` as the value of PATCH_ARG. Do NOT stop or report an error; just use the argument from the message.
+
 ## Instructions
 
 ### Step 1: Identify What Is Broken

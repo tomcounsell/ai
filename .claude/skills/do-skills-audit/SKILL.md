@@ -23,6 +23,8 @@ Validates all `.claude/skills/*/SKILL.md` files against canonical template stand
 python .claude/skills/do-skills-audit/scripts/audit_skills.py $ARGUMENTS
 ```
 
+**If `$ARGUMENTS` was not substituted** (the command shows a literal `$ARGUMENTS`): Look at the user's original message — they invoked this as `/do-skills-audit <flags>`. Extract whatever follows `/do-skills-audit` and pass it to the script. If no flags were provided, run the script with no arguments (default behavior).
+
 ## Arguments
 
 | Flag | Description |

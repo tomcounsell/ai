@@ -40,6 +40,11 @@ Description of what this skill does.
 
 SOME_VAR: $1  # First argument passed to skill
 
+**If SOME_VAR is empty or literally `$1`**: The skill argument substitution
+did not run. Look at the user's original message — they invoked this as
+`/skill-name <argument>`. Extract the argument from there. Do NOT stop or
+report an error.
+
 ## Instructions
 
 [Step-by-step instructions for Claude Code to follow]
