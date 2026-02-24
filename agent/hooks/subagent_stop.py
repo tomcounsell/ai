@@ -17,14 +17,14 @@ async def subagent_stop_hook(
 ) -> dict[str, Any]:
     """Log when a subagent finishes execution.
 
-    Captures the subagent name/type for observability.
+    Captures the agent type and transcript path for observability.
     """
-    agent_name = input_data.get("agent_name", "unknown")
-    stop_reason = input_data.get("stop_reason", "unspecified")
+    agent_type = input_data.get("agent_type", "unknown")
+    agent_id = input_data.get("agent_id", "unknown")
 
     logger.info(
-        f"[subagent_stop] Subagent completed: agent={agent_name}, "
-        f"reason={stop_reason}"
+        f"[subagent_stop] Subagent completed: agent_type={agent_type}, "
+        f"agent_id={agent_id}"
     )
 
     return {}
