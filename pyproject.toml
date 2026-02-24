@@ -21,6 +21,7 @@ dependencies = [
     "html2text>=2024.2.26", # HTML to markdown conversion for web fetch
     "numpy>=1.26.0", # Vector math for semantic doc impact finder
     "openai>=1.0.0", # Embedding API for semantic doc impact finder
+    "pyyaml>=6.0.3",
 ]
 
 [project.optional-dependencies]
