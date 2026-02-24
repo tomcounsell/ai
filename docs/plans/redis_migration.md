@@ -4,7 +4,7 @@ type: chore
 appetite: Large
 owner: Valor
 created: 2026-02-24
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/161
 ---
 
 # Redis Migration: Consolidate All Persistence into Popoto
