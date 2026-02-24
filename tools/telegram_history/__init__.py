@@ -33,7 +33,8 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
 
     # Create tables if needed
-    conn.execute("""
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS messages (
             id INTEGER PRIMARY KEY,
             chat_id TEXT NOT NULL,
@@ -43,16 +44,22 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
             timestamp TIMESTAMP,
             message_type TEXT DEFAULT 'text'
         )
-    """)
-    conn.execute("""
+    """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_chat_id ON messages(chat_id)
-    """)
-    conn.execute("""
+    """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp)
-    """)
+    """
+    )
 
     # Links table for storing shared URLs with metadata
-    conn.execute("""
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS links (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             url TEXT NOT NULL,
@@ -70,32 +77,45 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
             ai_summary TEXT,
             UNIQUE(url, chat_id, message_id)
         )
-    """)
-    conn.execute("""
+    """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_links_domain ON links(domain)
-    """)
-    conn.execute("""
+    """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_links_sender ON links(sender)
-    """)
-    conn.execute("""
+    """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_links_timestamp ON links(timestamp)
-    """)
-    conn.execute("""
+    """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_links_status ON links(status)
-    """)
+    """
+    )
 
     # Chats table for mapping chat_id → chat_name
-    conn.execute("""
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS chats (
             chat_id TEXT PRIMARY KEY,
             chat_name TEXT NOT NULL,
             chat_type TEXT,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
-    """)
-    conn.execute("""
+    """
+    )
+    conn.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_chats_name ON chats(chat_name)
-    """)
+    """
+    )
 
     conn.commit()
 
@@ -502,10 +522,12 @@ def search_links(
     params = []
 
     if query:
-        conditions.append("""
+        conditions.append(
+            """
             (url LIKE ? OR title LIKE ? OR description LIKE ?
              OR notes LIKE ? OR ai_summary LIKE ?)
-        """)
+        """
+        )
         query_param = f"%{query}%"
         params.extend([query_param] * 5)
 
@@ -795,7 +817,8 @@ def get_link_stats(db_path: Path | None = None) -> dict:
     conn = _get_db_connection(db_path)
 
     try:
-        cursor = conn.execute("""
+        cursor = conn.execute(
+            """
             SELECT
                 COUNT(*) as total_links,
                 COUNT(DISTINCT domain) as unique_domains,
@@ -806,19 +829,22 @@ def get_link_stats(db_path: Path | None = None) -> dict:
                 MIN(timestamp) as first_link,
                 MAX(timestamp) as last_link
             FROM links
-        """)
+        """
+        )
 
         row = cursor.fetchone()
 
         # Get top domains
-        domain_cursor = conn.execute("""
+        domain_cursor = conn.execute(
+            """
             SELECT domain, COUNT(*) as count
             FROM links
             WHERE domain IS NOT NULL
             GROUP BY domain
             ORDER BY count DESC
             LIMIT 10
-        """)
+        """
+        )
         top_domains = [
             {"domain": r[0], "count": r[1]} for r in domain_cursor.fetchall()
         ]
@@ -906,7 +932,8 @@ def list_chats(db_path: Path | None = None) -> dict:
     conn = _get_db_connection(db_path)
 
     try:
-        cursor = conn.execute("""
+        cursor = conn.execute(
+            """
             SELECT
                 c.chat_id,
                 c.chat_name,
@@ -918,7 +945,8 @@ def list_chats(db_path: Path | None = None) -> dict:
             LEFT JOIN messages m ON c.chat_id = m.chat_id
             GROUP BY c.chat_id, c.chat_name, c.chat_type, c.updated_at
             ORDER BY last_message DESC NULLS LAST
-        """)
+        """
+        )
 
         chats = [dict(row) for row in cursor.fetchall()]
 

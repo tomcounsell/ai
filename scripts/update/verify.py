@@ -293,10 +293,16 @@ def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
     source = Path.home() / "Desktop" / "claude_code" / "claude_oauth_config.json"
     target = Path.home() / "Library" / "Application Support" / "Claude" / "config.json"
 
-    result: dict[str, str | bool] = {"synced": False, "reason": "", "refreshed_from_live": False}
+    result: dict[str, str | bool] = {
+        "synced": False,
+        "reason": "",
+        "refreshed_from_live": False,
+    }
 
     if not source.exists():
-        result["reason"] = "No source credentials at ~/Desktop/claude_code/claude_oauth_config.json"
+        result["reason"] = (
+            "No source credentials at ~/Desktop/claude_code/claude_oauth_config.json"
+        )
         return result
 
     try:
@@ -311,7 +317,9 @@ def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
         return result
 
     # First check if CLI auth is already working
-    claude_bin = shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
+    claude_bin = shutil.which("claude") or str(
+        Path.home() / ".local" / "bin" / "claude"
+    )
     try:
         auth_result = run_cmd([claude_bin, "auth", "status"], timeout=10)
         if auth_result.returncode == 0 and "loggedIn" in auth_result.stdout:

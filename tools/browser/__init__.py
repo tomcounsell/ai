@@ -122,12 +122,14 @@ def screenshot(
             # Get dimensions from viewport or page
             if full_page:
                 # Get full page dimensions
-                dimensions = page.evaluate("""() => {
+                dimensions = page.evaluate(
+                    """() => {
                     return {
                         width: document.documentElement.scrollWidth,
                         height: document.documentElement.scrollHeight
                     }
-                }""")
+                }"""
+                )
             else:
                 dimensions = {"width": 1280, "height": 720}
 
