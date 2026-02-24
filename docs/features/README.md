@@ -21,6 +21,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Daydream Auto-Fix](daydream-auto-fix.md) | Auto-opens PRs for high-confidence code bugs found during nightly reflection; includes ignore log and dry-run mode | Shipped |
 | [Documentation Audit](documentation-audit.md) | Weekly LLM-powered audit of docs/ accuracy against codebase; KEEP / UPDATE / DELETE verdicts, directory and filename enforcement | Shipped |
 | [Design Review](do-design-review.md) | Review web UI against 10 premium design criteria with severity ratings | Shipped |
+| [Skills Audit](do-skills-audit.md) | Deterministic validation of all SKILL.md files with 12 rules and Anthropic best practices sync | Shipped |
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; model-invocable by do-build | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, and structured reporting | Shipped |
 | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: hooks, pipeline stage model, session classification, resume | Shipped |
