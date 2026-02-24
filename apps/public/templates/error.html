@@ -5,65 +5,25 @@
 {% endblock %}
 
 {% block content %}
-<div class="error-page-container">
-  <div class="error-page-content">
+<div class="flex justify-center items-center" style="min-height: 70vh; padding: var(--space-xl);">
+  <div style="max-width: 600px; width: 100%;">
     {% include "components/common/error_message.html" with show_stack_trace=True %}
 
-    <div class="error-navigation">
-      <a href="/" class="btn-primary">Go to Home Page</a>
-      <button class="btn-secondary" onclick="history.back()">Go Back</button>
+    <div class="flex gap-4 mt-8 justify-center">
+      <a href="/" class="btn-brand" style="text-decoration: none;">Go to Home Page</a>
+      <button class="btn-brand" onclick="history.back()">Go Back</button>
     </div>
 
     {% if status_code == 404 %}
-    <div class="search-container">
-      <h3>Looking for something?</h3>
-      <form action="/search" method="get" class="search-form">
-        <input type="text" name="q" placeholder="Search..." aria-label="Search">
-        <button type="submit">Search</button>
+    <div class="mt-12 text-center">
+      <h3 style="font-family: var(--font-mono); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: var(--space-md);">Looking for something?</h3>
+      <form action="/search" method="get" class="flex gap-2 mx-auto" style="max-width: 400px;">
+        <input type="text" name="q" placeholder="Search..." aria-label="Search"
+          class="flex-1 px-3 py-2 border border-[var(--color-border-medium)] bg-white rounded-xs focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)] text-sm">
+        <button type="submit" class="btn-brand">Search</button>
       </form>
     </div>
     {% endif %}
   </div>
 </div>
 {% endblock content %}
-
-{% block extra_css %}
-<style>
-  .error-page-container {
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 70vh;
-    padding: 2rem;
-  }
-
-  .error-page-content {
-    max-width: 600px;
-    width: 100%;
-  }
-
-  .error-navigation {
-    display: flex;
-    gap: 1rem;
-    margin-top: 2rem;
-    justify-content: center;
-  }
-
-  .search-container {
-    margin-top: 3rem;
-    text-align: center;
-  }
-
-  .search-form {
-    display: flex;
-    gap: 0.5rem;
-    max-width: 400px;
-    margin: 1rem auto;
-  }
-
-  .search-form input {
-    flex: 1;
-    padding: 0.5rem;
-  }
-</style>
-{% endblock extra_css %}

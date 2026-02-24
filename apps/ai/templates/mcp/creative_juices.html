@@ -6,199 +6,16 @@
 
 {% block content_width %}12{% endblock %}
 
-{% block extra_css %}
-<style>
-    /* MCP Page Specific Styles */
-    body {
-        padding: 0 !important;
-    }
-
-    main {
-        padding: 0 !important;
-    }
-
-    #main_header {
-        display: none;
-    }
-
-    main > div {
-        max-width: 100% !important;
-        padding: 0 !important;
-    }
-
-    .mcp-container {
-        max-width: 1000px;
-        margin: 0 auto;
-        padding: var(--space-2xl) var(--space-lg);
-    }
-
-    .header {
-        border: 2px solid var(--color-border-dark);
-        background: var(--color-bg-white);
-        padding: var(--space-2xl);
-        margin-bottom: var(--space-2xl);
-        position: relative;
-    }
-
-    .header::before {
-        content: '';
-        position: absolute;
-        top: 8px;
-        left: 8px;
-        right: 8px;
-        bottom: 8px;
-        border: 1px solid var(--color-border-light);
-        pointer-events: none;
-    }
-
-    h1 {
-        font-family: var(--font-mono);
-        font-size: 2rem;
-        font-weight: 300;
-        letter-spacing: 0.15em;
-        text-transform: uppercase;
-        color: var(--color-text-black);
-        margin-bottom: var(--space-md);
-    }
-
-    h2 {
-        font-family: var(--font-mono);
-        font-size: 0.875rem;
-        font-weight: 600;
-        text-transform: uppercase;
-        letter-spacing: 0.08em;
-        color: var(--color-text-black);
-        margin-bottom: var(--space-lg);
-    }
-
-    h3 {
-        font-family: var(--font-mono);
-        font-size: 0.875rem;
-        font-weight: 500;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
-        color: var(--color-text-charcoal);
-    }
-
-    .tagline {
-        font-family: var(--font-mono);
-        font-size: 0.875rem;
-        letter-spacing: 0.05em;
-        color: var(--color-text-gray);
-        margin-bottom: var(--space-lg);
-    }
-
-    .intro {
-        font-size: 0.875rem;
-        line-height: 1.8;
-        color: var(--color-text-charcoal);
-    }
-
-    .tools-grid {
-        display: grid;
-        grid-template-columns: repeat(3, 1fr);
-        gap: var(--space-xl);
-        margin-bottom: var(--space-2xl);
-    }
-
-    .tool-card {
-        padding: 0;
-    }
-
-    .tool-card h3 {
-        margin-top: var(--space-sm);
-        margin-bottom: var(--space-sm);
-    }
-
-    .tool-card p {
-        font-size: 0.813rem;
-        line-height: 1.6;
-        color: var(--color-text-gray);
-        margin-bottom: var(--space-md);
-    }
-
-    .example {
-        background: var(--color-bg-warm-gray);
-        padding: var(--space-sm);
-        font-family: var(--font-mono);
-        font-size: 0.75rem;
-        line-height: 1.8;
-        color: var(--color-text-charcoal);
-        border-left: 2px solid var(--color-accent);
-    }
-
-    .divider {
-        height: 1px;
-        background: var(--color-border-medium);
-        margin: var(--space-2xl) 0;
-        position: relative;
-    }
-
-    .divider::before {
-        content: '';
-        position: absolute;
-        left: 50%;
-        top: -3px;
-        transform: translateX(-50%);
-        width: 6px;
-        height: 6px;
-        border: 1px solid var(--color-border-dark);
-        background: var(--color-bg-cream);
-        border-radius: 50%;
-    }
-
-    .section {
-        margin-bottom: var(--space-2xl);
-    }
-
-    .installation {
-        background: var(--color-bg-white);
-        border: 1px solid var(--color-border-medium);
-        padding: var(--space-lg);
-    }
-
-    .install-note {
-        font-size: 0.75rem;
-        color: var(--color-text-gray);
-        background: var(--color-bg-warm-gray);
-        padding: var(--space-sm);
-        border-left: 2px solid var(--color-accent);
-        line-height: 1.6;
-    }
-
-    .feature-list {
-        list-style: none;
-        padding: 0;
-    }
-
-    .feature-list li {
-        padding: var(--space-sm) 0;
-        border-bottom: 1px solid var(--color-border-light);
-        font-size: 0.875rem;
-        line-height: 1.6;
-        color: var(--color-text-charcoal);
-    }
-
-    .feature-list li:last-child {
-        border-bottom: none;
-    }
-
-    @media (max-width: 768px) {
-        .tools-grid {
-            grid-template-columns: 1fr;
-        }
-    }
-</style>
-{% endblock %}
+{% block body_class %}mcp-page{% endblock %}
 
 {% block content %}
 <div class="mcp-container">
-    <div class="header">
-        <div class="label">MCP_SERVER_01</div>
+    <div class="mcp-header">
+        <div class="label">Server</div>
         <h1>CREATIVE JUICES</h1>
-        <p class="tagline">RANDOMNESS TOOLS FOR DIVERGENT THINKING</p>
-        <div class="divider" style="margin: var(--space-lg) 0;"></div>
-        <p class="intro">
+        <p class="text-technical-label" style="margin-bottom: var(--space-lg);">RANDOMNESS TOOLS FOR DIVERGENT THINKING</p>
+        <div class="divider-technical" style="margin: var(--space-lg) 0;"></div>
+        <p style="font-size: 0.875rem; line-height: 1.8; color: var(--color-text-charcoal);">
             Creative Juices is a Model Context Protocol server that pushes LLMs into divergent thinking patterns using random verb-noun combinations and strategic frameworks. No setup, no API keys, completely private.
         </p>
     </div>
@@ -207,15 +24,15 @@
         <h2>INSTALLATION</h2>
 
         <!-- Recommended: One-Click Installation -->
-        <div class="installation" style="background: var(--color-bg-white); border: 2px solid var(--color-accent); margin-bottom: var(--space-lg);">
+        <div class="card-technical" style="background: var(--color-bg-white); border: 2px solid var(--color-accent); margin-bottom: var(--space-lg);">
             <div class="label">RECOMMENDED</div>
-            <h3 style="font-family: var(--font-mono); font-size: 0.875rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--color-text-black); margin-bottom: var(--space-md);">One-Click Installation</h3>
+            <h3 style="margin-bottom: var(--space-md);">One-Click Installation</h3>
             <p style="font-size: 0.875rem; color: var(--color-text-charcoal); margin-bottom: var(--space-lg); line-height: 1.6;">
                 Download the MCP Bundle for instant installation. Works with Claude Desktop, Cursor, Windsurf, and other MCP-compatible clients.
             </p>
             <div style="text-align: center;">
                 <a href="/mcp/creative-juices/download.mcpb" class="btn-brand" style="font-size: 0.875rem; padding: var(--space-md) var(--space-xl);">
-                    📦 DOWNLOAD CREATIVE-JUICES.MCPB
+                    DOWNLOAD CREATIVE-JUICES.MCPB
                 </a>
             </div>
             <div class="install-note" style="margin-top: var(--space-lg);">
@@ -224,24 +41,24 @@
         </div>
 
         <!-- Advanced: Manual Installation -->
-        <div style="background: var(--color-bg-white); border: 1px solid var(--color-border-medium); padding: var(--space-lg);">
-            <h3 style="font-family: var(--font-sans); font-size: 0.875rem; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--color-text-gray); margin-bottom: var(--space-md);">
-                ⚙️ Advanced: Manual Installation
+        <div class="card-technical">
+            <h3 style="color: var(--color-text-gray); margin-bottom: var(--space-md);">
+                Advanced: Manual Installation
             </h3>
             <p style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-lg); line-height: 1.6;">
                 Prefer to configure manually? Expand your client below for detailed instructions.
             </p>
 
             <!-- Claude Desktop -->
-            <details style="margin-bottom: var(--space-sm); border: 1px solid var(--color-border-light); background: var(--color-bg-cream);">
-                <summary style="padding: var(--space-md); cursor: pointer; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">
+            <details class="details-accordion">
+                <summary>
                     Claude Desktop
                 </summary>
-                <div style="padding: var(--space-lg); border-top: 1px solid var(--color-border-light); background: var(--color-bg-white);">
+                <div>
                     <p style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-md);">
-                        Edit: <code style="background: var(--color-bg-warm-gray); padding: 2px 6px; font-family: var(--font-mono);">~/Library/Application Support/Claude/claude_desktop_config.json</code>
+                        Edit: <code class="text-mono bg-warm-gray" style="padding: 2px 6px;">~/Library/Application Support/Claude/claude_desktop_config.json</code>
                     </p>
-                    <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-md); font-family: var(--font-mono); font-size: 0.688rem; overflow-x: auto; margin: var(--space-md) 0;"><code>{
+                    <pre class="brand-code"><code>{
   "mcpServers": {
     "creative-juices": {
       "url": "https://ai.yuda.me/mcp/creative-juices/serve"
@@ -249,34 +66,34 @@
   }
 }</code></pre>
                     <p style="font-size: 0.75rem; color: var(--color-text-charcoal); line-height: 1.6;">
-                        After saving, restart Claude Desktop (Cmd+Q then reopen). Look for the 🔌 icon.
+                        After saving, restart Claude Desktop (Cmd+Q then reopen). Look for the plug icon.
                     </p>
                 </div>
             </details>
 
             <!-- Claude Code CLI -->
-            <details style="margin-bottom: var(--space-sm); border: 1px solid var(--color-border-light); background: var(--color-bg-cream);">
-                <summary style="padding: var(--space-md); cursor: pointer; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">
+            <details class="details-accordion">
+                <summary>
                     Claude Code (CLI)
                 </summary>
-                <div style="padding: var(--space-lg); border-top: 1px solid var(--color-border-light); background: var(--color-bg-white);">
+                <div>
                     <p style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-md);">
                         Run this command in your terminal:
                     </p>
-                    <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-md); font-family: var(--font-mono); font-size: 0.75rem; overflow-x: auto; margin: 0;"><code>claude mcp add --transport http creative-juices https://ai.yuda.me/mcp/creative-juices/serve</code></pre>
+                    <pre class="brand-code"><code>claude mcp add --transport http creative-juices https://ai.yuda.me/mcp/creative-juices/serve</code></pre>
                 </div>
             </details>
 
             <!-- Cursor -->
-            <details style="margin-bottom: var(--space-sm); border: 1px solid var(--color-border-light); background: var(--color-bg-cream);">
-                <summary style="padding: var(--space-md); cursor: pointer; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">
+            <details class="details-accordion">
+                <summary>
                     Cursor
                 </summary>
-                <div style="padding: var(--space-lg); border-top: 1px solid var(--color-border-light); background: var(--color-bg-white);">
+                <div>
                     <p style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-md);">
-                        Edit: <code style="background: var(--color-bg-warm-gray); padding: 2px 6px; font-family: var(--font-mono);">~/.cursor/mcp.json</code>
+                        Edit: <code class="text-mono bg-warm-gray" style="padding: 2px 6px;">~/.cursor/mcp.json</code>
                     </p>
-                    <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-md); font-family: var(--font-mono); font-size: 0.688rem; overflow-x: auto; margin: var(--space-md) 0;"><code>{
+                    <pre class="brand-code"><code>{
   "mcpServers": {
     "creative-juices": {
       "url": "https://ai.yuda.me/mcp/creative-juices/serve"
@@ -290,15 +107,15 @@
             </details>
 
             <!-- Windsurf -->
-            <details style="margin-bottom: var(--space-sm); border: 1px solid var(--color-border-light); background: var(--color-bg-cream);">
-                <summary style="padding: var(--space-md); cursor: pointer; font-family: var(--font-mono); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase;">
+            <details class="details-accordion">
+                <summary>
                     Windsurf
                 </summary>
-                <div style="padding: var(--space-lg); border-top: 1px solid var(--color-border-light); background: var(--color-bg-white);">
+                <div>
                     <p style="font-size: 0.75rem; color: var(--color-text-gray); margin-bottom: var(--space-md);">
-                        Edit: <code style="background: var(--color-bg-warm-gray); padding: 2px 6px; font-family: var(--font-mono);">~/.codeium/windsurf/mcp_config.json</code>
+                        Edit: <code class="text-mono bg-warm-gray" style="padding: 2px 6px;">~/.codeium/windsurf/mcp_config.json</code>
                     </p>
-                    <pre style="background: var(--color-text-black); color: var(--color-bg-cream); padding: var(--space-md); font-family: var(--font-mono); font-size: 0.688rem; overflow-x: auto; margin: var(--space-md) 0;"><code>{
+                    <pre class="brand-code"><code>{
   "mcpServers": {
     "creative-juices": {
       "url": "https://ai.yuda.me/mcp/creative-juices/serve"
@@ -314,37 +131,37 @@
         </div>
     </div>
 
-    <div class="divider"></div>
+    <div class="divider-technical" style="margin: var(--space-2xl) 0;"></div>
 
     <h2>AVAILABLE TOOLS</h2>
-    <div class="tools-grid">
-        <div class="tool-card">
-            <div class="label">TOOL_01</div>
-            <h3>get_inspiration</h3>
-            <p>Gentle creative nudges with everyday metaphors for early-stage ideation.</p>
-            <div class="example">
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-[var(--space-xl)]" style="margin-bottom: var(--space-2xl);">
+        <div>
+            <div class="label">Tool 1</div>
+            <h3 style="margin-top: var(--space-sm); margin-bottom: var(--space-sm);">get_inspiration</h3>
+            <p style="font-size: 0.813rem; line-height: 1.6; color: var(--color-text-gray); margin-bottom: var(--space-md);">Gentle creative nudges with everyday metaphors for early-stage ideation.</p>
+            <div class="install-note">
 painting-shoe<br>
 baking-door<br>
 knitting-spoon
             </div>
         </div>
 
-        <div class="tool-card">
-            <div class="label">TOOL_02</div>
-            <h3>think_outside_the_box</h3>
-            <p>Intense creative shocks with dramatic metaphors when you're stuck in patterns.</p>
-            <div class="example">
+        <div>
+            <div class="label">Tool 2</div>
+            <h3 style="margin-top: var(--space-sm); margin-bottom: var(--space-sm);">think_outside_the_box</h3>
+            <p style="font-size: 0.813rem; line-height: 1.6; color: var(--color-text-gray); margin-bottom: var(--space-md);">Intense creative shocks with dramatic metaphors when you're stuck in patterns.</p>
+            <div class="install-note">
 crushing-fire<br>
 swarming-venom<br>
 teleporting-plasma
             </div>
         </div>
 
-        <div class="tool-card">
-            <div class="label">TOOL_03</div>
-            <h3>reality_check</h3>
-            <p>Strategic validation using proven frameworks for convergent thinking.</p>
-            <div class="example">
+        <div>
+            <div class="label">Tool 3</div>
+            <h3 style="margin-top: var(--space-sm); margin-bottom: var(--space-sm);">reality_check</h3>
+            <p style="font-size: 0.813rem; line-height: 1.6; color: var(--color-text-gray); margin-bottom: var(--space-md);">Strategic validation using proven frameworks for convergent thinking.</p>
+            <div class="install-note">
 First Principles<br>
 Limit Thinking<br>
 Platonic Ideal
@@ -352,16 +169,16 @@ Platonic Ideal
         </div>
     </div>
 
-    <div class="divider"></div>
+    <div class="divider-technical" style="margin: var(--space-2xl) 0;"></div>
 
     <div class="section">
         <h2>KEY FEATURES</h2>
-        <ul class="feature-list">
-            <li><strong>Break habitual thinking</strong> — Random concrete metaphors force new mental pathways</li>
-            <li><strong>Zero setup</strong> — No API keys, no configuration, works immediately</li>
-            <li><strong>Completely private</strong> — Runs locally, no external calls, no data collection</li>
-            <li><strong>Curated word lists</strong> — 600+ words spanning human history and experience</li>
-            <li><strong>Validated frameworks</strong> — Strategic questions from proven thinking methodologies</li>
+        <ul style="list-style: none; padding: 0;">
+            <li style="padding: var(--space-sm) 0; border-bottom: 1px solid var(--color-border-light); font-size: 0.875rem; line-height: 1.6; color: var(--color-text-charcoal);"><strong>Break habitual thinking</strong> -- Random concrete metaphors force new mental pathways</li>
+            <li style="padding: var(--space-sm) 0; border-bottom: 1px solid var(--color-border-light); font-size: 0.875rem; line-height: 1.6; color: var(--color-text-charcoal);"><strong>Zero setup</strong> -- No API keys, no configuration, works immediately</li>
+            <li style="padding: var(--space-sm) 0; border-bottom: 1px solid var(--color-border-light); font-size: 0.875rem; line-height: 1.6; color: var(--color-text-charcoal);"><strong>Completely private</strong> -- Runs locally, no external calls, no data collection</li>
+            <li style="padding: var(--space-sm) 0; border-bottom: 1px solid var(--color-border-light); font-size: 0.875rem; line-height: 1.6; color: var(--color-text-charcoal);"><strong>Curated word lists</strong> -- 600+ words spanning human history and experience</li>
+            <li style="padding: var(--space-sm) 0; font-size: 0.875rem; line-height: 1.6; color: var(--color-text-charcoal);"><strong>Validated frameworks</strong> -- Strategic questions from proven thinking methodologies</li>
         </ul>
     </div>
 </div>
@@ -371,39 +188,34 @@ Platonic Ideal
 <script>
     // Auto-add copy buttons to all terminal-style code blocks
     document.addEventListener('DOMContentLoaded', function() {
-        document.querySelectorAll('pre').forEach(pre => {
-            // Only add to dark terminal-style code blocks
-            if (pre.style.background && pre.style.background.includes('var(--color-text-black)')) {
-                const wrapper = document.createElement('div');
-                wrapper.style.position = 'relative';
+        document.querySelectorAll('pre.brand-code').forEach(pre => {
+            const wrapper = document.createElement('div');
+            wrapper.style.position = 'relative';
 
-                const button = document.createElement('button');
-                button.textContent = 'COPY';
-                button.style.cssText = 'position: absolute; top: 8px; right: 8px; background: var(--color-border-medium); color: var(--color-text-black); border: none; padding: 4px 8px; font-family: var(--font-mono); font-size: 0.688rem; cursor: pointer; opacity: 0.7; transition: opacity 0.2s;';
-                button.onmouseover = () => button.style.opacity = '1';
-                button.onmouseout = () => button.style.opacity = '0.7';
+            const button = document.createElement('button');
+            button.textContent = 'COPY';
+            button.className = 'copy-btn';
 
-                button.onclick = function() {
-                    const code = pre.querySelector('code');
-                    const text = code ? code.textContent : pre.textContent;
+            button.onclick = function() {
+                const code = pre.querySelector('code');
+                const text = code ? code.textContent : pre.textContent;
 
-                    navigator.clipboard.writeText(text).then(() => {
-                        button.textContent = 'COPIED!';
-                        button.style.background = 'var(--color-text-black)';
-                        button.style.color = 'var(--color-bg-cream)';
+                navigator.clipboard.writeText(text).then(() => {
+                    button.textContent = 'COPIED!';
+                    button.style.background = 'var(--color-text-black)';
+                    button.style.color = 'var(--color-bg-cream)';
 
-                        setTimeout(() => {
-                            button.textContent = 'COPY';
-                            button.style.background = 'var(--color-border-medium)';
-                            button.style.color = 'var(--color-text-black)';
-                        }, 2000);
-                    });
-                };
+                    setTimeout(() => {
+                        button.textContent = 'COPY';
+                        button.style.background = '';
+                        button.style.color = '';
+                    }, 2000);
+                });
+            };
 
-                pre.parentNode.insertBefore(wrapper, pre);
-                wrapper.appendChild(button);
-                wrapper.appendChild(pre);
-            }
+            pre.parentNode.insertBefore(wrapper, pre);
+            wrapper.appendChild(button);
+            wrapper.appendChild(pre);
         });
     });
 </script>

@@ -30,7 +30,7 @@
   <div class="relative ml-3">
     <!-- Avatar/Button that toggles the dropdown -->
     <button type="button"
-            class="relative flex rounded-full bg-white text-sm focus:outline-hidden focus:ring-2 focus:ring-slate-500 focus:ring-offset-2 focus:ring-offset-white"
+            class="relative flex rounded-full bg-white text-sm focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:ring-offset-2 focus:ring-offset-white"
             id="nav_user_menu_button"
             aria-controls="nav_user_menu"
             onclick="toggleDropdown(this); event.stopPropagation();"
@@ -38,7 +38,7 @@
             aria-haspopup="true">
       <span class="absolute -inset-1.5"></span>
       <span class="sr-only">Open user menu</span>
-      <span class="inline-flex size-8 items-center justify-center rounded-full bg-slate-700">
+      <span class="inline-flex size-8 items-center justify-center rounded-full bg-[var(--color-border-dark)]">
         <span class="text-sm font-medium text-white">{{ user.initials|default:"U" }}</span>
       </span>
     </button>
@@ -60,20 +60,20 @@
          aria-labelledby="nav_user_menu_button"
          tabindex="-1">
       <!-- Menu items -->
-      <a href="{% url 'podcast:list' %}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" role="menuitem" tabindex="-1">
+      <a href="{% url 'podcast:list' %}" class="block px-4 py-2 text-sm text-[var(--color-text-gray)] hover:bg-[var(--color-bg-warm-gray)]" role="menuitem" tabindex="-1">
         My Podcasts
       </a>
-      <a href="{% url 'public:account-settings' %}" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" role="menuitem" tabindex="-1" id="user-menu-item-0">
+      <a href="{% url 'public:account-settings' %}" class="block px-4 py-2 text-sm text-[var(--color-text-gray)] hover:bg-[var(--color-bg-warm-gray)]" role="menuitem" tabindex="-1" id="user-menu-item-0">
         Account Settings
       </a>
       {% if user.is_staff %}
-        <a href="/admin/" class="block px-4 py-2 text-sm text-gray-700 hover:bg-gray-100" role="menuitem" tabindex="-1" id="user-menu-item-1">
+        <a href="/admin/" class="block px-4 py-2 text-sm text-[var(--color-text-gray)] hover:bg-[var(--color-bg-warm-gray)]" role="menuitem" tabindex="-1" id="user-menu-item-1">
           Admin Dashboard
         </a>
       {% endif %}
       <form method="post" action="{% url 'public:account-logout' %}" class="block px-0 py-0 logout-form">
         {% csrf_token %}
-        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 hover:text-red-600" role="menuitem" tabindex="-1" id="user-menu-item-2">
+        <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-[var(--color-text-gray)] hover:bg-[var(--color-bg-warm-gray)] hover:text-[var(--color-accent)]" role="menuitem" tabindex="-1" id="user-menu-item-2">
           Logout
         </button>
       </form>
@@ -81,7 +81,7 @@
   </div>
 {% else %}
   <!-- Login link for non-authenticated users -->
-  <a href="{% url 'public:account-login' %}" class="rounded-xs px-3 py-2 text-sm font-medium text-slate-700 hover:text-slate-900">
+  <a href="{% url 'public:account-login' %}" class="rounded-xs px-3 py-2 text-sm font-medium text-[var(--color-text-gray)] hover:text-[var(--color-text-black)]">
     Login
   </a>
 {% endif %}

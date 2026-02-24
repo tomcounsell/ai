@@ -3,7 +3,7 @@
 {% block title %}Reset Password{% endblock %}
 
 {% block main_header %}
-  <h1 class="text-3xl font-bold tracking-tight text-slate-600">Reset Your Password</h1>
+  <h1>Reset Your Password</h1>
 {% endblock %}
 
 {% block content %}
@@ -42,7 +42,7 @@
               Email <span class="text-red-500">*</span>
             </label>
             <div class="relative">
-              {{ form.email|add_class:"w-full px-3 py-2 border rounded-xs bg-white focus:outline-hidden focus:ring-2 focus:ring-slate-600 focus:border-slate-600 text-sm" }}
+              {{ form.email|add_class:"w-full px-3 py-2 border rounded-xs bg-white focus:outline-hidden focus:ring-2 focus:ring-[var(--color-border-dark)] focus:border-[var(--color-border-dark)] text-sm" }}
               <div class="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
                 <i class="fas fa-envelope text-gray-400"></i>
               </div>
@@ -52,14 +52,14 @@
             {% endif %}
           </div>
 
-          <button type="submit" class="w-full inline-flex justify-center rounded-xs border border-transparent bg-slate-700 px-3 py-2 text-sm font-medium text-white shadow-xs hover:bg-slate-600 focus:outline-hidden focus:ring-2 focus:ring-offset-2 focus:ring-slate-600">
+          <button type="submit" class="btn-brand w-full">
             Send Reset Link
           </button>
         </form>
       </div>
 
-      <div class="flex items-center justify-center p-6 bg-gray-50 border-t border-gray-200">
-        <a href="{% url 'public:account-login' %}" class="text-sm font-semibold text-slate-600 hover:text-slate-500">
+      <div class="flex items-center justify-center p-6 bg-[var(--color-bg-warm-gray)] border-t border-[var(--color-border-light)]">
+        <a href="{% url 'public:account-login' %}" class="text-sm font-semibold text-[var(--color-text-gray)] hover:text-[var(--color-text-black)]">
           Return to login
         </a>
       </div>

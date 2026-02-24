@@ -105,3 +105,99 @@ class HTMLRenderingTestCase(TestCase):
         messages = list(response.context["messages"])
         self.assertTrue(len(messages) > 0)
         self.assertEqual(str(messages[0]), "User settings updated.")
+
+
+class DashboardBrandCSSTestCase(TestCase):
+    """Tests that the dashboard template uses brand.css classes instead of inline styles."""
+
+    def setUp(self):
+        """Set up test data and fetch the dashboard HTML."""
+        self.user = UserFactory.create(
+            username="branduser",
+            email="branduser@example.com",
+            password="testpassword123",
+        )
+        self.client.login(username="branduser", password="testpassword123")
+        url = reverse("public:dashboard")
+        response = self.client.get(url)
+        self.html = response.content.decode("utf-8")
+
+    def test_uses_section_hero_class(self):
+        """Test that the outer container uses section-hero class."""
+        self.assertIn('class="section-hero"', self.html)
+
+    def test_uses_card_technical_class(self):
+        """Test that the MCP overview section uses card-technical class."""
+        self.assertIn('class="card-technical"', self.html)
+
+    def test_uses_status_indicator_classes(self):
+        """Test that status dots use status-indicator and status-operational classes."""
+        self.assertIn("status-indicator", self.html)
+        self.assertIn("status-operational", self.html)
+
+    def test_no_hardcoded_green_color(self):
+        """Test that hardcoded #4CAF50 is not used in inline styles."""
+        self.assertNotIn("#4CAF50", self.html)
+
+    def test_no_underscore_case_labels(self):
+        """Test that UNDERSCORE_CASE labels are removed."""
+        underscore_labels = [
+            "PLATFORM_SPECIFICATIONS",
+            "PROTOCOL_OVERVIEW",
+            "BENEFIT_01",
+            "BENEFIT_02",
+            "BENEFIT_03",
+            "AVAILABLE_SERVERS",
+            "MCP_SERVER_01",
+            "MCP_SERVER_02",
+            "IMPLEMENTATION_DETAILS",
+        ]
+        for label in underscore_labels:
+            self.assertNotIn(label, self.html, f"Found UNDERSCORE_CASE label: {label}")
+
+    def test_no_onmouseover_handlers(self):
+        """Test that onmouseover/onmouseout inline handlers are removed."""
+        self.assertNotIn("onmouseover", self.html)
+        self.assertNotIn("onmouseout", self.html)
+
+    def test_uses_footer_link_class(self):
+        """Test that the repository link uses footer-link class."""
+        self.assertIn("footer-link", self.html)
+
+    def test_uses_text_technical_label_class(self):
+        """Test that implementation detail labels use text-technical-label class."""
+        self.assertIn("text-technical-label", self.html)
+
+    def test_spec_table_no_redundant_inline_styles(self):
+        """Test that spec-table-inline td elements don't have redundant inline styles."""
+        # The spec-table-inline class handles font-family, font-size, padding, and
+        # first-child color. So td elements inside it should not need those inline.
+        import re
+
+        # Find all td elements inside spec-table-inline context
+        # After migration, td elements should be plain <td> without class="text-mono"
+        # and without redundant inline font-size/padding styles
+        spec_table_match = re.search(
+            r'class="spec-table-inline".*?</table>', self.html, re.DOTALL
+        )
+        if spec_table_match:
+            table_html = spec_table_match.group()
+            self.assertNotIn('class="text-mono"', table_html)
+
+    def test_h2_no_inline_mono_overrides(self):
+        """Test that h2 elements don't have inline mono font overrides."""
+        import re
+
+        h2_matches = re.findall(r"<h2[^>]*>", self.html)
+        for h2 in h2_matches:
+            self.assertNotIn("text-mono", h2)
+            self.assertNotIn("font-family", h2)
+
+    def test_h3_no_inline_mono_overrides(self):
+        """Test that h3 elements don't have inline mono font overrides."""
+        import re
+
+        h3_matches = re.findall(r"<h3[^>]*>", self.html)
+        for h3 in h3_matches:
+            self.assertNotIn("text-mono", h3)
+            self.assertNotIn("font-family", h3)

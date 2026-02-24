@@ -11,7 +11,7 @@
     </p>
   </div>
 
-  <div class="bg-white rounded-xs shadow-xs p-6">
+  <div class="card-technical p-6">
     {% if validlink %}
       <form method="post">
         {% csrf_token %}
@@ -53,7 +53,7 @@
           {% endif %}
         </div>
 
-        <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded-xs">
+        <button type="submit" class="btn-brand w-full">
           Change My Password
         </button>
       </form>
@@ -67,7 +67,7 @@
       </div>
 
       <div class="mt-6 text-center">
-        <a href="{% url 'public:account-login' %}" class="bg-blue-500 hover:bg-blue-600 text-white py-2 px-4 rounded-xs">
+        <a href="{% url 'public:account-login' %}" class="btn-brand" style="text-decoration: none; display: inline-block;">
           Return to Login
         </a>
       </div>
