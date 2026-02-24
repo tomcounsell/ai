@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Large
 owner: Valor
@@ -24,7 +24,7 @@ The system uses a split persistence architecture: SQLite for durable message/lin
 **Desired outcome:**
 - Single persistence layer: Redis (persistent, RDB snapshots) via Popoto for all structured data
 - Session transcripts saved as `.txt` files on disk with metadata in Popoto for queryability
-- 3-month TTL on all data with automated cleanup
+- 3-month TTL on Redis data with automated cleanup; transcript files kept indefinitely
 - Eliminate SQLite entirely from the message/link/chat path
 - Eliminate the dual-write pattern and silent error swallowing
 
@@ -53,9 +53,9 @@ No prerequisites — Redis is already running with RDB persistence enabled, Popo
 ### Key Elements
 
 - **Promoted Popoto models**: Upgrade `TelegramMessage` from mirror to source of truth; new `Link` and `Chat` models replace SQLite tables
-- **Session transcript logging**: `SessionLog` Popoto model with metadata + `.txt` file path for full transcript content
+- **Session transcript logging**: `SessionLog` Popoto model (merges and replaces `AgentSession`) with metadata + `.txt` file path for full transcript content. Includes a `tags` ListField for categorization (e.g., "pr-review", "compacted"). Tagging system is a follow-up issue.
 - **Unified data layer**: Single `tools/telegram_history/__init__.py` module rewritten to use Popoto instead of SQLite
-- **TTL cleanup**: Shared cleanup job deleting records older than 3 months across all models
+- **TTL cleanup**: Shared cleanup job deleting records older than 3 months for Redis models. Transcript `.txt` files are kept indefinitely (no TTL).
 - **Data migration script**: One-time script to import existing SQLite records into Redis
 
 ### Flow
@@ -73,8 +73,9 @@ No prerequisites — Redis is already running with RDB persistence enabled, Popo
 - **Pagination**: Python list slicing on query results.
 - **Chat name resolution**: `Chat` model with `chat_name` as KeyField for exact match; fall back to `query.all()` with case-insensitive Python filtering for partial match.
 - **Link upsert**: Get-or-create pattern — `Link.query.filter(url=X, chat_id=Y)` then create or update.
-- **Session transcripts**: Append-only `.txt` files at `logs/sessions/{session_id}/transcript.txt`. Each line is `[timestamp] role: content`. The `SessionLog` Popoto model stores metadata (session_id, project, status, turn_count, tool_call_count, log_path) for querying without reading the file.
-- **TTL enforcement**: A `cleanup_expired()` classmethod on each model using the `BridgeEvent.cleanup_old()` pattern. SortedField on timestamp enables efficient range queries. Called from daydream or a periodic job. TTL = 90 days (3 months).
+- **Session transcripts**: Append-only `.txt` files at `logs/sessions/{session_id}/transcript.txt`. Each line is `[timestamp] role: content`. The `SessionLog` Popoto model stores metadata (session_id, project, status, turn_count, tool_call_count, log_path, tags) for querying without reading the file. `SessionLog` merges and replaces the existing `AgentSession` model.
+- **TTL enforcement**: A `cleanup_expired()` classmethod on each model using the `BridgeEvent.cleanup_old()` pattern. SortedField on timestamp enables efficient range queries. Called from daydream or a periodic job. TTL = 90 days (3 months) for Redis models. Transcript `.txt` files have no TTL — they are kept indefinitely on disk.
+- **Response storage**: Store full Valor responses with no character cap. Popoto Field max_length is sufficient (set to 50,000 chars).
 - **KeyField mutation**: Follow existing delete-and-recreate pattern (already proven in `RedisJob` status transitions).
 
 ## Rabbit Holes
@@ -96,7 +97,7 @@ No prerequisites — Redis is already running with RDB persistence enabled, Popo
 
 ### Risk 3: Redis memory growth
 **Impact:** Unbounded growth fills available RAM
-**Mitigation:** 3-month TTL with automated cleanup. At ~5KB per message, 3 months of data at 50 messages/day = ~22MB. Well within available RAM.
+**Mitigation:** 3-month TTL on Redis models with automated cleanup. Transcript files live on disk (no RAM impact). At ~5KB per message with full responses, 3 months of data at 50 messages/day = ~22MB. Well within available RAM.
 
 ### Risk 4: Bridge restart during migration
 **Impact:** Messages could be written to old SQLite path if code is partially deployed
@@ -109,6 +110,7 @@ No prerequisites — Redis is already running with RDB persistence enabled, Popo
 - Changing the CLI interface or command structure (same commands, different backend)
 - Migrating flat-file crash history or daydream state (low value, low urgency)
 - Adding new query capabilities beyond what SQLite currently provides
+- Session tagging system (the `tags` ListField is added to the model, but the tagging UI/automation is a separate issue)
 
 ## Update System
 
@@ -208,9 +210,10 @@ See plan template for full list.
 - **Parallel**: true
 - Create `models/link.py` with `Link` Popoto model (fields: link_id AutoKey, url KeyField, chat_id KeyField, message_id Field, domain KeyField, sender KeyField, status KeyField, timestamp SortedField, final_url Field, title Field, description Field, tags ListField, notes Field, ai_summary Field)
 - Create `models/chat.py` with `Chat` Popoto model (fields: chat_id UniqueKeyField, chat_name KeyField, chat_type KeyField, updated_at SortedField with auto_now)
-- Create `models/session_log.py` with `SessionLog` Popoto model (fields: session_id UniqueKeyField, project_key KeyField, status KeyField, chat_id KeyField, sender KeyField, started_at SortedField partitioned by project_key, completed_at Field, turn_count IntField, tool_call_count IntField, log_path Field, summary Field, branch_name Field, work_item_slug Field)
-- Update `models/__init__.py` to export new models
-- Add `cleanup_expired(max_age_days=90)` classmethod to TelegramMessage, Link, Chat, and SessionLog
+- Create `models/session_log.py` with `SessionLog` Popoto model (fields: session_id UniqueKeyField, project_key KeyField, status KeyField, chat_id KeyField, sender KeyField, started_at SortedField partitioned by project_key, completed_at Field, turn_count IntField, tool_call_count IntField, log_path Field, summary Field, branch_name Field, work_item_slug Field, tags ListField, classification_type Field, classification_confidence Field). This model replaces `AgentSession`.
+- Remove `models/sessions.py` (`AgentSession`) — all references migrate to `SessionLog`
+- Update `models/__init__.py` to export new models (Link, Chat, SessionLog) and remove AgentSession
+- Add `cleanup_expired(max_age_days=90)` classmethod to TelegramMessage, Link, and Chat. SessionLog gets `cleanup_expired()` for Redis metadata only — transcript files are kept indefinitely.
 
 ### 2. Rewrite Data Layer
 - **Task ID**: build-data-layer
@@ -252,6 +255,8 @@ See plan template for full list.
 - Integrate with `agent/sdk_client.py` to capture turns as they happen
 - Integrate with `agent/job_queue.py` to start/complete transcripts at job lifecycle boundaries
 - Replace `bridge/session_logs.py` snapshot approach with transcript approach (keep old module as deprecated fallback for one release)
+- Migrate all `AgentSession` references to `SessionLog`: `agent/job_queue.py`, `agent/health_check.py`, `agent/sdk_client.py`, `monitoring/session_watchdog.py`
+- Transcript files have no TTL — kept indefinitely on disk
 
 ### 4. Update Bridge Integration Points
 - **Task ID**: build-bridge-integration
@@ -260,8 +265,8 @@ See plan template for full list.
 - **Agent Type**: builder
 - **Parallel**: false
 - Update `bridge/telegram_bridge.py` lines 596-618: `store_message()` and `register_chat()` calls (same function names, no change needed if signatures preserved)
-- Update `bridge/telegram_bridge.py` lines 964-970: Remove the 1000-char truncation on Valor's responses — store full content (Redis can handle 20KB per field)
-- Update `bridge/telegram_bridge.py` lines 1094-1101: Same for job queue send callback
+- Update `bridge/telegram_bridge.py` lines 964-970: Remove the 1000-char truncation on Valor's responses — store full content with no cap
+- Update `bridge/telegram_bridge.py` lines 1094-1101: Same for job queue send callback — remove `[:1000]` truncation
 - Update `bridge/context.py` lines 276, 433, 504: Verify `get_recent_messages()`, `get_link_by_url()`, `store_link()` work against new backend
 - Remove the try/except Redis mirror block from old `store_message()` (no longer needed — Redis IS the store)
 
@@ -345,10 +350,12 @@ See plan template for full list.
 
 ---
 
-## Open Questions
+## Decisions (Finalized 2026-02-24)
 
-1. **Response truncation**: Currently Valor's responses are truncated to 1,000 chars before storage. Should we store the full response now that Redis can handle it (up to 20KB per field), or keep a cap? Recommendation: store full response, cap at 20KB.
+1. **Response storage**: Store full Valor responses with no character cap. Remove the `[:1000]` truncation entirely.
 
-2. **Session transcript retention**: Should transcript `.txt` files follow the same 3-month TTL as Redis data, or keep them longer on disk since they're cheap? Recommendation: same 3-month TTL for consistency.
+2. **Session transcript retention**: Transcript `.txt` files have no TTL — kept indefinitely on disk. Redis `SessionLog` metadata follows the 3-month TTL for cleanup, but the transcript files persist.
 
-3. **Existing `AgentSession` model**: The new `SessionLog` model overlaps significantly with `AgentSession`. Should we merge them into one model, or keep `AgentSession` for real-time status tracking and `SessionLog` for the transcript reference? Recommendation: merge — `SessionLog` subsumes `AgentSession` with the addition of `log_path` and transcript-specific fields.
+3. **AgentSession merge**: `SessionLog` replaces `AgentSession` entirely. All fields from `AgentSession` are carried over, plus `log_path`, `tags` (ListField), and transcript-specific counters.
+
+4. **Session tagging**: `SessionLog` includes a `tags` ListField for categorization (e.g., "pr-review", "compacted", "hotfix"). The tagging system itself (auto-tagging, tag management UI, tag-based queries) is a separate follow-up issue.
