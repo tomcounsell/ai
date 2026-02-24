@@ -165,7 +165,7 @@ The README created by PR #156 may reference agent counts. Update to reflect 6 ag
 
 ## Update System
 
-No update system changes required — this is purely local cleanup of agent definitions. The symlinks/hardlink system was already updated by PR #156.
+No update system changes required — this is purely local cleanup of agent definitions. The hardlink system was already updated by PR #156.
 
 ## Agent Integration
 

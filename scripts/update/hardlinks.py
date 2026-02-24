@@ -51,7 +51,7 @@ class LinkAction:
 
 
 @dataclass
-class SymlinkSyncResult:
+class HardlinkSyncResult:
     """Result of syncing project .claude dirs to user level."""
 
     success: bool = True
@@ -62,7 +62,7 @@ class SymlinkSyncResult:
     errors: int = 0
 
 
-def sync_claude_dirs(project_dir: Path) -> SymlinkSyncResult:
+def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     """Hardlink project .claude/{skills,commands,agents} files to ~/.claude/.
 
     Skills (directories with SKILL.md), commands (.md files), and agents
@@ -71,7 +71,7 @@ def sync_claude_dirs(project_dir: Path) -> SymlinkSyncResult:
     Also cleans up stale hardlinks in ~/.claude/ that no longer have
     a corresponding source in the project directory.
     """
-    result = SymlinkSyncResult()
+    result = HardlinkSyncResult()
     user_claude = Path.home() / ".claude"
 
     # Sync skills: each is a directory containing SKILL.md.
@@ -112,7 +112,7 @@ def sync_claude_dirs(project_dir: Path) -> SymlinkSyncResult:
     return result
 
 
-def _sync_skills(src_dir: Path, dst_dir: Path, result: SymlinkSyncResult) -> None:
+def _sync_skills(src_dir: Path, dst_dir: Path, result: HardlinkSyncResult) -> None:
     """Sync skill directories (each containing SKILL.md) and all sub-files.
 
     Skills use progressive disclosure: SKILL.md is loaded on invocation,
@@ -156,7 +156,7 @@ def _sync_skills(src_dir: Path, dst_dir: Path, result: SymlinkSyncResult) -> Non
             _ensure_hardlink(src_file, dst_file, dst_file.parent, result)
 
 
-def _sync_commands(src_dir: Path, dst_dir: Path, result: SymlinkSyncResult) -> None:
+def _sync_commands(src_dir: Path, dst_dir: Path, result: HardlinkSyncResult) -> None:
     """Sync command .md files."""
     if not src_dir.is_dir():
         return
@@ -169,7 +169,7 @@ def _sync_commands(src_dir: Path, dst_dir: Path, result: SymlinkSyncResult) -> N
 
 
 def _ensure_hardlink(
-    src: Path, dst: Path, dst_parent: Path, result: SymlinkSyncResult
+    src: Path, dst: Path, dst_parent: Path, result: HardlinkSyncResult
 ) -> None:
     """Ensure dst is a hardlink to src. Create if missing or stale."""
     rel_src = str(src).replace(str(Path.home()), "~")
@@ -217,7 +217,7 @@ def _is_hardlinked_to_project(dst_file: Path, src_dir: Path) -> bool:
     return False
 
 
-def _cleanup_renamed(user_claude: Path, result: SymlinkSyncResult) -> None:
+def _cleanup_renamed(user_claude: Path, result: HardlinkSyncResult) -> None:
     """Remove old-name commands/skills listed in RENAMED_REMOVALS."""
     for kind, old_name in RENAMED_REMOVALS:
         target = user_claude / kind / old_name
@@ -238,7 +238,7 @@ def _cleanup_renamed(user_claude: Path, result: SymlinkSyncResult) -> None:
 
 
 def _cleanup_stale_commands(
-    src_dir: Path, dst_dir: Path, result: SymlinkSyncResult
+    src_dir: Path, dst_dir: Path, result: HardlinkSyncResult
 ) -> None:
     """Remove command files in dst_dir that were hardlinked from old source names.
 
@@ -284,7 +284,7 @@ def _cleanup_stale_commands(
 
 
 def _cleanup_stale_skills(
-    src_dir: Path, dst_dir: Path, result: SymlinkSyncResult
+    src_dir: Path, dst_dir: Path, result: HardlinkSyncResult
 ) -> None:
     """Remove skill directories in dst_dir that were hardlinked from old source names.
 

@@ -27,7 +27,7 @@ from scripts.update import (  # noqa: E402
     git,
     hooks,
     service,
-    symlinks,
+    hardlinks,
     verify,
 )
 
@@ -106,7 +106,7 @@ class UpdateResult:
     calendar_config: cal_integration.CalendarConfigResult | None = None
     service_status: service.ServiceStatus | None = None
     caffeinate_status: service.CaffeinateStatus | None = None
-    symlink_result: symlinks.SymlinkSyncResult | None = None
+    hardlink_result: hardlinks.HardlinkSyncResult | None = None
     hook_audit: hooks.HookAuditResult | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -161,23 +161,23 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
 
     # Step 1.5: Sync .claude hardlinks (skills + commands to ~/.claude/)
     log("Syncing .claude hardlinks...", v)
-    result.symlink_result = symlinks.sync_claude_dirs(project_dir)
-    if result.symlink_result.created > 0:
-        log(f"Created {result.symlink_result.created} new hardlink(s)", v, always=True)
-        for action in result.symlink_result.actions:
+    result.hardlink_result = hardlinks.sync_claude_dirs(project_dir)
+    if result.hardlink_result.created > 0:
+        log(f"Created {result.hardlink_result.created} new hardlink(s)", v, always=True)
+        for action in result.hardlink_result.actions:
             if action.action == "created":
                 log(f"  {action.dst}", v, always=True)
-    if result.symlink_result.removed > 0:
+    if result.hardlink_result.removed > 0:
         log(
-            f"Removed {result.symlink_result.removed} stale hardlink(s)",
+            f"Removed {result.hardlink_result.removed} stale hardlink(s)",
             v,
             always=True,
         )
-        for action in result.symlink_result.actions:
+        for action in result.hardlink_result.actions:
             if action.action == "removed":
                 log(f"  {action.dst}", v, always=True)
-    if result.symlink_result.errors > 0:
-        for action in result.symlink_result.actions:
+    if result.hardlink_result.errors > 0:
+        for action in result.hardlink_result.actions:
             if action.action == "error":
                 log(f"WARN: Failed to link {action.dst}: {action.error}", v)
                 result.warnings.append(f"Hardlink failed: {action.dst}")

@@ -207,7 +207,7 @@ The skill can also accept arguments:
 
 ## Update System
 
-No update system changes required — this is a new skill in `.claude/skills/` which the existing `symlinks.py` system will sync to `~/.claude/skills/` automatically.
+No update system changes required — this is a new skill in `.claude/skills/` which the existing `hardlinks.py` system will sync to `~/.claude/skills/` automatically.
 
 ## Agent Integration
 

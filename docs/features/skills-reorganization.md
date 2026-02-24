@@ -32,4 +32,4 @@ Every skill now has proper frontmatter fields:
 
 ## Related
 - `.claude/skills/README.md` — full skills index
-- `scripts/update/symlinks.py` — hardlink sync logic
+- `scripts/update/hardlinks.py` — hardlink sync logic
