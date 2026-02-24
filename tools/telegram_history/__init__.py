@@ -9,7 +9,7 @@ All data is stored in Redis via Popoto models (TelegramMessage, Link, Chat).
 """
 
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from urllib.parse import urlparse
 
 

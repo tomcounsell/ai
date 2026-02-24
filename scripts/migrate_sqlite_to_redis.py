@@ -333,15 +333,12 @@ def main():
 
         print()
         print("Migration summary:")
-        print(
-            f"  Messages: {msg_stats['created']} created, {msg_stats['skipped']} skipped, {msg_stats['errors']} errors"
-        )
-        print(
-            f"  Links:    {link_stats['created']} created, {link_stats['skipped']} skipped, {link_stats['errors']} errors"
-        )
-        print(
-            f"  Chats:    {chat_stats['created']} created, {chat_stats['skipped']} skipped, {chat_stats['errors']} errors"
-        )
+        c, s, e = msg_stats["created"], msg_stats["skipped"], msg_stats["errors"]
+        print(f"  Messages: {c} created, {s} skipped, {e} errors")
+        c, s, e = link_stats["created"], link_stats["skipped"], link_stats["errors"]
+        print(f"  Links:    {c} created, {s} skipped, {e} errors")
+        c, s, e = chat_stats["created"], chat_stats["skipped"], chat_stats["errors"]
+        print(f"  Chats:    {c} created, {s} skipped, {e} errors")
 
         if args.verify or not args.dry_run:
             verify_migration(conn)

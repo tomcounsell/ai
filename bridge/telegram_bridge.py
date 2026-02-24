@@ -801,9 +801,9 @@ async def main():
             # === STEERING CHECK: Reply to running session → inject, don't queue ===
             if is_reply_to_valor and message.reply_to_msg_id:
                 try:
-                    from models.sessions import AgentSession
+                    from models.session_log import SessionLog
 
-                    active_sessions = AgentSession.query.filter(
+                    active_sessions = SessionLog.query.filter(
                         session_id=session_id, status="active"
                     )
                     if active_sessions:

@@ -1,4 +1,4 @@
-"""Tests for scripts/update/symlinks.py — retired commands and project-only skill scoping."""
+"""Tests for scripts/update/hardlinks.py — retired commands and project-only skill scoping."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts.update.symlinks import (
+from scripts.update.hardlinks import (
     PROJECT_ONLY_SKILLS,
     RENAMED_REMOVALS,
-    SymlinkSyncResult,
+    HardlinkSyncResult,
     _sync_skills,
     sync_claude_dirs,
 )
@@ -89,7 +89,7 @@ def skill_dirs(tmp_path: Path):
 def test_sync_skills_skips_project_only(skill_dirs):
     """_sync_skills should not create hardlinks for project-only skills."""
     src_skills, dst_skills = skill_dirs
-    result = SymlinkSyncResult()
+    result = HardlinkSyncResult()
     _sync_skills(src_skills, dst_skills, result)
 
     # Shared skill was synced
@@ -103,7 +103,7 @@ def test_sync_skills_skips_project_only(skill_dirs):
 def test_sync_skills_counts_skipped_project_only(skill_dirs):
     """Project-only skills should not increment created count."""
     src_skills, dst_skills = skill_dirs
-    result = SymlinkSyncResult()
+    result = HardlinkSyncResult()
     _sync_skills(src_skills, dst_skills, result)
 
     # Only 1 skill should have been created (do-test)
