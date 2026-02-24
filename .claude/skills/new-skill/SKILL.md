@@ -2,6 +2,8 @@
 name: new-skill
 description: Use when creating a new Claude Code skill directory and SKILL.md. Also use when the user says 'create a skill', 'new skill', or 'add a skill'. Handles both shared (~/.claude/skills/) and project-specific (.claude/skills/) skills.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
+argument-hint: "<skill-name>"
+disable-model-invocation: true
 ---
 
 # New Skill

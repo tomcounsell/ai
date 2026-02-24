@@ -1,7 +1,7 @@
 ---
 name: sdlc
 description: "Use when executing end-to-end autonomous development. Runs Plan → Build → Test → Review → Ship with quality gates. Triggered by 'ship this feature', 'sdlc', or 'full development cycle'."
-model-invocable: true
+context: fork
 ---
 
 # AI Developer Workflow (SDLC)
