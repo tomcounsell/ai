@@ -32,6 +32,33 @@ The worker loop now includes a drain guard before exiting. When `_pop_job()` ret
 
 `_recover_orphaned_jobs()` scans for RedisJob objects in the Redis class set that are not present in any status KeyField index. These orphans result from past index corruption or creation races. They are re-created with status `pending` and priority `high`. Called at bridge startup alongside `_recover_interrupted_jobs()`.
 
+## Revival Chat Scoping Fix
+
+`check_revival()` was rewritten to scope revival detection strictly to the originating Telegram chat. The previous implementation listed all `session/*` git branches across the entire repository (via `git branch --list "session/*"`), which caused revival notifications to bleed across unrelated Telegram chats whenever any project had an open session branch.
+
+### New Approach
+
+Instead of scanning git branches globally, `check_revival()` queries Redis (Popoto) for jobs filtered by `project_key` + `status` (pending or running), then filters by `chat_id` in Python:
+
+```python
+for status in ("pending", "running"):
+    jobs = RedisJob.query.filter(project_key=project_key, status=status)
+    for job in jobs:
+        if str(job.chat_id) == chat_id_str:
+            branch = _session_branch_name(job.session_id)
+            branches.append(branch)
+```
+
+Branch existence is then verified individually in git (`git branch --list <specific-branch>`), rather than enumerating all branches. The `state.work_status` legacy fallback was also removed.
+
+### Behavioral Change
+
+| Before | After |
+|--------|-------|
+| All `session/*` branches visible to any chat | Only branches belonging to the calling `chat_id` |
+| Revival could notify wrong chat | Revival only notifies the chat that owns the session |
+| `state.work_status` checked as fallback | Redis is the sole source of truth |
+
 ## See Also
 
 - `docs/features/scale-job-queue-with-popoto-and-worktrees.md` -- Original job queue architecture

@@ -66,7 +66,7 @@ depth = Job.query.count(project_key="valor", status="pending")
 **What survives crashes**: Everything. Redis persists with RDB/AOF. No corrupt JSON, no lost jobs.
 
 **Code changes required**:
-- `agent/job_queue.py`: Replace `ProjectJobQueue` class (~40 lines) with the popoto `Job` model (~20 lines). The `_worker_loop`, `_execute_job`, callback registry, and revival detection stay the same.
+- `agent/job_queue.py`: Replace `ProjectJobQueue` class (~40 lines) with the popoto `Job` model (~20 lines). The `_worker_loop`, `_execute_job`, and callback registry stay the same. Note: `check_revival()` was subsequently rewritten to query Redis by `chat_id` rather than scanning all git branches — see `docs/features/job-queue.md`.
 - `requirements.txt`: Add `popoto`
 - Delete: `data/job_queue/` directory (no longer needed)
 - Delete: `MessageQueue` class from `bridge/telegram_bridge.py` (fully superseded)
