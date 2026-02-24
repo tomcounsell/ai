@@ -2,14 +2,10 @@
 
 from __future__ import annotations
 
-import json
-import tempfile
+import sys
 from pathlib import Path
 
 import pytest
-
-# Import audit functions directly
-import sys
 
 sys.path.insert(
     0,
@@ -24,7 +20,6 @@ sys.path.insert(
 
 from audit_skills import (  # noqa: E402
     AuditReport,
-    Finding,
     apply_fixes,
     audit_skill,
     discover_skills,
@@ -48,7 +43,6 @@ from sync_best_practices import (  # noqa: E402
     extract_line_limit,
     generate_report,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -246,9 +240,7 @@ class TestRule05DescriptionLength:
 
 class TestRule06InfraClassification:
     def test_infra_with_flag(self):
-        f = rule_06_infra_classification(
-            "setup", {"disable-model-invocation": True}
-        )
+        f = rule_06_infra_classification("setup", {"disable-model-invocation": True})
         assert f.severity == "PASS"
 
     def test_infra_without_flag(self):
@@ -267,9 +259,7 @@ class TestRule06InfraClassification:
 
 class TestRule07BackgroundClassification:
     def test_bg_with_flag(self):
-        f = rule_07_background_classification(
-            "telegram", {"user-invocable": False}
-        )
+        f = rule_07_background_classification("telegram", {"user-invocable": False})
         assert f.severity == "PASS"
 
     def test_bg_without_flag(self):
@@ -357,9 +347,7 @@ class TestRule11KnownFields:
         assert f.severity == "PASS"
 
     def test_unknown_field(self):
-        f = rule_11_known_fields(
-            "test", {"name": "foo", "custom-field": "value"}
-        )
+        f = rule_11_known_fields("test", {"name": "foo", "custom-field": "value"})
         assert f.severity == "WARN"
         assert "custom-field" in f.message
 
@@ -383,9 +371,7 @@ class TestRule12ArgumentHint:
         assert f.severity == "PASS"
 
     def test_arguments_without_hint(self):
-        f = rule_12_argument_hint(
-            "test", {}, "Process $ARGUMENTS here."
-        )
+        f = rule_12_argument_hint("test", {}, "Process $ARGUMENTS here.")
         assert f.severity == "WARN"
 
     def test_positional_arguments(self):
@@ -419,7 +405,9 @@ class TestApplyFixes:
         skill_dir = tmp_path / "test-skill"
         skill_dir.mkdir()
         skill_md = skill_dir / "SKILL.md"
-        skill_md.write_text("---\nname: test-skill\ndescription: 'has trailing  '\n---\n\nBody.")
+        skill_md.write_text(
+            "---\nname: test-skill\ndescription: 'has trailing  '\n---\n\nBody."
+        )
 
         fm = {"name": "test-skill", "description": "has trailing  "}
         text = skill_md.read_text()
@@ -447,7 +435,10 @@ class TestAuditSkill:
 
 class TestSyncBestPractices:
     def test_extract_fields(self):
-        text = "The `name` field is required. Use `description` for triggers. The `model` field is optional."
+        text = (
+            "The `name` field is required. Use `description` for triggers."
+            " The `model` field is optional."
+        )
         fields = extract_fields_from_docs(text)
         assert "name" in fields
         assert "description" in fields
