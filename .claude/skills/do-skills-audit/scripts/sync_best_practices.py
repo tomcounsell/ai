@@ -198,7 +198,9 @@ def extract_fields_from_docs(text: str) -> set[str]:
 def extract_line_limit(text: str) -> int | None:
     """Extract recommended line limit from docs."""
     m = re.search(
-        r"(?:under|less than|<=?\s*|max(?:imum)?\s+)(\d+)\s*lines", text, re.I
+        r"(?:under\s+|less\s+than\s+|<=?\s*|max(?:imum)?\s+)(\d+)\s*lines",
+        text,
+        re.I,
     )
     if m:
         return int(m.group(1))
