@@ -17,18 +17,18 @@ async def stop_hook(
 ) -> dict[str, Any]:
     """Log when a session completes. Hard-blocks code-on-main violations.
 
-    Captures the session_id and stop reason for observability.
+    Captures the session_id and transcript path for observability.
 
     SDLC enforcement: if code was modified on the main branch, the session
     is hard-blocked with an explanatory message. Sessions on feature branches
     (session/{slug}) or docs-only sessions always pass.
     """
     session_id = input_data.get("session_id", "unknown")
-    stop_reason = input_data.get("stop_reason", "unspecified")
+    transcript_path = input_data.get("transcript_path", "")
 
     logger.info(
         f"[stop_hook] Session completed: session_id={session_id}, "
-        f"reason={stop_reason}"
+        f"transcript={transcript_path}"
     )
 
     # SDLC enforcement: hard-block code pushed directly to main
