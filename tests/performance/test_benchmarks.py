@@ -116,7 +116,12 @@ class TestMemoryPerformance:
 
         # Import all tools
         try:
-            from tools import code_execution, image_analysis, search, test_judge
+            from tools import (  # noqa: F401
+                code_execution,  # noqa: F401
+                image_analysis,  # noqa: F401
+                search,  # noqa: F401
+                test_judge,  # noqa: F401
+            )
         except ImportError:
             pytest.skip("Tools not available")
 
@@ -180,7 +185,7 @@ class TestResponseTime:
         start = time.perf_counter()
 
         # Simple operation
-        result = sum(range(10000))
+        sum(range(10000))
 
         elapsed_ms = (time.perf_counter() - start) * 1000
         assert elapsed_ms < 100, f"Simple operation took {elapsed_ms:.1f}ms"
@@ -191,7 +196,7 @@ class TestResponseTime:
         test_file = Path(__file__)
 
         start = time.perf_counter()
-        content = test_file.read_text()
+        test_file.read_text()
         elapsed_ms = (time.perf_counter() - start) * 1000
 
         assert elapsed_ms < 100, f"File read took {elapsed_ms:.1f}ms"
@@ -204,7 +209,7 @@ class TestResponseTime:
         async def quick_task():
             return 42
 
-        result = await quick_task()
+        await quick_task()
         elapsed_ms = (time.perf_counter() - start) * 1000
 
         assert elapsed_ms < 10, f"Async task latency {elapsed_ms:.1f}ms is too high"
@@ -322,7 +327,7 @@ class TestToolPerformance:
         for tool_name in tools_to_test:
             start = time.perf_counter()
             try:
-                module = __import__(f"tools.{tool_name}", fromlist=[tool_name])
+                __import__(f"tools.{tool_name}", fromlist=[tool_name])
                 elapsed_ms = (time.perf_counter() - start) * 1000
                 assert (
                     elapsed_ms < 500

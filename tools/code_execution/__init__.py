@@ -4,7 +4,6 @@ Code Execution Tool
 Sandboxed code execution environment with resource limits and safety measures.
 """
 
-import os
 import subprocess
 import sys
 import tempfile

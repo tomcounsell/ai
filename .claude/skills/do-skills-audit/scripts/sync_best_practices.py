@@ -24,7 +24,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -149,7 +149,7 @@ def local_files_age_days() -> int:
     try:
         meta = json.loads(METADATA_FILE.read_text(encoding="utf-8"))
         fetched = datetime.fromisoformat(meta["fetched_at"])
-        return (datetime.now(tz=timezone.utc) - fetched).days
+        return (datetime.now(tz=datetime.UTC) - fetched).days
     except (json.JSONDecodeError, KeyError, ValueError):
         return 999
 
@@ -177,14 +177,16 @@ def save_local_docs(docs_text: str | None, creator_text: str | None) -> list[str
             changed.append(DOCS_FILE.name)
 
     if creator_text is not None:
-        existing = CREATOR_FILE.read_text(encoding="utf-8") if CREATOR_FILE.exists() else ""
+        existing = (
+            CREATOR_FILE.read_text(encoding="utf-8") if CREATOR_FILE.exists() else ""
+        )
         if creator_text != existing:
             CREATOR_FILE.write_text(creator_text, encoding="utf-8")
             changed.append(CREATOR_FILE.name)
 
     # Always update metadata timestamp
     meta = {
-        "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
+        "fetched_at": datetime.now(tz=datetime.UTC).isoformat(),
         "sources": {
             "skills_docs": SKILLS_DOCS_URL,
             "skill_creator": SKILL_CREATOR_URL,
@@ -341,7 +343,10 @@ def generate_report(sources: dict[str, str], our_state: dict) -> dict:
         )
 
     for sub in ANTHROPIC_SUBSTITUTIONS:
-        if sub.replace("$", "").replace("{", "").replace("}", "").lower() in all_text.lower():
+        if (
+            sub.replace("$", "").replace("{", "").replace("}", "").lower()
+            in all_text.lower()
+        ):
             report["alignments"].append(f"Substitution variable {sub} documented")
 
     return report
@@ -357,7 +362,8 @@ def format_report_human(report: dict, sync_status: dict | None = None) -> str:
 
     if sync_status:
         if sync_status.get("skipped"):
-            lines.append(f"Local docs: FRESH ({sync_status['age_days']} days old) — skipped upstream check")
+            age = sync_status["age_days"]
+            lines.append(f"Local docs: FRESH ({age} days old) — skipped upstream check")
         else:
             changed = sync_status.get("changed", [])
             errors = sync_status.get("fetch_errors", [])
@@ -395,7 +401,9 @@ def format_report_human(report: dict, sync_status: dict | None = None) -> str:
         lines.append("")
 
     if not report["new_in_anthropic"] and not report["drifts"]:
-        lines.append("✅ Fully aligned with Anthropic's latest published best practices.")
+        lines.append(
+            "✅ Fully aligned with Anthropic's latest published best practices."
+        )
         lines.append("")
 
     return "\n".join(lines)
@@ -433,7 +441,9 @@ def apply_updates(report: dict) -> list[str]:
                         last_row = rows[-1]
                         new_row = f"| `{field_name}` | No | {desc} |\n"
                         text = text[: last_row.end()] + new_row + text[last_row.end() :]
-                        changes.append(f"Added '{field_name}' to field constraints table")
+                        changes.append(
+                            f"Added '{field_name}' to field constraints table"
+                        )
 
     if changes:
         OUR_SKILL_DOCS.write_text(text, encoding="utf-8")
@@ -480,9 +490,15 @@ def main() -> int:
         action="store_true",
         help="Skip upstream check, read from local files only",
     )
-    parser.add_argument("--force-refresh", action="store_true", help="Force upstream fetch")
-    parser.add_argument("--apply", action="store_true", help="Apply updates to our template")
-    parser.add_argument("--update-skills", action="store_true", help="Suggest skill updates")
+    parser.add_argument(
+        "--force-refresh", action="store_true", help="Force upstream fetch"
+    )
+    parser.add_argument(
+        "--apply", action="store_true", help="Apply updates to our template"
+    )
+    parser.add_argument(
+        "--update-skills", action="store_true", help="Suggest skill updates"
+    )
     parser.add_argument("--json", action="store_true", help="JSON output")
     args = parser.parse_args()
 

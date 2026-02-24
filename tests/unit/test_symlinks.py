@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import shutil
 from pathlib import Path
 
 import pytest
@@ -15,7 +13,6 @@ from scripts.update.symlinks import (
     _sync_skills,
     sync_claude_dirs,
 )
-
 
 # ---------------------------------------------------------------------------
 # RENAMED_REMOVALS: retired commands should be listed

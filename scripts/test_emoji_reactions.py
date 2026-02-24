@@ -307,7 +307,6 @@ async def test_reactions_for_real(emojis_to_test: list[str], delay: float = 0.5)
 
             # If rate limited, wait the required time
             if "FloodWait" in error_type:
-                wait_match = str(e)
                 print("      Rate limited! Waiting before continuing...")
                 await asyncio.sleep(5)  # Brief pause before continuing
             else:

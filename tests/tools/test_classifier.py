@@ -176,7 +176,7 @@ def test_classifier_error_handling():
     # Most inputs should return valid classifications
     test_inputs = [
         "This is a very short message",
-        "This is a longer message that goes on and on with lots of details about what needs to be done",
+        "This is a longer message that goes on and on with lots of details about what needs to be done",  # noqa: E501
         "123",
         "!!!",
         "",

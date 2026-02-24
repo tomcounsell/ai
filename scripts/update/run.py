@@ -21,7 +21,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.update import (
+from scripts.update import (  # noqa: E402
     cal_integration,
     deps,
     git,
@@ -29,7 +29,7 @@ from scripts.update import (
     service,
     symlinks,
     verify,
-)  # noqa: E402
+)
 
 
 @dataclass
@@ -487,7 +487,9 @@ def main() -> int:
                 status += f"\n  - {err}"
         elif result.warnings:
             detail = f"updated to {sha}" if commits > 0 else f"up to date at {sha}"
-            status = f"{detail} ({len(result.warnings)} warning{'s' if len(result.warnings) != 1 else ''})"
+            w_count = len(result.warnings)
+            plural = "s" if w_count != 1 else ""
+            status = f"{detail} ({w_count} warning{plural})"
         else:
             status = "update successful"
 

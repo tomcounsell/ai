@@ -107,7 +107,7 @@ class TestClaudeAgentOptionsValidity:
     def test_options_creation_no_errors(self):
         """Test that creating options doesn't raise any errors."""
         try:
-            from claude_agent_sdk import ClaudeAgentOptions
+            from claude_agent_sdk import ClaudeAgentOptions  # noqa: F401
         except ImportError:
             pytest.skip("claude_agent_sdk not available")
 
@@ -129,9 +129,9 @@ class TestClaudeAgentOptionsValidity:
         sig = inspect.signature(ClaudeAgentOptions.__init__)
         valid_params = set(sig.parameters.keys()) - {"self"}
 
-        # Our options
+        # Our options — create to verify no exception; result not needed
         agent = ValorAgent()
-        options = agent._create_options(session_id="test")
+        agent._create_options(session_id="test")
 
         # Check that we're not setting any invalid attributes
         # (This would have raised an error during creation, but let's be explicit)

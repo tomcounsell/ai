@@ -608,7 +608,9 @@ class TestIgnoreLog:
         try:
             daydream_mod.prune_ignore_log()
             remaining = [
-                json.loads(l) for l in ignore_file.read_text().splitlines() if l.strip()
+                json.loads(line)
+                for line in ignore_file.read_text().splitlines()
+                if line.strip()
             ]
             patterns = [e["pattern"] for e in remaining]
             assert "expired" not in patterns
@@ -920,7 +922,7 @@ class TestCLIFlags:
         asyncio.run(daydream_mod.main())
 
         assert ignore_file.exists()
-        lines = [l for l in ignore_file.read_text().splitlines() if l.strip()]
+        lines = [line for line in ignore_file.read_text().splitlines() if line.strip()]
         assert len(lines) == 1
         entry = json.loads(lines[0])
         assert entry["pattern"] == "some bug pattern"
@@ -938,8 +940,6 @@ class TestCLIFlags:
         monkeypatch.setattr(sys, "argv", ["daydream.py", "--dry-run"])
 
         captured_runner = {}
-
-        original_run = daydream_mod.DaydreamRunner.run
 
         async def fake_run(self):
             captured_runner["instance"] = self

@@ -65,7 +65,9 @@ class TestSubprocessInvocation:
         result = run_tool_subprocess(
             "import sys, json; sys.path.insert(0, '.'); "
             "from tools.doc_impact_finder import chunk_markdown; "
-            "chunks = chunk_markdown('# Title\\n\\n## Section A\\n\\nContent A\\n\\n## Section B\\n\\nContent B', 'test.md'); "
+            "chunks = chunk_markdown("
+            "'# Title\\n\\n## Section A\\n\\nContent A"
+            "\\n\\n## Section B\\n\\nContent B', 'test.md'); "
             "print(json.dumps([{'section': c['section'], 'path': c['path']} for c in chunks]))"
         )
         assert result.returncode == 0, f"Failed: {result.stderr}"
@@ -80,7 +82,8 @@ class TestSubprocessInvocation:
             "import sys; sys.path.insert(0, '.'); "
             "from tools.doc_impact_finder import find_affected_docs; "
             "from pathlib import Path; "
-            "results = find_affected_docs('Changed session scoping', repo_root=Path('/nonexistent')); "
+            "results = find_affected_docs("
+            "'Changed session scoping', repo_root=Path('/nonexistent')); "
             "print(f'results={len(results)}')",
             env_override={
                 "OPENAI_API_KEY": "",
@@ -209,17 +212,27 @@ class TestLiveHaikuReranking:
             {
                 "path": "docs/features/bridge-self-healing.md",
                 "section": "## Restart Escalation",
-                "content_preview": "## Restart Escalation\n\nThe bridge watchdog monitors health every 60s and uses a 5-level escalation: restart, kill stale, clear locks, revert commit, alert human.",
+                "content_preview": (
+                    "## Restart Escalation\n\nThe bridge watchdog monitors health every 60s "
+                    "and uses a 5-level escalation: restart, kill stale, clear locks, "
+                    "revert commit, alert human."
+                ),
             },
             {
                 "path": "config/SOUL.md",
                 "section": "## Communication Style",
-                "content_preview": "## Communication Style\n\nDirect, no fluff. Prefer action over discussion. Never apologize for being thorough.",
+                "content_preview": (
+                    "## Communication Style\n\nDirect, no fluff. "
+                    "Prefer action over discussion. Never apologize for being thorough."
+                ),
             },
             {
                 "path": "docs/testing/testing-strategy.md",
                 "section": "## Test Categories",
-                "content_preview": "## Test Categories\n\nUnit tests for isolated logic. Integration tests with real APIs. E2E tests through Telegram flow.",
+                "content_preview": (
+                    "## Test Categories\n\nUnit tests for isolated logic. "
+                    "Integration tests with real APIs. E2E tests through Telegram flow."
+                ),
             },
         ]
 
@@ -254,7 +267,10 @@ class TestLiveHaikuReranking:
             {
                 "path": "docs/deployment.md",
                 "section": "## Deployment Steps",
-                "content_preview": "## Deployment Steps\n\n1. Clone the repo\n2. Run setup script\n3. Configure .env\n4. Start bridge",
+                "content_preview": (
+                    "## Deployment Steps\n\n1. Clone the repo\n2. Run setup script"
+                    "\n3. Configure .env\n4. Start bridge"
+                ),
             },
         )
         # If fence stripping works, we get a parsed result (not a parse error → None)
@@ -319,7 +335,7 @@ class TestIndexLifecycle:
             with patch(
                 "tools.impact_finder_core._embed_openai", side_effect=counting_embed
             ):
-                idx1 = index_docs(repo_root=tmp_path)
+                index_docs(repo_root=tmp_path)
 
         first_count = embed_call_count
         assert first_count > 0, "Should have embedded some chunks"
@@ -336,7 +352,7 @@ class TestIndexLifecycle:
             with patch(
                 "tools.impact_finder_core._embed_openai", side_effect=counting_embed
             ):
-                idx2 = index_docs(repo_root=tmp_path)
+                index_docs(repo_root=tmp_path)
 
         assert (
             embed_call_count < first_count
@@ -438,8 +454,12 @@ class TestFullPipelineLive:
             with patch(
                 "tools.impact_finder_core._embed_openai", side_effect=smart_embed
             ):
+                change_desc = (
+                    "Refactored session isolation to use slug-based worktrees "
+                    "instead of thread IDs"
+                )
                 results = find_affected_docs(
-                    "Refactored session isolation to use slug-based worktrees instead of thread IDs",
+                    change_desc,
                     repo_root=tmp_path,
                 )
 
