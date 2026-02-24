@@ -105,11 +105,12 @@ Code changes (.py, .js, .ts) never go directly to main.
 
 ### Pre-completion check in `ValorAgent`
 
-In `sdk_client.py`, add a check that fires when the session ends:
+Attached to the Agent SDK's complete/finish hook. When the session ends:
 - Read `data/sessions/{session_id}/sdlc_state.json`
 - If `code_modified: true`: run `git rev-parse --abbrev-ref HEAD`
-- If current branch is `main`: emit a block message instructing the agent to create a branch and PR
-- Soft-block: honor `SKIP_SDLC=1` env var (same as Stop hook pattern)
+- If current branch is `main`: raise a hard block — session cannot complete
+- Emit a clear instruction: create a branch, open a PR, do not push to main
+- **Hard-block, no bypass.** Telegram messages are free text — there is no mechanism for a user to set env vars or signal an override through the message channel. The soft-block escape hatch (`SKIP_SDLC=1`) is a Claude Code hook concern, not an SDK concern.
 
 ### SOUL.md cleanup
 
@@ -177,8 +178,8 @@ No agent integration changes required. This is purely internal to `agent/sdk_cli
 **SDK wiring:**
 - [ ] `agent/sdk_client.py` has a `SDLC_WORKFLOW` constant with the mandatory pipeline text
 - [ ] `load_system_prompt()` injects `SDLC_WORKFLOW` between SOUL.md and completion criteria
-- [ ] `ValorAgent` has a pre-completion check that blocks code-on-main sessions
-- [ ] `SKIP_SDLC=1` bypasses the pre-completion check
+- [ ] `ValorAgent` attaches a hard-block check to the SDK complete/finish hook
+- [ ] Code-on-main is a hard-block — no bypass, no env var escape hatch at this layer
 
 **Behavioral:**
 - [ ] A session that modifies a `.py` file and is on `main` branch is blocked at completion
@@ -234,8 +235,8 @@ No agent integration changes required. This is purely internal to `agent/sdk_cli
 - Add `SDLC_WORKFLOW` module-level constant to `agent/sdk_client.py` with the mandatory pipeline text (see Solution section)
 - Update `load_system_prompt()` to inject it between SOUL.md content and completion criteria
 - Add `_check_no_direct_main_push(session_id)` method to `ValorAgent`
-- Call the check from the appropriate session completion path
-- Write `tests/unit/test_sdk_client_sdlc.py` covering: code-on-main blocked; docs-on-main allowed; code-on-feature-branch allowed; SKIP_SDLC=1 bypasses
+- Attach it to the Agent SDK complete/finish hook
+- Write `tests/unit/test_sdk_client_sdlc.py` covering: code-on-main hard-blocked; docs-on-main allowed; code-on-feature-branch allowed
 
 ### 3. Validate enforcement
 - **Task ID**: validate-enforcement
@@ -277,6 +278,6 @@ No agent integration changes required. This is purely internal to `agent/sdk_cli
 
 ## Open Questions
 
-1. **Soft-block vs hard-block for the pre-completion check**: Should it match the Stop hook pattern (soft-block, bypassable with `SKIP_SDLC=1`) or be a hard block that cannot be overridden? Recommend soft-block for consistency.
+~~1. Soft-block vs hard-block~~ — Resolved: **hard-block**. Telegram is free text — no mechanism exists for a user to signal a bypass through the message channel. No escape hatch at the SDK layer.
 
-2. **Where exactly in `ValorAgent` does the pre-completion check fire?** The SDK session runs as an async generator yielding events. Is there a clean "session end" hook, or does it need to wrap the `run()` method's finally block?
+~~2. Where does the check fire~~ — Resolved: attach to the **Agent SDK complete/finish hook**. Clean attachment point, no need to wrap `run()` finally block.
