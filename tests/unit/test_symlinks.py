@@ -35,9 +35,10 @@ RETIRED_COMMANDS = [
 @pytest.mark.parametrize("cmd", RETIRED_COMMANDS)
 def test_retired_commands_in_removals(cmd: str):
     """Each retired command must appear in RENAMED_REMOVALS as a commands entry."""
-    assert ("commands", cmd) in RENAMED_REMOVALS, (
-        f"Retired command {cmd!r} missing from RENAMED_REMOVALS"
-    )
+    assert (
+        "commands",
+        cmd,
+    ) in RENAMED_REMOVALS, f"Retired command {cmd!r} missing from RENAMED_REMOVALS"
 
 
 # ---------------------------------------------------------------------------
