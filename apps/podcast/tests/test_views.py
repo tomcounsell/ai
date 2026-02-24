@@ -1,4 +1,7 @@
+from unittest.mock import patch
+
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
@@ -832,3 +835,85 @@ class PodcastEditViewTestCase(TestCase):
         """Anonymous user does not see Edit button on detail page."""
         response = self.client.get(f"/podcast/{self.podcast.slug}/")
         self.assertNotContains(response, f"/podcast/{self.podcast.slug}/edit/")
+
+    @patch("apps.podcast.views.podcast_views.store_file")
+    def test_cover_image_upload(self, mock_store_file):
+        """POST with cover image uploads to Supabase and updates cover_image_url."""
+        mock_store_file.return_value = (
+            "https://storage.example.com/podcast/editable-podcast/cover.png"
+        )
+        self.client.login(username="editowner", password="testpass123")
+
+        # Create a small valid PNG file (1x1 pixel)
+        image_content = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+            b"\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde\x00"
+            b"\x00\x00\x0cIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00"
+            b"\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        cover_image = SimpleUploadedFile(
+            "cover.png", image_content, content_type="image/png"
+        )
+
+        response = self.client.post(
+            f"/podcast/{self.podcast.slug}/edit/",
+            {
+                "title": "Editable Podcast",
+                "description": "A podcast for edit tests.",
+                "author_name": "Author",
+                "author_email": "a@b.com",
+                "language": "en",
+                "website_url": "",
+                "spotify_url": "",
+                "apple_podcasts_url": "",
+                "cover_image": cover_image,
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.podcast.refresh_from_db()
+        self.assertEqual(
+            self.podcast.cover_image_url,
+            "https://storage.example.com/podcast/editable-podcast/cover.png",
+        )
+
+        # Verify store_file was called with correct arguments
+        mock_store_file.assert_called_once()
+        call_args = mock_store_file.call_args
+        self.assertEqual(call_args[0][0], "podcast/editable-podcast/cover.png")
+        self.assertIsInstance(call_args[0][1], bytes)
+        self.assertEqual(call_args[0][2], "image/png")
+        self.assertTrue(call_args[1]["public"])
+
+    def test_cover_image_rejects_oversized_file(self):
+        """POST with cover image > 5MB returns form error, podcast unchanged."""
+        self.client.login(username="editowner", password="testpass123")
+
+        # Create a file just over 5MB
+        oversized_content = b"\x00" * (5 * 1024 * 1024 + 1)
+        oversized_image = SimpleUploadedFile(
+            "huge.png", oversized_content, content_type="image/png"
+        )
+
+        original_cover_url = self.podcast.cover_image_url
+
+        response = self.client.post(
+            f"/podcast/{self.podcast.slug}/edit/",
+            {
+                "title": "Editable Podcast",
+                "description": "A podcast for edit tests.",
+                "author_name": "Author",
+                "author_email": "a@b.com",
+                "language": "en",
+                "website_url": "",
+                "spotify_url": "",
+                "apple_podcasts_url": "",
+                "cover_image": oversized_image,
+            },
+        )
+        # form_invalid returns 200 with form errors
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "5MB")
+
+        # Verify podcast cover_image_url is unchanged
+        self.podcast.refresh_from_db()
+        self.assertEqual(self.podcast.cover_image_url, original_cover_url)

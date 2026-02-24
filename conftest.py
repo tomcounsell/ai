@@ -5,6 +5,7 @@ This file configures pytest for running Django tests with proper
 database setup and fixtures.
 """
 
+import contextlib
 import os
 import warnings
 
@@ -22,7 +23,10 @@ try:
     SELENIUM_AVAILABLE = True
 except ImportError:
     SELENIUM_AVAILABLE = False
-    warnings.warn("Selenium not installed. Browser tests will be skipped.")
+    warnings.warn(
+        "Selenium not installed. Browser tests will be skipped.",
+        stacklevel=2,
+    )
 
 
 def pytest_configure(config):
@@ -54,10 +58,8 @@ def pytest_configure(config):
     storages._backends = None
     storages._storages = {}
     # Clear the cached_property so it re-reads from settings.STORAGES
-    try:
+    with contextlib.suppress(AttributeError):
         del storages.backends
-    except AttributeError:
-        pass
 
     # Reset the lazy staticfiles_storage so it re-creates from the handler.
     from django.contrib.staticfiles.storage import staticfiles_storage
@@ -78,19 +80,27 @@ def pytest_configure(config):
 
 
 @pytest.fixture(scope="session")
-def django_db_setup():
-    """Configure database for testing."""
-    settings.DATABASES = {
-        "default": {
-            "ENGINE": "django.db.backends.postgresql",
-            "NAME": os.environ.get("TEST_DB_NAME", "test_django_project"),
-            "USER": os.environ.get("TEST_DB_USER", "postgres"),
-            "PASSWORD": os.environ.get("TEST_DB_PASSWORD", "postgres"),
-            "HOST": os.environ.get("TEST_DB_HOST", "localhost"),
-            "PORT": os.environ.get("TEST_DB_PORT", "5432"),
-            "CONN_MAX_AGE": 0,
-        }
-    }
+def django_db_setup(django_test_environment, django_db_blocker):
+    """Create a fresh test database with all migrations applied.
+
+    Delegates to Django's standard test database creation so the schema
+    always matches the current model definitions, regardless of whether
+    migrations have been applied to the local dev database.
+    """
+    from django.test.utils import setup_databases, teardown_databases
+
+    with django_db_blocker.unblock():
+        db_cfg = setup_databases(
+            verbosity=0,
+            interactive=False,
+            keepdb=False,
+            serialized_aliases=set(),
+        )
+
+    yield
+
+    with django_db_blocker.unblock():
+        teardown_databases(db_cfg, verbosity=0)
 
 
 if SELENIUM_AVAILABLE:

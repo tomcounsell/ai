@@ -173,7 +173,7 @@ class EpisodeSourcesView(MainContentView):
         return self.render(request)
 
 
-class PodcastEditView(LoginRequiredMixin, MainContentView, UpdateView):
+class PodcastEditView(LoginRequiredMixin, UpdateView, MainContentView):
     """Edit podcast metadata and upload cover art. Owner-only access."""
 
     model = Podcast
@@ -199,6 +199,13 @@ class PodcastEditView(LoginRequiredMixin, MainContentView, UpdateView):
         context = super().get_context_data(**kwargs)
         context["title"] = f"Edit: {self.object.title}"
         context["podcast"] = self.object
+        # MainContentView.dispatch sets base_template in self.context,
+        # but UpdateView uses TemplateResponse context from get_context_data.
+        # Merge base_template so the template's {% extends base_template %} works.
+        if hasattr(self, "context") and "base_template" in self.context:
+            context["base_template"] = self.context["base_template"]
+        else:
+            context["base_template"] = self.base_template
         return context
 
     def form_valid(self, form):
