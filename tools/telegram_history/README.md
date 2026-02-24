@@ -5,7 +5,7 @@ Search Telegram conversation history with relevance scoring.
 ## Overview
 
 This tool provides local storage and search for Telegram messages:
-- Store messages in SQLite database
+- Store messages in Redis via Popoto ORM
 - Keyword search with relevance scoring
 - Time-based filtering
 - Chat statistics
@@ -99,7 +99,6 @@ def search_history(
     chat_id: str,
     max_results: int = 5,
     max_age_days: int = 30,
-    db_path: Path | None = None,
 ) -> dict
 ```
 
@@ -108,7 +107,6 @@ def search_history(
 - `chat_id`: Telegram chat ID
 - `max_results`: Maximum results (default: 5)
 - `max_age_days`: Time window in days (default: 30)
-- `db_path`: Custom database path
 
 **Returns:**
 ```python
@@ -140,7 +138,6 @@ def store_message(
     message_id: int | None = None,
     timestamp: datetime | None = None,
     message_type: str = "text",
-    db_path: Path | None = None,
 ) -> dict
 ```
 
@@ -152,7 +149,6 @@ Store a message in the history database.
 def get_recent_messages(
     chat_id: str,
     limit: int = 10,
-    db_path: Path | None = None,
 ) -> dict
 ```
 
@@ -161,7 +157,7 @@ Get recent messages from a chat.
 ### get_chat_stats()
 
 ```python
-def get_chat_stats(chat_id: str, db_path: Path | None = None) -> dict
+def get_chat_stats(chat_id: str) -> dict
 ```
 
 Get statistics for a chat.
@@ -175,7 +171,7 @@ Messages are scored based on:
 
 ## Storage
 
-Messages are stored in SQLite at `~/.valor/telegram_history.db`.
+Messages are stored in Redis via Popoto ORM (`TelegramMessage`, `Link`, `Chat` models). Redis must be running locally on port 6379.
 
 ## Error Handling
 

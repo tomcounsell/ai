@@ -4,6 +4,8 @@ tracking: https://github.com/tomcounsell/ai/issues/22
 
 # Plan: Expand Popoto Redis Models for Messages and Queues
 
+> **Note**: This plan was partially superseded by the [Redis Migration](../plans/redis_migration.md) (PR #166), which consolidated all persistence into Redis/Popoto. The `AgentSession` model described here was replaced by `SessionLog`, and `TelegramMessage` became the sole source of truth (no longer a mirror alongside SQLite). `DeadLetter` and `BridgeEvent` models from this plan were implemented separately.
+
 ## Problem Statement
 
 The codebase uses JSONL files and JSON files for temporary state in several places — dead letters, bridge events, calendar caches. These are susceptible to race conditions (read-modify-write on files), don't support atomic operations, and require parsing entire files for queries. Meanwhile, `RedisJob` in `agent/job_queue.py` already demonstrates popoto working well for the job queue.
