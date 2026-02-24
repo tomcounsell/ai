@@ -71,6 +71,33 @@ SOUL_PATH = Path(__file__).parent.parent / "config" / "SOUL.md"
 # Log a warning when a single query's equivalent API cost exceeds this
 _COST_WARN_THRESHOLD = float(os.getenv("SDK_COST_WARN_THRESHOLD", "0.50"))
 
+# Mandatory SDLC pipeline rules injected into every agent session.
+# Hardcoded here — not in SOUL.md or any config file — so they cannot be
+# accidentally removed from a persona doc edit.
+SDLC_WORKFLOW = """\
+## Mandatory Development Pipeline
+
+ALL code changes follow this pipeline — no exceptions, no hotfixes:
+
+1. ISSUE: A GitHub issue must exist describing the change.
+2. PLAN: Run /do-plan {slug} referencing the issue.
+   - Raise all open questions during planning.
+   - Do not proceed to build until questions are resolved.
+3. BUILD: Run /do-build {plan path or issue number}.
+   - do-build creates a worktree + session/{slug} branch.
+   - Agents implement, test, and lint on the feature branch.
+   - do-build opens a PR automatically when done.
+4. REVIEW: PR is reviewed (/do-pr-review or human review).
+5. MERGE: PR is merged to main by a human.
+
+NEVER commit code directly to main.
+NEVER push code to main — all code pushes go to session/{slug} branches.
+NEVER skip Issue or Plan — they are mandatory, not optional.
+
+Plan/doc changes (.md, .json, .yaml) may be committed directly to main.
+Code changes (.py, .js, .ts) never go directly to main.\
+"""
+
 
 def _log_system_resources(context: str = "") -> dict:
     """Log current system resource usage for diagnostics.
@@ -153,7 +180,15 @@ def load_completion_criteria() -> str:
 
 
 def load_system_prompt() -> str:
-    """Load Valor's system prompt from SOUL.md with completion criteria."""
+    """Load Valor's system prompt from SOUL.md with SDLC rules and completion criteria.
+
+    System prompt structure:
+        [SOUL.md — persona, attitude, purpose, communication style]
+        ---
+        [SDLC_WORKFLOW — mandatory pipeline rules, hardcoded in sdk_client.py]
+        ---
+        [Work Completion Criteria — from CLAUDE.md]
+    """
     soul_prompt = ""
     if SOUL_PATH.exists():
         soul_prompt = SOUL_PATH.read_text()
@@ -161,12 +196,109 @@ def load_system_prompt() -> str:
         logger.warning(f"SOUL.md not found at {SOUL_PATH}, using default prompt")
         soul_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
 
+    # Inject mandatory SDLC pipeline rules between SOUL.md and completion criteria
+    soul_prompt += f"\n\n---\n\n{SDLC_WORKFLOW}"
+
     # Append completion criteria
     criteria = load_completion_criteria()
     if criteria:
         soul_prompt += f"\n\n---\n\n{criteria}"
 
     return soul_prompt
+
+
+def _check_no_direct_main_push(
+    session_id: str, repo_root: Path | None = None
+) -> str | None:
+    """Check whether a session pushed code directly to main.
+
+    Reads the session's sdlc_state.json. If code was modified and the current
+    git branch is 'main', returns a hard-block error message. Otherwise returns
+    None (session may complete).
+
+    This is a hard-block — there is no escape hatch at the SDK layer.
+    Telegram is free text; there is no mechanism for a user to signal an
+    override through the message channel.
+
+    Args:
+        session_id: The session ID to check.
+        repo_root: Path to the git repo root. Defaults to the ai/ repo root.
+
+    Returns:
+        None   — session is clear (non-code, on a feature branch, or docs-only)
+        str    — error message describing the violation (hard-block)
+    """
+    if repo_root is None:
+        repo_root = Path(__file__).parent.parent
+
+    sessions_dir = repo_root / "data" / "sessions"
+    state_path = sessions_dir / session_id / "sdlc_state.json"
+
+    # Non-code session: no state file → no enforcement needed
+    if not state_path.exists():
+        return None
+
+    try:
+        import json
+
+        with open(state_path) as f:
+            state = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        # Corrupt/unreadable state — fail open, do not block the session
+        logger.warning(
+            f"[sdlc-main-check] Could not read sdlc_state.json for {session_id}: "
+            "fail open, skipping branch check"
+        )
+        return None
+
+    # No code modified → docs/ops session, no enforcement
+    if not state.get("code_modified", False):
+        return None
+
+    # Code was modified: check if we're on main
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+            timeout=5,
+        )
+        current_branch = result.stdout.strip()
+    except Exception as e:
+        logger.warning(
+            f"[sdlc-main-check] Could not determine git branch for {session_id}: {e} "
+            "— fail open, skipping branch check"
+        )
+        return None
+
+    if current_branch != "main":
+        # On a feature branch (inside /do-build worktree) — all good
+        return None
+
+    # Code modified + on main = SDLC violation
+    modified_files = state.get("files", [])
+    files_list = (
+        "\n".join(f"  - {f}" for f in modified_files)
+        if modified_files
+        else "  (unknown)"
+    )
+    return (
+        "SDLC VIOLATION: Code was modified directly on the main branch.\n\n"
+        f"Modified files:\n{files_list}\n\n"
+        "The mandatory pipeline requires all code changes to go through a feature branch:\n"
+        "  1. Create a GitHub issue for the change\n"
+        "  2. Run /do-plan {slug} to create a plan\n"
+        "  3. Run /do-build to implement on a session/{slug} branch\n"
+        "  4. A PR is opened and merged to main — never pushed directly\n\n"
+        "To remediate:\n"
+        "  git checkout -b session/your-fix-slug\n"
+        "  git push -u origin session/your-fix-slug\n"
+        "  gh pr create\n\n"
+        "Do NOT push these changes to main."
+    )
 
 
 class ValorAgent:
