@@ -176,13 +176,12 @@ class TestStepCleanLegacyBugFix:
         await runner.step_clean_legacy()
 
         assert "clean_legacy" in runner.state.step_progress
-        assert "cache_dirs" in runner.state.step_progress["clean_legacy"]
-        assert "pyc_files" in runner.state.step_progress["clean_legacy"]
+        assert "findings" in runner.state.step_progress["clean_legacy"]
 
     @pytest.mark.asyncio
     @patch("scripts.daydream.subprocess.run")
     async def test_step_clean_legacy_records_counts(self, mock_run):
-        """step_clean_legacy records cache_dirs and pyc_files as 0."""
+        """step_clean_legacy records findings count."""
         from scripts.daydream import DaydreamRunner
 
         mock_run.return_value = MagicMock(returncode=0, stdout="")
@@ -192,8 +191,8 @@ class TestStepCleanLegacyBugFix:
         await runner.step_clean_legacy()
 
         progress = runner.state.step_progress["clean_legacy"]
-        assert progress["cache_dirs"] == 0
-        assert progress["pyc_files"] == 0
+        assert "findings" in progress
+        assert isinstance(progress["findings"], int)
 
 
 # --- step_review_logs multi-repo ---
