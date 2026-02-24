@@ -113,7 +113,13 @@ def sync_claude_dirs(project_dir: Path) -> SymlinkSyncResult:
 
 
 def _sync_skills(src_dir: Path, dst_dir: Path, result: SymlinkSyncResult) -> None:
-    """Sync skill directories (each containing SKILL.md)."""
+    """Sync skill directories (each containing SKILL.md) and all sub-files.
+
+    Skills use progressive disclosure: SKILL.md is loaded on invocation,
+    but sub-files (templates, scripts, references) are loaded on-demand
+    via Read tool calls. All files in the skill directory must be synced
+    so sub-file references resolve at the user level too.
+    """
     if not src_dir.is_dir():
         return
 
@@ -132,9 +138,22 @@ def _sync_skills(src_dir: Path, dst_dir: Path, result: SymlinkSyncResult) -> Non
             continue
 
         dst_skill_dir = dst_dir / skill_dir.name
-        dst_skill_file = dst_skill_dir / "SKILL.md"
 
-        _ensure_hardlink(skill_file, dst_skill_file, dst_skill_dir, result)
+        # Sync SKILL.md
+        _ensure_hardlink(skill_file, dst_skill_dir / "SKILL.md", dst_skill_dir, result)
+
+        # Sync all sub-files (templates, scripts, references)
+        for src_file in sorted(skill_dir.rglob("*")):
+            if not src_file.is_file():
+                continue
+            if src_file.name == "SKILL.md":
+                continue  # Already synced above
+            if src_file.suffix == ".pyc" or "__pycache__" in src_file.parts:
+                continue  # Skip compiled Python cache
+
+            rel = src_file.relative_to(skill_dir)
+            dst_file = dst_skill_dir / rel
+            _ensure_hardlink(src_file, dst_file, dst_file.parent, result)
 
 
 def _sync_commands(src_dir: Path, dst_dir: Path, result: SymlinkSyncResult) -> None:
