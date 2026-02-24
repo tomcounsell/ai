@@ -40,7 +40,7 @@ A `/do-skills-audit` skill that:
 - PM check-ins: 0
 - Review rounds: 1
 
-Two parts: (1) deterministic validation — mechanical, read files, check 12 rules, report results; (2) LLM best practices sync — fetches Anthropic's latest published guidance, compares against our template/validator, and optionally updates skills to match state of the art.
+Two parts: (1) deterministic validation — mechanical, read files, check 12 rules, report results; (2) LLM best practices sync — runs by default, fetches Anthropic's latest published guidance, compares against our template/validator, and updates skills to match state of the art. Also integrates into the daydream maintenance system for continuous automated compliance.
 
 ## Prerequisites
 
@@ -54,15 +54,20 @@ Two parts: (1) deterministic validation — mechanical, read files, check 12 rul
 
 - **Skill directory**: `.claude/skills/do-skills-audit/SKILL.md` — the audit skill itself
 - **Validation script**: `.claude/skills/do-skills-audit/scripts/audit_skills.py` — standalone Python script that runs all checks and outputs structured results
-- **Rule set**: Hardcoded checks matching the standards established in #152/#156
+- **Best practices sync**: `.claude/skills/do-skills-audit/scripts/sync_best_practices.py` — LLM-powered comparison against latest Anthropic docs (runs by default as part of audit)
+- **Daydream integration**: New step in `scripts/daydream.py` that runs the skills audit + best practices sync daily
+- **Rule set**: Hardcoded checks matching the standards established in #152/#156, continuously updated by best practices sync
 
 ### Flow
 
-**Standard audit (deterministic):**
-`/do-skills-audit` → `audit_skills.py` → scan SKILL.md files → check rules → structured report
+**Default audit (deterministic + LLM sync):**
+`/do-skills-audit` → `audit_skills.py` runs 12 deterministic rules → `sync_best_practices.py` fetches latest Anthropic docs → LLM compares current skills against published standards → combined report with structural results + best practices delta
 
-**Best practices sync (LLM-powered, new scope):**
-`/do-skills-audit --sync-best-practices` → fetch latest Anthropic docs → LLM compares current skills against published standards → generates update recommendations → optionally applies fixes
+**Deterministic-only mode:**
+`/do-skills-audit --no-sync` → skip the LLM best practices sync, only run deterministic rules (fast, offline)
+
+**Daydream integration:**
+Daily daydream maintenance → step 12: Skills Audit → runs full audit (deterministic + sync) → findings added to daily report → creates GitHub issues for FAILs
 
 ### Technical Approach
 
@@ -105,9 +110,9 @@ Exit codes:
 - 0: All pass (may have warnings)
 - 1: At least one FAIL
 
-#### LLM Best Practices Sync (New Scope)
+#### LLM Best Practices Sync (Default Behavior)
 
-`sync_best_practices.py` — a separate script that uses an LLM to:
+`sync_best_practices.py` runs as part of the default audit flow (not behind a flag). It:
 
 1. **Fetch latest Anthropic docs**: Pull current content from `https://code.claude.com/docs/en/skills` and `https://github.com/anthropics/skills` (the official skill-creator and spec)
 2. **Extract current best practices**: Parse the fetched docs for frontmatter fields, structural rules, progressive disclosure guidance, description format, and directory structure requirements
@@ -121,7 +126,26 @@ Exit codes:
 
 **LLM choice**: Use local Ollama (lightweight) for diffing/comparison. Fall back to Claude API for complex semantic analysis if needed.
 
-**Caching**: Cache fetched docs in `data/best_practices_cache.json` with TTL of 7 days to avoid redundant fetches.
+**Caching**: Cache fetched docs in `data/best_practices_cache.json` with TTL of 7 days to avoid redundant fetches. The cache means the LLM sync adds negligible overhead on repeat runs — it only fetches when stale.
+
+**Offline fallback**: If fetch fails and cache is stale, the sync portion logs a warning and the audit continues with deterministic rules only. No hard failure.
+
+#### Daydream Integration
+
+Add a new step 12 to `scripts/daydream.py`:
+
+```python
+(12, "Skills Audit", self.step_skills_audit),
+```
+
+**`step_skills_audit()`** runs:
+1. `audit_skills.py` — deterministic rules, collect FAIL/WARN results
+2. `sync_best_practices.py` — LLM comparison against latest Anthropic docs
+3. Add findings to daydream report under "Skills Audit" category
+4. If any FAILs found, create a GitHub issue (via existing `create_daydream_issue()`)
+5. If best practices delta detected, add recommendations to the report for PM review
+
+This means skills compliance is checked daily, Anthropic best practice changes are surfaced automatically, and drift is caught before it accumulates.
 
 #### Skill Design
 
@@ -135,19 +159,20 @@ The skill can also accept arguments:
 - `--fix` — auto-fix trivial issues (add missing `name` field from directory name, trim trailing whitespace)
 - `--json` — output only JSON (for piping to other tools)
 - `--skill <name>` — audit a single skill instead of all
-- `--sync-best-practices` — fetch latest Anthropic docs and compare against current standards
-- `--sync-best-practices --apply` — apply recommended updates to template and validator
-- `--sync-best-practices --update-skills` — also update existing skills to match new standards
+- `--no-sync` — skip LLM best practices sync (fast, offline, deterministic only)
+- `--apply` — apply recommended best practices updates to template and validator
+- `--update-skills` — also update existing skills to match new best practices
+- `--force-refresh` — bypass cache and re-fetch Anthropic docs
 
 ## Rabbit Holes
 
-- **Don't use LLM for deterministic validation**: The 12 structural/classification rules are deterministic string/regex operations. LLM is only used for the best practices sync feature — comparing our standards against Anthropic's latest published guidance.
+- **Don't use LLM for deterministic validation**: The 12 structural/classification rules are deterministic string/regex operations. LLM is only used for the best practices sync — comparing our standards against Anthropic's latest published guidance.
 - **Don't enforce content structure beyond frontmatter**: Checking for specific sections (## Workflow, ## Examples, etc.) is too rigid. Skills have different needs. Only enforce frontmatter and structural constraints.
 - **Don't auto-fix content issues via deterministic rules**: Auto-fix should only handle mechanical problems (missing name field, whitespace). Content rewrites happen only through the LLM best practices sync with explicit `--update-skills` flag.
-- **Don't build a watch mode**: A one-shot audit is sufficient. CI integration or file watchers would be over-engineering.
 - **Don't audit hooks**: PR #154 added `.claude/hooks/` with validators and post-tool-use hooks. These follow different patterns than skills and are out of scope.
 - **Don't audit agent files**: Issue #155 will trim agents to 6. Agent files have no canonical template — auditing them adds no value.
-- **Don't auto-apply LLM suggestions without review**: The `--apply` and `--update-skills` flags generate changes, but the user reviews the diff before committing. No blind rewrites.
+- **Don't auto-apply LLM suggestions without review**: The sync runs by default to surface deltas, but `--apply` and `--update-skills` require explicit flags. Daydream reports findings but doesn't auto-apply — human reviews first.
+- **Don't make daydream step block on sync failure**: If the LLM sync fails (network, API, etc.), the daydream step should still complete with deterministic results only.
 
 ## Risks
 
@@ -205,12 +230,21 @@ No agent integration required — this is a Claude Code skill invoked via `/do-s
 - [ ] `--json` flag outputs machine-readable results
 - [ ] `--skill <name>` flag audits a single skill
 
-**LLM best practices sync:**
-- [ ] `--sync-best-practices` fetches latest Anthropic docs and produces a delta report
+**LLM best practices sync (runs by default):**
+- [ ] Default audit run includes best practices sync (fetches Anthropic docs, produces delta)
+- [ ] `--no-sync` flag skips the sync for fast offline-only runs
 - [ ] Delta report clearly shows what's new/changed/deprecated vs. our current standards
 - [ ] `--apply` updates the `new-skill/SKILL_TEMPLATE.md` and `new-skill/SKILL.md` to match latest
 - [ ] `--update-skills` generates specific fixes for existing skills that violate new best practices
 - [ ] Fetched docs are cached (7-day TTL) to avoid redundant network requests
+- [ ] Graceful fallback when fetch fails (uses cache or runs deterministic-only)
+
+**Daydream integration:**
+- [ ] New step 12 "Skills Audit" added to `scripts/daydream.py`
+- [ ] Daydream step runs full audit (deterministic + sync) daily
+- [ ] Findings added to daydream daily report under "Skills Audit" category
+- [ ] FAILs trigger GitHub issue creation via existing `create_daydream_issue()`
+- [ ] Best practices deltas surfaced in report for PM review
 
 **General:**
 - [ ] Script has unit tests covering each validation rule
@@ -272,7 +306,8 @@ No agent integration required — this is a Claude Code skill invoked via `/do-s
 - Implement `--apply` to update template and validator
 - Implement `--update-skills` to generate fixes for existing skills
 - Cache fetched docs in `data/best_practices_cache.json` with 7-day TTL
-- Wire into audit skill via `--sync-best-practices` flag
+- Wire into `audit_skills.py` as default behavior (called unless `--no-sync`)
+- Graceful fallback: if fetch fails, log warning and continue with deterministic rules only
 
 ### 2. Write unit tests
 - **Task ID**: build-tests
@@ -292,37 +327,56 @@ No agent integration required — this is a Claude Code skill invoked via `/do-s
 - **Assigned To**: audit-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Run `/do-skills-audit` against the actual `.claude/skills/` directory
+- Run `/do-skills-audit` against the actual `.claude/skills/` directory (default = deterministic + sync)
 - Verify all current skills pass (no false positives)
 - Verify the report format is clear and actionable
 - If any current skills fail, determine whether the rule or the skill needs fixing
-- Run `--sync-best-practices` and verify delta report is sensible
+- Verify best practices delta report is sensible
+- Test `--no-sync` mode works for fast offline runs
 
-### 4. Documentation
-- **Task ID**: document-feature
+### 4. Add daydream integration
+- **Task ID**: build-daydream
 - **Depends On**: validate-audit
+- **Assigned To**: skill-creator
+- **Agent Type**: builder
+- **Parallel**: false
+- Add step 12 "Skills Audit" to `scripts/daydream.py` `DaydreamRunner.steps`
+- Implement `step_skills_audit()` method:
+  - Run `audit_skills.py` (deterministic rules)
+  - Run `sync_best_practices.py` (LLM comparison)
+  - Add findings to daydream report via `self.state.add_finding("Skills Audit", ...)`
+  - On FAILs: create GitHub issue via `create_daydream_issue()`
+  - On best practices delta: add recommendations to report for PM review
+- Handle errors gracefully — sync failure should not block daydream completion
+- Add tests for the daydream step
+
+### 5. Documentation
+- **Task ID**: document-feature
+- **Depends On**: build-daydream
 - **Assigned To**: docs-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Create `docs/features/do-skills-audit.md`
 - Add entry to `docs/features/README.md`
 - Add entry to `.claude/skills/README.md`
+- Document daydream integration in feature doc
 
-### 5. Final validation
+### 6. Final validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: audit-validator
 - **Agent Type**: validator
 - **Parallel**: false
 - Run full test suite
-- Verify all success criteria met
+- Verify all success criteria met (including daydream step)
 - Generate final report
 
 ## Validation Commands
 
-- `python .claude/skills/do-skills-audit/scripts/audit_skills.py` — Run deterministic audit against all skills
+- `python .claude/skills/do-skills-audit/scripts/audit_skills.py` — Full audit (deterministic + best practices sync)
+- `python .claude/skills/do-skills-audit/scripts/audit_skills.py --no-sync` — Deterministic only (fast, offline)
 - `python .claude/skills/do-skills-audit/scripts/audit_skills.py --json` — JSON output
-- `python .claude/skills/do-skills-audit/scripts/audit_skills.py --sync-best-practices` — Fetch and compare against latest Anthropic best practices
+- `python scripts/daydream.py --dry-run` — Verify daydream step 12 runs correctly
 - `pytest tests/unit/test_skills_audit.py -v` — Unit tests
 - `ruff check . && black --check .` — Code quality
 
