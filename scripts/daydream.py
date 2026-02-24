@@ -14,6 +14,7 @@ A long-running process that performs daily maintenance tasks:
 9. Memory consolidation (lessons_learned.jsonl)
 10. Produce daily report (local markdown)
 11. GitHub issue creation (per-project, via daydream_report module)
+12. Skills audit (validate all SKILL.md files against template standards)
 
 This process is resumable - if interrupted, it picks up where it left off.
 """
@@ -527,6 +528,7 @@ class DaydreamRunner:
             (9, "Memory Consolidation", self.step_memory_consolidation),
             (10, "Produce Daily Report", self.step_produce_report),
             (11, "GitHub Issue Creation", self.step_create_github_issue),
+            (12, "Skills Audit", self.step_skills_audit),
         ]
 
     async def run(self) -> None:
@@ -1133,6 +1135,55 @@ class DaydreamRunner:
             "created": projects_with_issues > 0,
             "projects_with_issues": projects_with_issues,
         }
+
+    async def step_skills_audit(self) -> None:
+        """Step 12: Run skills audit to validate all SKILL.md files."""
+        audit_script = (
+            PROJECT_ROOT
+            / ".claude"
+            / "skills"
+            / "do-skills-audit"
+            / "scripts"
+            / "audit_skills.py"
+        )
+        if not audit_script.exists():
+            logger.warning("Skills audit script not found, skipping")
+            return
+
+        try:
+            result = subprocess.run(
+                [sys.executable, str(audit_script), "--no-sync", "--json"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                cwd=str(PROJECT_ROOT),
+            )
+            audit_data = json.loads(result.stdout) if result.stdout else {}
+            summary = audit_data.get("summary", {})
+            fails = summary.get("fail", 0)
+            warns = summary.get("warn", 0)
+            total = summary.get("total_skills", 0)
+
+            self.state.step_progress["skills_audit"] = {
+                "total_skills": total,
+                "fails": fails,
+                "warns": warns,
+            }
+
+            if fails > 0:
+                self.state.findings.setdefault("ai:skills_audit", []).append(
+                    f"{fails} skill(s) have FAIL findings"
+                )
+                for f in audit_data.get("findings", []):
+                    if f.get("severity") == "FAIL":
+                        self.state.findings["ai:skills_audit"].append(
+                            f"  {f.get('skill')}: {f.get('message')}"
+                        )
+
+            logger.info(f"Skills audit: {total} skills, {fails} fails, {warns} warns")
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
+            logger.error(f"Skills audit failed: {e}")
+            self.state.step_progress["skills_audit"] = {"error": str(e)}
 
     async def step_post_to_telegram(self, project: dict, issue_url: str = "") -> None:
         """Post daydream summary to project's Telegram chat.
