@@ -1352,8 +1352,11 @@ def _save_cooldowns(cooldowns: dict[str, float]) -> None:
 
 def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | None:
     """
-    Lightweight check for existing session branches with unmerged work.
-    Returns revival info dict if found, None otherwise.
+    Lightweight check for existing session branches with unmerged work,
+    scoped strictly to this chat_id.
+
+    Uses Popoto (Redis) as the source of truth for which sessions belong
+    to this chat — avoids false positives from other chats' branches.
     Does NOT spawn an SDK agent.
     """
     wd = Path(working_dir)
@@ -1364,38 +1367,49 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
     if time.time() - last_notified < REVIVAL_COOLDOWN_SECONDS:
         return None
 
-    # Check for session branches
+    # Find sessions belonging to this chat via Redis (pending + running jobs)
+    chat_id_str = str(chat_id)
+    branches = []
     try:
-        result = subprocess.run(
-            ["git", "branch", "--list", "session/*"],
-            cwd=wd,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        branches = [
-            b.strip().lstrip("* ")
-            for b in result.stdout.strip().split("\n")
-            if b.strip()
-        ]
-    except Exception:
-        branches = []
+        for status in ("pending", "running"):
+            jobs = RedisJob.query.filter(project_key=project_key, status=status)
+            for job in jobs:
+                if str(job.chat_id) == chat_id_str:
+                    branch = _session_branch_name(job.session_id)
+                    if branch not in branches:
+                        branches.append(branch)
+    except Exception as e:
+        logger.warning(f"[{project_key}] Redis revival check failed: {e}")
 
-    # Also check legacy state (ACTIVE-*.md or non-main branch)
-    state = get_branch_state(wd)
+    # Verify branches actually exist in git (they may have been cleaned up)
+    if branches:
+        existing = []
+        for branch in branches:
+            try:
+                result = subprocess.run(
+                    ["git", "branch", "--list", branch],
+                    cwd=wd,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if result.stdout.strip():
+                    existing.append(branch)
+            except Exception:
+                pass
+        branches = existing
 
-    if not branches and state.work_status != "IN_PROGRESS":
+    if not branches:
         return None
 
-    # Build context
+    # Build context from branch manager state
+    state = get_branch_state(wd)
     plan_context = ""
     if state.active_plan:
         plan_context = get_plan_context(state.active_plan)
 
-    branch_info = branches[0] if branches else state.current_branch
-
     return {
-        "branch": branch_info,
+        "branch": branches[0],
         "all_branches": branches,
         "has_uncommitted": state.has_uncommitted_changes,
         "plan_context": plan_context[:200] if plan_context else "",
