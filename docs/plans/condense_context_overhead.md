@@ -40,6 +40,52 @@ This is file deletion and minor template editing. Ship it.
 - ✅ #152/#156 (Skills & Agents Reorganization) — merged. Commands consolidated, skills reorganized, `.claude/skills/README.md` created.
 - ✅ #154 (SDLC Enforcement) — merged. Hooks, pipeline state, do-patch added.
 
+## Progressive Disclosure Hierarchy (Reference)
+
+Before deleting anything, we must understand what's loaded at each level. Anthropic's progressive disclosure model for skills has 3 levels, plus a 4th for agents:
+
+```
+Level 0 — System prompt (EVERY session, automatic)
+├── Skill names + descriptions from frontmatter YAML
+├── 25 skills × ~1 line each = ~25 lines always loaded
+└── This is what Claude sees to decide WHICH skill to invoke
+
+Level 1 — SKILL.md body (on-demand, when skill is INVOKED)
+├── Full instructions, workflow steps, examples
+├── Up to 500 lines per skill, loaded only when Claude invokes it
+└── Agent references here: do-test → "frontend-tester", do-patch → "builder"
+
+Level 2 — Sub-files (on-demand, when SKILL.md says "Read file:")
+├── Templates, scripts, reference docs — loaded by explicit Read calls
+├── do-build → WORKFLOW.md, PR_AND_CLEANUP.md
+├── do-plan → PLAN_TEMPLATE.md, SCOPING.md, EXAMPLES.md
+├── frontend-design → 7 design principle files
+├── new-skill → SKILL_TEMPLATE.md
+├── do-skills-audit (PR #157) → scripts/audit_skills.py, sync_best_practices.py
+└── Agent references here: PLAN_TEMPLATE.md → "documentarian", "plan-maker"
+
+Level 3 — Agent definitions (on-demand, when Task tool spawns sub-agent)
+├── .claude/agents/*.md — prompt context for sub-agents
+├── Only loaded when a Task tool call uses that subagent_type
+├── Registered in agent_definitions.py: builder, validator, code-reviewer
+└── Referenced by skills: + frontend-tester, documentarian, plan-maker
+```
+
+**Tracing all `subagent_type` references across Levels 1-2:**
+
+| Agent | Where Referenced | Level |
+|-------|-----------------|-------|
+| `builder` | do-patch/SKILL.md, agent_definitions.py | L1, code |
+| `validator` | do-test/SKILL.md, agent_definitions.py | L1, code |
+| `code-reviewer` | agent_definitions.py | code |
+| `frontend-tester` | do-test/SKILL.md (3 refs) | L1 |
+| `documentarian` | do-plan/PLAN_TEMPLATE.md | L2 |
+| `plan-maker` | do-plan/PLAN_TEMPLATE.md | L2 |
+| `test-engineer` | do-test/SKILL.md (**stale — fix**) | L1 |
+| `[dynamic]` | do-build reads from plan task list | L1 |
+
+**Key insight**: Only 6 agent files are reachable through any disclosure level. The other 25 are orphaned — no skill at any level references them. Safe to delete.
+
 ## Solution
 
 ### 1. Delete 26 unused files from `.claude/agents/` (~750 tokens saved)
@@ -128,6 +174,7 @@ No agent integration required — agent files are prompt hints for the Task tool
 ## Documentation
 
 - [ ] Delete `.claude/agents/README.md` (agent index now trivial with only 6 files)
+- [ ] Add progressive disclosure hierarchy diagram to `.claude/skills/README.md` — document all 4 levels (L0 system prompt → L1 SKILL.md body → L2 sub-files → L3 agent definitions) with which skills have sub-files and which agents are referenced at each level. This is the canonical reference so future cleanup can trace what's reachable before deleting.
 - [ ] No new feature doc needed — this is internal cleanup
 
 ## Success Criteria
@@ -138,6 +185,7 @@ No agent integration required — agent files are prompt hints for the Task tool
 - [ ] `scan_secrets.py` no longer references `security-reviewer.md`
 - [ ] All existing skills still invocable (`/do-build`, `/do-plan`, `/do-test`, etc.)
 - [ ] No broken agent references in active skills
+- [ ] `.claude/skills/README.md` contains progressive disclosure hierarchy diagram
 - [ ] `pytest tests/ -v` passes
 
 ## Team Orchestration
@@ -180,9 +228,19 @@ No agent integration required — agent files are prompt hints for the Task tool
 - Remove `security-reviewer.md` ignore pattern from `scripts/scan_secrets.py`
 - Update `.claude/skills/README.md` if it references agent counts
 
-### 3. Validate
+### 3. Add progressive disclosure hierarchy to skills README
+- **Task ID**: add-hierarchy-doc
+- **Depends On**: delete-agents
+- **Assigned To**: cleanup-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Add a "Progressive Disclosure" section to `.claude/skills/README.md`
+- Document all 4 levels (L0→L3) with which skills have sub-files and which agents are referenced
+- This becomes the canonical reference for future cleanup decisions
+
+### 4. Validate
 - **Task ID**: validate-cleanup
-- **Depends On**: delete-agents, trim-and-fix
+- **Depends On**: delete-agents, trim-and-fix, add-hierarchy-doc
 - **Assigned To**: cleanup-validator
 - **Agent Type**: validator
 - **Parallel**: false
