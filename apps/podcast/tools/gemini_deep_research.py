@@ -37,6 +37,15 @@ except ImportError:
     pass
 
 
+class GeminiQuotaError(Exception):
+    """Raised when the Gemini API returns HTTP 429 (quota exceeded).
+
+    This typically means the API key is on a free tier or has exhausted its
+    quota.  Callers should catch this to provide actionable error messages
+    directing the user to upgrade billing.
+    """
+
+
 def get_api_key() -> str | None:
     """Get API key from environment or .env file."""
     api_key = os.getenv("GEMINI_API_KEY")
@@ -91,6 +100,14 @@ def submit_research(api_key: str, prompt: str, stream: bool = False) -> dict | N
     except requests.exceptions.RequestException as e:
         print(f"ERROR: Request failed: {e}")
         return None
+
+    if response.status_code == 429:
+        try:
+            error_data = response.json()
+            error_msg = error_data.get("error", {}).get("message", "Quota exceeded")
+        except Exception:
+            error_msg = response.text or "Quota exceeded"
+        raise GeminiQuotaError(f"Gemini API quota exceeded (HTTP 429): {error_msg}")
 
     if response.status_code != 200:
         print(f"ERROR: API returned status {response.status_code}")
