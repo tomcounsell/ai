@@ -25,9 +25,9 @@ from scripts.update import (  # noqa: E402
     cal_integration,
     deps,
     git,
+    hardlinks,
     hooks,
     service,
-    hardlinks,
     verify,
 )
 

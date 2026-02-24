@@ -19,7 +19,7 @@ Guidance for Claude Code when working with this repository.
 | `python scripts/daydream.py --ignore "pattern"` | Silence a bug pattern for 14 days |
 | `./scripts/install_daydream.sh` | Install daydream launchd schedule |
 | `tail -f logs/daydream.log` | Stream daydream logs |
-| `cat data/lessons_learned.jsonl` | View institutional memory |
+| `cat data/lessons_learned.jsonl` | View institutional memory (daydream) |
 
 ## Development Principles
 
@@ -108,7 +108,7 @@ The standard flow from conversation to shipped feature:
 
 ### Session Continuity
 - Full session logs are saved at all breakpoints for later analysis
-- Telegram chat history is cached in local SQLite for fast review anytime
+- Telegram chat history is stored in Redis via Popoto ORM for fast review anytime
 - Reply-to messages in Telegram resume the original session context
 
 ## System Architecture
@@ -182,13 +182,13 @@ See `docs/features/session-isolation.md` for the full technical design.
 
 The bridge includes automatic crash recovery (see `docs/features/bridge-self-healing.md`):
 
-- **Session lock cleanup**: Kills stale processes holding SQLite locks on startup
+- **Session lock cleanup**: Kills stale processes holding session-related files on startup
 - **Bridge watchdog**: Separate launchd service (`com.valor.bridge-watchdog`) monitors health every 60s
-- **Crash tracker**: Logs start/crash events to `data/crash_history.jsonl` with git commit correlation
+- **Crash tracker**: Logs start/crash events to Redis via `monitoring/crash_tracker.py` with git commit correlation
 - **5-level escalation**: restart → kill stale → clear locks → revert commit → alert human
 
 **Check watchdog**: `python monitoring/bridge_watchdog.py --check-only`
-**View crashes**: `cat data/crash_history.jsonl`
+**View crashes**: `python -c "from monitoring.crash_tracker import get_recent_crashes; print(get_recent_crashes(3600))"`
 **Enable auto-revert**: `touch data/auto-revert-enabled` (disabled by default)
 
 ### Configuration Files

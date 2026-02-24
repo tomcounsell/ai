@@ -63,6 +63,6 @@ valor-telegram chats
 ## Notes
 
 - Chat names are resolved from the history database (groups) and DM whitelist (users)
-- Messages are read from the SQLite cache at `~/.valor/telegram_history.db`
+- Messages are read from Redis via Popoto ORM (TelegramMessage model)
 - Sending uses Telethon directly (requires bridge session and API credentials)
 - Use `valor-telegram chats` if unsure of the exact chat name

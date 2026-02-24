@@ -6,18 +6,15 @@ The bridge includes a multi-layered self-healing system to recover from crashes 
 
 ### 1. Session Lock Cleanup (`bridge/telegram_bridge.py`)
 
-**Problem**: SQLite session DB locks occur when:
-- Multiple bridge instances fight over the same session file during restarts
-- A previous process doesn't fully release the lock before exit
+**Problem**: Stale processes from prior restarts can block the bridge from starting.
 
 **Solution**: Before attempting to connect, the bridge:
-1. Uses `lsof` to find processes holding `*.session` files
+1. Uses `lsof` to find processes holding session-related files
 2. Terminates stale processes (>60 seconds old) that aren't the current process using SIGTERM/SIGKILL escalation:
    - Sends SIGTERM first to request graceful shutdown
    - Waits up to 5 seconds for the process to exit
    - Falls back to SIGKILL only if the process is still alive
-   - This prevents SQLite corruption from abrupt termination of processes mid-write
-3. Clears orphaned `-journal`, `-wal`, `-shm` files
+3. Clears orphaned lock/journal files
 4. Adds jitter to prevent thundering herd on restart
 
 **Retry Logic**: Exponential backoff with cleanup between attempts (2s, 5s, 10s).
@@ -30,6 +27,8 @@ Logs bridge start/crash events with:
 - Commit age in seconds
 - Crash reason (if available)
 
+Events are stored in Redis via the crash tracker module. Previous JSONL file (`data/crash_history.jsonl`) was replaced as part of the Redis migration (2026-02-24).
+
 **Pattern Detection**: Identifies when 3+ crashes occur within 30 minutes after a recent commit (<1 hour old), suggesting code-caused crashes.
 
 **Usage**:
@@ -38,7 +37,7 @@ from monitoring.crash_tracker import log_start, log_crash, detect_crash_pattern
 
 # Log events
 log_start()
-log_crash("database is locked")
+log_crash("connection lost")
 
 # Check for patterns
 should_revert, commit_sha = detect_crash_pattern()
@@ -96,8 +95,9 @@ python monitoring/bridge_watchdog.py --check-only
 ```
 
 **View crash history**:
-```bash
-cat data/crash_history.jsonl
+```python
+from monitoring.crash_tracker import get_recent_crashes
+crashes = get_recent_crashes(3600)  # last hour
 ```
 
 **Enable auto-revert** (use with caution):
@@ -122,22 +122,20 @@ rm data/auto-revert-enabled
 | `monitoring/crash_tracker.py` | Crash event logging and pattern detection |
 | `monitoring/bridge_watchdog.py` | External health monitor |
 | `scripts/auto-revert.sh` | Git revert and restart |
-| `data/crash_history.jsonl` | Crash event log |
 | `data/recovery-in-progress` | Recovery lock file |
 | `data/auto-revert-enabled` | Auto-revert enable flag |
 | `logs/watchdog.log` | Watchdog output |
 
 ## Design Principles
 
-Per the plan (docs/plans/bridge-self-healing.md):
-
 - **No complex process management** - Just kill, clean, restart
-- **No distributed locking** - Local SQLite only
 - **No deep git analysis** - Only HEAD~1 revert
 - **No monitoring dashboards** - Telegram alerts only
 - **No configuration** - Hardcoded 60s watchdog, sensible defaults
 - **No external services** - Self-contained recovery
+- **Single persistence layer** - All state in Redis (no SQLite, no flat files)
 
 ## Related
 
 - [Message Pipeline](message-pipeline.md) — deferred enrichment and zero-loss restart mechanisms
+- [Session Transcripts](session-transcripts.md) — session lifecycle logging via SessionLog model

@@ -1,9 +1,10 @@
 ---
-status: Ready
+status: Done
 type: chore
 appetite: Large
 owner: Valor
 created: 2026-02-24
+completed: 2026-02-24
 tracking: https://github.com/tomcounsell/ai/issues/161
 ---
 

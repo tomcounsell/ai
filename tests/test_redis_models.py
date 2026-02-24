@@ -1,4 +1,4 @@
-"""Tests for popoto Redis models (DeadLetter, BridgeEvent, TelegramMessage, AgentSession).
+"""Tests for popoto Redis models (DeadLetter, BridgeEvent, TelegramMessage, SessionLog).
 
 All tests use redis_test_db fixture (db=1) for isolation from production data.
 """
@@ -354,7 +354,7 @@ class TestAgentSession:
     """Tests for the AgentSession model."""
 
     def test_create_active_session(self):
-        from models.sessions import AgentSession
+        from models.session_log import SessionLog as AgentSession
 
         s = AgentSession.create(
             session_id="tg_valor_100",
@@ -366,14 +366,13 @@ class TestAgentSession:
             last_activity=time.time(),
             tool_call_count=0,
             branch_name="session/tg-valor-100",
-            message_text="fix the bug",
         )
         assert s.session_id == "tg_valor_100"
         assert s.status == "active"
         assert s.tool_call_count == 0
 
     def test_update_status_to_completed(self):
-        from models.sessions import AgentSession
+        from models.session_log import SessionLog as AgentSession
 
         now = time.time()
         s = AgentSession.create(
@@ -409,7 +408,7 @@ class TestAgentSession:
         assert found[0].status == "completed"
 
     def test_update_tool_call_count(self):
-        from models.sessions import AgentSession
+        from models.session_log import SessionLog as AgentSession
 
         s = AgentSession.create(
             session_id="tg_valor_300",
@@ -429,7 +428,7 @@ class TestAgentSession:
         assert found[0].tool_call_count == 20
 
     def test_query_active_sessions(self):
-        from models.sessions import AgentSession
+        from models.session_log import SessionLog as AgentSession
 
         now = time.time()
         AgentSession.create(
@@ -474,7 +473,7 @@ class TestAgentSession:
         assert valor_active[0].session_id == "s1"
 
     def test_query_by_project(self):
-        from models.sessions import AgentSession
+        from models.session_log import SessionLog as AgentSession
 
         now = time.time()
         AgentSession.create(
@@ -502,7 +501,7 @@ class TestAgentSession:
         assert len(valor) == 1
 
     def test_failed_status(self):
-        from models.sessions import AgentSession
+        from models.session_log import SessionLog as AgentSession
 
         now = time.time()
         s = AgentSession.create(
@@ -533,7 +532,7 @@ class TestAgentSession:
 
     @pytest.mark.asyncio
     async def test_async_create_and_save(self):
-        from models.sessions import AgentSession
+        from models.session_log import SessionLog as AgentSession
 
         now = time.time()
         s = await AgentSession.async_create(
@@ -571,45 +570,41 @@ class TestAgentSession:
         assert found[0].tool_call_count == 5
 
 
-# ── Integration: store_message Redis mirror ──────────────────────────────────
+# ── Integration: store_message via Redis ─────────────────────────────────────
 
 
 class TestStoreMessageMirror:
-    """Test that store_message() writes to both SQLite and Redis."""
+    """Test that store_message() writes directly to Redis (source of truth)."""
 
-    def test_store_message_creates_redis_mirror(self, redis_test_db, tmp_path):
+    def test_store_message_creates_redis_mirror(self, redis_test_db):
         from models.telegram import TelegramMessage
         from tools.telegram_history import store_message
 
-        db_path = tmp_path / "test_history.db"
         result = store_message(
             chat_id="mirror_chat",
             content="hello from test",
             sender="TestUser",
             message_id=99,
             message_type="text",
-            db_path=db_path,
         )
         assert result.get("stored") is True
 
-        # Verify Redis mirror was created
+        # Verify stored in Redis
         found = TelegramMessage.query.filter(chat_id="mirror_chat")
         assert len(found) == 1
         assert found[0].content == "hello from test"
         assert found[0].direction == "in"
         assert found[0].sender == "TestUser"
 
-    def test_store_message_outgoing_direction(self, redis_test_db, tmp_path):
+    def test_store_message_outgoing_direction(self, redis_test_db):
         from models.telegram import TelegramMessage
         from tools.telegram_history import store_message
 
-        db_path = tmp_path / "test_history.db"
         store_message(
             chat_id="out_chat",
             content="response text",
             sender="Valor",
             message_type="response",
-            db_path=db_path,
         )
 
         found = TelegramMessage.query.filter(chat_id="out_chat")

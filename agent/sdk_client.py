@@ -813,12 +813,9 @@ async def get_agent_response_sdk(
         # find the session still "active" and potentially trigger further errors.
         # See docs/features/coaching-loop.md "Error-Classified Output Bypass".
         try:
-            from models.sessions import AgentSession
+            from bridge.session_transcript import complete_transcript
 
-            sessions = AgentSession.query.filter(session_id=session_id)
-            for s in sessions:
-                s.status = "failed"
-                s.save()
+            complete_transcript(session_id, status="failed")
         except Exception:
             pass  # Best-effort cleanup
         return (

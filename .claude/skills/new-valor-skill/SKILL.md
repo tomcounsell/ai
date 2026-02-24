@@ -164,7 +164,7 @@ If validation fails, you receive specific instructions on what is missing.
 | `tools/image_gen/` | API + file output | Gemini API, saves to `generated_images/` |
 | `tools/image_analysis/` | Vision + multi-mode | Claude vision, multiple analysis types |
 | `tools/sms_reader/` | System access | macOS database, CLI subcommands |
-| `tools/telegram_history/` | Database query | SQLite, search patterns |
+| `tools/telegram_history/` | Database query | Redis/Popoto, search patterns |
 
 ## Checklist
 

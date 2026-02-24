@@ -41,7 +41,7 @@ When a stuck job is found:
 
 The health check loop starts automatically with the bridge process, alongside the existing session watchdog. Both run at 5-minute intervals but monitor different concerns:
 
-- **Session watchdog** (`monitoring/session_watchdog.py`): Monitors `AgentSession` objects at the application level
+- **Session watchdog** (`monitoring/session_watchdog.py`): Monitors `SessionLog` objects at the application level
 - **Job health monitor** (`agent/job_queue.py`): Monitors `RedisJob` status at the queue level
 
 ## CLI Usage

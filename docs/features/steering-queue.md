@@ -79,7 +79,7 @@ if is_reply_to_valor and message.reply_to_msg_id:
     session_id = f"tg_{project_key}_{event.chat_id}_{message.reply_to_msg_id}"
 
     # NEW: Check if this session is currently running
-    active_sessions = AgentSession.query.filter(session_id=session_id, status="active")
+    active_sessions = SessionLog.query.filter(session_id=session_id, status="active")
     if active_sessions:
         # Route to steering queue instead of job queue
         push_steering_message(session_id, clean_text, sender_name)

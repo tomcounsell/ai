@@ -28,7 +28,7 @@ The env var is set in `ValorAgent._create_options()` and passed through `get_age
 
 ### Model Fields
 
-- `AgentSession.work_item_slug` -- Redis model field storing the active slug for a session. Set when `/do-plan {slug}` runs.
+- `SessionLog.work_item_slug` -- Redis model field storing the active slug for a session. Set when `/do-plan {slug}` runs.
 - `Job.work_item_slug` -- Propagated from the session to each job for task list routing.
 - `Job.task_list_id` -- The computed task list ID (either slug or thread-derived).
 
@@ -64,7 +64,7 @@ Experiments validated the approach before implementation:
 | `agent/worktree_manager.py` | Git worktree create/remove/list/prune operations |
 | `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment |
 | `agent/job_queue.py` | Computes task list ID in `_execute_job()` and passes to SDK |
-| `models/sessions.py` | `AgentSession` model with `work_item_slug` field |
+| `models/session_log.py` | `SessionLog` model with `work_item_slug` field |
 | `docs/features/task-list-isolation.md` | Experiment results for CLAUDE_CODE_TASK_LIST_ID behavior |
 | `docs/features/worktree-sdk-compatibility.md` | Experiment results for SDK + worktree compatibility |
 

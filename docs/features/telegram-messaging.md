@@ -4,7 +4,7 @@ Unified interface for reading and sending Telegram messages via the `valor-teleg
 
 ## Overview
 
-Consolidates two previously separate skills (`searching-message-history` and `get-telegram-messages`) into a single unified tool. Messages are read from a local SQLite cache populated by the bridge, while sending uses Telethon directly.
+Consolidates two previously separate skills (`searching-message-history` and `get-telegram-messages`) into a single unified tool. Messages are read from Redis (Popoto ORM) populated by the bridge, while sending uses Telethon directly.
 
 ## CLI Reference
 
@@ -56,7 +56,7 @@ valor-telegram read
     ↓
 resolve_chat(name) → chat_id
     ↓
-SQLite cache (~/.valor/telegram_history.db)
+Redis (Popoto TelegramMessage/Chat models)
     ↓
 Format and display
 
@@ -72,7 +72,7 @@ Telegram API
 ### Chat Resolution
 
 Chat names are resolved in order:
-1. **History database** (`chats` table) — matches group names
+1. **Chat model** (Redis `Chat` Popoto model) — matches group names
 2. **DM whitelist** (`tools/telegram_users.py`) — matches user names
 3. **Raw numeric ID** — used directly if name looks like a number
 
@@ -80,9 +80,9 @@ Chat names are resolved in order:
 
 | Component | Source | Purpose |
 |-----------|--------|---------|
-| Reading | SQLite (`~/.valor/telegram_history.db`) | Cached messages from bridge |
+| Reading | Redis (Popoto `TelegramMessage` model) | Messages stored by bridge |
 | Sending | Telethon (direct API) | Real-time message delivery |
-| Chat names | SQLite `chats` table | Group name → chat_id mapping |
+| Chat names | Redis (Popoto `Chat` model) | Group name → chat_id mapping |
 | User names | `dm_whitelist.json` | Username → user_id mapping |
 
 ## Files
@@ -95,5 +95,5 @@ Chat names are resolved in order:
 
 ## Related
 
-- [Telegram History](telegram-history.md) — underlying SQLite storage
+- [Telegram History](telegram-history.md) — underlying Redis/Popoto storage
 - `config/SOUL.md` — agent persona references to this tool
