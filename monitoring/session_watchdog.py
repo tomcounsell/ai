@@ -22,7 +22,9 @@ from typing import Any
 
 from popoto.exceptions import ModelException
 
-from models.sessions import AgentSession
+from models.session_log import (
+    SessionLog as AgentSession,
+)  # SessionLog replaces AgentSession
 
 logger = logging.getLogger(__name__)
 

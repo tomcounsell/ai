@@ -1,4 +1,4 @@
-"""Tests for popoto Redis models (DeadLetter, BridgeEvent, TelegramMessage, AgentSession).
+"""Tests for popoto Redis models (DeadLetter, BridgeEvent, TelegramMessage, SessionLog).
 
 All tests use redis_test_db fixture (db=1) for isolation from production data.
 """

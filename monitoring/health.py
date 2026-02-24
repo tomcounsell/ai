@@ -72,51 +72,34 @@ class HealthChecker:
         self.data_dir = data_dir or Path(__file__).parent.parent / "data"
 
     def check_database(self) -> HealthCheckResult:
-        """Check database connectivity and status.
+        """Check Redis connectivity and status.
+
+        Redis is the single persistence layer (replaced SQLite as of 2026-02-24).
 
         Returns:
             HealthCheckResult for database.
         """
-        db_path = self.data_dir / "valor.db"
-
-        if not db_path.exists():
-            # Check for session files instead
-            session_files = list(self.data_dir.glob("*.session"))
-            if session_files:
-                return HealthCheckResult(
-                    component="database",
-                    status=HealthStatus.HEALTHY,
-                    message="Session files present",
-                    details={"session_count": len(session_files)},
-                )
-            return HealthCheckResult(
-                component="database",
-                status=HealthStatus.DEGRADED,
-                message="No database or session files found",
-                details={"path": str(db_path)},
-            )
-
         try:
-            import sqlite3
+            import redis
 
-            conn = sqlite3.connect(str(db_path))
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1")
-            conn.close()
+            client = redis.Redis(host="localhost", port=6379, socket_timeout=2)
+            client.ping()
+            info = client.info("memory")
+            used_mb = info.get("used_memory", 0) / (1024 * 1024)
             return HealthCheckResult(
                 component="database",
                 status=HealthStatus.HEALTHY,
-                message="Database connected successfully",
+                message="Redis connected successfully",
                 details={
-                    "path": str(db_path),
-                    "size_mb": db_path.stat().st_size / (1024 * 1024),
+                    "backend": "redis",
+                    "used_memory_mb": round(used_mb, 2),
                 },
             )
         except Exception as e:
             return HealthCheckResult(
                 component="database",
                 status=HealthStatus.UNHEALTHY,
-                message=f"Database error: {str(e)}",
+                message=f"Redis error: {str(e)}",
                 details={"error": str(e)},
             )
 

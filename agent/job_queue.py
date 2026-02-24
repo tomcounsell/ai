@@ -948,12 +948,12 @@ async def _execute_job(job: Job) -> None:
         working_dir=str(working_dir),
     )
 
-    # Track session in Redis
+    # Track session in Redis via SessionLog (replaces AgentSession)
     agent_session = None
     try:
-        from models.sessions import AgentSession
+        from models.session_log import SessionLog
 
-        agent_session = await AgentSession.async_create(
+        agent_session = SessionLog.create(
             session_id=job.session_id,
             project_key=job.project_key,
             status="active",
@@ -964,11 +964,10 @@ async def _execute_job(job: Job) -> None:
             tool_call_count=0,
             branch_name=branch_name,
             work_item_slug=job.work_item_slug,
-            message_text=job.message_text[:20_000] if job.message_text else None,
             classification_type=job.classification_type,
         )
     except Exception as e:
-        logger.debug(f"AgentSession create failed (non-fatal): {e}")
+        logger.debug(f"SessionLog create failed (non-fatal): {e}")
 
     # Calendar heartbeat at session start
     asyncio.create_task(_calendar_heartbeat(job.project_key, project=job.project_key))
@@ -1215,18 +1214,24 @@ async def _execute_job(job: Job) -> None:
             )
             last_heartbeat = time.time()
 
-    # Update session status in Redis
+    # Update session status in Redis via SessionLog
     # When auto-continue deferred, session is still active (not completed)
     if agent_session:
         try:
-            if _defer_reaction:
-                agent_session.status = "active"  # Continuation job pending
+            from bridge.session_transcript import complete_transcript
+
+            final_status = (
+                "active"
+                if _defer_reaction
+                else ("completed" if not task.error else "failed")
+            )
+            if not _defer_reaction:
+                complete_transcript(job.session_id, status=final_status)
             else:
-                agent_session.status = "completed" if not task.error else "failed"
-            agent_session.last_activity = time.time()
-            await agent_session.async_save()
+                agent_session.last_activity = time.time()
+                agent_session.save()
         except Exception as e:
-            logger.debug(f"AgentSession update failed (non-fatal): {e}")
+            logger.debug(f"SessionLog update failed (non-fatal): {e}")
 
     # Save session snapshot for error cases
     if task.error:

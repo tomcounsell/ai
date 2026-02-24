@@ -1,15 +1,17 @@
-"""TelegramMessage model - Redis mirror of Telegram message traffic."""
+"""TelegramMessage model - source of truth for Telegram message traffic."""
+
+import time
 
 from popoto import AutoKeyField, Field, KeyField, Model, SortedField
 
-MSG_MAX_CHARS = 20_000
+MSG_MAX_CHARS = 50_000  # Full responses, no artificial cap
 
 
 class TelegramMessage(Model):
-    """Mirror of incoming/outgoing Telegram messages in Redis.
+    """Source of truth for incoming/outgoing Telegram messages in Redis.
 
-    SQLite remains the durable long-term archive; this model provides
-    fast recent-access queries keyed on chat_id with sorted timestamps.
+    Replaces the SQLite messages table. SortedField on timestamp partitioned
+    by chat_id enables efficient time-range queries per chat via ZRANGEBYSCORE.
     """
 
     msg_id = AutoKeyField()
@@ -21,3 +23,19 @@ class TelegramMessage(Model):
     timestamp = SortedField(type=float, partition_by="chat_id")
     message_type = KeyField(default="text")  # text, media, response, acknowledgment
     session_id = Field(null=True)
+
+    @classmethod
+    def cleanup_expired(cls, max_age_days: int = 90) -> int:
+        """Delete message records older than max_age_days. Returns count deleted.
+
+        Uses all() scan since SortedField is partitioned by chat_id.
+        At 90 days x 50 msgs/day = ~4500 records — fast enough for maintenance.
+        """
+        cutoff = time.time() - (max_age_days * 86400)
+        all_messages = cls.query.all()
+        deleted = 0
+        for msg in all_messages:
+            if msg.timestamp and msg.timestamp < cutoff:
+                msg.delete()
+                deleted += 1
+        return deleted

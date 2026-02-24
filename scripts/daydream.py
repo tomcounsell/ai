@@ -529,6 +529,7 @@ class DaydreamRunner:
             (10, "Produce Daily Report", self.step_produce_report),
             (11, "GitHub Issue Creation", self.step_create_github_issue),
             (12, "Skills Audit", self.step_skills_audit),
+            (13, "Redis TTL Cleanup", self.step_redis_cleanup),
         ]
 
     async def run(self) -> None:
@@ -1184,6 +1185,35 @@ class DaydreamRunner:
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as e:
             logger.error(f"Skills audit failed: {e}")
             self.state.step_progress["skills_audit"] = {"error": str(e)}
+
+    async def step_redis_cleanup(self) -> None:
+        """Step 13: Run TTL cleanup on Redis models (90-day retention).
+
+        Deletes TelegramMessage, Link, Chat, and SessionLog records older
+        than 90 days. Transcript .txt files are NOT deleted.
+        """
+        try:
+            from models.chat import Chat
+            from models.link import Link
+            from models.session_log import SessionLog
+            from models.telegram import TelegramMessage
+
+            msg_deleted = TelegramMessage.cleanup_expired(max_age_days=90)
+            link_deleted = Link.cleanup_expired(max_age_days=90)
+            chat_deleted = Chat.cleanup_expired(max_age_days=90)
+            session_deleted = SessionLog.cleanup_expired(max_age_days=90)
+
+            total = msg_deleted + link_deleted + chat_deleted + session_deleted
+            logger.info(
+                f"Redis TTL cleanup: {total} records deleted "
+                f"(msgs={msg_deleted}, links={link_deleted}, "
+                f"chats={chat_deleted}, sessions={session_deleted})"
+            )
+            self.state.daily_report.append(
+                f"Redis cleanup: {total} expired records removed"
+            )
+        except Exception as e:
+            logger.warning(f"Redis TTL cleanup failed (non-fatal): {e}")
 
     async def step_post_to_telegram(self, project: dict, issue_url: str = "") -> None:
         """Post daydream summary to project's Telegram chat.

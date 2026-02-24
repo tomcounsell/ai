@@ -3,16 +3,14 @@ Telegram History Tool
 
 Search Telegram conversation history with relevance scoring.
 Store and manage links shared in Telegram chats.
+
+Backend: Redis/Popoto (replaced SQLite as of 2026-02-24).
+All data is stored in Redis via Popoto models (TelegramMessage, Link, Chat).
 """
 
-import json
-import sqlite3
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 from urllib.parse import urlparse
-
-DEFAULT_DB_PATH = Path.home() / ".valor" / "telegram_history.db"
 
 
 class TelegramHistoryError(Exception):
@@ -24,102 +22,87 @@ class TelegramHistoryError(Exception):
         super().__init__(message)
 
 
-def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
-    """Get or create database connection."""
-    path = db_path or DEFAULT_DB_PATH
-    path.parent.mkdir(parents=True, exist_ok=True)
+# =============================================================================
+# Shared Utilities
+# =============================================================================
 
-    conn = sqlite3.connect(str(path))
-    conn.row_factory = sqlite3.Row
 
-    # Create tables if needed
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY,
-            chat_id TEXT NOT NULL,
-            message_id INTEGER,
-            sender TEXT,
-            content TEXT,
-            timestamp TIMESTAMP,
-            message_type TEXT DEFAULT 'text'
-        )
-    """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_chat_id ON messages(chat_id)
-    """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_timestamp ON messages(timestamp)
-    """
-    )
+def _score_relevance(
+    query: str,
+    content: str,
+    timestamp: float,
+    max_age_days: int = 30,
+) -> float:
+    """Compute a relevance score for a message against a query.
 
-    # Links table for storing shared URLs with metadata
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS links (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            url TEXT NOT NULL,
-            final_url TEXT,
-            title TEXT,
-            description TEXT,
-            domain TEXT,
-            sender TEXT,
-            chat_id TEXT,
-            message_id INTEGER,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            tags TEXT,
-            notes TEXT,
-            status TEXT DEFAULT 'unread',
-            ai_summary TEXT,
-            UNIQUE(url, chat_id, message_id)
-        )
-    """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_links_domain ON links(domain)
-    """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_links_sender ON links(sender)
-    """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_links_timestamp ON links(timestamp)
-    """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_links_status ON links(status)
-    """
-    )
+    Score components:
+    - 0.5 bonus for exact phrase match (case-insensitive)
+    - 0.2 per matching word
+    - up to 0.3 recency bonus (newer = higher)
 
-    # Chats table for mapping chat_id → chat_name
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS chats (
-            chat_id TEXT PRIMARY KEY,
-            chat_name TEXT NOT NULL,
-            chat_type TEXT,
-            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-    """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_chats_name ON chats(chat_name)
-    """
-    )
+    Args:
+        query: The search query string.
+        content: The message content to score against.
+        timestamp: Unix timestamp of the message.
+        max_age_days: Window for recency scoring.
 
-    conn.commit()
+    Returns:
+        Float relevance score (higher = more relevant).
+    """
+    query_lower = query.lower()
+    content_lower = content.lower() if content else ""
+    query_words = set(query_lower.split())
 
-    return conn
+    score = 0.0
+
+    # Exact phrase match
+    if query_lower in content_lower:
+        score += 0.5
+
+    # Word match bonus
+    content_words = set(content_lower.split())
+    matching_words = query_words & content_words
+    score += len(matching_words) * 0.2
+
+    # Recency bonus
+    now = time.time()
+    age_seconds = now - timestamp
+    age_days = age_seconds / 86400
+    if age_days < max_age_days:
+        recency_bonus = max(0.0, (max_age_days - age_days) / max_age_days) * 0.3
+        score += recency_bonus
+
+    return score
+
+
+def _ts_to_iso(ts: float | None) -> str | None:
+    """Convert unix timestamp to ISO 8601 string, or None."""
+    if ts is None:
+        return None
+    try:
+        return datetime.fromtimestamp(ts).isoformat()
+    except (ValueError, OSError):
+        return None
+
+
+def _parse_ts(ts_val) -> float:
+    """Parse a timestamp value to unix float."""
+    if ts_val is None:
+        return time.time()
+    if isinstance(ts_val, (int, float)):
+        return float(ts_val)
+    if hasattr(ts_val, "timestamp"):
+        return ts_val.timestamp()
+    # Try parsing ISO string
+    try:
+        return datetime.fromisoformat(str(ts_val)).timestamp()
+    except (ValueError, TypeError):
+        return time.time()
+
+
+# =============================================================================
+# Message Storage Functions
+# =============================================================================
 
 
 def store_message(
@@ -129,69 +112,44 @@ def store_message(
     message_id: int | None = None,
     timestamp: datetime | None = None,
     message_type: str = "text",
-    db_path: Path | None = None,
+    db_path=None,  # Ignored — kept for API compatibility
 ) -> dict:
-    """
-    Store a message in the history database.
+    """Store a message in Redis via TelegramMessage.
 
     Args:
-        chat_id: Telegram chat ID
-        content: Message content
-        sender: Message sender
-        message_id: Telegram message ID
-        timestamp: Message timestamp
-        message_type: Type of message (text, photo, etc.)
-        db_path: Custom database path
+        chat_id: Telegram chat ID.
+        content: Message content (stored in full, no truncation).
+        sender: Message sender.
+        message_id: Telegram message ID.
+        timestamp: Message timestamp (defaults to now).
+        message_type: Type of message (text, photo, etc.).
+        db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
-        dict with storage result
+        dict with storage result: {"stored": True, "id": msg_id, "chat_id": chat_id}
     """
-    conn = _get_db_connection(db_path)
+    from models.telegram import TelegramMessage
 
-    if timestamp is None:
-        timestamp = datetime.now()
+    ts = _parse_ts(timestamp)
+    direction = "out" if sender and sender.lower() == "valor" else "in"
 
     try:
-        cursor = conn.execute(
-            """
-            INSERT INTO messages (chat_id, message_id, sender, content, timestamp, message_type)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (chat_id, message_id, sender, content, timestamp, message_type),
+        msg = TelegramMessage.create(
+            chat_id=str(chat_id),
+            message_id=message_id,
+            direction=direction,
+            sender=sender or "unknown",
+            content=content or "",
+            timestamp=ts,
+            message_type=message_type,
         )
-        conn.commit()
-
-        # Mirror to Redis for fast recent-access queries
-        try:
-            from models.telegram import TelegramMessage
-
-            direction = "out" if sender and sender.lower() == "valor" else "in"
-            ts = (
-                timestamp.timestamp()
-                if hasattr(timestamp, "timestamp")
-                else time.time()
-            )
-            TelegramMessage.create(
-                chat_id=str(chat_id),
-                message_id=message_id,
-                direction=direction,
-                sender=sender or "unknown",
-                content=content[:20_000] if content else "",
-                timestamp=ts,
-                message_type=message_type,
-            )
-        except Exception:
-            pass  # Redis mirror is best-effort; SQLite is the source of truth
-
         return {
             "stored": True,
-            "id": cursor.lastrowid,
+            "id": msg.msg_id,
             "chat_id": chat_id,
         }
     except Exception as e:
         return {"error": str(e)}
-    finally:
-        conn.close()
 
 
 def search_history(
@@ -199,22 +157,24 @@ def search_history(
     chat_id: str,
     max_results: int = 5,
     max_age_days: int = 30,
-    db_path: Path | None = None,
+    db_path=None,  # Ignored — kept for API compatibility
 ) -> dict:
-    """
-    Search Telegram conversation history.
+    """Search Telegram conversation history.
+
+    Fetches messages by chat_id within the time window, then filters
+    content in Python and ranks by relevance score.
 
     Args:
-        query: Search query
-        chat_id: Telegram chat ID
-        max_results: Maximum results (default: 5)
-        max_age_days: Time window in days (default: 30)
-        db_path: Custom database path
+        query: Search query.
+        chat_id: Telegram chat ID.
+        max_results: Maximum results (default: 5).
+        max_age_days: Time window in days (default: 30).
+        db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
         dict with:
-            - results: Matching messages with relevance scores
-            - total_matches: Number of matches found
+            - results: Matching messages with relevance scores.
+            - total_matches: Number of matches found.
     """
     if not query or not query.strip():
         return {"error": "Query cannot be empty"}
@@ -224,176 +184,138 @@ def search_history(
 
     max_results = max(1, min(100, max_results))
 
-    conn = _get_db_connection(db_path)
+    from models.telegram import TelegramMessage
 
-    # Calculate cutoff date
-    cutoff = datetime.now() - timedelta(days=max_age_days)
+    cutoff = time.time() - (max_age_days * 86400)
+    query_lower = query.lower()
 
     try:
-        # Search with keyword matching
-        cursor = conn.execute(
-            """
-            SELECT id, message_id, sender, content, timestamp, message_type
-            FROM messages
-            WHERE chat_id = ?
-              AND content LIKE ?
-              AND timestamp >= ?
-            ORDER BY timestamp DESC
-            LIMIT ?
-            """,
-            (chat_id, f"%{query}%", cutoff, max_results * 3),
-        )
-
-        rows = cursor.fetchall()
-
-        # Score and rank results
-        results = []
-        query_lower = query.lower()
-        query_words = set(query_lower.split())
-
-        for row in rows:
-            content = row["content"]
-            content_lower = content.lower()
-
-            # Calculate relevance score
-            score = 0.0
-
-            # Exact match bonus
-            if query_lower in content_lower:
-                score += 0.5
-
-            # Word match bonus
-            content_words = set(content_lower.split())
-            matching_words = query_words & content_words
-            score += len(matching_words) * 0.2
-
-            # Recency bonus (newer = higher score)
-            try:
-                msg_time = datetime.fromisoformat(row["timestamp"])
-                days_old = (datetime.now() - msg_time).days
-                recency_bonus = max(0, (max_age_days - days_old) / max_age_days) * 0.3
-                score += recency_bonus
-            except (ValueError, TypeError):
-                pass
-
-            results.append(
-                {
-                    "id": row["id"],
-                    "message_id": row["message_id"],
-                    "sender": row["sender"],
-                    "content": content,
-                    "timestamp": row["timestamp"],
-                    "message_type": row["message_type"],
-                    "relevance_score": round(score, 3),
-                }
-            )
-
-        # Sort by relevance and take top results
-        results.sort(key=lambda x: x["relevance_score"], reverse=True)
-        results = results[:max_results]
-
-        return {
-            "query": query,
-            "chat_id": chat_id,
-            "results": results,
-            "total_matches": len(results),
-            "time_window_days": max_age_days,
-        }
-
+        messages = TelegramMessage.query.filter(chat_id=str(chat_id))
     except Exception as e:
         return {"error": str(e)}
-    finally:
-        conn.close()
+
+    results = []
+    for msg in messages:
+        ts = msg.timestamp or 0.0
+        if ts < cutoff:
+            continue
+        content = msg.content or ""
+        if query_lower not in content.lower():
+            continue
+
+        score = _score_relevance(query, content, ts, max_age_days)
+        results.append(
+            {
+                "id": msg.msg_id,
+                "message_id": msg.message_id,
+                "sender": msg.sender,
+                "content": content,
+                "timestamp": _ts_to_iso(ts),
+                "message_type": msg.message_type,
+                "relevance_score": round(score, 3),
+            }
+        )
+
+    results.sort(key=lambda x: x["relevance_score"], reverse=True)
+    results = results[:max_results]
+
+    return {
+        "query": query,
+        "chat_id": chat_id,
+        "results": results,
+        "total_matches": len(results),
+        "time_window_days": max_age_days,
+    }
 
 
 def get_recent_messages(
     chat_id: str,
     limit: int = 10,
-    db_path: Path | None = None,
+    db_path=None,  # Ignored — kept for API compatibility
 ) -> dict:
-    """
-    Get recent messages from a chat.
+    """Get recent messages from a chat.
 
     Args:
-        chat_id: Telegram chat ID
-        limit: Maximum messages to return
-        db_path: Custom database path
+        chat_id: Telegram chat ID.
+        limit: Maximum messages to return.
+        db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
-        dict with recent messages
+        dict with recent messages.
     """
     if not chat_id:
         return {"error": "Chat ID is required"}
 
-    conn = _get_db_connection(db_path)
+    from models.telegram import TelegramMessage
 
     try:
-        cursor = conn.execute(
-            """
-            SELECT id, message_id, sender, content, timestamp, message_type
-            FROM messages
-            WHERE chat_id = ?
-            ORDER BY timestamp DESC
-            LIMIT ?
-            """,
-            (chat_id, limit),
-        )
-
-        messages = [dict(row) for row in cursor.fetchall()]
-
-        return {
-            "chat_id": chat_id,
-            "messages": messages,
-            "count": len(messages),
-        }
-
+        messages = TelegramMessage.query.filter(chat_id=str(chat_id))
     except Exception as e:
         return {"error": str(e)}
-    finally:
-        conn.close()
+
+    # Sort by timestamp descending, take limit
+    msgs_with_ts = [(msg, msg.timestamp or 0.0) for msg in messages]
+    msgs_with_ts.sort(key=lambda x: x[1], reverse=True)
+    msgs_with_ts = msgs_with_ts[:limit]
+
+    result_msgs = [
+        {
+            "id": msg.msg_id,
+            "message_id": msg.message_id,
+            "sender": msg.sender,
+            "content": msg.content,
+            "timestamp": _ts_to_iso(ts),
+            "message_type": msg.message_type,
+        }
+        for msg, ts in msgs_with_ts
+    ]
+
+    return {
+        "chat_id": chat_id,
+        "messages": result_msgs,
+        "count": len(result_msgs),
+    }
 
 
-def get_chat_stats(chat_id: str, db_path: Path | None = None) -> dict:
-    """
-    Get statistics for a chat.
+def get_chat_stats(
+    chat_id: str,
+    db_path=None,  # Ignored — kept for API compatibility
+) -> dict:
+    """Get statistics for a chat.
 
     Args:
-        chat_id: Telegram chat ID
-        db_path: Custom database path
+        chat_id: Telegram chat ID.
+        db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
-        dict with chat statistics
+        dict with chat statistics.
     """
-    conn = _get_db_connection(db_path)
+    from models.telegram import TelegramMessage
 
     try:
-        cursor = conn.execute(
-            """
-            SELECT
-                COUNT(*) as total_messages,
-                COUNT(DISTINCT sender) as unique_senders,
-                MIN(timestamp) as first_message,
-                MAX(timestamp) as last_message
-            FROM messages
-            WHERE chat_id = ?
-            """,
-            (chat_id,),
-        )
-
-        row = cursor.fetchone()
-
-        return {
-            "chat_id": chat_id,
-            "total_messages": row["total_messages"],
-            "unique_senders": row["unique_senders"],
-            "first_message": row["first_message"],
-            "last_message": row["last_message"],
-        }
-
+        messages = list(TelegramMessage.query.filter(chat_id=str(chat_id)))
     except Exception as e:
         return {"error": str(e)}
-    finally:
-        conn.close()
+
+    if not messages:
+        return {
+            "chat_id": chat_id,
+            "total_messages": 0,
+            "unique_senders": 0,
+            "first_message": None,
+            "last_message": None,
+        }
+
+    timestamps = [msg.timestamp or 0.0 for msg in messages]
+    senders = {msg.sender for msg in messages if msg.sender}
+
+    return {
+        "chat_id": chat_id,
+        "total_messages": len(messages),
+        "unique_senders": len(senders),
+        "first_message": _ts_to_iso(min(timestamps)),
+        "last_message": _ts_to_iso(max(timestamps)),
+    }
 
 
 # =============================================================================
@@ -413,85 +335,92 @@ def store_link(
     tags: list[str] | None = None,
     notes: str | None = None,
     ai_summary: str | None = None,
-    db_path: Path | None = None,
+    db_path=None,  # Ignored — kept for API compatibility
 ) -> dict:
-    """
-    Store a link in the history database.
+    """Store a link in Redis via the Link model.
+
+    Uses get-or-create pattern: looks for existing link by url+chat_id
+    and updates metadata if found, creates new if not.
 
     Args:
-        url: The URL to store
-        sender: Who shared the link
-        chat_id: Telegram chat ID
-        message_id: Telegram message ID
-        timestamp: When the link was shared
-        title: Page title (optional, can be fetched)
-        description: Page description (optional)
-        final_url: Final URL after redirects
-        tags: List of tags for categorization
-        notes: User notes about the link
-        ai_summary: AI-generated summary
-        db_path: Custom database path
+        url: The URL to store.
+        sender: Who shared the link.
+        chat_id: Telegram chat ID.
+        message_id: Telegram message ID.
+        timestamp: When the link was shared.
+        title: Page title (optional).
+        description: Page description (optional).
+        final_url: Final URL after redirects.
+        tags: List of tags for categorization.
+        notes: User notes about the link.
+        ai_summary: AI-generated summary.
+        db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
-        dict with storage result
+        dict with storage result.
     """
-    conn = _get_db_connection(db_path)
+    from models.link import Link
 
-    if timestamp is None:
-        timestamp = datetime.now()
+    ts = _parse_ts(timestamp)
 
     # Extract domain from URL
     try:
         parsed = urlparse(url)
         domain = parsed.netloc.lower()
-        # Remove www. prefix if present
         if domain.startswith("www."):
             domain = domain[4:]
+        domain = domain or None
     except Exception:
         domain = None
 
-    # Serialize tags as JSON
-    tags_json = json.dumps(tags) if tags else None
-
     try:
-        cursor = conn.execute(
-            """
-            INSERT INTO links (url, final_url, title, description, domain, sender,
-                              chat_id, message_id, timestamp, tags, notes, ai_summary)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(url, chat_id, message_id) DO UPDATE SET
-                title = COALESCE(excluded.title, links.title),
-                description = COALESCE(excluded.description, links.description),
-                final_url = COALESCE(excluded.final_url, links.final_url),
-                ai_summary = COALESCE(excluded.ai_summary, links.ai_summary)
-            """,
-            (
-                url,
-                final_url,
-                title,
-                description,
-                domain,
-                sender,
-                chat_id,
-                message_id,
-                timestamp,
-                tags_json,
-                notes,
-                ai_summary,
-            ),
-        )
-        conn.commit()
+        # Get-or-create: look for existing link by url+chat_id
+        existing = list(Link.query.filter(url=url, chat_id=str(chat_id)))
+        if existing:
+            # Update existing link (prefer new non-None values)
+            link = existing[0]
+            if title is not None:
+                link.title = title
+            if description is not None:
+                link.description = description
+            if final_url is not None:
+                link.final_url = final_url
+            if ai_summary is not None:
+                link.ai_summary = ai_summary
+            if message_id is not None:
+                link.message_id = message_id
+            link.save()
+            return {
+                "stored": True,
+                "id": link.link_id,
+                "url": url,
+                "domain": domain,
+            }
 
+        # Create new link
+        link = Link.create(
+            url=url,
+            chat_id=str(chat_id),
+            message_id=message_id,
+            domain=domain,
+            sender=sender,
+            status="unread",
+            timestamp=ts,
+            final_url=final_url,
+            title=title,
+            description=description,
+            tags=tags or [],
+            notes=notes,
+            ai_summary=ai_summary,
+        )
         return {
             "stored": True,
-            "id": cursor.lastrowid,
+            "id": link.link_id,
             "url": url,
             "domain": domain,
         }
     except Exception as e:
         return {"error": str(e)}
-    finally:
-        conn.close()
 
 
 def search_links(
@@ -500,373 +429,378 @@ def search_links(
     sender: str | None = None,
     status: str | None = None,
     limit: int = 20,
-    db_path: Path | None = None,
+    db_path=None,  # Ignored — kept for API compatibility
 ) -> dict:
-    """
-    Search stored links with various filters.
+    """Search stored links with various filters.
 
     Args:
-        query: Text search in URL, title, description, notes
-        domain: Filter by domain
-        sender: Filter by sender
-        status: Filter by status (unread, read, archived)
-        limit: Maximum results
-        db_path: Custom database path
+        query: Text search in URL, title, description, notes, ai_summary.
+        domain: Filter by domain (exact match).
+        sender: Filter by sender (case-insensitive contains).
+        status: Filter by status (unread, read, archived).
+        limit: Maximum results.
+        db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
-        dict with matching links
+        dict with matching links.
     """
-    conn = _get_db_connection(db_path)
-
-    conditions = []
-    params = []
-
-    if query:
-        conditions.append(
-            """
-            (url LIKE ? OR title LIKE ? OR description LIKE ?
-             OR notes LIKE ? OR ai_summary LIKE ?)
-        """
-        )
-        query_param = f"%{query}%"
-        params.extend([query_param] * 5)
-
-    if domain:
-        conditions.append("domain = ?")
-        params.append(domain.lower())
-
-    if sender:
-        conditions.append("sender LIKE ?")
-        params.append(f"%{sender}%")
-
-    if status:
-        conditions.append("status = ?")
-        params.append(status)
-
-    where_clause = " AND ".join(conditions) if conditions else "1=1"
+    from models.link import Link
 
     try:
-        cursor = conn.execute(
-            f"""
-            SELECT id, url, final_url, title, description, domain, sender,
-                   chat_id, message_id, timestamp, tags, notes, status, ai_summary
-            FROM links
-            WHERE {where_clause}
-            ORDER BY timestamp DESC
-            LIMIT ?
-            """,
-            params + [limit],
-        )
+        # Build filter kwargs for KeyFields (exact match)
+        filter_kwargs = {}
+        if domain:
+            filter_kwargs["domain"] = domain.lower()
+        if sender:
+            filter_kwargs["sender"] = sender
+        if status:
+            filter_kwargs["status"] = status
 
-        links = []
-        for row in cursor.fetchall():
-            link = dict(row)
-            # Parse tags from JSON
-            if link.get("tags"):
-                try:
-                    link["tags"] = json.loads(link["tags"])
-                except json.JSONDecodeError:
-                    link["tags"] = []
-            links.append(link)
-
-        return {
-            "links": links,
-            "count": len(links),
-            "query": query,
-            "filters": {
-                "domain": domain,
-                "sender": sender,
-                "status": status,
-            },
-        }
-
+        if filter_kwargs:
+            all_links = list(Link.query.filter(**filter_kwargs))
+        else:
+            all_links = list(Link.query.all())
     except Exception as e:
         return {"error": str(e)}
-    finally:
-        conn.close()
+
+    # Apply text query filtering in Python
+    if query:
+        query_lower = query.lower()
+        filtered = []
+        for link in all_links:
+            searchable = " ".join(
+                filter(
+                    None,
+                    [
+                        link.url or "",
+                        link.title or "",
+                        link.description or "",
+                        link.notes or "",
+                        link.ai_summary or "",
+                    ],
+                )
+            ).lower()
+            if query_lower in searchable:
+                filtered.append(link)
+        all_links = filtered
+
+    # Apply case-insensitive sender filter if not already filtered via KeyField
+    if sender and not filter_kwargs.get("sender"):
+        sender_lower = sender.lower()
+        all_links = [
+            lnk
+            for lnk in all_links
+            if lnk.sender and sender_lower in lnk.sender.lower()
+        ]
+
+    # Sort by timestamp descending
+    all_links.sort(key=lambda x: x.timestamp or 0.0, reverse=True)
+    all_links = all_links[:limit]
+
+    links_out = [
+        {
+            "id": lnk.link_id,
+            "url": lnk.url,
+            "final_url": lnk.final_url,
+            "title": lnk.title,
+            "description": lnk.description,
+            "domain": lnk.domain,
+            "sender": lnk.sender,
+            "chat_id": lnk.chat_id,
+            "message_id": lnk.message_id,
+            "timestamp": _ts_to_iso(lnk.timestamp),
+            "tags": lnk.tags or [],
+            "notes": lnk.notes,
+            "status": lnk.status,
+            "ai_summary": lnk.ai_summary,
+        }
+        for lnk in all_links
+    ]
+
+    return {
+        "links": links_out,
+        "count": len(links_out),
+        "query": query,
+        "filters": {
+            "domain": domain,
+            "sender": sender,
+            "status": status,
+        },
+    }
 
 
 def list_links(
     limit: int = 20,
     offset: int = 0,
     status: str | None = None,
-    db_path: Path | None = None,
+    db_path=None,  # Ignored — kept for API compatibility
 ) -> dict:
-    """
-    List recent links with pagination.
+    """List recent links with pagination.
 
     Args:
-        limit: Maximum results
-        offset: Skip first N results
-        status: Filter by status
-        db_path: Custom database path
+        limit: Maximum results.
+        offset: Skip first N results.
+        status: Filter by status.
+        db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
-        dict with links and pagination info
+        dict with links and pagination info.
     """
-    conn = _get_db_connection(db_path)
-
-    conditions = []
-    params = []
-
-    if status:
-        conditions.append("status = ?")
-        params.append(status)
-
-    where_clause = " AND ".join(conditions) if conditions else "1=1"
+    from models.link import Link
 
     try:
-        # Get total count
-        count_cursor = conn.execute(
-            f"SELECT COUNT(*) FROM links WHERE {where_clause}",
-            params,
-        )
-        total = count_cursor.fetchone()[0]
-
-        # Get links
-        cursor = conn.execute(
-            f"""
-            SELECT id, url, final_url, title, description, domain, sender,
-                   chat_id, message_id, timestamp, tags, notes, status, ai_summary
-            FROM links
-            WHERE {where_clause}
-            ORDER BY timestamp DESC
-            LIMIT ? OFFSET ?
-            """,
-            params + [limit, offset],
-        )
-
-        links = []
-        for row in cursor.fetchall():
-            link = dict(row)
-            if link.get("tags"):
-                try:
-                    link["tags"] = json.loads(link["tags"])
-                except json.JSONDecodeError:
-                    link["tags"] = []
-            links.append(link)
-
-        return {
-            "links": links,
-            "count": len(links),
-            "total": total,
-            "offset": offset,
-            "limit": limit,
-            "has_more": offset + len(links) < total,
-        }
-
+        if status:
+            all_links = list(Link.query.filter(status=status))
+        else:
+            all_links = list(Link.query.all())
     except Exception as e:
         return {"error": str(e)}
-    finally:
-        conn.close()
+
+    # Sort by timestamp descending
+    all_links.sort(key=lambda x: x.timestamp or 0.0, reverse=True)
+
+    total = len(all_links)
+    page = all_links[offset : offset + limit]
+
+    links_out = [
+        {
+            "id": lnk.link_id,
+            "url": lnk.url,
+            "final_url": lnk.final_url,
+            "title": lnk.title,
+            "description": lnk.description,
+            "domain": lnk.domain,
+            "sender": lnk.sender,
+            "chat_id": lnk.chat_id,
+            "message_id": lnk.message_id,
+            "timestamp": _ts_to_iso(lnk.timestamp),
+            "tags": lnk.tags or [],
+            "notes": lnk.notes,
+            "status": lnk.status,
+            "ai_summary": lnk.ai_summary,
+        }
+        for lnk in page
+    ]
+
+    return {
+        "links": links_out,
+        "count": len(links_out),
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + len(page) < total,
+    }
 
 
 def get_link_by_url(
     url: str,
     max_age_hours: int | None = None,
-    db_path: Path | None = None,
+    db_path=None,  # Ignored — kept for API compatibility
 ) -> dict | None:
-    """
-    Get an existing link record by URL.
+    """Get an existing link record by URL.
 
     Used for caching - check if we already have a summary for this URL.
 
     Args:
-        url: URL to look up
-        max_age_hours: Only return if summary is newer than this (None = any age)
-        db_path: Custom database path
+        url: URL to look up.
+        max_age_hours: Only return if summary is newer than this (None = any age).
+        db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
-        dict with link data if found and has summary, None otherwise
+        dict with link data if found and has ai_summary, None otherwise.
     """
-    conn = _get_db_connection(db_path)
+    from models.link import Link
 
     try:
-        # Build query based on whether we want to filter by age
-        if max_age_hours is not None:
-            cutoff = datetime.now() - timedelta(hours=max_age_hours)
-            cursor = conn.execute(
-                """
-                SELECT id, url, final_url, title, description, domain, sender,
-                       chat_id, message_id, timestamp, tags, notes, status, ai_summary
-                FROM links
-                WHERE url = ?
-                  AND ai_summary IS NOT NULL
-                  AND timestamp >= ?
-                ORDER BY timestamp DESC
-                LIMIT 1
-                """,
-                (url, cutoff),
-            )
-        else:
-            cursor = conn.execute(
-                """
-                SELECT id, url, final_url, title, description, domain, sender,
-                       chat_id, message_id, timestamp, tags, notes, status, ai_summary
-                FROM links
-                WHERE url = ?
-                  AND ai_summary IS NOT NULL
-                ORDER BY timestamp DESC
-                LIMIT 1
-                """,
-                (url,),
-            )
-
-        row = cursor.fetchone()
-        if row:
-            link = dict(row)
-            if link.get("tags"):
-                try:
-                    link["tags"] = json.loads(link["tags"])
-                except json.JSONDecodeError:
-                    link["tags"] = []
-            return link
-
-        return None
-
+        matches = list(Link.query.filter(url=url))
     except Exception:
         return None
-    finally:
-        conn.close()
+
+    if not matches:
+        return None
+
+    # Filter to links with ai_summary
+    with_summary = [lnk for lnk in matches if lnk.ai_summary]
+    if not with_summary:
+        return None
+
+    # Sort by timestamp descending, take most recent
+    with_summary.sort(key=lambda x: x.timestamp or 0.0, reverse=True)
+    link = with_summary[0]
+
+    # Apply max_age_hours filter
+    if max_age_hours is not None:
+        cutoff = time.time() - (max_age_hours * 3600)
+        if (link.timestamp or 0.0) < cutoff:
+            return None
+
+    return {
+        "id": link.link_id,
+        "url": link.url,
+        "final_url": link.final_url,
+        "title": link.title,
+        "description": link.description,
+        "domain": link.domain,
+        "sender": link.sender,
+        "chat_id": link.chat_id,
+        "message_id": link.message_id,
+        "timestamp": _ts_to_iso(link.timestamp),
+        "tags": link.tags or [],
+        "notes": link.notes,
+        "status": link.status,
+        "ai_summary": link.ai_summary,
+    }
 
 
 def update_link(
-    link_id: int,
+    link_id: str,
     status: str | None = None,
     tags: list[str] | None = None,
     notes: str | None = None,
     ai_summary: str | None = None,
-    db_path: Path | None = None,
+    db_path=None,  # Ignored — kept for API compatibility
 ) -> dict:
-    """
-    Update a stored link.
+    """Update a stored link by link_id.
+
+    For status changes (KeyField), uses delete-and-recreate pattern.
+    For non-KeyField updates (notes, ai_summary), uses direct .save().
 
     Args:
-        link_id: ID of the link to update
-        status: New status (unread, read, archived)
-        tags: New tags (replaces existing)
-        notes: New notes (replaces existing)
-        ai_summary: New AI summary
-        db_path: Custom database path
+        link_id: ID (link_id) of the link to update.
+        status: New status (unread, read, archived).
+        tags: New tags (replaces existing).
+        notes: New notes (replaces existing).
+        ai_summary: New AI summary.
+        db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
-        dict with update result
+        dict with update result.
     """
-    conn = _get_db_connection(db_path)
+    from models.link import Link
 
-    updates = []
-    params = []
-
-    if status is not None:
-        updates.append("status = ?")
-        params.append(status)
-
-    if tags is not None:
-        updates.append("tags = ?")
-        params.append(json.dumps(tags))
-
-    if notes is not None:
-        updates.append("notes = ?")
-        params.append(notes)
-
-    if ai_summary is not None:
-        updates.append("ai_summary = ?")
-        params.append(ai_summary)
-
-    if not updates:
+    if not any(v is not None for v in [status, tags, notes, ai_summary]):
         return {"error": "No fields to update"}
 
-    params.append(link_id)
-
     try:
-        cursor = conn.execute(
-            f"""
-            UPDATE links
-            SET {", ".join(updates)}
-            WHERE id = ?
-            """,
-            params,
+        # Find link by link_id
+        all_links = list(Link.query.all())
+        target = next(
+            (lnk for lnk in all_links if str(lnk.link_id) == str(link_id)), None
         )
-        conn.commit()
 
-        if cursor.rowcount == 0:
+        if target is None:
             return {"error": f"Link {link_id} not found"}
+
+        fields_updated = 0
+
+        if status is not None and status != target.status:
+            # Status is a KeyField — delete and recreate
+            old_data = {
+                "url": target.url,
+                "chat_id": target.chat_id,
+                "message_id": target.message_id,
+                "domain": target.domain,
+                "sender": target.sender,
+                "timestamp": target.timestamp,
+                "final_url": target.final_url,
+                "title": target.title,
+                "description": target.description,
+                "tags": target.tags,
+                "notes": notes if notes is not None else target.notes,
+                "ai_summary": (
+                    ai_summary if ai_summary is not None else target.ai_summary
+                ),
+            }
+            target.delete()
+            Link.create(status=status, **old_data)
+            fields_updated += 1
+            return {
+                "updated": True,
+                "id": link_id,
+                "fields_updated": fields_updated
+                + sum(1 for v in [tags, notes, ai_summary] if v is not None),
+            }
+
+        # Non-KeyField updates — direct save
+        if notes is not None:
+            target.notes = notes
+            fields_updated += 1
+        if ai_summary is not None:
+            target.ai_summary = ai_summary
+            fields_updated += 1
+        if tags is not None:
+            target.tags = tags
+            fields_updated += 1
+
+        if fields_updated:
+            target.save()
 
         return {
             "updated": True,
             "id": link_id,
-            "fields_updated": len(updates),
+            "fields_updated": fields_updated,
         }
-
     except Exception as e:
         return {"error": str(e)}
-    finally:
-        conn.close()
 
 
-def get_link_stats(db_path: Path | None = None) -> dict:
-    """
-    Get statistics about stored links.
+def get_link_stats(
+    db_path=None,  # Ignored — kept for API compatibility
+) -> dict:
+    """Get statistics about stored links.
 
     Args:
-        db_path: Custom database path
+        db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
-        dict with link statistics
+        dict with link statistics.
     """
-    conn = _get_db_connection(db_path)
+    from models.link import Link
 
     try:
-        cursor = conn.execute(
-            """
-            SELECT
-                COUNT(*) as total_links,
-                COUNT(DISTINCT domain) as unique_domains,
-                COUNT(DISTINCT sender) as unique_senders,
-                SUM(CASE WHEN status = 'unread' THEN 1 ELSE 0 END) as unread,
-                SUM(CASE WHEN status = 'read' THEN 1 ELSE 0 END) as read,
-                SUM(CASE WHEN status = 'archived' THEN 1 ELSE 0 END) as archived,
-                MIN(timestamp) as first_link,
-                MAX(timestamp) as last_link
-            FROM links
-        """
-        )
-
-        row = cursor.fetchone()
-
-        # Get top domains
-        domain_cursor = conn.execute(
-            """
-            SELECT domain, COUNT(*) as count
-            FROM links
-            WHERE domain IS NOT NULL
-            GROUP BY domain
-            ORDER BY count DESC
-            LIMIT 10
-        """
-        )
-        top_domains = [
-            {"domain": r[0], "count": r[1]} for r in domain_cursor.fetchall()
-        ]
-
-        return {
-            "total_links": row["total_links"],
-            "unique_domains": row["unique_domains"],
-            "unique_senders": row["unique_senders"],
-            "by_status": {
-                "unread": row["unread"],
-                "read": row["read"],
-                "archived": row["archived"],
-            },
-            "first_link": row["first_link"],
-            "last_link": row["last_link"],
-            "top_domains": top_domains,
-        }
-
+        all_links = list(Link.query.all())
     except Exception as e:
         return {"error": str(e)}
-    finally:
-        conn.close()
+
+    if not all_links:
+        return {
+            "total_links": 0,
+            "unique_domains": 0,
+            "unique_senders": 0,
+            "by_status": {"unread": 0, "read": 0, "archived": 0},
+            "first_link": None,
+            "last_link": None,
+            "top_domains": [],
+        }
+
+    domains = [lnk.domain for lnk in all_links if lnk.domain]
+    senders = {lnk.sender for lnk in all_links if lnk.sender}
+    timestamps = [lnk.timestamp for lnk in all_links if lnk.timestamp]
+
+    status_counts = {"unread": 0, "read": 0, "archived": 0}
+    domain_counts: dict[str, int] = {}
+    for lnk in all_links:
+        s = lnk.status or "unread"
+        if s in status_counts:
+            status_counts[s] += 1
+        if lnk.domain:
+            domain_counts[lnk.domain] = domain_counts.get(lnk.domain, 0) + 1
+
+    top_domains = sorted(
+        [{"domain": d, "count": c} for d, c in domain_counts.items()],
+        key=lambda x: x["count"],
+        reverse=True,
+    )[:10]
+
+    return {
+        "total_links": len(all_links),
+        "unique_domains": len(set(domains)),
+        "unique_senders": len(senders),
+        "by_status": status_counts,
+        "first_link": _ts_to_iso(min(timestamps)) if timestamps else None,
+        "last_link": _ts_to_iso(max(timestamps)) if timestamps else None,
+        "top_domains": top_domains,
+    }
 
 
 # =============================================================================
@@ -878,38 +812,50 @@ def register_chat(
     chat_id: str,
     chat_name: str,
     chat_type: str | None = None,
-    db_path: Path | None = None,
+    db_path=None,  # Ignored — kept for API compatibility
 ) -> dict:
-    """
-    Register or update a chat mapping.
+    """Register or update a chat mapping in Redis via Chat model.
 
     Called by the bridge when messages are received to maintain
-    the chat_id → chat_name mapping.
+    the chat_id -> chat_name mapping.
 
     Args:
-        chat_id: Telegram chat ID
-        chat_name: Human-readable chat name/title
-        chat_type: Type of chat (private, group, supergroup, channel)
-        db_path: Custom database path
+        chat_id: Telegram chat ID.
+        chat_name: Human-readable chat name/title.
+        chat_type: Type of chat (private, group, supergroup, channel).
+        db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
-        dict with registration result
+        dict with registration result.
     """
-    conn = _get_db_connection(db_path)
+    from models.chat import Chat
 
     try:
-        conn.execute(
-            """
-            INSERT INTO chats (chat_id, chat_name, chat_type, updated_at)
-            VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-            ON CONFLICT(chat_id) DO UPDATE SET
-                chat_name = excluded.chat_name,
-                chat_type = COALESCE(excluded.chat_type, chats.chat_type),
-                updated_at = CURRENT_TIMESTAMP
-            """,
-            (chat_id, chat_name, chat_type),
-        )
-        conn.commit()
+        existing = list(Chat.query.filter(chat_id=str(chat_id)))
+        if existing:
+            chat = existing[0]
+            # chat_name is a KeyField — delete-and-recreate if changed
+            if chat.chat_name != chat_name or (
+                chat_type and chat.chat_type != chat_type
+            ):
+                old_type = chat_type or chat.chat_type
+                chat.delete()
+                Chat.create(
+                    chat_id=str(chat_id),
+                    chat_name=chat_name,
+                    chat_type=old_type,
+                    updated_at=time.time(),
+                )
+            else:
+                chat.updated_at = time.time()
+                chat.save()
+        else:
+            Chat.create(
+                chat_id=str(chat_id),
+                chat_name=chat_name,
+                chat_type=chat_type,
+                updated_at=time.time(),
+            )
 
         return {
             "registered": True,
@@ -918,200 +864,168 @@ def register_chat(
         }
     except Exception as e:
         return {"error": str(e)}
-    finally:
-        conn.close()
 
 
-def list_chats(db_path: Path | None = None) -> dict:
-    """
-    List all known chats with their message counts.
+def list_chats(
+    db_path=None,  # Ignored — kept for API compatibility
+) -> dict:
+    """List all known chats with their message counts.
 
     Returns:
-        dict with list of chats and their stats
+        dict with list of chats and their stats.
     """
-    conn = _get_db_connection(db_path)
+    from models.chat import Chat
+    from models.telegram import TelegramMessage
 
     try:
-        cursor = conn.execute(
-            """
-            SELECT
-                c.chat_id,
-                c.chat_name,
-                c.chat_type,
-                c.updated_at,
-                COUNT(m.id) as message_count,
-                MAX(m.timestamp) as last_message
-            FROM chats c
-            LEFT JOIN messages m ON c.chat_id = m.chat_id
-            GROUP BY c.chat_id, c.chat_name, c.chat_type, c.updated_at
-            ORDER BY last_message DESC NULLS LAST
-        """
-        )
-
-        chats = [dict(row) for row in cursor.fetchall()]
-
-        return {
-            "chats": chats,
-            "count": len(chats),
-        }
-
+        all_chats = list(Chat.query.all())
     except Exception as e:
         return {"error": str(e)}
-    finally:
-        conn.close()
+
+    chats_out = []
+    for chat in all_chats:
+        # Compute message count
+        try:
+            msgs = list(TelegramMessage.query.filter(chat_id=str(chat.chat_id)))
+            msg_count = len(msgs)
+            last_ts = max((m.timestamp or 0.0 for m in msgs), default=None)
+            last_msg = _ts_to_iso(last_ts) if last_ts else None
+        except Exception:
+            msg_count = 0
+            last_msg = None
+
+        chats_out.append(
+            {
+                "chat_id": chat.chat_id,
+                "chat_name": chat.chat_name,
+                "chat_type": chat.chat_type,
+                "updated_at": _ts_to_iso(chat.updated_at),
+                "message_count": msg_count,
+                "last_message": last_msg,
+            }
+        )
+
+    # Sort by last_message desc
+    chats_out.sort(key=lambda x: x["last_message"] or "", reverse=True)
+
+    return {
+        "chats": chats_out,
+        "count": len(chats_out),
+    }
 
 
 def resolve_chat_id(
     chat_name: str,
-    db_path: Path | None = None,
+    db_path=None,  # Ignored — kept for API compatibility
 ) -> str | None:
-    """
-    Resolve a chat name to its chat_id.
+    """Resolve a chat name to its chat_id.
 
     Supports partial matching and case-insensitive search.
 
     Args:
-        chat_name: Chat name to search for
-        db_path: Custom database path
+        chat_name: Chat name to search for.
+        db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
-        chat_id if found, None otherwise
+        chat_id if found, None otherwise.
     """
-    conn = _get_db_connection(db_path)
+    from models.chat import Chat
 
     try:
-        # Try exact match first
-        cursor = conn.execute(
-            "SELECT chat_id FROM chats WHERE chat_name = ?",
-            (chat_name,),
-        )
-        row = cursor.fetchone()
-        if row:
-            return row["chat_id"]
+        # Exact match via KeyField
+        exact = list(Chat.query.filter(chat_name=chat_name))
+        if exact:
+            return exact[0].chat_id
 
-        # Try case-insensitive match
-        cursor = conn.execute(
-            "SELECT chat_id FROM chats WHERE LOWER(chat_name) = LOWER(?)",
-            (chat_name,),
-        )
-        row = cursor.fetchone()
-        if row:
-            return row["chat_id"]
+        # Fall back to Python case-insensitive/partial matching
+        all_chats = list(Chat.query.all())
+        chat_name_lower = chat_name.lower()
 
-        # Try partial match (contains)
-        cursor = conn.execute(
-            "SELECT chat_id FROM chats WHERE LOWER(chat_name) LIKE LOWER(?)",
-            (f"%{chat_name}%",),
-        )
-        row = cursor.fetchone()
-        if row:
-            return row["chat_id"]
+        # Case-insensitive exact
+        for chat in all_chats:
+            if chat.chat_name and chat.chat_name.lower() == chat_name_lower:
+                return chat.chat_id
+
+        # Partial contains
+        for chat in all_chats:
+            if chat.chat_name and chat_name_lower in chat.chat_name.lower():
+                return chat.chat_id
 
         return None
-
     except Exception:
         return None
-    finally:
-        conn.close()
 
 
 def search_all_chats(
     query: str,
     max_results: int = 20,
     max_age_days: int = 30,
-    db_path: Path | None = None,
+    db_path=None,  # Ignored — kept for API compatibility
 ) -> dict:
-    """
-    Search across all chats.
+    """Search across all chats.
 
     Args:
-        query: Search query
-        max_results: Maximum results total
-        max_age_days: Time window in days
-        db_path: Custom database path
+        query: Search query.
+        max_results: Maximum results total.
+        max_age_days: Time window in days.
+        db_path: Ignored — kept for backward-compatibility signature.
 
     Returns:
-        dict with results grouped by chat
+        dict with results grouped by chat.
     """
     if not query or not query.strip():
         return {"error": "Query cannot be empty"}
 
-    conn = _get_db_connection(db_path)
-    cutoff = datetime.now() - timedelta(days=max_age_days)
+    from models.chat import Chat
+    from models.telegram import TelegramMessage
+
+    cutoff = time.time() - (max_age_days * 86400)
+    query_lower = query.lower()
+
+    # Build chat_id -> chat_name map
+    try:
+        chat_map = {c.chat_id: c.chat_name for c in Chat.query.all()}
+    except Exception:
+        chat_map = {}
 
     try:
-        cursor = conn.execute(
-            """
-            SELECT m.id, m.chat_id, m.message_id, m.sender, m.content,
-                   m.timestamp, m.message_type,
-                   c.chat_name
-            FROM messages m
-            LEFT JOIN chats c ON m.chat_id = c.chat_id
-            WHERE m.content LIKE ?
-              AND m.timestamp >= ?
-            ORDER BY m.timestamp DESC
-            LIMIT ?
-            """,
-            (f"%{query}%", cutoff, max_results * 3),
-        )
-
-        rows = cursor.fetchall()
-
-        # Score and rank results
-        results = []
-        query_lower = query.lower()
-        query_words = set(query_lower.split())
-
-        for row in rows:
-            content = row["content"]
-            content_lower = content.lower()
-
-            # Calculate relevance score
-            score = 0.0
-
-            if query_lower in content_lower:
-                score += 0.5
-
-            content_words = set(content_lower.split())
-            matching_words = query_words & content_words
-            score += len(matching_words) * 0.2
-
-            try:
-                msg_time = datetime.fromisoformat(row["timestamp"])
-                days_old = (datetime.now() - msg_time).days
-                recency_bonus = max(0, (max_age_days - days_old) / max_age_days) * 0.3
-                score += recency_bonus
-            except (ValueError, TypeError):
-                pass
-
-            results.append(
-                {
-                    "id": row["id"],
-                    "chat_id": row["chat_id"],
-                    "chat_name": row["chat_name"] or row["chat_id"],
-                    "message_id": row["message_id"],
-                    "sender": row["sender"],
-                    "content": content,
-                    "timestamp": row["timestamp"],
-                    "message_type": row["message_type"],
-                    "relevance_score": round(score, 3),
-                }
-            )
-
-        results.sort(key=lambda x: x["relevance_score"], reverse=True)
-        results = results[:max_results]
-
-        return {
-            "query": query,
-            "results": results,
-            "total_matches": len(results),
-            "time_window_days": max_age_days,
-        }
-
+        all_messages = list(TelegramMessage.query.all())
     except Exception as e:
         return {"error": str(e)}
-    finally:
-        conn.close()
+
+    results = []
+    for msg in all_messages:
+        ts = msg.timestamp or 0.0
+        if ts < cutoff:
+            continue
+        content = msg.content or ""
+        if query_lower not in content.lower():
+            continue
+
+        score = _score_relevance(query, content, ts, max_age_days)
+        results.append(
+            {
+                "id": msg.msg_id,
+                "chat_id": msg.chat_id,
+                "chat_name": chat_map.get(str(msg.chat_id), str(msg.chat_id)),
+                "message_id": msg.message_id,
+                "sender": msg.sender,
+                "content": content,
+                "timestamp": _ts_to_iso(ts),
+                "message_type": msg.message_type,
+                "relevance_score": round(score, 3),
+            }
+        )
+
+    results.sort(key=lambda x: x["relevance_score"], reverse=True)
+    results = results[:max_results]
+
+    return {
+        "query": query,
+        "results": results,
+        "total_matches": len(results),
+        "time_window_days": max_age_days,
+    }
 
 
 if __name__ == "__main__":
