@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Small
 owner: Tom
@@ -44,21 +44,24 @@ Also extract `generate_prompt_from_report()` -- this already takes text and retu
 **`tools/add_logo_watermark.py`** -- Extract `add_branding()` into a function that accepts and returns image bytes:
 
 ```python
-def apply_branding(image_bytes: bytes, series_text: str | None = None,
-                   episode_text: str | None = None) -> bytes:
+def apply_branding(image_bytes: bytes, series_text: str | None = None) -> bytes:
     """Apply Yudame Research branding overlay. Returns branded PNG bytes."""
 ```
 
-The existing `add_branding()` works on file paths. The new function wraps it using `io.BytesIO` for in-memory image processing.
+The existing `add_branding()` works on file paths. The new function wraps it using `io.BytesIO` for in-memory image processing. The `episode_text` parameter is dropped -- only the "Yudame Research" brand name and optional series name are shown on the overlay.
 
-### 2. Implement `generate_cover_art()` service
+### 2. Install fonts via Render build script
+
+Playfair Display fonts are required for the branding overlay. Add font installation to the Render build process so they're available in production. The build script should download the fonts to a project-local directory and the `add_logo_watermark.py` font path list should include that location.
+
+### 3. Implement `generate_cover_art()` service
 
 Replace the `NotImplementedError` stub in `apps/podcast/services/publishing.py` with:
 
-1. Load Episode + content_plan artifact for metadata (title, series)
+1. Load Episode for metadata (title, podcast series)
 2. Load report_text for AI prompt generation
 3. Call `generate_cover_image()` with auto-generated prompt from report
-4. Call `apply_branding()` with series/episode text
+4. Call `apply_branding()` with series name from `Episode.podcast.title`
 5. Upload to Supabase via `store_file()`
 6. Save URL to `Episode.cover_image_url`
 7. Create `cover-art` artifact with generation metadata
@@ -83,9 +86,10 @@ Remove the `except NotImplementedError` block from `step_cover_art` in `tasks.py
 | File | Change | Type |
 |------|--------|------|
 | `apps/podcast/tools/generate_cover.py` | Add `generate_cover_image()` returning bytes | modify |
-| `apps/podcast/tools/add_logo_watermark.py` | Add `apply_branding()` accepting/returning bytes | modify |
+| `apps/podcast/tools/add_logo_watermark.py` | Add `apply_branding()` accepting/returning bytes, drop `episode_text` | modify |
 | `apps/podcast/services/publishing.py` | Replace stub with real implementation | modify |
 | `apps/podcast/tasks.py` | Remove `NotImplementedError` catch from `step_cover_art` | modify |
+| Build script (e.g. `render-build.sh` or `render.yaml`) | Add Playfair Display font installation step | modify |
 
 ## Files NOT to modify
 
@@ -98,7 +102,6 @@ Remove the `except NotImplementedError` block from `step_cover_art` in `tasks.py
 - **Prompt engineering** -- Don't spend time optimizing the AI prompt. The existing `generate_prompt_from_report()` is good enough. Improvements can come later.
 - **Image quality validation** -- Don't add image quality checks or retry logic. If generation fails, the pipeline falls back to podcast-level cover. That's fine.
 - **Logo file path** -- The branding tool expects `yudame-logo.png` relative to the tools directory. For the in-memory function, bundle the logo path lookup internally rather than requiring callers to locate it.
-- **Font installation on Render** -- Playfair Display fonts must be installed on the production server. This is a deployment concern, not a code concern. If fonts are missing, Pillow falls back to system fonts. Document this as a known limitation.
 
 ## No-gos
 
@@ -106,6 +109,7 @@ Remove the `except NotImplementedError` block from `step_cover_art` in `tasks.py
 - No changes to the Episode admin
 - No changes to the RSS feed template (it already uses `effective_cover_image_url`)
 - No retry/queue logic for failed generations
+- No backfill of existing episodes -- published episodes already have covers, and podcast-level covers are custom
 
 ## Success Criteria
 
@@ -115,10 +119,8 @@ Remove the `except NotImplementedError` block from `step_cover_art` in `tasks.py
 - [ ] Episode detail page shows generated cover art
 - [ ] Tests cover: successful generation, missing API key, missing report_text
 
-## Open Questions
+## Decisions
 
-1. **Font availability on Render** -- Are Playfair Display fonts installed on the production server? If not, should we add a `render-build.sh` step to install them, or accept the Pillow fallback fonts for now?
-
-2. **Episode text format** -- The branding overlay can show series name and episode text (e.g., "Ep 5 - Topic"). Should we pull this from the content_plan artifact metadata, or derive it from the Episode model fields (title, episode_number)?
-
-3. **Existing episodes** -- Should we backfill cover art for the ~42 published episodes, or only generate for new ones going forward? A backfill would cost ~42 OpenRouter API calls.
+1. **Fonts on Render** -- Install Playfair Display fonts as part of the build process. Nothing extra is pre-installed on the server.
+2. **Branding overlay text** -- Show "Yudame Research" brand + optional series name from Episode model. No episode number or episode-specific text on the image.
+3. **No backfill** -- Published episodes already have cover images. Podcast-level covers are custom. Only new episodes going forward get auto-generated covers.
