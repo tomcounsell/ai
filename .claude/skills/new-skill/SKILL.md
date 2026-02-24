@@ -13,6 +13,8 @@ Creates a new Claude Code skill from scratch, following the canonical template s
 ## When to load sub-files
 
 - Creating any new skill → read [SKILL_TEMPLATE.md](SKILL_TEMPLATE.md) and use it as the starting skeleton
+- Need current Anthropic field specs or substitution variable docs → read `~/.claude/skills/do-skills-audit/references/anthropic-skills-docs.txt`
+- Need a real-world example of a canonical skill structure → read `~/.claude/skills/do-skills-audit/references/anthropic-skill-creator.md`
 
 ## Quick start
 
@@ -57,6 +59,9 @@ The `description` field in frontmatter is what Claude uses to decide whether to 
 | `disable-model-invocation` | No | Set `true` to prevent Claude from auto-triggering. Use for infrastructure skills (setup, update). |
 | `user-invocable` | No | Set `false` to hide from `/slash-command` menu. Use for background reference skills. |
 | `context` | No | Set `fork` to run in a separate context. Use for long-running or parallel tasks. |
+| `agent` | No | Which subagent type to use when `context: fork` is set. |
+| `argument-hint` | No | Hint shown during autocomplete when the skill expects `$ARGUMENTS`. |
+| `model` | No | Model to use when this skill is active. |
 
 ## Skill directory structure
 
