@@ -1,5 +1,5 @@
 ---
-status: Ready
+status: Done
 type: chore
 appetite: Small
 owner: Valor Engels
