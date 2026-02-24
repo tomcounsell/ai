@@ -85,7 +85,7 @@ def generate_prompt(
 
     # Get brand elements from config
     podcast_title = config.get("podcast_title", "Yudame Research")
-    is_public = config.get("is_public", True)
+    privacy = config.get("privacy", "public")
     website_url = config.get("website_url", "https://research.yuda.me")
     opening_script = config.get("opening_script", "")
     closing_script = config.get("closing_script", "")
@@ -130,7 +130,7 @@ AUDIENCE DEPTH:
 
     # Sponsor break section (only for public feeds)
     sponsor_section = ""
-    if sponsor_break and is_public:
+    if sponsor_break and privacy == "public":
         sponsor_section = """
 
 SPONSOR BREAK:

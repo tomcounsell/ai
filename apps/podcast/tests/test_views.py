@@ -33,7 +33,7 @@ class PodcastListViewTestCase(TestCase):
             description="A public podcast.",
             author_name="Author",
             author_email="a@b.com",
-            is_public=True,
+            privacy=Podcast.Privacy.PUBLIC,
             published_at=timezone.now() - timezone.timedelta(hours=1),
         )
         response = self.client.get("/podcast/")
@@ -47,7 +47,7 @@ class PodcastListViewTestCase(TestCase):
             description="Public but not yet published.",
             author_name="Author",
             author_email="a@b.com",
-            is_public=True,
+            privacy=Podcast.Privacy.PUBLIC,
         )
         response = self.client.get("/podcast/")
         self.assertNotContains(response, "Unpublished Public")
@@ -60,7 +60,7 @@ class PodcastListViewTestCase(TestCase):
             description="A hidden podcast.",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
         )
         response = self.client.get("/podcast/")
         self.assertNotContains(response, "Hidden Podcast")
@@ -74,7 +74,7 @@ class PodcastListViewTestCase(TestCase):
             description="Private but mine.",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             owner=owner,
         )
         self.client.login(username="podowner", password="testpass123")
@@ -93,7 +93,7 @@ class PodcastListViewTestCase(TestCase):
             description="Belongs to someone else.",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             owner=other_user,
         )
         self.client.login(username="viewer", password="testpass123")
@@ -112,7 +112,7 @@ class PodcastDetailViewTestCase(TestCase):
             description="Podcast for detail view tests.",
             author_name="Author",
             author_email="a@b.com",
-            is_public=True,
+            privacy=Podcast.Privacy.PUBLIC,
             published_at=timezone.now() - timezone.timedelta(hours=1),
         )
         self.published_episode = Episode.objects.create(
@@ -155,7 +155,7 @@ class PodcastDetailViewTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
         )
         response = self.client.get(f"/podcast/{private_podcast.slug}/")
         self.assertEqual(response.status_code, 404)
@@ -168,7 +168,7 @@ class PodcastDetailViewTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=True,
+            privacy=Podcast.Privacy.PUBLIC,
         )
         response = self.client.get(f"/podcast/{unpublished.slug}/")
         self.assertEqual(response.status_code, 404)
@@ -182,7 +182,7 @@ class PodcastDetailViewTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             owner=owner,
         )
         self.client.login(username="detailowner", password="testpass123")
@@ -199,7 +199,7 @@ class PodcastDetailViewTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             owner=owner,
         )
         self.client.login(username="stranger", password="testpass123")
@@ -215,7 +215,7 @@ class PodcastDetailViewTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             owner=owner,
         )
         response = self.client.get(f"/podcast/{private_podcast.slug}/")
@@ -229,7 +229,7 @@ class PodcastDetailViewTestCase(TestCase):
             description="Has platform links.",
             author_name="Author",
             author_email="a@b.com",
-            is_public=True,
+            privacy=Podcast.Privacy.PUBLIC,
             published_at=timezone.now() - timezone.timedelta(hours=1),
             spotify_url="https://open.spotify.com/show/test123",
             apple_podcasts_url="https://podcasts.apple.com/us/podcast/test123",
@@ -259,7 +259,7 @@ class EpisodeDetailViewTestCase(TestCase):
             description="Podcast for episode detail tests.",
             author_name="Author",
             author_email="a@b.com",
-            is_public=True,
+            privacy=Podcast.Privacy.PUBLIC,
             published_at=timezone.now() - timezone.timedelta(hours=1),
         )
         self.published_episode = Episode.objects.create(
@@ -302,7 +302,7 @@ class EpisodeDetailViewTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             owner=owner,
         )
         episode = Episode.objects.create(
@@ -327,7 +327,7 @@ class EpisodeDetailViewTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             owner=owner,
         )
         episode = Episode.objects.create(
@@ -353,7 +353,7 @@ class EpisodeReportViewTestCase(TestCase):
             description="Podcast for report tests.",
             author_name="Author",
             author_email="a@b.com",
-            is_public=True,
+            privacy=Podcast.Privacy.PUBLIC,
             published_at=timezone.now() - timezone.timedelta(hours=1),
         )
         self.episode_with_report = Episode.objects.create(
@@ -400,7 +400,7 @@ class EpisodeReportViewTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             owner=owner,
         )
         episode = Episode.objects.create(
@@ -431,7 +431,7 @@ class EpisodeReportViewTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             owner=owner,
         )
         Episode.objects.create(
@@ -460,7 +460,7 @@ class EpisodeReportViewTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             owner=owner,
         )
         Episode.objects.create(
@@ -488,7 +488,7 @@ class EpisodeSourcesViewTestCase(TestCase):
             description="Podcast for sources tests.",
             author_name="Author",
             author_email="a@b.com",
-            is_public=True,
+            privacy=Podcast.Privacy.PUBLIC,
             published_at=timezone.now() - timezone.timedelta(hours=1),
         )
         self.episode_with_sources = Episode.objects.create(
@@ -537,7 +537,7 @@ class EpisodeSourcesViewTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             owner=owner,
         )
         episode = Episode.objects.create(
@@ -568,7 +568,7 @@ class EpisodeSourcesViewTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             owner=owner,
         )
         Episode.objects.create(
@@ -597,7 +597,7 @@ class EpisodeSourcesViewTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             owner=owner,
         )
         Episode.objects.create(
@@ -626,7 +626,7 @@ class EpisodeCreateViewTestCase(TestCase):
             description="Podcast for episode creation tests.",
             author_name="Author",
             author_email="a@b.com",
-            is_public=True,
+            privacy=Podcast.Privacy.PUBLIC,
             published_at=timezone.now() - timezone.timedelta(hours=1),
         )
         self.private_podcast = Podcast.objects.create(
@@ -635,7 +635,7 @@ class EpisodeCreateViewTestCase(TestCase):
             description="Private podcast for creation tests.",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
         )
         self.staff_user = User.objects.create_user(
             "staffuser", "staff@test.com", "password", is_staff=True

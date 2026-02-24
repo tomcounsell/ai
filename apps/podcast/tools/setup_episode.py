@@ -184,7 +184,8 @@ def load_podcast_config(podcast_slug: str) -> dict:
         **DEFAULT_CONFIG,
         "podcast_slug": podcast.slug,
         "podcast_title": podcast.title,
-        "is_public": podcast.is_public,
+        "privacy": podcast.privacy,
+        "uses_private_bucket": podcast.uses_private_bucket,
         "website_url": podcast.website_url or DEFAULT_CONFIG["website_url"],
     }
 

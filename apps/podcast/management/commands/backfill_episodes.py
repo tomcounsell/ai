@@ -69,7 +69,7 @@ PODCAST_DEFINITIONS = {
             "technology, and decision-making. Each episode synthesizes academic "
             "and industry research into actionable insights."
         ),
-        "is_public": True,
+        "privacy": "public",
     },
     "solomon-islands-telecom": {
         "title": "Solomon Islands Telecom",
@@ -77,7 +77,7 @@ PODCAST_DEFINITIONS = {
             "Research series examining telecommunications infrastructure, "
             "policy, and connectivity challenges in the Solomon Islands."
         ),
-        "is_public": False,
+        "privacy": "restricted",
     },
     "stablecoin": {
         "title": "Stablecoin",
@@ -85,7 +85,7 @@ PODCAST_DEFINITIONS = {
             "Research series analyzing stablecoin technology, regulation, "
             "and market dynamics in the cryptocurrency ecosystem."
         ),
-        "is_public": False,
+        "privacy": "restricted",
     },
 }
 
@@ -176,7 +176,7 @@ class Command(BaseCommand):
                         author_name="Yudame Research",
                         author_email="podcast@yuda.me",
                         language="en",
-                        is_public=defn["is_public"],
+                        privacy=defn["privacy"],
                     )
                 podcast_cache[podcast_slug] = podcast
             else:
@@ -188,7 +188,7 @@ class Command(BaseCommand):
                         "author_name": "Yudame Research",
                         "author_email": "podcast@yuda.me",
                         "language": "en",
-                        "is_public": defn["is_public"],
+                        "privacy": defn["privacy"],
                     },
                 )
                 if created:

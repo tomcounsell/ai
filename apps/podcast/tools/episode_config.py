@@ -21,7 +21,8 @@ from pathlib import Path
 DEFAULT_CONFIG = {
     "podcast_slug": "yudame-research",
     "podcast_title": "Yudame Research",
-    "is_public": True,
+    "privacy": "public",
+    "uses_private_bucket": False,
     "website_url": "https://research.yuda.me",
     "opening_script": "",
     "closing_script": "",
@@ -113,7 +114,8 @@ def _load_from_db(podcast_slug: str) -> dict | None:
             **DEFAULT_CONFIG,
             "podcast_slug": podcast.slug,
             "podcast_title": podcast.title,
-            "is_public": podcast.is_public,
+            "privacy": podcast.privacy,
+            "uses_private_bucket": podcast.uses_private_bucket,
             "website_url": podcast.website_url or DEFAULT_CONFIG["website_url"],
         }
 

@@ -20,27 +20,49 @@ def _podcast_published_filter() -> Q:
 
 
 def _get_accessible_podcast(request, slug: str) -> Podcast:
-    """Get podcast if published and public, or owned by request.user, else 404."""
+    """Get podcast if accessible to this user, else 404.
+
+    Access rules:
+    - Owner always has access (published or not)
+    - Staff always has access
+    - Public + published -> accessible to everyone
+    - Unlisted + published -> accessible to everyone (via direct link)
+    - Restricted -> owner/staff only on web UI (feed uses tokens)
+    - Unpublished -> owner/staff only
+    """
     podcast = get_object_or_404(Podcast, slug=slug)
     is_owner = request.user.is_authenticated and podcast.owner == request.user
-    if is_owner:
+    is_staff = request.user.is_authenticated and request.user.is_staff
+    if is_owner or is_staff:
         return podcast
-    if not podcast.is_public or not podcast.is_published:
+    # Must be published for anonymous/regular users
+    if not podcast.is_published:
         raise Http404
-    return podcast
+    if podcast.privacy in (Podcast.Privacy.PUBLIC, Podcast.Privacy.UNLISTED):
+        return podcast
+    # Restricted: owner/staff only (already checked above)
+    raise Http404
 
 
 class PodcastListView(MainContentView):
-    """List all published public podcasts and the logged-in user's private podcasts."""
+    """List all published public podcasts and the logged-in user's non-public podcasts."""
 
     template_name = "podcast/podcast_list.html"
 
     def get(self, request, *args, **kwargs):
-        # Only show public podcasts that have been published
-        podcasts = Podcast.objects.filter(_podcast_published_filter(), is_public=True)
+        # Public published podcasts visible to everyone
+        podcasts = Podcast.objects.filter(
+            _podcast_published_filter(),
+            privacy=Podcast.Privacy.PUBLIC,
+        )
         if request.user.is_authenticated:
-            user_private = Podcast.objects.filter(owner=request.user, is_public=False)
-            podcasts = (podcasts | user_private).distinct()
+            # Owner sees their own podcasts regardless of privacy/published state
+            user_owned = Podcast.objects.filter(owner=request.user).exclude(
+                privacy=Podcast.Privacy.PUBLIC
+            )
+            podcasts = (podcasts | user_owned).distinct()
+
+        # Preserve existing annotations
         published_episode_filter = Q(episodes__published_at__isnull=False) & (
             Q(episodes__unpublished_at__isnull=True)
             | Q(episodes__unpublished_at__lt=F("episodes__published_at"))

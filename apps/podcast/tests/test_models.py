@@ -2,7 +2,7 @@ from django.db import IntegrityError
 from django.test import TestCase
 from django.utils import timezone
 
-from apps.podcast.models import Episode, EpisodeArtifact, Podcast
+from apps.podcast.models import Episode, EpisodeArtifact, Podcast, PodcastAccessToken
 
 
 class PodcastModelTestCase(TestCase):
@@ -22,7 +22,7 @@ class PodcastModelTestCase(TestCase):
             author_email="test@example.com",
             cover_image_url="https://example.com/cover.jpg",
             language="en",
-            is_public=True,
+            privacy=Podcast.Privacy.PUBLIC,
             categories=["Technology"],
             website_url="https://example.com",
         )
@@ -34,6 +34,7 @@ class PodcastModelTestCase(TestCase):
         self.assertEqual(podcast.author_email, "test@example.com")
         self.assertEqual(podcast.cover_image_url, "https://example.com/cover.jpg")
         self.assertEqual(podcast.language, "en")
+        self.assertEqual(podcast.privacy, Podcast.Privacy.PUBLIC)
         self.assertTrue(podcast.is_public)
         self.assertEqual(podcast.categories, ["Technology"])
         self.assertEqual(podcast.website_url, "https://example.com")
@@ -515,93 +516,272 @@ class EpisodeArtifactModelTestCase(TestCase):
         self.assertEqual(EpisodeArtifact.objects.count(), 0)
 
 
-class PodcastImmutabilityTestCase(TestCase):
-    """Tests for Podcast.is_public immutability after creation."""
+class PodcastPrivacyTestCase(TestCase):
+    """Tests for Podcast.privacy field, convenience properties, and immutability."""
+
+    def _create_podcast(self, slug, privacy=None, **kwargs):
+        """Helper to create a podcast with given privacy."""
+        defaults = {
+            "title": f"Podcast {slug}",
+            "slug": slug,
+            "description": "desc",
+            "author_name": "Author",
+            "author_email": "a@b.com",
+        }
+        defaults.update(kwargs)
+        if privacy is not None:
+            defaults["privacy"] = privacy
+        return Podcast.objects.create(**defaults)
+
+    def test_default_privacy_is_unlisted(self):
+        """Default privacy value is 'unlisted'."""
+        podcast = self._create_podcast("default-priv")
+        podcast.refresh_from_db()
+        self.assertEqual(podcast.privacy, Podcast.Privacy.UNLISTED)
 
     def test_create_public_podcast(self):
-        """Creating a podcast with is_public=True works."""
-        podcast = Podcast.objects.create(
-            title="Public Podcast",
-            slug="public-immut",
-            description="desc",
-            author_name="Author",
-            author_email="a@b.com",
-            is_public=True,
-        )
+        """Creating a podcast with privacy=PUBLIC works."""
+        podcast = self._create_podcast("pub", privacy=Podcast.Privacy.PUBLIC)
         podcast.refresh_from_db()
+        self.assertEqual(podcast.privacy, Podcast.Privacy.PUBLIC)
+
+    def test_create_unlisted_podcast(self):
+        """Creating a podcast with privacy=UNLISTED works."""
+        podcast = self._create_podcast("unlist", privacy=Podcast.Privacy.UNLISTED)
+        podcast.refresh_from_db()
+        self.assertEqual(podcast.privacy, Podcast.Privacy.UNLISTED)
+
+    def test_create_restricted_podcast(self):
+        """Creating a podcast with privacy=RESTRICTED works."""
+        podcast = self._create_podcast("restrict", privacy=Podcast.Privacy.RESTRICTED)
+        podcast.refresh_from_db()
+        self.assertEqual(podcast.privacy, Podcast.Privacy.RESTRICTED)
+
+    def test_is_public_property_true_for_public(self):
+        """is_public returns True only for PUBLIC privacy."""
+        podcast = self._create_podcast("pub-prop", privacy=Podcast.Privacy.PUBLIC)
         self.assertTrue(podcast.is_public)
 
-    def test_create_private_podcast(self):
-        """Creating a podcast with is_public=False works."""
-        podcast = Podcast.objects.create(
-            title="Private Podcast",
-            slug="private-immut",
-            description="desc",
-            author_name="Author",
-            author_email="a@b.com",
-            is_public=False,
-        )
-        podcast.refresh_from_db()
+    def test_is_public_property_false_for_unlisted(self):
+        """is_public returns False for UNLISTED privacy."""
+        podcast = self._create_podcast("unl-prop", privacy=Podcast.Privacy.UNLISTED)
         self.assertFalse(podcast.is_public)
 
-    def test_cannot_change_public_to_private(self):
-        """Changing is_public from True to False raises ValueError."""
-        podcast = Podcast.objects.create(
-            title="Was Public",
-            slug="was-public",
-            description="desc",
-            author_name="Author",
-            author_email="a@b.com",
-            is_public=True,
+    def test_is_public_property_false_for_restricted(self):
+        """is_public returns False for RESTRICTED privacy."""
+        podcast = self._create_podcast("res-prop", privacy=Podcast.Privacy.RESTRICTED)
+        self.assertFalse(podcast.is_public)
+
+    def test_is_unlisted_property(self):
+        """is_unlisted returns True only for UNLISTED privacy."""
+        public = self._create_podcast("is-unl-pub", privacy=Podcast.Privacy.PUBLIC)
+        unlisted = self._create_podcast("is-unl-unl", privacy=Podcast.Privacy.UNLISTED)
+        restricted = self._create_podcast(
+            "is-unl-res", privacy=Podcast.Privacy.RESTRICTED
         )
-        podcast.is_public = False
+        self.assertFalse(public.is_unlisted)
+        self.assertTrue(unlisted.is_unlisted)
+        self.assertFalse(restricted.is_unlisted)
+
+    def test_is_restricted_property(self):
+        """is_restricted returns True only for RESTRICTED privacy."""
+        public = self._create_podcast("is-res-pub", privacy=Podcast.Privacy.PUBLIC)
+        unlisted = self._create_podcast("is-res-unl", privacy=Podcast.Privacy.UNLISTED)
+        restricted = self._create_podcast(
+            "is-res-res", privacy=Podcast.Privacy.RESTRICTED
+        )
+        self.assertFalse(public.is_restricted)
+        self.assertFalse(unlisted.is_restricted)
+        self.assertTrue(restricted.is_restricted)
+
+    def test_uses_private_bucket_property(self):
+        """uses_private_bucket returns True only for RESTRICTED privacy."""
+        public = self._create_podcast("bucket-pub", privacy=Podcast.Privacy.PUBLIC)
+        unlisted = self._create_podcast("bucket-unl", privacy=Podcast.Privacy.UNLISTED)
+        restricted = self._create_podcast(
+            "bucket-res", privacy=Podcast.Privacy.RESTRICTED
+        )
+        self.assertFalse(public.uses_private_bucket)
+        self.assertFalse(unlisted.uses_private_bucket)
+        self.assertTrue(restricted.uses_private_bucket)
+
+    def test_cannot_change_privacy_after_creation(self):
+        """Changing privacy after creation raises ValueError."""
+        podcast = self._create_podcast("immut-1", privacy=Podcast.Privacy.PUBLIC)
+        podcast.privacy = Podcast.Privacy.RESTRICTED
         with self.assertRaises(ValueError) as ctx:
             podcast.save()
         self.assertIn("cannot be changed", str(ctx.exception))
 
-    def test_cannot_change_private_to_public(self):
-        """Changing is_public from False to True raises ValueError."""
-        podcast = Podcast.objects.create(
-            title="Was Private",
-            slug="was-private",
-            description="desc",
-            author_name="Author",
-            author_email="a@b.com",
-            is_public=False,
-        )
-        podcast.is_public = True
+    def test_cannot_change_restricted_to_public(self):
+        """Changing privacy from RESTRICTED to PUBLIC raises ValueError."""
+        podcast = self._create_podcast("immut-2", privacy=Podcast.Privacy.RESTRICTED)
+        podcast.privacy = Podcast.Privacy.PUBLIC
         with self.assertRaises(ValueError) as ctx:
             podcast.save()
         self.assertIn("cannot be changed", str(ctx.exception))
 
-    def test_save_same_visibility_works(self):
-        """Saving with same is_public value does not raise."""
-        podcast = Podcast.objects.create(
-            title="Same Vis",
-            slug="same-vis",
-            description="desc",
-            author_name="Author",
-            author_email="a@b.com",
-            is_public=True,
-        )
+    def test_save_same_privacy_works(self):
+        """Saving with same privacy value does not raise."""
+        podcast = self._create_podcast("same-priv", privacy=Podcast.Privacy.PUBLIC)
         podcast.title = "Updated Title"
         podcast.save()  # Should not raise
         podcast.refresh_from_db()
         self.assertEqual(podcast.title, "Updated Title")
-        self.assertTrue(podcast.is_public)
+        self.assertEqual(podcast.privacy, Podcast.Privacy.PUBLIC)
 
-    def test_save_private_same_visibility_works(self):
-        """Saving private podcast with same is_public=False does not raise."""
-        podcast = Podcast.objects.create(
-            title="Private Same",
-            slug="private-same",
-            description="desc",
-            author_name="Author",
-            author_email="a@b.com",
-            is_public=False,
+    def test_save_restricted_same_privacy_works(self):
+        """Saving restricted podcast with same privacy does not raise."""
+        podcast = self._create_podcast(
+            "same-restrict", privacy=Podcast.Privacy.RESTRICTED
         )
         podcast.description = "Updated description"
         podcast.save()  # Should not raise
         podcast.refresh_from_db()
         self.assertEqual(podcast.description, "Updated description")
-        self.assertFalse(podcast.is_public)
+        self.assertEqual(podcast.privacy, Podcast.Privacy.RESTRICTED)
+
+    def test_privacy_choices_values(self):
+        """Privacy enum has the expected values."""
+        self.assertEqual(Podcast.Privacy.PUBLIC, "public")
+        self.assertEqual(Podcast.Privacy.UNLISTED, "unlisted")
+        self.assertEqual(Podcast.Privacy.RESTRICTED, "restricted")
+
+
+class PodcastAccessTokenTestCase(TestCase):
+    """Tests for the PodcastAccessToken model."""
+
+    def setUp(self):
+        self.podcast = Podcast.objects.create(
+            title="Token Podcast",
+            slug="token-podcast",
+            description="A podcast for token tests.",
+            author_name="Author",
+            author_email="a@b.com",
+            privacy=Podcast.Privacy.RESTRICTED,
+        )
+
+    def test_create_access_token(self):
+        """Create a PodcastAccessToken with required fields."""
+        token = PodcastAccessToken.objects.create(
+            podcast=self.podcast,
+            label="Tom iPhone",
+        )
+        token.refresh_from_db()
+        self.assertEqual(token.podcast, self.podcast)
+        self.assertEqual(token.label, "Tom iPhone")
+        self.assertTrue(token.is_active)
+        self.assertIsNone(token.last_accessed_at)
+        self.assertEqual(token.access_count, 0)
+        self.assertIsNotNone(token.pk)
+
+    def test_token_auto_generated_on_save(self):
+        """Token is auto-generated when not provided."""
+        token = PodcastAccessToken.objects.create(
+            podcast=self.podcast,
+            label="Auto Token",
+        )
+        self.assertIsNotNone(token.token)
+        self.assertGreater(len(token.token), 20)
+
+    def test_token_unique(self):
+        """Two tokens cannot share the same token value."""
+        token1 = PodcastAccessToken.objects.create(
+            podcast=self.podcast,
+            label="Token 1",
+        )
+        with self.assertRaises(IntegrityError):
+            PodcastAccessToken.objects.create(
+                podcast=self.podcast,
+                label="Token 2",
+                token=token1.token,
+            )
+
+    def test_explicit_token_preserved(self):
+        """When an explicit token is provided, it is used."""
+        token = PodcastAccessToken.objects.create(
+            podcast=self.podcast,
+            label="Explicit Token",
+            token="my-custom-token-value",
+        )
+        token.refresh_from_db()
+        self.assertEqual(token.token, "my-custom-token-value")
+
+    def test_str_representation(self):
+        """__str__ returns 'podcast -- label' format."""
+        token = PodcastAccessToken.objects.create(
+            podcast=self.podcast,
+            label="Client A",
+        )
+        expected = f"{self.podcast} \u2014 Client A"
+        self.assertEqual(str(token), expected)
+
+    def test_record_access_increments_count(self):
+        """record_access() increments access_count and sets last_accessed_at."""
+        token = PodcastAccessToken.objects.create(
+            podcast=self.podcast,
+            label="Access Test",
+        )
+        self.assertEqual(token.access_count, 0)
+        self.assertIsNone(token.last_accessed_at)
+
+        token.record_access()
+        token.refresh_from_db()
+        self.assertEqual(token.access_count, 1)
+        self.assertIsNotNone(token.last_accessed_at)
+
+    def test_record_access_multiple_times(self):
+        """record_access() can be called multiple times."""
+        token = PodcastAccessToken.objects.create(
+            podcast=self.podcast,
+            label="Multi Access",
+        )
+        token.record_access()
+        token.record_access()
+        token.record_access()
+        token.refresh_from_db()
+        self.assertEqual(token.access_count, 3)
+
+    def test_cascade_delete_with_podcast(self):
+        """Deleting podcast cascades to access tokens."""
+        PodcastAccessToken.objects.create(
+            podcast=self.podcast,
+            label="Delete Test",
+        )
+        self.assertEqual(PodcastAccessToken.objects.count(), 1)
+        self.podcast.delete()
+        self.assertEqual(PodcastAccessToken.objects.count(), 0)
+
+    def test_ordering_by_created_at_desc(self):
+        """Tokens are ordered by -created_at."""
+        t1 = PodcastAccessToken.objects.create(
+            podcast=self.podcast,
+            label="First",
+        )
+        t2 = PodcastAccessToken.objects.create(
+            podcast=self.podcast,
+            label="Second",
+        )
+        tokens = list(PodcastAccessToken.objects.filter(podcast=self.podcast))
+        # Most recently created first
+        self.assertEqual(tokens[0].pk, t2.pk)
+        self.assertEqual(tokens[1].pk, t1.pk)
+
+    def test_is_active_default_true(self):
+        """Token is active by default."""
+        token = PodcastAccessToken.objects.create(
+            podcast=self.podcast,
+            label="Active Test",
+        )
+        self.assertTrue(token.is_active)
+
+    def test_deactivate_token(self):
+        """Token can be deactivated."""
+        token = PodcastAccessToken.objects.create(
+            podcast=self.podcast,
+            label="Deactivate Test",
+        )
+        token.is_active = False
+        token.save()
+        token.refresh_from_db()
+        self.assertFalse(token.is_active)

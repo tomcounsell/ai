@@ -21,7 +21,7 @@ class PodcastFeedTestCase(TestCase):
             author_email="feed@example.com",
             cover_image_url="https://example.com/cover.jpg",
             language="en",
-            is_public=True,
+            privacy=Podcast.Privacy.PUBLIC,
             categories=["Technology", "Science"],
             website_url="https://example.com",
         )
@@ -112,7 +112,7 @@ class PodcastFeedTestCase(TestCase):
             description="desc",
             author_name="Author",
             author_email="a@b.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
         )
         response = self.client.get(f"/podcast/{private_podcast.slug}/feed.xml")
         self.assertEqual(response.status_code, 403)
@@ -185,7 +185,7 @@ class PrivateFeedTestCase(TestCase):
             author_email="private@example.com",
             cover_image_url="https://example.com/private-cover.jpg",
             language="en",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
             categories=["Business"],
             website_url="https://example.com/private",
         )
@@ -335,7 +335,7 @@ class PrivateFeedTestCase(TestCase):
         mock_get_file_url.side_effect = lambda key, **kw: f"https://signed.url/{key}"
         owner = User.objects.create_user(username="feedowner", password="testpass123")
         self.private_podcast.owner = owner
-        # Save without triggering is_public change check — use update()
+        # Save without triggering privacy change check — use update()
         Podcast.objects.filter(pk=self.private_podcast.pk).update(owner=owner)
         self.private_podcast.refresh_from_db()
 

@@ -165,7 +165,14 @@ class Command(BaseCommand):
         title = episode_data.get("title", "unknown")
         slug = episode_data.get("slug", f"episode-{episode_id}")
         podcast_slug = episode_data.get("podcast_slug", "podcast")
-        is_public = episode_data.get("is_public", True)
+        # Support both new 'privacy'/'uses_private_bucket' keys and legacy 'is_public'
+        if "uses_private_bucket" in episode_data:
+            is_private = episode_data["uses_private_bucket"]
+        elif "privacy" in episode_data:
+            is_private = episode_data["privacy"] == "restricted"
+        else:
+            # Legacy API response: is_public boolean
+            is_private = not episode_data.get("is_public", True)
         sources = episode_data.get("sources", {})
 
         logger.info("Processing episode %d: %s", episode_id, title)
@@ -187,7 +194,7 @@ class Command(BaseCommand):
             # Upload to storage (public or private based on podcast visibility)
             storage_key = f"podcast/{podcast_slug}/{slug}/audio.mp3"
             audio_url = store_file(
-                storage_key, audio_bytes, "audio/mpeg", public=is_public
+                storage_key, audio_bytes, "audio/mpeg", public=not is_private
             )
             logger.info("Uploaded audio for episode %d: %s", episode_id, audio_url)
 

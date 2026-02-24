@@ -119,16 +119,18 @@ def generate_audio(episode_id: int) -> str:
 
         # 6. Upload to storage (public or private based on podcast visibility)
         storage_key = f"podcast/{episode.podcast.slug}/{episode.slug}/audio.mp3"
-        is_public = episode.podcast.is_public
-        audio_url = store_file(storage_key, audio_bytes, "audio/mpeg", public=is_public)
+        is_private = episode.podcast.uses_private_bucket
+        audio_url = store_file(
+            storage_key, audio_bytes, "audio/mpeg", public=not is_private
+        )
 
         # 7. Update episode
-        if is_public:
-            episode.audio_url = audio_url
-        else:
-            # For private podcasts, store the storage key instead of the URL.
+        if is_private:
+            # For restricted podcasts, store the storage key instead of the URL.
             # Fresh signed URLs are generated on-demand in the feed view.
             episode.audio_url = storage_key
+        else:
+            episode.audio_url = audio_url
         episode.audio_file_size_bytes = len(audio_bytes)
         episode.save(update_fields=["audio_url", "audio_file_size_bytes"])
 

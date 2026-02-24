@@ -5,6 +5,11 @@ from apps.common.behaviors import Publishable, Timestampable
 
 
 class Podcast(Timestampable, Publishable):
+    class Privacy(models.TextChoices):
+        PUBLIC = "public", "Public"
+        UNLISTED = "unlisted", "Unlisted"
+        RESTRICTED = "restricted", "Restricted"
+
     title = models.CharField(max_length=200)
     slug = models.SlugField(unique=True)
     description = models.TextField()
@@ -12,7 +17,11 @@ class Podcast(Timestampable, Publishable):
     author_email = models.EmailField()
     cover_image_url = models.URLField(blank=True)
     language = models.CharField(max_length=10, default="en")
-    is_public = models.BooleanField(default=False)
+    privacy = models.CharField(
+        max_length=20,
+        choices=Privacy.choices,
+        default=Privacy.UNLISTED,
+    )
     categories = models.JSONField(default=list, blank=True)
     website_url = models.URLField(blank=True)
     owner = models.ForeignKey(
@@ -34,16 +43,34 @@ class Podcast(Timestampable, Publishable):
     def __str__(self):
         return self.title
 
+    @property
+    def is_public(self) -> bool:
+        """Backward-compat property: True if privacy is PUBLIC."""
+        return self.privacy == self.Privacy.PUBLIC
+
+    @property
+    def is_unlisted(self) -> bool:
+        return self.privacy == self.Privacy.UNLISTED
+
+    @property
+    def is_restricted(self) -> bool:
+        return self.privacy == self.Privacy.RESTRICTED
+
+    @property
+    def uses_private_bucket(self) -> bool:
+        """Only restricted podcasts use the private Supabase bucket."""
+        return self.is_restricted
+
     def save(self, *args, **kwargs):
         if self.pk:
-            # Prevent changing is_public after creation.
+            # Prevent changing privacy after creation.
             # Switching visibility would leave audio files in the wrong bucket
             # and break existing feed URLs.
             try:
-                existing = Podcast.objects.only("is_public").get(pk=self.pk)
-                if existing.is_public != self.is_public:
+                existing = Podcast.objects.only("privacy").get(pk=self.pk)
+                if existing.privacy != self.privacy:
                     raise ValueError(
-                        "Podcast visibility (is_public) cannot be changed "
+                        "Podcast privacy cannot be changed "
                         "after creation. Create a new podcast instead."
                     )
             except Podcast.DoesNotExist:

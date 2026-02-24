@@ -204,7 +204,7 @@ class Command(BaseCommand):
                 language=language,
                 categories=categories,
                 website_url=website_url,
-                is_public=True,
+                privacy="public",
             )
             podcast.pk = -1  # Sentinel for dry run
             return podcast
@@ -220,7 +220,7 @@ class Command(BaseCommand):
                 "language": language,
                 "categories": categories,
                 "website_url": website_url,
-                "is_public": True,
+                "privacy": "public",
             },
         )
         action = "Created" if created else "Updated"

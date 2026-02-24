@@ -72,7 +72,8 @@ class PodcastConfig(Timestampable):
         return {
             "podcast_slug": self.podcast.slug,
             "podcast_title": self.podcast.title,
-            "is_public": self.podcast.is_public,
+            "privacy": self.podcast.privacy,
+            "uses_private_bucket": self.podcast.uses_private_bucket,
             "website_url": self.podcast.website_url,
             "opening_script": self.opening_script,
             "closing_script": self.closing_script,

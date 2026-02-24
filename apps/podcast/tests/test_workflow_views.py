@@ -26,7 +26,7 @@ class EpisodeWorkflowViewTestCase(TestCase):
             description="A test podcast.",
             author_name="Author",
             author_email="author@example.com",
-            is_public=True,
+            privacy=Podcast.Privacy.PUBLIC,
         )
         self.episode = Episode.objects.create(
             podcast=self.podcast,
@@ -152,7 +152,7 @@ class EpisodeWorkflowViewTestCase(TestCase):
             description="A private podcast.",
             author_name="Author",
             author_email="author@example.com",
-            is_public=False,
+            privacy=Podcast.Privacy.RESTRICTED,
         )
         Episode.objects.create(
             podcast=private_podcast,

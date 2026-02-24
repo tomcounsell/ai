@@ -6,6 +6,7 @@ from apps.podcast.models import (
     EpisodeArtifact,
     EpisodeWorkflow,
     Podcast,
+    PodcastAccessToken,
     PodcastConfig,
 )
 
@@ -46,25 +47,32 @@ class EpisodeArtifactInline(TabularInline):
     ordering = ["title"]
 
 
+class PodcastAccessTokenInline(TabularInline):
+    model = PodcastAccessToken
+    fields = ["label", "token", "is_active", "last_accessed_at", "access_count"]
+    readonly_fields = ["token", "last_accessed_at", "access_count"]
+    extra = 0
+
+
 @admin.register(Podcast)
 class PodcastAdmin(ModelAdmin):
     list_display = [
         "title",
         "slug",
         "language",
-        "is_public",
+        "privacy",
         "published_at",
         "created_at",
         "owner",
         "spotify_url",
         "apple_podcasts_url",
     ]
-    list_filter = ["is_public", "published_at", "language", "owner"]
+    list_filter = ["privacy", "published_at", "language", "owner"]
     search_fields = ["title", "description"]
     prepopulated_fields = {"slug": ("title",)}
     raw_id_fields = ["owner"]
     ordering = ["title"]
-    inlines = [PodcastConfigInline, EpisodeInline]
+    inlines = [PodcastConfigInline, PodcastAccessTokenInline, EpisodeInline]
 
 
 @admin.register(Episode)
@@ -102,3 +110,10 @@ class EpisodeWorkflowAdmin(ModelAdmin):
     search_fields = ["episode__title", "current_step", "blocked_on"]
     raw_id_fields = ["episode"]
     ordering = ["-created_at"]
+
+
+@admin.register(PodcastAccessToken)
+class PodcastAccessTokenAdmin(ModelAdmin):
+    list_display = ["podcast", "label", "is_active", "access_count", "last_accessed_at"]
+    list_filter = ["is_active", "podcast"]
+    readonly_fields = ["token", "last_accessed_at", "access_count"]
