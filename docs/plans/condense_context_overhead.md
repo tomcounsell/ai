@@ -11,17 +11,19 @@ tracking: https://github.com/tomcounsell/ai/issues/155
 
 ## Problem
 
-Every Claude Code session loads ~7.1k tokens of user-controllable overhead (agents, skills, CLAUDE.md) before any work begins. The largest waste is **32 custom agent files** (31 agents + README) of which only 6 are ever referenced — the other 26 contribute ~750 tokens of dead weight. The do-plan template also advertises 13 agent types that no plan has ever used (~200 tokens).
+Every Claude Code session loads ~7.1k tokens of user-controllable overhead (agents, skills, CLAUDE.md) before any work begins. The largest waste is **32 custom agent files** (31 agents + README) of which only 7 are ever referenced — the other 25 contribute ~750 tokens of dead weight. The do-plan template also advertises 13 agent types that no plan has ever used (~200 tokens).
 
 **Prerequisite PRs now merged:**
 - PR #152/#156 (Skills & Agents Reorganization) — commands consolidated into skills, `.claude/commands/` emptied, hardlinks updated, `.claude/skills/README.md` created
 - PR #154 (SDLC Enforcement) — hooks, pipeline state, do-patch skill added
 
+**Reference:** Full skill-to-skill and skill-to-agent dependency map at `docs/features/skills-dependency-map.md`
+
 **Current behavior:**
-32 files in `.claude/agents/` (31 `.md` agents + README), only 3 registered in `agent_definitions.py` (builder, validator, code-reviewer). 3 more referenced by skills (plan-maker, documentarian, frontend-tester). The remaining 26 are dead weight.
+32 files in `.claude/agents/` (31 `.md` agents + README), only 3 registered in `agent_definitions.py` (builder, validator, code-reviewer). 4 more referenced by skills (plan-maker, documentarian, frontend-tester, test-engineer). The remaining 25 are dead weight.
 
 **Desired outcome:**
-6 agent files + a trimmed do-plan template. Combined savings: ~950 tokens.
+7 agent files + a trimmed do-plan template. Combined savings: ~900 tokens.
 
 ## Appetite
 
@@ -81,27 +83,28 @@ Level 3 — Agent definitions (on-demand, when Task tool spawns sub-agent)
 | `frontend-tester` | do-test/SKILL.md (3 refs) | L1 |
 | `documentarian` | do-plan/PLAN_TEMPLATE.md | L2 |
 | `plan-maker` | do-plan/PLAN_TEMPLATE.md | L2 |
-| `test-engineer` | do-test/SKILL.md (**stale — fix**) | L1 |
+| `test-engineer` | do-test/SKILL.md, do-plan/PLAN_TEMPLATE.md | L1, L2 |
 | `[dynamic]` | do-build reads from plan task list | L1 |
 
-**Key insight**: Only 6 agent files are reachable through any disclosure level. The other 25 are orphaned — no skill at any level references them. Safe to delete.
+**Key insight**: Only 7 agent files are reachable through any disclosure level. The other 24 are orphaned — no skill at any level references them. Safe to delete.
 
 ## Solution
 
-### 1. Delete 26 unused files from `.claude/agents/` (~750 tokens saved)
+### 1. Delete 25 unused files from `.claude/agents/` (~750 tokens saved)
 
-**Keep these 6 agents** (actively referenced in `agent_definitions.py`, skills, or plans):
+**Keep these 7 agents** (actively referenced in `agent_definitions.py`, skills, or plans):
 - `builder` — registered in `agent_definitions.py`, used by do-build, do-patch
-- `validator` — registered in `agent_definitions.py`, used by do-build
+- `validator` — registered in `agent_definitions.py`, used by do-build, do-test
 - `code-reviewer` — registered in `agent_definitions.py`
+- `test-engineer` — used by do-test (`subagent_type: "test-engineer"` at SKILL.md:118)
 - `plan-maker` — used by do-plan
 - `documentarian` — used in documentation tasks
 - `frontend-tester` — used by do-test for browser testing
 
-**Delete these 25 agent files + README (26 total):**
+**Delete these 24 agent files + README (25 total):**
 
 Rebuild-era (never used in any plan or skill):
-- `agent-architect`, `api-integration-specialist`, `async-specialist`, `data-architect`, `database-architect`, `debugging-specialist`, `infrastructure-engineer`, `integration-specialist`, `mcp-specialist`, `migration-specialist`, `quality-auditor`, `test-engineer`, `tool-developer`
+- `agent-architect`, `api-integration-specialist`, `async-specialist`, `data-architect`, `database-architect`, `debugging-specialist`, `infrastructure-engineer`, `integration-specialist`, `mcp-specialist`, `migration-specialist`, `quality-auditor`, `tool-developer`
 
 Redundant specialists (never referenced):
 - `designer`, `documentation-specialist`, `performance-optimizer`, `security-reviewer`, `test-writer`, `ui-ux-specialist`, `validation-specialist`
@@ -114,7 +117,7 @@ Also delete:
 
 ### 2. Trim do-plan template's "Available Agent Types" list (~200 tokens saved)
 
-The `PLAN_TEMPLATE.md` (moved from SKILL.md to sub-file by PR #156) lists 13 agent types across Builders/Validators/Service Agents categories. Replace with just the 6 that have agent files.
+The `PLAN_TEMPLATE.md` (moved from SKILL.md to sub-file by PR #156) lists 13 agent types across Builders/Validators/Service Agents categories. Replace with just the 7 that have agent files.
 
 **File:** `.claude/skills/do-plan/PLAN_TEMPLATE.md` (lines 165-183)
 
@@ -124,18 +127,19 @@ The `PLAN_TEMPLATE.md` (moved from SKILL.md to sub-file by PR #156) lists 13 age
 - `builder` - General implementation (default for most work)
 - `validator` - Read-only verification (no Write/Edit tools)
 - `code-reviewer` - Code review, security checks
+- `test-engineer` - Test implementation and strategy
 - `plan-maker` - Planning subagent
 - `documentarian` - Documentation updates
 - `frontend-tester` - Browser testing
 ```
 
-Also update line 154's example from `[builder | designer | tool-developer | database-architect | etc.]` to `[builder | code-reviewer | documentarian | etc.]`.
+Also update line 154's example from `[builder | designer | tool-developer | database-architect | etc.]` to `[builder | code-reviewer | test-engineer | etc.]`.
 
 ### 3. Fix stale references to deleted agents
 
-**`do-test/SKILL.md` line 115:** Uses `subagent_type: "test-engineer"`. Change to `"builder"` — the Task tool falls back to defaults anyway, but using a known type is cleaner.
-
 **`scan_secrets.py` line 66:** Has `security-reviewer.md` in ignore patterns. Remove the line — the file won't exist.
+
+Note: `do-test/SKILL.md` reference to `test-engineer` is NOT stale — it's an active reference. Agent is kept.
 
 ### 4. Update `.claude/skills/README.md` agent count
 
@@ -173,15 +177,15 @@ No agent integration required — agent files are prompt hints for the Task tool
 
 ## Documentation
 
-- [ ] Delete `.claude/agents/README.md` (agent index now trivial with only 6 files)
+- [ ] Delete `.claude/agents/README.md` (agent index now trivial with only 7 files)
 - [ ] Add progressive disclosure hierarchy diagram to `.claude/skills/README.md` — document all 4 levels (L0 system prompt → L1 SKILL.md body → L2 sub-files → L3 agent definitions) with which skills have sub-files and which agents are referenced at each level. This is the canonical reference so future cleanup can trace what's reachable before deleting.
-- [ ] No new feature doc needed — this is internal cleanup
+- [x] `docs/features/skills-dependency-map.md` — full skill-to-skill, skill-to-agent, and progressive disclosure mapping (created pre-build as prerequisite)
+- [ ] Add entry to `docs/features/README.md` index table for the dependency map
 
 ## Success Criteria
 
-- [ ] Agent file count reduced from 32 to 6 (`ls .claude/agents/*.md | wc -l` = 6)
-- [ ] do-plan `PLAN_TEMPLATE.md` lists only the 6 existing agent types
-- [ ] `do-test/SKILL.md` no longer references `test-engineer`
+- [ ] Agent file count reduced from 32 to 7 (`ls .claude/agents/*.md | wc -l` = 7)
+- [ ] do-plan `PLAN_TEMPLATE.md` lists only the 7 existing agent types
 - [ ] `scan_secrets.py` no longer references `security-reviewer.md`
 - [ ] All existing skills still invocable (`/do-build`, `/do-plan`, `/do-test`, etc.)
 - [ ] No broken agent references in active skills
@@ -212,9 +216,9 @@ No agent integration required — agent files are prompt hints for the Task tool
 - **Assigned To**: cleanup-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Delete 25 agent `.md` files listed in Solution section 1
+- Delete 24 agent `.md` files listed in Solution section 1
 - Delete `.claude/agents/README.md`
-- Keep only: builder, validator, code-reviewer, plan-maker, documentarian, frontend-tester
+- Keep only: builder, validator, code-reviewer, test-engineer, plan-maker, documentarian, frontend-tester
 
 ### 2. Trim do-plan template and fix stale references
 - **Task ID**: trim-and-fix
@@ -222,9 +226,8 @@ No agent integration required — agent files are prompt hints for the Task tool
 - **Assigned To**: cleanup-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Replace "Available Agent Types" section in `.claude/skills/do-plan/PLAN_TEMPLATE.md` with the 6 active types
+- Replace "Available Agent Types" section in `.claude/skills/do-plan/PLAN_TEMPLATE.md` with the 7 active types
 - Update line 154 example agent type list
-- Change `subagent_type: "test-engineer"` to `"builder"` in `.claude/skills/do-test/SKILL.md`
 - Remove `security-reviewer.md` ignore pattern from `scripts/scan_secrets.py`
 - Update `.claude/skills/README.md` if it references agent counts
 
@@ -244,13 +247,13 @@ No agent integration required — agent files are prompt hints for the Task tool
 - **Assigned To**: cleanup-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- `ls .claude/agents/*.md | wc -l` = 6
-- `grep -rn "agent-architect\|database-architect\|test-engineer\|quality-auditor\|security-reviewer\|tool-developer\|designer\b" .claude/skills/ scripts/` — should find no references to deleted agents
-- Verify do-plan `PLAN_TEMPLATE.md` "Available Agent Types" lists exactly 6 types
+- `ls .claude/agents/*.md | wc -l` = 7
+- `grep -rn "agent-architect\|database-architect\|quality-auditor\|security-reviewer\|tool-developer\|designer\b" .claude/skills/ scripts/` — should find no references to deleted agents
+- Verify do-plan `PLAN_TEMPLATE.md` "Available Agent Types" lists exactly 7 types
 - `pytest tests/ -v` — no regressions
 
 ## Validation Commands
 
-- `ls .claude/agents/*.md | wc -l` — should be 6
-- `grep -rn "agent-architect\|database-architect\|test-engineer\|quality-auditor\|security-reviewer" .claude/skills/ scripts/` — should find no references
+- `ls .claude/agents/*.md | wc -l` — should be 7
+- `grep -rn "agent-architect\|database-architect\|quality-auditor\|security-reviewer" .claude/skills/ scripts/` — should find no references
 - `pytest tests/ -v` — no regressions
