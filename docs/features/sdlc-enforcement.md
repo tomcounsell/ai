@@ -135,9 +135,75 @@ Set `SKIP_SDLC=1` to unblock, then file a GitHub issue with the session ID and `
 **Stop hook is slow on non-code sessions:**
 Should not happen — the first check is a file existence test. If slow, verify `sdlc_state.json` doesn't exist for the session.
 
+## Agent SDK Enforcement
+
+A second layer of SDLC enforcement operates at the Claude Agent SDK level, independent of the Claude Code hook system. This layer catches code pushed directly to `main` when the agent runs outside of a `/do-build` worktree.
+
+### System Prompt Injection (SDLC_WORKFLOW)
+
+Every agent session started by `ValorAgent` receives the mandatory pipeline rules injected into the system prompt. The rules are hardcoded in `agent/sdk_client.py` as the `SDLC_WORKFLOW` constant — not in `config/SOUL.md` or any config file. This prevents accidental removal via persona doc edits.
+
+The system prompt structure assembled by `load_system_prompt()`:
+
+```
+[SOUL.md — persona, attitude, purpose, communication style]
+---
+[SDLC_WORKFLOW — mandatory pipeline rules, hardcoded in sdk_client.py]
+---
+[Work Completion Criteria — from CLAUDE.md]
+```
+
+The `SDLC_WORKFLOW` block tells the agent:
+- ALL code changes require: Issue → Plan → Build → PR → Merge
+- NEVER commit code to main
+- NEVER push code to main — all pushes go to `session/{slug}` branches
+- Plan/doc changes (`.md`, `.json`, `.yaml`) may be committed directly to main
+- Code changes (`.py`, `.js`, `.ts`) never go directly to main
+
+### Pre-Completion Check (_check_no_direct_main_push)
+
+`agent/sdk_client.py` provides `_check_no_direct_main_push(session_id, repo_root)` which:
+
+1. Reads `data/sessions/{session_id}/sdlc_state.json`
+2. If no state file exists: passes (non-code session)
+3. If `code_modified: false`: passes (docs/ops session)
+4. If `code_modified: true`: checks current git branch via `git rev-parse --abbrev-ref HEAD`
+5. If branch is not `main`: passes (inside a `/do-build` worktree on `session/{slug}`)
+6. If branch IS `main`: returns a hard-block error with the list of modified files and remediation steps
+
+**Hard-block, no escape hatch at this layer.** The Claude Code hook system has `SKIP_SDLC=1` for genuine emergencies. The SDK stop hook does not — Telegram is free text and there is no mechanism for a user to signal an override through the message channel.
+
+**Fail-open on errors.** If the state file is corrupt or git fails, the check fails open (returns None) and logs a warning. The check never crashes a session.
+
+### Stop Hook Integration
+
+The check is wired into `agent/hooks/stop.py`, which fires when the Agent SDK session ends:
+
+```python
+violation = _check_no_direct_main_push(session_id)
+if violation:
+    return {"decision": "block", "reason": violation}
+```
+
+Sessions on `session/{slug}` branches — all `/do-build` builder agents — always pass the branch check. The check exclusively targets direct-to-main code pushes from ad-hoc sessions.
+
+### SOUL.md Cleanup
+
+`config/SOUL.md` no longer contains SDLC workflow instructions. The "Orchestration Instructions" section (Task Classification, SDLC Pattern, Parallel Execution, Validation Loop, Response Pattern blocks) has been removed. SOUL.md is now pure persona — who Valor is, communication style, values, machine setup. Pipeline rules live in `agent/sdk_client.py`.
+
+### Two-Layer Summary
+
+| Layer | Where | Enforcement |
+|-------|-------|-------------|
+| **Behavioral** | Agent system prompt (`SDLC_WORKFLOW`) | Instructs the agent to follow the pipeline |
+| **Structural** | SDK Stop hook (`_check_no_direct_main_push`) | Hard-blocks code-on-main at session end |
+| **Quality gate** | Claude Code Stop hook (`validate_sdlc_on_stop.py`) | Blocks if pytest/ruff/black not run |
+
 ## Related
 
 - [do-patch Skill](do-patch-skill.md) — repair loop invoked on test failure or review blockers
 - `.claude/hooks/validators/validate_commit_message.py` — commit message validation (blocks co-author trailers and empty messages)
 - `agent/pipeline_state.py` — pipeline state read/write module
 - `.claude/hooks/validators/validate_sdlc_on_stop.py` — stop hook source
+- `agent/sdk_client.py` — `SDLC_WORKFLOW` constant, `load_system_prompt()`, `_check_no_direct_main_push()`
+- `agent/hooks/stop.py` — SDK stop hook that fires `_check_no_direct_main_push()`
