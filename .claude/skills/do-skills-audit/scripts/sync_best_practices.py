@@ -13,7 +13,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -85,11 +85,29 @@ ANTHROPIC_SUBSTITUTIONS = [
 # ---------------------------------------------------------------------------
 
 
+def _get_ssl_context():
+    """Get an SSL context with proper CA certificates.
+
+    Uses certifi's CA bundle to work around macOS Python installations
+    that ship without root certificates (SSL: CERTIFICATE_VERIFY_FAILED).
+    Falls back to default context if certifi is unavailable.
+    """
+    import ssl
+
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
 def _fetch_url(url: str) -> str | None:
     """Fetch URL content. Returns None on failure."""
     try:
+        ctx = _get_ssl_context()
         req = Request(url, headers={"User-Agent": "skills-audit/1.0"})
-        with urlopen(req, timeout=15) as resp:
+        with urlopen(req, timeout=15, context=ctx) as resp:
             return resp.read().decode("utf-8", errors="replace")
     except (URLError, TimeoutError, OSError) as e:
         print(f"⚠️  Failed to fetch {url}: {e}", file=sys.stderr)
@@ -117,7 +135,7 @@ def load_cache() -> dict | None:
     try:
         data = json.loads(CACHE_FILE.read_text(encoding="utf-8"))
         fetched = datetime.fromisoformat(data["fetched_at"])
-        age_days = (datetime.now(datetime.UTC) - fetched).days
+        age_days = (datetime.now(tz=timezone.utc) - fetched).days
         if age_days < CACHE_TTL_DAYS:
             data["_cache_age_days"] = age_days
             data["_cache_status"] = "FRESH"
@@ -134,7 +152,7 @@ def save_cache(sources: dict[str, str]) -> None:
     """Save fetched docs to cache."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     data = {
-        "fetched_at": datetime.now(datetime.UTC).isoformat(),
+        "fetched_at": datetime.now(tz=timezone.utc).isoformat(),
         "ttl_days": CACHE_TTL_DAYS,
         "sources": sources,
     }
