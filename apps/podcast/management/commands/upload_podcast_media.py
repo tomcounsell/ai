@@ -18,6 +18,9 @@ Usage:
     # Only upload audio (skip cover images)
     uv run python manage.py upload_podcast_media --source-dir ... --audio-only
 
+    # Also upload podcast-level cover images
+    uv run python manage.py upload_podcast_media --source-dir ... --podcast-covers
+
 Idempotent: skips episodes that already have a Supabase URL.
 """
 
@@ -116,12 +119,18 @@ class Command(BaseCommand):
             action="store_true",
             help="Re-upload even if URL looks valid",
         )
+        parser.add_argument(
+            "--podcast-covers",
+            action="store_true",
+            help="Also upload podcast-level cover images",
+        )
 
     def handle(self, **options):
         source_dir = Path(options["source_dir"])
         dry_run = options["dry_run"]
         audio_only = options["audio_only"]
         force = options["force"]
+        podcast_covers = options.get("podcast_covers", False)
 
         if not source_dir.is_dir():
             raise CommandError(f"Source directory not found: {source_dir}")
@@ -160,6 +169,8 @@ class Command(BaseCommand):
             "audio_not_found": 0,
             "cover_not_found": 0,
             "duration_populated": 0,
+            "podcast_cover_uploaded": 0,
+            "podcast_cover_skipped": 0,
             "errors": 0,
         }
 
@@ -298,6 +309,13 @@ class Command(BaseCommand):
                     else:
                         stats["cover_skipped"] += 1
 
+        # Upload podcast-level cover images
+        if podcast_covers:
+            storage_client = None if dry_run else storage
+            self._upload_podcast_covers(
+                source_dir, dry_run, force, storage_client, stats
+            )
+
         # Summary
         self.stdout.write("\n=== Upload Summary ===")
         self.stdout.write(
@@ -310,6 +328,11 @@ class Command(BaseCommand):
             f"{stats['cover_skipped']} skipped, "
             f"{stats['cover_not_found']} not found"
         )
+        if podcast_covers:
+            self.stdout.write(
+                f"Podcast covers: {stats['podcast_cover_uploaded']} uploaded, "
+                f"{stats['podcast_cover_skipped']} skipped"
+            )
         self.stdout.write(f"Duration: {stats['duration_populated']} populated")
         if stats["errors"]:
             self.stderr.write(f"Errors:   {stats['errors']}")
@@ -355,3 +378,82 @@ class Command(BaseCommand):
                 if episode_slug in ep_dir.name or ep_dir.name in episode_slug:
                     return ep_dir
         return None
+
+    def _find_podcast_cover(self, podcast_slug: str, source_dir: Path) -> Path | None:
+        """Find podcast-level cover image using priority-based lookup.
+
+        Priority:
+        1. {source_dir}/../cover.png -- global cover (yudame-research)
+        2. {source_dir}/../{podcast_slug}/cover.png -- per-podcast cover
+        """
+        parent = source_dir.parent
+
+        # Priority 1: global cover in parent directory
+        global_cover = parent / "cover.png"
+        if global_cover.exists():
+            return global_cover
+
+        # Priority 2: per-podcast cover by slug
+        slug_cover = parent / podcast_slug / "cover.png"
+        if slug_cover.exists():
+            return slug_cover
+
+        return None
+
+    def _upload_podcast_covers(
+        self,
+        source_dir: Path,
+        dry_run: bool,
+        force: bool,
+        storage,
+        stats: dict,
+    ) -> None:
+        """Upload podcast-level cover images to Supabase."""
+        self.stdout.write("\n--- Podcast Covers ---")
+
+        for podcast in Podcast.objects.all():
+            existing_url = podcast.cover_image_url or ""
+            if existing_url.startswith(("http://", "https://")) and not force:
+                self.stdout.write(
+                    f"  {podcast.title}: Already uploaded: {existing_url}"
+                )
+                stats["podcast_cover_skipped"] += 1
+                continue
+
+            cover_path = self._find_podcast_cover(podcast.slug, source_dir)
+            if not cover_path:
+                self.stdout.write(f"  {podcast.title}: No cover file found")
+                stats["podcast_cover_skipped"] += 1
+                continue
+
+            storage_key = f"podcast/{podcast.slug}/cover.png"
+
+            if dry_run:
+                self.stdout.write(
+                    f"  {podcast.title}: [DRY] Would upload "
+                    f"{cover_path} -> {storage_key}"
+                )
+            else:
+                try:
+                    content_type = (
+                        mimetypes.guess_type(str(cover_path))[0] or "image/png"
+                    )
+                    cover_bytes = cover_path.read_bytes()
+                    storage.upload(
+                        storage_key,
+                        file=cover_bytes,
+                        file_options={
+                            "content-type": content_type,
+                            "upsert": "true",
+                        },
+                    )
+                    url = storage.get_public_url(storage_key)
+                    podcast.cover_image_url = url
+                    podcast.save(update_fields=["cover_image_url", "modified_at"])
+                    self.stdout.write(f"  {podcast.title}: Cover -> {url}")
+                except Exception as e:
+                    self.stderr.write(f"  {podcast.title}: ERROR uploading cover: {e}")
+                    stats["errors"] += 1
+                    continue
+
+            stats["podcast_cover_uploaded"] += 1
