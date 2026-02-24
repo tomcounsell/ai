@@ -20,7 +20,7 @@ if user_site.exists() and str(user_site) not in sys.path:
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # noqa: E402
 
 # Load env
 env_path = project_root / ".env"

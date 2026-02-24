@@ -37,9 +37,15 @@ async def search(query: str, **kwargs) -> SearchResult | None:
 
     # Build system prompt based on search type
     system_prompts = {
-        "conversational": "Be precise and concise. Provide a helpful summary of the search results.",
-        "factual": "Provide factual, verifiable information. Be precise and cite specific data points.",
-        "citations": "Always cite your sources. Include URLs for verification. Format citations clearly.",
+        "conversational": (
+            "Be precise and concise. Provide a helpful summary of the search results."
+        ),
+        "factual": (
+            "Provide factual, verifiable information. Be precise and cite specific data points."
+        ),
+        "citations": (
+            "Always cite your sources. Include URLs for verification. Format citations clearly."
+        ),
     }
     system_prompt = system_prompts.get(search_type, system_prompts["conversational"])
 

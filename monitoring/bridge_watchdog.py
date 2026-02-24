@@ -31,7 +31,7 @@ from pathlib import Path
 PROJECT_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_DIR))
 
-from monitoring.crash_tracker import (
+from monitoring.crash_tracker import (  # noqa: E402
     detect_crash_pattern,
     get_recent_crashes,
     log_crash,

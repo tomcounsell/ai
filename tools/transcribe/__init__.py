@@ -4,7 +4,6 @@ Voice Transcription Tool
 Audio transcription using OpenAI Whisper API.
 """
 
-import base64
 import os
 from pathlib import Path
 

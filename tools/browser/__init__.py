@@ -5,7 +5,6 @@ Web automation using Playwright for navigation, screenshots, and interaction.
 """
 
 import base64
-import os
 from typing import Literal
 
 # Check if playwright is available
@@ -31,7 +30,10 @@ def _check_playwright():
     """Check if Playwright is available."""
     if not PLAYWRIGHT_AVAILABLE:
         return {
-            "error": "Playwright not installed. Run: pip install playwright && playwright install chromium"
+            "error": (
+                "Playwright not installed. "
+                "Run: pip install playwright && playwright install chromium"
+            )
         }
     return None
 

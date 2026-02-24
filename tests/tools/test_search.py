@@ -122,7 +122,10 @@ class TestSearchEdgeCases:
 
     def test_long_query(self, perplexity_api_key):
         """Test with a longer query."""
-        query = "Explain the process of photosynthesis in plants including the light-dependent and light-independent reactions"
+        query = (
+            "Explain the process of photosynthesis in plants including the "
+            "light-dependent and light-independent reactions"
+        )
         result = search(query)
         assert "error" not in result
         assert result.get("summary")

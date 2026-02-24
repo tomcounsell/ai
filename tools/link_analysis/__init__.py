@@ -659,7 +659,10 @@ async def summarize_url_content(url: str, timeout: float = 30.0) -> str | None:
                     "messages": [
                         {
                             "role": "user",
-                            "content": f"Summarize the main points of this URL in 2-3 sentences. Be concise and informative: {url}",
+                            "content": (
+                                "Summarize the main points of this URL in 2-3 sentences. "
+                                f"Be concise and informative: {url}"
+                            ),
                         }
                     ],
                     "max_tokens": 256,

@@ -202,8 +202,12 @@ def create_plan_document(
         claude_md = working_dir / "CLAUDE.md"
         if claude_md.exists():
             content = claude_md.read_text()
+            pattern = (
+                r"## Work Completion Criteria\n\n.*?"
+                r"### Required Completion Checks(.*?)(?=\n## |\n### Why|$)"
+            )
             match = re.search(
-                r"## Work Completion Criteria\n\n.*?### Required Completion Checks(.*?)(?=\n## |\n### Why|$)",
+                pattern,
                 content,
                 re.DOTALL,
             )
@@ -211,6 +215,12 @@ def create_plan_document(
                 success_criteria = match.group(1).strip()
 
     # Create plan content
+    default_criteria = (
+        "- Fulfill the original request\n"
+        "- All code committed and pushed\n"
+        "- Tests passing (if applicable)"
+    )
+    criteria_text = success_criteria if success_criteria else default_criteria
     plan_content = f"""# Work Plan: {branch_name}
 
 **Status**: IN_PROGRESS
@@ -223,7 +233,7 @@ def create_plan_document(
 
 ## Success Criteria
 
-{success_criteria if success_criteria else "- Fulfill the original request\n- All code committed and pushed\n- Tests passing (if applicable)"}
+{criteria_text}
 
 ## Implementation Notes
 
@@ -487,7 +497,7 @@ def return_to_main(working_dir: Path) -> bool:
             )
             logger.info("Switched to master branch")
             return True
-        except:
+        except Exception:
             return False
 
 
@@ -543,7 +553,10 @@ def format_branch_state_message(state: BranchState, revival_mode: bool = False) 
                 msg += f"Plan: `{state.active_plan.name}`\n\n"
             msg += "The previous session is being resumed separately. "
             msg += "Your current message will be processed in parallel.\n\n"
-            msg += "_Sessions are dormant until revived. Reply to any Valor message to continue that specific thread._"
+            msg += (
+                "_Sessions are dormant until revived. "
+                "Reply to any Valor message to continue that specific thread._"
+            )
             return msg
         else:
             # Legacy format (for direct replies or manual checks)

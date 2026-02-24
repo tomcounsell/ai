@@ -21,7 +21,7 @@ from rich.table import Table
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from config import config_loader, validate_configuration
+from config import config_loader, validate_configuration  # noqa: E402
 
 console = Console()
 
@@ -244,7 +244,10 @@ def show_config_summary():
         # Workspace
         if "workspace" in summary and "error" not in summary["workspace"]:
             ws = summary["workspace"]
-            workspace_info = f"{ws['name']} v{ws['version']} ({ws['agents_count']} agents, {ws['tools_count']} tools)"
+            workspace_info = (
+                f"{ws['name']} v{ws['version']} "
+                f"({ws['agents_count']} agents, {ws['tools_count']} tools)"
+            )
             table.add_row("Workspace", workspace_info)
         else:
             table.add_row("Workspace", "❌ Configuration error")

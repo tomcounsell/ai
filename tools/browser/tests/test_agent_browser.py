@@ -259,7 +259,7 @@ class TestErrorHandling:
 
     def test_invalid_url(self, session_id):
         """Should handle invalid URL gracefully."""
-        result = run_browser_cmd("open", "not-a-valid-url", session=session_id)
+        run_browser_cmd("open", "not-a-valid-url", session=session_id)
         # Should either fail gracefully or auto-add protocol
         # Different tools handle this differently
 

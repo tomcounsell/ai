@@ -82,18 +82,24 @@ def judge_test_result(
         "strict": "Be rigorous. All criteria must be fully met with no compromises.",
     }
 
-    prompt = f"""You are a test evaluator. Judge whether this test output meets the specified criteria.
+    intro = "You are a test evaluator. Judge whether this test output meets the specified criteria."
+    criteria_list = chr(10).join(f"- {c}" for c in expected_criteria)
+    context_section = f"## Context\n{context}" if context else ""
+    strictness_text = strictness_instructions.get(
+        strictness, strictness_instructions["standard"]
+    )
+    prompt = f"""{intro}
 
 ## Test Output
 {test_output}
 
 ## Expected Criteria
-{chr(10).join(f"- {c}" for c in expected_criteria)}
+{criteria_list}
 
-{f"## Context{chr(10)}{context}" if context else ""}
+{context_section}
 
 ## Strictness
-{strictness_instructions.get(strictness, strictness_instructions["standard"])}
+{strictness_text}
 
 ## Instructions
 For each criterion, determine if it is met. Then provide an overall pass/fail judgment.

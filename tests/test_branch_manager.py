@@ -49,23 +49,23 @@ class TestBranchDecision:
 
     def test_simple_request_no_branch(self):
         """Test simple one-word request doesn't need branch."""
-        assert should_create_branch("typo") == False
-        assert should_create_branch("fix typo in readme") == False
+        assert not should_create_branch("typo")
+        assert not should_create_branch("fix typo in readme")
 
     def test_multi_step_needs_branch(self):
         """Test multi-step work needs branch."""
-        assert should_create_branch("update readme and add docs") == True
-        assert should_create_branch("implement feature then add tests") == True
+        assert should_create_branch("update readme and add docs")
+        assert should_create_branch("implement feature then add tests")
 
     def test_long_request_needs_branch(self):
         """Test detailed request needs branch."""
         long_request = "a" * 150
-        assert should_create_branch(long_request) == True
+        assert should_create_branch(long_request)
 
     def test_complex_keywords_need_branch(self):
         """Test complex keywords trigger branching."""
-        assert should_create_branch("refactor authentication module") == True
-        assert should_create_branch("build new API endpoint") == True
+        assert should_create_branch("refactor authentication module")
+        assert should_create_branch("build new API endpoint")
 
 
 class TestGitOperations:

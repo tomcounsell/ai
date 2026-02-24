@@ -16,7 +16,8 @@ async def search(query: str, **kwargs) -> SearchResult | None:
 
     Args:
         query: Search query
-        **kwargs: Additional parameters (max_results, search_depth, include_domains, exclude_domains)
+        **kwargs: Additional parameters (max_results, search_depth, include_domains,
+            exclude_domains)
 
     Returns:
         SearchResult on success, None on failure

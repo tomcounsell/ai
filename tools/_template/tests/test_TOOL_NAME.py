@@ -1,3 +1,4 @@
+# ruff: noqa: N999
 """
 Integration tests for TOOL_NAME.
 

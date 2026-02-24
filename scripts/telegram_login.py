@@ -82,9 +82,12 @@ async def authorize_telegram_client():
             sent_code = await client.send_code_request(PHONE, force_sms=False)
             code_type = sent_code.type.__class__.__name__
             print(f"✅ Code sent via: {code_type}")
-            print(
-                f"   Code length: {sent_code.type.length if hasattr(sent_code.type, 'length') else 'unknown'}"
+            code_length = (
+                sent_code.type.length
+                if hasattr(sent_code.type, "length")
+                else "unknown"
             )
+            print(f"   Code length: {code_length}")
 
             code = None  # Will be set below
 

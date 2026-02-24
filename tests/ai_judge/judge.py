@@ -250,6 +250,10 @@ def judge_test_result(
     criteria_text = "\n".join(f"- {c}" for c in expected_criteria)
     context_text = json.dumps(test_context) if test_context else "No additional context"
 
+    criteria_scores_desc = (
+        '- "criteria_scores": object mapping each criterion to '
+        '"excellent", "good", "acceptable", "poor", or "fail"'
+    )
     prompt = f"""Evaluate the following test output against the given criteria.
 
 TEST OUTPUT:
@@ -263,7 +267,7 @@ CONTEXT:
 
 Respond with a JSON object containing:
 - "overall_score": one of "excellent", "good", "acceptable", "poor", "fail"
-- "criteria_scores": object mapping each criterion to "excellent", "good", "acceptable", "poor", or "fail"
+{criteria_scores_desc}
 - "pass_fail": true or false
 - "confidence": number between 0 and 1
 - "reasoning": brief explanation of your judgment
