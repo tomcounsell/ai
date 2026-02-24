@@ -2,6 +2,7 @@
 name: do-design-review
 description: "Review an existing web UI against premium design criteria. Screenshots pages and evaluates visual hierarchy, typography, color, spacing, consistency, and more. Use when the user wants to evaluate design quality or says 'review this design', 'check the UI', or provides a URL for design feedback."
 allowed-tools: Bash(agent-browser:*)
+context: fork
 ---
 
 This skill evaluates existing web interfaces against premium design criteria. It is the review-time companion to `/frontend-design` — that skill builds to the standard; this one audits against it.

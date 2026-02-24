@@ -1,8 +1,6 @@
 ---
 name: frontend-design
-icon: 󰏘
 description: "Use when creating distinctive, production-grade frontend interfaces with high design quality. Triggered by requests to build web components, pages, artifacts, posters, or applications. Generates creative, polished code that avoids generic AI aesthetics."
-license: Apache 2.0. Based on Anthropic's frontend-design skill. See NOTICE.md for attribution.
 ---
 
 This skill guides creation of distinctive, production-grade frontend interfaces that avoid generic "AI slop" aesthetics. Implement real working code with exceptional attention to aesthetic details and creative choices.

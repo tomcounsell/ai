@@ -2,6 +2,7 @@
 name: new-valor-skill
 description: Use when creating a Valor-specific tool that integrates with the Telegram bridge, uses SOUL.md persona, or needs CLAUDE.md documentation. Also use when the user says 'create a valor tool', 'new valor skill', or 'build a tool for this project'. Handles tool directory structure, CLI registration, bridge integration, and validation hooks.
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash, AskUserQuestion
+disable-model-invocation: true
 hooks:
   Stop:
     - hooks:

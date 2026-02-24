@@ -1,6 +1,7 @@
 ---
 name: add-feature
 description: "Use when adding a new feature, skill, tool, or MCP server to the Valor system. Triggered by 'add a feature', 'create a new tool', 'extend the system', or 'how do I add...'."
+argument-hint: "<feature-name> or description"
 ---
 
 # Add Feature - Extension Guide
