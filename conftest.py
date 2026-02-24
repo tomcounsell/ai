@@ -83,9 +83,15 @@ def pytest_configure(config):
 def django_db_setup(django_test_environment, django_db_blocker):
     """Create a fresh test database with all migrations applied.
 
-    Delegates to Django's standard test database creation so the schema
-    always matches the current model definitions, regardless of whether
-    migrations have been applied to the local dev database.
+    Overrides pytest-django's default django_db_setup to use Django's
+    setup_databases / teardown_databases directly. This creates a
+    disposable ``test_<dbname>`` database with the full migration chain
+    applied, so tests always run against the current schema even when
+    the local dev database has unapplied migrations.
+
+    The test database is destroyed after the session via teardown_databases.
+    Individual tests still get transaction isolation from pytest-django's
+    ``@pytest.mark.django_db`` / ``TransactionTestCase`` machinery.
     """
     from django.test.utils import setup_databases, teardown_databases
 

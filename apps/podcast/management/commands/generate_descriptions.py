@@ -87,7 +87,10 @@ def _truncate_at_sentence(text: str, max_length: int = 250) -> str:
     if len(text) <= max_length:
         return text
 
-    # Find the last sentence boundary (". ") within max_length
+    # Find the last sentence boundary (". ") within max_length.
+    # Note: naive split — abbreviations like "Dr. " or "U.S. " may cause
+    # early truncation. Acceptable for AI-generated report text which uses
+    # clean sentence boundaries.
     truncated = text[:max_length]
     last_period = truncated.rfind(". ")
     if last_period > 0:
