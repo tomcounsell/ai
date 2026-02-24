@@ -1,7 +1,7 @@
 ---
 status: Planning
 type: feature
-appetite: Small
+appetite: Medium
 owner: Valor
 created: 2025-02-23
 tracking: https://github.com/tomcounsell/ai/issues/153
@@ -32,7 +32,7 @@ A `/do-skills-audit` skill that:
 
 ## Appetite
 
-**Size:** Small
+**Size:** Medium (upgraded from Small — LLM sync adds complexity)
 
 **Team:** Solo dev
 
@@ -40,7 +40,7 @@ A `/do-skills-audit` skill that:
 - PM check-ins: 0
 - Review rounds: 1
 
-This is a straightforward validation tool. The rules are already defined by #152/#156. Implementation is mechanical — read files, check rules, report results.
+Two parts: (1) deterministic validation — mechanical, read files, check 12 rules, report results; (2) LLM best practices sync — fetches Anthropic's latest published guidance, compares against our template/validator, and optionally updates skills to match state of the art.
 
 ## Prerequisites
 
@@ -58,19 +58,23 @@ This is a straightforward validation tool. The rules are already defined by #152
 
 ### Flow
 
-**User invokes `/do-skills-audit`** → Skill runs `audit_skills.py` → Script scans all SKILL.md files → Checks each against rules → Outputs structured report → Skill summarizes findings
+**Standard audit (deterministic):**
+`/do-skills-audit` → `audit_skills.py` → scan SKILL.md files → check rules → structured report
+
+**Best practices sync (LLM-powered, new scope):**
+`/do-skills-audit --sync-best-practices` → fetch latest Anthropic docs → LLM compares current skills against published standards → generates update recommendations → optionally applies fixes
 
 ### Technical Approach
 
-#### Validation Rules
+#### Validation Rules (Deterministic)
 
-Each SKILL.md is checked against these rules (derived from the canonical template and #152/#156 decisions):
+Each SKILL.md is checked against these rules, aligned with [Anthropic's official skill docs](https://code.claude.com/docs/en/skills) and [skill-creator](https://github.com/anthropics/skills/blob/main/skills/skill-creator/SKILL.md):
 
 **Structural rules:**
-1. **Line count**: SKILL.md must be <= 500 lines (FAIL if exceeded)
+1. **Line count**: SKILL.md must be <= 500 lines (FAIL if exceeded) — per Anthropic: "Keep SKILL.md under 500 lines"
 2. **Frontmatter exists**: Must have YAML frontmatter delimited by `---` (FAIL if missing)
-3. **Name field**: Must be present, lowercase, hyphens only, max 64 chars (FAIL if invalid)
-4. **Description field**: Must be present and start with "Use when" (WARN if missing trigger phrase)
+3. **Name field**: Must be present, lowercase, hyphens only, max 64 chars (FAIL if invalid) — per Anthropic: "Lowercase letters, numbers, and hyphens only (max 64 characters)"
+4. **Description field**: Must be present and trigger-oriented — should describe both what the skill does AND when to use it (WARN if missing trigger phrasing). Per Anthropic's skill-creator: description is the "PRIMARY TRIGGERING MECHANISM" — include "when to use" information in the description, not the body, because the body only loads after triggering.
 5. **Description length**: Must be <= 1024 characters (WARN if exceeded)
 
 **Classification rules:**
@@ -81,6 +85,10 @@ Each SKILL.md is checked against these rules (derived from the canonical templat
 **Content rules:**
 9. **Sub-file references**: Any `[text](file.md)` link must point to a file that exists in the skill directory (FAIL if broken). This is critical now that PR #156 introduced sub-files — do-plan has 3 sub-files (PLAN_TEMPLATE.md, SCOPING.md, EXAMPLES.md) and do-build has 2 (WORKFLOW.md, PR_AND_CLEANUP.md).
 10. **No duplicate descriptions**: No two skills should have identical or near-identical description fields (WARN if found)
+
+**Frontmatter completeness rules (new):**
+11. **Known fields only**: Frontmatter should only contain recognized fields: `name`, `description`, `argument-hint`, `disable-model-invocation`, `user-invocable`, `allowed-tools`, `model`, `context`, `agent`, `hooks` (WARN if unknown fields found)
+12. **`argument-hint` for skills with `$ARGUMENTS`**: If SKILL.md body references `$ARGUMENTS` or `$0`/`$1`, the `argument-hint` field should be set (WARN if missing)
 
 #### Script Design
 
@@ -97,6 +105,24 @@ Exit codes:
 - 0: All pass (may have warnings)
 - 1: At least one FAIL
 
+#### LLM Best Practices Sync (New Scope)
+
+`sync_best_practices.py` — a separate script that uses an LLM to:
+
+1. **Fetch latest Anthropic docs**: Pull current content from `https://code.claude.com/docs/en/skills` and `https://github.com/anthropics/skills` (the official skill-creator and spec)
+2. **Extract current best practices**: Parse the fetched docs for frontmatter fields, structural rules, progressive disclosure guidance, description format, and directory structure requirements
+3. **Compare against our standards**: Diff the extracted practices against our validator rules and template
+4. **Generate a delta report**: List what's new, changed, or deprecated in Anthropic's guidance vs. our current template/validator
+5. **Update artifacts** (with `--apply` flag):
+   - Update `new-skill/SKILL_TEMPLATE.md` to match latest canonical structure
+   - Update `new-skill/SKILL.md` field constraints and best practice guidance
+   - Update `audit_skills.py` validation rules to match any new fields or constraints
+   - Update existing skills that violate newly-discovered best practices (with `--update-skills` flag)
+
+**LLM choice**: Use local Ollama (lightweight) for diffing/comparison. Fall back to Claude API for complex semantic analysis if needed.
+
+**Caching**: Cache fetched docs in `data/best_practices_cache.json` with TTL of 7 days to avoid redundant fetches.
+
 #### Skill Design
 
 The SKILL.md is minimal — it describes when to use the audit, then shells out to the script:
@@ -109,15 +135,19 @@ The skill can also accept arguments:
 - `--fix` — auto-fix trivial issues (add missing `name` field from directory name, trim trailing whitespace)
 - `--json` — output only JSON (for piping to other tools)
 - `--skill <name>` — audit a single skill instead of all
+- `--sync-best-practices` — fetch latest Anthropic docs and compare against current standards
+- `--sync-best-practices --apply` — apply recommended updates to template and validator
+- `--sync-best-practices --update-skills` — also update existing skills to match new standards
 
 ## Rabbit Holes
 
-- **Don't use LLM for validation**: All checks are deterministic string/regex operations. No need for AI-powered analysis — that would add latency and cost for no benefit.
+- **Don't use LLM for deterministic validation**: The 12 structural/classification rules are deterministic string/regex operations. LLM is only used for the best practices sync feature — comparing our standards against Anthropic's latest published guidance.
 - **Don't enforce content structure beyond frontmatter**: Checking for specific sections (## Workflow, ## Examples, etc.) is too rigid. Skills have different needs. Only enforce frontmatter and structural constraints.
-- **Don't auto-fix content issues**: Auto-fix should only handle mechanical problems (missing name field, whitespace). Never rewrite descriptions or restructure content.
+- **Don't auto-fix content issues via deterministic rules**: Auto-fix should only handle mechanical problems (missing name field, whitespace). Content rewrites happen only through the LLM best practices sync with explicit `--update-skills` flag.
 - **Don't build a watch mode**: A one-shot audit is sufficient. CI integration or file watchers would be over-engineering.
 - **Don't audit hooks**: PR #154 added `.claude/hooks/` with validators and post-tool-use hooks. These follow different patterns than skills and are out of scope.
 - **Don't audit agent files**: Issue #155 will trim agents to 6. Agent files have no canonical template — auditing them adds no value.
+- **Don't auto-apply LLM suggestions without review**: The `--apply` and `--update-skills` flags generate changes, but the user reviews the diff before committing. No blind rewrites.
 
 ## Risks
 
@@ -132,6 +162,14 @@ The skill can also accept arguments:
 ### Risk 3: Sub-file link validation across do-plan split
 **Impact:** PR #156 split do-plan into SKILL.md + 3 sub-files. Sub-file references use relative paths like `[template](PLAN_TEMPLATE.md)`. If the audit resolves these incorrectly, it'll report false FAILs.
 **Mitigation:** Resolve sub-file links relative to the skill directory (parent of SKILL.md), not the repo root.
+
+### Risk 4: Anthropic docs change URL structure or content format
+**Impact:** The LLM sync feature scrapes `code.claude.com/docs/en/skills`. If Anthropic restructures URLs or changes their docs format, fetching will break silently.
+**Mitigation:** Cache last-known-good content. If fetch fails, fall back to cache and report staleness. Include a `--force-refresh` flag to bypass cache. Log fetch errors clearly.
+
+### Risk 5: LLM hallucination in best practices extraction
+**Impact:** When using an LLM to extract best practices from fetched docs, it could hallucinate rules that Anthropic never published.
+**Mitigation:** The delta report shows exact source quotes alongside extracted rules. Human reviews the report before applying changes. No auto-apply without explicit `--apply` flag.
 
 ## No-Gos (Out of Scope)
 
@@ -158,13 +196,23 @@ No agent integration required — this is a Claude Code skill invoked via `/do-s
 
 ## Success Criteria
 
+**Deterministic audit:**
 - [ ] `/do-skills-audit` runs and produces a structured report for all 25 skills
-- [ ] All 10 validation rules implemented and tested
+- [ ] All 12 validation rules implemented and tested
 - [ ] Sub-file link validation works for multi-file skills (do-plan with 3 sub-files, do-build with 2)
 - [ ] Current skills all pass (no FAILs) — confirms rules match the standards we already enforce
 - [ ] `--fix` flag auto-fixes trivial issues (missing name field)
 - [ ] `--json` flag outputs machine-readable results
 - [ ] `--skill <name>` flag audits a single skill
+
+**LLM best practices sync:**
+- [ ] `--sync-best-practices` fetches latest Anthropic docs and produces a delta report
+- [ ] Delta report clearly shows what's new/changed/deprecated vs. our current standards
+- [ ] `--apply` updates the `new-skill/SKILL_TEMPLATE.md` and `new-skill/SKILL.md` to match latest
+- [ ] `--update-skills` generates specific fixes for existing skills that violate new best practices
+- [ ] Fetched docs are cached (7-day TTL) to avoid redundant network requests
+
+**General:**
 - [ ] Script has unit tests covering each validation rule
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -199,29 +247,46 @@ No agent integration required — this is a Claude Code skill invoked via `/do-s
 
 ## Step by Step Tasks
 
-### 0. Create audit skill and validation script
+### 0. Create audit skill and deterministic validation script
 - **Task ID**: build-skill
 - **Depends On**: none
 - **Assigned To**: skill-creator
 - **Agent Type**: builder
 - **Parallel**: true
 - Create `.claude/skills/do-skills-audit/SKILL.md` with proper frontmatter
-- Create `.claude/skills/do-skills-audit/scripts/audit_skills.py` implementing all 10 validation rules
+- Create `.claude/skills/do-skills-audit/scripts/audit_skills.py` implementing all 12 validation rules
 - Support `--fix`, `--json`, and `--skill <name>` flags
 - Ensure script exits 0 on pass, 1 on any FAIL
 
-### 1. Write unit tests
+### 1. Create LLM best practices sync script
+- **Task ID**: build-sync
+- **Depends On**: none
+- **Assigned To**: skill-creator
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `.claude/skills/do-skills-audit/scripts/sync_best_practices.py`
+- Implement doc fetching from `code.claude.com/docs/en/skills` and `github.com/anthropics/skills`
+- Extract best practices (frontmatter fields, structural rules, description format, directory conventions)
+- Compare against current `new-skill/SKILL_TEMPLATE.md`, `new-skill/SKILL.md`, and validator rules
+- Generate delta report showing new/changed/deprecated practices
+- Implement `--apply` to update template and validator
+- Implement `--update-skills` to generate fixes for existing skills
+- Cache fetched docs in `data/best_practices_cache.json` with 7-day TTL
+- Wire into audit skill via `--sync-best-practices` flag
+
+### 2. Write unit tests
 - **Task ID**: build-tests
-- **Depends On**: build-skill
+- **Depends On**: build-skill, build-sync
 - **Assigned To**: test-writer
 - **Agent Type**: builder
 - **Parallel**: false
 - Create `tests/unit/test_skills_audit.py`
-- Test each validation rule with passing and failing fixtures
+- Test each of the 12 validation rules with passing and failing fixtures
 - Test `--fix` mode actually corrects trivial issues
 - Test JSON output format
+- Test sync script's doc parsing and delta comparison (with cached test fixtures, not live fetches)
 
-### 2. Validate against real repo
+### 3. Validate against real repo
 - **Task ID**: validate-audit
 - **Depends On**: build-tests
 - **Assigned To**: audit-validator
@@ -231,8 +296,9 @@ No agent integration required — this is a Claude Code skill invoked via `/do-s
 - Verify all current skills pass (no false positives)
 - Verify the report format is clear and actionable
 - If any current skills fail, determine whether the rule or the skill needs fixing
+- Run `--sync-best-practices` and verify delta report is sensible
 
-### 3. Documentation
+### 4. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-audit
 - **Assigned To**: docs-writer
@@ -242,7 +308,7 @@ No agent integration required — this is a Claude Code skill invoked via `/do-s
 - Add entry to `docs/features/README.md`
 - Add entry to `.claude/skills/README.md`
 
-### 4. Final validation
+### 5. Final validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: audit-validator
@@ -254,11 +320,28 @@ No agent integration required — this is a Claude Code skill invoked via `/do-s
 
 ## Validation Commands
 
-- `python .claude/skills/do-skills-audit/scripts/audit_skills.py` — Run audit against all skills
+- `python .claude/skills/do-skills-audit/scripts/audit_skills.py` — Run deterministic audit against all skills
 - `python .claude/skills/do-skills-audit/scripts/audit_skills.py --json` — JSON output
+- `python .claude/skills/do-skills-audit/scripts/audit_skills.py --sync-best-practices` — Fetch and compare against latest Anthropic best practices
 - `pytest tests/unit/test_skills_audit.py -v` — Unit tests
 - `ruff check . && black --check .` — Code quality
 
+## Anthropic Best Practices Reference
+
+Sources used to align validation rules and template:
+- [Official skills documentation](https://code.claude.com/docs/en/skills) — frontmatter fields, progressive disclosure, invocation control
+- [Anthropic's skill-creator](https://github.com/anthropics/skills/blob/main/skills/skill-creator/SKILL.md) — description as "PRIMARY TRIGGERING MECHANISM", directory structure, degrees of freedom
+- [Anthropic skills repository](https://github.com/anthropics/skills) — official template, examples, packaging spec
+
+Key alignment points with Anthropic's latest guidance:
+- Description should contain both what + when (trigger-oriented), not just "Use when..."
+- `argument-hint` field for skills accepting arguments
+- `model` and `agent` fields for execution control
+- 3-level progressive disclosure: metadata → SKILL.md body → linked files
+- `scripts/`, `references/`, `assets/` as canonical resource subdirectories
+- SKILL.md under 500 lines (Anthropic says "under 5,000 words" but we enforce stricter 500-line limit)
+- Context budget: 2% of context window for all skill descriptions combined
+
 ## Open Questions
 
-None — the requirements are well-defined by issue #153 and the standards from #152/#156. The skill count (currently 25) and classification lists reflect the post-PR-154/156 state. If issue #155 ships first, no changes needed here — the audit dynamically discovers skills from the filesystem.
+None — the requirements are well-defined by issue #153, the standards from #152/#156, and Anthropic's published skill documentation. The LLM sync feature ensures we stay aligned with Anthropic's evolving best practices without manual tracking.
