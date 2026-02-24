@@ -96,9 +96,11 @@ flowchart TD
     chapters --> s11_fork[Publishing Assets]
 
     subgraph P11["Phase 11: Publishing (parallel)"]
-        s11_fork --> s11a["generate_cover_art (stub)"]
+        s11_fork --> s11a[generate_cover_art]
         s11_fork --> s11b[write_episode_metadata]
         s11_fork --> s11c[generate_companions]
+        s11a -->|"creates"| a11a[cover-art artifact]
+        s11a -->|"writes"| cover["Episode.cover_image_url"]
         s11b -->|"creates"| a11b[metadata artifact]
         s11b -->|"writes"| desc["Episode.description"]
         s11b -->|"writes"| notes["Episode.show_notes"]

@@ -37,6 +37,26 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "google/gemini-3-pro-image-preview"
 
 
+def _build_enhanced_prompt(prompt: str) -> str:
+    """Append visual requirements and composition rules to a generation prompt."""
+    return f"""{prompt}
+
+IMPORTANT VISUAL REQUIREMENTS:
+- The ENTIRE canvas from edge to edge must be warm cream/off-white (#F5F1E8) - a light, warm background
+- Light cream background fills the complete image area - not just a section or inner frame
+- Use black (#000000) and warm salmon/coral (#E8B4A8) as accent colors on the cream background
+- Color palette should feel warm, sophisticated, and editorial - like a premium research publication
+- Pure abstract visualization only
+- Absolutely no text, no numbers, no labels, no annotations, no icons, no logos, no symbols, no letterforms of any kind
+- Clean visual design without any typography or graphic elements
+
+COMPOSITION:
+- Visual interest and detail should be concentrated in the LOWER 2/3 of the image
+- Keep the TOP 1/3 relatively simple and uncluttered for text overlay placement
+- Main graphic elements should flow from center to bottom
+- Avoid placing busy patterns or focal points in the upper third"""
+
+
 def read_report(episode_dir):
     """Read the episode's report.md file."""
     report_path = Path(episode_dir) / "report.md"
@@ -52,9 +72,9 @@ def generate_prompt_from_report(report_text, episode_title):
     """
     # Extract first few paragraphs for context
     lines = [
-        l.strip()
-        for l in report_text.split("\n")
-        if l.strip() and not l.startswith("#")
+        line.strip()
+        for line in report_text.split("\n")
+        if line.strip() and not line.startswith("#")
     ]
     summary = " ".join(lines[:3])[:500]
 
@@ -112,24 +132,8 @@ def generate_image(
         )
         return None, None
 
-    # Append explicit instructions to avoid text/icons and ensure consistent brand colors
-    # Design spec colors: Cream (#F5F1E8) background, Black (#000000), Salmon (#E8B4A8) accents
-    enhanced_prompt = f"""{prompt}
-
-IMPORTANT VISUAL REQUIREMENTS:
-- The ENTIRE canvas from edge to edge must be warm cream/off-white (#F5F1E8) - a light, warm background
-- Light cream background fills the complete image area - not just a section or inner frame
-- Use black (#000000) and warm salmon/coral (#E8B4A8) as accent colors on the cream background
-- Color palette should feel warm, sophisticated, and editorial - like a premium research publication
-- Pure abstract visualization only
-- Absolutely no text, no numbers, no labels, no annotations, no icons, no logos, no symbols, no letterforms of any kind
-- Clean visual design without any typography or graphic elements
-
-COMPOSITION:
-- Visual interest and detail should be concentrated in the LOWER 2/3 of the image
-- Keep the TOP 1/3 relatively simple and uncluttered for text overlay placement
-- Main graphic elements should flow from center to bottom
-- Avoid placing busy patterns or focal points in the upper third"""
+    # Append visual requirements and composition rules
+    enhanced_prompt = _build_enhanced_prompt(prompt)
 
     log(f"Generating image with {model_id}...")
     log(f"Aspect ratio: {aspect_ratio}")
@@ -197,8 +201,8 @@ COMPOSITION:
                 # URL to download (shouldn't happen with Gemini but handle it)
                 import urllib.request
 
-                log(f"Downloading from URL...")
-                urllib.request.urlretrieve(image_url, output_path)
+                log("Downloading from URL...")
+                urllib.request.urlretrieve(image_url, output_path)  # nosec B310
                 log(f"✓ Cover art saved to: {output_path}")
 
             return output_path, enhanced_prompt
@@ -217,6 +221,80 @@ COMPOSITION:
     except Exception as e:
         log(f"Error: An unexpected error occurred: {str(e)}")
         return None, None
+
+
+def generate_cover_image(prompt: str, api_key: str) -> bytes:
+    """Generate cover art via OpenRouter. Returns PNG bytes.
+
+    This is the service-layer-friendly version of :func:`generate_image`.
+    Instead of writing to a file path, it returns the decoded image bytes
+    directly.
+
+    Args:
+        prompt: Image generation prompt.
+        api_key: OpenRouter API key.
+
+    Returns:
+        PNG image bytes.
+
+    Raises:
+        RuntimeError: If image generation fails for any reason.
+    """
+    import requests
+
+    enhanced_prompt = _build_enhanced_prompt(prompt)
+
+    response = requests.post(
+        OPENROUTER_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://research.yuda.me",
+            "X-Title": "Yudame Research Podcast Cover Generator",
+        },
+        json={
+            "model": DEFAULT_MODEL,
+            "modalities": ["text", "image"],
+            "n": 1,
+            "image_config": {"aspect_ratio": "1:1"},
+            "messages": [
+                {"role": "user", "content": f"Generate an image: {enhanced_prompt}"}
+            ],
+        },
+        timeout=120,
+    )
+
+    response.raise_for_status()
+    result = response.json()
+
+    if "choices" not in result or len(result["choices"]) == 0:
+        raise RuntimeError("No valid response from OpenRouter API")
+
+    message = result["choices"][0].get("message", {})
+    raw_images = message.get("images", [])
+
+    if not raw_images:
+        raise RuntimeError("No images returned from OpenRouter API")
+
+    img = raw_images[0]
+    image_url = None
+    if isinstance(img, dict):
+        image_url = img.get("image_url", {}).get("url", "")
+    elif isinstance(img, str):
+        image_url = img
+
+    if not image_url:
+        raise RuntimeError("Could not extract image URL from API response")
+
+    if image_url.startswith("data:"):
+        _header, b64_data = image_url.split(",", 1)
+        return base64.b64decode(b64_data)
+
+    # URL to download (shouldn't happen with Gemini but handle it)
+    import urllib.request
+
+    with urllib.request.urlopen(image_url) as resp:  # nosec B310
+        return resp.read()
 
 
 def main():
@@ -335,14 +413,14 @@ def main():
     prompts_file = episode_dir / "prompts.md"
     if prompts_file.exists():
         with open(prompts_file, "a") as f:
-            f.write(f"\n\n## Cover Art Generation\n\n")
+            f.write("\n\n## Cover Art Generation\n\n")
             f.write(f"**Tool Used:** OpenRouter - {args.model}\n\n")
             f.write(f"**Original Prompt:**\n```\n{prompt}\n```\n\n")
             f.write(f"**Enhanced Prompt:**\n```\n{enhanced_prompt}\n```\n\n")
             f.write(f"**Aspect Ratio:** {args.aspect_ratio}\n\n")
             f.write(f"**Output:** {output_filename}\n\n")
             f.write(f"**Date:** {datetime.now().strftime('%Y-%m-%d')}\n")
-        log(f"✓ Prompt logged to prompts.md")
+        log("✓ Prompt logged to prompts.md")
 
     log(f"\n✓ Done! Cover art ready at: {image_path}")
 
@@ -351,8 +429,8 @@ def main():
 
     # Print next steps (only if not quiet)
     if not args.quiet:
-        log(f"\nNext step: Add branding with add_logo_watermark.py")
-        log(f"\nTo use in feed.xml, add this line to the episode <item>:")
+        log("\nNext step: Add branding with add_logo_watermark.py")
+        log("\nTo use in feed.xml, add this line to the episode <item>:")
         log(
             f'  <itunes:image href="https://research.yuda.me/podcast/episodes/{episode_dir.name}/{output_filename}?v=1"/>'
         )

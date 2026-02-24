@@ -219,9 +219,9 @@ Reads `Episode.transcript`, delegates to the `generate_chapters` Named AI Tool, 
 ### `publishing.py` -- Publishing Assets
 
 ```python
-generate_cover_art(episode_id: int) -> str
+generate_cover_art(episode_id: int) -> str | None
 ```
-Stub -- raises `NotImplementedError`. The CLI pipeline in `tools/cover_art.py` needs to be refactored into importable functions.
+Generates AI cover art via OpenRouter (Gemini), applies Yudame Research branding overlay, and uploads to Supabase storage. Uses `generate_cover_image()` from `tools/generate_cover.py` for image generation and `apply_branding()` from `tools/add_logo_watermark.py` for logo/text overlay. Saves the URL to `Episode.cover_image_url` and creates a `cover-art` artifact with generation metadata. Gracefully degrades when `OPENROUTER_API_KEY` is missing (creates a `[SKIPPED]` artifact and returns `None`).
 
 ```python
 write_episode_metadata(episode_id: int) -> EpisodeArtifact

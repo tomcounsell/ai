@@ -566,26 +566,6 @@ def step_cover_art(episode_id: int) -> None:
         publishing.generate_cover_art(episode_id)
         logger.info("step_cover_art: completed for episode %d", episode_id)
         # Do NOT enqueue next step -- signal handles fan-in
-    except NotImplementedError:
-        # Cover art generation is currently a stub. Log a warning and
-        # create a placeholder artifact so the fan-in signal can proceed.
-        logger.warning(
-            "step_cover_art: cover art generation not yet implemented "
-            "for episode %d, creating placeholder",
-            episode_id,
-        )
-        from apps.podcast.models import Episode
-
-        episode = Episode.objects.get(pk=episode_id)
-        EpisodeArtifact.objects.update_or_create(
-            episode=episode,
-            title="cover-art",
-            defaults={
-                "content": "placeholder",
-                "description": "Cover art placeholder (generation not yet implemented).",
-                "workflow_context": "Publishing Assets",
-            },
-        )
     except Exception as exc:
         workflow.fail_step(episode_id, "Publishing Assets", str(exc))
         raise

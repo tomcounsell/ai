@@ -362,7 +362,9 @@ Standalone CLI scripts for external service integrations and file processing.
 | `transcribe_only.py` | Local Whisper transcription |
 | `generate_companion_resources.py` | Create summary, checklist, frameworks |
 | `generate_landing_page.py` | Generate HTML episode page |
-| `cover_art.py` | AI cover art and branding |
+| `generate_cover.py` | AI image generation via OpenRouter (Gemini) |
+| `add_logo_watermark.py` | Branding overlay (logo, series/episode text) |
+| `cover_art.py` | CLI wrapper combining generation + branding |
 | `setup_episode.py` | Set up episode directory structure |
 | `perplexity_deep_research.py` | Perplexity research integration |
 | `gemini_deep_research.py` | Gemini research integration |
@@ -390,7 +392,7 @@ GOOGLE_API_KEY=your_key        # Gemini research
 ```
 PERPLEXITY_API_KEY=your_key    # Perplexity Deep Research (Phase 2)
 TAVILY_API_KEY=your_key        # Together Open Deep Research (web search)
-OPENROUTER_API_KEY=your_key    # Alternative LLM provider
+OPENROUTER_API_KEY=your_key    # Cover art generation (Gemini via OpenRouter)
 ```
 
 If optional keys are missing, the pipeline logs a warning, creates a "[SKIPPED: ...]" artifact, and continues with other research sources.

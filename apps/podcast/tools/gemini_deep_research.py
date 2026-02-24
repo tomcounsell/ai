@@ -97,7 +97,7 @@ def submit_research(api_key: str, prompt: str, stream: bool = False) -> dict | N
         try:
             error_data = response.json()
             print(f"Error details: {json.dumps(error_data, indent=2)}")
-        except:
+        except Exception:
             print(f"Response: {response.text}")
         return None
 
@@ -186,7 +186,7 @@ def run_gemini_research(
             if len(prompt) > 200
             else f"\nPrompt: {prompt}"
         )
-        log(f"\nSubmitting research request...")
+        log("\nSubmitting research request...")
 
     # Submit the research request
     result = submit_research(api_key, prompt)
@@ -203,10 +203,10 @@ def run_gemini_research(
         return None
 
     if verbose or log_file:
-        log(f"\nResearch started successfully!")
+        log("\nResearch started successfully!")
         log(f"Interaction ID: {interaction_id}")
         log(f"Status: {result.get('status', 'unknown')}")
-        log(f"\nEstimated time: 3-10 minutes (max 60 minutes)")
+        log("\nEstimated time: 3-10 minutes (max 60 minutes)")
         log(f"Polling every {poll_interval} seconds...")
         log("-" * 60)
 
@@ -466,7 +466,7 @@ Environment:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = str(Path(log_dir) / f"gemini_output_{timestamp}.md")
         log_file = str(Path(log_dir) / f"gemini_log_{timestamp}.txt")
-        print(f"Auto-save enabled:")
+        print("Auto-save enabled:")
         print(f"  Output: {output_file}")
         print(f"  Log: {log_file}")
         print()
@@ -496,7 +496,7 @@ Environment:
         # Output to file or stdout
         if output_file:
             with open(output_file, "w") as f:
-                f.write(f"# Gemini Deep Research Results\n\n")
+                f.write("# Gemini Deep Research Results\n\n")
                 f.write(f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
                 f.write(f"**Prompt:** {prompt}\n\n")
                 f.write("---\n\n")

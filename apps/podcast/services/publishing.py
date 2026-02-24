@@ -16,68 +16,142 @@ from apps.podcast.services.write_metadata import write_metadata as _write_metada
 logger = logging.getLogger(__name__)
 
 
-def generate_cover_art(episode_id: int) -> str:
-    """Generate cover art and upload to storage. Returns URL.
+def generate_cover_art(episode_id: int) -> str | None:
+    """Generate cover art, brand it, upload to storage, and save URL.
 
-    Integration point: ``apps/podcast/tools/cover_art.py``
+    Pipeline:
+        1. Load Episode and extract report text for prompt generation.
+        2. Generate an AI image via OpenRouter (Gemini).
+        3. Apply Yudame Research branding overlay.
+        4. Upload to Supabase storage.
+        5. Save URL to ``Episode.cover_image_url``.
+        6. Create ``cover-art`` artifact with generation metadata.
 
-    The cover art pipeline in ``tools/cover_art.py`` is a CLI tool that calls
-    ``tools/generate_cover.py`` (AI image generation) and
-    ``tools/add_logo_watermark.py`` (branding overlay). This service wraps
-    that pipeline for DB-driven workflows:
-
-        1. Read Episode and the ``content_plan`` artifact for metadata.
-        2. Generate the cover art image (stubbed -- see TODO below).
-        3. Upload resulting bytes via :func:`store_file`.
-        4. Save URL to ``Episode.cover_image_url``.
-
-    TODO: Integrate with ``tools/cover_art.py`` programmatically.  The CLI
-    tool currently operates on filesystem paths.  A future refactor should
-    extract the generation logic into importable functions that accept text
-    inputs and return image bytes.
+    If ``OPENROUTER_API_KEY`` is not set, logs a warning, creates a
+    placeholder artifact, and returns ``None`` (graceful degradation).
 
     Args:
         episode_id: Primary key of the :class:`Episode`.
 
     Returns:
-        The public URL of the uploaded cover image.
+        The URL of the uploaded cover image, or ``None`` if skipped.
 
     Raises:
         Episode.DoesNotExist: If no episode matches *episode_id*.
-        NotImplementedError: Always, until the generation logic is extracted
-            from the CLI tool.
     """
-    episode = Episode.objects.select_related("podcast").get(pk=episode_id)
+    import os
 
+    from apps.common.services.storage import store_file
+    from apps.podcast.tools.add_logo_watermark import apply_branding
+    from apps.podcast.tools.generate_cover import (
+        generate_cover_image,
+        generate_prompt_from_report,
+    )
+
+    episode = Episode.objects.select_related("podcast").get(pk=episode_id)
     logger.info("generate_cover_art: episode=%s", episode.title)
 
-    # TODO: Replace this stub with actual cover art generation.
-    #
-    # The integration path is:
-    #   1. Read report_text and content_plan artifact for context.
-    #   2. Call an image generation API (e.g. via tools/generate_cover.py logic).
-    #   3. Apply branding overlay (e.g. via tools/add_logo_watermark.py logic).
-    #   4. Collect the final PNG bytes.
-    #
-    # Once image_bytes are available:
-    #
-    #   storage_key = f"podcast/{episode.podcast.slug}/{episode.slug}/cover.png"
-    #   is_private = episode.podcast.uses_private_bucket
-    #   cover_url = store_file(storage_key, image_bytes, "image/png", public=not is_private)
-    #   if is_private:
-    #       # For restricted podcasts, store the storage key instead of the URL.
-    #       # Fresh signed URLs are generated on-demand in the feed view.
-    #       episode.cover_image_url = storage_key
-    #   else:
-    #       episode.cover_image_url = cover_url
-    #   episode.save(update_fields=["cover_image_url"])
-    #   return cover_url
+    # Check for API key (graceful degradation)
+    api_key = os.environ.get("OPENROUTER_API_KEY", "")
+    if not api_key:
+        logger.warning(
+            "generate_cover_art: OPENROUTER_API_KEY not set, skipping for episode=%s",
+            episode.title,
+        )
+        EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="cover-art",
+            defaults={
+                "content": "[SKIPPED: OPENROUTER_API_KEY not configured]",
+                "description": "Cover art skipped (no API key).",
+                "workflow_context": "Publishing Assets",
+                "metadata": {"skipped": True, "reason": "missing_api_key"},
+            },
+        )
+        return None
 
-    raise NotImplementedError(
-        "Cover art generation requires extracting the CLI pipeline from "
-        "tools/cover_art.py into importable functions. "
-        "See the TODO in this function for the integration plan."
+    # Get report text for prompt generation
+    report_text = episode.report_text or ""
+    if not report_text:
+        # Fall back to content_plan artifact
+        try:
+            plan_artifact = EpisodeArtifact.objects.get(
+                episode=episode, title="content_plan"
+            )
+            report_text = plan_artifact.content or ""
+        except EpisodeArtifact.DoesNotExist:
+            pass
+
+    if not report_text:
+        logger.warning(
+            "generate_cover_art: no report_text or content_plan for episode=%s, "
+            "using title only",
+            episode.title,
+        )
+
+    # Generate prompt from report
+    prompt = (
+        generate_prompt_from_report(report_text, episode.title)
+        if report_text
+        else (
+            f'Modern podcast episode cover art for "{episode.title}": '
+            "Clean, professional, abstract visualization. "
+            "Color palette: Light warm cream (#F5F1E8) background with black "
+            "and salmon (#E8B4A8) accents. "
+            "Square format (1024x1024px) with space for text overlay. "
+            "No text in the image."
+        )
     )
+
+    # Generate image
+    image_bytes = generate_cover_image(prompt, api_key)
+
+    # Apply branding
+    series_name = episode.podcast.title if episode.podcast else None
+    branded_bytes = apply_branding(image_bytes, series_text=series_name)
+
+    # Upload to storage
+    storage_key = f"podcast/{episode.podcast.slug}/{episode.slug}/cover.png"
+    is_private = episode.podcast.uses_private_bucket
+    cover_url = store_file(
+        storage_key, branded_bytes, "image/png", public=not is_private
+    )
+
+    # Save URL to episode
+    if is_private:
+        episode.cover_image_url = storage_key
+    else:
+        episode.cover_image_url = cover_url
+    episode.save(update_fields=["cover_image_url"])
+
+    # Create artifact with metadata
+    EpisodeArtifact.objects.update_or_create(
+        episode=episode,
+        title="cover-art",
+        defaults={
+            "content": json.dumps(
+                {
+                    "prompt": prompt,
+                    "storage_key": storage_key,
+                    "cover_url": cover_url,
+                }
+            ),
+            "description": "AI-generated episode cover art with branding overlay.",
+            "workflow_context": "Publishing Assets",
+            "metadata": {
+                "skipped": False,
+                "image_size_bytes": len(branded_bytes),
+                "storage_key": storage_key,
+            },
+        },
+    )
+
+    logger.info(
+        "generate_cover_art: uploaded cover for episode=%s url=%s",
+        episode.title,
+        cover_url,
+    )
+    return cover_url
 
 
 def write_episode_metadata(episode_id: int) -> EpisodeArtifact:

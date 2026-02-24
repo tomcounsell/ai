@@ -163,3 +163,6 @@ reports/
 
 # Podcast episode working directory
 apps/podcast/pending-episodes/
+
+# Downloaded fonts (installed by build scripts)
+fonts/

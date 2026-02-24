@@ -76,7 +76,7 @@ def load_font(font_paths, size, fallback_paths=None):
     for font_path in all_paths:
         try:
             return ImageFont.truetype(Path(font_path).expanduser(), size)
-        except:
+        except Exception:
             continue
 
     return ImageFont.load_default()
@@ -84,12 +84,22 @@ def load_font(font_paths, size, fallback_paths=None):
 
 # Font paths used by branding
 PLAYFAIR_SEMIBOLD_PATHS = [
+    str(
+        Path(__file__).resolve().parent.parent.parent.parent
+        / "fonts"
+        / "playfair-display-v40-latin-600.ttf"
+    ),
     "~/Library/Fonts/playfair-display-v40-latin-600.ttf",
     "/Library/Fonts/playfair-display-v40-latin-600.ttf",
     "~/Library/Fonts/PlayfairDisplay-SemiBold.ttf",
     "/Library/Fonts/PlayfairDisplay-SemiBold.ttf",
 ]
 PLAYFAIR_ITALIC_PATHS = [
+    str(
+        Path(__file__).resolve().parent.parent.parent.parent
+        / "fonts"
+        / "playfair-display-v40-latin-italic.ttf"
+    ),
     "~/Library/Fonts/playfair-display-v40-latin-italic.ttf",
     "/Library/Fonts/playfair-display-v40-latin-italic.ttf",
     "~/Library/Fonts/PlayfairDisplay-Italic.ttf",
@@ -112,12 +122,12 @@ def check_fonts():
         try:
             font = ImageFont.truetype(Path(path).expanduser(), 48)
             name = font.getname()
-            print(f"✓ Playfair Display SemiBold")
+            print("✓ Playfair Display SemiBold")
             print(f"  Path: {path}")
             print(f"  Font: {name[0]} {name[1]}")
             semibold_found = True
             break
-        except:
+        except Exception:
             continue
 
     if not semibold_found:
@@ -135,12 +145,12 @@ def check_fonts():
         try:
             font = ImageFont.truetype(Path(path).expanduser(), 48)
             name = font.getname()
-            print(f"✓ Playfair Display Italic")
+            print("✓ Playfair Display Italic")
             print(f"  Path: {path}")
             print(f"  Font: {name[0]} {name[1]}")
             italic_found = True
             break
-        except:
+        except Exception:
             continue
 
     if not italic_found:
@@ -178,13 +188,11 @@ def add_branding(
     log_file=None,
 ):
     """
-    Add clean branding overlays to cover image.
+    Add clean branding overlays to cover image (file-based wrapper).
 
-    Design approach:
-    - Auto-detect background brightness
-    - Black text on light backgrounds, white on dark
-    - Playfair Display for brand, Inter for content
-    - Clean editorial typography hierarchy
+    Reads the image from *cover_path*, delegates to :func:`apply_branding`
+    for the actual overlay work, and writes the result back, replacing the
+    original file.
     """
 
     def log(msg):
@@ -201,19 +209,62 @@ def add_branding(
         return None
 
     log(f"Loading cover: {cover_path}")
+    image_bytes = cover_path.read_bytes()
 
-    # Load image
-    cover = Image.open(cover_path).convert("RGBA")
-    width, height = cover.size
+    brightness = get_background_brightness(
+        Image.open(cover_path).convert("RGBA"), "top"
+    )
+    log(
+        f"Background brightness: {brightness:.0f} "
+        f"({'light' if brightness > 128 else 'dark'})"
+    )
+
+    branded_bytes = apply_branding(
+        image_bytes,
+        series_text=series_text,
+        episode_text=episode_text,
+        logo_path=logo_path if show_logo else None,
+    )
+
+    cover_path.write_bytes(branded_bytes)
+    log(f"✓ Branded cover saved to: {cover_path}")
+
+    return cover_path
+
+
+def apply_branding(
+    image_bytes: bytes,
+    series_text: str | None = None,
+    episode_text: str | None = None,
+    logo_path: str | Path | None = None,
+) -> bytes:
+    """Apply Yudame Research branding overlay. Returns branded PNG bytes.
+
+    This is the canonical branding implementation. :func:`add_branding` is a
+    thin file-I/O wrapper around this function.
+
+    Args:
+        image_bytes: Raw PNG image bytes.
+        series_text: Optional series/podcast name to show below brand.
+        episode_text: Optional episode title to show below series.
+        logo_path: Path to logo file.  Defaults to ``yudame-logo.png`` in
+            the ``apps/podcast/`` directory.
+
+    Returns:
+        Branded PNG image bytes.
+    """
+    import io
+
+    # Load image from bytes
+    cover = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+    width = cover.width
 
     # Detect background brightness
     brightness = get_background_brightness(cover, "top")
     is_light_bg = brightness > 128
-    log(
-        f"Background brightness: {brightness:.0f} ({'light' if is_light_bg else 'dark'})"
-    )
 
     # Choose text colors based on background
+    shadow_offset = 0  # Overridden below when use_shadow is True
     if is_light_bg:
         text_primary = COLORS["black"]
         text_secondary = COLORS["dark_gray"]
@@ -225,20 +276,19 @@ def add_branding(
         text_tertiary = (180, 180, 180)
         use_shadow = True
 
-    # Typography sizing (matching website header proportions)
-    # Logo is larger, text sized independently
-    logo_size = int(width * 0.064)  # ~66px at 1024 - 1.6x larger
-    brand_size = int(width * 0.04)  # ~41px at 1024 - keep text size as is
+    # Typography sizing
+    logo_size = int(width * 0.064)
+    brand_size = int(width * 0.04)
     series_size = int(brand_size * 0.9)
     episode_size = int(brand_size * 0.8)
 
-    # Spacing (8px base from design spec, scaled)
-    base_unit = width / 128  # 8px at 1024
-    padding = int(base_unit * 5)  # 40px at 1024
-    line_gap = int(base_unit * 1)  # 8px at 1024
-    section_gap = int(base_unit * 1.5)  # 12px at 1024
+    # Spacing
+    base_unit = width / 128
+    padding = int(base_unit * 5)
+    line_gap = int(base_unit * 1)
+    section_gap = int(base_unit * 1.5)
 
-    # Load fonts (using module-level constants)
+    # Load fonts
     fallback_paths = [
         "/System/Library/Fonts/Helvetica.ttc",
         "/System/Library/Fonts/Supplemental/Arial.ttf",
@@ -260,37 +310,31 @@ def add_branding(
     img = cover.convert("RGBA")
     draw = ImageDraw.Draw(img)
 
-    # Current Y position for text layout
     current_y = padding
     current_x = padding
 
-    # Draw logo + brand name (like header)
-    brand_text = "Yudame Research"
-    logo_height_target = logo_size  # Logo is the anchor, text sized relative to it
-
-    # Load and place logo if available
-    if show_logo and logo_path:
+    # Resolve logo path (default: apps/podcast/yudame-logo.png)
+    logo_height_target = logo_size
+    if logo_path is None:
+        logo_file = Path(__file__).resolve().parent.parent / "yudame-logo.png"
+    else:
         logo_file = Path(logo_path)
-        if logo_file.exists():
-            logo_img = Image.open(logo_file).convert("RGBA")
-            # Scale logo to match brand text height
-            logo_aspect = logo_img.width / logo_img.height
-            logo_h = logo_height_target
-            logo_w = int(logo_h * logo_aspect)
-            logo_img = logo_img.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
 
-            # Paste logo
-            img.paste(logo_img, (current_x, current_y), logo_img)
-            current_x += logo_w + int(base_unit * 1.5)  # Gap after logo
+    if logo_file.exists():
+        logo_img = Image.open(logo_file).convert("RGBA")
+        logo_aspect = logo_img.width / logo_img.height
+        logo_h = logo_height_target
+        logo_w = int(logo_h * logo_aspect)
+        logo_img = logo_img.resize((logo_w, logo_h), Image.Resampling.LANCZOS)
+        img.paste(logo_img, (current_x, current_y), logo_img)
+        current_x += logo_w + int(base_unit * 1.5)
 
-    # Draw brand text - vertically centered with logo
+    # Draw brand text
+    brand_text = "Yudame Research"
     brand_bbox = draw.textbbox((0, 0), brand_text, font=brand_font)
     brand_text_height = brand_bbox[3] - brand_bbox[1]
-    # Center text with logo, accounting for font metrics (top of bbox is offset from origin)
     logo_center_y = current_y + logo_height_target // 2
-    text_center_offset = (
-        brand_text_height // 2 + brand_bbox[1]
-    )  # Account for bbox top offset
+    text_center_offset = brand_text_height // 2 + brand_bbox[1]
     brand_y = logo_center_y - text_center_offset
 
     if use_shadow:
@@ -305,9 +349,9 @@ def add_branding(
 
     # Move down for series/episode
     current_y += logo_height_target + section_gap
-    current_x = padding  # Reset X
+    current_x = padding
 
-    # Draw series name (if provided)
+    # Draw series name
     if series_text:
         if use_shadow:
             draw.text(
@@ -319,11 +363,10 @@ def add_branding(
         draw.text(
             (current_x, current_y), series_text, fill=text_secondary, font=series_font
         )
-
         bbox = draw.textbbox((0, 0), series_text, font=series_font)
         current_y += (bbox[3] - bbox[1]) + line_gap
 
-    # Draw episode text (if provided)
+    # Draw episode text
     if episode_text:
         if use_shadow:
             draw.text(
@@ -333,20 +376,16 @@ def add_branding(
                 font=episode_font,
             )
         draw.text(
-            (current_x, current_y), episode_text, fill=text_tertiary, font=episode_font
+            (current_x, current_y),
+            episode_text,
+            fill=text_tertiary,
+            font=episode_font,
         )
 
-    # Save
-    output_path = cover_path.parent / f"{cover_path.stem}_branded{cover_path.suffix}"
-    img.convert("RGB").save(output_path, "PNG", quality=95)
-    log(f"✓ Branded cover saved to: {output_path}")
-
-    # Replace original
-    cover_path.unlink()
-    output_path.rename(cover_path)
-    log(f"✓ Original replaced: {cover_path}")
-
-    return cover_path
+    # Convert to bytes
+    output = io.BytesIO()
+    img.convert("RGB").save(output, "PNG", quality=95)
+    return output.getvalue()
 
 
 def main():

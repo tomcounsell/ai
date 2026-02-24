@@ -333,11 +333,11 @@ def run_perplexity_research(
     log("PERPLEXITY DEEP RESEARCH API (sync)")
     log("=" * 60)
     log(f"\nPrompt: {prompt[:200]}..." if len(prompt) > 200 else f"\nPrompt: {prompt}")
-    log(f"\nConfiguration:")
-    log(f"  Model: sonar-deep-research")
+    log("\nConfiguration:")
+    log("  Model: sonar-deep-research")
     log(f"  Reasoning Effort: {reasoning_effort}")
     log(f"  Timeout: {timeout} seconds ({timeout//60} minutes)")
-    log(f"\nSubmitting research request...")
+    log("\nSubmitting research request...")
     log(f"Expected time: 30-120 seconds (but can take up to {timeout//60} minutes)")
     log("-" * 60)
 
@@ -400,14 +400,14 @@ def run_perplexity_research(
 
                 if "usage" in result:
                     usage = result["usage"]
-                    log(f"\nAPI Usage:")
+                    log("\nAPI Usage:")
                     log(f"  Input tokens: {usage.get('prompt_tokens', 'N/A')}")
                     log(f"  Output tokens: {usage.get('completion_tokens', 'N/A')}")
                     log(f"  Total tokens: {usage.get('total_tokens', 'N/A')}")
 
                 word_count = len(content.split())
                 log(f"\n{'=' * 60}")
-                log(f"RESEARCH COMPLETE")
+                log("RESEARCH COMPLETE")
                 log(f"Length: ~{word_count} words")
                 log(f"{'=' * 60}\n")
 
@@ -661,11 +661,11 @@ Environment:
             if len(prompt) > 200
             else f"\nPrompt: {prompt}"
         )
-        log(f"\nConfiguration:")
-        log(f"  Model: sonar-deep-research")
+        log("\nConfiguration:")
+        log("  Model: sonar-deep-research")
         log(f"  Reasoning Effort: {args.reasoning_effort}")
         log(f"  Mode: {'fire-and-forget' if args.no_wait else 'submit-and-poll'}")
-        log(f"\nSubmitting async research request...")
+        log("\nSubmitting async research request...")
         log("-" * 60)
 
         job_data = submit_async_research(prompt, api_key, args.reasoning_effort)
@@ -675,7 +675,7 @@ Environment:
 
         job_id = job_data.get("id")
         status = job_data.get("status", "UNKNOWN")
-        log(f"\nJob submitted successfully!")
+        log("\nJob submitted successfully!")
         log(f"  Job ID: {job_id}")
         log(f"  Status: {status}")
 
@@ -699,7 +699,7 @@ Environment:
             log=log,
         )
         if data is None:
-            print(f"\nJob did not complete. Poll again later with:")
+            print("\nJob did not complete. Poll again later with:")
             print(f"  python {sys.argv[0]} --job-id {job_id} --output results.md")
             sys.exit(1)
 
@@ -712,7 +712,7 @@ Environment:
 
         word_count = len(content.split())
         log(f"\n{'=' * 60}")
-        log(f"RESEARCH COMPLETE (async)")
+        log("RESEARCH COMPLETE (async)")
         log(f"Length: ~{word_count} words")
         log(f"{'=' * 60}\n")
 
@@ -734,7 +734,7 @@ Environment:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_file = str(Path(log_dir) / f"perplexity_output_{timestamp}.md")
         log_file = str(Path(log_dir) / f"perplexity_log_{timestamp}.txt")
-        print(f"Auto-save enabled:")
+        print("Auto-save enabled:")
         print(f"  Output: {output_file}")
         print(f"  Log: {log_file}")
         print()
@@ -763,9 +763,9 @@ Environment:
 
         if output_file:
             with open(output_file, "w") as f:
-                f.write(f"# Perplexity Deep Research Results\n\n")
+                f.write("# Perplexity Deep Research Results\n\n")
                 f.write(f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
-                f.write(f"**Model:** sonar-deep-research\n\n")
+                f.write("**Model:** sonar-deep-research\n\n")
                 f.write(f"**Reasoning Effort:** {args.reasoning_effort}\n\n")
                 f.write(f"**Prompt:** {prompt}\n\n")
                 f.write("---\n\n")
@@ -810,10 +810,10 @@ def _output_result(content: str, meta: dict, args, prompt: str | None = None):
 
     if output_file:
         with open(output_file, "w") as f:
-            f.write(f"# Perplexity Deep Research Results\n\n")
+            f.write("# Perplexity Deep Research Results\n\n")
             f.write(f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n")
-            f.write(f"**Model:** sonar-deep-research\n\n")
-            f.write(f"**Mode:** async\n\n")
+            f.write("**Model:** sonar-deep-research\n\n")
+            f.write("**Mode:** async\n\n")
             if prompt:
                 f.write(f"**Prompt:** {prompt}\n\n")
             f.write("---\n\n")
