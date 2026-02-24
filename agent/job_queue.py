@@ -1116,8 +1116,36 @@ async def _execute_job(job: Job) -> None:
 
         await send_cb(job.chat_id, msg, job.message_id)
 
-        # After sending a COMPLETION, close the gate — no more outputs
+        # After sending a COMPLETION, check for workarounds then close the gate
         if classification.output_type == OutputType.COMPLETION:
+            if classification.has_workarounds:
+                # Fire one more auto-continue to post GitHub issues for problems
+                logger.info(
+                    f"[{job.project_key}] Completion has workarounds — "
+                    f"enqueuing issue-posting continuation"
+                )
+                issue_prompt = (
+                    "You discovered issues. Post them as GitHub issues! "
+                    "Create one issue per distinct problem you encountered "
+                    "and worked around during this session. Include: what "
+                    "failed, how you worked around it, and what the fix "
+                    "should be."
+                )
+                await enqueue_job(
+                    project_key=job.project_key,
+                    session_id=job.session_id,
+                    working_dir=job.working_dir,
+                    message_text=issue_prompt,
+                    sender_name="System (auto-continue)",
+                    chat_id=job.chat_id,
+                    message_id=job.message_id,
+                    priority="high",
+                    work_item_slug=job.work_item_slug,
+                    task_list_id=job.task_list_id,
+                    auto_continue_count=MAX_AUTO_CONTINUES,  # No further auto-continues
+                )
+                _defer_reaction = True
+
             _completion_sent = True
             logger.info(
                 f"[{job.project_key}] Completion sent — suppressing further outputs"

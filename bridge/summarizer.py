@@ -74,6 +74,9 @@ class ClassificationResult:
     coaching_message: str | None = (
         None  # LLM-generated coaching for rejected completions
     )
+    has_workarounds: bool = (
+        False  # True when agent encountered problems it worked around
+    )
 
 
 @dataclass
@@ -141,13 +144,22 @@ You classify developer agent output to determine if human input is needed.
 
 Respond with ONLY a JSON object — no markdown, no explanation, no extra text:
 {"type": "question|status|completion|blocker|error", \
-"confidence": 0.95, "reason": "brief explanation", "coaching_message": null}
+"confidence": 0.95, "reason": "brief explanation", "coaching_message": null, \
+"has_workarounds": false}
 
 The coaching_message field is REQUIRED in your response. Set it to a helpful string \
 when you classify as "status" and the output LOOKS like a completion attempt but \
 lacks evidence (i.e., you are downgrading a completion to status). The coaching \
 message should explain what was missing and what the agent should include next time. \
 Set it to null for all other classifications.
+
+The has_workarounds field detects when the agent encountered problems, errors, or \
+obstacles during work that it had to work around but didn't fully resolve. Set to true when:
+- The agent mentions errors/failures it encountered and worked around
+- Something broke or was unavailable and the agent found an alternative
+- The agent explicitly mentions a workaround, fallback, or "skipped" step
+- There are warnings or issues discovered that should be tracked as GitHub issues
+Set to false when work completed cleanly without encountering problems.
 
 Classification rules:
 
@@ -219,6 +231,22 @@ and any verification commands you ran."}"""
 # 3. Implementation details - the agent should make these decisions autonomously
 # 4. Permission-seeking for routine tasks - the agent has authority to proceed
 # Misclassifying these as QUESTION causes premature stopping and unnecessary pauses.
+
+
+def _detect_workarounds(text_lower: str) -> bool:
+    """Detect if the agent encountered problems it worked around."""
+    workaround_patterns = [
+        r"\bwork(?:ed)?\s*around\b",
+        r"\bworkaround\b",
+        r"\bfallback\b",
+        r"\bskipp(?:ed|ing)\b.*\b(?:step|phase|sync|check)\b",
+        r"\bunavailable\b",
+        r"\bcould not fetch\b",
+        r"\bfailed.*\busing\b.*\binstead\b",
+        r"\bhad to\b.*\b(?:instead|alternative|manually)\b",
+        r"\b(?:warning|warn)\b.*\b(?:found|discovered|detected)\b",
+    ]
+    return any(re.search(p, text_lower) for p in workaround_patterns)
 
 
 def _classify_with_heuristics(text: str) -> ClassificationResult:
@@ -306,14 +334,17 @@ def _classify_with_heuristics(text: str) -> ClassificationResult:
                 output_type=OutputType.COMPLETION,
                 confidence=0.80,
                 reason="Detected completion pattern",
+                has_workarounds=_detect_workarounds(text_lower),
             )
 
     # Default: STATUS_UPDATE (conservative for auto-continue)
-    return ClassificationResult(
+    result = ClassificationResult(
         output_type=OutputType.STATUS_UPDATE,
         confidence=0.60,
         reason="No strong signal detected, defaulting to status update",
     )
+    result.has_workarounds = _detect_workarounds(text_lower)
+    return result
 
 
 async def classify_output(text: str) -> ClassificationResult:
@@ -445,11 +476,15 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
         if not coaching_message or coaching_message == "null":
             coaching_message = None
 
+    # Extract has_workarounds flag
+    has_workarounds = bool(data.get("has_workarounds", False))
+
     result = ClassificationResult(
         output_type=output_type,
         confidence=confidence,
         reason=str(reason),
         coaching_message=coaching_message,
+        has_workarounds=has_workarounds,
     )
 
     # Detect rejected completions: LLM provided a coaching_message on a
@@ -510,7 +545,10 @@ Output rules:
 - Flag with ⚠️ ONLY for genuinely external blockers (missing credentials, need third-party \
 access, policy decisions). Do NOT flag: implementation choices, internal obstacles, things \
 the agent could resolve with its tools
-- Tone: direct, no preamble, no filler"""
+- Tone: direct, no preamble, no filler
+- IMPORTANT: If the output mentions a GitHub issue or PR URL, ALWAYS include it as the \
+last line of your summary. Format: just the bare URL on its own line. If multiple URLs, \
+include the most relevant one (the PR or issue being actively worked on)."""
 
 # Blocker flag logic explained:
 # The ⚠️ flag is meant to alert the PM only when human intervention is truly required.
@@ -557,6 +595,39 @@ async def _summarize_with_ollama(prompt: str) -> str | None:
         return None
 
 
+def _ensure_github_link_footer(text: str, artifacts: dict[str, list[str]]) -> str:
+    """Ensure summary ends with a GitHub issue/PR URL if one exists in artifacts.
+
+    If the summary already contains a GitHub URL on its last line, leave it.
+    Otherwise, find the most relevant GitHub URL from artifacts and append it.
+    Prefers PR URLs over issue URLs (PRs are the active deliverable).
+    """
+    gh_pattern = r"https?://github\.com/[^\s)>\]\"']+"
+
+    # Check if the last line already contains a GitHub URL
+    lines = text.rstrip().split("\n")
+    if lines and re.search(gh_pattern, lines[-1]):
+        return text  # Already has a trailing GitHub link
+
+    # Find GitHub URLs from artifacts
+    urls = artifacts.get("urls", [])
+    gh_urls = [u for u in urls if re.match(gh_pattern, u)]
+
+    if not gh_urls:
+        # Also scan the text itself for GitHub URLs not captured in artifacts
+        gh_urls = re.findall(gh_pattern, text)
+
+    if not gh_urls:
+        return text  # No GitHub URLs to append
+
+    # Prefer PR URLs over issue URLs
+    pr_urls = [u for u in gh_urls if "/pull/" in u]
+    issue_urls = [u for u in gh_urls if "/issues/" in u]
+    best_url = (pr_urls or issue_urls or gh_urls)[-1]  # Last = most recent
+
+    return text.rstrip() + "\n" + best_url
+
+
 async def summarize_response(
     raw_response: str,
 ) -> SummarizedResponse:
@@ -600,6 +671,9 @@ async def summarize_response(
                 summary_text = raw_response[: SAFETY_TRUNCATE - 3] + "..."
             else:
                 summary_text = raw_response
+
+        # Ensure GitHub link footer
+        summary_text = _ensure_github_link_footer(summary_text, artifacts)
 
         return SummarizedResponse(
             text=summary_text,
