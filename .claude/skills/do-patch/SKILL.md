@@ -1,6 +1,6 @@
 ---
 name: do-patch
-description: "Apply a targeted fix to failing tests or review blockers. Use when the user says 'patch this', 'fix the failures', 'fix the blockers', or 'do-patch'. Also model-invocable: called automatically by do-build at test-fail and review-blocker lifecycle steps."
+description: "Apply a targeted fix to failing tests or review blockers. Use when the user says 'patch this', 'fix the failures', 'fix the blockers', or 'do-patch'. Also called automatically by do-build at test-fail and review-blocker lifecycle steps."
 argument-hint: "<description-of-what-to-patch>"
 ---
 
