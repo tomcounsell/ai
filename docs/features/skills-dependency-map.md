@@ -98,11 +98,9 @@ add-feature ....(references)...> prime, pthread, sdlc, do-pr-review
 
 ## Skill Categories
 
-### SDLC Core (the critical path)
+### SDLC Core (the critical path — see `.claude/skills/sdlc/SKILL.md` for ground truth)
 ```
-do-plan --> do-build --> do-test --> do-pr-review
-                    \-> do-patch
-                    \-> do-docs
+do-plan → do-build → do-test → do-patch → do-pr-review → do-patch → do-docs → merge
 ```
 These 6 skills form the autonomous development loop. Everything else is support.
 

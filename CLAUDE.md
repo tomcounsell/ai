@@ -84,14 +84,9 @@ The standard flow from conversation to shipped feature:
 
 ### Phase 2: SDLC (triggered by issue reference)
 - When a message references an issue number → invoke `/sdlc`
-- `/sdlc` assesses the issue's current state and picks up from the right stage:
-  1. **Plan** (`/do-plan`) — create plan doc, link to issue, iterate with human
-  2. **Build** (`/do-build`) — implement in worktree on `session/{slug}` branch
-  3. **Test** (`/do-test`) — run tests, lint, validate
-  4. **Patch** (`/do-patch`) — fix test failures, loop back to test
-  5. **Review** (`/do-pr-review`) — open PR, validate against plan requirements
-  6. **Patch** (`/do-patch`) — fix review blockers, loop back to test and review
-  7. **Docs** (`/do-docs`) — cascade documentation updates for changed areas
+- `/sdlc` assesses the issue's current state and picks up from the right stage
+- Stages: Plan → Build → Test → Patch → Review → Patch → Docs → Merge
+- See `.claude/skills/sdlc/SKILL.md` for the ground truth on stage definitions
 - `/sdlc` does NOT restart from scratch if prior stages are already complete
 - When complete, a PR link is sent back to the Telegram chat
 

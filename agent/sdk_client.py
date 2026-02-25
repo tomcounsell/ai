@@ -91,21 +91,10 @@ The /sdlc skill handles the ENTIRE lifecycle: it figures out where the issue sta
 NEVER invoke /do-plan or /do-build directly when an issue number is provided.
 ALWAYS route through /sdlc — it orchestrates the right sequence automatically.
 
-### Pipeline stages (managed by /sdlc):
+### Pipeline stages (managed by /sdlc — see .claude/skills/sdlc/SKILL.md for ground truth):
 
-1. ISSUE: A GitHub issue must exist describing the change.
-2. PLAN: /do-plan {slug} creates a plan referencing the issue.
-   - Raise all open questions during planning.
-   - Do not proceed to build until questions are resolved.
-3. BUILD: /do-build executes the plan.
-   - Creates a worktree + session/{slug} branch.
-   - Agents implement code on the feature branch.
-4. TEST: /do-test runs tests, linting, and validation.
-5. PATCH: /do-patch fixes test failures, loops back to test.
-6. REVIEW: /do-pr-review opens PR and validates against plan requirements.
-7. PATCH: /do-patch fixes review blockers, loops back to test and review.
-8. DOCS: /do-docs cascades documentation updates for changed areas.
-9. MERGE: PR is merged to main by a human.
+1. ISSUE → 2. PLAN → 3. BUILD → 4. TEST → 5. PATCH (fix failures)
+→ 6. REVIEW → 7. PATCH (fix blockers) → 8. DOCS → 9. MERGE
 
 ### Hard rules:
 

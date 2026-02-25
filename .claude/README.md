@@ -81,12 +81,9 @@ Spawn multiple agents for independent work. The system auto-parallelizes when:
 
 ### /sdlc - AI Developer Workflow
 
-Complete development lifecycle with validation loops:
-```
-Plan → Build → Test → Review → Ship
-         ↑           │
-         └───────────┘ (loop on failure)
-```
+Single entry point for all issue-referenced work. Detects where an issue stands and picks up from the right stage. See `.claude/skills/sdlc/SKILL.md` for ground truth on stages and state assessment.
+
+Stages: Plan → Build → Test → Patch → Review → Patch → Docs → Merge
 
 The system does not stop until all quality gates pass.
 
