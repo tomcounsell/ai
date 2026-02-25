@@ -12,7 +12,7 @@ After the reflection step (step 7) categorizes findings, auto-fix examines each 
 Step 7: Reflect
   └─ Step 8: Auto-Fix
        ├─ Confidence check (2-of-3 criteria)
-       ├─ Ignore log check (data/daydream_ignore.jsonl)
+       ├─ Ignore log check (Redis DaydreamIgnore model)
        ├─ Dedup check (open PR already exists for this pattern?)
        ├─ Subprocess: /do-plan + /do-build (10-minute timeout)
        ├─ PR opened on feature branch
@@ -33,7 +33,7 @@ If fewer than 2 criteria are met, the issue is logged but no action is taken.
 
 ## Ignore Log
 
-The ignore log (`data/daydream_ignore.jsonl`) suppresses auto-fix for specific patterns for 14 days. Use this when a pattern keeps triggering but you are not ready to fix it yet.
+The ignore log (Redis `DaydreamIgnore` model) suppresses auto-fix for specific patterns for 14 days. Use this when a pattern keeps triggering but you are not ready to fix it yet.
 
 ### Adding an entry
 
@@ -49,13 +49,7 @@ python scripts/daydream.py --ignore "pattern text here" --reason "Intentional de
 
 - Each entry expires after **14 days** from when it was added
 - Expired entries are automatically pruned at the start of each daydream run
-- The file is plain JSONL and can be edited by hand
-
-### File format
-
-```jsonl
-{"pattern": "...", "reason": "...", "expires_at": "2026-03-05T00:00:00"}
-```
+- Entries are stored in the `DaydreamIgnore` Redis model with automatic TTL-based expiry
 
 ## Dry-Run Mode
 

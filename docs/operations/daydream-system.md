@@ -4,7 +4,7 @@ Operational runbook for the daydream autonomous maintenance system.
 
 ## Overview
 
-The daydream system runs daily at 6 AM Pacific via macOS launchd. It performs an 11-step maintenance cycle covering cleanup, analysis, reflection, reporting, and per-project Telegram notifications.
+The daydream system runs daily at 6 AM Pacific via macOS launchd. It performs a 14-step maintenance cycle covering cleanup, analysis, reflection, reporting, and per-project Telegram notifications.
 
 For the full feature description, see [Daydream Reactivation](../features/daydream-reactivation.md).
 
@@ -17,11 +17,11 @@ For the full feature description, see [Daydream Reactivation](../features/daydre
 | `python scripts/daydream.py --ignore "pattern"` | Add pattern to ignore log (silenced for 14 days) |
 | `./scripts/install_daydream.sh` | Install/update launchd schedule |
 | `tail -f logs/daydream.log` | Stream daydream logs |
-| `cat data/lessons_learned.jsonl` | View institutional memory |
-| `cat data/daydream_ignore.jsonl` | View active ignore log entries |
+| `python -c "from models.daydream import LessonLearned; [print(f'{l.date} [{l.category}] {l.summary}') for l in LessonLearned.get_recent()]"` | View institutional memory |
+| `python -c "from models.daydream import DaydreamIgnore; [print(f'{e.pattern} (expires {e.expires_at})') for e in DaydreamIgnore.get_active()]"` | View active ignore entries |
 | `launchctl list \| grep daydream` | Check launchd status |
 
-## 11-Step Pipeline
+## 14-Step Pipeline
 
 | Step | Name | Failure Mode |
 |------|------|-------------|
@@ -33,9 +33,12 @@ For the full feature description, see [Daydream Reactivation](../features/daydre
 | 6 | Session Analysis | Non-blocking. Skips if no session logs exist. |
 | 7 | LLM Reflection | Non-blocking. Requires `ANTHROPIC_API_KEY`. |
 | 8 | Auto-Fix Bugs | Non-blocking. Skips if `DAYDREAM_AUTO_FIX_ENABLED=false`. Requires `claude` CLI and `gh` auth. |
-| 9 | Memory Consolidation | Non-blocking. Appends to `data/lessons_learned.jsonl`. |
+| 9 | Memory Consolidation | Non-blocking. Persists to Redis LessonLearned model. |
 | 10 | Report Generation | Non-blocking. Writes to `logs/daydream/`. |
 | 11 | GitHub Issue Creation | Non-blocking. Per-project. Skips if no findings. Also posts to Telegram. Requires `gh` auth. |
+| 12 | Skills Audit | Non-blocking. Validates SKILL.md files. |
+| 13 | Redis TTL Cleanup | Non-blocking. Prunes expired records across all models. |
+| 14 | Redis Data Quality | Non-blocking. Surfaces unsummarized links, dead channels, error patterns. |
 
 ### Step 5: Documentation Audit
 
@@ -49,7 +52,7 @@ Step 5 (`step_audit_docs`) replaced the older `step_update_docs` function, which
 5. Sweeps `docs/README.md` and `docs/features/README.md` for broken links after any deletions
 6. Normalizes filenames to lowercase-with-hyphens and relocates misplaced docs
 
-**Frequency.** Reads `last_audit_date` from `data/daydream_state.json`. Skips if fewer than 7 days have passed since the last run. Updates `last_audit_date` on completion.
+**Frequency.** Reads `last_audit_date` from the Redis DaydreamRun model. Skips if fewer than 7 days have passed since the last run. Updates `last_audit_date` on completion.
 
 **Findings recorded.**
 
@@ -99,7 +102,7 @@ launchctl list | grep daydream
 |------|---------|
 | `logs/daydream.log` | Runner stdout/stderr |
 | `logs/daydream/` | Generated reports (one per run) |
-| `data/lessons_learned.jsonl` | Institutional memory (pruned to 90 days) |
+| Redis: LessonLearned model | Institutional memory (pruned to 90 days) |
 
 ## Dependencies
 
@@ -111,7 +114,7 @@ launchctl list | grep daydream
 | `DAYDREAM_AUTO_FIX_ENABLED` | Step 8 | No (defaults to `true`; set `false` to disable auto-fix) |
 | Sentry MCP | Step 3 | No (skips gracefully) |
 | `logs/bridge.log` | Step 2 | No (skips if missing) |
-| `logs/sessions/*/chat.json` | Step 6 | No (skips if empty) |
+| Redis: SessionLog model | Step 6 | No (skips if empty) |
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Step 11 | No (skips if missing) |
 | `data/valor.session` | Step 11 | No (skips if missing) |
 | `config/projects.json` `telegram.groups` | Step 11 | No (skips per-project if absent) |

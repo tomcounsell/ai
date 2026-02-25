@@ -16,6 +16,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 PROJECT_DIR = Path(__file__).parent.parent
+# TODO: Migrate crash history to Redis model (currently still file-based)
 CRASH_HISTORY_FILE = PROJECT_DIR / "data" / "crash_history.jsonl"
 
 # Detection thresholds
