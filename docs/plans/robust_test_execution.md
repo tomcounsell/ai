@@ -4,7 +4,7 @@ type: chore
 appetite: Small
 owner: Valor
 created: 2026-02-25
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/172
 ---
 
 # Robust Test Execution
