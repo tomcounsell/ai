@@ -4,7 +4,7 @@ type: feature
 appetite: Medium
 owner: Valor
 created: 2026-02-25
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/177
 ---
 
 # Summarizer: Bullet-Point Format with Markdown Links
@@ -95,6 +95,7 @@ No prerequisites — this work builds on existing RedisJob model and summarizer 
 - Structured formatting for non-SDLC conversational replies (keep those simple)
 - Custom formatting per project or per chat
 - Inline images or media in summaries
+- **Session tagging** (#162): That system tags `SessionLog` entries at session completion to categorize what happened (e.g., "pr-review", "daydream"). This plan adds `history` to `RedisJob` to track pipeline stage transitions *during* job execution for formatting summaries. Different models (`SessionLog` vs `RedisJob`), different timing (post-session vs mid-job), different purpose (categorization vs rendering).
 
 ## Update System
 
