@@ -23,7 +23,7 @@ User request
   |
   |---> /do-patch             (auto-invoked on test failure, up to 3x)
   |       |---> [Task: builder]  apply fix
-  |       \---> /do-test         re-verify
+  |       \---> direct pytest + lint  (no longer dispatches do-test)
   |
   |---> /do-docs              cascade doc updates
   |       \---> [Task: 3 parallel explorers]
@@ -49,7 +49,7 @@ do-build ------> do-test
              \-> do-patch
              \-> do-docs
 
-do-patch -------> do-test
+do-patch -------> (direct pytest + lint, no longer invokes do-test)
 
 do-pr-review ---> prepare-app
               \-> agent-browser
