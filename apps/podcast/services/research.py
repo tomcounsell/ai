@@ -234,18 +234,40 @@ def run_gemini_research(episode_id: int, prompt: str) -> EpisodeArtifact:
     )
 
     # Call the existing Gemini tool
+    from apps.podcast.tools.gemini_deep_research import GeminiQuotaError
     from apps.podcast.tools.gemini_deep_research import run_gemini_research as _gemini
 
-    content_text = _gemini(
-        prompt=full_prompt,
-        verbose=False,
-    )
+    try:
+        content_text = _gemini(
+            prompt=full_prompt,
+            verbose=False,
+        )
+    except GeminiQuotaError:
+        logger.warning(
+            "Gemini API quota exceeded for episode %s. Upgrade billing at "
+            "https://aistudio.google.com/apikey",
+            episode_id,
+        )
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-gemini",
+            defaults={
+                "content": (
+                    "[SKIPPED: Gemini API quota exceeded. "
+                    "Upgrade billing at https://aistudio.google.com/apikey]"
+                ),
+                "description": "Gemini Deep Research (skipped - quota exceeded).",
+                "workflow_context": "Research Gathering",
+                "metadata": {"skipped": True, "reason": "quota_exceeded"},
+            },
+        )
+        return artifact
 
-    # Handle None response (API error, quota exceeded, etc.)
+    # Handle None response (API error, empty content, etc.)
     if content_text is None:
         logger.warning(
-            "Gemini research returned no content for episode %s (likely quota "
-            "exceeded or API error). Skipping Gemini research. This is optional "
+            "Gemini research returned no content for episode %s (API error or "
+            "empty response). Skipping Gemini research. This is optional "
             "and the pipeline will continue with other research sources.",
             episode_id,
         )
@@ -253,10 +275,10 @@ def run_gemini_research(episode_id: int, prompt: str) -> EpisodeArtifact:
             episode=episode,
             title="p2-gemini",
             defaults={
-                "content": "[SKIPPED: Gemini API error or quota exceeded]",
+                "content": "[SKIPPED: Gemini API error or empty response]",
                 "description": "Gemini Deep Research (skipped - API error).",
                 "workflow_context": "Research Gathering",
-                "metadata": {"skipped": True, "reason": "API error or quota exceeded"},
+                "metadata": {"skipped": True, "reason": "api_error_or_empty"},
             },
         )
         return artifact

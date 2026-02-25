@@ -337,7 +337,7 @@ Django `@task`-per-step pipeline for autonomous episode production.
 
 **Entry point:** `produce_episode.enqueue(episode_id=42)`
 
-**Graceful degradation:** Perplexity and Together AI research steps are optional. If their API keys are missing (`PERPLEXITY_API_KEY`, `TAVILY_API_KEY`, or LLM provider keys), the pipeline logs a warning, creates a "[SKIPPED: ...]" artifact, and continues with other research sources. Claude, OpenAI, and Gemini are required.
+**Graceful degradation:** All research steps except OpenAI (GPT-Researcher) degrade gracefully. If API keys are missing or calls fail, the pipeline logs a warning, creates a "[SKIPPED: ...]" artifact, and continues with other research sources. Gemini quota errors (HTTP 429) are detected specifically with an actionable upgrade message. Claude research catches validation and API errors. Perplexity and Together AI skip when keys are missing.
 
 ### Models
 
@@ -385,7 +385,8 @@ Add to `.env.local` for podcast tools:
 ```
 ANTHROPIC_API_KEY=your_key     # Claude research + AI tools
 OPENAI_API_KEY=your_key        # GPT-Researcher + Whisper transcription
-GOOGLE_API_KEY=your_key        # Gemini research
+GOOGLE_API_KEY=your_key        # Gemini research (general)
+GEMINI_API_KEY=your_key        # Gemini Deep Research (paid tier required)
 ```
 
 **Optional (graceful degradation if missing):**
@@ -395,7 +396,7 @@ TAVILY_API_KEY=your_key        # Together Open Deep Research (web search)
 OPENROUTER_API_KEY=your_key    # Cover art generation (Gemini via OpenRouter)
 ```
 
-If optional keys are missing, the pipeline logs a warning, creates a "[SKIPPED: ...]" artifact, and continues with other research sources.
+If optional keys are missing, the pipeline logs a warning, creates a "[SKIPPED: ...]" artifact, and continues with other research sources. Gemini and Claude also degrade gracefully on API errors.
 
 ## Render Infrastructure
 

@@ -122,7 +122,7 @@ Calls GPT-Researcher multi-agent system via `asyncio.run`. Saves result as `p2-c
 ```python
 run_gemini_research(episode_id: int, prompt: str) -> EpisodeArtifact
 ```
-Calls Gemini Deep Research. Saves result as `p2-gemini` artifact.
+Calls Gemini Deep Research via the Interactions API. Saves result as `p2-gemini` artifact. Catches `GeminiQuotaError` (HTTP 429) separately from other failures, creating skip artifacts with specific `reason` metadata (`quota_exceeded` vs `api_error_or_empty`). Gracefully degrades when `GEMINI_API_KEY` is missing or quota is exceeded.
 
 ```python
 run_together_research(episode_id: int, prompt: str) -> EpisodeArtifact
@@ -132,7 +132,7 @@ Calls Open Deep Research (LangGraph multi-hop, auto-detects LLM provider). Saves
 ```python
 run_claude_research(episode_id: int, prompt: str) -> EpisodeArtifact
 ```
-Calls the multi-agent deep research orchestrator (`claude_deep_research.deep_research`). Plans subtasks, runs Sonnet researchers, synthesizes findings. Saves result as `p2-claude` artifact with structured metadata (sources, key findings, confidence assessment).
+Calls the multi-agent deep research orchestrator (`claude_deep_research.deep_research`). Plans subtasks, runs Sonnet researchers, synthesizes findings. Saves result as `p2-claude` artifact with structured metadata (sources, key findings, confidence assessment). Gracefully degrades on any failure (validation errors, API issues) by creating a skip artifact.
 
 ```python
 add_manual_research(episode_id: int, title: str, content: str) -> EpisodeArtifact
