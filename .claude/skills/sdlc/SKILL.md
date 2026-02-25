@@ -10,21 +10,21 @@ This skill is a **dispatcher**, not an implementation skill. It figures out wher
 
 ## Step 0: Create Pipeline Tasks
 
-Immediately create tasks for the full pipeline so progress is trackable and resumable:
+Immediately create tasks for the full pipeline. These are **strictly sequential** — each stage must complete before the next begins. Do NOT run stages in parallel.
 
 ```
-TaskCreate({ description: "ISSUE: Ensure GitHub issue exists", status: "in_progress" })
-TaskCreate({ description: "PLAN: Create plan doc via /do-plan", status: "pending" })
-TaskCreate({ description: "BUILD: Implement via /do-build", status: "pending" })
-TaskCreate({ description: "TEST: Validate via /do-test", status: "pending" })
-TaskCreate({ description: "PATCH: Fix test failures via /do-patch", status: "pending" })
-TaskCreate({ description: "REVIEW: PR review via /do-pr-review", status: "pending" })
-TaskCreate({ description: "PATCH: Fix review blockers via /do-patch", status: "pending" })
-TaskCreate({ description: "DOCS: Update docs via /do-docs", status: "pending" })
-TaskCreate({ description: "MERGE: Ready for human merge", status: "pending" })
+TaskCreate({ description: "1. ISSUE: Ensure GitHub issue exists", status: "in_progress" })
+TaskCreate({ description: "2. PLAN: Create plan doc via /do-plan", status: "pending" })
+TaskCreate({ description: "3. BUILD: Implement via /do-build", status: "pending" })
+TaskCreate({ description: "4. TEST: Validate via /do-test", status: "pending" })
+TaskCreate({ description: "5. PATCH: Fix test failures via /do-patch", status: "pending" })
+TaskCreate({ description: "6. REVIEW: PR review via /do-pr-review", status: "pending" })
+TaskCreate({ description: "7. PATCH: Fix review blockers via /do-patch", status: "pending" })
+TaskCreate({ description: "8. DOCS: Update docs via /do-docs", status: "pending" })
+TaskCreate({ description: "9. MERGE: Ready for human merge", status: "pending" })
 ```
 
-As you assess state (Step 2), mark already-completed stages as `completed` and set the current stage to `in_progress`. Update tasks as each sub-skill finishes.
+As you assess state (Step 2), mark already-completed stages as `completed` and set the current stage to `in_progress`. Use `TaskUpdate` to advance one stage at a time as each sub-skill finishes. Never skip ahead.
 
 ## Step 1: Ensure a GitHub Issue Exists
 
