@@ -72,6 +72,19 @@ from tools.link_analysis import analyze_url
 metadata = analyze_url("https://example.com")
 ```
 
+### Session Tags (`tools.session_tags`)
+
+CRUD and auto-tagging for session categorization.
+
+```python
+from tools.session_tags import add_tags, get_tags, sessions_by_tag, auto_tag_session
+
+add_tags("session-123", ["hotfix", "urgent"])
+tags = get_tags("session-123")
+bug_sessions = sessions_by_tag("bug")
+auto_tag_session("session-123")  # called automatically at session completion
+```
+
 ## Image Tools
 
 Installed CLI commands via `pip install -e .`

@@ -118,7 +118,7 @@ The `SessionLog` model replaces `AgentSession` everywhere:
 
 ## Session Tagging
 
-The `tags` ListField is available for categorization (e.g., "pr-review", "compacted", "hotfix"). The tagging system (auto-tagging automation, tag management UI, tag-based queries) is a separate follow-up issue.
+The `tags` ListField stores session categorization tags (e.g., "bug", "sdlc", "pr-created", "daydream"). Auto-tagging runs automatically at session completion inside `complete_transcript()` via `tools/session_tags.py`. See [Session Tagging](session-tagging.md) for the full tagging system documentation.
 
 ## Cleanup
 

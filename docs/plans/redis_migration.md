@@ -111,7 +111,7 @@ No prerequisites — Redis is already running with RDB persistence enabled, Popo
 - Changing the CLI interface or command structure (same commands, different backend)
 - Migrating flat-file crash history or daydream state (low value, low urgency)
 - Adding new query capabilities beyond what SQLite currently provides
-- Session tagging system (the `tags` ListField is added to the model, but the tagging UI/automation is a separate issue)
+- ~~Session tagging system~~ -- shipped in PR #179 (see `docs/features/session-tagging.md`)
 
 ## Update System
 
@@ -359,4 +359,4 @@ See plan template for full list.
 
 3. **AgentSession merge**: `SessionLog` replaces `AgentSession` entirely. All fields from `AgentSession` are carried over, plus `log_path`, `tags` (ListField), and transcript-specific counters.
 
-4. **Session tagging**: `SessionLog` includes a `tags` ListField for categorization (e.g., "pr-review", "compacted", "hotfix"). The tagging system itself (auto-tagging, tag management UI, tag-based queries) is a separate follow-up issue.
+4. **Session tagging**: `SessionLog` includes a `tags` ListField for categorization. Auto-tagging runs at session completion via `tools/session_tags.py` (shipped in PR #179). See `docs/features/session-tagging.md`.

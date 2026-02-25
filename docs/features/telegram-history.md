@@ -222,4 +222,4 @@ Tests use Redis db=1 (isolated via the `redis_test_db` autouse fixture) and cove
 - Export to Notion/bookmarks
 - Automatic categorization with AI
 - Link health checking (detect dead links)
-- Session tagging automation (tags field exists, automation is future work)
+- ~~Session tagging automation~~ — shipped, see [Session Tagging](session-tagging.md)
