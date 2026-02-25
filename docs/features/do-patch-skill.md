@@ -54,7 +54,7 @@ Capped at **3 patch→test→review iterations**. After 3 cycles, emits a struct
 1. Accept failure description (or read last failure from session context)
 2. Read the failing test output or review comment in full
 3. Deploy a **single builder agent** to make targeted edits
-4. Re-run `/do-test` to verify the fix
+4. Run `pytest` + `ruff` + `black` directly to verify the fix (no `/do-test` dispatch)
 5. If pass: report success, update pipeline state to next stage
    - Test failure context → advance to `review`
    - Review blocker context → advance to `document`
