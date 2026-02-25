@@ -6,7 +6,7 @@ context: fork
 
 # AI Developer Workflow (SDLC)
 
-Autonomous software development lifecycle: **Plan → Build → Test → Review → Ship**
+Autonomous software development lifecycle: **Plan → Build → Test → Review → Docs → Ship**
 
 This workflow runs to completion without human intervention. Each phase validates before proceeding. Failures loop back automatically.
 
@@ -16,7 +16,8 @@ Don't just write code. Execute a complete development cycle with built-in qualit
 1. Code is written
 2. Tests pass
 3. Quality checks pass
-4. Work is committed and pushed
+4. Documentation is updated (/do-docs)
+5. Work is committed and pushed
 
 ## The Workflow
 
@@ -66,7 +67,16 @@ Don't just write code. Execute a complete development cycle with built-in qualit
                     │
                     ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                     5. SHIP PHASE                            │
+│                     5. DOCS PHASE (/do-docs)                 │                            │
+│  - Run /do-docs cascade                                      │
+│  - Update all docs referencing changed area                  │
+│  - Create new docs if feature is undocumented                │
+│  - Verify docs match actual implementation                   │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                     6. SHIP PHASE                            │
 │  - Stage changes (git add)                                   │
 │  - Commit with clear message                                 │
 │  - Push to remote                                            │
@@ -139,7 +149,24 @@ Self-review before shipping:
 - [ ] No debugging code left in
 ```
 
-### 5. SHIP Phase
+### 5. DOCS Phase
+
+Cascade documentation updates using `/do-docs`:
+
+```markdown
+## Docs Checklist
+- [ ] Run /do-docs cascade for the changes made
+- [ ] All docs referencing changed areas are updated
+- [ ] New features have corresponding docs created
+- [ ] Feature index (docs/features/README.md) updated if needed
+- [ ] No stale references to old patterns remain
+```
+
+The `/do-docs` skill handles this automatically — it finds every document referencing the changed area and makes targeted surgical updates so docs match the actual implementation.
+
+If `/do-docs` reports zero affected documents, that's fine — proceed to Ship.
+
+### 6. SHIP Phase
 
 Commit and push:
 
@@ -170,6 +197,7 @@ def execute_sdlc(task):
 
         if test_results.all_pass:
             review()
+            docs()   # /do-docs cascade
             ship()
             return SUCCESS
         else:
@@ -214,6 +242,7 @@ Each phase has a quality gate. The system cannot proceed unless the gate passes:
 | Build | Code compiles/loads | Fix syntax/imports |
 | Test | All tests pass | Loop back to Build |
 | Review | Self-review passes | Address issues |
+| Docs | Docs match implementation | Update stale references |
 | Ship | Commit succeeds | Resolve conflicts |
 
 ## Metrics
@@ -265,6 +294,10 @@ REVIEW:
 - Tests comprehensive
 - No security issues
 
+DOCS (/do-docs):
+- Updated docs/tools-reference.md with rate limit parameters
+- No other docs referenced rate limiting
+
 SHIP:
 - Committed: "Add rate limiting to API endpoints"
 - Pushed to origin
@@ -281,6 +314,6 @@ The SDLC workflow embodies this principle. The system doesn't ask "is this good?
 ---
 
 **Workflow Type**: AI Developer Workflow (ADW)
-**Phases**: Plan → Build → Test → Review → Ship
+**Phases**: Plan → Build → Test → Review → Docs → Ship
 **Completion Criteria**: All quality gates pass, code is pushed
 **Failure Handling**: Automatic loop-back with analysis
