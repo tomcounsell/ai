@@ -154,6 +154,7 @@ For each existing test directory/group, create a Task:
 Task({
   description: "Run [suite-name] tests",
   subagent_type: "test-engineer",
+  model: "sonnet",
   prompt: "Run the following test command and report results:
 
     cd [CWD]
@@ -171,6 +172,7 @@ If lint is enabled, dispatch a lint agent in parallel too:
 Task({
   description: "Run lint checks",
   subagent_type: "validator",
+  model: "sonnet",
   prompt: "Run lint checks in [CWD]:
 
     cd [CWD]
@@ -182,9 +184,27 @@ Task({
 })
 ```
 
-**Step 3: Wait for all agents to complete**
+**Step 3: Wait for agents with timeout fallback**
 
-Monitor all background tasks. Collect their outputs.
+Monitor all background tasks. Set a **2-minute timeout** from dispatch.
+
+**If all agents complete within 2 minutes:** Collect their outputs normally and proceed to Result Aggregation.
+
+**If any agent has NOT returned output after 2 minutes:**
+1. Abandon all pending agents (do not wait further)
+2. Log which agents timed out: `"Agent timeout: [suite-name] test-engineer did not return within 2 minutes"`
+3. **Fall back to direct execution:**
+   ```bash
+   pytest tests/ -v --tb=short
+   ```
+4. Use the direct execution output for Result Aggregation
+5. Run lint directly too if lint agents also timed out:
+   ```bash
+   ruff check .
+   black --check .
+   ```
+
+This fallback ensures test results are always collected, even when agent dispatch fails.
 
 ## Result Aggregation
 
