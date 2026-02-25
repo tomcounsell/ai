@@ -35,10 +35,10 @@ Based on the results, **pick up from the right phase**:
 | No plan exists | Start from Plan — invoke `/do-plan` |
 | Plan exists, no branch/PR | Start from Build — invoke `/do-build` |
 | Branch exists, tests failing | Invoke `/do-patch` to fix failures, then `/do-test` |
-| Branch exists, tests passing, no docs | Invoke `/do-docs` to cascade doc updates |
-| Branch exists, no PR | Invoke `/do-pr-review` to open and review PR |
-| PR exists, review blockers | Invoke `/do-patch` to fix blockers, then re-review |
-| PR exists, looks good | Report ready for human merge |
+| Branch exists, tests passing, no PR | Invoke `/do-pr-review` to open and review PR |
+| PR exists, review blockers | Invoke `/do-patch` to fix blockers, re-test, re-review |
+| PR approved, docs not updated | Invoke `/do-docs` to cascade doc updates |
+| PR approved, docs done | Report ready for human merge |
 
 Do NOT restart from scratch if prior phases are already complete.
 

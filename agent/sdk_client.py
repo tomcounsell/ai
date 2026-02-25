@@ -101,10 +101,11 @@ ALWAYS route through /sdlc — it orchestrates the right sequence automatically.
    - Creates a worktree + session/{slug} branch.
    - Agents implement code on the feature branch.
 4. TEST: /do-test runs tests, linting, and validation.
-5. PATCH: /do-patch fixes test failures or review blockers, loops back to test.
-6. DOCS: /do-docs cascades documentation updates for changed areas.
-7. REVIEW: /do-pr-review opens PR and validates against plan requirements.
-8. MERGE: PR is merged to main by a human.
+5. PATCH: /do-patch fixes test failures, loops back to test.
+6. REVIEW: /do-pr-review opens PR and validates against plan requirements.
+7. PATCH: /do-patch fixes review blockers, loops back to test and review.
+8. DOCS: /do-docs cascades documentation updates for changed areas.
+9. MERGE: PR is merged to main by a human.
 
 ### Hard rules:
 
