@@ -14,6 +14,16 @@ TEST_ARGS: $ARGUMENTS
 
 **If TEST_ARGS is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation — they invoked this as `/do-test <argument>`. Extract whatever follows `/do-test` as the value of TEST_ARGS. Do NOT stop or report an error; just use the argument from the message.
 
+## Step 0: Discover Additional Test Skills
+
+Before running tests, scan for any additional test-related skill docs in the project:
+
+```bash
+ls .claude/skills/*test*/*.md 2>/dev/null
+```
+
+**Read any discovered files.** They may define additional test runners, targets, or configurations beyond what this skill covers (e.g., mobile tests, browser tests, performance benchmarks). Incorporate their instructions alongside the defaults below.
+
 ## Argument Parsing
 
 Parse `TEST_ARGS` to determine what to run:

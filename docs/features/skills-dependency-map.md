@@ -71,10 +71,17 @@ add-feature ....(references)...> prime, pthread, sdlc, do-pr-review
 | do-docs | 3 unnamed parallel explorers (not agent definitions) |
 | do-docs-audit | unnamed parallel auditors (not agent definitions) |
 
-**Agents actually referenced by skills (6):** builder, validator, test-engineer, documentarian, frontend-tester, plan-maker
+**Agents actually referenced by skills (7):** builder, validator, code-reviewer, test-engineer, documentarian, frontend-tester, plan-maker
 
-**Agents defined but never referenced by any skill (25):**
-agent-architect, api-integration-specialist, async-specialist, code-reviewer, data-architect, database-architect, debugging-specialist, designer, documentation-specialist, infrastructure-engineer, integration-specialist, linear, mcp-specialist, migration-specialist, notion, performance-optimizer, quality-auditor, render, security-reviewer, sentry, stripe, test-writer, tool-developer, ui-ux-specialist, validation-specialist
+**Full 25-agent roster (3 tiers):**
+
+| Tier | Agents | Purpose |
+|------|--------|---------|
+| **Tier 1 — Core (7)** | builder, validator, code-reviewer, test-engineer, documentarian, plan-maker, frontend-tester | Wired into SDLC pipeline |
+| **Tier 2 — Specialists (13)** | debugging-specialist, async-specialist, security-reviewer, performance-optimizer, mcp-specialist, agent-architect, api-integration-specialist, data-architect, migration-specialist, documentation-specialist, test-writer, ui-ux-specialist, designer | Recruitable by plans for domain expertise |
+| **Tier 2b — Service (5)** | linear, notion, sentry, stripe, render | Domain-specific task delegation |
+
+**Agents consolidated (issue #155):** database-architect (patterns now in builder), infrastructure-engineer (patterns now in performance-optimizer), integration-specialist (patterns now in mcp-specialist), tool-developer (patterns now in mcp-specialist), validation-specialist (patterns now in validator), quality-auditor (covered by code-reviewer), agents README (now in skills README)
 
 ## Progressive Disclosure (Sub-files)
 
@@ -135,14 +142,8 @@ new-skill (generic) <--- new-valor-skill (wraps with Valor patterns)
 
 ## Observations
 
-### Orphaned Agents (candidates for issue #155 deletion)
-25 of 31 agent definitions are never referenced by any skill. The 6 that ARE used:
-- **builder** - do-build, do-patch
-- **validator** - do-build, do-test
-- **test-engineer** - do-build, do-test
-- **documentarian** - do-build
-- **frontend-tester** - do-test
-- **plan-maker** - do-plan (referenced in .claude/settings)
+### Agent Roster Status (post issue #155 cleanup)
+25 agents remain after deleting 7 redundant/merged files. 7 agents are wired into the SDLC pipeline, 13 are specialist agents recruitable by plans, and 5 are service agents. The full tiered roster is documented in PLAN_TEMPLATE.md and the skills README.
 
 ### Potential Redundancies
 - **sdlc** vs **do-build**: sdlc describes the pattern that do-build executes. sdlc adds Plan + Review phases around do-build. Consider whether sdlc should be folded into CLAUDE.md workflow docs instead of being a skill.

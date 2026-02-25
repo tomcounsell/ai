@@ -25,6 +25,23 @@ Users may also invoke directly:
 PATCH_ARG: $ARGUMENTS
 ITERATION_CAP: 3  (default; caller may override by appending e.g. `--max-iterations 5`)
 
+## Build Context Recovery
+
+The patch agent is re-entering the build loop. It needs the **same context** that `do-build` originally gave its builder agents — not just a failure message. Without this context, fixes may pass tests but drift from intent, use wrong patterns, or edit the wrong files.
+
+**Before deploying the builder agent, gather ALL of this:**
+
+1. **Plan document** — The full plan, not just a summary:
+   - If the caller passed the plan path, read it
+   - Otherwise: check git branch (`session/{slug}`) → read `docs/plans/{slug}.md`
+   - Extract: goal, acceptance criteria, no-gos, relevant files, architectural decisions
+2. **Tracking issue** — `gh issue view N` for the original issue context and discussion
+3. **Working directory** — Confirm CWD (worktree path if invoked by do-build, repo root if direct)
+4. **What was already built** — Run `git log --oneline main..HEAD` to see what the build has done so far
+5. **Relevant file paths** — From the plan's "Relevant Files" section, so the builder knows where to look
+
+**If no plan exists** (e.g., user-invoked hotfix), proceed with failure context alone — but note this in the fix report.
+
 **If PATCH_ARG is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation — they invoked this as `/do-patch <argument>`. Extract whatever follows `/do-patch` as the value of PATCH_ARG. Do NOT stop or report an error; just use the argument from the message.
 
 ## Instructions
@@ -54,19 +71,33 @@ You are fixing a specific failure. Make targeted edits only — do not refactor 
 
 CWD: [current working directory — do not navigate away]
 
+PLAN CONTEXT:
+[full plan document contents — goal, acceptance criteria, no-gos, architectural decisions]
+
+TRACKING ISSUE:
+[issue title and body from gh issue view, or 'No tracking issue']
+
+RELEVANT FILES (from plan):
+[list of file paths the plan identifies as relevant to the feature]
+
+BUILD HISTORY (commits so far on this branch):
+[output of git log --oneline main..HEAD]
+
 FAILURE TO FIX:
 [full PATCH_ARG content or failure text from context]
 
 YOUR JOB:
 1. Read the failure output carefully. Identify the root cause.
-2. Make the minimal code change that fixes the root cause.
-3. Do NOT change unrelated code, tests, or files.
-4. Do NOT create a PR.
-5. Do NOT commit — the caller will handle commits.
-6. After editing, report what you changed and why.
+2. Review the plan context and build history to understand what was intended.
+3. Make the minimal code change that fixes the root cause while staying aligned with the plan.
+4. Do NOT change unrelated code, tests, or files.
+5. Do NOT create a PR.
+6. Do NOT commit — the caller will handle commits.
+7. After editing, report what you changed and why, referencing the plan context.
 
 If the fix requires understanding surrounding context, read the relevant files first.
 If the failure has multiple root causes, fix all of them in this single pass.
+If a fix would contradict the plan's no-gos or architectural decisions, report the conflict instead of proceeding.
 "
 })
 ```

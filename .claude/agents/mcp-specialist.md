@@ -457,6 +457,53 @@ async def database_tables() -> List[Resource]:
     ]
 ```
 
+## Message Pipeline Pattern
+
+When building MCP servers that process messages, follow this 5-step pipeline:
+
+1. **Security Gate** - Access control, rate limiting, authentication
+2. **Context Builder** - Workspace detection, history retrieval, session context
+3. **Type Router** - Message classification and routing to appropriate handler
+4. **Agent Orchestrator** - AI processing, tool execution, response generation
+5. **Response Manager** - Delivery, formatting, error wrapping
+
+Each step is a discrete stage with clear inputs/outputs, enabling independent testing and graceful degradation.
+
+## Error Categorization Framework
+
+Categorize all tool errors into four categories for consistent handling:
+
+| Category | Description | Example |
+|----------|-------------|---------|
+| `configuration` | Missing env vars, bad config files | API key not set |
+| `validation` | Invalid inputs, schema violations | Bad parameter type |
+| `execution` | Runtime failures during tool logic | Timeout, crash |
+| `integration` | External service failures | API down, auth expired |
+
+```python
+class ToolImplementation:
+    """Base pattern for MCP tools with error categorization"""
+    error_categories = {
+        'configuration': [],
+        'validation': [],
+        'execution': [],
+        'integration': []
+    }
+```
+
+## Context Injection for Stateless Servers
+
+MCP servers are stateless. Inject workspace context via request headers:
+
+```python
+def inject_workspace_context(request) -> WorkspaceContext:
+    return WorkspaceContext(
+        workspace_id=request.headers.get('X-Workspace-ID'),
+        user_id=request.headers.get('X-User-ID'),
+        session_id=request.headers.get('X-Session-ID')
+    )
+```
+
 ## References
 
 - MCP specification documentation

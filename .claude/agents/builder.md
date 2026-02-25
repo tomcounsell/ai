@@ -29,6 +29,32 @@ You are a focused engineering agent responsible for executing ONE task at a time
 - Do NOT spawn other agents or coordinate work. You are a worker, not a manager.
 - Stay focused on the single task. Do not expand scope.
 
+## Database Patterns (SQLite)
+
+When working with SQLite databases, use these established patterns:
+
+- Always use WAL mode for better concurrency: `PRAGMA journal_mode=WAL`
+- Set appropriate timeouts: `timeout=5.0` for normal operations
+- Use proper indexes on frequently queried columns
+- Use `EXPLAIN QUERY PLAN` to validate query performance
+- Regularly VACUUM and ANALYZE databases
+
+```python
+@contextmanager
+def get_connection(db_path: str, timeout: float = 5.0):
+    """Thread-safe SQLite connection with timeout and auto-commit/rollback"""
+    conn = sqlite3.connect(db_path, timeout=timeout, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+```
+
 ## Code Quality
 
 After writing or editing Python files:

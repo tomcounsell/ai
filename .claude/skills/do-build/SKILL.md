@@ -337,10 +337,14 @@ Note: `delete_branch=False` because the PR still references `session/{slug}`. Th
 
 ### Step 7.6: Documentation Cascade
 
-After the PR is created, run the `/do-docs` cascade to find and surgically update any existing documentation affected by the code changes in this build. Pass the PR number so the cascade can inspect the full diff:
+After the PR is created, run the `/do-docs` cascade to find and surgically update any existing documentation affected by the code changes in this build. Pass the PR number AND plan context so the cascade understands the feature intent:
 
 ```
 /do-docs {PR-number}
+
+Plan: {PLAN_PATH}
+Goal: [1-2 sentence summary from plan]
+Issue: #{issue-number}
 ```
 
 This invokes the cascade skill defined in `.claude/skills/do-docs/SKILL.md`, which:
