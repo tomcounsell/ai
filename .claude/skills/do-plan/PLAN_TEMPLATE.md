@@ -151,7 +151,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Builder ([component-name])**
   - Name: [unique-name, e.g., "api-builder"]
   - Role: [Single focused responsibility]
-  - Agent Type: [builder | designer | tool-developer | database-architect | etc.]
+  - Agent Type: [builder | security-reviewer | async-specialist | etc.]
   - Resume: true
 
 - **Validator ([component-name])**
@@ -164,23 +164,32 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 
 ### Available Agent Types
 
-**Builders:**
+**Tier 1 — Core (default choices):**
 - `builder` - General implementation (default for most work)
-- `designer` - UI/UX following design systems
-- `tool-developer` - High-quality tool creation
-- `database-architect` - Schema design, migrations
-- `agent-architect` - Agent systems, context management
-- `test-engineer` - Test implementation
-- `documentarian` - Documentation updates
-- `integration-specialist` - External service integration
-
-**Validators:**
 - `validator` - Read-only verification (no Write/Edit tools)
 - `code-reviewer` - Code review, security checks
-- `quality-auditor` - Standards compliance
+- `test-engineer` - Test implementation and strategy
+- `documentarian` - Documentation updates
+- `plan-maker` - Planning subagent
+- `frontend-tester` - Browser testing
 
-**Service Agents:**
-- `github`, `notion`, `linear`, `stripe`, `sentry`, `render`
+**Tier 2 — Specialists (recruit for specific needs):**
+- `debugging-specialist` - Complex bug investigation, memory leaks, async debugging
+- `async-specialist` - Concurrency, rate limiting, circuit breakers, event loop optimization
+- `security-reviewer` - OWASP vulnerability scanning, auth review, secrets detection
+- `performance-optimizer` - Query optimization, multi-tier caching, profiling
+- `mcp-specialist` - MCP server development and tool integration
+- `agent-architect` - Agent systems, context management, living codebase patterns
+- `api-integration-specialist` - External API auth, rate limiting, error strategies
+- `data-architect` - Schema design, migrations, audit triggers, archival
+- `migration-specialist` - Data migration, traffic routing, rollback procedures
+- `documentation-specialist` - Doc format standards, templates, Mermaid diagrams
+- `test-writer` - Edge case generation, assertion patterns, async testing
+- `ui-ux-specialist` - Conversational UX, error humanization, accessibility
+- `designer` - UI implementation, atomic design, design system adherence
+
+**Service Agents (domain-specific task delegation):**
+- `linear`, `notion`, `sentry`, `stripe`, `render`
 
 ## Step by Step Tasks
 
