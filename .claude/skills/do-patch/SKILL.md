@@ -25,6 +25,15 @@ Users may also invoke directly:
 PATCH_ARG: $ARGUMENTS
 ITERATION_CAP: 3  (default; caller may override by appending e.g. `--max-iterations 5`)
 
+## Goal Alignment
+
+When invoked by `do-build`, this skill should receive the **plan context** (high-level goal and acceptance criteria) alongside the failure output. This prevents fixes that technically pass tests but drift from the original intent.
+
+**How to get plan context** (in priority order):
+1. If the caller passed plan context inline (e.g., `do-build` includes it in the prompt), use that directly
+2. Check the current git branch — if `session/{slug}`, look for `docs/plans/{slug}.md` and read its summary and acceptance criteria
+3. If no plan found, proceed without it — but note the absence in the fix report
+
 **If PATCH_ARG is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation — they invoked this as `/do-patch <argument>`. Extract whatever follows `/do-patch` as the value of PATCH_ARG. Do NOT stop or report an error; just use the argument from the message.
 
 ## Instructions
@@ -53,6 +62,9 @@ Task({
 You are fixing a specific failure. Make targeted edits only — do not refactor unrelated code.
 
 CWD: [current working directory — do not navigate away]
+
+HIGH-LEVEL GOAL (from plan):
+[plan summary and acceptance criteria, or 'No plan context available']
 
 FAILURE TO FIX:
 [full PATCH_ARG content or failure text from context]

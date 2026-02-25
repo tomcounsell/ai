@@ -19,6 +19,21 @@ Review a pull request by analyzing its changes against the plan, checking code q
 
 - `pr_number` (required): The PR number to review (e.g., `42` or `#42`)
 
+## Goal Alignment
+
+Every PR review must be grounded in the original intent. Before reviewing code, find and read the plan and tracking issue to understand *what was supposed to be built and why*.
+
+**How to get plan context** (in priority order):
+1. Check PR body for `Closes #N` — fetch the issue via `gh issue view N`
+2. Extract slug from branch name (e.g., `session/{slug}`) and read `docs/plans/{slug}.md`
+3. Look for plan docs in `docs/plans/` that reference the issue number
+4. If no plan exists (e.g., hotfix), review against the PR description alone
+
+When plan context is available, the review should validate that implementation matches the plan's:
+- Acceptance criteria and success conditions
+- No-Gos (things explicitly excluded)
+- Architectural decisions and patterns
+
 ## Instructions
 
 Follow this review process to validate a pull request:
@@ -40,10 +55,11 @@ gh pr diff {pr_number}
 gh pr diff {pr_number} --name-only
 ```
 
-**Find the associated plan (if any):**
-- Check PR body for `Closes #N` to find the tracking issue
-- Look for plan docs in `docs/plans/` that reference that issue
-- The plan contains acceptance criteria and requirements to validate against
+**Find and read the associated plan and issue:**
+- Check PR body for `Closes #N` — run `gh issue view N` to get the tracking issue context
+- Extract slug from the head branch name and read `docs/plans/{slug}.md`
+- The plan contains acceptance criteria, no-gos, and requirements to validate against
+- Keep the plan summary in mind throughout the entire review
 
 ### 2. Code Review
 

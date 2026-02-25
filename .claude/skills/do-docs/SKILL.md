@@ -7,6 +7,21 @@ description: "Use when cascading documentation updates after code changes. Finds
 
 After a code change lands, find every document that references the changed area and make targeted, surgical updates so docs match the actual implementation.
 
+## Goal Alignment
+
+When invoked by `do-build`, this skill should receive the **plan context** (high-level goal, tracking issue, and acceptance criteria) so doc updates are aligned with the feature's intent — not just the raw diff.
+
+**How to get plan context** (in priority order):
+1. If the caller passed plan context inline (e.g., `do-build` includes it in the prompt), use that directly
+2. Check the PR body for `Closes #N` — fetch the issue, then look for `docs/plans/{slug}.md`
+3. Check the current git branch — if `session/{slug}`, look for `docs/plans/{slug}.md`
+4. If no plan found, proceed without it — the diff alone is sufficient for doc cascading
+
+When plan context is available, use it to:
+- Understand the *purpose* of the change (not just what moved)
+- Identify which docs are conceptually related even without keyword overlap
+- Write doc updates that explain the "why" alongside the "what"
+
 ## Principles
 
 1. **Document what IS, not what WAS** — match the actual API/behavior, not the plan
