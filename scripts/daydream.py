@@ -8,15 +8,18 @@ A long-running process that performs daily maintenance tasks:
 3. Check error logs via Sentry (skips gracefully if MCP unavailable)
 4. Clean up task management (per-project, via gh CLI)
 5. Update documentation
-6. Session analysis (thrash ratio, user corrections)
+6. Session analysis (thrash ratio, user corrections) - Redis-backed via SessionLog
 7. LLM reflection (Claude Haiku categorization)
 8. Auto-fix high-confidence code bugs via plan-build-PR
-9. Memory consolidation (lessons_learned.jsonl)
+9. Memory consolidation (Redis LessonLearned model)
 10. Produce daily report (local markdown)
 11. GitHub issue creation (per-project, via daydream_report module)
 12. Skills audit (validate all SKILL.md files against template standards)
+13. Redis TTL cleanup (all models including daydream models)
 
-This process is resumable - if interrupted, it picks up where it left off.
+State is persisted in Redis via DaydreamRun model for resumability.
+Ignore patterns use DaydreamIgnore model with TTL-based auto-expiry.
+Lessons learned use LessonLearned model for queryable institutional memory.
 """
 
 from __future__ import annotations
@@ -28,7 +31,6 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -58,15 +60,46 @@ PROJECT_ROOT = Path(__file__).parent.parent
 AI_ROOT = PROJECT_ROOT  # Preserved alias; do not reassign in production code
 LOGS_DIR = PROJECT_ROOT / "logs"
 DAYDREAM_DIR = LOGS_DIR / "daydream"
-STATE_FILE = DAYDREAM_DIR / "state.json"
 DATA_DIR = PROJECT_ROOT / "data"
-LESSONS_FILE = DATA_DIR / "lessons_learned.jsonl"
 SESSIONS_DIR = LOGS_DIR / "sessions"
+
+# Legacy file paths (kept for backward compatibility during transition)
+STATE_FILE = DAYDREAM_DIR / "state.json"
+LESSONS_FILE = DATA_DIR / "lessons_learned.jsonl"
 IGNORE_LOG_FILE = DATA_DIR / "daydream_ignore.jsonl"
 
 
+# --- Redis-backed helpers (replacing flat file operations) ---
+
+
 def load_ignore_log() -> list[dict]:
-    """Load active (non-expired) ignore log entries."""
+    """Load active (non-expired) ignore entries from Redis.
+
+    Falls back to JSONL file if Redis is unavailable.
+    """
+    try:
+        from models.daydream import DaydreamIgnore
+
+        active = DaydreamIgnore.get_active()
+        return [
+            {
+                "pattern": entry.pattern,
+                "ignored_until": (
+                    datetime.fromtimestamp(entry.expires_at).date().isoformat()
+                    if entry.expires_at
+                    else ""
+                ),
+                "reason": entry.reason or "",
+            }
+            for entry in active
+        ]
+    except Exception:
+        logger.debug("Redis unavailable for ignore log, falling back to file")
+        return _load_ignore_log_from_file()
+
+
+def _load_ignore_log_from_file() -> list[dict]:
+    """Legacy: Load active ignore entries from JSONL file."""
     if not IGNORE_LOG_FILE.exists():
         return []
     today = datetime.now().date().isoformat()
@@ -85,7 +118,24 @@ def load_ignore_log() -> list[dict]:
 
 
 def prune_ignore_log() -> None:
-    """Remove expired entries from the ignore log."""
+    """Remove expired entries from the ignore log.
+
+    Uses Redis DaydreamIgnore.cleanup_expired() primarily,
+    falls back to file-based pruning.
+    """
+    try:
+        from models.daydream import DaydreamIgnore
+
+        deleted = DaydreamIgnore.cleanup_expired()
+        if deleted:
+            logger.info(f"Pruned {deleted} expired ignore entries from Redis")
+    except Exception:
+        logger.debug("Redis unavailable for ignore prune, falling back to file")
+        _prune_ignore_log_from_file()
+
+
+def _prune_ignore_log_from_file() -> None:
+    """Legacy: Remove expired entries from JSONL file."""
     if not IGNORE_LOG_FILE.exists():
         return
     today = datetime.now().date().isoformat()
@@ -177,8 +227,122 @@ def load_local_projects() -> list[dict]:
     return projects
 
 
+def analyze_sessions_from_redis(target_date: str) -> dict[str, Any]:
+    """Analyze sessions using Redis SessionLog and BridgeEvent models.
+
+    Queries SessionLog for sessions from the target date and BridgeEvent
+    for error patterns, replacing the flat-file session directory scan.
+
+    Args:
+        target_date: Date string (YYYY-MM-DD) to filter sessions.
+
+    Returns:
+        Dict with sessions_analyzed, corrections, thrash_sessions, error_patterns.
+    """
+    result: dict[str, Any] = {
+        "sessions_analyzed": 0,
+        "corrections": [],
+        "thrash_sessions": [],
+        "error_patterns": [],
+    }
+
+    try:
+        from models.bridge_event import BridgeEvent
+        from models.session_log import SessionLog
+
+        # Query SessionLog for sessions from the target date
+        all_sessions = SessionLog.query.all()
+        target_sessions = []
+        for session in all_sessions:
+            if session.started_at:
+                session_date = datetime.fromtimestamp(session.started_at).strftime(
+                    "%Y-%m-%d"
+                )
+                if session_date == target_date:
+                    target_sessions.append(session)
+
+        # Cap at 20 most interesting (sort by turn_count descending)
+        target_sessions.sort(key=lambda s: s.turn_count or 0, reverse=True)
+        target_sessions = target_sessions[:20]
+
+        for session in target_sessions:
+            result["sessions_analyzed"] += 1
+            session_id = session.session_id or "unknown"
+
+            # Check for thrashing: high tool_call_count relative to turn_count
+            tool_calls = session.tool_call_count or 0
+            turn_count = session.turn_count or 0
+            if tool_calls > 5 and turn_count > 0:
+                failure_ratio = max(0.0, 1.0 - (turn_count / tool_calls))
+                if failure_ratio > THRASH_RATIO_THRESHOLD:
+                    result["thrash_sessions"].append(
+                        {
+                            "session_id": session_id,
+                            "tool_calls": tool_calls,
+                            "successes": turn_count,
+                            "failure_ratio": round(failure_ratio, 2),
+                        }
+                    )
+
+            # Check transcript file for user corrections if available
+            if session.log_path:
+                log_path = Path(session.log_path)
+                if log_path.exists():
+                    try:
+                        content = log_path.read_text()
+                        for line in content.splitlines():
+                            if "USER:" in line or "user:" in line:
+                                for pattern in CORRECTION_PATTERNS:
+                                    if pattern.search(line):
+                                        result["corrections"].append(
+                                            {
+                                                "session_id": session_id,
+                                                "message": line.strip()[:200],
+                                                "pattern": pattern.pattern,
+                                            }
+                                        )
+                                        break
+                    except OSError:
+                        pass
+
+            # Check for failed sessions
+            if session.status == "failed":
+                result["error_patterns"].append(
+                    {
+                        "session_id": session_id,
+                        "status": "failed",
+                        "summary": (session.summary or "")[:200],
+                    }
+                )
+
+        # Also query BridgeEvent for error events from the target date
+        try:
+            all_events = BridgeEvent.query.filter(event_type="error")
+            for event in all_events:
+                if event.timestamp:
+                    event_date = datetime.fromtimestamp(event.timestamp).strftime(
+                        "%Y-%m-%d"
+                    )
+                    if event_date == target_date:
+                        result["error_patterns"].append(
+                            {
+                                "event_type": "bridge_error",
+                                "data": event.data or {},
+                                "timestamp": event_date,
+                            }
+                        )
+        except Exception:
+            pass  # BridgeEvent query is supplementary
+
+    except Exception as e:
+        logger.warning(f"Redis session analysis failed, falling back to file: {e}")
+        return analyze_sessions(SESSIONS_DIR, target_date)
+
+    return result
+
+
 def analyze_sessions(sessions_dir: Path, target_date: str) -> dict[str, Any]:
-    """Analyze session snapshots for a given date.
+    """Analyze session snapshots for a given date (file-based fallback).
 
     Reads chat.json and tool_use.jsonl from session directories,
     filters to the target date, and extracts:
@@ -286,7 +450,7 @@ def run_llm_reflection(
     """Run LLM reflection on session analysis using Claude Haiku.
 
     Args:
-        analysis: Output from analyze_sessions().
+        analysis: Output from analyze_sessions() or analyze_sessions_from_redis().
 
     Returns:
         List of reflection dicts with category, summary, pattern,
@@ -363,15 +527,58 @@ def consolidate_memory(
     date: str,
     lessons_file: Path | None = None,
 ) -> None:
-    """Append reflection output to lessons_learned.jsonl.
+    """Persist reflection output to Redis LessonLearned model.
 
-    Deduplicates by pattern similarity and prunes entries older than 90 days.
+    Falls back to JSONL file if Redis is unavailable.
+    Also prunes entries older than 90 days.
 
     Args:
         reflections: List of reflection dicts from run_llm_reflection().
         date: Date string (YYYY-MM-DD) for new entries.
-        lessons_file: Path to lessons_learned.jsonl (defaults to DATA_DIR).
+        lessons_file: Path to lessons_learned.jsonl (fallback only).
     """
+    try:
+        from models.daydream import LessonLearned
+
+        # Prune old entries
+        pruned = LessonLearned.cleanup_expired(max_age_days=90)
+        if pruned:
+            logger.info(f"Pruned {pruned} expired lessons from Redis")
+
+        # Add new entries (deduplication handled by add_lesson)
+        added = 0
+        for reflection in reflections:
+            pattern = reflection.get("pattern", "")
+            if not pattern:
+                continue
+            result = LessonLearned.add_lesson(
+                date=date,
+                category=reflection.get("category", "unknown"),
+                summary=reflection.get("summary", ""),
+                pattern=pattern,
+                prevention=reflection.get("prevention", ""),
+                source_session=reflection.get("source_session", ""),
+            )
+            if result is not None:
+                added += 1
+
+        if added:
+            logger.info(f"Added {added} new lessons to Redis")
+        return
+
+    except Exception as e:
+        logger.debug(f"Redis unavailable for memory consolidation: {e}")
+
+    # Fallback to file-based consolidation
+    _consolidate_memory_to_file(reflections, date, lessons_file)
+
+
+def _consolidate_memory_to_file(
+    reflections: list[dict[str, str]],
+    date: str,
+    lessons_file: Path | None = None,
+) -> None:
+    """Legacy: Append reflection output to lessons_learned.jsonl."""
     if lessons_file is None:
         lessons_file = LESSONS_FILE
 
@@ -466,55 +673,57 @@ def extract_structured_errors(log_file: Path) -> list[dict[str, str]]:
     return errors
 
 
-@dataclass
-class DaydreamState:
-    """Persisted state for resumability."""
+def extract_errors_from_redis(target_date: str) -> list[dict[str, str]]:
+    """Extract error patterns from BridgeEvent Redis model.
 
-    current_step: int = 1
-    step_started_at: str | None = None
-    step_progress: dict[str, Any] = field(default_factory=dict)
-    completed_steps: list[int] = field(default_factory=list)
-    daily_report: list[str] = field(default_factory=list)
-    date: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
-    findings: dict[str, list[str]] = field(default_factory=dict)
-    session_analysis: dict[str, Any] = field(default_factory=dict)
-    reflections: list[dict[str, str]] = field(default_factory=list)
-    auto_fix_attempts: list[dict] = field(default_factory=list)
+    Supplements log file analysis with structured error data from Redis.
 
-    @classmethod
-    def load(cls) -> DaydreamState:
-        """Load state from file or create new."""
-        if STATE_FILE.exists():
-            try:
-                with open(STATE_FILE) as f:
-                    data = json.load(f)
-                # Reset if it's a new day
-                if data.get("date") != datetime.now().strftime("%Y-%m-%d"):
-                    logger.info("New day detected, starting fresh")
-                    return cls()
-                return cls(**data)
-            except Exception as e:
-                logger.warning(f"Could not load state: {e}")
-        return cls()
+    Args:
+        target_date: Date string (YYYY-MM-DD) to filter events.
 
-    def save(self) -> None:
-        """Save state to file."""
-        DAYDREAM_DIR.mkdir(parents=True, exist_ok=True)
-        with open(STATE_FILE, "w") as f:
-            json.dump(asdict(self), f, indent=2)
+    Returns:
+        List of dicts with timestamp, level, message, and context.
+    """
+    errors: list[dict[str, str]] = []
+    try:
+        from models.bridge_event import BridgeEvent
 
-    def add_finding(self, category: str, finding: str) -> None:
-        """Add a finding to the report."""
-        if category not in self.findings:
-            self.findings[category] = []
-        self.findings[category].append(finding)
+        all_events = BridgeEvent.query.filter(event_type="error")
+        for event in all_events:
+            if event.timestamp:
+                event_date = datetime.fromtimestamp(event.timestamp).strftime(
+                    "%Y-%m-%d"
+                )
+                if event_date == target_date:
+                    data = event.data or {}
+                    errors.append(
+                        {
+                            "timestamp": datetime.fromtimestamp(
+                                event.timestamp
+                            ).strftime("%Y-%m-%d %H:%M:%S"),
+                            "level": "ERROR",
+                            "message": data.get(
+                                "error", data.get("message", str(data))
+                            ),
+                            "context": f"project={event.project_key or 'unknown'} "
+                            f"chat={event.chat_id or 'unknown'}",
+                        }
+                    )
+    except Exception as e:
+        logger.debug(f"Could not extract errors from Redis BridgeEvent: {e}")
+
+    return errors
 
 
 class DaydreamRunner:
-    """Runs the daydream maintenance process."""
+    """Runs the daydream maintenance process.
+
+    State is persisted in Redis via DaydreamRun model. Falls back to
+    local JSON file if Redis is unavailable.
+    """
 
     def __init__(self) -> None:
-        self.state = DaydreamState.load()
+        self.state = self._load_state()
         self.projects = load_local_projects()
         self.steps = [
             (1, "Clean Up Legacy Code", self.step_clean_legacy),
@@ -531,6 +740,32 @@ class DaydreamRunner:
             (12, "Skills Audit", self.step_skills_audit),
             (13, "Redis TTL Cleanup", self.step_redis_cleanup),
         ]
+
+    def _load_state(self) -> DaydreamState:
+        """Load state from Redis DaydreamRun, falling back to local JSON."""
+        today = datetime.now().strftime("%Y-%m-%d")
+        try:
+            from models.daydream import DaydreamRun
+
+            run = DaydreamRun.load_or_create(today)
+            # Wrap in DaydreamState for API compatibility
+            state = DaydreamState(
+                current_step=run.current_step or 1,
+                completed_steps=run.completed_steps or [],
+                daily_report=run.daily_report or [],
+                date=run.date or today,
+                findings=run.findings or {},
+                session_analysis=run.session_analysis or {},
+                reflections=run.reflections or [],
+                auto_fix_attempts=run.auto_fix_attempts or [],
+                step_progress=run.step_progress or {},
+            )
+            state._redis_backed = True
+            state._redis_date = today
+            return state
+        except Exception as e:
+            logger.debug(f"Redis state unavailable, using file: {e}")
+            return DaydreamState.load()
 
     async def run(self) -> None:
         """Run all daydream steps."""
@@ -625,26 +860,41 @@ class DaydreamRunner:
         }
 
     async def step_review_logs(self) -> None:
-        """Step 2: Review previous day's logs per project with structured error extraction.
+        """Step 2: Review previous day's logs per project.
 
-        Iterates over each local project from config/projects.json and reviews
-        log files in <project>/logs/. Findings are namespaced as
-        '{slug}:log_review' to distinguish per-project results.
+        Uses both file-based log analysis and Redis BridgeEvent queries
+        for a comprehensive view of errors and warnings.
         """
         total_files_analyzed = 0
         total_findings = 0
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
         for project in self.projects:
             slug = project["slug"]
             project_dir = Path(project["working_directory"])
             logs_dir = project_dir / "logs"
 
+            findings = []
+
+            # Query Redis BridgeEvent for structured errors
+            redis_errors = extract_errors_from_redis(yesterday)
+            if redis_errors:
+                findings.append(
+                    f"Redis BridgeEvent: {len(redis_errors)} error events yesterday"
+                )
+                for error in redis_errors[-5:]:
+                    msg = error["message"][:200]
+                    findings.append(f"  [BridgeEvent] {error['timestamp']}: {msg}")
+
             if not logs_dir.exists():
-                logger.info(f"No logs directory found for {slug}, skipping")
+                logger.info(f"No logs directory found for {slug}, skipping file scan")
+                if findings:
+                    for finding in findings:
+                        self.state.add_finding(f"{slug}:log_review", finding)
+                    total_findings += len(findings)
                 continue
 
             log_files = list(logs_dir.glob("*.log"))
-            findings = []
 
             for log_file in log_files:
                 if not log_file.is_file():
@@ -873,6 +1123,17 @@ class DaydreamRunner:
                         f"{t.get('tool_calls', 0)} calls, "
                         f"{t.get('successes', 0)} successes"
                     )
+
+            # Include error patterns from Redis
+            error_patterns = sa.get("error_patterns", [])
+            if error_patterns:
+                report_lines.append(f"- Error patterns: {len(error_patterns)}")
+                for ep in error_patterns[:5]:
+                    report_lines.append(
+                        f"  - {ep.get('session_id', ep.get('event_type', '?'))}: "
+                        f"{ep.get('summary', ep.get('data', ''))}"
+                    )
+
             report_lines.append("")
 
         # Add reflections if available
@@ -910,10 +1171,16 @@ class DaydreamRunner:
         print("=" * 60)
 
     async def step_session_analysis(self) -> None:
-        """Step 6: Analyze yesterday's sessions (ai-repo specific)."""
+        """Step 6: Analyze yesterday's sessions.
+
+        Tries Redis-backed analysis via SessionLog/BridgeEvent first,
+        falls back to file-based analysis.
+        """
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-        analysis = analyze_sessions(SESSIONS_DIR, yesterday)
+        # Try Redis-backed analysis first
+        analysis = analyze_sessions_from_redis(yesterday)
+
         self.state.session_analysis = analysis
 
         # Add findings
@@ -929,11 +1196,18 @@ class DaydreamRunner:
                 f"Detected {len(analysis['thrash_sessions'])} thrashing "
                 f"sessions (high failure ratio)",
             )
+        error_patterns = analysis.get("error_patterns", [])
+        if error_patterns:
+            self.state.add_finding(
+                "session_analysis",
+                f"Found {len(error_patterns)} error patterns in sessions/events",
+            )
 
         self.state.step_progress["session_analysis"] = {
             "sessions_analyzed": analysis["sessions_analyzed"],
             "corrections": len(analysis["corrections"]),
             "thrash_sessions": len(analysis["thrash_sessions"]),
+            "error_patterns": len(error_patterns),
         }
 
     async def step_llm_reflection(self) -> None:
@@ -1080,7 +1354,7 @@ class DaydreamRunner:
         }
 
     async def step_memory_consolidation(self) -> None:
-        """Step 9: Consolidate lessons learned (was step 8)."""
+        """Step 9: Consolidate lessons learned to Redis."""
         consolidate_memory(self.state.reflections, self.state.date, LESSONS_FILE)
 
         self.state.step_progress["memory_consolidation"] = {
@@ -1187,13 +1461,16 @@ class DaydreamRunner:
             self.state.step_progress["skills_audit"] = {"error": str(e)}
 
     async def step_redis_cleanup(self) -> None:
-        """Step 13: Run TTL cleanup on Redis models (90-day retention).
+        """Step 13: Run TTL cleanup on all Redis models.
 
-        Deletes TelegramMessage, Link, Chat, and SessionLog records older
-        than 90 days. Transcript .txt files are NOT deleted.
+        Cleans up: TelegramMessage, Link, Chat, SessionLog (90-day),
+        BridgeEvent (7-day), DaydreamRun (30-day), DaydreamIgnore (expired),
+        LessonLearned (90-day).
         """
         try:
+            from models.bridge_event import BridgeEvent
             from models.chat import Chat
+            from models.daydream import DaydreamIgnore, DaydreamRun, LessonLearned
             from models.link import Link
             from models.session_log import SessionLog
             from models.telegram import TelegramMessage
@@ -1202,12 +1479,27 @@ class DaydreamRunner:
             link_deleted = Link.cleanup_expired(max_age_days=90)
             chat_deleted = Chat.cleanup_expired(max_age_days=90)
             session_deleted = SessionLog.cleanup_expired(max_age_days=90)
+            event_deleted = BridgeEvent.cleanup_old(max_age_seconds=7 * 86400)
+            run_deleted = DaydreamRun.cleanup_expired(max_age_days=30)
+            ignore_deleted = DaydreamIgnore.cleanup_expired()
+            lesson_deleted = LessonLearned.cleanup_expired(max_age_days=90)
 
-            total = msg_deleted + link_deleted + chat_deleted + session_deleted
+            total = (
+                msg_deleted
+                + link_deleted
+                + chat_deleted
+                + session_deleted
+                + event_deleted
+                + run_deleted
+                + ignore_deleted
+                + lesson_deleted
+            )
             logger.info(
                 f"Redis TTL cleanup: {total} records deleted "
                 f"(msgs={msg_deleted}, links={link_deleted}, "
-                f"chats={chat_deleted}, sessions={session_deleted})"
+                f"chats={chat_deleted}, sessions={session_deleted}, "
+                f"events={event_deleted}, runs={run_deleted}, "
+                f"ignores={ignore_deleted}, lessons={lesson_deleted})"
             )
             self.state.daily_report.append(
                 f"Redis cleanup: {total} expired records removed"
@@ -1274,6 +1566,90 @@ class DaydreamRunner:
             logger.warning(f"Telegram post failed for {project['slug']}: {e}")
 
 
+# --- DaydreamState: compatibility wrapper ---
+
+from dataclasses import asdict, dataclass, field  # noqa: E402
+
+
+@dataclass
+class DaydreamState:
+    """Persisted state for resumability.
+
+    When Redis is available, save() persists to DaydreamRun model.
+    Falls back to local JSON file otherwise.
+    """
+
+    current_step: int = 1
+    step_started_at: str | None = None
+    step_progress: dict[str, Any] = field(default_factory=dict)
+    completed_steps: list[int] = field(default_factory=list)
+    daily_report: list[str] = field(default_factory=list)
+    date: str = field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d"))
+    findings: dict[str, list[str]] = field(default_factory=dict)
+    session_analysis: dict[str, Any] = field(default_factory=dict)
+    reflections: list[dict[str, str]] = field(default_factory=list)
+    auto_fix_attempts: list[dict] = field(default_factory=list)
+
+    @classmethod
+    def load(cls) -> DaydreamState:
+        """Load state from file or create new."""
+        if STATE_FILE.exists():
+            try:
+                with open(STATE_FILE) as f:
+                    data = json.load(f)
+                # Reset if it's a new day
+                if data.get("date") != datetime.now().strftime("%Y-%m-%d"):
+                    logger.info("New day detected, starting fresh")
+                    return cls()
+                return cls(**data)
+            except Exception as e:
+                logger.warning(f"Could not load state: {e}")
+        return cls()
+
+    def save(self) -> None:
+        """Save state to Redis DaydreamRun, falling back to file."""
+        # Try Redis first
+        if getattr(self, "_redis_backed", False):
+            try:
+                import time as _time
+
+                from models.daydream import DaydreamRun
+
+                existing = DaydreamRun.query.filter(date=self.date)
+                started_at = _time.time()
+                if existing:
+                    started_at = existing[0].started_at or started_at
+                    existing[0].delete()
+
+                DaydreamRun.create(
+                    date=self.date,
+                    current_step=self.current_step,
+                    completed_steps=self.completed_steps,
+                    daily_report=self.daily_report,
+                    findings=self.findings,
+                    session_analysis=self.session_analysis,
+                    reflections=self.reflections,
+                    auto_fix_attempts=self.auto_fix_attempts,
+                    step_progress=self.step_progress,
+                    started_at=started_at,
+                    dry_run=getattr(self, "_dry_run", False),
+                )
+                return
+            except Exception as e:
+                logger.debug(f"Redis save failed, falling back to file: {e}")
+
+        # Fallback to file
+        DAYDREAM_DIR.mkdir(parents=True, exist_ok=True)
+        with open(STATE_FILE, "w") as f:
+            json.dump(asdict(self), f, indent=2)
+
+    def add_finding(self, category: str, finding: str) -> None:
+        """Add a finding to the report."""
+        if category not in self.findings:
+            self.findings[category] = []
+        self.findings[category].append(finding)
+
+
 async def main() -> None:
     """Main entry point."""
     import argparse
@@ -1298,16 +1674,30 @@ async def main() -> None:
     args = parser.parse_args()
 
     if args.ignore:
-        ignored_until = (datetime.now() + timedelta(days=14)).date().isoformat()
-        entry = {
-            "pattern": args.ignore,
-            "ignored_until": ignored_until,
-            "reason": args.reason,
-        }
-        IGNORE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with IGNORE_LOG_FILE.open("a") as f:
-            f.write(json.dumps(entry) + "\n")
-        print(f"Added ignore entry: {args.ignore!r} (until {ignored_until})")
+        # Try Redis first, fall back to file
+        try:
+            from models.daydream import DaydreamIgnore
+
+            entry = DaydreamIgnore.add_ignore(
+                pattern=args.ignore, reason=args.reason, days=14
+            )
+            ignored_until = datetime.fromtimestamp(entry.expires_at).date().isoformat()
+            print(
+                f"Added ignore entry to Redis: {args.ignore!r} (until {ignored_until})"
+            )
+        except Exception:
+            ignored_until = (datetime.now() + timedelta(days=14)).date().isoformat()
+            entry_dict = {
+                "pattern": args.ignore,
+                "ignored_until": ignored_until,
+                "reason": args.reason,
+            }
+            IGNORE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with IGNORE_LOG_FILE.open("a") as f:
+                f.write(json.dumps(entry_dict) + "\n")
+            print(
+                f"Added ignore entry to file: {args.ignore!r} (until {ignored_until})"
+            )
         return
 
     runner = DaydreamRunner()
