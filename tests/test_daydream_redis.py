@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 
 class TestDaydreamRunModel:
     """Tests for DaydreamRun Popoto model."""
@@ -437,7 +439,7 @@ class TestRedisDataQuality:
         step_names = {s[0]: s[1] for s in runner.steps}
         assert step_names.get(14) == "Redis Data Quality"
 
-    @__import__("pytest").mark.asyncio
+    @pytest.mark.asyncio
     async def test_detects_unsummarized_links(self):
         """Finds links with no ai_summary in last 7 days."""
         import time
@@ -472,7 +474,7 @@ class TestRedisDataQuality:
         findings = runner.state.findings.get("redis_data_quality", [])
         assert any("1 links" in f and "no AI summary" in f for f in findings)
 
-    @__import__("pytest").mark.asyncio
+    @pytest.mark.asyncio
     async def test_detects_dead_channels(self):
         """Finds chats with no recent activity."""
         import time
@@ -502,7 +504,7 @@ class TestRedisDataQuality:
         findings = runner.state.findings.get("redis_data_quality", [])
         assert any("1 chat" in f and "no activity" in f for f in findings)
 
-    @__import__("pytest").mark.asyncio
+    @pytest.mark.asyncio
     async def test_empty_when_no_data(self):
         """No findings when Redis has no data."""
         from scripts.daydream import DaydreamRunner

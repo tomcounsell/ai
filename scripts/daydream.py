@@ -531,7 +531,6 @@ class DaydreamRunner:
             auto_fix_attempts=run.auto_fix_attempts or [],
             step_progress=run.step_progress or {},
         )
-        state._redis_backed = True
         return state
 
     async def run(self) -> None:
@@ -1299,9 +1298,7 @@ class DaydreamRunner:
             unsummarized = [
                 link
                 for link in all_links
-                if link.timestamp
-                and link.timestamp > week_ago
-                and not link.ai_summary
+                if link.timestamp and link.timestamp > week_ago and not link.ai_summary
             ]
             if unsummarized:
                 findings.append(
@@ -1327,9 +1324,7 @@ class DaydreamRunner:
                     f"{len(dead_chats)} chat(s) with no activity in 30+ days"
                 )
                 for chat in dead_chats[:5]:
-                    days_inactive = int(
-                        (_time.time() - chat.updated_at) / 86400
-                    )
+                    days_inactive = int((_time.time() - chat.updated_at) / 86400)
                     findings.append(
                         f"  Inactive: {chat.chat_name} "
                         f"({days_inactive} days, type={chat.chat_type})"
@@ -1339,9 +1334,7 @@ class DaydreamRunner:
             recent_cutoff = _time.time() - (7 * 86400)
             all_sessions = SessionLog.query.all()
             recent_sessions = [
-                s
-                for s in all_sessions
-                if s.started_at and s.started_at > recent_cutoff
+                s for s in all_sessions if s.started_at and s.started_at > recent_cutoff
             ]
 
             error_keywords: dict[str, int] = {}
@@ -1384,11 +1377,13 @@ class DaydreamRunner:
                     findings.append(f"  {keyword}: {count} occurrences")
 
             # 4. Message volume per chat (identify high-traffic vs low-traffic)
-            all_messages = TelegramMessage.query.all()
+            # Cap to last 10000 messages to bound memory usage.
+            # Popoto lacks server-side filtering for SortedField range queries
+            # on TelegramMessage, so we fetch and filter in Python (same pattern
+            # as cleanup_expired in models/telegram.py -- bounded dataset).
+            all_messages = TelegramMessage.query.all()[:10000]
             recent_messages = [
-                m
-                for m in all_messages
-                if m.timestamp and m.timestamp > week_ago
+                m for m in all_messages if m.timestamp and m.timestamp > week_ago
             ]
             chat_volumes: dict[str, int] = {}
             for msg in recent_messages:
