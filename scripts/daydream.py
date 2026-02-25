@@ -20,6 +20,8 @@ A long-running process that performs daily maintenance tasks:
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
 State: DaydreamRun | Ignore patterns: DaydreamIgnore | Lessons: LessonLearned
+
+See docs/features/daydream.md for full documentation.
 """
 
 from __future__ import annotations

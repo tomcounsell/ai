@@ -1,9 +1,11 @@
 """Daydream Popoto models - Redis-backed state for the daydream maintenance system.
 
-Replaces three JSONL/JSON flat files:
-- data/daydream_state.json -> DaydreamRun (per-run state with resumability)
-- data/daydream_ignore.jsonl -> DaydreamIgnore (with TTL-based auto-expiry)
-- data/lessons_learned.jsonl -> LessonLearned (queryable institutional memory)
+Three models:
+- DaydreamRun: per-run state with resumability (one per day)
+- DaydreamIgnore: auto-fix suppression with TTL-based auto-expiry
+- LessonLearned: queryable institutional memory from LLM reflection
+
+See docs/features/daydream.md for full documentation.
 """
 
 import time

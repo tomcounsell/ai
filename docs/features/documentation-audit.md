@@ -165,5 +165,5 @@ API calls use the `ANTHROPIC_API_KEY` environment variable. In dry-run mode with
 
 - `scripts/docs_auditor.py` — full implementation
 - `scripts/daydream.py` — daydream pipeline including `step_audit_docs`
-- `docs/operations/daydream-system.md` — daydream system overview with step table
+- `docs/features/daydream.md` — daydream system overview with step table
 - `docs/features/README.md` — feature index

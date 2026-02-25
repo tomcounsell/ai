@@ -8,22 +8,22 @@ The runner (`scripts/daydream.py`) loads state from Redis, executes each step in
 
 ### 14-Step Pipeline
 
-| Step | Name | Description | Scope |
-|------|------|-------------|-------|
-| 1 | Clean Up Legacy Code | Scans for TODO comments, deprecated typing imports (`from typing import Optional`) | AI repo only |
-| 2 | Review Logs | Extracts structured errors from log files and Redis BridgeEvent records | Per-project |
-| 3 | Check Error Logs (Sentry) | Queries Sentry for unresolved issues; skips gracefully if MCP unavailable | AI repo only |
-| 4 | Clean Up Task Management | Lists open bug issues via `gh issue list` per project | Per-project |
-| 5 | Audit Documentation | Weekly LLM-powered accuracy audit of `docs/`; KEEP/UPDATE/DELETE verdicts (see [Documentation Audit](documentation-audit.md)) | AI repo only |
-| 6 | Session Analysis | Queries Redis SessionLog and BridgeEvent; computes thrash ratio, detects user corrections | AI repo only |
-| 7 | LLM Reflection | Claude Haiku categorizes mistakes into 6 categories | AI repo only |
-| 8 | Auto-Fix Bugs | For high-confidence `code_bug` reflections, spawns `/do-plan` + `/do-build` to open fix PRs (see [Daydream Auto-Fix](daydream-auto-fix.md)) | AI repo only |
-| 9 | Memory Consolidation | Persists LessonLearned entries to Redis; deduplicates by pattern; prunes entries >90 days | AI repo only |
-| 10 | Report Generation | Writes local markdown report to `logs/daydream/report_YYYY-MM-DD.md` | AI repo only |
-| 11 | GitHub Issue Creation | Posts daily digest issue per project via `gh` CLI; posts summary to Telegram | Per-project |
-| 12 | Skills Audit | Validates all SKILL.md files against template standards (see [Skills Audit](do-skills-audit.md)) | AI repo only |
-| 13 | Redis TTL Cleanup | Prunes expired records across all Redis models (TelegramMessage 90d, Link 90d, Chat 90d, SessionLog 90d, BridgeEvent 7d, DaydreamRun 30d, DaydreamIgnore per-entry, LessonLearned 90d) | AI repo only |
-| 14 | Redis Data Quality | Surfaces data quality issues: unsummarized links, dead channels, error patterns in transcripts, message volume per chat | AI repo only |
+| Step | Name | Description | Scope | Failure Mode |
+|------|------|-------------|-------|--------------|
+| 1 | Clean Up Legacy Code | Scans for TODO comments, deprecated typing imports | AI repo only | Non-blocking |
+| 2 | Review Logs | Extracts structured errors from log files and Redis BridgeEvent records | Per-project | Non-blocking, skips if `logs/bridge.log` missing |
+| 3 | Check Error Logs (Sentry) | Queries Sentry for unresolved issues | AI repo only | Non-blocking, skips if MCP unavailable |
+| 4 | Clean Up Task Management | Lists open bug issues via `gh issue list` per project | Per-project | Non-blocking, requires `gh` auth |
+| 5 | Audit Documentation | Weekly LLM-powered accuracy audit of `docs/` (see [Documentation Audit](documentation-audit.md)) | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
+| 6 | Session Analysis | Queries Redis SessionLog and BridgeEvent; computes thrash ratio, detects user corrections | AI repo only | Non-blocking |
+| 7 | LLM Reflection | Claude Haiku categorizes mistakes into 6 categories | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
+| 8 | Auto-Fix Bugs | For high-confidence `code_bug` reflections, spawns `/do-plan` + `/do-build` to open fix PRs | AI repo only | Non-blocking, requires `claude` CLI |
+| 9 | Memory Consolidation | Persists LessonLearned entries to Redis; deduplicates by pattern; prunes entries >90 days | AI repo only | Non-blocking |
+| 10 | Report Generation | Writes local markdown report to `logs/daydream/report_YYYY-MM-DD.md` | AI repo only | Non-blocking |
+| 11 | GitHub Issue Creation | Posts daily digest issue per project via `gh` CLI; posts summary to Telegram | Per-project | Non-blocking, requires `gh` auth |
+| 12 | Skills Audit | Validates all SKILL.md files against template standards (see [Skills Audit](do-skills-audit.md)) | AI repo only | Non-blocking |
+| 13 | Redis TTL Cleanup | Prunes expired records across all Redis models | AI repo only | Non-blocking |
+| 14 | Redis Data Quality | Surfaces data quality issues: unsummarized links, dead channels, error patterns | AI repo only | Non-blocking |
 
 ## State & Persistence
 
@@ -119,7 +119,7 @@ These regex patterns are defined in `CORRECTION_PATTERNS` and applied to user me
 
 ## LLM Reflection (Step 7)
 
-Flagged sessions are sent to Claude Haiku (`claude-haiku-4-20250414`) for categorization:
+Flagged sessions are sent to Claude Haiku (`claude-haiku-4-5-20251001`) for categorization:
 
 | Category | Description |
 |----------|-------------|
@@ -136,15 +136,83 @@ Each reflection output includes: `category`, `summary`, `pattern`, `prevention`,
 
 ## Auto-Fix Bugs (Step 8)
 
-When a reflection is categorized as `code_bug` and meets the confidence threshold (2-of-3 criteria), daydream spawns a subprocess to open a fix PR. See [Daydream Auto-Fix](daydream-auto-fix.md) for confidence criteria, the ignore system, and safety properties.
+When a reflection is categorized as `code_bug` and meets the confidence threshold, daydream spawns a subprocess to open a fix PR. It never pushes directly to `main` — human review and merge are always required.
+
+### Confidence Criteria
+
+Auto-fix triggers when a reflection meets **2 of 3** criteria:
+
+| Criterion | Condition |
+|-----------|----------|
+| Category | `category == "code_bug"` |
+| Prevention | `prevention` field is non-empty |
+| Pattern length | `pattern` field is at least 10 characters |
+
+If fewer than 2 criteria are met, the issue is logged but no action is taken.
+
+### Ignore Log
+
+The ignore log (Redis `DaydreamIgnore` model) suppresses auto-fix for specific patterns for 14 days:
+
+```bash
+python scripts/daydream.py --ignore "pattern text here"
+python scripts/daydream.py --ignore "pattern text here" --reason "Intentional design, not a bug"
+```
+
+### Safety Properties
+
+- **PRs only** — Never pushes to `main`. Every fix requires human review.
+- **Dedup** — If an open PR already exists for the pattern, no duplicate is created.
+- **Ignore log** — Patterns can be silenced for 14 days with one CLI command.
+- **Dry-run** — All logic is testable without external side effects.
+- **Kill switch** — `DAYDREAM_AUTO_FIX_ENABLED=false` disables the feature entirely.
+- **Timeout** — Each `/do-plan` + `/do-build` subprocess has a 10-minute timeout.
+
+## Multi-Repo Support
+
+Daydream reads `config/projects.json`, filters to repos present on the current machine via `load_local_projects()`, and runs per-project analysis. A machine with only `ai` checked out analyzes only `ai`; a machine with four repos analyzes all four.
+
+**Per-project steps**: 2 (Log Review), 4 (Task Cleanup), 11 (GitHub Issues + Telegram)
+**AI-only steps**: Everything else runs once from the AI repo root
+
+### Configuration
+
+Each project entry in `config/projects.json`:
+
+```json
+{
+  "working_directory": "/Users/valorengels/src/my-project",
+  "github": { "org": "myorg", "repo": "my-project" },
+  "telegram": { "groups": ["@my_group"] }
+}
+```
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| `working_directory` | Yes | Must exist on disk to be included |
+| `github.org` / `github.repo` | For issues/tasks | Steps 4 and 11 skip if absent |
+| `telegram.groups` | No | Step 11 skips if absent or empty |
+
+### Subprocess Scoping
+
+Per-project subprocess calls (`gh issue list`, `gh issue create`) use `cwd=project["working_directory"]` rather than `os.chdir`. `gh` auto-detects the GitHub repo from the git remote of the given directory.
+
+### Findings Namespacing
+
+`state.findings` keys use `"{slug}:category"` format (e.g., `"ai:log_review"`, `"popoto:tasks"`) to prevent per-project findings from colliding.
+
+### Graceful Fallbacks
+
+- `working_directory` absent from disk — project excluded from `load_local_projects()`
+- `github` key missing — steps 4 and 11 log a warning and skip that project
+- `telegram.groups` missing or empty — step 11 logs and skips
+- `data/valor.session` missing — step 11 skips silently
+- `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` not set — step 11 skips silently
+- `telethon` not installed — step 11 skips silently
 
 ## Findings System
 
 Every step can record findings via `state.add_finding(category, finding_string)`. Findings accumulate in `state.findings` as `{category: [strings]}`.
-
-### Multi-Repo Namespacing
-
-When analyzing multiple projects, findings keys use `"{slug}:category"` format (e.g., `"ai:log_review"`, `"popoto:tasks"`) to prevent collisions.
 
 ### Findings Flow
 
@@ -152,17 +220,6 @@ When analyzing multiple projects, findings keys use `"{slug}:category"` format (
 2. **Checkpointed** — Saved to Redis DaydreamRun after each step
 3. **Reported** — Step 10 writes a local markdown report to `logs/daydream/`
 4. **Published** — Step 11 creates per-project GitHub issues and posts to Telegram
-
-## Redis Data Quality (Step 14)
-
-Surfaces data quality issues across the Redis persistence layer:
-
-| Check | What It Finds |
-|-------|---------------|
-| Unsummarized links | Links shared in the last 7 days that have no `ai_summary` — indicates the summarization pipeline missed them |
-| Dead channels | Chats with no activity in 30+ days — candidates for archival |
-| Error patterns | Common error keywords (ImportError, ConnectionError, etc.) recurring across recent session transcripts |
-| Message volume | Messages per chat in the last 7 days — identifies high-traffic vs low-traffic channels |
 
 ## Redis TTL Cleanup (Step 13)
 
@@ -179,14 +236,18 @@ Prunes expired records to keep Redis lean:
 | DaydreamIgnore | Per-entry TTL | `cleanup_expired()` |
 | LessonLearned | 90 days | `cleanup_expired()` |
 
-## Multi-Repo Support
+## Redis Data Quality (Step 14)
 
-Daydream reads `config/projects.json`, filters to repos present on the current machine, and runs per-project analysis. See [Daydream Multi-Repo](daydream-multi-repo.md) for configuration and architecture.
+| Check | What It Finds |
+|-------|---------------|
+| Unsummarized links | Links shared in the last 7 days with no `ai_summary` |
+| Dead channels | Chats with no activity in 30+ days |
+| Error patterns | Common error keywords recurring across recent session transcripts |
+| Message volume | Messages per chat in the last 7 days |
 
-**Per-project steps**: 2 (Log Review), 4 (Task Cleanup), 11 (GitHub Issues + Telegram)
-**AI-only steps**: Everything else runs once from the AI repo root
+## Operations
 
-## Scheduling
+### Scheduling
 
 | Component | Detail |
 |-----------|--------|
@@ -199,14 +260,33 @@ Daydream reads `config/projects.json`, filters to repos present on the current m
 
 Install: `./scripts/install_daydream.sh`
 
-## CLI Interface
+Reload after changes:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.valor.daydream.plist
+launchctl load ~/Library/LaunchAgents/com.valor.daydream.plist
+```
 
-| Command | Effect |
-|---------|--------|
+### Quick Commands
+
+| Command | Description |
+|---------|-------------|
 | `python scripts/daydream.py` | Run all 14 steps manually |
 | `python scripts/daydream.py --dry-run` | Run without side effects (no PRs, no Telegram) |
 | `python scripts/daydream.py --ignore "pattern"` | Suppress auto-fix for pattern for 14 days |
 | `python scripts/daydream.py --ignore "pattern" --reason "why"` | Suppress with reason |
+| `./scripts/install_daydream.sh` | Install/update launchd schedule |
+| `tail -f logs/daydream.log` | Stream daydream logs |
+| `python -c "from models.daydream import LessonLearned; [print(f'{l.date} [{l.category}] {l.summary}') for l in LessonLearned.get_recent()]"` | View institutional memory |
+| `python -c "from models.daydream import DaydreamIgnore; [print(f'{e.pattern} (expires {e.expires_at})') for e in DaydreamIgnore.get_active()]"` | View active ignore entries |
+| `launchctl list \| grep daydream` | Check launchd status |
+
+### Output Locations
+
+| Path | Content |
+|------|---------|
+| `logs/daydream.log` | Runner stdout/stderr |
+| `logs/daydream/` | Generated reports (one per run) |
+| Redis: LessonLearned model | Institutional memory (pruned to 90 days) |
 
 ## Key Files
 
@@ -215,10 +295,15 @@ Install: `./scripts/install_daydream.sh`
 | `scripts/daydream.py` | Main 14-step runner |
 | `scripts/daydream_report.py` | GitHub issue creation module |
 | `models/daydream.py` | Redis models (DaydreamRun, DaydreamIgnore, LessonLearned) |
-| `scripts/install_daydream.sh` | launchd installation |
+| `scripts/install_daydream.sh` | launchd installation script |
 | `com.valor.daydream.plist` | Schedule definition |
 | `config/projects.json` | Multi-repo project registry |
 | `logs/daydream/` | Local report output directory |
+| `tests/test_daydream.py` | Core daydream tests |
+| `tests/test_daydream_scheduling.py` | Scheduling tests |
+| `tests/test_daydream_multi_repo.py` | Multi-repo tests |
+| `tests/test_daydream_report.py` | Report generation tests |
+| `tests/test_daydream_redis.py` | Redis model tests |
 
 ## Dependencies
 
@@ -248,8 +333,5 @@ Install: `./scripts/install_daydream.sh`
 
 ## See Also
 
-- [Daydream Auto-Fix](daydream-auto-fix.md) — confidence criteria, ignore system, safety properties
-- [Daydream Multi-Repo](daydream-multi-repo.md) — per-project configuration and architecture
 - [Documentation Audit](documentation-audit.md) — step 5 deep dive
 - [Skills Audit](do-skills-audit.md) — step 12 deep dive
-- [Daydream Operations](../operations/daydream-system.md) — operational runbook
