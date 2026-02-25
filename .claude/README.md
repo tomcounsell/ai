@@ -61,7 +61,7 @@ Skills in `.claude/commands/` define reusable workflows:
 |-------|---------|
 | `/prime` | **Start here** - Codebase onboarding for new sessions |
 | `/pthread` | Scale compute via parallel agent execution |
-| `/sdlc` | Autonomous Plan→Build→Test→Ship workflow |
+| `/sdlc` | Autonomous Plan→Build→Test→Review→Docs→Ship pipeline |
 | `/audit-next-tool` | Quality audits for tools |
 
 ### /prime - Codebase Onboarding (NEW SESSIONS START HERE)

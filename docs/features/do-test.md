@@ -63,7 +63,7 @@ The execution strategy adapts based on the target:
 
 **Single target** (specific type or file): Runs directly in the current agent. The overhead of parallel dispatch is not worth it for a single runner. Lint runs sequentially after tests.
 
-**All tests** (no target specified): Dispatches parallel subagents via the Task tool for each test directory that exists. A separate lint agent runs in parallel with the test agents. Results are collected and aggregated after all agents complete.
+**All tests** (no target specified): If the total number of test files exceeds `PARALLEL_DISPATCH_THRESHOLD` (50), dispatches parallel subagents via the Task tool for each test directory that exists. A separate lint agent runs in parallel with the test agents. Results are collected and aggregated after all agents complete. Below the threshold, all suites run sequentially in-process to avoid subagent overhead.
 
 This fan-out approach maximizes throughput when running the full suite while keeping single-target runs simple and fast.
 
@@ -104,7 +104,7 @@ The `/do-build` workflow invokes `/do-test` as its testing step. When called fro
 | Lint by default | Code quality checks should run with every test pass unless explicitly opted out |
 | `--no-lint` flag | Provides escape hatch for fast iteration when only test results matter |
 | CWD-relative execution | No worktree detection logic needed; works correctly whether invoked directly or via `/do-build` |
-| Smart dispatch | Parallel for full suite (throughput), direct for single target (simplicity) |
+| Smart dispatch | Parallel when >50 test files (throughput), direct for single target or small suites (simplicity) |
 | `--changed` branch awareness | On `main`, compares last commit; on feature branches, compares against `main` |
 | Silent skip for missing dirs | Repositories with partial test directory structures work without configuration |
 | `-v --tb=short` pytest flags | Verbose test names for clarity with concise tracebacks for debugging |
