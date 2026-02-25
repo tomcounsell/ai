@@ -63,94 +63,36 @@ DAYDREAM_DIR = LOGS_DIR / "daydream"
 DATA_DIR = PROJECT_ROOT / "data"
 SESSIONS_DIR = LOGS_DIR / "sessions"
 
-# Legacy file paths (kept for backward compatibility during transition)
-STATE_FILE = DAYDREAM_DIR / "state.json"
-LESSONS_FILE = DATA_DIR / "lessons_learned.jsonl"
-IGNORE_LOG_FILE = DATA_DIR / "daydream_ignore.jsonl"
 
-
-# --- Redis-backed helpers (replacing flat file operations) ---
+# --- Redis-backed helpers ---
 
 
 def load_ignore_log() -> list[dict]:
-    """Load active (non-expired) ignore entries from Redis.
+    """Load active (non-expired) ignore entries from Redis."""
+    from models.daydream import DaydreamIgnore
 
-    Falls back to JSONL file if Redis is unavailable.
-    """
-    try:
-        from models.daydream import DaydreamIgnore
-
-        active = DaydreamIgnore.get_active()
-        return [
-            {
-                "pattern": entry.pattern,
-                "ignored_until": (
-                    datetime.fromtimestamp(entry.expires_at).date().isoformat()
-                    if entry.expires_at
-                    else ""
-                ),
-                "reason": entry.reason or "",
-            }
-            for entry in active
-        ]
-    except Exception:
-        logger.debug("Redis unavailable for ignore log, falling back to file")
-        return _load_ignore_log_from_file()
-
-
-def _load_ignore_log_from_file() -> list[dict]:
-    """Legacy: Load active ignore entries from JSONL file."""
-    if not IGNORE_LOG_FILE.exists():
-        return []
-    today = datetime.now().date().isoformat()
-    entries = []
-    for line in IGNORE_LOG_FILE.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-            if entry.get("ignored_until", "") >= today:
-                entries.append(entry)
-        except json.JSONDecodeError:
-            pass
-    return entries
+    active = DaydreamIgnore.get_active()
+    return [
+        {
+            "pattern": entry.pattern,
+            "ignored_until": (
+                datetime.fromtimestamp(entry.expires_at).date().isoformat()
+                if entry.expires_at
+                else ""
+            ),
+            "reason": entry.reason or "",
+        }
+        for entry in active
+    ]
 
 
 def prune_ignore_log() -> None:
-    """Remove expired entries from the ignore log.
+    """Remove expired entries from the ignore log via Redis."""
+    from models.daydream import DaydreamIgnore
 
-    Uses Redis DaydreamIgnore.cleanup_expired() primarily,
-    falls back to file-based pruning.
-    """
-    try:
-        from models.daydream import DaydreamIgnore
-
-        deleted = DaydreamIgnore.cleanup_expired()
-        if deleted:
-            logger.info(f"Pruned {deleted} expired ignore entries from Redis")
-    except Exception:
-        logger.debug("Redis unavailable for ignore prune, falling back to file")
-        _prune_ignore_log_from_file()
-
-
-def _prune_ignore_log_from_file() -> None:
-    """Legacy: Remove expired entries from JSONL file."""
-    if not IGNORE_LOG_FILE.exists():
-        return
-    today = datetime.now().date().isoformat()
-    active = []
-    for line in IGNORE_LOG_FILE.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-            if entry.get("ignored_until", "") >= today:
-                active.append(json.dumps(entry))
-        except json.JSONDecodeError:
-            pass
-    IGNORE_LOG_FILE.write_text("\n".join(active) + ("\n" if active else ""))
+    deleted = DaydreamIgnore.cleanup_expired()
+    if deleted:
+        logger.info(f"Pruned {deleted} expired ignore entries from Redis")
 
 
 def is_ignored(pattern: str, ignore_entries: list[dict]) -> bool:
