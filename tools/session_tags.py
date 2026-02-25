@@ -35,10 +35,10 @@ TRANSCRIPT_TAIL_LINES = 50
 
 def _get_session(session_id: str):
     """Look up a SessionLog by session_id. Returns None if not found."""
-    from models.session_log import SessionLog
+    from models.agent_session import AgentSession
 
     try:
-        sessions = list(SessionLog.query.filter(session_id=session_id))
+        sessions = list(AgentSession.query.filter(session_id=session_id))
         return sessions[0] if sessions else None
     except Exception as e:
         logger.debug(f"Failed to look up session {session_id}: {e}")
@@ -111,13 +111,13 @@ def sessions_by_tag(tag: str, project_key: str | None = None) -> list:
     Returns:
         List of SessionLog instances matching the tag.
     """
-    from models.session_log import SessionLog
+    from models.agent_session import AgentSession
 
     try:
         if project_key:
-            all_sessions = list(SessionLog.query.filter(project_key=project_key))
+            all_sessions = list(AgentSession.query.filter(project_key=project_key))
         else:
-            all_sessions = list(SessionLog.query.all())
+            all_sessions = list(AgentSession.query.all())
     except Exception as e:
         logger.warning(f"sessions_by_tag: failed to query sessions: {e}")
         return []

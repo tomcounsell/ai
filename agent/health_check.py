@@ -259,9 +259,9 @@ async def watchdog_hook(
     try:
         import time
 
-        from models.session_log import SessionLog
+        from models.agent_session import AgentSession
 
-        sessions = SessionLog.query.filter(session_id=session_id)
+        sessions = AgentSession.query.filter(session_id=session_id)
         if sessions:
             s = sessions[0]
             s.tool_call_count = count

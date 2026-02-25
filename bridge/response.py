@@ -339,6 +339,7 @@ async def send_response_with_files(
     response: str,
     chat_id: int | None = None,
     reply_to: int | None = None,
+    session=None,
 ) -> bool:
     """
     Send response to Telegram, handling both files and text.
@@ -346,10 +347,13 @@ async def send_response_with_files(
     1. Filter out tool execution logs
     2. Extract any files from the response
     3. Send files first (as separate messages)
-    4. Send remaining text (if any)
+    4. Send remaining text (if any) with Markdown formatting
 
     Can be called with event (handler context) or chat_id+reply_to (queue context).
     Returns True if any content was sent, False otherwise.
+
+    Args:
+        session: Optional AgentSession for summarizer context enrichment.
     """
     # Resolve chat_id and reply_to from event or explicit params
     _chat_id = chat_id or (event.chat_id if event else None)
@@ -383,7 +387,7 @@ async def send_response_with_files(
         try:
             from bridge.summarizer import summarize_response
 
-            summarized = await summarize_response(text)
+            summarized = await summarize_response(text, session=session)
             text = summarized.text
             if summarized.full_output_file:
                 files.append(summarized.full_output_file)
@@ -458,7 +462,10 @@ async def send_response_with_files(
         if len(text) > 4096:
             text = text[:4093] + "..."
         try:
-            await client.send_message(_chat_id, text, reply_to=_reply_to)
+            # Use markdown parse mode with plain-text fallback
+            from bridge.markdown import send_markdown
+
+            await send_markdown(client, _chat_id, text, reply_to=_reply_to)
             sent_content = True
         except Exception as e:
             logger.error(

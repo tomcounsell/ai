@@ -5,7 +5,7 @@ Serializes agent work per project working directory so git operations
 never conflict. Agent runs directly in the project's working directory.
 
 Architecture:
-- RedisJob: popoto Model persisted atomically in Redis (replaces JSON files)
+- AgentSession: unified popoto Model persisted in Redis (replaces RedisJob + SessionLog)
 - Worker loop: one asyncio.Task per project, processes jobs sequentially
 - Revival detection: lightweight git state check, no SDK agent call
 """
@@ -19,8 +19,6 @@ import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-from popoto import AutoKeyField, Field, KeyField, Model, SortedField
-
 from agent.branch_manager import (
     get_branch_state,
     get_plan_context,
@@ -28,9 +26,12 @@ from agent.branch_manager import (
 )
 from bridge.response import REACTION_COMPLETE, REACTION_ERROR, REACTION_SUCCESS
 from bridge.session_logs import save_session_snapshot
+from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
 
+# Backward compatibility alias
+RedisJob = AgentSession
 
 MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent input
 MAX_AUTO_CONTINUES = 3  # Max status updates to auto-continue before sending to chat
@@ -46,45 +47,10 @@ JOB_HEALTH_MIN_RUNNING = (
 )
 
 
-class RedisJob(Model):
-    """A queued unit of work, persisted atomically in Redis via popoto."""
-
-    job_id = AutoKeyField()
-    project_key = KeyField()
-    status = KeyField(default="pending")  # pending | running | completed | failed
-    priority = Field(default="high")  # "high" (top of stack) or "low" (bottom)
-    created_at = SortedField(type=float, partition_by="project_key")
-    session_id = Field()
-    working_dir = Field()
-    message_text = Field(max_length=MSG_MAX_CHARS)
-    sender_name = Field()
-    sender_id = Field(type=int, null=True)  # Telegram user ID for permission checking
-    chat_id = Field()
-    message_id = Field(type=int)
-    chat_title = Field(null=True)
-    revival_context = Field(null=True, max_length=MSG_MAX_CHARS)
-    workflow_id = Field(null=True)  # 8-char unique workflow identifier for tracked work
-    work_item_slug = Field(null=True)  # Named work item slug (tier 2)
-    task_list_id = Field(null=True)  # Computed CLAUDE_CODE_TASK_LIST_ID value
-
-    # Deferred enrichment fields (added for fast enqueue)
-    has_media = Field(type=bool, default=False)
-    media_type = Field(null=True)  # "photo", "voice", "document", etc.
-    youtube_urls = Field(null=True)  # JSON string of [(url, video_id), ...]
-    non_youtube_urls = Field(null=True)  # JSON string of [url, ...]
-    reply_to_msg_id = Field(type=int, null=True)
-    chat_id_for_enrichment = Field(null=True)  # Telegram chat ID for API calls
-    classification_type = Field(null=True)  # Auto-classified type (bug/feature/chore)
-    auto_continue_count = Field(
-        type=int, default=0
-    )  # Persisted across re-enqueued jobs
-    started_at = Field(type=float, null=True)  # Set when job transitions to running
-
-
 class Job:
-    """Convenience wrapper around RedisJob for the worker interface."""
+    """Convenience wrapper around AgentSession for the worker interface."""
 
-    def __init__(self, redis_job: RedisJob):
+    def __init__(self, redis_job: AgentSession):
         self._rj = redis_job
 
     @property
@@ -184,9 +150,9 @@ class Job:
         return self._rj.auto_continue_count or 0
 
 
-# Fields to extract from RedisJob for delete-and-recreate pattern.
+# Fields to extract from AgentSession for delete-and-recreate pattern.
 # Excludes job_id (AutoKeyField, auto-generated on create).
-_REDIS_JOB_FIELDS = [
+_JOB_FIELDS = [
     "project_key",
     "status",
     "priority",
@@ -212,17 +178,34 @@ _REDIS_JOB_FIELDS = [
     "classification_type",
     "auto_continue_count",
     "started_at",
+    # Session-phase fields preserved across delete-and-recreate
+    "last_activity",
+    "completed_at",
+    "turn_count",
+    "tool_call_count",
+    "log_path",
+    "summary",
+    "branch_name",
+    "tags",
+    "classification_confidence",
+    "history",
+    "issue_url",
+    "plan_url",
+    "pr_url",
 ]
 
+# Backward compat alias
+_REDIS_JOB_FIELDS = _JOB_FIELDS
 
-def _extract_job_fields(redis_job: RedisJob) -> dict:
-    """Extract all non-auto fields from a RedisJob instance.
 
-    Returns a dict suitable for RedisJob.create(**fields) or
-    RedisJob.async_create(**fields). Excludes job_id since that is
+def _extract_job_fields(redis_job: AgentSession) -> dict:
+    """Extract all non-auto fields from an AgentSession instance.
+
+    Returns a dict suitable for AgentSession.create(**fields) or
+    AgentSession.async_create(**fields). Excludes job_id since that is
     an AutoKeyField and will be auto-generated on create.
     """
-    return {field: getattr(redis_job, field) for field in _REDIS_JOB_FIELDS}
+    return {field: getattr(redis_job, field) for field in _JOB_FIELDS}
 
 
 async def _push_job(
@@ -250,7 +233,7 @@ async def _push_job(
     auto_continue_count: int = 0,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project."""
-    await RedisJob.async_create(
+    await AgentSession.async_create(
         project_key=project_key,
         status="pending",
         priority=priority,
@@ -276,7 +259,7 @@ async def _push_job(
         classification_type=classification_type,
         auto_continue_count=auto_continue_count,
     )
-    return await RedisJob.query.async_count(project_key=project_key, status="pending")
+    return await AgentSession.query.async_count(project_key=project_key, status="pending")
 
 
 async def _pop_job(project_key: str) -> Job | None:
@@ -290,7 +273,7 @@ async def _pop_job(project_key: str) -> Job | None:
     status index set but never REMOVEs from the old one, so mutating
     status and calling save() leaves a stale entry in the pending index.
     """
-    pending = await RedisJob.query.async_filter(
+    pending = await AgentSession.query.async_filter(
         project_key=project_key, status="pending"
     )
     if not pending:
@@ -309,18 +292,18 @@ async def _pop_job(project_key: str) -> Job | None:
     await chosen.async_delete()
     fields["status"] = "running"
     fields["started_at"] = time.time()
-    new_job = await RedisJob.async_create(**fields)
+    new_job = await AgentSession.async_create(**fields)
     return Job(new_job)
 
 
 async def _pending_depth(project_key: str) -> int:
     """Count of pending jobs for a project."""
-    return await RedisJob.query.async_count(project_key=project_key, status="pending")
+    return await AgentSession.query.async_count(project_key=project_key, status="pending")
 
 
 async def _remove_by_session(project_key: str, session_id: str) -> bool:
     """Remove all pending jobs for a session. Returns True if any removed."""
-    jobs = await RedisJob.query.async_filter(project_key=project_key, status="pending")
+    jobs = await AgentSession.query.async_filter(project_key=project_key, status="pending")
     removed = False
     for j in jobs:
         if j.session_id == session_id:
@@ -334,9 +317,9 @@ async def _complete_job(job: Job) -> None:
     await job._rj.async_delete()
 
 
-def _get_pending_jobs_sync(project_key: str) -> list[RedisJob]:
+def _get_pending_jobs_sync(project_key: str) -> list[AgentSession]:
     """Synchronous helper for startup: get pending jobs for a project."""
-    return RedisJob.query.filter(project_key=project_key, status="pending")
+    return AgentSession.query.filter(project_key=project_key, status="pending")
 
 
 def _recover_interrupted_jobs(project_key: str) -> int:
@@ -348,7 +331,7 @@ def _recover_interrupted_jobs(project_key: str) -> int:
     Returns the number of recovered jobs.
     """
     running_jobs = list(
-        RedisJob.query.filter(project_key=project_key, status="running")
+        AgentSession.query.filter(project_key=project_key, status="running")
     )
     if not running_jobs:
         return 0
@@ -364,7 +347,7 @@ def _recover_interrupted_jobs(project_key: str) -> int:
         job.delete()
         fields["status"] = "pending"
         fields["priority"] = "high"
-        new_job = RedisJob.create(**fields)
+        new_job = AgentSession.create(**fields)
         logger.info(f"[{project_key}] Recovered job {old_id} -> {new_job.job_id}")
 
     logger.warning(f"[{project_key}] Recovered {count} interrupted job(s)")
@@ -377,7 +360,7 @@ async def _reset_running_jobs(project_key: str) -> int:
     Uses delete-and-recreate to avoid KeyField index corruption.
     Returns the number of reset jobs.
     """
-    running_jobs = await RedisJob.query.async_filter(
+    running_jobs = await AgentSession.query.async_filter(
         project_key=project_key, status="running"
     )
     if not running_jobs:
@@ -392,7 +375,7 @@ async def _reset_running_jobs(project_key: str) -> int:
         await job.async_delete()
         fields["status"] = "pending"
         fields["priority"] = "high"
-        new_job = await RedisJob.async_create(**fields)
+        new_job = await AgentSession.async_create(**fields)
         logger.info(f"[{project_key}] Reset job {old_id} -> {new_job.job_id}")
 
     return len(running_jobs)
@@ -414,7 +397,7 @@ def _recover_orphaned_jobs(project_key: str) -> int:
     from popoto.redis_db import POPOTO_REDIS_DB
 
     # Get all RedisJob keys from the class set
-    class_set_key = RedisJob._meta.db_class_set_key.redis_key
+    class_set_key = AgentSession._meta.db_class_set_key.redis_key
     all_keys = POPOTO_REDIS_DB.smembers(class_set_key)
     if not all_keys:
         return 0
@@ -424,7 +407,7 @@ def _recover_orphaned_jobs(project_key: str) -> int:
     indexed_keys: set[bytes] = set()
     for status in ["pending", "running", "completed", "failed"]:
         index_key = DB_key(
-            RedisJob._meta.fields["status"].get_special_use_field_db_key(
+            AgentSession._meta.fields["status"].get_special_use_field_db_key(
                 RedisJob, "status"
             ),
             status,
@@ -458,7 +441,7 @@ def _recover_orphaned_jobs(project_key: str) -> int:
             try:
                 from popoto.models.encoding import decode_popoto_model_hashmap
 
-                orphan_job = decode_popoto_model_hashmap(RedisJob, data)
+                orphan_job = decode_popoto_model_hashmap(AgentSession, data)
                 if orphan_job is None:
                     continue
                 fields = _extract_job_fields(orphan_job)
@@ -476,7 +459,7 @@ def _recover_orphaned_jobs(project_key: str) -> int:
             # Create new properly-indexed job
             fields["status"] = "pending"
             fields["priority"] = "high"
-            new_job = RedisJob.create(**fields)
+            new_job = AgentSession.create(**fields)
             recovered += 1
             logger.warning(
                 f"[{project_key}] Recovered orphaned job from key {key_str} "
@@ -521,7 +504,7 @@ async def _job_health_check() -> None:
     _recover_interrupted_jobs(): delete the stuck RedisJob, create a new
     one as pending with high priority, then ensure a worker is running.
     """
-    running_jobs = list(RedisJob.query.filter(status="running"))
+    running_jobs = list(AgentSession.query.filter(status="running"))
     if not running_jobs:
         logger.debug("[job-health] No running jobs found")
         return
@@ -589,7 +572,7 @@ async def _job_health_check() -> None:
             fields["status"] = "pending"
             fields["priority"] = "high"
             fields["started_at"] = None  # Reset started_at for re-processing
-            new_job = RedisJob.create(**fields)
+            new_job = AgentSession.create(**fields)
             logger.info(
                 "[job-health] Recovered job %s -> %s (project=%s)",
                 job.job_id,
@@ -706,7 +689,7 @@ def _check_restart_flag() -> bool:
 
     # Check all projects for running jobs
     for pkey in list(_active_workers.keys()):
-        running = RedisJob.query.filter(project_key=pkey, status="running")
+        running = AgentSession.query.filter(project_key=pkey, status="running")
         if running:
             logger.info(
                 f"[{pkey}] Restart requested but {len(running)} job(s) still running — deferring"
@@ -948,26 +931,22 @@ async def _execute_job(job: Job) -> None:
         working_dir=str(working_dir),
     )
 
-    # Track session in Redis via SessionLog (replaces AgentSession)
+    # Update the AgentSession (already created at enqueue time) with session-phase fields
     agent_session = None
     try:
-        from models.session_log import SessionLog
-
-        agent_session = SessionLog.create(
-            session_id=job.session_id,
-            project_key=job.project_key,
-            status="active",
-            chat_id=str(job.chat_id),
-            sender=job.sender_name,
-            started_at=time.time(),
-            last_activity=time.time(),
-            tool_call_count=0,
-            branch_name=branch_name,
-            work_item_slug=job.work_item_slug,
-            classification_type=job.classification_type,
+        sessions = list(
+            AgentSession.query.filter(project_key=job.project_key, status="running")
         )
+        for s in sessions:
+            if s.session_id == job.session_id:
+                agent_session = s
+                break
+        if agent_session:
+            agent_session.last_activity = time.time()
+            agent_session.branch_name = branch_name
+            agent_session.append_history("user", (job.message_text or "")[:200])
     except Exception as e:
-        logger.debug(f"SessionLog create failed (non-fatal): {e}")
+        logger.debug(f"AgentSession update failed (non-fatal): {e}")
 
     # Calendar heartbeat at session start
     asyncio.create_task(_calendar_heartbeat(job.project_key, project=job.project_key))
@@ -1214,7 +1193,7 @@ async def _execute_job(job: Job) -> None:
             )
             last_heartbeat = time.time()
 
-    # Update session status in Redis via SessionLog
+    # Update session status in Redis via AgentSession
     # When auto-continue deferred, session is still active (not completed)
     if agent_session:
         try:
@@ -1231,7 +1210,7 @@ async def _execute_job(job: Job) -> None:
                 agent_session.last_activity = time.time()
                 agent_session.save()
         except Exception as e:
-            logger.debug(f"SessionLog update failed (non-fatal): {e}")
+            logger.debug(f"AgentSession update failed (non-fatal): {e}")
 
     # Save session snapshot for error cases
     if task.error:
@@ -1377,7 +1356,7 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
     branches = []
     try:
         for status in ("pending", "running"):
-            jobs = RedisJob.query.filter(project_key=project_key, status=status)
+            jobs = AgentSession.query.filter(project_key=project_key, status=status)
             for job in jobs:
                 if str(job.chat_id) == chat_id_str:
                     branch = _session_branch_name(job.session_id)
@@ -1524,7 +1503,7 @@ async def cleanup_stale_branches(
 
 def _cli_show_status() -> None:
     """Show current queue state grouped by project and status."""
-    all_jobs = list(RedisJob.query.all())
+    all_jobs = list(AgentSession.query.all())
     if not all_jobs:
         print("Queue is empty.")
         return
@@ -1565,7 +1544,7 @@ def _cli_show_status() -> None:
 
 def _cli_flush_stuck() -> None:
     """Find and recover all stuck running jobs with dead/missing workers."""
-    running = list(RedisJob.query.filter(status="running"))
+    running = list(AgentSession.query.filter(status="running"))
     if not running:
         print("No running jobs found.")
         return
@@ -1590,7 +1569,7 @@ def _cli_flush_job(job_id: str) -> None:
     import sys
 
     try:
-        job = RedisJob.query.get(job_id)
+        job = AgentSession.query.get(job_id)
     except Exception:
         job = None
 
@@ -1607,7 +1586,7 @@ def _cli_flush_job(job_id: str) -> None:
     print("Done.")
 
 
-def _cli_recover_single_job(job: RedisJob) -> None:
+def _cli_recover_single_job(job: AgentSession) -> None:
     """Delete a stuck job and recreate as pending."""
     fields = _extract_job_fields(job)
 
@@ -1618,7 +1597,7 @@ def _cli_recover_single_job(job: RedisJob) -> None:
     fields["status"] = "pending"
     fields["priority"] = "high"
     fields["started_at"] = None
-    new_job = RedisJob.create(**fields)
+    new_job = AgentSession.create(**fields)
     print(f"  Re-enqueued as pending (new id: {new_job.job_id})")
 
 

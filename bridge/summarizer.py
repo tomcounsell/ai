@@ -495,11 +495,95 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
     return result
 
 
-def _build_summary_prompt(text: str, artifacts: dict[str, list[str]]) -> str:
+def _render_stage_progress(session) -> str | None:
+    """Render SDLC stage progress line from session history.
+
+    Returns a line like: ☑ ISSUE → ☑ PLAN → ▶ BUILD → ☐ TEST → ☐ REVIEW → ☐ DOCS
+    Returns None if no stage data is available.
+    """
+    if not session:
+        return None
+
+    progress = session.get_stage_progress()
+
+    # Only render if at least one stage has progressed
+    if all(v == "pending" for v in progress.values()):
+        return None
+
+    from models.agent_session import SDLC_STAGES
+
+    parts = []
+    for stage in SDLC_STAGES:
+        status = progress.get(stage, "pending")
+        if status == "completed":
+            parts.append(f"☑ {stage}")
+        elif status == "in_progress":
+            parts.append(f"▶ {stage}")
+        else:
+            parts.append(f"☐ {stage}")
+
+    return " → ".join(parts)
+
+
+def _render_link_footer(session) -> str | None:
+    """Render link footer from session's tracked links.
+
+    Returns a line like: Issue #168 | Plan | PR #176
+    with markdown links. Returns None if no links exist.
+    """
+    if not session:
+        return None
+
+    links = session.get_links()
+    if not links:
+        return None
+
+    parts = []
+    for kind, url in links.items():
+        if kind == "issue":
+            # Extract issue number from URL
+            import re as _re
+
+            match = _re.search(r"/issues/(\d+)", url)
+            label = f"Issue #{match.group(1)}" if match else "Issue"
+            parts.append(f"[{label}]({url})")
+        elif kind == "plan":
+            parts.append(f"[Plan]({url})")
+        elif kind == "pr":
+            import re as _re
+
+            match = _re.search(r"/pull/(\d+)", url)
+            label = f"PR #{match.group(1)}" if match else "PR"
+            parts.append(f"[{label}]({url})")
+
+    return " | ".join(parts) if parts else None
+
+
+def _get_status_emoji(session, is_completion: bool = True) -> str:
+    """Get the status emoji prefix based on session state."""
+    if not session:
+        return "✅" if is_completion else "⏳"
+
+    status = session.status
+    if status in ("completed",):
+        return "✅"
+    elif status in ("failed",):
+        return "❌"
+    elif status in ("running", "active"):
+        return "⏳"
+    else:
+        return "✅" if is_completion else "⏳"
+
+
+def _build_summary_prompt(
+    text: str,
+    artifacts: dict[str, list[str]],
+    session=None,
+) -> str:
     """Build the summarization prompt.
 
-    The system prompt handles format rules. This just provides the content
-    and any extracted artifacts that must be preserved.
+    The system prompt handles format rules. This provides the content,
+    extracted artifacts, and optional session context for enrichment.
     """
     artifact_section = ""
     if artifacts:
@@ -510,8 +594,24 @@ def _build_summary_prompt(text: str, artifacts: dict[str, list[str]]) -> str:
             "\n\nPreserve these artifacts verbatim:\n" + "\n".join(parts) + "\n"
         )
 
+    context_section = ""
+    if session:
+        context_parts = []
+        if session.message_text:
+            context_parts.append(
+                f"Original request: {(session.message_text or '')[:200]}"
+            )
+        if session.classification_type:
+            context_parts.append(f"Work type: {session.classification_type}")
+        if session.branch_name:
+            context_parts.append(f"Branch: {session.branch_name}")
+        if context_parts:
+            context_section = (
+                "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
+            )
+
     return f"""/no_think
-Summarize this developer session output:{artifact_section}
+Summarize this developer session output:{artifact_section}{context_section}
 
 {text}"""
 
@@ -535,20 +635,31 @@ CRITICAL: Never reject, editorialize, or add meta-commentary about the input. \
 Your job is to condense, not to judge whether the content is "valid". \
 If the input is a conversational reply or opinion, condense it faithfully.
 
-Output rules:
-- For simple completions: respond with just "Done ✅" or "Yes" or "No"
-- For conversational replies: condense while preserving tone and key points
-- For questions directed at the PM: preserve the question exactly (never rewrite or drop questions)
-- For work needing context: 2-4 sentences max
+FORMAT RULES (adaptive based on content type):
+
+1. SIMPLE COMPLETIONS: Just "Done ✅" or "Yes" or "No"
+
+2. CONVERSATIONAL REPLIES: Condense while preserving tone and key points. Prose format.
+
+3. QUESTIONS DIRECTED AT PM: Preserve the question exactly (never rewrite or drop questions)
+
+4. SDLC / DEVELOPMENT WORK (when session context is provided):
+   Output ONLY the bullet points — 2-4 bullets max, each starting with "• ".
+   The stage progress line and link footer are added automatically — do NOT include them.
+   Do NOT include any emoji status prefix (✅, ⏳, etc.) — that is added automatically.
+   Do NOT include any issue/PR URLs — those are rendered from session data automatically.
+   Focus on WHAT was accomplished, not process details.
+
+5. STATUS UPDATES / WORK WITH CONTEXT: 2-4 bullet points starting with "• "
+
+GENERAL RULES:
 - Lead with the outcome, not the process
-- Preserve commit hashes and URLs inline (e.g., `abc1234`, https://github.com/org/repo/pull/42)
+- Preserve commit hashes inline (e.g., `abc1234`)
 - Flag with ⚠️ ONLY for genuinely external blockers (missing credentials, need third-party \
 access, policy decisions). Do NOT flag: implementation choices, internal obstacles, things \
 the agent could resolve with its tools
 - Tone: direct, no preamble, no filler
-- IMPORTANT: If the output mentions a GitHub issue or PR URL, ALWAYS include it as the \
-last line of your summary. Format: just the bare URL on its own line. If multiple URLs, \
-include the most relevant one (the PR or issue being actively worked on)."""
+- Do NOT include bare URLs at the end — link rendering is handled separately"""
 
 # Blocker flag logic explained:
 # The ⚠️ flag is meant to alert the PM only when human intervention is truly required.
@@ -595,49 +706,73 @@ async def _summarize_with_ollama(prompt: str) -> str | None:
         return None
 
 
-def _ensure_github_link_footer(text: str, artifacts: dict[str, list[str]]) -> str:
-    """Ensure summary ends with a GitHub issue/PR URL if one exists in artifacts.
+def _compose_structured_summary(
+    summary_text: str, session=None, is_completion: bool = True
+) -> str:
+    """Compose the full structured summary with emoji, stage line, bullets, and links.
 
-    If the summary already contains a GitHub URL on its last line, leave it.
-    Otherwise, find the most relevant GitHub URL from artifacts and append it.
-    Prefers PR URLs over issue URLs (PRs are the active deliverable).
+    For SDLC sessions with history, produces:
+        ✅ Original request summary
+        ☑ ISSUE → ☑ PLAN → ☑ BUILD → ☑ TEST → ☑ REVIEW → ☑ DOCS
+        • Bullet point 1
+        • Bullet point 2
+        Issue #168 | Plan | PR #176
+
+    For non-SDLC sessions, returns the summary text with status emoji prepended.
     """
-    gh_pattern = r"https?://github\.com/[^\s)>\]\"']+"
+    parts = []
 
-    # Check if the last line already contains a GitHub URL
-    lines = text.rstrip().split("\n")
-    if lines and re.search(gh_pattern, lines[-1]):
-        return text  # Already has a trailing GitHub link
+    # Status emoji + first-line label
+    emoji = _get_status_emoji(session, is_completion)
+    # Extract a short label from the original request if available
+    label = ""
+    if session and session.message_text:
+        # Use first line of message, truncated
+        first_line = (session.message_text or "").split("\n")[0].strip()
+        # Strip common prefixes
+        for prefix in ("SDLC ", "sdlc ", "/sdlc ", "MESSAGE: "):
+            if first_line.startswith(prefix):
+                first_line = first_line[len(prefix) :].strip()
+        if first_line and len(first_line) <= 80:
+            label = first_line
+    if label:
+        parts.append(f"{emoji} {label}")
+    else:
+        # No label — put emoji before the summary text
+        # But only if summary doesn't already start with an emoji
+        if summary_text and summary_text[0] not in "✅⏳❌⚠️❓":
+            parts.append(f"{emoji}")
 
-    # Find GitHub URLs from artifacts
-    urls = artifacts.get("urls", [])
-    gh_urls = [u for u in urls if re.match(gh_pattern, u)]
+    # Stage progress line (SDLC only)
+    stage_line = _render_stage_progress(session)
+    if stage_line:
+        parts.append(stage_line)
 
-    if not gh_urls:
-        # Also scan the text itself for GitHub URLs not captured in artifacts
-        gh_urls = re.findall(gh_pattern, text)
+    # Summary text (bullets or prose)
+    parts.append(summary_text.strip())
 
-    if not gh_urls:
-        return text  # No GitHub URLs to append
+    # Link footer
+    link_footer = _render_link_footer(session)
+    if link_footer:
+        parts.append(link_footer)
 
-    # Prefer PR URLs over issue URLs
-    pr_urls = [u for u in gh_urls if "/pull/" in u]
-    issue_urls = [u for u in gh_urls if "/issues/" in u]
-    best_url = (pr_urls or issue_urls or gh_urls)[-1]  # Last = most recent
-
-    return text.rstrip() + "\n" + best_url
+    return "\n".join(parts)
 
 
 async def summarize_response(
     raw_response: str,
+    session=None,
 ) -> SummarizedResponse:
-    """
-    Summarize an agent response for Telegram delivery.
+    """Summarize an agent response for Telegram delivery.
 
     - Responses <= SUMMARIZE_THRESHOLD chars: returned as-is
     - Longer responses: summarized via Haiku, then Ollama fallback
     - Very long responses (> FILE_ATTACH_THRESHOLD): full output
       attached as file
+
+    Args:
+        raw_response: The raw agent output text.
+        session: Optional AgentSession for context enrichment.
 
     Falls back to safety truncation if all summarization fails.
     """
@@ -655,7 +790,7 @@ async def summarize_response(
             logger.warning(f"Failed to write full output file: {e}")
 
     # Build prompt once, try multiple backends
-    prompt = _build_summary_prompt(raw_response, artifacts)
+    prompt = _build_summary_prompt(raw_response, artifacts, session=session)
 
     # Try Haiku first, then Ollama
     summary_text = await _summarize_with_haiku(prompt)
@@ -672,8 +807,10 @@ async def summarize_response(
             else:
                 summary_text = raw_response
 
-        # Ensure GitHub link footer
-        summary_text = _ensure_github_link_footer(summary_text, artifacts)
+        # Compose structured output with stage progress and links
+        summary_text = _compose_structured_summary(
+            summary_text, session=session, is_completion=True
+        )
 
         return SummarizedResponse(
             text=summary_text,

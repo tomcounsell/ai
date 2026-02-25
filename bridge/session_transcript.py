@@ -63,17 +63,18 @@ def start_transcript(
     Returns:
         Path to the transcript file as a string, or None on failure.
     """
-    from models.session_log import SessionLog
+    from models.agent_session import AgentSession
 
     log_path = str(_transcript_path(session_id))
 
     try:
-        SessionLog.create(
+        AgentSession.create(
             session_id=session_id,
             project_key=project_key,
             status="active",
             chat_id=str(chat_id) if chat_id is not None else None,
-            sender=sender,
+            sender_name=sender,
+            created_at=time.time(),
             started_at=time.time(),
             last_activity=time.time(),
             turn_count=0,
@@ -84,7 +85,7 @@ def start_transcript(
             classification_type=classification_type,
         )
     except Exception as e:
-        logger.warning(f"Failed to create SessionLog for {session_id}: {e}")
+        logger.warning(f"Failed to create AgentSession for {session_id}: {e}")
 
     # Write transcript header
     try:
@@ -125,7 +126,7 @@ def append_turn(
         tool_name: Tool name for TOOL_CALL entries.
         tool_input: Tool input for TOOL_CALL entries (summarized).
     """
-    from models.session_log import SessionLog
+    from models.agent_session import AgentSession
 
     log_path = _transcript_path(session_id)
 
@@ -146,7 +147,7 @@ def append_turn(
 
     # Update SessionLog counters
     try:
-        sessions = list(SessionLog.query.filter(session_id=session_id))
+        sessions = list(AgentSession.query.filter(session_id=session_id))
         if sessions:
             s = sessions[0]
             s.turn_count = (s.turn_count or 0) + 1
@@ -170,7 +171,7 @@ def append_tool_result(
         session_id: Session identifier.
         result: Tool result content (truncated to TOOL_RESULT_MAX_CHARS).
     """
-    from models.session_log import SessionLog
+    from models.agent_session import AgentSession
 
     log_path = _transcript_path(session_id)
     result_summary = str(result or "")[:TOOL_RESULT_MAX_CHARS]
@@ -187,7 +188,7 @@ def append_tool_result(
 
     # Increment tool_call_count in SessionLog
     try:
-        sessions = list(SessionLog.query.filter(session_id=session_id))
+        sessions = list(AgentSession.query.filter(session_id=session_id))
         if sessions:
             s = sessions[0]
             s.tool_call_count = (s.tool_call_count or 0) + 1
@@ -211,7 +212,7 @@ def complete_transcript(
         status: Final status (completed, failed, dormant).
         summary: Brief summary of session outcome (optional).
     """
-    from models.session_log import SessionLog
+    from models.agent_session import AgentSession
 
     # Write completion marker to transcript
     log_path = _transcript_path(session_id)
@@ -236,7 +237,7 @@ def complete_transcript(
 
     # Update SessionLog
     try:
-        sessions = list(SessionLog.query.filter(session_id=session_id))
+        sessions = list(AgentSession.query.filter(session_id=session_id))
         if sessions:
             s = sessions[0]
             # status is a KeyField — delete and recreate if changed
@@ -245,7 +246,8 @@ def complete_transcript(
                     "session_id": s.session_id,
                     "project_key": s.project_key,
                     "chat_id": s.chat_id,
-                    "sender": s.sender,
+                    "sender_name": s.sender_name,
+                    "created_at": s.created_at,
                     "started_at": s.started_at,
                     "last_activity": time.time(),
                     "completed_at": time.time(),
@@ -258,9 +260,13 @@ def complete_transcript(
                     "tags": s.tags,
                     "classification_type": s.classification_type,
                     "classification_confidence": s.classification_confidence,
+                    "history": s.history,
+                    "issue_url": s.issue_url,
+                    "plan_url": s.plan_url,
+                    "pr_url": s.pr_url,
                 }
                 s.delete()
-                SessionLog.create(status=status, **old_data)
+                AgentSession.create(status=status, **old_data)
             else:
                 s.completed_at = time.time()
                 s.last_activity = time.time()

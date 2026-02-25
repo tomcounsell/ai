@@ -50,9 +50,9 @@ def _get_running_jobs_info() -> tuple[int, list[str]]:
     checks between jobs. Sessions may finish before the restart actually occurs.
     """
     try:
-        from agent.job_queue import RedisJob
+        from models.agent_session import AgentSession
 
-        running_jobs = RedisJob.query.filter(status="running")
+        running_jobs = AgentSession.query.filter(status="running")
         if not running_jobs:
             return 0, []
 
@@ -179,10 +179,10 @@ async def _handle_force_update_command(tg_client, event):
 
     # 1. Flush pending jobs from queue
     try:
-        from agent.job_queue import RedisJob
+        from models.agent_session import AgentSession
 
-        pending = RedisJob.query.filter(status="pending")
-        running = RedisJob.query.filter(status="running")
+        pending = AgentSession.query.filter(status="pending")
+        running = AgentSession.query.filter(status="running")
         pending_count = len(pending) if pending else 0
         running_count = len(running) if running else 0
 

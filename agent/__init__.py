@@ -18,6 +18,7 @@ from .completion import (
     verify_completion,
 )
 from .job_queue import (
+    AgentSession,
     Job,
     RedisJob,
     check_revival,
@@ -64,6 +65,7 @@ __all__ = [
     "format_branch_state_message",
     "BranchState",
     "WorkStatus",
+    "AgentSession",
     "RedisJob",
     "Job",
     "enqueue_job",
