@@ -16,7 +16,7 @@ Called at `DaydreamRunner.__init__`. Reads `config/projects.json` and returns on
 
 ### `AI_ROOT` constant
 
-Set to `PROJECT_ROOT` at module import time (before any `chdir`). Steps that must stay anchored to the `ai` repo — state file, lessons file — use `AI_ROOT` explicitly so they work correctly regardless of which project is currently being processed.
+Set to `PROJECT_ROOT` at module import time (before any `chdir`). Steps that must stay anchored to the `ai` repo — Redis state, lessons model — use `AI_ROOT` explicitly so they work correctly regardless of which project is currently being processed.
 
 ### Step classification
 
@@ -27,10 +27,10 @@ Set to `PROJECT_ROOT` at module import time (before any `chdir`). Steps that mus
 | 3 — Sentry check | AI-only | Runs once (MCP skipped in standalone) |
 | 4 — Clean tasks | Per-project | `gh issue list` per project via `cwd=` |
 | 5 — Audit docs | AI-only | Runs once from `AI_ROOT` |
-| 6 — Session analysis | AI-only | Analyzes `AI_ROOT/logs/sessions/` |
+| 6 — Session analysis | AI-only | Queries Redis SessionLog model |
 | 7 — LLM reflection | AI-only | Reflects on combined session findings |
 | 8 — Auto-fix bugs | AI-only | Spawns plan+build for high-confidence `code_bug` reflections |
-| 9 — Memory consolidation | AI-only | Appends to `AI_ROOT/data/lessons_learned.jsonl` |
+| 9 — Memory consolidation | AI-only | Persists to Redis LessonLearned model |
 | 10 — Report generation | AI-only | Single report for all findings |
 | 11 — GitHub issue creation | Per-project | Issue in each project's own repo; also posts to Telegram |
 
@@ -81,7 +81,7 @@ Each project entry in `config/projects.json`:
 
 ## See Also
 
-- `docs/features/daydream-reactivation.md` — core 11-step process and architecture
+- `docs/features/daydream-reactivation.md` — core 14-step process and architecture
 - `config/projects.json` — live project registry
 - `scripts/daydream.py` — implementation
 - `scripts/daydream_report.py` — `create_daydream_issue(findings, date, cwd=None)`

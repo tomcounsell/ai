@@ -22,7 +22,7 @@ The `--dry-run` flag prints verdicts and reasons to stdout without writing, dele
 
 The audit is integrated into daydream as step 5 (`step_audit_docs`) in `scripts/daydream.py:L644`. It replaces the older `step_update_docs` approach, which used a 30-day timestamp check — a mechanism that was actively harmful (a freshly-written doc describing an unbuilt feature would pass; an accurate 60-day-old doc would be flagged).
 
-**Frequency gating.** The step reads `last_audit_date` from `data/daydream_state.json`. If that date is fewer than 7 days ago, the step is skipped (`DocsAuditor._should_skip()`, `scripts/docs_auditor.py:L901`). This prevents redundant full-corpus scans during daily daydream runs while ensuring the audit runs at least weekly.
+**Frequency gating.** The step reads `last_audit_date` from the Redis DaydreamRun model. If that date is fewer than 7 days ago, the step is skipped (`DocsAuditor._should_skip()`, `scripts/docs_auditor.py:L901`). This prevents redundant full-corpus scans during daily daydream runs while ensuring the audit runs at least weekly.
 
 After a successful run, daydream records findings and writes back to state:
 

@@ -19,7 +19,7 @@ Guidance for Claude Code when working with this repository.
 | `python scripts/daydream.py --ignore "pattern"` | Silence a bug pattern for 14 days |
 | `./scripts/install_daydream.sh` | Install daydream launchd schedule |
 | `tail -f logs/daydream.log` | Stream daydream logs |
-| `cat data/lessons_learned.jsonl` | View institutional memory (daydream) |
+| `python -c "from models.daydream import LessonLearned; [print(f'{l.date} [{l.category}] {l.summary}') for l in LessonLearned.get_recent()]"` | View institutional memory (daydream) |
 
 ## Development Principles
 

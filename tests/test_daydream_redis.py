@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 
 class TestDaydreamRunModel:
     """Tests for DaydreamRun Popoto model."""
@@ -409,7 +411,7 @@ class TestDaydreamStateSave:
     """Tests for DaydreamState Redis-backed save."""
 
     def test_save_to_redis(self):
-        """DaydreamState.save() persists to Redis when _redis_backed=True."""
+        """DaydreamState.save() persists to Redis DaydreamRun model."""
         from models.daydream import DaydreamRun
         from scripts.daydream import DaydreamState
 
@@ -417,7 +419,6 @@ class TestDaydreamStateSave:
         DaydreamRun.load_or_create("2026-02-25")
 
         state = DaydreamState(date="2026-02-25")
-        state._redis_backed = True
         state.current_step = 5
         state.completed_steps = [1, 2, 3, 4]
         state.save()
@@ -426,15 +427,93 @@ class TestDaydreamStateSave:
         assert len(runs) == 1
         assert runs[0].current_step == 5
 
-    def test_save_fallback_to_file(self, tmp_path, monkeypatch):
-        """DaydreamState.save() falls back to file when not Redis-backed."""
-        import scripts.daydream as mod
 
-        monkeypatch.setattr(mod, "DAYDREAM_DIR", tmp_path)
-        monkeypatch.setattr(mod, "STATE_FILE", tmp_path / "state.json")
+class TestRedisDataQuality:
+    """Tests for step 14: Redis data quality checks."""
 
-        state = mod.DaydreamState(date="2026-02-25")
-        state.current_step = 3
-        state.save()
+    def test_step_registered_as_step_14(self):
+        """step_redis_data_quality is registered as step 14."""
+        from scripts.daydream import DaydreamRunner
 
-        assert (tmp_path / "state.json").exists()
+        runner = DaydreamRunner()
+        step_names = {s[0]: s[1] for s in runner.steps}
+        assert step_names.get(14) == "Redis Data Quality"
+
+    @pytest.mark.asyncio
+    async def test_detects_unsummarized_links(self):
+        """Finds links with no ai_summary in last 7 days."""
+        import time
+
+        from models.link import Link
+        from scripts.daydream import DaydreamRunner
+
+        # Create a recent link with no summary
+        Link.create(
+            url="https://example.com/no-summary",
+            chat_id="123",
+            domain="example.com",
+            sender="user1",
+            status="unread",
+            timestamp=time.time(),
+        )
+        # Create a recent link WITH summary
+        Link.create(
+            url="https://example.com/summarized",
+            chat_id="123",
+            domain="example.com",
+            sender="user1",
+            status="read",
+            timestamp=time.time(),
+            ai_summary="This is a summary",
+        )
+
+        runner = DaydreamRunner()
+        runner.state.findings = {}
+        await runner.step_redis_data_quality()
+
+        findings = runner.state.findings.get("redis_data_quality", [])
+        assert any("1 links" in f and "no AI summary" in f for f in findings)
+
+    @pytest.mark.asyncio
+    async def test_detects_dead_channels(self):
+        """Finds chats with no recent activity."""
+        import time
+
+        from models.chat import Chat
+        from scripts.daydream import DaydreamRunner
+
+        # Create a stale chat (40 days old)
+        Chat.create(
+            chat_id="stale-chat",
+            chat_name="Dead Channel",
+            chat_type="group",
+            updated_at=time.time() - (40 * 86400),
+        )
+        # Create an active chat
+        Chat.create(
+            chat_id="active-chat",
+            chat_name="Active Channel",
+            chat_type="group",
+            updated_at=time.time(),
+        )
+
+        runner = DaydreamRunner()
+        runner.state.findings = {}
+        await runner.step_redis_data_quality()
+
+        findings = runner.state.findings.get("redis_data_quality", [])
+        assert any("1 chat" in f and "no activity" in f for f in findings)
+
+    @pytest.mark.asyncio
+    async def test_empty_when_no_data(self):
+        """No findings when Redis has no data."""
+        from scripts.daydream import DaydreamRunner
+
+        runner = DaydreamRunner()
+        runner.state.findings = {}
+        await runner.step_redis_data_quality()
+
+        findings = runner.state.findings.get("redis_data_quality", [])
+        # Should have no unsummarized/dead channel findings
+        assert not any("no AI summary" in f for f in findings)
+        assert not any("no activity" in f for f in findings)

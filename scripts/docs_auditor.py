@@ -14,7 +14,6 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import subprocess
@@ -291,7 +290,6 @@ class DocsAuditor:
     produced.
     """
 
-    STATE_FILE = Path("data/daydream_state.json")
     AUDIT_FREQUENCY_DAYS = 7
     INDEX_FILES = [
         "docs/README.md",
@@ -912,22 +910,39 @@ CORRECTIONS:
             return False
 
     def _load_state(self) -> dict[str, Any]:
-        """Load daydream_state.json from data/ directory."""
-        state_path = self.repo_root / self.STATE_FILE
-        if not state_path.exists():
-            return {}
+        """Load audit state from Redis via DaydreamRun model.
+
+        Uses a DaydreamRun with date='__docs_audit_meta__' as a singleton
+        to store cross-run metadata like last_audit_date.
+        """
         try:
-            return json.loads(state_path.read_text())
+            from models.daydream import DaydreamRun
+
+            runs = DaydreamRun.query.filter(date="__docs_audit_meta__")
+            if runs:
+                return runs[0].step_progress or {}
+            return {}
         except Exception:
             return {}
 
     def _record_audit_date(self) -> None:
-        """Write today's date as last_audit_date in daydream_state.json."""
-        state_path = self.repo_root / self.STATE_FILE
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        state = self._load_state()
-        state["last_audit_date"] = datetime.now().isoformat()
-        state_path.write_text(json.dumps(state, indent=2))
+        """Write today's date as last_audit_date in Redis via DaydreamRun."""
+        try:
+            from models.daydream import DaydreamRun
+
+            state = self._load_state()
+            state["last_audit_date"] = datetime.now().isoformat()
+            # Delete existing singleton and recreate with updated state
+            existing = DaydreamRun.query.filter(date="__docs_audit_meta__")
+            for run in existing:
+                run.delete()
+            DaydreamRun.create(
+                date="__docs_audit_meta__",
+                step_progress=state,
+                started_at=0.0,
+            )
+        except Exception:
+            logger.warning("Failed to record audit date to Redis", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
