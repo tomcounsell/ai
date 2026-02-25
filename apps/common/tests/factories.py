@@ -7,7 +7,7 @@ that can be overridden as needed.
 """
 
 import random
-from typing import Any, Dict, Type, TypeVar
+from typing import Any, TypeVar
 
 from django.contrib.auth import get_user_model
 from django.db import models

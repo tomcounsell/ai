@@ -5,9 +5,9 @@ import io
 import sys
 import traceback
 from contextlib import redirect_stderr, redirect_stdout
-from typing import Any, Dict
+from typing import Any
 
-from pydantic_ai import RunContext, Tool
+from pydantic_ai import Tool
 
 
 async def run_python_code(code: str) -> dict[str, Any]:

@@ -1,7 +1,7 @@
 import logging
 import random
 import string
-from typing import Any, Dict
+from typing import Any
 
 from django.core.cache import cache
 

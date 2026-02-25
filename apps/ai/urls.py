@@ -1,14 +1,7 @@
-from typing import List
 
 from django.urls import URLPattern, path
 
 from apps.ai.views import (
-    ChatClearView,
-    ChatIndexView,
-    ChatLoadSessionView,
-    ChatNewSessionView,
-    ChatPollMessageView,
-    ChatSendMessageView,
     CreativeJuicesBundleView,
     CreativeJuicesClientView,
     CreativeJuicesLandingView,

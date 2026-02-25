@@ -1,5 +1,4 @@
 import logging
-from typing import Optional
 
 import requests
 
@@ -157,4 +156,3 @@ class LoopsClient:
 class LoopsAPIError(Exception):
     """Custom exception for Loops API errors"""
 
-    pass

@@ -14,8 +14,7 @@ from django.contrib.auth import get_user_model
 # Import test pattern base classes if available
 try:
     import playwright.async_api
-    from browser_use import BrowserAgent
-    from playwright.async_api import Browser, BrowserContext, Page
+    from playwright.async_api import Page
 
     from apps.public.tests.test_e2e_patterns import (
         E2ETestBase,

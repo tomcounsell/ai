@@ -1,11 +1,9 @@
 """Tests for deep research tools (Perplexity, Gemini, GPT-Researcher)."""
 
-import os
-import shutil
 import sys
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 

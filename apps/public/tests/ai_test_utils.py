@@ -9,12 +9,11 @@ import asyncio
 import json
 import os
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 try:
-    import playwright.async_api
-    from browser_use import Agent, BrowserAgent, use
-    from playwright.async_api import Browser, BrowserContext, Page
+    from browser_use import Agent, BrowserAgent
+    from playwright.async_api import Page
 
     BROWSER_USE_AVAILABLE = True
 except ImportError:

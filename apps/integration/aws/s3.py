@@ -9,7 +9,7 @@ import logging
 import mimetypes
 import os
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 from urllib.parse import urlparse
 
 import boto3

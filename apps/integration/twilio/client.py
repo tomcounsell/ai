@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from django.conf import settings
 
@@ -235,4 +235,3 @@ class TwilioClient:
 class TwilioAPIError(Exception):
     """Custom exception for Twilio API errors"""
 
-    pass

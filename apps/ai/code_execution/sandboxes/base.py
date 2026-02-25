@@ -205,7 +205,6 @@ class BaseSandbox(ABC):
             >>> result = sandbox.execute("x = 1 + 1", config)
             >>> assert result.success
         """
-        pass
 
     def __enter__(self):
         """Context manager support for resource cleanup."""
@@ -224,7 +223,6 @@ class BaseSandbox(ABC):
 
         Default implementation does nothing.
         """
-        pass
 
     def _validate_code(self, code: str) -> None:
         """

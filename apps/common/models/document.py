@@ -1,4 +1,3 @@
-from django.db import models
 
 from .upload import Upload
 
@@ -26,7 +25,6 @@ class Document(Upload):
         Implemented by subclasses
         :return: string containing the HTML to display for this document
         """
-        pass
 
 
 class PDF(Document):

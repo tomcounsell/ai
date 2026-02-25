@@ -6,7 +6,7 @@ creating checkout sessions, managing customers, and handling subscriptions.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any
 
 from django.conf import settings
 from django.urls import reverse

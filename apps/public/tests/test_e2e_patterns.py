@@ -13,7 +13,7 @@ These patterns demonstrate how to:
 
 import os
 import sys
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING
 
 import pytest
 from django.contrib.auth import get_user_model

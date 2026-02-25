@@ -1,7 +1,6 @@
 """Base connector interface for security tools."""
 
 from abc import ABC, abstractmethod
-from datetime import datetime
 
 from .types import Alert, Asset, QueryFilters
 
@@ -28,7 +27,6 @@ class BaseSecurityConnector(ABC):
         Returns:
             True if connection successful, False otherwise
         """
-        pass
 
     @abstractmethod
     async def fetch_alerts(self, filters: QueryFilters) -> list[Alert]:
@@ -40,7 +38,6 @@ class BaseSecurityConnector(ABC):
         Returns:
             List of alerts from this tool
         """
-        pass
 
     @abstractmethod
     async def fetch_assets(self, asset_ids: list[str]) -> list[Asset]:
@@ -52,7 +49,6 @@ class BaseSecurityConnector(ABC):
         Returns:
             List of asset details
         """
-        pass
 
     async def get_capabilities(self) -> list[str]:
         """Get list of capabilities supported by this connector.
@@ -129,7 +125,6 @@ class PolicyConnector(BaseSecurityConnector):
         Returns:
             List of policy documents
         """
-        pass
 
     async def get_capabilities(self) -> list[str]:
         """Policy connectors provide compliance and policy documents."""

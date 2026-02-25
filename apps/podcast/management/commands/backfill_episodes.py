@@ -40,8 +40,6 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from apps.podcast.management.commands._episode_import_utils import (
-    EPISODE_FIELD_FILES,
-    SKIP_DIRS,
     SKIP_EXTENSIONS,
     SKIP_FILES,
     create_artifacts,

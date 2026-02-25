@@ -20,8 +20,6 @@ User = get_user_model()
 # Check for browser testing dependencies
 try:
     import playwright.async_api
-    import pytest_asyncio
-    from playwright.async_api import Browser, BrowserContext
 
     # Define Page for type hints
     if TYPE_CHECKING:
@@ -39,7 +37,7 @@ except ImportError:
 
 # Conditional asyncio marker
 try:
-    import pytest_asyncio
+    pass
 
     HAS_PYTEST_ASYNCIO = True
     asyncio_mark = pytest.mark.asyncio

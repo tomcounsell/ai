@@ -6,7 +6,7 @@ Single-page dashboard with HTMX modals for add/edit operations.
 
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.http import HttpResponse
-from django.shortcuts import get_object_or_404, redirect
+from django.shortcuts import get_object_or_404
 from django.template.response import TemplateResponse
 from django.views import View
 

@@ -7,7 +7,7 @@ handling authentication, API calls, error handling, and webhooks.
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 from django.conf import settings
 
@@ -472,4 +472,3 @@ class StripeClient:
 class StripeAPIError(Exception):
     """Custom exception for Stripe API errors"""
 
-    pass

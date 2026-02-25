@@ -7,7 +7,7 @@ such as payment success, subscription updates, and customer events.
 
 import logging
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any
 
 from django.utils import timezone
 

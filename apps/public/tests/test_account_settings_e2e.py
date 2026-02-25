@@ -27,7 +27,6 @@ User = get_user_model()
 try:
     import playwright.async_api
     import pytest_asyncio
-    from playwright.async_api import Browser, BrowserContext
 
     # Define Page for type hints
     if TYPE_CHECKING:

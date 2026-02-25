@@ -1,4 +1,3 @@
-from typing import Dict, Optional
 
 from django.contrib import messages
 from django.http import HttpRequest, HttpResponse

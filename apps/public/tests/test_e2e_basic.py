@@ -42,7 +42,6 @@ class MockBrowserTests:
         4. Submit the form via HTMX
         5. Verify the new todo appears in the list without a page reload
         """
-        pass
 
     @pytest.mark.skip(reason="Mock example only - requires browser-use")
     def test_responsive_design(self):
@@ -55,4 +54,3 @@ class MockBrowserTests:
         3. Check that mobile navigation appears at small sizes
         4. Verify all content remains accessible
         """
-        pass

@@ -9,7 +9,7 @@ import logging
 import traceback
 from collections.abc import Callable
 from functools import wraps
-from typing import Any, Dict, List, Optional, Type, TypeVar
+from typing import Any, TypeVar
 
 from django.conf import settings
 from django.contrib import messages

@@ -21,7 +21,6 @@ import pytest
 # Try to import browser-use dependencies
 try:
     import playwright.async_api
-    import pytest_asyncio
 
     # Define Page type for type hints
     if TYPE_CHECKING:

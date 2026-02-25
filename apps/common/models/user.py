@@ -1,6 +1,6 @@
 import hashlib
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any
 
 from django.contrib.auth.models import AbstractUser
 from django.db import models

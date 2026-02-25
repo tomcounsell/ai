@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any
 
 from django.core.validators import validate_slug
 from django.db import models

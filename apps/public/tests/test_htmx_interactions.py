@@ -20,9 +20,8 @@ from django.contrib.auth import get_user_model
 
 # Try importing browser-use components
 try:
-    import playwright.async_api
-    from browser_use import BrowserAgent, use
-    from playwright.async_api import Browser, BrowserContext, Page
+    from browser_use import BrowserAgent
+    from playwright.async_api import Page
 
     BROWSER_USE_AVAILABLE = True
 except ImportError:

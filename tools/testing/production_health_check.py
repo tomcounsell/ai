@@ -6,7 +6,6 @@ Run with: python tools/testing/production_health_check.py
 """
 
 import sys
-from typing import Dict, List, Tuple
 
 try:
     import requests

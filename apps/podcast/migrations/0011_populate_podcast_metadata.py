@@ -12,7 +12,9 @@ def populate_yudame_research_metadata(apps, schema_editor):
         return
     p.published_at = p.published_at or timezone.now()
     p.cover_image_url = "https://research.yuda.me/podcast/cover.png"
-    p.apple_podcasts_url = "https://podcasts.apple.com/us/podcast/yudame-research-podcast/id1862329179"
+    p.apple_podcasts_url = (
+        "https://podcasts.apple.com/us/podcast/yudame-research-podcast/id1862329179"
+    )
     p.spotify_url = "https://open.spotify.com/show/32xUME8x4FN1DcNwBOrYfc"
     p.website_url = "https://research.yuda.me"
     p.save()

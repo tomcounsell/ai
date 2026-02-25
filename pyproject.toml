@@ -140,6 +140,7 @@ filterwarnings = [
 
 [dependency-groups]
 dev = [
+    "autoflake>=2.3.3",
     "django-browser-reload>=1.18.0",
     "pre-commit>=4.3.0",
     "pyright>=1.1.408",

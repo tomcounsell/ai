@@ -11,7 +11,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Tuple
 
 # Add project root to path
 PROJECT_ROOT = Path(__file__).parent.parent.parent

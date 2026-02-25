@@ -5,7 +5,7 @@ import secrets
 import time
 from urllib.parse import urlencode
 
-from django.http import HttpResponse, JsonResponse
+from django.http import JsonResponse
 from django.shortcuts import redirect
 from django.utils.decorators import method_decorator
 from django.views import View

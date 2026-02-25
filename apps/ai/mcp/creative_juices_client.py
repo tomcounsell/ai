@@ -25,15 +25,12 @@ Manual installation:
 """
 
 import asyncio
-import json
 import sys
-from typing import Any
 
 try:
     import httpx
     from mcp.client import Client
     from mcp.client.session import ClientSession
-    from mcp.client.stdio import stdio_client
 except ImportError:
     print(
         "Error: Required packages not found. uvx should install these automatically.",
