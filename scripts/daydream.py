@@ -16,10 +16,10 @@ A long-running process that performs daily maintenance tasks:
 11. GitHub issue creation (per-project, via daydream_report module)
 12. Skills audit (validate all SKILL.md files against template standards)
 13. Redis TTL cleanup (all models including daydream models)
+14. Redis data quality checks (unsummarized links, dead channels)
 
-State is persisted in Redis via DaydreamRun model for resumability.
-Ignore patterns use DaydreamIgnore model with TTL-based auto-expiry.
-Lessons learned use LessonLearned model for queryable institutional memory.
+All persistence is Redis-backed via Popoto models (see models/ directory).
+State: DaydreamRun | Ignore patterns: DaydreamIgnore | Lessons: LessonLearned
 """
 
 from __future__ import annotations
