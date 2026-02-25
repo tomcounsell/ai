@@ -319,3 +319,132 @@ class TestUpdateSdlcStateForBash:
         update_sdlc_state_for_bash(hook_input)
         state_path = sessions_dir / session_id / "sdlc_state.json"
         assert not state_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Merge detection: gh pr merge resets code_modified
+# ---------------------------------------------------------------------------
+
+
+class TestMergeDetection:
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "gh pr merge --squash --delete-branch",
+            "gh pr merge 42 --squash",
+            "gh pr merge",
+            "gh pr merge --merge",
+            "gh pr merge --rebase",
+        ],
+    )
+    def test_gh_pr_merge_resets_code_modified(
+        self, patch_project_dir, tmp_session, command
+    ):
+        """gh pr merge commands should reset code_modified to false."""
+        session_id, _ = tmp_session
+        save_sdlc_state(session_id, _make_quality_state())
+        hook_input = {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        }
+        update_sdlc_state_for_bash(hook_input)
+        state = load_sdlc_state(session_id)
+        assert state["code_modified"] is False
+
+    def test_non_merge_command_preserves_code_modified(
+        self, patch_project_dir, tmp_session
+    ):
+        """Non-merge bash commands should not reset code_modified."""
+        session_id, _ = tmp_session
+        save_sdlc_state(session_id, _make_quality_state())
+        hook_input = {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr view 42"},
+        }
+        update_sdlc_state_for_bash(hook_input)
+        state = load_sdlc_state(session_id)
+        assert state["code_modified"] is True
+
+    def test_merge_without_existing_state_is_noop(self, patch_project_dir, tmp_session):
+        """gh pr merge without pre-existing state file does nothing."""
+        sessions_dir = patch_project_dir
+        session_id, _ = tmp_session
+        hook_input = {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge --squash"},
+        }
+        update_sdlc_state_for_bash(hook_input)
+        state_path = sessions_dir / session_id / "sdlc_state.json"
+        assert not state_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# Branch recording: modified_on_branch set on first code write
+# ---------------------------------------------------------------------------
+
+
+class TestBranchRecording:
+    def test_branch_recorded_on_first_code_write(self, patch_project_dir, tmp_session):
+        """When code is first modified, modified_on_branch should be recorded."""
+        session_id, _ = tmp_session
+        hook_input = {
+            "session_id": session_id,
+            "tool_name": "Write",
+            "tool_input": {"file_path": "agent/foo.py"},
+        }
+        with patch("subprocess.run") as mock_run:
+            mock_result = type("Result", (), {"stdout": "session/my-feature\n"})()
+            mock_run.return_value = mock_result
+            update_sdlc_state_for_file_write(hook_input)
+        state = load_sdlc_state(session_id)
+        assert state["modified_on_branch"] == "session/my-feature"
+
+    def test_branch_not_overwritten_on_subsequent_writes(
+        self, patch_project_dir, tmp_session
+    ):
+        """modified_on_branch should only be set once (first write wins)."""
+        session_id, _ = tmp_session
+        # First write on session/first-branch
+        hook_input = {
+            "session_id": session_id,
+            "tool_name": "Write",
+            "tool_input": {"file_path": "agent/foo.py"},
+        }
+        with patch("subprocess.run") as mock_run:
+            mock_result = type("Result", (), {"stdout": "session/first-branch\n"})()
+            mock_run.return_value = mock_result
+            update_sdlc_state_for_file_write(hook_input)
+
+        # Second write (branch changed to main, but should not overwrite)
+        hook_input2 = {
+            "session_id": session_id,
+            "tool_name": "Write",
+            "tool_input": {"file_path": "agent/bar.py"},
+        }
+        with patch("subprocess.run") as mock_run:
+            mock_result = type("Result", (), {"stdout": "main\n"})()
+            mock_run.return_value = mock_result
+            update_sdlc_state_for_file_write(hook_input2)
+
+        state = load_sdlc_state(session_id)
+        assert state["modified_on_branch"] == "session/first-branch"
+
+    def test_branch_recording_failure_does_not_block_state_save(
+        self, patch_project_dir, tmp_session
+    ):
+        """If git rev-parse fails, state should still be saved with code_modified=True."""
+        session_id, _ = tmp_session
+        hook_input = {
+            "session_id": session_id,
+            "tool_name": "Write",
+            "tool_input": {"file_path": "agent/foo.py"},
+        }
+        with patch("subprocess.run", side_effect=Exception("git not found")):
+            update_sdlc_state_for_file_write(hook_input)
+        state = load_sdlc_state(session_id)
+        assert state["code_modified"] is True
+        # modified_on_branch should not be present since git failed
+        assert "modified_on_branch" not in state

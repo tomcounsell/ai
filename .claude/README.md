@@ -61,7 +61,7 @@ Skills in `.claude/commands/` define reusable workflows:
 |-------|---------|
 | `/prime` | **Start here** - Codebase onboarding for new sessions |
 | `/pthread` | Scale compute via parallel agent execution |
-| `/sdlc` | Autonomous Plan→Build→Test→Ship workflow |
+| `/sdlc` | Autonomous Plan→Build→Test→Review→Docs→Ship pipeline |
 | `/audit-next-tool` | Quality audits for tools |
 
 ### /prime - Codebase Onboarding (NEW SESSIONS START HERE)
@@ -81,7 +81,7 @@ Spawn multiple agents for independent work. The system auto-parallelizes when:
 
 ### /sdlc - AI Developer Workflow
 
-Single entry point for all issue-referenced work. Detects where an issue stands and picks up from the right stage. See `.claude/skills/sdlc/SKILL.md` for ground truth on stages and state assessment.
+Single entry point for all development work. It's a **dispatcher** — assesses state and invokes the right sub-skill (`/do-plan`, `/do-build`, `/do-test`, `/do-patch`, `/do-pr-review`, `/do-docs`). See `.claude/skills/sdlc/SKILL.md` for ground truth on stages.
 
 Stages: Plan → Build → Test → Patch → Review → Patch → Docs → Merge
 

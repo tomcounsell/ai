@@ -16,9 +16,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Completion Tracking](completion-tracking.md) | Branch-based work tracking and completion token system | Archived |
 | [Coaching Loop](coaching-loop.md) | Merged classifier-coach with LLM-generated coaching, tiered fallback, and error crash guard | Shipped |
 | [Code Impact Finder](code-impact-finder.md) | Semantic search for blast radius analysis during /do-plan | Shipped |
-| [Daydream Reactivation](daydream-reactivation.md) | Autonomous 11-step daily maintenance: cleanup, log analysis, session quality, LLM reflection, institutional memory, Telegram notifications | Shipped |
-| [Daydream Multi-Repo](daydream-multi-repo.md) | Extends daydream to analyze multiple repos per machine via config/projects.json with per-project GitHub issues and Telegram posts | Shipped |
-| [Daydream Auto-Fix](daydream-auto-fix.md) | Auto-opens PRs for high-confidence code bugs found during nightly reflection; includes ignore log and dry-run mode | Shipped |
+| [Daydream](daydream.md) | Autonomous 14-step daily maintenance: cleanup, log analysis, session quality, LLM reflection, auto-fix PRs, multi-repo support, institutional memory, Telegram notifications | Shipped |
 | [Documentation Audit](documentation-audit.md) | Weekly LLM-powered audit of docs/ accuracy against codebase; KEEP / UPDATE / DELETE verdicts, directory and filename enforcement | Shipped |
 | [Design Review](do-design-review.md) | Review web UI against 10 premium design criteria with severity ratings | Shipped |
 | [Skills Audit](do-skills-audit.md) | Deterministic validation of all SKILL.md files with 12 rules and Anthropic best practices sync | Shipped |

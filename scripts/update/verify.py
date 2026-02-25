@@ -363,21 +363,42 @@ def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
 
 
 def check_mcp_servers() -> list[str]:
-    """Get list of configured MCP servers."""
-    try:
-        result = run_cmd(["claude", "mcp", "list"], timeout=30)
-        if result.returncode != 0:
-            return []
+    """Get list of configured MCP servers by reading config files directly.
 
-        # Parse output - each line is a server
-        servers = []
-        for line in result.stdout.strip().split("\n"):
-            line = line.strip()
-            if line and not line.startswith("No "):
-                servers.append(line)
-        return servers
-    except Exception:
-        return []
+    Reads ~/.claude/mcp_settings.json instead of `claude mcp list` which
+    can hang when Claude Desktop is running.
+    """
+    import json
+
+    servers = []
+
+    # Read from ~/.claude/mcp_settings.json (global config, key: "servers")
+    mcp_settings = Path.home() / ".claude" / "mcp_settings.json"
+    if mcp_settings.exists():
+        try:
+            data = json.loads(mcp_settings.read_text())
+            for key in ("servers", "mcpServers"):
+                if key in data:
+                    servers.extend(data[key].keys())
+                    break
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Read from project .mcp.json if it exists (key: "mcpServers")
+    project_mcp = Path.cwd() / ".mcp.json"
+    if project_mcp.exists():
+        try:
+            data = json.loads(project_mcp.read_text())
+            for key in ("mcpServers", "servers"):
+                if key in data:
+                    for name in data[key]:
+                        if name not in servers:
+                            servers.append(name)
+                    break
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return servers
 
 
 def check_gitignore_issues() -> list[GitignoreIssue]:

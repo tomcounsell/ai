@@ -3,6 +3,8 @@ Daydream Report - GitHub Issue Creation
 
 Creates GitHub issues from daydream findings using the `gh` CLI.
 Designed to be imported by the main daydream runner or used standalone.
+
+See docs/features/daydream.md for full documentation.
 """
 
 from __future__ import annotations

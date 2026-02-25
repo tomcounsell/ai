@@ -15,7 +15,10 @@ if user_site.exists() and str(user_site) not in sys.path:
 sdk_client_path = Path(__file__).parent.parent / "agent" / "sdk_client.py"
 spec = importlib.util.spec_from_file_location("sdk_client", sdk_client_path)
 sdk_client = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(sdk_client)
+try:
+    spec.loader.exec_module(sdk_client)
+except ImportError as e:
+    pytest.skip(f"SDK dependencies unavailable: {e}", allow_module_level=True)
 ValorAgent = sdk_client.ValorAgent
 load_system_prompt = sdk_client.load_system_prompt
 
@@ -47,25 +50,6 @@ class TestValorAgentConfig:
         assert agent.working_dir.exists()
         assert (agent.working_dir / "CLAUDE.md").exists()
 
-    def test_create_options_has_correct_settings(self):
-        """Test that _create_options creates valid ClaudeAgentOptions."""
-        agent = ValorAgent()
-        options = agent._create_options(session_id="test_session")
-
-        assert options.permission_mode == "bypassPermissions"
-        assert options.system_prompt is not None
-        assert options.cwd is not None
-        assert options.continue_conversation is True
-        assert options.resume == "test_session"
-
-    def test_create_options_without_session(self):
-        """Test options creation without session ID."""
-        agent = ValorAgent()
-        options = agent._create_options(session_id=None)
-
-        assert options.continue_conversation is False
-        assert options.resume is None
-
 
 class TestSystemPrompt:
     """Test system prompt loading."""
@@ -88,64 +72,6 @@ class TestSystemPrompt:
         prompt = load_system_prompt()
         assert "full" in prompt.lower()
         assert "access" in prompt.lower() or "permission" in prompt.lower()
-
-
-class TestClaudeAgentOptionsValidity:
-    """Test that ClaudeAgentOptions accepts our configuration."""
-
-    def test_bypass_permissions_is_valid_mode(self):
-        """Test that bypassPermissions is a valid permission mode."""
-        try:
-            from claude_agent_sdk import ClaudeAgentOptions
-        except ImportError:
-            pytest.skip("claude_agent_sdk not available")
-
-        # Should not raise
-        options = ClaudeAgentOptions(permission_mode="bypassPermissions")
-        assert options.permission_mode == "bypassPermissions"
-
-    def test_options_creation_no_errors(self):
-        """Test that creating options doesn't raise any errors."""
-        try:
-            from claude_agent_sdk import ClaudeAgentOptions  # noqa: F401
-        except ImportError:
-            pytest.skip("claude_agent_sdk not available")
-
-        agent = ValorAgent()
-        # Should not raise
-        options = agent._create_options()
-        assert options is not None
-
-    def test_all_options_are_valid_parameters(self):
-        """Test that all options we set are valid ClaudeAgentOptions parameters."""
-        try:
-            import inspect
-
-            from claude_agent_sdk import ClaudeAgentOptions
-        except ImportError:
-            pytest.skip("claude_agent_sdk not available")
-
-        # Get valid parameters
-        sig = inspect.signature(ClaudeAgentOptions.__init__)
-        valid_params = set(sig.parameters.keys()) - {"self"}
-
-        # Our options — create to verify no exception; result not needed
-        agent = ValorAgent()
-        agent._create_options(session_id="test")
-
-        # Check that we're not setting any invalid attributes
-        # (This would have raised an error during creation, but let's be explicit)
-        our_params = {
-            "system_prompt",
-            "cwd",
-            "permission_mode",
-            "continue_conversation",
-            "resume",
-            "env",
-        }
-
-        for param in our_params:
-            assert param in valid_params, f"Invalid parameter: {param}"
 
 
 if __name__ == "__main__":

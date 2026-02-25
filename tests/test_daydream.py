@@ -1,4 +1,4 @@
-"""Tests for daydream core: session analysis, LLM reflection, memory consolidation."""
+"""Tests for daydream core: LLM reflection, memory consolidation, auto-fix, data quality."""
 
 from __future__ import annotations
 
@@ -8,143 +8,6 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# --- Session Analysis Tests (Step 7) ---
-
-
-class TestSessionAnalysis:
-    """Tests for session analysis logic."""
-
-    def test_analyze_empty_sessions_dir(self, tmp_path):
-        """No sessions directory returns empty analysis."""
-        from scripts.daydream import analyze_sessions
-
-        result = analyze_sessions(tmp_path / "sessions", "2026-02-16")
-        assert result["sessions_analyzed"] == 0
-        assert result["corrections"] == []
-        assert result["thrash_sessions"] == []
-
-    def test_analyze_filters_to_target_date(self, tmp_path):
-        """Only sessions from the target date are analyzed."""
-        from scripts.daydream import analyze_sessions
-
-        sessions_dir = tmp_path / "sessions"
-
-        # Create a session with yesterday's date in chat.json
-        session_dir = sessions_dir / "session_abc"
-        session_dir.mkdir(parents=True)
-        chat_data = {
-            "session_id": "abc",
-            "started_at": "2026-02-16T10:00:00",
-            "messages": [
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi there"},
-            ],
-        }
-        (session_dir / "chat.json").write_text(json.dumps(chat_data))
-
-        # Create a session from a different day
-        session_dir2 = sessions_dir / "session_def"
-        session_dir2.mkdir(parents=True)
-        chat_data2 = {
-            "session_id": "def",
-            "started_at": "2026-02-10T10:00:00",
-            "messages": [{"role": "user", "content": "Old session"}],
-        }
-        (session_dir2 / "chat.json").write_text(json.dumps(chat_data2))
-
-        result = analyze_sessions(sessions_dir, "2026-02-16")
-        assert result["sessions_analyzed"] == 1
-
-    def test_detect_user_corrections(self, tmp_path):
-        """Detects correction patterns in user messages."""
-        from scripts.daydream import analyze_sessions
-
-        sessions_dir = tmp_path / "sessions"
-        session_dir = sessions_dir / "session_corrections"
-        session_dir.mkdir(parents=True)
-
-        chat_data = {
-            "session_id": "corrections",
-            "started_at": "2026-02-16T10:00:00",
-            "messages": [
-                {"role": "user", "content": "Do X"},
-                {"role": "assistant", "content": "Did X"},
-                {"role": "user", "content": "No, I meant Y"},
-                {"role": "assistant", "content": "OK doing Y"},
-                {"role": "user", "content": "That's wrong, do Z"},
-            ],
-        }
-        (session_dir / "chat.json").write_text(json.dumps(chat_data))
-
-        result = analyze_sessions(sessions_dir, "2026-02-16")
-        assert len(result["corrections"]) >= 2
-
-    def test_thrash_ratio_computation(self, tmp_path):
-        """Computes thrash ratio from tool_use.jsonl."""
-        from scripts.daydream import analyze_sessions
-
-        sessions_dir = tmp_path / "sessions"
-        session_dir = sessions_dir / "session_thrash"
-        session_dir.mkdir(parents=True)
-
-        chat_data = {
-            "session_id": "thrash",
-            "started_at": "2026-02-16T10:00:00",
-            "messages": [{"role": "user", "content": "Do stuff"}],
-        }
-        (session_dir / "chat.json").write_text(json.dumps(chat_data))
-
-        # 10 tool calls, only 2 successes = high thrash
-        tool_lines = []
-        for i in range(10):
-            entry = {
-                "tool": "bash",
-                "success": i < 2,
-                "timestamp": "2026-02-16T10:00:00",
-            }
-            tool_lines.append(json.dumps(entry))
-        (session_dir / "tool_use.jsonl").write_text("\n".join(tool_lines))
-
-        result = analyze_sessions(sessions_dir, "2026-02-16")
-        assert len(result["thrash_sessions"]) == 1
-        session_info = result["thrash_sessions"][0]
-        assert session_info["tool_calls"] == 10
-        assert session_info["successes"] == 2
-
-    def test_caps_at_10_sessions(self, tmp_path):
-        """Caps analysis at 10 most interesting sessions."""
-        from scripts.daydream import analyze_sessions
-
-        sessions_dir = tmp_path / "sessions"
-        for i in range(15):
-            session_dir = sessions_dir / f"session_{i:03d}"
-            session_dir.mkdir(parents=True)
-            chat_data = {
-                "session_id": f"s{i}",
-                "started_at": "2026-02-16T10:00:00",
-                "messages": [
-                    {"role": "user", "content": "Do something"},
-                    {"role": "user", "content": "No, I meant something else"},
-                ],
-            }
-            (session_dir / "chat.json").write_text(json.dumps(chat_data))
-
-        result = analyze_sessions(sessions_dir, "2026-02-16")
-        assert result["sessions_analyzed"] <= 10
-
-    def test_handles_malformed_chat_json(self, tmp_path):
-        """Gracefully handles invalid JSON in chat.json."""
-        from scripts.daydream import analyze_sessions
-
-        sessions_dir = tmp_path / "sessions"
-        session_dir = sessions_dir / "session_bad"
-        session_dir.mkdir(parents=True)
-        (session_dir / "chat.json").write_text("NOT VALID JSON {{{")
-
-        result = analyze_sessions(sessions_dir, "2026-02-16")
-        assert result["sessions_analyzed"] == 0
-
 
 # --- LLM Reflection Tests (Step 8) ---
 
@@ -251,13 +114,10 @@ class TestLLMReflection:
 class TestMemoryConsolidation:
     """Tests for lessons learned consolidation."""
 
-    def test_appends_lessons_to_jsonl(self, tmp_path):
-        """Writes reflection output to lessons_learned.jsonl."""
+    def test_appends_lessons_to_redis(self):
+        """Writes reflection output to Redis LessonLearned model."""
+        from models.daydream import LessonLearned
         from scripts.daydream import consolidate_memory
-
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
-        lessons_file = data_dir / "lessons_learned.jsonl"
 
         reflections = [
             {
@@ -269,36 +129,33 @@ class TestMemoryConsolidation:
             }
         ]
 
-        consolidate_memory(reflections, "2026-02-16", lessons_file)
+        consolidate_memory(reflections, "2026-02-16")
 
-        lines = lessons_file.read_text().strip().split("\n")
-        assert len(lines) == 1
-        entry = json.loads(lines[0])
-        assert entry["date"] == "2026-02-16"
-        assert entry["category"] == "misunderstanding"
-        assert entry["validated"] == 0
+        lessons = LessonLearned.query.all()
+        assert len(lessons) == 1
+        assert lessons[0].date == "2026-02-16"
+        assert lessons[0].category == "misunderstanding"
+        assert lessons[0].validated == 0
 
-    def test_deduplicates_by_pattern(self, tmp_path):
+    def test_deduplicates_by_pattern(self):
         """Does not add duplicate patterns."""
+        from models.daydream import LessonLearned
         from scripts.daydream import consolidate_memory
 
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
-        lessons_file = data_dir / "lessons_learned.jsonl"
+        # Add first entry
+        reflections1 = [
+            {
+                "category": "misunderstanding",
+                "summary": "Old entry",
+                "pattern": "Jumped to code before confirming",
+                "prevention": "Ask first",
+                "source_session": "old",
+            }
+        ]
+        consolidate_memory(reflections1, "2026-02-15")
 
-        # Write existing entry
-        existing = {
-            "date": "2026-02-15",
-            "category": "misunderstanding",
-            "summary": "Old entry",
-            "pattern": "Jumped to code before confirming",
-            "prevention": "Ask first",
-            "source_session": "old",
-            "validated": 0,
-        }
-        lessons_file.write_text(json.dumps(existing) + "\n")
-
-        reflections = [
+        # Try to add duplicate
+        reflections2 = [
             {
                 "category": "misunderstanding",
                 "summary": "New but same pattern",
@@ -307,57 +164,52 @@ class TestMemoryConsolidation:
                 "source_session": "abc",
             }
         ]
+        consolidate_memory(reflections2, "2026-02-16")
 
-        consolidate_memory(reflections, "2026-02-16", lessons_file)
+        lessons = LessonLearned.query.all()
+        assert len(lessons) == 1  # Still just one entry
 
-        lines = lessons_file.read_text().strip().split("\n")
-        assert len(lines) == 1  # Still just one entry
-
-    def test_prunes_old_entries(self, tmp_path):
+    def test_prunes_old_entries(self):
         """Removes entries older than 90 days."""
+        import time
+
+        from models.daydream import LessonLearned
         from scripts.daydream import consolidate_memory
 
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
-        lessons_file = data_dir / "lessons_learned.jsonl"
+        # Create old lesson directly in Redis
+        LessonLearned.create(
+            date="2025-01-01",
+            category="old",
+            summary="Should be pruned",
+            pattern="old pattern",
+            prevention="n/a",
+            source_session="old",
+            validated=0,
+            created_at=time.time() - (100 * 86400),
+        )
+        # Create recent lesson
+        LessonLearned.create(
+            date=(datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d"),
+            category="recent",
+            summary="Should remain",
+            pattern="recent pattern",
+            prevention="n/a",
+            source_session="recent",
+            validated=0,
+            created_at=time.time() - (10 * 86400),
+        )
 
-        old_date = (datetime.now() - timedelta(days=100)).strftime("%Y-%m-%d")
-        recent_date = (datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d")
+        consolidate_memory([], "2026-02-16")
 
-        entries = [
-            {
-                "date": old_date,
-                "category": "old",
-                "summary": "Should be pruned",
-                "pattern": "old pattern",
-                "prevention": "n/a",
-                "source_session": "old",
-                "validated": 0,
-            },
-            {
-                "date": recent_date,
-                "category": "recent",
-                "summary": "Should remain",
-                "pattern": "recent pattern",
-                "prevention": "n/a",
-                "source_session": "recent",
-                "validated": 0,
-            },
-        ]
-        lessons_file.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+        remaining = LessonLearned.query.all()
+        assert len(remaining) == 1
+        assert remaining[0].category == "recent"
 
-        consolidate_memory([], "2026-02-16", lessons_file)
-
-        lines = lessons_file.read_text().strip().split("\n")
-        assert len(lines) == 1
-        remaining = json.loads(lines[0])
-        assert remaining["category"] == "recent"
-
-    def test_creates_file_if_not_exists(self, tmp_path):
-        """Creates lessons_learned.jsonl if it does not exist."""
+    def test_creates_lesson_in_redis(self):
+        """Creates lesson in Redis even when no prior entries exist."""
+        from models.daydream import LessonLearned
         from scripts.daydream import consolidate_memory
 
-        lessons_file = tmp_path / "data" / "lessons_learned.jsonl"
         reflections = [
             {
                 "category": "test",
@@ -367,22 +219,18 @@ class TestMemoryConsolidation:
                 "source_session": "test",
             }
         ]
-        consolidate_memory(reflections, "2026-02-16", lessons_file)
-        assert lessons_file.exists()
+        consolidate_memory(reflections, "2026-02-16")
+        lessons = LessonLearned.query.all()
+        assert len(lessons) == 1
 
-    def test_handles_empty_reflections(self, tmp_path):
+    def test_handles_empty_reflections(self):
         """No-op with empty reflections (but still prunes)."""
+        from models.daydream import LessonLearned
         from scripts.daydream import consolidate_memory
 
-        data_dir = tmp_path / "data"
-        data_dir.mkdir()
-        lessons_file = data_dir / "lessons_learned.jsonl"
-        lessons_file.write_text("")
-
-        consolidate_memory([], "2026-02-16", lessons_file)
-        # File should exist but be empty (or have no valid lines)
-        content = lessons_file.read_text().strip()
-        assert content == ""
+        consolidate_memory([], "2026-02-16")
+        # No lessons should exist
+        assert len(LessonLearned.query.all()) == 0
 
 
 # --- Step 3 Sentry Check ---
@@ -543,80 +391,66 @@ class TestStepAuditDocs:
 class TestIgnoreLog:
     """Tests for ignore log helpers."""
 
-    def test_load_ignore_log_empty_when_file_missing(self, tmp_path):
-        """load_ignore_log returns empty list when file doesn't exist."""
-        import scripts.daydream as daydream_mod
+    def test_load_ignore_log_empty_when_no_entries(self):
+        """load_ignore_log returns empty list when no entries exist in Redis."""
         from scripts.daydream import load_ignore_log
 
-        original = daydream_mod.IGNORE_LOG_FILE
-        daydream_mod.IGNORE_LOG_FILE = tmp_path / "daydream_ignore.jsonl"
-        try:
-            result = load_ignore_log()
-            assert result == []
-        finally:
-            daydream_mod.IGNORE_LOG_FILE = original
+        result = load_ignore_log()
+        assert result == []
 
-    def test_load_ignore_log_filters_expired(self, tmp_path):
-        """load_ignore_log excludes entries past their ignored_until date."""
-        import json
-        from datetime import date, timedelta
+    def test_load_ignore_log_filters_expired(self):
+        """load_ignore_log excludes expired entries via Redis."""
+        import time
 
-        import scripts.daydream as daydream_mod
+        from models.daydream import DaydreamIgnore
+        from scripts.daydream import load_ignore_log
 
-        ignore_file = tmp_path / "daydream_ignore.jsonl"
-        today = date.today().isoformat()
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
-        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        # Create expired entry
+        DaydreamIgnore.create(
+            pattern="expired",
+            reason="",
+            created_at=time.time() - (2 * 86400),
+            expires_at=time.time() - 86400,  # expired yesterday
+        )
+        # Create active entry
+        DaydreamIgnore.add_ignore("active", days=14)
+        # Create entry expiring today (still active)
+        DaydreamIgnore.create(
+            pattern="today",
+            reason="",
+            created_at=time.time() - 86400,
+            expires_at=time.time() + 3600,  # expires in 1 hour
+        )
 
-        entries = [
-            {"pattern": "expired", "ignored_until": yesterday, "reason": ""},
-            {"pattern": "active", "ignored_until": tomorrow, "reason": ""},
-            {"pattern": "today", "ignored_until": today, "reason": ""},
-        ]
-        ignore_file.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
+        result = load_ignore_log()
+        patterns = [e["pattern"] for e in result]
+        assert "expired" not in patterns
+        assert "active" in patterns
+        assert "today" in patterns
 
-        original = daydream_mod.IGNORE_LOG_FILE
-        daydream_mod.IGNORE_LOG_FILE = ignore_file
-        try:
-            result = daydream_mod.load_ignore_log()
-            patterns = [e["pattern"] for e in result]
-            assert "expired" not in patterns
-            assert "active" in patterns
-            assert "today" in patterns
-        finally:
-            daydream_mod.IGNORE_LOG_FILE = original
+    def test_prune_ignore_log_removes_expired(self):
+        """prune_ignore_log removes expired entries and keeps active ones in Redis."""
+        import time
 
-    def test_prune_ignore_log_removes_expired(self, tmp_path):
-        """prune_ignore_log removes expired entries and keeps active ones."""
-        import json
-        from datetime import date, timedelta
+        from models.daydream import DaydreamIgnore
+        from scripts.daydream import prune_ignore_log
 
-        import scripts.daydream as daydream_mod
+        # Create expired entry
+        DaydreamIgnore.create(
+            pattern="expired",
+            reason="",
+            created_at=time.time() - (2 * 86400),
+            expires_at=time.time() - 86400,
+        )
+        # Create active entry
+        DaydreamIgnore.add_ignore("active", days=14)
 
-        ignore_file = tmp_path / "daydream_ignore.jsonl"
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
-        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        prune_ignore_log()
 
-        entries = [
-            {"pattern": "expired", "ignored_until": yesterday},
-            {"pattern": "active", "ignored_until": tomorrow},
-        ]
-        ignore_file.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
-
-        original = daydream_mod.IGNORE_LOG_FILE
-        daydream_mod.IGNORE_LOG_FILE = ignore_file
-        try:
-            daydream_mod.prune_ignore_log()
-            remaining = [
-                json.loads(line)
-                for line in ignore_file.read_text().splitlines()
-                if line.strip()
-            ]
-            patterns = [e["pattern"] for e in remaining]
-            assert "expired" not in patterns
-            assert "active" in patterns
-        finally:
-            daydream_mod.IGNORE_LOG_FILE = original
+        remaining = DaydreamIgnore.query.all()
+        patterns = [e.pattern for e in remaining]
+        assert "expired" not in patterns
+        assert "active" in patterns
 
     def test_is_ignored_matches_substring(self):
         """is_ignored returns True when entry_pattern is a substring of pattern."""
@@ -894,15 +728,12 @@ class TestDaydreamStateAutoFixField:
 class TestCLIFlags:
     """Tests for CLI --dry-run and --ignore flags."""
 
-    def test_ignore_flag_appends_to_ignore_log(self, tmp_path, monkeypatch):
-        """--ignore appends a new entry to IGNORE_LOG_FILE."""
-        import json
+    def test_ignore_flag_appends_to_redis(self, tmp_path, monkeypatch):
+        """--ignore appends a new entry to Redis DaydreamIgnore model."""
         import sys
 
         import scripts.daydream as daydream_mod
-
-        ignore_file = tmp_path / "daydream_ignore.jsonl"
-        monkeypatch.setattr(daydream_mod, "IGNORE_LOG_FILE", ignore_file)
+        from models.daydream import DaydreamIgnore
 
         # Simulate CLI: python daydream.py --ignore "some bug pattern" --reason "known issue"
         monkeypatch.setattr(
@@ -921,13 +752,10 @@ class TestCLIFlags:
 
         asyncio.run(daydream_mod.main())
 
-        assert ignore_file.exists()
-        lines = [line for line in ignore_file.read_text().splitlines() if line.strip()]
-        assert len(lines) == 1
-        entry = json.loads(lines[0])
-        assert entry["pattern"] == "some bug pattern"
-        assert entry["reason"] == "known issue"
-        assert "ignored_until" in entry
+        entries = DaydreamIgnore.query.all()
+        assert len(entries) == 1
+        assert entries[0].pattern == "some bug pattern"
+        assert entries[0].reason == "known issue"
 
     def test_dry_run_flag_sets_state(self, tmp_path, monkeypatch):
         """--dry-run sets runner.state._dry_run = True."""

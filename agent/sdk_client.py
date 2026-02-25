@@ -79,19 +79,17 @@ SDLC_WORKFLOW = """\
 
 ALL code changes follow this pipeline — no exceptions, no hotfixes.
 
-### When a message references a GitHub issue (e.g. "work on #123", "issue 45", "#99"):
+### When you receive a work request:
 
-There are only two possibilities:
-1. **It's a question or discussion** about the issue → answer it, revise the issue if needed.
-2. **It's a request to do work** → invoke `/sdlc` with the issue number. ALWAYS.
+1. If an issue number is provided → invoke /sdlc with it.
+2. If no issue number but it's clearly work → invoke /sdlc (it will create the issue).
+3. If it's a question about an issue → answer it, revise the issue if needed.
 
-The /sdlc skill handles the ENTIRE lifecycle: it figures out where the issue stands
-(no plan yet? needs building? tests failing? PR needed?) and picks up from there.
+/sdlc is a DISPATCHER. It assesses state and delegates to sub-skills.
+NEVER write code, run tests, or create plans directly — /sdlc invokes
+/do-plan, /do-build, /do-test, /do-patch, /do-pr-review, /do-docs.
 
-NEVER invoke /do-plan or /do-build directly when an issue number is provided.
-ALWAYS route through /sdlc — it orchestrates the right sequence automatically.
-
-### Pipeline stages (managed by /sdlc — see .claude/skills/sdlc/SKILL.md for ground truth):
+### Pipeline stages (see .claude/skills/sdlc/SKILL.md for ground truth):
 
 1. ISSUE → 2. PLAN → 3. BUILD → 4. TEST → 5. PATCH (fix failures)
 → 6. REVIEW → 7. PATCH (fix blockers) → 8. DOCS → 9. MERGE
@@ -221,8 +219,12 @@ def _check_no_direct_main_push(
     """Check whether a session pushed code directly to main.
 
     Reads the session's sdlc_state.json. If code was modified and the current
-    git branch is 'main', returns a hard-block error message. Otherwise returns
-    None (session may complete).
+    git branch is 'main', checks ``modified_on_branch`` to distinguish:
+
+    - Code written on a ``session/*`` branch and now on main via PR merge
+      → **allowed** (no violation).
+    - Code written directly on main (or legacy state without the field)
+      → **hard-block** violation.
 
     This is a hard-block — there is no escape hatch at the SDK layer.
     Telegram is free text; there is no mechanism for a user to signal an
@@ -286,7 +288,20 @@ def _check_no_direct_main_push(
         # On a feature branch (inside /do-build worktree) — all good
         return None
 
-    # Code modified + on main = SDLC violation
+    # Code modified + on main: check where the code was *originally* written.
+    # If it was written on a session/* branch, it arrived here via PR merge —
+    # not a direct push. Only block if modified_on_branch is "main" or absent
+    # (legacy state without the field → preserve backward-compat behavior).
+    modified_on_branch = state.get("modified_on_branch", "")
+    if modified_on_branch.startswith("session/"):
+        logger.info(
+            f"[sdlc-main-check] Code for {session_id} was modified on "
+            f"'{modified_on_branch}' and is now on main — arrived via merge, "
+            "no violation."
+        )
+        return None
+
+    # Code modified on main (or legacy state) = SDLC violation
     modified_files = state.get("files", [])
     files_list = (
         "\n".join(f"  - {f}" for f in modified_files)

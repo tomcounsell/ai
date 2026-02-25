@@ -19,7 +19,7 @@ Guidance for Claude Code when working with this repository.
 | `python scripts/daydream.py --ignore "pattern"` | Silence a bug pattern for 14 days |
 | `./scripts/install_daydream.sh` | Install daydream launchd schedule |
 | `tail -f logs/daydream.log` | Stream daydream logs |
-| `cat data/lessons_learned.jsonl` | View institutional memory (daydream) |
+| `python -c "from models.daydream import LessonLearned; [print(f'{l.date} [{l.category}] {l.summary}') for l in LessonLearned.get_recent()]"` | View institutional memory (daydream) |
 
 ## Development Principles
 
@@ -61,11 +61,10 @@ Guidance for Claude Code when working with this repository.
 - Always aggregate results before reporting
 
 ### 9. SDLC IS AUTONOMOUS
-- `/sdlc` is the **single entry point** for all issue-referenced work
-- When a message references an issue number, invoke `/sdlc` — it detects where the issue stands and picks up from the right phase
-- NEVER invoke `/do-plan` or `/do-build` directly for issue-referenced work — `/sdlc` orchestrates them
-- Builder agents loop on test failures automatically (up to 5 iterations)
-- Do NOT manually orchestrate SDLC steps — invoke `/sdlc` and let it run
+- `/sdlc` is the **single entry point** for all development work
+- It is a dispatcher: it assesses state and invokes `/do-plan`, `/do-build`, `/do-test`, `/do-patch`, `/do-pr-review`, `/do-docs` as needed
+- NEVER write code, run tests, or create plans directly — always delegate through sub-skills
+- See `.claude/skills/sdlc/SKILL.md` for the ground truth on pipeline stages
 
 ### 10. ALWAYS RESTART RUNNING SERVICES
 - If bridge is running and you modify bridge/agent code, restart immediately after committing
@@ -82,13 +81,11 @@ The standard flow from conversation to shipped feature:
 - No branch, no task list, no slug yet — just conversation
 - If it's a real piece of work: create a GitHub issue
 
-### Phase 2: SDLC (triggered by issue reference)
-- When a message references an issue number → invoke `/sdlc`
-- `/sdlc` assesses the issue's current state and picks up from the right stage
+### Phase 2: SDLC (triggered by work request)
+- Invoke `/sdlc` — it assesses state and dispatches to the right sub-skill
 - Stages: Plan → Build → Test → Patch → Review → Patch → Docs → Merge
 - See `.claude/skills/sdlc/SKILL.md` for the ground truth on stage definitions
 - `/sdlc` does NOT restart from scratch if prior stages are already complete
-- When complete, a PR link is sent back to the Telegram chat
 
 ### Phase 3: Review & Merge
 - Valor may or may not be asked to merge the PR after human review
@@ -244,7 +241,7 @@ The **## Agent Integration** section should cover:
 | `/setup` | New machine configuration |
 | `/do-pr-review` | PR review with implementation validation and screenshots |
 | `/add-feature` | How to extend the system |
-| `/sdlc` | Autonomous Plan → Build → Test → Ship workflow |
+| `/sdlc` | Autonomous Plan → Build → Test → Review → Docs → Ship pipeline |
 | `docs/deployment.md` | Multi-instance deployment |
 | `docs/tools-reference.md` | Complete tool documentation |
 | `config/SOUL.md` | Valor persona and philosophy |

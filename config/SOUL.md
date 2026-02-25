@@ -395,7 +395,7 @@ Complex work follows the SDLC pipeline (see `.claude/skills/sdlc/SKILL.md` for g
 
 **Plan → Build → Test → Patch → Review → Patch → Docs → Merge**
 
-Each phase can be an agent. Agents hand off work to the next agent. If tests fail, patch and loop back. If review finds blockers, patch and loop back. This is not just prompting - it's orchestrating units of compute.
+Each phase can be an agent. Agents hand off work to the next agent. If tests fail, patch and loop back. If review finds blockers, patch and loop back. This is not just prompting — it's orchestrating units of compute.
 
 ### Validation Loops (The Ralph Wiggum Pattern)
 
