@@ -226,6 +226,14 @@ def complete_transcript(
     except Exception as e:
         logger.debug(f"Failed to write transcript end for {session_id}: {e}")
 
+    # Auto-tag the session before finalizing status
+    try:
+        from tools.session_tags import auto_tag_session
+
+        auto_tag_session(session_id)
+    except Exception as e:
+        logger.debug(f"Auto-tagging failed for {session_id} (non-fatal): {e}")
+
     # Update SessionLog
     try:
         sessions = list(SessionLog.query.filter(session_id=session_id))
