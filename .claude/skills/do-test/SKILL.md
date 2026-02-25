@@ -41,6 +41,8 @@ Parse `TEST_ARGS` to determine what to run:
 | `--no-lint` | Skip ruff/black checks (combinable with any above) |
 | `unit --no-lint` | Run `tests/unit/` without lint |
 | `--changed --no-lint` | Changed-file tests without lint |
+| `--direct` | Force direct execution, skip parallel agent dispatch |
+| `unit --direct` | Run `tests/unit/` directly (combinable with any target) |
 | `frontend <url> "<scenario>"` | Run a browser-based UI test via `frontend-tester` subagent |
 
 **Parsing rules:**
@@ -48,6 +50,7 @@ Parse `TEST_ARGS` to determine what to run:
 2. If target is `frontend`, route to **Frontend Testing** (see below) — do not run pytest
 3. Whatever remains is the **target**: a test type name (`unit`, `integration`, `e2e`, `tools`, `performance`) or a file/directory path
 4. If no target and no `--changed`, target is "all"
+5. Extract `--direct` flag alongside `--changed` and `--no-lint`
 
 ## Changed-File Detection (`--changed`)
 
@@ -106,6 +109,31 @@ black --check .
 ### All Tests (no target specified)
 
 When running all tests, dispatch **parallel subagents** via the Task tool for each test directory that exists. This maximizes throughput.
+
+**Step 0: Decide execution mode**
+
+Before dispatching parallel agents, determine if direct execution is more efficient:
+
+```bash
+TEST_FILE_COUNT=$(find tests/ -name "test_*.py" 2>/dev/null | wc -l | tr -d ' ')
+```
+
+**Run tests DIRECTLY (no agent dispatch) if ANY of these are true:**
+- `--direct` flag is set
+- Test file count is below 50
+- Previous parallel dispatch in this session failed to produce output
+
+When running directly, execute as a single command:
+```bash
+pytest tests/ -v --tb=short
+```
+
+Then run lint (if enabled) and skip to **Result Aggregation**.
+
+**Only dispatch parallel agents if:**
+- No `--direct` flag
+- Test file count is 50 or more
+- No prior agent failures in this session
 
 **Step 1: Discover test directories**
 
