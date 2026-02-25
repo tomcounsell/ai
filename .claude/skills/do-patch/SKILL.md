@@ -104,14 +104,24 @@ If a fix would contradict the plan's no-gos or architectural decisions, report t
 
 ### Step 3: Re-run Tests to Verify
 
-After the builder agent reports completion, invoke `/do-test` to verify the fix:
+After the builder agent reports completion, run tests and lint directly — do NOT invoke `/do-test` (parallel dispatch is overkill for patch verification):
 
-```
-/do-test
+```bash
+# Run full test suite
+pytest tests/ -v --tb=short
+
+# Run lint checks
+ruff check .
+black --check .
 ```
 
-- If all tests pass: proceed to Step 4 (advance pipeline and report success).
-- If tests still fail: proceed to Step 5 (retry or report stuck).
+Parse the results:
+- **pytest exit code 0** AND **both lint tools pass**: All tests pass — proceed to Step 4
+- **pytest exit code 1**: Some tests failed — proceed to Step 5 (retry or report stuck)
+- **pytest exit code 2**: Test execution error — report the error and proceed to Step 5
+- **pytest exit code 5**: No tests collected — treat as pass (no tests to break)
+
+Report the test summary (passed/failed/skipped counts) before proceeding.
 
 ### Step 4: Advance Pipeline State (on success)
 

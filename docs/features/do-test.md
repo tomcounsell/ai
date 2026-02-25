@@ -21,9 +21,11 @@ Invoked via `/do-test` with optional arguments. The skill determines what to run
 | `/do-test --no-lint` | Run all tests, skip ruff/black checks |
 | `/do-test unit --no-lint` | Run `tests/unit/` without lint |
 | `/do-test --changed --no-lint` | Changed-file tests without lint |
+| `/do-test --direct` | Force direct execution, skip parallel agent dispatch |
+| `/do-test unit --direct` | Run `tests/unit/` directly (combinable with any target) |
 
 **Parsing rules:**
-1. Extract flags: `--changed`, `--no-lint`
+1. Extract flags: `--changed`, `--no-lint`, `--direct`
 2. Whatever remains is the **target**: a test type name or a file/directory path
 3. If no target and no `--changed`, target is "all"
 
@@ -63,9 +65,11 @@ The execution strategy adapts based on the target:
 
 **Single target** (specific type or file): Runs directly in the current agent. The overhead of parallel dispatch is not worth it for a single runner. Lint runs sequentially after tests.
 
-**All tests** (no target specified): If the total number of test files exceeds `PARALLEL_DISPATCH_THRESHOLD` (50), dispatches parallel subagents via the Task tool for each test directory that exists. A separate lint agent runs in parallel with the test agents. Results are collected and aggregated after all agents complete. Below the threshold, all suites run sequentially in-process to avoid subagent overhead.
+**All tests** (no target specified): Uses a smart dispatch decision based on suite size. If the test file count is below 50 or the `--direct` flag is set, tests run directly in the current agent (no subagent dispatch). For larger suites (50+ test files), dispatches parallel subagents via the Task tool using `model: "sonnet"` for reliable bash execution. A separate lint agent runs in parallel with the test agents.
 
-This fan-out approach maximizes throughput when running the full suite while keeping single-target runs simple and fast.
+**Timeout fallback**: When parallel agents are dispatched, a 2-minute timeout applies. If any agent hasn't returned output within 2 minutes, all pending agents are abandoned and tests fall back to direct execution. This ensures test results are always collected, even when agent dispatch fails.
+
+This adaptive approach maximizes throughput for large suites while keeping small-suite and single-target runs simple and fast.
 
 ## Result Format
 
@@ -104,7 +108,7 @@ The `/do-build` workflow invokes `/do-test` as its testing step. When called fro
 | Lint by default | Code quality checks should run with every test pass unless explicitly opted out |
 | `--no-lint` flag | Provides escape hatch for fast iteration when only test results matter |
 | CWD-relative execution | No worktree detection logic needed; works correctly whether invoked directly or via `/do-build` |
-| Smart dispatch | Parallel when >50 test files (throughput), direct for single target or small suites (simplicity) |
+| Smart dispatch | Direct for small suites (<50 files) or `--direct`; parallel with sonnet agents + 2-min timeout fallback for large suites |
 | `--changed` branch awareness | On `main`, compares last commit; on feature branches, compares against `main` |
 | Silent skip for missing dirs | Repositories with partial test directory structures work without configuration |
 | `-v --tb=short` pytest flags | Verbose test names for clarity with concise tracebacks for debugging |
