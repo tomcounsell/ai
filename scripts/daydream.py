@@ -277,111 +277,7 @@ def analyze_sessions_from_redis(target_date: str) -> dict[str, Any]:
             pass  # BridgeEvent query is supplementary
 
     except Exception as e:
-        logger.warning(f"Redis session analysis failed, falling back to file: {e}")
-        return analyze_sessions(SESSIONS_DIR, target_date)
-
-    return result
-
-
-def analyze_sessions(sessions_dir: Path, target_date: str) -> dict[str, Any]:
-    """Analyze session snapshots for a given date (file-based fallback).
-
-    Reads chat.json and tool_use.jsonl from session directories,
-    filters to the target date, and extracts:
-    - User corrections (patterns like "No, I meant...")
-    - Thrash ratio (tool calls / successful outcomes)
-
-    Args:
-        sessions_dir: Path to logs/sessions/ directory.
-        target_date: Date string (YYYY-MM-DD) to filter sessions.
-
-    Returns:
-        Dict with sessions_analyzed, corrections, thrash_sessions.
-    """
-    result: dict[str, Any] = {
-        "sessions_analyzed": 0,
-        "corrections": [],
-        "thrash_sessions": [],
-    }
-
-    if not sessions_dir.exists():
-        return result
-
-    # Collect all sessions for the target date
-    matching_sessions = []
-    for session_dir in sorted(sessions_dir.iterdir()):
-        if not session_dir.is_dir():
-            continue
-        chat_file = session_dir / "chat.json"
-        if not chat_file.exists():
-            continue
-        try:
-            chat_data = json.loads(chat_file.read_text())
-        except (json.JSONDecodeError, OSError):
-            logger.warning(f"Skipping malformed session: {session_dir.name}")
-            continue
-
-        started_at = chat_data.get("started_at", "")
-        if not started_at.startswith(target_date):
-            continue
-
-        matching_sessions.append((session_dir, chat_data))
-
-    # Cap at 10 most interesting (sort by message count descending for now)
-    matching_sessions.sort(key=lambda x: len(x[1].get("messages", [])), reverse=True)
-    matching_sessions = matching_sessions[:10]
-
-    for session_dir, chat_data in matching_sessions:
-        result["sessions_analyzed"] += 1
-        session_id = chat_data.get("session_id", session_dir.name)
-        messages = chat_data.get("messages", [])
-
-        # Detect user corrections
-        for msg in messages:
-            if msg.get("role") != "user":
-                continue
-            content = msg.get("content", "")
-            for pattern in CORRECTION_PATTERNS:
-                if pattern.search(content):
-                    result["corrections"].append(
-                        {
-                            "session_id": session_id,
-                            "message": content,
-                            "pattern": pattern.pattern,
-                        }
-                    )
-                    break  # One match per message is enough
-
-        # Compute thrash ratio from tool_use.jsonl
-        tool_file = session_dir / "tool_use.jsonl"
-        if tool_file.exists():
-            try:
-                tool_calls = 0
-                successes = 0
-                for line in tool_file.read_text().strip().split("\n"):
-                    if not line.strip():
-                        continue
-                    try:
-                        entry = json.loads(line)
-                        tool_calls += 1
-                        if entry.get("success", False):
-                            successes += 1
-                    except json.JSONDecodeError:
-                        continue
-
-                if tool_calls > 0:
-                    failure_ratio = 1.0 - (successes / tool_calls)
-                    if failure_ratio > THRASH_RATIO_THRESHOLD:
-                        result["thrash_sessions"].append(
-                            {
-                                "session_id": session_id,
-                                "tool_calls": tool_calls,
-                                "successes": successes,
-                                "failure_ratio": round(failure_ratio, 2),
-                            }
-                        )
-            except OSError:
-                pass
+        logger.warning(f"Redis session analysis failed: {e}")
 
     return result
 
@@ -467,108 +363,41 @@ Return ONLY the JSON array, no other text. If no issues found, return [].
 def consolidate_memory(
     reflections: list[dict[str, str]],
     date: str,
-    lessons_file: Path | None = None,
 ) -> None:
     """Persist reflection output to Redis LessonLearned model.
 
-    Falls back to JSONL file if Redis is unavailable.
     Also prunes entries older than 90 days.
 
     Args:
         reflections: List of reflection dicts from run_llm_reflection().
         date: Date string (YYYY-MM-DD) for new entries.
-        lessons_file: Path to lessons_learned.jsonl (fallback only).
     """
-    try:
-        from models.daydream import LessonLearned
+    from models.daydream import LessonLearned
 
-        # Prune old entries
-        pruned = LessonLearned.cleanup_expired(max_age_days=90)
-        if pruned:
-            logger.info(f"Pruned {pruned} expired lessons from Redis")
+    # Prune old entries
+    pruned = LessonLearned.cleanup_expired(max_age_days=90)
+    if pruned:
+        logger.info(f"Pruned {pruned} expired lessons from Redis")
 
-        # Add new entries (deduplication handled by add_lesson)
-        added = 0
-        for reflection in reflections:
-            pattern = reflection.get("pattern", "")
-            if not pattern:
-                continue
-            result = LessonLearned.add_lesson(
-                date=date,
-                category=reflection.get("category", "unknown"),
-                summary=reflection.get("summary", ""),
-                pattern=pattern,
-                prevention=reflection.get("prevention", ""),
-                source_session=reflection.get("source_session", ""),
-            )
-            if result is not None:
-                added += 1
-
-        if added:
-            logger.info(f"Added {added} new lessons to Redis")
-        return
-
-    except Exception as e:
-        logger.debug(f"Redis unavailable for memory consolidation: {e}")
-
-    # Fallback to file-based consolidation
-    _consolidate_memory_to_file(reflections, date, lessons_file)
-
-
-def _consolidate_memory_to_file(
-    reflections: list[dict[str, str]],
-    date: str,
-    lessons_file: Path | None = None,
-) -> None:
-    """Legacy: Append reflection output to lessons_learned.jsonl."""
-    if lessons_file is None:
-        lessons_file = LESSONS_FILE
-
-    # Ensure parent directory exists
-    lessons_file.parent.mkdir(parents=True, exist_ok=True)
-
-    # Load existing entries
-    existing_entries: list[dict[str, Any]] = []
-    if lessons_file.exists():
-        for line in lessons_file.read_text().strip().split("\n"):
-            if not line.strip():
-                continue
-            try:
-                existing_entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-
-    # Prune entries older than 90 days
-    cutoff = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
-    existing_entries = [e for e in existing_entries if e.get("date", "") >= cutoff]
-
-    # Collect existing patterns for deduplication
-    existing_patterns = {e.get("pattern", "") for e in existing_entries}
-
-    # Add new entries (deduplicate by exact pattern match)
+    # Add new entries (deduplication handled by add_lesson)
+    added = 0
     for reflection in reflections:
         pattern = reflection.get("pattern", "")
-        if pattern and pattern in existing_patterns:
-            logger.info(f"Skipping duplicate pattern: {pattern}")
+        if not pattern:
             continue
+        result = LessonLearned.add_lesson(
+            date=date,
+            category=reflection.get("category", "unknown"),
+            summary=reflection.get("summary", ""),
+            pattern=pattern,
+            prevention=reflection.get("prevention", ""),
+            source_session=reflection.get("source_session", ""),
+        )
+        if result is not None:
+            added += 1
 
-        entry = {
-            "date": date,
-            "category": reflection.get("category", "unknown"),
-            "summary": reflection.get("summary", ""),
-            "pattern": pattern,
-            "prevention": reflection.get("prevention", ""),
-            "source_session": reflection.get("source_session", ""),
-            "validated": 0,
-        }
-        existing_entries.append(entry)
-        existing_patterns.add(pattern)
-
-    # Write back
-    content = "\n".join(json.dumps(e) for e in existing_entries)
-    if content:
-        content += "\n"
-    lessons_file.write_text(content)
+    if added:
+        logger.info(f"Added {added} new lessons to Redis")
 
 
 def extract_structured_errors(log_file: Path) -> list[dict[str, str]]:
@@ -681,33 +510,29 @@ class DaydreamRunner:
             (11, "GitHub Issue Creation", self.step_create_github_issue),
             (12, "Skills Audit", self.step_skills_audit),
             (13, "Redis TTL Cleanup", self.step_redis_cleanup),
+            (14, "Redis Data Quality", self.step_redis_data_quality),
         ]
 
     def _load_state(self) -> DaydreamState:
-        """Load state from Redis DaydreamRun, falling back to local JSON."""
+        """Load state from Redis DaydreamRun model."""
         today = datetime.now().strftime("%Y-%m-%d")
-        try:
-            from models.daydream import DaydreamRun
+        from models.daydream import DaydreamRun
 
-            run = DaydreamRun.load_or_create(today)
-            # Wrap in DaydreamState for API compatibility
-            state = DaydreamState(
-                current_step=run.current_step or 1,
-                completed_steps=run.completed_steps or [],
-                daily_report=run.daily_report or [],
-                date=run.date or today,
-                findings=run.findings or {},
-                session_analysis=run.session_analysis or {},
-                reflections=run.reflections or [],
-                auto_fix_attempts=run.auto_fix_attempts or [],
-                step_progress=run.step_progress or {},
-            )
-            state._redis_backed = True
-            state._redis_date = today
-            return state
-        except Exception as e:
-            logger.debug(f"Redis state unavailable, using file: {e}")
-            return DaydreamState.load()
+        run = DaydreamRun.load_or_create(today)
+        # Wrap in DaydreamState for API compatibility
+        state = DaydreamState(
+            current_step=run.current_step or 1,
+            completed_steps=run.completed_steps or [],
+            daily_report=run.daily_report or [],
+            date=run.date or today,
+            findings=run.findings or {},
+            session_analysis=run.session_analysis or {},
+            reflections=run.reflections or [],
+            auto_fix_attempts=run.auto_fix_attempts or [],
+            step_progress=run.step_progress or {},
+        )
+        state._redis_backed = True
+        return state
 
     async def run(self) -> None:
         """Run all daydream steps."""
@@ -1297,7 +1122,7 @@ class DaydreamRunner:
 
     async def step_memory_consolidation(self) -> None:
         """Step 9: Consolidate lessons learned to Redis."""
-        consolidate_memory(self.state.reflections, self.state.date, LESSONS_FILE)
+        consolidate_memory(self.state.reflections, self.state.date)
 
         self.state.step_progress["memory_consolidation"] = {
             "lessons_written": len(self.state.reflections),
@@ -1510,16 +1335,12 @@ class DaydreamRunner:
 
 # --- DaydreamState: compatibility wrapper ---
 
-from dataclasses import asdict, dataclass, field  # noqa: E402
+from dataclasses import dataclass, field  # noqa: E402
 
 
 @dataclass
 class DaydreamState:
-    """Persisted state for resumability.
-
-    When Redis is available, save() persists to DaydreamRun model.
-    Falls back to local JSON file otherwise.
-    """
+    """Persisted state for resumability via Redis DaydreamRun model."""
 
     current_step: int = 1
     step_started_at: str | None = None
@@ -1532,58 +1353,31 @@ class DaydreamState:
     reflections: list[dict[str, str]] = field(default_factory=list)
     auto_fix_attempts: list[dict] = field(default_factory=list)
 
-    @classmethod
-    def load(cls) -> DaydreamState:
-        """Load state from file or create new."""
-        if STATE_FILE.exists():
-            try:
-                with open(STATE_FILE) as f:
-                    data = json.load(f)
-                # Reset if it's a new day
-                if data.get("date") != datetime.now().strftime("%Y-%m-%d"):
-                    logger.info("New day detected, starting fresh")
-                    return cls()
-                return cls(**data)
-            except Exception as e:
-                logger.warning(f"Could not load state: {e}")
-        return cls()
-
     def save(self) -> None:
-        """Save state to Redis DaydreamRun, falling back to file."""
-        # Try Redis first
-        if getattr(self, "_redis_backed", False):
-            try:
-                import time as _time
+        """Save state to Redis DaydreamRun model."""
+        import time as _time
 
-                from models.daydream import DaydreamRun
+        from models.daydream import DaydreamRun
 
-                existing = DaydreamRun.query.filter(date=self.date)
-                started_at = _time.time()
-                if existing:
-                    started_at = existing[0].started_at or started_at
-                    existing[0].delete()
+        existing = DaydreamRun.query.filter(date=self.date)
+        started_at = _time.time()
+        if existing:
+            started_at = existing[0].started_at or started_at
+            existing[0].delete()
 
-                DaydreamRun.create(
-                    date=self.date,
-                    current_step=self.current_step,
-                    completed_steps=self.completed_steps,
-                    daily_report=self.daily_report,
-                    findings=self.findings,
-                    session_analysis=self.session_analysis,
-                    reflections=self.reflections,
-                    auto_fix_attempts=self.auto_fix_attempts,
-                    step_progress=self.step_progress,
-                    started_at=started_at,
-                    dry_run=getattr(self, "_dry_run", False),
-                )
-                return
-            except Exception as e:
-                logger.debug(f"Redis save failed, falling back to file: {e}")
-
-        # Fallback to file
-        DAYDREAM_DIR.mkdir(parents=True, exist_ok=True)
-        with open(STATE_FILE, "w") as f:
-            json.dump(asdict(self), f, indent=2)
+        DaydreamRun.create(
+            date=self.date,
+            current_step=self.current_step,
+            completed_steps=self.completed_steps,
+            daily_report=self.daily_report,
+            findings=self.findings,
+            session_analysis=self.session_analysis,
+            reflections=self.reflections,
+            auto_fix_attempts=self.auto_fix_attempts,
+            step_progress=self.step_progress,
+            started_at=started_at,
+            dry_run=getattr(self, "_dry_run", False),
+        )
 
     def add_finding(self, category: str, finding: str) -> None:
         """Add a finding to the report."""
@@ -1616,30 +1410,13 @@ async def main() -> None:
     args = parser.parse_args()
 
     if args.ignore:
-        # Try Redis first, fall back to file
-        try:
-            from models.daydream import DaydreamIgnore
+        from models.daydream import DaydreamIgnore
 
-            entry = DaydreamIgnore.add_ignore(
-                pattern=args.ignore, reason=args.reason, days=14
-            )
-            ignored_until = datetime.fromtimestamp(entry.expires_at).date().isoformat()
-            print(
-                f"Added ignore entry to Redis: {args.ignore!r} (until {ignored_until})"
-            )
-        except Exception:
-            ignored_until = (datetime.now() + timedelta(days=14)).date().isoformat()
-            entry_dict = {
-                "pattern": args.ignore,
-                "ignored_until": ignored_until,
-                "reason": args.reason,
-            }
-            IGNORE_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with IGNORE_LOG_FILE.open("a") as f:
-                f.write(json.dumps(entry_dict) + "\n")
-            print(
-                f"Added ignore entry to file: {args.ignore!r} (until {ignored_until})"
-            )
+        entry = DaydreamIgnore.add_ignore(
+            pattern=args.ignore, reason=args.reason, days=14
+        )
+        ignored_until = datetime.fromtimestamp(entry.expires_at).date().isoformat()
+        print(f"Added ignore entry: {args.ignore!r} (until {ignored_until})")
         return
 
     runner = DaydreamRunner()
