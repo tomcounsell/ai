@@ -266,6 +266,25 @@ class PerformanceMonitor:
 6. **I/O**: Buffering, compression, async operations
 7. **Network**: Connection reuse, compression, CDN
 
+## System Health Scoring
+
+Use this formula for calculating overall system health (0-100):
+
+```python
+def calculate_health_score(memory_percent, cpu_percent, session_load):
+    """Calculate overall system health (0-100)"""
+    memory_health = max(0, 100 - (memory_percent * 1.5))
+    cpu_health = max(0, 100 - (cpu_percent * 1.2))
+    session_health = max(0, 100 - (session_load * 100))
+    return memory_health * 0.4 + cpu_health * 0.3 + session_health * 0.3
+```
+
+**Resource limit thresholds:**
+- Memory: <500MB baseline, <50MB per session, emergency at 800MB, restart at 1000MB
+- CPU: <80% sustained, <95% peak
+- Health score: Maintain >85% at all times
+- Auto-restart: At 1000MB memory or 48 hours uptime
+
 ## Performance Targets
 
 - API response time: <2s (p95)

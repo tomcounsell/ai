@@ -124,6 +124,26 @@ Include the TDD verification as a distinct section in your validation report:
 - Details: [specifics if FAIL]
 ```
 
+## Cross-System Consistency Checks
+
+When validating systems with multiple state stores, check consistency across all layers:
+
+**Promise Lifecycle (3-layer validation):**
+1. **Database state** - Query the persistent store for the record's status
+2. **In-memory state** - Check the runtime manager's cached state
+3. **Background task state** - Verify the task runner agrees with the record status
+
+If any layer disagrees (e.g., DB says "running" but task manager has no active task), report the inconsistency as a hard failure. State drift between layers causes silent data corruption.
+
+```python
+# Pattern: Cross-system consistency check
+inconsistencies = []
+if db_state.status != memory_state.status:
+    inconsistencies.append(f"DB ({db_state.status}) != Memory ({memory_state.status})")
+if task_state and task_state.is_running != (db_state.status == 'running'):
+    inconsistencies.append("Task running state doesn't match promise status")
+```
+
 ## Workflow
 
 1. **Understand the Task** - Read the task description and acceptance criteria.
