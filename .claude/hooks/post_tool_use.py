@@ -3,6 +3,7 @@
 
 import json
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -88,11 +89,30 @@ def save_sdlc_state(session_id: str, state: dict) -> None:
         raise
 
 
+def _get_current_branch() -> str | None:
+    """Return the current git branch name, or None if git fails."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        branch = result.stdout.strip()
+        return branch if branch else None
+    except Exception:
+        return None
+
+
 def update_sdlc_state_for_file_write(hook_input: dict) -> None:
     """Update SDLC state when a Write or Edit tool use touches a code file.
 
     Fast path: if the tool is not Write/Edit, or the file is not a code file,
     return immediately without any I/O.
+
+    On the first code modification, records the current git branch as
+    ``modified_on_branch`` so the stop hook can distinguish code that arrived
+    on main via a PR merge from code written directly on main.
     """
     tool_name = hook_input.get("tool_name", "")
     if tool_name not in ("Write", "Edit"):
@@ -106,6 +126,14 @@ def update_sdlc_state_for_file_write(hook_input: dict) -> None:
 
     session_id = hook_input.get("session_id", "unknown")
     state = load_sdlc_state(session_id)
+
+    # Record the branch on the *first* code modification only.
+    # Subsequent writes do not overwrite — the first branch wins.
+    if not state.get("code_modified") and "modified_on_branch" not in state:
+        branch = _get_current_branch()
+        if branch:
+            state["modified_on_branch"] = branch
+
     state["code_modified"] = True
     if file_path not in state["files"]:
         state["files"].append(file_path)
@@ -113,11 +141,19 @@ def update_sdlc_state_for_file_write(hook_input: dict) -> None:
 
 
 def update_sdlc_state_for_bash(hook_input: dict) -> None:
-    """Update quality_commands when a Bash tool runs pytest, ruff, or black.
+    """Update state when a Bash tool runs quality commands or merges a PR.
+
+    Tracks two categories of bash commands:
+
+    1. **Quality commands** (pytest, ruff, black): marks them as run in the
+       session's quality_commands dict.
+    2. **PR merge** (``gh pr merge``): resets ``code_modified`` to False,
+       since the code has been properly merged via a PR and is no longer
+       "pending" on the session.
 
     Key principle: if no sdlc_state.json exists (non-code session), do nothing.
-    We only track quality commands when the session is already classified as a
-    code session (i.e., the state file was created by a prior code file write).
+    We only track these when the session is already classified as a code session
+    (i.e., the state file was created by a prior code file write).
     """
     tool_name = hook_input.get("tool_name", "")
     if tool_name != "Bash":
@@ -125,6 +161,9 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
 
     tool_input = hook_input.get("tool_input", {})
     command = tool_input.get("command", "")
+
+    # Detect gh pr merge commands (belt-and-suspenders cleanup after merge)
+    is_merge = bool(re.search(r"\bgh\s+pr\s+merge\b", command))
 
     # Check if this command runs any quality tool.
     # Use regex word boundary to avoid false positives like `echo "pytest"` or
@@ -135,7 +174,7 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
             matched_command = cmd
             break
 
-    if matched_command is None:
+    if matched_command is None and not is_merge:
         return
 
     session_id = hook_input.get("session_id", "unknown")
@@ -146,7 +185,13 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
         return
 
     state = load_sdlc_state(session_id)
-    state["quality_commands"][matched_command] = True
+
+    if matched_command is not None:
+        state["quality_commands"][matched_command] = True
+
+    if is_merge:
+        state["code_modified"] = False
+
     save_sdlc_state(session_id, state)
 
 

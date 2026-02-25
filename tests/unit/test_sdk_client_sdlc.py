@@ -7,16 +7,33 @@ Covers:
 - _check_no_direct_main_push(): docs-only on main → allowed
 - _check_no_direct_main_push(): code on feature branch → allowed
 - _check_no_direct_main_push(): no state file → allowed
+- _check_no_direct_main_push(): modified_on_branch=session/* + main → no violation (merge)
+- _check_no_direct_main_push(): modified_on_branch=main + main → violation (direct push)
+- _check_no_direct_main_push(): no modified_on_branch + main → violation (backward compat)
 """
 
 from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import MagicMock, patch
 
-from agent.sdk_client import (
+# Mock claude_agent_sdk before importing agent.sdk_client to avoid
+# dependency issues (mcp.types.ToolAnnotations import error).
+if "claude_agent_sdk" not in sys.modules:
+
+    class _MockSDK(ModuleType):
+        """Auto-mock module: returns a MagicMock for any attribute access."""
+
+        def __getattr__(self, name):
+            return MagicMock()
+
+    sys.modules["claude_agent_sdk"] = _MockSDK("claude_agent_sdk")
+
+from agent.sdk_client import (  # noqa: E402
     SDLC_WORKFLOW,
     _check_no_direct_main_push,
     load_system_prompt,
@@ -233,3 +250,51 @@ class TestCheckNoDirectMainPush:
         with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 5)):
             result = _check_no_direct_main_push("git-fail-session", repo_root=tmp_path)
         assert result is None
+
+    # -----------------------------------------------------------------------
+    # modified_on_branch: merge scenario vs. direct push
+    # -----------------------------------------------------------------------
+
+    def test_modified_on_session_branch_now_on_main_returns_none(self, tmp_path):
+        """Code modified on session/foo, now on main → arrived via merge, no violation."""
+        result = self._run_check(
+            tmp_path,
+            "merged-session",
+            state={
+                "code_modified": True,
+                "modified_on_branch": "session/stop-hook-fix",
+                "files": ["agent/sdk_client.py"],
+            },
+            branch="main",
+        )
+        assert result is None
+
+    def test_modified_on_main_now_on_main_returns_violation(self, tmp_path):
+        """Code modified on main, still on main → direct push, violation."""
+        result = self._run_check(
+            tmp_path,
+            "direct-push-session",
+            state={
+                "code_modified": True,
+                "modified_on_branch": "main",
+                "files": ["agent/sdk_client.py"],
+            },
+            branch="main",
+        )
+        assert result is not None
+        assert "SDLC VIOLATION" in result
+
+    def test_no_modified_on_branch_legacy_returns_violation(self, tmp_path):
+        """Legacy state without modified_on_branch, on main → violation (backward compat)."""
+        result = self._run_check(
+            tmp_path,
+            "legacy-session",
+            state={
+                "code_modified": True,
+                "files": ["bridge/telegram_bridge.py"],
+                # No modified_on_branch — legacy state
+            },
+            branch="main",
+        )
+        assert result is not None
+        assert "SDLC VIOLATION" in result
