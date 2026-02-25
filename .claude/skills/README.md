@@ -24,7 +24,7 @@ Human-readable index of all Claude Code skills in this project. Not loaded by Cl
 | pthread | 138 | User + Model | fork | Spawn parallel agents for independent tasks |
 | reading-sms-messages | 38 | Model only | - | Read SMS/iMessage from macOS Messages app |
 | reclassify | 52 | Infra | - | Reclassify plan type during Planning phase |
-| sdlc | 284 | User + Model | - | End-to-end autonomous Plan → Build → Test → Review → Ship |
+| sdlc | 284 | User + Model | - | Single entry point — dispatcher for all development work (ground truth for pipeline stages) |
 | setup | 407 | Infra | - | Configure new machine for Valor bridge |
 | telegram | 68 | Model only | - | Read and send Telegram messages |
 | update | 183 | Infra | - | Pull changes, sync deps, restart bridge |

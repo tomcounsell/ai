@@ -61,9 +61,10 @@ Guidance for Claude Code when working with this repository.
 - Always aggregate results before reporting
 
 ### 9. SDLC IS AUTONOMOUS
-- The `/do-build` command owns the full cycle: Build → Test → Review → Ship
-- Builder agents loop on test failures automatically (up to 5 iterations)
-- Do NOT manually orchestrate SDLC steps — invoke `/do-build` and let it run
+- `/sdlc` is the **single entry point** for all development work
+- It is a dispatcher: it assesses state and invokes `/do-plan`, `/do-build`, `/do-test`, `/do-patch`, `/do-pr-review`, `/do-docs` as needed
+- NEVER write code, run tests, or create plans directly — always delegate through sub-skills
+- See `.claude/skills/sdlc/SKILL.md` for the ground truth on pipeline stages
 
 ### 10. ALWAYS RESTART RUNNING SERVICES
 - If bridge is running and you modify bridge/agent code, restart immediately after committing
@@ -78,23 +79,15 @@ The standard flow from conversation to shipped feature:
 - Chat arrives via Telegram (or local Claude Code session)
 - Could be Q&A, exploring an idea, or raising an issue
 - No branch, no task list, no slug yet — just conversation
-- If there's an obvious quick fix: push a hotfix directly to `main`
 - If it's a real piece of work: create a GitHub issue
 
-### Phase 2: Planning
-- Invoke `/do-plan {slug}` referencing the issue
-- Agent creates a feature branch (`session/{slug}`) and writes `docs/plans/{slug}.md`
-- A link to the plan doc is added to the top of the issue description
-- Two links sent back to chat: issue URL + plan doc URL (on its branch in GitHub)
-- Iterate on the plan via conversation as needed
+### Phase 2: SDLC (triggered by work request)
+- Invoke `/sdlc` — it assesses state and dispatches to the right sub-skill
+- Stages: Plan → Build → Test → Patch → Review → Patch → Docs → Merge
+- See `.claude/skills/sdlc/SKILL.md` for the ground truth on stage definitions
+- `/sdlc` does NOT restart from scratch if prior stages are already complete
 
-### Phase 3: Building
-- Invoke `/do-build docs/plans/{slug}.md` (or `/do-build #{issue-number}`)
-- The do-build command autonomously executes: Build → Test → loop until passing → PR
-- When complete, a PR link is sent back to the Telegram chat
-- Plan doc is migrated and tracking issue is closed
-
-### Phase 4: Review & Merge
+### Phase 3: Review & Merge
 - Valor may or may not be asked to merge the PR after human review
 - Thumbs-up emoji reaction (👍) signals "done for now" / final completion
 

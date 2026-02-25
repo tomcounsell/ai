@@ -163,7 +163,7 @@ From CLAUDE.md:
 - **No legacy code tolerance** - All deprecated patterns must go
 - **No mocks in tests** - Use real integrations
 - **Always commit and push** - Work should be preserved
-- **SDLC pattern** - Plan → Build → Test → Review → Ship
+- **SDLC pattern** - Plan → Build → Test → Patch → Review → Patch → Docs → Merge (see `.claude/skills/sdlc/SKILL.md`)
 
 ## When to Approve
 

@@ -66,28 +66,15 @@ Set `SKIP_SDLC=1` to bypass the stop gate. The hook exits 0 with a warning logge
 
 ## Pipeline Stage Model
 
-The canonical SDLC path for code sessions:
+See `.claude/skills/sdlc/SKILL.md` for the ground truth on pipeline stages.
 
-```
-Plan → Branch → Implement → Test ──fail──→ /do-patch ─┐
-                    ↑                                   │
-                    │ (commits at checkpoints)          │(loop)
-                    │                                   │
-                    │           pass                    │
-                    └───────────────────────────────────┘
-                                  ↓
-                             Review ──blockers──→ /do-patch → Test (max 3 iter)
-                               │
-                               success
-                               ↓
-                            Document → PR
-```
+Stages: **Plan → Build → Test → Patch → Review → Patch → Docs → Merge**
 
 Key properties:
-- **Commits happen throughout Implement** at logical checkpoints — not batched at end
+- **Commits happen throughout Build** at logical checkpoints — not batched at end
 - **Test failure loop**: no iteration cap — keep patching until it passes or human intervenes
 - **Review blocker loop**: capped at 3 patch→test→review iterations, then escalates to human
-- **Document** is a dedicated phase *after* review passes
+- **Docs** is a dedicated phase *after* review passes, right before merge
 
 ## Pipeline State Persistence
 

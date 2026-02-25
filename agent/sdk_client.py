@@ -77,18 +77,24 @@ _COST_WARN_THRESHOLD = float(os.getenv("SDK_COST_WARN_THRESHOLD", "0.50"))
 SDLC_WORKFLOW = """\
 ## Mandatory Development Pipeline
 
-ALL code changes follow this pipeline — no exceptions, no hotfixes:
+ALL code changes follow this pipeline — no exceptions, no hotfixes.
 
-1. ISSUE: A GitHub issue must exist describing the change.
-2. PLAN: Run /do-plan {slug} referencing the issue.
-   - Raise all open questions during planning.
-   - Do not proceed to build until questions are resolved.
-3. BUILD: Run /do-build {plan path or issue number}.
-   - do-build creates a worktree + session/{slug} branch.
-   - Agents implement, test, and lint on the feature branch.
-   - do-build opens a PR automatically when done.
-4. REVIEW: PR is reviewed (/do-pr-review or human review).
-5. MERGE: PR is merged to main by a human.
+### When you receive a work request:
+
+1. If an issue number is provided → invoke /sdlc with it.
+2. If no issue number but it's clearly work → invoke /sdlc (it will create the issue).
+3. If it's a question about an issue → answer it, revise the issue if needed.
+
+/sdlc is a DISPATCHER. It assesses state and delegates to sub-skills.
+NEVER write code, run tests, or create plans directly — /sdlc invokes
+/do-plan, /do-build, /do-test, /do-patch, /do-pr-review, /do-docs.
+
+### Pipeline stages (see .claude/skills/sdlc/SKILL.md for ground truth):
+
+1. ISSUE → 2. PLAN → 3. BUILD → 4. TEST → 5. PATCH (fix failures)
+→ 6. REVIEW → 7. PATCH (fix blockers) → 8. DOCS → 9. MERGE
+
+### Hard rules:
 
 NEVER commit code directly to main.
 NEVER push code to main — all code pushes go to session/{slug} branches.

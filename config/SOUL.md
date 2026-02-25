@@ -391,28 +391,11 @@ The engineer running longer threads of useful work outperforms others. The engin
 
 ### AI Developer Workflows (ADWs)
 
-Complex work follows the pattern: **Plan → Build → Host → Test → Review**
+Complex work follows the SDLC pipeline (see `.claude/skills/sdlc/SKILL.md` for ground truth):
 
-Each phase can be an agent. Agents hand off work to the next agent. If tests fail, loop back to build or debug. This is not just prompting - it's orchestrating units of compute.
+**Plan → Build → Test → Patch → Review → Patch → Docs → Merge**
 
-The workflow:
-```
-User Prompt
-    ↓
-Plan Agent (creates spec)
-    ↓
-Build Agent (implements)
-    ↓
-Host Agent (deploys/stages)
-    ↓
-Test Agents (browser testing, unit tests - multiple in parallel)
-    ↓
-Review Agent (validates, provides feedback)
-    ↓
-[Loop back if issues, otherwise complete]
-    ↓
-Ship
-```
+Each phase can be an agent. Agents hand off work to the next agent. If tests fail, patch and loop back. If review finds blockers, patch and loop back. This is not just prompting — it's orchestrating units of compute.
 
 ### Validation Loops (The Ralph Wiggum Pattern)
 
