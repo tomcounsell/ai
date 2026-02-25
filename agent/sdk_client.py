@@ -219,8 +219,12 @@ def _check_no_direct_main_push(
     """Check whether a session pushed code directly to main.
 
     Reads the session's sdlc_state.json. If code was modified and the current
-    git branch is 'main', returns a hard-block error message. Otherwise returns
-    None (session may complete).
+    git branch is 'main', checks ``modified_on_branch`` to distinguish:
+
+    - Code written on a ``session/*`` branch and now on main via PR merge
+      → **allowed** (no violation).
+    - Code written directly on main (or legacy state without the field)
+      → **hard-block** violation.
 
     This is a hard-block — there is no escape hatch at the SDK layer.
     Telegram is free text; there is no mechanism for a user to signal an
@@ -284,7 +288,20 @@ def _check_no_direct_main_push(
         # On a feature branch (inside /do-build worktree) — all good
         return None
 
-    # Code modified + on main = SDLC violation
+    # Code modified + on main: check where the code was *originally* written.
+    # If it was written on a session/* branch, it arrived here via PR merge —
+    # not a direct push. Only block if modified_on_branch is "main" or absent
+    # (legacy state without the field → preserve backward-compat behavior).
+    modified_on_branch = state.get("modified_on_branch", "")
+    if modified_on_branch.startswith("session/"):
+        logger.info(
+            f"[sdlc-main-check] Code for {session_id} was modified on "
+            f"'{modified_on_branch}' and is now on main — arrived via merge, "
+            "no violation."
+        )
+        return None
+
+    # Code modified on main (or legacy state) = SDLC violation
     modified_files = state.get("files", [])
     files_list = (
         "\n".join(f"  - {f}" for f in modified_files)
