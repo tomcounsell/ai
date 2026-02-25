@@ -95,6 +95,7 @@ No prerequisites — this work builds on existing RedisJob model and summarizer 
 - Structured formatting for non-SDLC conversational replies (keep those simple)
 - Custom formatting per project or per chat
 - Inline images or media in summaries
+- **RedisJob/SessionLog unification**: These models share many fields and represent the same logical thing (a unit of work) at different lifecycle phases. Merging them is worthwhile but is a separate refactor — it touches the entire job queue, worker loop, session transcript system, and every call site. This plan adds `history`/links to RedisJob as-is. A future issue should unify the two models (RedisJob becomes a status on SessionLog, queue-specific fields like `priority`, `message_text`, `auto_continue_count` move there).
 
 ## Update System
 
