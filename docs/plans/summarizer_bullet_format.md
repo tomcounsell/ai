@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Large
 owner: Valor
@@ -52,8 +52,8 @@ No prerequisites — this work builds on existing RedisJob model, SessionLog mod
 - **Job history tracking**: `history` ListField on AgentSession — append-only log of lifecycle events (user input, classification, stage transitions, summary) capped at 20 entries
 - **Link accumulator**: `issue_url`, `plan_url`, `pr_url` fields on AgentSession, set as each SDLC stage completes
 - **Summarizer context enrichment**: Summarizer reads from the single model — original message, history, and links — to produce structured output
-- **Bullet-point format**: Emoji-first, stage-progress, bullet-point summaries for SDLC; prose for casual
-- **Telegram markdown**: `parse_mode='md'` on all `send_message` calls with escape fallback
+- **Adaptive format**: Prose for casual/conversational replies; bullet points whenever there's a list of things (changes, test results, steps taken); full structured format (emoji + stage line + bullets + links) for SDLC completions
+- **Telegram markdown**: Basic `parse_mode='md'` on all `send_message` calls — bold, inline code, `[text](url)` links only. No MarkdownV2. Plain-text fallback on parse errors.
 
 ### Flow
 
@@ -73,7 +73,7 @@ No prerequisites — this work builds on existing RedisJob model, SessionLog mod
 - Keep the `Job` wrapper class for the worker interface, backed by AgentSession
 
 **Phase B: Summarizer Rewrite**
-- Rewrite `SUMMARIZER_SYSTEM_PROMPT` with bullet-point format, emoji vocabulary, SDLC-aware patterns
+- Rewrite `SUMMARIZER_SYSTEM_PROMPT` with adaptive format: prose for casual replies, bullets for any list of things, full structured format for SDLC (emoji + stage line + bullets + links)
 - Change `summarize_response()` to accept AgentSession for context enrichment
 - Build `_render_stage_progress(history)` and `_render_link_footer(links)` renderers
 - Remove `_ensure_github_link_footer()` URL parsing
@@ -129,7 +129,14 @@ No update system changes required — this feature modifies bridge-internal mode
 
 ## Agent Integration
 
-No agent integration required — this is a bridge-internal change. The agent's tools and MCP servers are unaffected. The changes happen in the data model layer, summarizer (post-processing), and Telegram send path. SDLC sub-skills are invoked by the agent but stage recording happens in the bridge/job infrastructure.
+The agent needs a tool to record SDLC stage transitions and set links on the AgentSession. This is a simple CLI tool the agent calls via Bash — one line per stage update.
+
+- Create `tools/session_progress.py` — CLI tool that updates AgentSession fields in Redis via Popoto
+- Usage: `python -m tools.session_progress --session-id $CLAUDE_CODE_TASK_LIST_ID --stage BUILD --status completed`
+- Link setting: `python -m tools.session_progress --session-id $CLAUDE_CODE_TASK_LIST_ID --pr-url https://github.com/...`
+- The tool looks up the AgentSession by session_id, calls `append_history("stage", "BUILD ☑")` and/or `set_link("pr", url)`, then saves
+- SDLC sub-skills (`.claude/commands/do-build.md`, etc.) should include a call to this tool at each stage boundary
+- No MCP server needed — plain Bash invocation like all other tools in `tools/`
 
 ## Documentation
 
@@ -156,7 +163,8 @@ No agent integration required — this is a bridge-internal change. The agent's 
 - [ ] `_ensure_github_link_footer()` removed
 - [ ] All Telegram `send_message` calls use `parse_mode='md'`
 - [ ] Markdown escape fallback prevents send failures
-- [ ] Non-SDLC summaries still work (conversational, Q&A, simple completions)
+- [ ] Non-SDLC summaries still work (prose for conversational, bullets for lists)
+- [ ] `tools/session_progress.py` CLI tool updates AgentSession stage/links from Bash
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
 
@@ -248,7 +256,7 @@ No agent integration required — this is a bridge-internal change. The agent's 
 - **Assigned To**: summarizer-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Rewrite `SUMMARIZER_SYSTEM_PROMPT` with bullet-point format, emoji vocabulary (✅ ⏳ ❓ ⚠️ ❌), SDLC-aware patterns
+- Rewrite `SUMMARIZER_SYSTEM_PROMPT`: prose for casual, bullets for lists, full structured format for SDLC. Emoji vocabulary: ✅ ⏳ ❓ ⚠️ ❌
 - Change `summarize_response()` to accept optional `session: AgentSession = None`
 - Build `_render_stage_progress(history)` producing `☑ ISSUE → ☑ PLAN → ...` line
 - Build `_render_link_footer(links)` producing `Issue #N | Plan | PR #N` with markdown links
@@ -266,17 +274,29 @@ No agent integration required — this is a bridge-internal change. The agent's 
 - Add try/except fallback to plain text on parse errors
 - Update other `send_message` calls in `bridge/telegram_bridge.py`
 
-### 6. Wire session context through response path
+### 6. Create session progress CLI tool
+- **Task ID**: build-progress-tool
+- **Depends On**: build-model
+- **Assigned To**: model-builder
+- **Agent Type**: builder
+- **Parallel**: true
+- Create `tools/session_progress.py` — CLI tool that updates AgentSession via Popoto
+- Accept `--session-id`, `--stage` (with `--status completed|failed|in_progress`), `--issue-url`, `--plan-url`, `--pr-url`
+- Look up AgentSession by session_id, call `append_history()` and/or `set_link()`, save
+- Print confirmation line to stdout so the agent sees it worked
+- Handle missing session gracefully (print warning, exit 0)
+
+### 7. Wire session context through response path
 - **Task ID**: build-wiring
-- **Depends On**: build-job-migration, build-summarizer, build-telegram-md
+- **Depends On**: build-job-migration, build-summarizer, build-telegram-md, build-progress-tool
 - **Assigned To**: summarizer-builder
 - **Agent Type**: builder
 - **Parallel**: false
 - Pass AgentSession to `summarize_response()` from the worker loop
 - Append history at key points: enqueue (`[user]`), classification (`[classify]`), summary (`[summary]`)
-- Wire stage recording for SDLC skill invocations
+- Add `session_progress.py` calls to SDLC sub-skill docs (`.claude/commands/do-build.md`, etc.)
 
-### 7. Validate integration
+### 8. Validate integration
 - **Task ID**: validate-integration
 - **Depends On**: build-wiring, build-session-migration
 - **Assigned To**: integration-validator
@@ -289,10 +309,11 @@ No agent integration required — this is a bridge-internal change. The agent's 
 - Verify `append_history()` caps at 20 entries
 - Verify stage progress and link footer renderers
 - Verify markdown escape and fallback
+- Verify `tools/session_progress.py` updates session from CLI
 - Verify no remaining references to `RedisJob` or `SessionLog` in Python code
 - Run full test suite
 
-### 8. Documentation
+### 9. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-integration
 - **Assigned To**: docs-writer
@@ -304,7 +325,7 @@ No agent integration required — this is a bridge-internal change. The agent's 
 - Update `docs/features/session-tagging.md`
 - Add entries to `docs/features/README.md` index table
 
-### 9. Final Validation
+### 10. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: integration-validator
@@ -319,16 +340,7 @@ No agent integration required — this is a bridge-internal change. The agent's 
 - `python -c "from models.agent_session import AgentSession; print('model loads')"` - Unified model exists
 - `python -c "from agent.job_queue import RedisJob"` - Should FAIL (RedisJob removed)
 - `python -c "from models.session_log import SessionLog"` - Should FAIL (SessionLog removed)
-- `ruff check models/ bridge/ agent/` - No lint errors
-- `black --check models/ bridge/ agent/` - Formatting OK
+- `python -m tools.session_progress --session-id test --stage BUILD --status completed` - CLI tool works
+- `ruff check models/ bridge/ agent/ tools/` - No lint errors
+- `black --check models/ bridge/ agent/ tools/` - Formatting OK
 - `pytest tests/ -x` - All tests pass
-
----
-
-## Open Questions
-
-1. **Stage recording depth**: SDLC sub-skills run inside Claude Code as slash commands — they don't have direct access to the AgentSession. Should we (a) have the bridge record stages based on parsing skill invocations from agent output, (b) expose a tool/MCP endpoint for the agent to call, or (c) defer stage recording to a follow-up and ship the model unification + summarizer format first?
-
-2. **Markdown parse mode**: Telethon supports `'md'` (basic Markdown) and `'html'`. Basic Markdown is simpler but limited. HTML (`<b>`, `<a href>`, `<code>`) is more reliable for complex formatting. Which one?
-
-3. **Non-SDLC summary format**: Keep prose style for casual Q&A replies, or also switch to bullet points?
