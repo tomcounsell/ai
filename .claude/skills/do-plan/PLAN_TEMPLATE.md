@@ -151,7 +151,7 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - **Builder ([component-name])**
   - Name: [unique-name, e.g., "api-builder"]
   - Role: [Single focused responsibility]
-  - Agent Type: [builder | security-reviewer | async-specialist | etc.]
+  - Agent Type: [builder | code-reviewer | test-engineer | etc.]
   - Resume: true
 
 - **Validator ([component-name])**
