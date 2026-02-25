@@ -81,7 +81,7 @@ add-feature ....(references)...> prime, pthread, sdlc, do-pr-review
 | **Tier 2 — Specialists (13)** | debugging-specialist, async-specialist, security-reviewer, performance-optimizer, mcp-specialist, agent-architect, api-integration-specialist, data-architect, migration-specialist, documentation-specialist, test-writer, ui-ux-specialist, designer | Recruitable by plans for domain expertise |
 | **Tier 2b — Service (5)** | linear, notion, sentry, stripe, render | Domain-specific task delegation |
 
-**Agents removed in issue #155:** database-architect (patterns now in builder), infrastructure-engineer (patterns now in performance-optimizer), integration-specialist (patterns now in mcp-specialist), tool-developer (patterns now in mcp-specialist), validation-specialist (patterns now in validator), quality-auditor (covered by code-reviewer), README.md (replaced by skills README)
+**Agents consolidated (issue #155):** database-architect (patterns now in builder), infrastructure-engineer (patterns now in performance-optimizer), integration-specialist (patterns now in mcp-specialist), tool-developer (patterns now in mcp-specialist), validation-specialist (patterns now in validator), quality-auditor (covered by code-reviewer), agents README (now in skills README)
 
 ## Progressive Disclosure (Sub-files)
 
