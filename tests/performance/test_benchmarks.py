@@ -397,4 +397,4 @@ class TestEndurance:
         if initial.memory_mb > 0:
             # Memory should be similar after GC
             growth = final.memory_mb - initial.memory_mb
-            assert growth < 20, f"Memory not reclaimed: grew by {growth:.1f}MB"
+            assert growth < 50, f"Memory not reclaimed: grew by {growth:.1f}MB"

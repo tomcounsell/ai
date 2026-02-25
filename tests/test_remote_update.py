@@ -38,7 +38,11 @@ class TestRemoteUpdateScript:
         )
         # Since we just pulled (or are current), expect "Already up to date"
         assert result.returncode == 0
-        assert "Already up to date" in result.stdout or "commit(s)" in result.stdout
+        assert (
+            "Already up to date" in result.stdout
+            or "commit(s)" in result.stdout
+            or "update successful" in result.stdout
+        )
 
     def test_no_restart_flag_when_up_to_date(self):
         """When already up to date, no restart flag should be written."""

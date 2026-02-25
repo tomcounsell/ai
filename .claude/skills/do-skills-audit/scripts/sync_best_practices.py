@@ -303,7 +303,7 @@ def read_our_template() -> dict:
 
 
 def generate_report(sources: dict[str, str], our_state: dict) -> dict:
-    all_text = " ".join(sources.values())
+    all_text = " ".join(v for v in sources.values() if isinstance(v, str))
 
     report: dict = {
         "alignments": [],
