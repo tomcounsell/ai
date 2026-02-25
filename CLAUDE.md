@@ -61,9 +61,11 @@ Guidance for Claude Code when working with this repository.
 - Always aggregate results before reporting
 
 ### 9. SDLC IS AUTONOMOUS
-- The `/do-build` command owns the full cycle: Build → Test → Review → Ship
+- `/sdlc` is the **single entry point** for all issue-referenced work
+- When a message references an issue number, invoke `/sdlc` — it detects where the issue stands and picks up from the right phase
+- NEVER invoke `/do-plan` or `/do-build` directly for issue-referenced work — `/sdlc` orchestrates them
 - Builder agents loop on test failures automatically (up to 5 iterations)
-- Do NOT manually orchestrate SDLC steps — invoke `/do-build` and let it run
+- Do NOT manually orchestrate SDLC steps — invoke `/sdlc` and let it run
 
 ### 10. ALWAYS RESTART RUNNING SERVICES
 - If bridge is running and you modify bridge/agent code, restart immediately after committing
@@ -78,23 +80,21 @@ The standard flow from conversation to shipped feature:
 - Chat arrives via Telegram (or local Claude Code session)
 - Could be Q&A, exploring an idea, or raising an issue
 - No branch, no task list, no slug yet — just conversation
-- If there's an obvious quick fix: push a hotfix directly to `main`
 - If it's a real piece of work: create a GitHub issue
 
-### Phase 2: Planning
-- Invoke `/do-plan {slug}` referencing the issue
-- Agent creates a feature branch (`session/{slug}`) and writes `docs/plans/{slug}.md`
-- A link to the plan doc is added to the top of the issue description
-- Two links sent back to chat: issue URL + plan doc URL (on its branch in GitHub)
-- Iterate on the plan via conversation as needed
-
-### Phase 3: Building
-- Invoke `/do-build docs/plans/{slug}.md` (or `/do-build #{issue-number}`)
-- The do-build command autonomously executes: Build → Test → loop until passing → PR
+### Phase 2: SDLC (triggered by issue reference)
+- When a message references an issue number → invoke `/sdlc`
+- `/sdlc` assesses the issue's current state and picks up from the right stage:
+  1. **Plan** (`/do-plan`) — create plan doc, link to issue, iterate with human
+  2. **Build** (`/do-build`) — implement in worktree on `session/{slug}` branch
+  3. **Test** (`/do-test`) — run tests, lint, validate
+  4. **Patch** (`/do-patch`) — fix test failures or review blockers, loop back to test
+  5. **Docs** (`/do-docs`) — cascade documentation updates for changed areas
+  6. **Review** (`/do-pr-review`) — open PR, validate against plan requirements
+- `/sdlc` does NOT restart from scratch if prior stages are already complete
 - When complete, a PR link is sent back to the Telegram chat
-- Plan doc is migrated and tracking issue is closed
 
-### Phase 4: Review & Merge
+### Phase 3: Review & Merge
 - Valor may or may not be asked to merge the PR after human review
 - Thumbs-up emoji reaction (👍) signals "done for now" / final completion
 

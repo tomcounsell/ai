@@ -1,6 +1,6 @@
 ---
 name: sdlc
-description: "Use when executing end-to-end autonomous development. Runs Plan → Build → Test → Review → Ship with quality gates. Triggered by 'ship this feature', 'sdlc', or 'full development cycle'."
+description: "The single entry point for all issue-referenced work. Detects where an issue stands in the pipeline and picks up from there. Runs Plan → Build → Test → Review → Docs → Ship with quality gates."
 context: fork
 ---
 
@@ -8,7 +8,39 @@ context: fork
 
 Autonomous software development lifecycle: **Plan → Build → Test → Review → Docs → Ship**
 
-This workflow runs to completion without human intervention. Each phase validates before proceeding. Failures loop back automatically.
+This is the **single entry point** for all development work referenced by issue number. It runs to completion without human intervention. Each phase validates before proceeding. Failures loop back automatically.
+
+## Step 0: Assess Current State
+
+Before doing anything, determine where this issue stands. Run these checks:
+
+```bash
+# 1. Get the issue details
+gh issue view {number}
+
+# 2. Check if a plan already exists
+ls docs/plans/*.md  # look for a plan that references this issue
+
+# 3. Check if a feature branch exists
+git branch -a | grep session/
+
+# 4. Check if a PR already exists
+gh pr list --search "issue {number}" --state open
+```
+
+Based on the results, **pick up from the right phase**:
+
+| State | Action |
+|-------|--------|
+| No plan exists | Start from Plan — invoke `/do-plan` |
+| Plan exists, no branch/PR | Start from Build — invoke `/do-build` |
+| Branch exists, tests failing | Invoke `/do-patch` to fix failures, then `/do-test` |
+| Branch exists, tests passing, no docs | Invoke `/do-docs` to cascade doc updates |
+| Branch exists, no PR | Invoke `/do-pr-review` to open and review PR |
+| PR exists, review blockers | Invoke `/do-patch` to fix blockers, then re-review |
+| PR exists, looks good | Report ready for human merge |
+
+Do NOT restart from scratch if prior phases are already complete.
 
 ## Core Principle
 

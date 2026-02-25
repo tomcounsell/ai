@@ -77,18 +77,36 @@ _COST_WARN_THRESHOLD = float(os.getenv("SDK_COST_WARN_THRESHOLD", "0.50"))
 SDLC_WORKFLOW = """\
 ## Mandatory Development Pipeline
 
-ALL code changes follow this pipeline — no exceptions, no hotfixes:
+ALL code changes follow this pipeline — no exceptions, no hotfixes.
+
+### When a message references a GitHub issue (e.g. "work on #123", "issue 45", "#99"):
+
+There are only two possibilities:
+1. **It's a question or discussion** about the issue → answer it, revise the issue if needed.
+2. **It's a request to do work** → invoke `/sdlc` with the issue number. ALWAYS.
+
+The /sdlc skill handles the ENTIRE lifecycle: it figures out where the issue stands
+(no plan yet? needs building? tests failing? PR needed?) and picks up from there.
+
+NEVER invoke /do-plan or /do-build directly when an issue number is provided.
+ALWAYS route through /sdlc — it orchestrates the right sequence automatically.
+
+### Pipeline stages (managed by /sdlc):
 
 1. ISSUE: A GitHub issue must exist describing the change.
-2. PLAN: Run /do-plan {slug} referencing the issue.
+2. PLAN: /do-plan {slug} creates a plan referencing the issue.
    - Raise all open questions during planning.
    - Do not proceed to build until questions are resolved.
-3. BUILD: Run /do-build {plan path or issue number}.
-   - do-build creates a worktree + session/{slug} branch.
-   - Agents implement, test, and lint on the feature branch.
-   - do-build opens a PR automatically when done.
-4. REVIEW: PR is reviewed (/do-pr-review or human review).
-5. MERGE: PR is merged to main by a human.
+3. BUILD: /do-build executes the plan.
+   - Creates a worktree + session/{slug} branch.
+   - Agents implement code on the feature branch.
+4. TEST: /do-test runs tests, linting, and validation.
+5. PATCH: /do-patch fixes test failures or review blockers, loops back to test.
+6. DOCS: /do-docs cascades documentation updates for changed areas.
+7. REVIEW: /do-pr-review opens PR and validates against plan requirements.
+8. MERGE: PR is merged to main by a human.
+
+### Hard rules:
 
 NEVER commit code directly to main.
 NEVER push code to main — all code pushes go to session/{slug} branches.
