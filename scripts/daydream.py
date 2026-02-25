@@ -288,7 +288,7 @@ def run_llm_reflection(
     """Run LLM reflection on session analysis using Claude Haiku.
 
     Args:
-        analysis: Output from analyze_sessions() or analyze_sessions_from_redis().
+        analysis: Output from analyze_sessions_from_redis().
 
     Returns:
         List of reflection dicts with category, summary, pattern,
@@ -1273,6 +1273,155 @@ class DaydreamRunner:
             )
         except Exception as e:
             logger.warning(f"Redis TTL cleanup failed (non-fatal): {e}")
+
+    async def step_redis_data_quality(self) -> None:
+        """Step 14: Redis data quality checks.
+
+        Queries Redis models to surface data quality issues:
+        - Unsummarized links (shared but never summarized by AI)
+        - Dead channels (chats with no recent message activity)
+        - Sessions with transcripts containing recurring error patterns
+        """
+        findings: list[str] = []
+
+        try:
+            import time as _time
+
+            from models.chat import Chat
+            from models.link import Link
+            from models.session_log import SessionLog
+            from models.telegram import TelegramMessage
+
+            # 1. Unsummarized links: shared in last 7 days, no ai_summary
+
+            week_ago = _time.time() - (7 * 86400)
+            all_links = Link.query.all()
+            unsummarized = [
+                link
+                for link in all_links
+                if link.timestamp
+                and link.timestamp > week_ago
+                and not link.ai_summary
+            ]
+            if unsummarized:
+                findings.append(
+                    f"{len(unsummarized)} links shared in last 7 days "
+                    f"have no AI summary"
+                )
+                for link in unsummarized[:5]:
+                    findings.append(
+                        f"  Unsummarized: {link.url} "
+                        f"(chat={link.chat_id}, status={link.status})"
+                    )
+
+            # 2. Dead channels: chats not updated in 30+ days
+            month_ago = _time.time() - (30 * 86400)
+            all_chats = Chat.query.all()
+            dead_chats = [
+                chat
+                for chat in all_chats
+                if chat.updated_at and chat.updated_at < month_ago
+            ]
+            if dead_chats:
+                findings.append(
+                    f"{len(dead_chats)} chat(s) with no activity in 30+ days"
+                )
+                for chat in dead_chats[:5]:
+                    days_inactive = int(
+                        (_time.time() - chat.updated_at) / 86400
+                    )
+                    findings.append(
+                        f"  Inactive: {chat.chat_name} "
+                        f"({days_inactive} days, type={chat.chat_type})"
+                    )
+
+            # 3. Transcript error pattern analysis: find common errors in recent sessions
+            recent_cutoff = _time.time() - (7 * 86400)
+            all_sessions = SessionLog.query.all()
+            recent_sessions = [
+                s
+                for s in all_sessions
+                if s.started_at and s.started_at > recent_cutoff
+            ]
+
+            error_keywords: dict[str, int] = {}
+            for session in recent_sessions:
+                if not session.log_path:
+                    continue
+                log_path = Path(session.log_path)
+                if not log_path.exists():
+                    continue
+                try:
+                    content = log_path.read_text(errors="replace")
+                    # Count common error patterns in transcripts
+                    for keyword in [
+                        "ImportError",
+                        "ModuleNotFoundError",
+                        "ConnectionError",
+                        "TimeoutError",
+                        "PermissionError",
+                        "FileNotFoundError",
+                        "KeyError",
+                        "AttributeError",
+                    ]:
+                        count = content.count(keyword)
+                        if count > 0:
+                            error_keywords[keyword] = (
+                                error_keywords.get(keyword, 0) + count
+                            )
+                except OSError:
+                    continue
+
+            if error_keywords:
+                sorted_errors = sorted(
+                    error_keywords.items(), key=lambda x: x[1], reverse=True
+                )
+                findings.append(
+                    f"Error patterns across {len(recent_sessions)} "
+                    f"recent session transcripts:"
+                )
+                for keyword, count in sorted_errors[:5]:
+                    findings.append(f"  {keyword}: {count} occurrences")
+
+            # 4. Message volume per chat (identify high-traffic vs low-traffic)
+            all_messages = TelegramMessage.query.all()
+            recent_messages = [
+                m
+                for m in all_messages
+                if m.timestamp and m.timestamp > week_ago
+            ]
+            chat_volumes: dict[str, int] = {}
+            for msg in recent_messages:
+                chat_id = msg.chat_id or "unknown"
+                chat_volumes[chat_id] = chat_volumes.get(chat_id, 0) + 1
+
+            if chat_volumes:
+                sorted_chats = sorted(
+                    chat_volumes.items(), key=lambda x: x[1], reverse=True
+                )
+                findings.append(
+                    f"Message volume (last 7 days): "
+                    f"{len(recent_messages)} messages across "
+                    f"{len(chat_volumes)} chats"
+                )
+                for chat_id, count in sorted_chats[:3]:
+                    # Try to resolve chat name
+                    chat_name = chat_id
+                    chat_records = Chat.query.filter(chat_id=chat_id)
+                    if chat_records:
+                        chat_name = chat_records[0].chat_name or chat_id
+                    findings.append(f"  {chat_name}: {count} messages")
+
+        except Exception as e:
+            logger.warning(f"Redis data quality check failed (non-fatal): {e}")
+            findings.append(f"Data quality check error: {e}")
+
+        for finding in findings:
+            self.state.add_finding("redis_data_quality", finding)
+
+        self.state.step_progress["redis_data_quality"] = {
+            "findings": len(findings),
+        }
 
     async def step_post_to_telegram(self, project: dict, issue_url: str = "") -> None:
         """Post daydream summary to project's Telegram chat.

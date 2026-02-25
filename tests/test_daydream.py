@@ -1,4 +1,4 @@
-"""Tests for daydream core: session analysis, LLM reflection, memory consolidation."""
+"""Tests for daydream core: LLM reflection, memory consolidation, auto-fix, data quality."""
 
 from __future__ import annotations
 
@@ -8,143 +8,6 @@ from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# --- Session Analysis Tests (Step 7) ---
-
-
-class TestSessionAnalysis:
-    """Tests for session analysis logic."""
-
-    def test_analyze_empty_sessions_dir(self, tmp_path):
-        """No sessions directory returns empty analysis."""
-        from scripts.daydream import analyze_sessions
-
-        result = analyze_sessions(tmp_path / "sessions", "2026-02-16")
-        assert result["sessions_analyzed"] == 0
-        assert result["corrections"] == []
-        assert result["thrash_sessions"] == []
-
-    def test_analyze_filters_to_target_date(self, tmp_path):
-        """Only sessions from the target date are analyzed."""
-        from scripts.daydream import analyze_sessions
-
-        sessions_dir = tmp_path / "sessions"
-
-        # Create a session with yesterday's date in chat.json
-        session_dir = sessions_dir / "session_abc"
-        session_dir.mkdir(parents=True)
-        chat_data = {
-            "session_id": "abc",
-            "started_at": "2026-02-16T10:00:00",
-            "messages": [
-                {"role": "user", "content": "Hello"},
-                {"role": "assistant", "content": "Hi there"},
-            ],
-        }
-        (session_dir / "chat.json").write_text(json.dumps(chat_data))
-
-        # Create a session from a different day
-        session_dir2 = sessions_dir / "session_def"
-        session_dir2.mkdir(parents=True)
-        chat_data2 = {
-            "session_id": "def",
-            "started_at": "2026-02-10T10:00:00",
-            "messages": [{"role": "user", "content": "Old session"}],
-        }
-        (session_dir2 / "chat.json").write_text(json.dumps(chat_data2))
-
-        result = analyze_sessions(sessions_dir, "2026-02-16")
-        assert result["sessions_analyzed"] == 1
-
-    def test_detect_user_corrections(self, tmp_path):
-        """Detects correction patterns in user messages."""
-        from scripts.daydream import analyze_sessions
-
-        sessions_dir = tmp_path / "sessions"
-        session_dir = sessions_dir / "session_corrections"
-        session_dir.mkdir(parents=True)
-
-        chat_data = {
-            "session_id": "corrections",
-            "started_at": "2026-02-16T10:00:00",
-            "messages": [
-                {"role": "user", "content": "Do X"},
-                {"role": "assistant", "content": "Did X"},
-                {"role": "user", "content": "No, I meant Y"},
-                {"role": "assistant", "content": "OK doing Y"},
-                {"role": "user", "content": "That's wrong, do Z"},
-            ],
-        }
-        (session_dir / "chat.json").write_text(json.dumps(chat_data))
-
-        result = analyze_sessions(sessions_dir, "2026-02-16")
-        assert len(result["corrections"]) >= 2
-
-    def test_thrash_ratio_computation(self, tmp_path):
-        """Computes thrash ratio from tool_use.jsonl."""
-        from scripts.daydream import analyze_sessions
-
-        sessions_dir = tmp_path / "sessions"
-        session_dir = sessions_dir / "session_thrash"
-        session_dir.mkdir(parents=True)
-
-        chat_data = {
-            "session_id": "thrash",
-            "started_at": "2026-02-16T10:00:00",
-            "messages": [{"role": "user", "content": "Do stuff"}],
-        }
-        (session_dir / "chat.json").write_text(json.dumps(chat_data))
-
-        # 10 tool calls, only 2 successes = high thrash
-        tool_lines = []
-        for i in range(10):
-            entry = {
-                "tool": "bash",
-                "success": i < 2,
-                "timestamp": "2026-02-16T10:00:00",
-            }
-            tool_lines.append(json.dumps(entry))
-        (session_dir / "tool_use.jsonl").write_text("\n".join(tool_lines))
-
-        result = analyze_sessions(sessions_dir, "2026-02-16")
-        assert len(result["thrash_sessions"]) == 1
-        session_info = result["thrash_sessions"][0]
-        assert session_info["tool_calls"] == 10
-        assert session_info["successes"] == 2
-
-    def test_caps_at_10_sessions(self, tmp_path):
-        """Caps analysis at 10 most interesting sessions."""
-        from scripts.daydream import analyze_sessions
-
-        sessions_dir = tmp_path / "sessions"
-        for i in range(15):
-            session_dir = sessions_dir / f"session_{i:03d}"
-            session_dir.mkdir(parents=True)
-            chat_data = {
-                "session_id": f"s{i}",
-                "started_at": "2026-02-16T10:00:00",
-                "messages": [
-                    {"role": "user", "content": "Do something"},
-                    {"role": "user", "content": "No, I meant something else"},
-                ],
-            }
-            (session_dir / "chat.json").write_text(json.dumps(chat_data))
-
-        result = analyze_sessions(sessions_dir, "2026-02-16")
-        assert result["sessions_analyzed"] <= 10
-
-    def test_handles_malformed_chat_json(self, tmp_path):
-        """Gracefully handles invalid JSON in chat.json."""
-        from scripts.daydream import analyze_sessions
-
-        sessions_dir = tmp_path / "sessions"
-        session_dir = sessions_dir / "session_bad"
-        session_dir.mkdir(parents=True)
-        (session_dir / "chat.json").write_text("NOT VALID JSON {{{")
-
-        result = analyze_sessions(sessions_dir, "2026-02-16")
-        assert result["sessions_analyzed"] == 0
-
 
 # --- LLM Reflection Tests (Step 8) ---
 
@@ -251,7 +114,7 @@ class TestLLMReflection:
 class TestMemoryConsolidation:
     """Tests for lessons learned consolidation."""
 
-    def test_appends_lessons_to_redis(self, tmp_path):
+    def test_appends_lessons_to_redis(self):
         """Writes reflection output to Redis LessonLearned model."""
         from models.daydream import LessonLearned
         from scripts.daydream import consolidate_memory
@@ -274,7 +137,7 @@ class TestMemoryConsolidation:
         assert lessons[0].category == "misunderstanding"
         assert lessons[0].validated == 0
 
-    def test_deduplicates_by_pattern(self, tmp_path):
+    def test_deduplicates_by_pattern(self):
         """Does not add duplicate patterns."""
         from models.daydream import LessonLearned
         from scripts.daydream import consolidate_memory
@@ -306,7 +169,7 @@ class TestMemoryConsolidation:
         lessons = LessonLearned.query.all()
         assert len(lessons) == 1  # Still just one entry
 
-    def test_prunes_old_entries(self, tmp_path):
+    def test_prunes_old_entries(self):
         """Removes entries older than 90 days."""
         import time
 
@@ -342,7 +205,7 @@ class TestMemoryConsolidation:
         assert len(remaining) == 1
         assert remaining[0].category == "recent"
 
-    def test_creates_lesson_in_redis(self, tmp_path):
+    def test_creates_lesson_in_redis(self):
         """Creates lesson in Redis even when no prior entries exist."""
         from models.daydream import LessonLearned
         from scripts.daydream import consolidate_memory
@@ -360,7 +223,7 @@ class TestMemoryConsolidation:
         lessons = LessonLearned.query.all()
         assert len(lessons) == 1
 
-    def test_handles_empty_reflections(self, tmp_path):
+    def test_handles_empty_reflections(self):
         """No-op with empty reflections (but still prunes)."""
         from models.daydream import LessonLearned
         from scripts.daydream import consolidate_memory
@@ -528,20 +391,14 @@ class TestStepAuditDocs:
 class TestIgnoreLog:
     """Tests for ignore log helpers."""
 
-    def test_load_ignore_log_empty_when_file_missing(self, tmp_path):
-        """load_ignore_log returns empty list when file doesn't exist."""
-        import scripts.daydream as daydream_mod
+    def test_load_ignore_log_empty_when_no_entries(self):
+        """load_ignore_log returns empty list when no entries exist in Redis."""
         from scripts.daydream import load_ignore_log
 
-        original = daydream_mod.IGNORE_LOG_FILE
-        daydream_mod.IGNORE_LOG_FILE = tmp_path / "daydream_ignore.jsonl"
-        try:
-            result = load_ignore_log()
-            assert result == []
-        finally:
-            daydream_mod.IGNORE_LOG_FILE = original
+        result = load_ignore_log()
+        assert result == []
 
-    def test_load_ignore_log_filters_expired(self, tmp_path):
+    def test_load_ignore_log_filters_expired(self):
         """load_ignore_log excludes expired entries via Redis."""
         import time
 
@@ -571,7 +428,7 @@ class TestIgnoreLog:
         assert "active" in patterns
         assert "today" in patterns
 
-    def test_prune_ignore_log_removes_expired(self, tmp_path):
+    def test_prune_ignore_log_removes_expired(self):
         """prune_ignore_log removes expired entries and keeps active ones in Redis."""
         import time
 
