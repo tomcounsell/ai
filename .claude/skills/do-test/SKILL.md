@@ -80,6 +80,12 @@ When `--changed` is specified:
 
 5. If no test files are found after mapping, report "No test files found for changed files" and skip test execution (lint still runs unless `--no-lint`).
 
+## Constants
+
+| Name | Value | Description |
+|------|-------|-------------|
+| `PARALLEL_DISPATCH_THRESHOLD` | 50 | Number of test files above which parallel subagent dispatch is used instead of sequential execution. Below this threshold, run tests in-process to avoid subagent overhead. |
+
 ## Execution Strategy
 
 ### Single Target (specific type or file)
@@ -105,7 +111,7 @@ black --check .
 
 ### All Tests (no target specified)
 
-When running all tests, dispatch **parallel subagents** via the Task tool for each test directory that exists. This maximizes throughput.
+When running all tests and the total number of test files exceeds `PARALLEL_DISPATCH_THRESHOLD` (50), dispatch **parallel subagents** via the Task tool for each test directory that exists. This maximizes throughput. Below the threshold, run all suites sequentially in-process to avoid subagent overhead.
 
 **Step 1: Discover test directories**
 

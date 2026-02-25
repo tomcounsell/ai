@@ -241,7 +241,7 @@ The **## Agent Integration** section should cover:
 | `/setup` | New machine configuration |
 | `/do-pr-review` | PR review with implementation validation and screenshots |
 | `/add-feature` | How to extend the system |
-| `/sdlc` | Autonomous Plan → Build → Test → Ship workflow |
+| `/sdlc` | Autonomous Plan → Build → Test → Review → Docs → Ship pipeline |
 | `docs/deployment.md` | Multi-instance deployment |
 | `docs/tools-reference.md` | Complete tool documentation |
 | `config/SOUL.md` | Valor persona and philosophy |
