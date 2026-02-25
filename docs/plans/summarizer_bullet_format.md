@@ -1,7 +1,7 @@
 ---
 status: Planning
 type: feature
-appetite: Medium
+appetite: Large
 owner: Valor
 created: 2026-02-25
 tracking: https://github.com/tomcounsell/ai/issues/177
@@ -12,6 +12,8 @@ tracking: https://github.com/tomcounsell/ai/issues/177
 ## Problem
 
 SDLC completion summaries are dense single-paragraph walls of text. Hard to scan in Telegram, especially when multiple jobs complete back-to-back. All Telegram messages are sent as plain text — no bold, italic, inline code, or clickable links. The summarizer operates blind — no idea what was originally requested. And there's no visibility into which pipeline stages actually ran.
+
+Additionally, `RedisJob` and `SessionLog` represent the same logical thing — a unit of work triggered by a message — but are split across two models with duplicated fields (`session_id`, `project_key`, `status`, `chat_id`, `sender`, `started_at`, `work_item_slug`, `classification_type`). RedisJob is ephemeral (deleted after completion), SessionLog is the historical record. This split creates a handoff gap and makes it impossible for the summarizer to access lifecycle data cleanly.
 
 **Current behavior:**
 > Done ✅ PR #176 fixes infinite false-positive loop after gh pr merge --squash with two-layer defense: tracks modified_on_branch at write time to distinguish merged session code from main edits, plus bash detection of gh pr merge resets code_modified=false. 10 new tests, all 63 passing. Commit 8b60821c.
@@ -28,65 +30,88 @@ Issue #168 | Plan | PR #176
 
 ## Appetite
 
-**Size:** Medium
+**Size:** Large
 
 **Team:** Solo dev
 
 **Interactions:**
-- PM check-ins: 1 (scope alignment on format spec)
-- Review rounds: 1
+- PM check-ins: 1-2 (scope alignment on model merge + format spec)
+- Review rounds: 1-2
+
+The model unification is the heavy lift. The summarizer rewrite and markdown enablement are straightforward once the single model exists.
 
 ## Prerequisites
 
-No prerequisites — this work builds on existing RedisJob model and summarizer infrastructure.
+No prerequisites — this work builds on existing RedisJob model, SessionLog model, and summarizer infrastructure. Note: PR #179 (session tagging) has been merged — `SessionLog.tags` and `tools/session_tags.py` are now active. The unified model must carry forward the tags field and tagging integration.
 
 ## Solution
 
 ### Key Elements
 
-- **RedisJob history tracking**: Append-only log of job lifecycle events (user input, classification, stage transitions, summary) capped at 20 entries
-- **RedisJob link accumulator**: Store `issue_url`, `plan_url`, `pr_url` on the job as each SDLC stage completes, eliminating URL parsing from agent output
-- **Summarizer context enrichment**: Pass original message text, job links, and history to the summarizer so it can name the task, build the stage progress line, and format links
-- **Bullet-point format**: Replace dense paragraphs with emoji-first, stage-progress, bullet-point summaries
-- **Telegram markdown**: Enable `parse_mode='md'` on all `send_message` calls with escape handling for raw agent output
+- **Unified AgentSession model**: Merge `RedisJob` and `SessionLog` into a single `AgentSession` model that tracks the full lifecycle from enqueue through completion. Queue-specific fields (`priority`, `message_text`, `auto_continue_count`) and session-specific fields (`turn_count`, `tool_call_count`, `log_path`, `summary`, `tags`) live together. `status` field expands to cover both: `pending → running → active → dormant → completed → failed`.
+- **Job history tracking**: `history` ListField on AgentSession — append-only log of lifecycle events (user input, classification, stage transitions, summary) capped at 20 entries
+- **Link accumulator**: `issue_url`, `plan_url`, `pr_url` fields on AgentSession, set as each SDLC stage completes
+- **Summarizer context enrichment**: Summarizer reads from the single model — original message, history, and links — to produce structured output
+- **Bullet-point format**: Emoji-first, stage-progress, bullet-point summaries for SDLC; prose for casual
+- **Telegram markdown**: `parse_mode='md'` on all `send_message` calls with escape fallback
 
 ### Flow
 
-**Job enqueued** → history records `[user]` entry → classification adds `[classify]` entry → SDLC stages append `[stage]` entries → links accumulate on job fields → summarizer reads history + links + original message → renders structured bullet-point format → Telegram sends with markdown parse mode
+**Message arrives** → AgentSession created (status=`pending`) → history records `[user]` → enqueued → worker picks up (status=`running`) → classification adds `[classify]` → SDLC stages append `[stage]` entries → links accumulate → agent completes → summarizer reads AgentSession → renders structured format → Telegram sends with markdown → AgentSession transitions to `completed` → auto-tagger applies tags
 
 ### Technical Approach
 
-- Add `history` (ListField), `issue_url`, `plan_url`, `pr_url` (Field) to RedisJob model
-- Add helper methods on RedisJob/Job: `append_history(role, text)` and `set_link(kind, url)`
-- Modify SDLC sub-skills to call `set_link()` and `append_history("stage", ...)` as they complete
-- Rewrite `SUMMARIZER_SYSTEM_PROMPT` with bullet-point format guidance, emoji vocabulary, and SDLC-aware patterns
-- Change `summarize_response()` signature to accept optional `job` parameter for context enrichment
-- Build stage progress line renderer from history (last occurrence of each stage type)
-- Build link footer renderer from job fields (progressive accumulation)
-- Remove `_ensure_github_link_footer()` URL parsing — links come from job fields
-- Enable markdown parse mode in `bridge/response.py` `send_response_with_files()` and other send points
-- Add markdown escape utility for raw agent output that bypasses summarizer
+**Phase A: Model Unification**
+- Create `models/agent_session.py` with unified `AgentSession` model containing all fields from both `RedisJob` and `SessionLog`, plus new `history`, `issue_url`, `plan_url`, `pr_url` fields
+- Status values: `pending` | `running` | `active` | `dormant` | `completed` | `failed`
+- Add helper methods: `append_history(role, text)`, `set_link(kind, url)`, `get_stage_progress()`, `get_links()`
+- Migrate `agent/job_queue.py` to use AgentSession instead of RedisJob — `enqueue_job()`, `dequeue_job()`, worker loop, health checks all operate on AgentSession
+- Migrate `bridge/session_transcript.py` to use AgentSession instead of SessionLog — `start_transcript()`, `complete_transcript()`, `save_session_snapshot()`
+- Migrate `tools/session_tags.py` to reference AgentSession (preserving the tagging system from PR #179)
+- Update all imports and call sites across the codebase
+- Delete `RedisJob` from `agent/job_queue.py` and `SessionLog` from `models/session_log.py`
+- Keep the `Job` wrapper class for the worker interface, backed by AgentSession
+
+**Phase B: Summarizer Rewrite**
+- Rewrite `SUMMARIZER_SYSTEM_PROMPT` with bullet-point format, emoji vocabulary, SDLC-aware patterns
+- Change `summarize_response()` to accept AgentSession for context enrichment
+- Build `_render_stage_progress(history)` and `_render_link_footer(links)` renderers
+- Remove `_ensure_github_link_footer()` URL parsing
+
+**Phase C: Telegram Markdown**
+- Create `bridge/markdown.py` with `escape_markdown(text)` utility
+- Enable `parse_mode='md'` on all `send_message` calls
+- Add try/except fallback to plain text on parse errors
 
 ## Rabbit Holes
 
-- **Rich markdown formatting beyond basics**: Stick to bold, inline code, and links. Don't attempt tables, headers, or complex formatting that Telegram renders poorly.
-- **Retroactive history for in-flight jobs**: Don't try to backfill history for jobs that started before this feature. New jobs only.
-- **MarkdownV2 parse mode**: Telegram's MarkdownV2 has extremely aggressive escaping requirements. Stick with basic `md` (Markdown) parse mode which is simpler and sufficient.
-- **Real-time stage progress updates**: Don't try to edit existing messages to show live progress. Just format the final summary correctly.
+- **Rich markdown formatting beyond basics**: Stick to bold, inline code, and links. No tables or headers — Telegram renders them poorly.
+- **Retroactive history for in-flight sessions**: Don't backfill. New sessions only.
+- **MarkdownV2 parse mode**: Too aggressive escaping. Stick with basic `md`.
+- **Real-time stage progress updates**: Don't edit sent messages. Format the final summary correctly.
+- **Redis data migration**: Don't try to migrate existing RedisJob/SessionLog data. Old sessions stay as-is in Redis until they age out (90-day TTL). New sessions use AgentSession from day one.
 
 ## Risks
 
-### Risk 1: Markdown escaping breaks message delivery
-**Impact:** Messages fail to send if they contain unescaped markdown special characters (e.g., `_`, `*`, `` ` ``, `[`)
-**Mitigation:** Wrap all `send_message` calls with a try/except that falls back to plain text on markdown parse errors. Add an `escape_markdown()` utility that handles common characters.
+### Risk 1: Model merge breaks the job queue
+**Impact:** Jobs stop processing, bridge goes down
+**Mitigation:** Phase A is the critical path — do it first with comprehensive tests. The `Job` wrapper class isolates the worker loop from the underlying model. Keep the same queue semantics (FILO, per-project sequential). Test enqueue/dequeue/health-check before touching anything else.
 
-### Risk 2: Popoto ListField serialization edge cases
-**Impact:** History entries could be lost or corrupted if concurrent writes happen
-**Mitigation:** RedisJob is processed sequentially per project (one worker per project_key). No concurrent write risk. Cap list at 20 entries with truncation on append.
+### Risk 2: Markdown escaping breaks message delivery
+**Impact:** Messages fail to send on unescaped special characters
+**Mitigation:** Try/except with plain text fallback on every send. `escape_markdown()` utility for known edge cases.
 
-### Risk 3: SDLC skills fail to record stage transitions
-**Impact:** Stage progress line shows incomplete data
-**Mitigation:** Graceful degradation — if no history exists, omit the stage progress line entirely. The summary still works without it.
+### Risk 3: Popoto ListField serialization
+**Impact:** History entries lost or corrupted
+**Mitigation:** Sequential per-project processing (no concurrent writes). Cap at 20 entries. Graceful degradation — if history is empty/broken, omit stage line.
+
+### Risk 4: Import graph changes break startup
+**Impact:** Bridge fails to start after refactor
+**Mitigation:** Map all imports before starting. Use the `Job` wrapper as the stable interface. Test bridge startup as part of validation.
+
+### Risk 5: Session tagging integration breaks
+**Impact:** Auto-tagging from PR #179 stops working after model rename
+**Mitigation:** `tools/session_tags.py` references `SessionLog` — update all references to `AgentSession`. The `tags` field carries over directly. Run tagging tests as part of validation.
 
 ## No-Gos (Out of Scope)
 
@@ -95,33 +120,42 @@ No prerequisites — this work builds on existing RedisJob model and summarizer 
 - Structured formatting for non-SDLC conversational replies (keep those simple)
 - Custom formatting per project or per chat
 - Inline images or media in summaries
-- **RedisJob/SessionLog unification**: These models share many fields and represent the same logical thing (a unit of work) at different lifecycle phases. Merging them is worthwhile but is a separate refactor — it touches the entire job queue, worker loop, session transcript system, and every call site. This plan adds `history`/links to RedisJob as-is. A future issue should unify the two models (RedisJob becomes a status on SessionLog, queue-specific fields like `priority`, `message_text`, `auto_continue_count` move there).
-- **Session tagging** (#162): That system tags `SessionLog` entries at session completion to categorize what happened (e.g., "pr-review", "daydream"). This plan adds `history` to `RedisJob` to track pipeline stage transitions *during* job execution for formatting summaries. Different models (`SessionLog` vs `RedisJob`), different timing (post-session vs mid-job), different purpose (categorization vs rendering).
+- Redis data migration for existing sessions/jobs
+- **Session tagging logic** (#162, PR #179): The tagging system is already merged and working. This plan carries the `tags` field forward into the unified model and updates `tools/session_tags.py` imports, but does NOT modify tagging logic itself.
 
 ## Update System
 
-No update system changes required — this feature modifies bridge-internal behavior (summarizer, response sending, job model). The update script pulls code and restarts the bridge, which is sufficient.
+No update system changes required — this feature modifies bridge-internal models and behavior. The update script pulls code and restarts the bridge, which is sufficient. Existing Redis keys for old `RedisJob` and `SessionLog` instances will be orphaned but harmless — they'll age out via TTL or can be cleaned up manually.
 
 ## Agent Integration
 
-No agent integration required — this is a bridge-internal change. The agent's tools and MCP servers are unaffected. The changes happen in the summarizer (post-processing agent output) and the Telegram send path (formatting). SDLC sub-skills are invoked by the agent but the stage recording happens in the bridge/job infrastructure that wraps them.
+No agent integration required — this is a bridge-internal change. The agent's tools and MCP servers are unaffected. The changes happen in the data model layer, summarizer (post-processing), and Telegram send path. SDLC sub-skills are invoked by the agent but stage recording happens in the bridge/job infrastructure.
 
 ## Documentation
 
 - [ ] Create `docs/features/summarizer-format.md` describing the bullet-point format, emoji vocabulary, stage progress rendering, and link accumulation
-- [ ] Update `docs/features/README.md` index table with new entry
-- [ ] Update inline docstrings in `bridge/summarizer.py` and `agent/job_queue.py`
+- [ ] Create `docs/features/agent-session-model.md` describing the unified model, its fields, status lifecycle, and relationship to the job queue and session transcripts
+- [ ] Update `docs/features/README.md` index table with new entries
+- [ ] Update `docs/features/session-transcripts.md` to reference AgentSession instead of SessionLog
+- [ ] Update `docs/features/session-tagging.md` to reference AgentSession instead of SessionLog
+- [ ] Update inline docstrings in `models/agent_session.py`, `bridge/summarizer.py`, `agent/job_queue.py`
 
 ## Success Criteria
 
-- [ ] RedisJob has `history`, `issue_url`, `plan_url`, `pr_url` fields
-- [ ] `append_history()` and `set_link()` helpers work and cap history at 20 entries
-- [ ] Summarizer accepts job context and produces bullet-point format for SDLC completions
-- [ ] Stage progress line renders correctly from history (last occurrence of each stage)
-- [ ] Link footer renders progressively from job fields
-- [ ] `_ensure_github_link_footer()` removed, links come from job fields
+- [ ] `AgentSession` model exists with all fields from RedisJob + SessionLog + new history/link fields
+- [ ] `RedisJob` class removed from `agent/job_queue.py`
+- [ ] `SessionLog` class removed from `models/session_log.py`
+- [ ] All imports updated — no references to `RedisJob` or `SessionLog` in Python code
+- [ ] Job queue (enqueue/dequeue/worker/health-check) works on AgentSession
+- [ ] Session transcripts (start/complete/snapshot) work on AgentSession
+- [ ] Session tagging (`tools/session_tags.py`) works on AgentSession
+- [ ] `append_history()` and `set_link()` helpers work, cap history at 20 entries
+- [ ] Summarizer accepts AgentSession context and produces bullet-point format for SDLC
+- [ ] Stage progress line renders correctly from history
+- [ ] Link footer renders progressively from session fields
+- [ ] `_ensure_github_link_footer()` removed
 - [ ] All Telegram `send_message` calls use `parse_mode='md'`
-- [ ] Markdown escape fallback prevents send failures on unescaped characters
+- [ ] Markdown escape fallback prevents send failures
 - [ ] Non-SDLC summaries still work (conversational, Q&A, simple completions)
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
@@ -130,9 +164,9 @@ No agent integration required — this is a bridge-internal change. The agent's 
 
 ### Team Members
 
-- **Builder (job-model)**
-  - Name: job-model-builder
-  - Role: Add history/link fields to RedisJob, implement helper methods
+- **Builder (model-unification)**
+  - Name: model-builder
+  - Role: Create unified AgentSession model, migrate job queue, session transcripts, and session tags
   - Agent Type: builder
   - Resume: true
 
@@ -150,7 +184,7 @@ No agent integration required — this is a bridge-internal change. The agent's 
 
 - **Validator (integration)**
   - Name: integration-validator
-  - Role: Verify end-to-end flow from job creation through formatted Telegram output
+  - Role: Verify end-to-end flow from session creation through formatted Telegram output
   - Agent Type: validator
   - Resume: true
 
@@ -169,80 +203,108 @@ No agent integration required — this is a bridge-internal change. The agent's 
 
 ## Step by Step Tasks
 
-### 1. Add history and link fields to RedisJob
-- **Task ID**: build-job-model
+### 1. Create unified AgentSession model
+- **Task ID**: build-model
 - **Depends On**: none
-- **Assigned To**: job-model-builder
+- **Assigned To**: model-builder
 - **Agent Type**: builder
-- **Parallel**: true
-- Add `history = ListField(null=True)` to RedisJob
-- Add `issue_url = Field(null=True)`, `plan_url = Field(null=True)`, `pr_url = Field(null=True)` to RedisJob
-- Add `append_history(role, text)` method to Job wrapper that appends `{"role": role, "text": text, "ts": time.time()}` and caps at 20 entries
-- Add `set_link(kind, url)` method to Job wrapper that sets the appropriate `*_url` field
-- Add `get_stage_progress()` method that reads history and returns last occurrence of each stage type
-- Add `get_links()` method that returns dict of non-null link fields
+- **Parallel**: false
+- Create `models/agent_session.py` with `AgentSession` combining all fields from RedisJob and SessionLog
+- Fields from RedisJob: `job_id` (AutoKeyField), `project_key`, `status`, `priority`, `created_at`, `session_id`, `working_dir`, `message_text`, `sender_name`, `sender_id`, `chat_id`, `message_id`, `chat_title`, `revival_context`, `workflow_id`, `work_item_slug`, `task_list_id`, `has_media`, `media_type`, `youtube_urls`, `non_youtube_urls`, `reply_to_msg_id`, `chat_id_for_enrichment`, `classification_type`, `auto_continue_count`, `started_at`
+- Fields from SessionLog: `completed_at`, `turn_count`, `tool_call_count`, `log_path`, `summary`, `branch_name`, `tags`, `classification_confidence`, `last_activity`
+- New fields: `history` (ListField), `issue_url` (Field), `plan_url` (Field), `pr_url` (Field)
+- Status values: `pending` | `running` | `active` | `dormant` | `completed` | `failed`
+- Add `append_history(role, text)`, `set_link(kind, url)`, `get_stage_progress()`, `get_links()`, `cleanup_expired()` methods
+- Add `sender` property that returns `sender_name` (reconcile the naming difference)
 
-### 2. Rewrite summarizer with bullet-point format
+### 2. Migrate job queue to AgentSession
+- **Task ID**: build-job-migration
+- **Depends On**: build-model
+- **Assigned To**: model-builder
+- **Agent Type**: builder
+- **Parallel**: false
+- Update `agent/job_queue.py`: replace all `RedisJob` references with `AgentSession`
+- Update `enqueue_job()`, `dequeue_job()`, `_process_job()`, health check functions
+- Keep `Job` wrapper class, backed by AgentSession instead of RedisJob
+- Update all imports across the codebase that reference `RedisJob`
+- Delete `RedisJob` class
+
+### 3. Migrate session transcripts and tags to AgentSession
+- **Task ID**: build-session-migration
+- **Depends On**: build-model
+- **Assigned To**: model-builder
+- **Agent Type**: builder
+- **Parallel**: true (parallel with task 2 — both depend on model but touch different files)
+- Update `bridge/session_transcript.py`: replace `SessionLog` references with `AgentSession`
+- Update `models/__init__.py` exports
+- Update `monitoring/session_watchdog.py`
+- Update `tools/session_tags.py` to reference AgentSession (carrying forward PR #179 tagging)
+- Update test files that reference SessionLog
+- Delete `SessionLog` from `models/session_log.py`
+
+### 4. Rewrite summarizer with bullet-point format
 - **Task ID**: build-summarizer
-- **Depends On**: build-job-model
+- **Depends On**: build-job-migration
 - **Assigned To**: summarizer-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Rewrite `SUMMARIZER_SYSTEM_PROMPT` with bullet-point format, emoji vocabulary (✅ ⏳ ❓ ⚠️ ❌), and SDLC-aware patterns
-- Change `summarize_response()` to accept optional `job: Job = None` parameter
-- When job is provided: pass original `message_text`, history, and links to the summarizer prompt
-- Build `_render_stage_progress(history)` function that produces the `☑ ISSUE → ☑ PLAN → ...` line
-- Build `_render_link_footer(links)` function that produces `Issue #N | Plan | PR #N` with markdown links
-- Remove `_ensure_github_link_footer()` function
-- Update `_build_summary_prompt()` to include job context when available
+- Rewrite `SUMMARIZER_SYSTEM_PROMPT` with bullet-point format, emoji vocabulary (✅ ⏳ ❓ ⚠️ ❌), SDLC-aware patterns
+- Change `summarize_response()` to accept optional `session: AgentSession = None`
+- Build `_render_stage_progress(history)` producing `☑ ISSUE → ☑ PLAN → ...` line
+- Build `_render_link_footer(links)` producing `Issue #N | Plan | PR #N` with markdown links
+- Remove `_ensure_github_link_footer()`
+- Update `_build_summary_prompt()` to include session context
 
-### 3. Enable Telegram markdown parse mode
+### 5. Enable Telegram markdown parse mode
 - **Task ID**: build-telegram-md
 - **Depends On**: none
 - **Assigned To**: telegram-md-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Create `bridge/markdown.py` with `escape_markdown(text)` utility that escapes `_`, `*`, `` ` ``, `[` characters in raw text
-- Update `send_response_with_files()` in `bridge/response.py` to use `parse_mode='md'` on `client.send_message()`
-- Add try/except fallback: if markdown send fails, retry with plain text (no parse_mode)
-- Update other `send_message` calls in `bridge/telegram_bridge.py` (queue position, revival prompts) to use `parse_mode='md'`
+- Create `bridge/markdown.py` with `escape_markdown(text)` utility
+- Update `send_response_with_files()` in `bridge/response.py` to use `parse_mode='md'`
+- Add try/except fallback to plain text on parse errors
+- Update other `send_message` calls in `bridge/telegram_bridge.py`
 
-### 4. Wire job context through response path
+### 6. Wire session context through response path
 - **Task ID**: build-wiring
-- **Depends On**: build-job-model, build-summarizer, build-telegram-md
+- **Depends On**: build-job-migration, build-summarizer, build-telegram-md
 - **Assigned To**: summarizer-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Update the call site in `bridge/response.py` where `summarize_response()` is called to pass the job object
-- Update `agent/job_queue.py` worker loop to pass job to response handler
-- Ensure history entries are appended at key points: job creation (`[user]`), classification (`[classify]`), and summary (`[summary]`)
-- Add stage recording hooks that SDLC skills can call (this may be a follow-up if skills need deeper integration)
+- Pass AgentSession to `summarize_response()` from the worker loop
+- Append history at key points: enqueue (`[user]`), classification (`[classify]`), summary (`[summary]`)
+- Wire stage recording for SDLC skill invocations
 
-### 5. Validate integration
+### 7. Validate integration
 - **Task ID**: validate-integration
-- **Depends On**: build-wiring
+- **Depends On**: build-wiring, build-session-migration
 - **Assigned To**: integration-validator
 - **Agent Type**: validator
 - **Parallel**: false
-- Verify RedisJob fields serialize/deserialize correctly
+- Verify AgentSession fields serialize/deserialize correctly
+- Verify job queue enqueue/dequeue/worker works
+- Verify session transcript start/complete works
+- Verify session tagging still works
 - Verify `append_history()` caps at 20 entries
-- Verify `_render_stage_progress()` handles empty, partial, and full stage histories
-- Verify `_render_link_footer()` handles progressive link accumulation
-- Verify markdown escape handles common edge cases
-- Verify markdown send fallback works on parse errors
+- Verify stage progress and link footer renderers
+- Verify markdown escape and fallback
+- Verify no remaining references to `RedisJob` or `SessionLog` in Python code
 - Run full test suite
 
-### 6. Documentation
+### 8. Documentation
 - **Task ID**: document-feature
 - **Depends On**: validate-integration
 - **Assigned To**: docs-writer
 - **Agent Type**: documentarian
 - **Parallel**: false
 - Create `docs/features/summarizer-format.md`
-- Add entry to `docs/features/README.md` index table
-- Update inline docstrings
+- Create `docs/features/agent-session-model.md`
+- Update `docs/features/session-transcripts.md`
+- Update `docs/features/session-tagging.md`
+- Add entries to `docs/features/README.md` index table
 
-### 7. Final Validation
+### 9. Final Validation
 - **Task ID**: validate-all
 - **Depends On**: document-feature
 - **Assigned To**: integration-validator
@@ -254,18 +316,19 @@ No agent integration required — this is a bridge-internal change. The agent's 
 
 ## Validation Commands
 
-- `python -c "from agent.job_queue import RedisJob; j = RedisJob(project_key='test', message_text='test', chat_id='1', message_id=1); print('history' in dir(j))"` - RedisJob has history field
+- `python -c "from models.agent_session import AgentSession; print('model loads')"` - Unified model exists
+- `python -c "from agent.job_queue import RedisJob"` - Should FAIL (RedisJob removed)
+- `python -c "from models.session_log import SessionLog"` - Should FAIL (SessionLog removed)
+- `ruff check models/ bridge/ agent/` - No lint errors
+- `black --check models/ bridge/ agent/` - Formatting OK
 - `pytest tests/ -x` - All tests pass
-- `ruff check bridge/summarizer.py bridge/response.py agent/job_queue.py` - No lint errors
-- `black --check bridge/summarizer.py bridge/response.py agent/job_queue.py` - Formatting OK
-- `python -c "from bridge.summarizer import _render_stage_progress; print('stage renderer exists')"` - Stage progress renderer exists
 
 ---
 
 ## Open Questions
 
-1. **Stage recording depth**: The issue says SDLC sub-skills should write stage entries to job history. These skills run inside Claude Code as slash commands — they don't have direct access to the RedisJob. Should we (a) have the bridge record stages based on parsing skill invocations from agent output, (b) expose a tool/MCP endpoint for the agent to call, or (c) defer stage recording to a follow-up and ship the summarizer format improvements first?
+1. **Stage recording depth**: SDLC sub-skills run inside Claude Code as slash commands — they don't have direct access to the AgentSession. Should we (a) have the bridge record stages based on parsing skill invocations from agent output, (b) expose a tool/MCP endpoint for the agent to call, or (c) defer stage recording to a follow-up and ship the model unification + summarizer format first?
 
-2. **Markdown parse mode**: Telethon supports `'md'` (basic Markdown) and `'html'`. Basic Markdown in Telegram is limited — no nested formatting, links are `[text](url)` style. Is basic Markdown sufficient, or should we use HTML (`<b>`, `<a href>`, `<code>`) which is more reliable for complex formatting?
+2. **Markdown parse mode**: Telethon supports `'md'` (basic Markdown) and `'html'`. Basic Markdown is simpler but limited. HTML (`<b>`, `<a href>`, `<code>`) is more reliable for complex formatting. Which one?
 
-3. **Non-SDLC summary format**: For casual Q&A and conversational replies, should the summarizer keep the current prose style, or also switch to bullet points? The issue focuses on SDLC completions but mentions enabling markdown for "all messages."
+3. **Non-SDLC summary format**: Keep prose style for casual Q&A replies, or also switch to bullet points?
