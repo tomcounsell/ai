@@ -42,6 +42,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) | Two-stage semantic search (embedding recall + LLM reranking) for finding docs affected by code changes | Shipped |
 | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
 | [Session Transcripts](session-transcripts.md) | Append-only session transcript files with SessionLog Redis model replacing AgentSession | Shipped |
+| [Skills Dependency Map](skills-dependency-map.md) | Visual map of skill-to-skill, skill-to-agent, and sub-file relationships for cleanup planning | Shipped |
 | [Skills Reorganization](skills-reorganization.md) | Canonical SKILL.md template, progressive disclosure, command consolidation, hardlink scoping | Shipped |
 | [System Overview](system-overview.md) | High-level architecture and design principles | Archived |
 | [Task List Isolation Experiment](task-list-isolation.md) | Experiment results validating CLAUDE_CODE_TASK_LIST_ID behavior | Archived |
