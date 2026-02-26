@@ -192,7 +192,7 @@ def analyze_sessions_from_redis(target_date: str) -> dict[str, Any]:
 
     try:
         from models.bridge_event import BridgeEvent
-        from models.session_log import SessionLog
+        from models.agent_session import AgentSession as SessionLog
 
         # Query SessionLog for sessions from the target date
         all_sessions = SessionLog.query.all()
@@ -1240,7 +1240,7 @@ class DaydreamRunner:
             from models.chat import Chat
             from models.daydream import DaydreamIgnore, DaydreamRun, LessonLearned
             from models.link import Link
-            from models.session_log import SessionLog
+            from models.agent_session import AgentSession as SessionLog
             from models.telegram import TelegramMessage
 
             msg_deleted = TelegramMessage.cleanup_expired(max_age_days=90)
@@ -1290,7 +1290,7 @@ class DaydreamRunner:
 
             from models.chat import Chat
             from models.link import Link
-            from models.session_log import SessionLog
+            from models.agent_session import AgentSession as SessionLog
             from models.telegram import TelegramMessage
 
             # 1. Unsummarized links: shared in last 7 days, no ai_summary
