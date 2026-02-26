@@ -90,7 +90,22 @@ prune_worktrees(repo)
 "
 ```
 
-Note: `delete_branch=False` because the PR still references `session/{slug}`. The branch is cleaned up when the PR is merged.
+Note: `delete_branch=False` because the PR still references `session/{slug}`. The branch is cleaned up when the PR is merged via the post-merge cleanup step (see below).
+
+### Post-Merge Cleanup (after PR is merged)
+
+After the human merges the PR with `gh pr merge --squash --delete-branch`, run the post-merge cleanup to remove the local branch and any lingering worktree references:
+
+```bash
+python scripts/post_merge_cleanup.py {slug}
+```
+
+This calls `cleanup_after_merge()` from `agent/worktree_manager.py`, which:
+1. Removes the worktree at `.worktrees/{slug}/` if it still exists
+2. Prunes stale git worktree references
+3. Deletes the local `session/{slug}` branch
+
+Without this step, `gh pr merge --delete-branch` fails to delete the local branch because git refuses to delete a branch referenced by an active worktree.
 
 ## Step 7.6: Documentation Cascade
 

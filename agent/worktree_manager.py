@@ -195,3 +195,93 @@ def prune_worktrees(repo_root: Path) -> None:
         timeout=10,
     )
     logger.info("Pruned stale worktree references")
+
+
+def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
+    """Clean up worktree and local branch after a PR has been merged.
+
+    This is the post-merge cleanup step for the SDLC pipeline. After
+    `gh pr merge --squash --delete-branch` deletes the remote branch,
+    this function removes the local worktree and branch that would
+    otherwise block deletion.
+
+    Safe to call in any state:
+    - Worktree exists + branch exists: removes both
+    - Worktree already removed + branch exists: deletes branch
+    - Everything already cleaned up: no-op
+
+    Args:
+        repo_root: Path to the main repository.
+        slug: Work item slug (e.g., "my-feature"). The worktree is
+              expected at .worktrees/{slug} and the branch at
+              session/{slug}.
+
+    Returns:
+        Dict with keys:
+        - slug: The slug that was cleaned up
+        - worktree_removed: True if a worktree was removed
+        - branch_deleted: True if a local branch was deleted
+        - already_clean: True if nothing needed cleanup
+        - errors: List of error messages for any failed steps
+
+    Raises:
+        ValueError: If the slug is invalid.
+    """
+    _validate_slug(slug)
+
+    branch_name = f"session/{slug}"
+    worktree_dir = repo_root / WORKTREES_DIR / slug
+    result = {
+        "slug": slug,
+        "worktree_removed": False,
+        "branch_deleted": False,
+        "already_clean": False,
+        "errors": [],
+    }
+
+    had_worktree = worktree_dir.exists()
+    had_branch = _branch_exists(repo_root, branch_name)
+
+    # Step 1: Remove worktree if it exists
+    if had_worktree:
+        removed = remove_worktree(repo_root, slug, delete_branch=False)
+        result["worktree_removed"] = removed
+        if removed:
+            logger.info(f"Post-merge: removed worktree for {slug}")
+        else:
+            msg = f"Failed to remove worktree .worktrees/{slug}"
+            result["errors"].append(msg)
+            logger.warning(f"Post-merge: {msg}")
+
+    # Step 2: Prune stale worktree references (handles cases where the
+    # directory was manually deleted but git still tracks the worktree)
+    prune_worktrees(repo_root)
+
+    # Step 3: Delete local branch if it still exists
+    # Re-check after prune -- pruning may unblock branch deletion
+    if had_branch or _branch_exists(repo_root, branch_name):
+        branch_result = subprocess.run(
+            ["git", "branch", "-D", branch_name],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if branch_result.returncode == 0:
+            result["branch_deleted"] = True
+            logger.info(f"Post-merge: deleted local branch {branch_name}")
+        else:
+            msg = (
+                f"Failed to delete branch {branch_name}: {branch_result.stderr.strip()}"
+            )
+            result["errors"].append(msg)
+            logger.warning(f"Post-merge: {msg}")
+    else:
+        logger.info(f"Post-merge: branch {branch_name} already gone")
+
+    # already_clean means nothing *needed* cleanup (not that cleanup failed)
+    if not had_worktree and not had_branch:
+        result["already_clean"] = True
+        logger.info(f"Post-merge: nothing to clean up for {slug}")
+
+    return result

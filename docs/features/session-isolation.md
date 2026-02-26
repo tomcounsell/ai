@@ -47,7 +47,23 @@ Each tier 2 work item gets its own git worktree for filesystem isolation:
 - On completion: changes are merged back, worktree is removed
 - Stale worktree references are pruned on startup via `git worktree prune`
 
-The worktree manager provides four operations: `create_worktree()`, `remove_worktree()`, `list_worktrees()`, and `prune_worktrees()`.
+The worktree manager provides five operations: `create_worktree()`, `remove_worktree()`, `list_worktrees()`, `prune_worktrees()`, and `cleanup_after_merge()`.
+
+### Post-Merge Worktree Cleanup
+
+When a PR is merged via `gh pr merge --squash --delete-branch`, the remote branch is deleted but local branch deletion fails if a git worktree still references it. The `cleanup_after_merge()` function handles this:
+
+1. Removes the worktree at `.worktrees/{slug}/` if it still exists
+2. Prunes stale git worktree references
+3. Deletes the local `session/{slug}` branch if it still exists
+
+A CLI script is available for manual or automated use:
+
+```bash
+python scripts/post_merge_cleanup.py {slug}
+```
+
+The function returns a status dict with `worktree_removed`, `branch_deleted`, `already_clean`, and `errors` fields. It is safe to call in any state -- if everything is already cleaned up, it is a no-op.
 
 ## Key Experiment Findings
 
@@ -61,7 +77,8 @@ Experiments validated the approach before implementation:
 
 | File | Purpose |
 |------|---------|
-| `agent/worktree_manager.py` | Git worktree create/remove/list/prune operations |
+| `agent/worktree_manager.py` | Git worktree create/remove/list/prune/cleanup operations |
+| `scripts/post_merge_cleanup.py` | CLI script for post-merge worktree and branch cleanup |
 | `agent/sdk_client.py` | Injects `CLAUDE_CODE_TASK_LIST_ID` into SDK environment |
 | `agent/job_queue.py` | Computes task list ID in `_execute_job()` and passes to SDK |
 | `models/agent_session.py` | `AgentSession` model with `work_item_slug` field |
