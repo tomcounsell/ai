@@ -11,13 +11,11 @@ Covers the gaps identified in PR #180 review:
 """
 
 import time
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from models.agent_session import HISTORY_MAX_ENTRIES, SDLC_STAGES, AgentSession
-
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -595,10 +593,10 @@ class TestBackwardCompatibility:
         assert RedisJob is AgentSession
 
     def test_models_init_exports_both(self):
-        from models import AgentSession as AS
-        from models import SessionLog as SL
+        from models import AgentSession as AgentSessionAlias
+        from models import SessionLog as SessionLogAlias
 
-        assert AS is SL
+        assert AgentSessionAlias is SessionLogAlias
 
     def test_sender_property(self, session):
         assert session.sender == session.sender_name
