@@ -1047,6 +1047,17 @@ async def _execute_job(job: Job) -> None:
         if not send_cb:
             return
 
+        # If this session was already completed (e.g., by a prior duplicate job),
+        # deliver the output but skip auto-continue to prevent chain reactions.
+        if agent_session and agent_session.status == "completed":
+            logger.info(
+                f"[{job.project_key}] Session already completed — "
+                f"delivering without auto-continue ({len(msg)} chars)"
+            )
+            await send_cb(job.chat_id, msg, job.message_id, agent_session)
+            _completion_sent = True
+            return
+
         # If we already sent a completion, drop all subsequent outputs.
         # The work is done — further messages are noise that spams the chat.
         if _completion_sent:
