@@ -59,22 +59,53 @@ To add a future skill, add an entry to `SKILL_DETECTORS` — the coach picks it 
 
 ## Flow
 
+The auto-continue system uses a two-path routing strategy. SDLC jobs (those with `[stage]` entries in `AgentSession.history`) use pipeline stage progress as the primary signal. Non-SDLC jobs (casual chat, Q&A) use the LLM classifier.
+
 ```
 Agent Output
     |
     v
-Classifier (LLM) --- produces {type, confidence, reason, coaching_message}
+Is SDLC job? (check AgentSession.history for [stage] entries)
     |
-    v
-build_coaching_message()
-    |-- Tier 1:  coaching_message from classifier (if present)
-    |-- Tier 1b: heuristic rejection templates (if was_rejected but no LLM coaching)
-    |-- Tier 2:  skill-aware coaching (plan criteria or skill evidence hints)
-    +-- Tier 3:  plain "continue"
+    +-- YES: Stage-Aware Path
+    |     |
+    |     +-- Has failed stage? --> Deliver to user immediately
+    |     +-- Stages remaining? --> Auto-continue (skip classifier)
+    |     +-- All stages done?  --> Fall through to Classifier Path
     |
-    v
-[System Coach] message sent to agent
+    +-- NO: Classifier Path
+          |
+          v
+    Classifier (LLM) --- produces {type, confidence, reason, coaching_message}
+          |
+          v
+    build_coaching_message()
+          |-- Tier 1:  coaching_message from classifier (if present)
+          |-- Tier 1b: heuristic rejection templates (if was_rejected but no LLM coaching)
+          |-- Tier 2:  skill-aware coaching (plan criteria or skill evidence hints)
+          +-- Tier 3:  plain "continue"
+          |
+          v
+    [System Coach] message sent to agent
 ```
+
+### Stage-Aware Auto-Continue Decision Matrix
+
+| Pipeline state | Output classification | Action |
+|---|---|---|
+| Stages remaining | (skipped) | Auto-continue |
+| All stages done | Completion | Deliver to user |
+| All stages done | Status (no evidence) | Coach + continue |
+| Any stage failed | Error/blocker | Deliver to user |
+| No stages (non-SDLC) | Question | Deliver to user |
+| No stages (non-SDLC) | Status | Auto-continue (existing behavior) |
+
+### Auto-Continue Caps
+
+- **Non-SDLC jobs**: `MAX_AUTO_CONTINUES = 3` (classifier is the primary signal; counter prevents runaway loops)
+- **SDLC jobs**: `MAX_AUTO_CONTINUES_SDLC = 10` (stage progress is the real termination signal; counter is a safety net)
+
+Both caps are defined in `agent/job_queue.py`. The effective cap is selected based on `AgentSession.is_sdlc_job()`.
 
 ## Error-Classified Output Bypass (Crash Guard)
 
@@ -105,12 +136,14 @@ Without this guard, an SDK crash would produce output classified as a status upd
 |------|---------|
 | `bridge/summarizer.py` | LLM classifier that produces `ClassificationResult` with optional `coaching_message` |
 | `bridge/coach.py` | Tiered coaching resolution via `build_coaching_message()` |
-| `agent/job_queue.py` | Auto-continue wiring, WorkflowState resolution, duplicate suppression |
+| `agent/job_queue.py` | Auto-continue wiring, stage-aware routing, WorkflowState resolution, duplicate suppression |
+| `models/agent_session.py` | `AgentSession` with `is_sdlc_job()`, `has_remaining_stages()`, `has_failed_stage()` helpers |
 | `agent/sdk_client.py` | Session cleanup on SDK errors (marks sessions as `failed`) |
 | `monitoring/session_watchdog.py` | Stale session detection with unique constraint handling |
 | `tests/test_coach.py` | Coach module tests (skill detection, criteria extraction, coaching tiers) |
 | `tests/test_summarizer.py` | Classifier tests including coaching_message extraction |
 | `tests/test_auto_continue.py` | Auto-continue duplicate suppression tests |
+| `tests/test_stage_aware_auto_continue.py` | Stage-aware decision matrix tests (32 tests) |
 
 ## Tuning Guide
 
