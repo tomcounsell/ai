@@ -18,6 +18,7 @@ import subprocess
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from agent.branch_manager import (
     get_branch_state,
@@ -632,7 +633,9 @@ _active_workers: dict[str, asyncio.Task] = {}
 _project_configs: dict[str, dict] = {}
 
 # Callbacks registered by the bridge for sending messages and reactions
-SendCallback = Callable[..., Awaitable[None]]  # (chat_id, text, reply_to, session=None)
+SendCallback = Callable[
+    [str, str, int, Any], Awaitable[None]
+]  # (chat_id, text, reply_to, session)
 ReactionCallback = Callable[[str, int, str | None], Awaitable[None]]
 ResponseCallback = Callable[[object, str, str, int], Awaitable[None]]
 

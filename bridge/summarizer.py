@@ -758,7 +758,6 @@ def _compose_structured_summary(
     bullets, questions = _parse_summary_and_questions(summary_text)
 
     parts = []
-    is_sdlc = session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
 
     # Status emoji + first-line label
     emoji = _get_status_emoji(session, is_completion)
@@ -776,15 +775,10 @@ def _compose_structured_summary(
         if bullets and bullets[0] not in "✅⏳❌⚠️❓":
             parts.append(f"{emoji}")
 
-    # Stage progress line — mandatory for SDLC jobs
-    if is_sdlc:
-        stage_line = _render_stage_progress(session)
-        if stage_line:
-            parts.append(stage_line)
-    else:
-        stage_line = _render_stage_progress(session)
-        if stage_line:
-            parts.append(stage_line)
+    # Stage progress line — mandatory for SDLC, optional for others
+    stage_line = _render_stage_progress(session)
+    if stage_line:
+        parts.append(stage_line)
 
     # Summary text (bullets or prose)
     parts.append(bullets.strip())
@@ -808,10 +802,10 @@ async def summarize_response(
 ) -> SummarizedResponse:
     """Summarize an agent response for Telegram delivery.
 
-    - Responses <= SUMMARIZE_THRESHOLD chars: returned as-is
-    - Longer responses: summarized via Haiku, then Ollama fallback
+    - All non-empty responses: summarized via Haiku, then Ollama fallback
     - Very long responses (> FILE_ATTACH_THRESHOLD): full output
       attached as file
+    - SDLC sessions: structured template with stage progress + link footer
 
     Args:
         raw_response: The raw agent output text.
