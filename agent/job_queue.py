@@ -1192,47 +1192,14 @@ async def _execute_job(job: Job) -> None:
                 working_dir=str(working_dir),
             )
 
-            # Build context-aware coaching message instead of bare "continue"
-            from bridge.coach import build_coaching_message
-
-            # Resolve plan_file from WorkflowState if available
-            _plan_file = None
-            if job.workflow_id:
-                try:
-                    from agent.workflow_state import WorkflowState
-
-                    ws = WorkflowState.load(job.workflow_id)
-                    if ws.data and ws.data.plan_file:
-                        _plan_file = ws.data.plan_file
-                except Exception:
-                    pass  # Degrade gracefully — coach without plan context
-
-            coaching_message = build_coaching_message(
-                classification=classification,
-                plan_file=_plan_file,
-                job_message_text=job.message_text,
-            )
-
-            logger.info(
-                f"[{job.project_key}] Coaching message "
-                f"({len(coaching_message)} chars): {coaching_message[:120]!r}"
-            )
-
-            # Re-enqueue a continuation job with the same session_id
-            # This uses the same mechanism as user reply-to messages:
-            # SDK creates session with continue_conversation=True, resume=session_id
-            await enqueue_job(
-                project_key=job.project_key,
-                session_id=job.session_id,
-                working_dir=job.working_dir,
-                message_text=coaching_message,
-                sender_name="System (auto-continue)",
-                chat_id=job.chat_id,
-                message_id=job.message_id,
-                priority="high",
-                work_item_slug=job.work_item_slug,
+            # Build coaching message and re-enqueue via shared helper
+            await _enqueue_continuation(
+                job=job,
+                branch_name=branch_name,
                 task_list_id=task_list_id,
                 auto_continue_count=auto_continue_count,
+                output_msg=msg,
+                coaching_source="classifier",
             )
 
             # Suppress BackgroundTask's final messenger.send(result) call.
@@ -1249,12 +1216,12 @@ async def _execute_job(job: Job) -> None:
         # For all other types (question, completion, blocker, error,
         # or max auto-continues reached), send to chat normally
         if (
-            auto_continue_count >= MAX_AUTO_CONTINUES
+            auto_continue_count >= effective_max
             and classification.output_type == OutputType.STATUS_UPDATE
         ):
             logger.info(
                 f"[{job.project_key}] Max auto-continues reached "
-                f"({MAX_AUTO_CONTINUES}), sending to chat"
+                f"({effective_max}), sending to chat"
             )
 
         await send_cb(job.chat_id, msg, job.message_id, agent_session)
@@ -1460,7 +1427,7 @@ async def _execute_job(job: Job) -> None:
     elif _defer_reaction:
         logger.info(
             f"[{job.project_key}] Skipping session cleanup — "
-            f"continuation job enqueued (auto-continue {auto_continue_count}/{MAX_AUTO_CONTINUES})"
+            f"continuation job enqueued (auto-continue {auto_continue_count})"
         )
 
 
