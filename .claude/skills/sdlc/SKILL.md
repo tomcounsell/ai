@@ -102,8 +102,24 @@ If the count is 0, re-invoke `/do-pr-review`. A review that only exists in agent
 6. REVIEW — /do-pr-review
 7. PATCH  — /do-patch (fix review blockers, loop back to TEST → REVIEW)
 8. DOCS   — /do-docs
-9. MERGE  — human merges the PR
+9. MERGE  — human merges the PR + post-merge cleanup
 ```
+
+## Merge Phase: Post-Merge Cleanup
+
+When the human says "merge", execute the merge and then clean up the local worktree and branch:
+
+```bash
+# 1. Merge the PR (human-initiated)
+gh pr merge {pr_number} --squash --delete-branch
+
+# 2. Clean up local worktree and branch
+python scripts/post_merge_cleanup.py {slug}
+```
+
+The cleanup script removes the `.worktrees/{slug}/` directory and deletes the local `session/{slug}` branch. It is safe to run even if the worktree or branch is already gone.
+
+Without this step, `gh pr merge --delete-branch` will fail to delete the local branch because git refuses to delete a branch referenced by an active worktree.
 
 ## After Dispatching
 
