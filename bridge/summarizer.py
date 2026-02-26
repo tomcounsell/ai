@@ -375,7 +375,9 @@ def _classify_with_heuristics(text: str) -> ClassificationResult:
     return result
 
 
-def _apply_heuristic_confidence_gate(result: ClassificationResult) -> ClassificationResult:
+def _apply_heuristic_confidence_gate(
+    result: ClassificationResult,
+) -> ClassificationResult:
     """Apply the same confidence threshold to heuristic results as the LLM path.
 
     When heuristic confidence is below CLASSIFICATION_CONFIDENCE_THRESHOLD,
@@ -412,17 +414,20 @@ def _write_classification_audit(
     renaming to .1 when file exceeds 10 MB.
     """
     try:
-        from datetime import datetime, timezone
+        from datetime import UTC, datetime
 
         _AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
         # Size-based rotation
-        if _AUDIT_LOG_PATH.exists() and _AUDIT_LOG_PATH.stat().st_size > _AUDIT_LOG_MAX_SIZE:
+        if (
+            _AUDIT_LOG_PATH.exists()
+            and _AUDIT_LOG_PATH.stat().st_size > _AUDIT_LOG_MAX_SIZE
+        ):
             rotated = _AUDIT_LOG_PATH.with_suffix(".jsonl.1")
             _AUDIT_LOG_PATH.rename(rotated)
 
         entry = {
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now(UTC).isoformat(),
             "text_preview": text[:200] if text else "",
             "result": result.output_type.value,
             "confidence": round(result.confidence, 3),

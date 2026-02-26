@@ -554,15 +554,21 @@ class TestClassifyWithHeuristics:
         result = _classify_with_heuristics("Finished the implementation.")
         assert result.output_type == OutputType.COMPLETION
 
-    def test_status_default(self):
-        """Unrecognized patterns default to STATUS_UPDATE."""
-        result = _classify_with_heuristics("Analyzing the codebase structure now")
-        assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.confidence < 0.80
+    def test_default_is_question(self):
+        """Unrecognized patterns now default to QUESTION (conservative).
 
-    def test_status_running_tests(self):
+        Changed from STATUS_UPDATE to QUESTION as part of the auto-continue
+        audit (issue #99): the heuristic fallback should be conservative
+        (show to user) rather than permissive (auto-continue).
+        """
+        result = _classify_with_heuristics("Analyzing the codebase structure now")
+        assert result.output_type == OutputType.QUESTION
+        assert result.confidence == 0.50
+
+    def test_default_running_tests(self):
+        """No explicit status pattern — falls to conservative QUESTION default."""
         result = _classify_with_heuristics("Running tests now...")
-        assert result.output_type == OutputType.STATUS_UPDATE
+        assert result.output_type == OutputType.QUESTION
 
     def test_heuristics_always_return_coaching_message_none(self):
         """All heuristic paths return coaching_message=None."""
@@ -587,9 +593,157 @@ class TestClassifyWithHeuristics:
         assert result.coaching_message is None
 
     def test_empty_text(self):
-        """Empty text still returns a valid classification."""
+        """Empty text still returns a valid classification (default QUESTION)."""
         result = _classify_with_heuristics("")
-        assert result.output_type == OutputType.STATUS_UPDATE
+        assert result.output_type == OutputType.QUESTION
+
+    def test_approval_gate_when_approved(self):
+        """'when approved' triggers QUESTION (approval gate)."""
+        result = _classify_with_heuristics("Ready to build when approved")
+        assert result.output_type == OutputType.QUESTION
+        assert result.confidence == 0.85
+        assert "approval gate" in result.reason.lower()
+
+    def test_approval_gate_go_ahead(self):
+        """'waiting for go-ahead' triggers QUESTION."""
+        result = _classify_with_heuristics("Waiting for your go-ahead to proceed")
+        assert result.output_type == OutputType.QUESTION
+
+    def test_approval_gate_shall_i_proceed(self):
+        """'shall I proceed' triggers QUESTION."""
+        result = _classify_with_heuristics(
+            "Plan is ready. Shall I proceed with the build?"
+        )
+        assert result.output_type == OutputType.QUESTION
+
+    def test_approval_gate_awaiting_approval(self):
+        """'awaiting approval' triggers QUESTION."""
+        result = _classify_with_heuristics(
+            "PR is up, awaiting your approval before merging"
+        )
+        assert result.output_type == OutputType.QUESTION
+
+    def test_approval_gate_let_me_know_when(self):
+        """'let me know when' triggers QUESTION."""
+        result = _classify_with_heuristics(
+            "Let me know when you want me to start the migration"
+        )
+        assert result.output_type == OutputType.QUESTION
+
+
+class TestApplyHeuristicConfidenceGate:
+    """Tests for _apply_heuristic_confidence_gate."""
+
+    def test_high_confidence_passes_through(self):
+        """Results above threshold are returned unchanged."""
+        from bridge.summarizer import _apply_heuristic_confidence_gate
+
+        result = ClassificationResult(
+            output_type=OutputType.COMPLETION,
+            confidence=0.85,
+            reason="Detected completion",
+        )
+        gated = _apply_heuristic_confidence_gate(result)
+        assert gated.output_type == OutputType.COMPLETION
+        assert gated.confidence == 0.85
+
+    def test_low_confidence_becomes_question(self):
+        """Results below threshold become QUESTION."""
+        from bridge.summarizer import _apply_heuristic_confidence_gate
+
+        result = ClassificationResult(
+            output_type=OutputType.STATUS_UPDATE,
+            confidence=0.60,
+            reason="No strong signal",
+        )
+        gated = _apply_heuristic_confidence_gate(result)
+        assert gated.output_type == OutputType.QUESTION
+        assert gated.confidence == 0.60
+        assert "Low heuristic confidence" in gated.reason
+
+    def test_threshold_boundary_exact(self):
+        """Exactly at threshold passes through (not below)."""
+        from bridge.summarizer import _apply_heuristic_confidence_gate
+
+        result = ClassificationResult(
+            output_type=OutputType.STATUS_UPDATE,
+            confidence=0.80,
+            reason="Status",
+        )
+        gated = _apply_heuristic_confidence_gate(result)
+        assert gated.output_type == OutputType.STATUS_UPDATE
+
+    def test_below_threshold_preserves_original_confidence(self):
+        """The original confidence value is preserved in the gated result."""
+        from bridge.summarizer import _apply_heuristic_confidence_gate
+
+        result = ClassificationResult(
+            output_type=OutputType.STATUS_UPDATE,
+            confidence=0.55,
+            reason="Weak signal",
+        )
+        gated = _apply_heuristic_confidence_gate(result)
+        assert gated.confidence == 0.55
+
+
+class TestClassificationAuditLog:
+    """Tests for the classification audit JSONL log."""
+
+    def test_audit_log_writes_entry(self, tmp_path):
+        """_write_classification_audit creates a JSONL entry."""
+        import json
+
+        import bridge.summarizer as mod
+        from bridge.summarizer import _write_classification_audit
+
+        # Redirect audit log to temp path
+        original_path = mod._AUDIT_LOG_PATH
+        mod._AUDIT_LOG_PATH = tmp_path / "test_audit.jsonl"
+
+        try:
+            result = ClassificationResult(
+                output_type=OutputType.QUESTION,
+                confidence=0.85,
+                reason="Direct question",
+            )
+            _write_classification_audit("Should I proceed?", result, source="llm")
+
+            # Verify file was written
+            assert mod._AUDIT_LOG_PATH.exists()
+            line = mod._AUDIT_LOG_PATH.read_text().strip()
+            entry = json.loads(line)
+            assert entry["result"] == "question"
+            assert entry["confidence"] == 0.85
+            assert entry["source"] == "llm"
+            assert entry["text_preview"] == "Should I proceed?"
+            assert "ts" in entry
+        finally:
+            mod._AUDIT_LOG_PATH = original_path
+
+    def test_audit_log_truncates_preview(self, tmp_path):
+        """Text preview is truncated to 200 chars."""
+        import json
+
+        import bridge.summarizer as mod
+        from bridge.summarizer import _write_classification_audit
+
+        original_path = mod._AUDIT_LOG_PATH
+        mod._AUDIT_LOG_PATH = tmp_path / "test_audit2.jsonl"
+
+        try:
+            result = ClassificationResult(
+                output_type=OutputType.STATUS_UPDATE,
+                confidence=0.90,
+                reason="Progress",
+            )
+            long_text = "x" * 500
+            _write_classification_audit(long_text, result, source="heuristic")
+
+            line = mod._AUDIT_LOG_PATH.read_text().strip()
+            entry = json.loads(line)
+            assert len(entry["text_preview"]) == 200
+        finally:
+            mod._AUDIT_LOG_PATH = original_path
 
 
 class TestClassifyOutput:
