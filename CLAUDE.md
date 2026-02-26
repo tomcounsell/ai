@@ -422,3 +422,7 @@ The background worker runs `python manage.py db_worker` to process tasks enqueue
 - **Health checks**: Configured via dashboard, endpoint is `/health/` (lightweight) and `/health/deep/` (DB + cache)
 - **Deploy logs and metrics**: Available via `list_deploys`, `list_logs`, `get_metrics` MCP tools
 - **Environment variables**: Use `update_environment_variables` MCP tool (this one works)
+
+## Business Context
+
+For business context, project notes, and assets see the work vault: `~/src/work-vault/Cuttlefish/`
