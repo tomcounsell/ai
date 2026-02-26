@@ -1078,7 +1078,9 @@ async def main():
 
             # Create send callback that uses the Telegram client
             async def _make_send_cb(_client=client):
-                async def _send(chat_id: str, text: str, reply_to_msg_id: int) -> None:
+                async def _send(
+                    chat_id: str, text: str, reply_to_msg_id: int, session=None
+                ) -> None:
                     try:
                         filtered = filter_tool_logs(text)
                         if filtered:
@@ -1088,6 +1090,7 @@ async def main():
                                 filtered,
                                 chat_id=int(chat_id),
                                 reply_to=reply_to_msg_id,
+                                session=session,
                             )
                             if sent:
                                 try:

@@ -66,7 +66,9 @@ def sdlc_session(redis_test_db):
     s.append_history("stage", "REVIEW completed ☑")
     s.append_history("stage", "DOCS completed ☑")
     s.set_link("issue", "https://github.com/tomcounsell/ai/issues/177")
-    s.set_link("plan", "https://github.com/tomcounsell/ai/blob/main/docs/plans/summarizer.md")
+    s.set_link(
+        "plan", "https://github.com/tomcounsell/ai/blob/main/docs/plans/summarizer.md"
+    )
     s.set_link("pr", "https://github.com/tomcounsell/ai/pull/180")
     return s
 
@@ -420,12 +422,15 @@ class TestSummarizeWithSession:
     """Tests for summarize_response passing session context."""
 
     @pytest.mark.asyncio
-    async def test_short_response_no_session(self):
+    async def test_short_response_still_summarized(self):
+        """All non-empty responses are now summarized (no threshold)."""
         from bridge.summarizer import summarize_response
 
-        result = await summarize_response("Done.", session=None)
-        assert result.text == "Done."
-        assert result.was_summarized is False
+        mock_haiku = AsyncMock(return_value="Done ✅")
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response("Done.", session=None)
+        assert result.was_summarized is True
+        mock_haiku.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_long_response_with_sdlc_session(self, sdlc_session):
