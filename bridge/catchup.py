@@ -111,6 +111,16 @@ async def scan_for_missed_messages(
                     )
                     continue
 
+                # Skip messages already processed (Redis dedup)
+                from bridge.dedup import is_duplicate_message
+
+                if await is_duplicate_message(dialog.entity.id, message.id):
+                    logger.info(
+                        f"[catchup] {chat_title}: msg {message.id} "
+                        f"already processed (Redis dedup) - skip"
+                    )
+                    continue
+
                 # Get sender info
                 sender = await message.get_sender()
                 sender_name = getattr(sender, "first_name", "Unknown")
@@ -183,6 +193,11 @@ async def scan_for_missed_messages(
                     sender_id=sender_id,
                     workflow_id=None,
                 )
+
+                # Record in Redis dedup to prevent re-enqueue on next scan
+                from bridge.dedup import record_message_processed
+
+                await record_message_processed(dialog.entity.id, message.id)
                 queued += 1
 
         except Exception as e:
