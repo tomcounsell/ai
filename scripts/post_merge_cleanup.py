@@ -63,13 +63,21 @@ def main() -> int:
 
     if result["already_clean"]:
         print(f"Nothing to clean up for '{args.slug}' -- already clean.")
-    else:
-        actions = []
-        if result["worktree_removed"]:
-            actions.append(f"Removed worktree .worktrees/{args.slug}")
-        if result["branch_deleted"]:
-            actions.append(f"Deleted branch session/{args.slug}")
+        return 0
+
+    actions = []
+    if result["worktree_removed"]:
+        actions.append(f"Removed worktree .worktrees/{args.slug}")
+    if result["branch_deleted"]:
+        actions.append(f"Deleted branch session/{args.slug}")
+
+    if actions:
         print(f"Cleaned up '{args.slug}': {'; '.join(actions)}")
+
+    if result["errors"]:
+        for err in result["errors"]:
+            print(f"Error: {err}", file=sys.stderr)
+        return 1
 
     return 0
 

@@ -222,6 +222,7 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
         - worktree_removed: True if a worktree was removed
         - branch_deleted: True if a local branch was deleted
         - already_clean: True if nothing needed cleanup
+        - errors: List of error messages for any failed steps
 
     Raises:
         ValueError: If the slug is invalid.
