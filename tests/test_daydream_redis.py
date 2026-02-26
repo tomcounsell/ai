@@ -281,12 +281,12 @@ class TestAnalyzeSessionsFromRedis:
     """Tests for Redis-backed session analysis."""
 
     def test_analyzes_sessions_from_redis(self):
-        """analyze_sessions_from_redis queries SessionLog model."""
-        from models.session_log import SessionLog
+        """analyze_sessions_from_redis queries AgentSession model."""
+        from models.agent_session import AgentSession
         from scripts.daydream import analyze_sessions_from_redis
 
         # Create a session for today
-        SessionLog.create(
+        AgentSession.create(
             session_id="test-session-1",
             project_key="ai",
             status="completed",
@@ -304,10 +304,10 @@ class TestAnalyzeSessionsFromRedis:
 
     def test_detects_failed_sessions(self):
         """Failed sessions appear in error_patterns."""
-        from models.session_log import SessionLog
+        from models.agent_session import AgentSession
         from scripts.daydream import analyze_sessions_from_redis
 
-        SessionLog.create(
+        AgentSession.create(
             session_id="failed-session",
             project_key="ai",
             status="failed",

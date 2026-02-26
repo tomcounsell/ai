@@ -1,7 +1,7 @@
 """Tests for job health monitor: detect and recover stuck running jobs.
 
 Tests cover:
-- started_at field on RedisJob (set when job transitions to running)
+- started_at field on AgentSession (set when job transitions to running)
 - _get_job_timeout() returning correct timeouts based on message_text
 - _job_health_check() detecting and recovering dead workers and timed-out jobs
 - CLI functions: format_duration, show_status, flush_stuck, flush_job
@@ -13,14 +13,14 @@ import time
 import pytest
 
 from agent.job_queue import (
-    RedisJob,
     _active_workers,
     _pop_job,
 )
+from models.agent_session import AgentSession
 
 
-def _create_test_job(**overrides) -> RedisJob:
-    """Create a RedisJob with sensible defaults for testing."""
+def _create_test_job(**overrides) -> AgentSession:
+    """Create an AgentSession with sensible defaults for testing."""
     defaults = {
         "project_key": "test",
         "status": "pending",
@@ -34,18 +34,18 @@ def _create_test_job(**overrides) -> RedisJob:
         "message_id": 1,
     }
     defaults.update(overrides)
-    return RedisJob.create(**defaults)
+    return AgentSession.create(**defaults)
 
 
 class TestStartedAtField:
-    """Tests for the started_at field on RedisJob."""
+    """Tests for the started_at field on AgentSession."""
 
     def test_started_at_field_exists(self):
-        """RedisJob should have a started_at field."""
-        assert hasattr(RedisJob, "started_at"), "RedisJob missing started_at field"
+        """AgentSession should have a started_at field."""
+        assert hasattr(AgentSession, "started_at"), "AgentSession missing started_at field"
 
     def test_started_at_defaults_to_none(self):
-        """A newly created RedisJob should have started_at=None."""
+        """A newly created AgentSession should have started_at=None."""
         job = _create_test_job()
         assert job.started_at is None
 
@@ -58,8 +58,8 @@ class TestStartedAtField:
         after = time.time()
 
         assert job is not None
-        # Verify the RedisJob in Redis has started_at set
-        running_jobs = RedisJob.query.filter(project_key="test", status="running")
+        # Verify the AgentSession in Redis has started_at set
+        running_jobs = AgentSession.query.filter(project_key="test", status="running")
         assert len(running_jobs) == 1
         assert running_jobs[0].started_at is not None
         assert before <= running_jobs[0].started_at <= after
@@ -136,10 +136,10 @@ class TestJobHealthCheck:
             await _job_health_check()
 
             # The running job should be gone, replaced by a pending one
-            running = RedisJob.query.filter(project_key="test", status="running")
+            running = AgentSession.query.filter(project_key="test", status="running")
             assert len(running) == 0
 
-            pending = RedisJob.query.filter(project_key="test", status="pending")
+            pending = AgentSession.query.filter(project_key="test", status="pending")
             assert len(pending) == 1
             assert pending[0].session_id == "dead_worker_session"
         finally:
@@ -161,10 +161,10 @@ class TestJobHealthCheck:
 
         await _job_health_check()
 
-        running = RedisJob.query.filter(project_key="test", status="running")
+        running = AgentSession.query.filter(project_key="test", status="running")
         assert len(running) == 0
 
-        pending = RedisJob.query.filter(project_key="test", status="pending")
+        pending = AgentSession.query.filter(project_key="test", status="pending")
         assert len(pending) == 1
         assert pending[0].session_id == "orphan_session"
 
@@ -187,11 +187,11 @@ class TestJobHealthCheck:
             await _job_health_check()
 
             # The job should still be running
-            running = RedisJob.query.filter(project_key="test", status="running")
+            running = AgentSession.query.filter(project_key="test", status="running")
             assert len(running) == 1
             assert running[0].session_id == "alive_session"
 
-            pending = RedisJob.query.filter(project_key="test", status="pending")
+            pending = AgentSession.query.filter(project_key="test", status="pending")
             assert len(pending) == 0
         finally:
             _active_workers.pop("test", None)
@@ -214,10 +214,10 @@ class TestJobHealthCheck:
         try:
             await _job_health_check()
 
-            running = RedisJob.query.filter(project_key="test", status="running")
+            running = AgentSession.query.filter(project_key="test", status="running")
             assert len(running) == 0
 
-            pending = RedisJob.query.filter(project_key="test", status="pending")
+            pending = AgentSession.query.filter(project_key="test", status="pending")
             assert len(pending) == 1
             assert pending[0].session_id == "timeout_session"
         finally:
@@ -243,7 +243,7 @@ class TestJobHealthCheck:
             await _job_health_check()
 
             # Should NOT be recovered due to race condition guard
-            running = RedisJob.query.filter(project_key="test", status="running")
+            running = AgentSession.query.filter(project_key="test", status="running")
             assert len(running) == 1
             assert running[0].session_id == "recent_session"
         finally:
@@ -269,7 +269,7 @@ class TestJobHealthCheck:
         # Without started_at, we can't determine how long it's been running
         # but if no worker exists, it should still be recovered if started_at is None
         # The health check should handle this gracefully
-        running = RedisJob.query.filter(project_key="test", status="running")
+        running = AgentSession.query.filter(project_key="test", status="running")
         # Legacy jobs without started_at and no worker should still be recovered
         # since we can't determine their age, recovering is safer than leaving them stuck
         assert len(running) == 0
@@ -285,7 +285,7 @@ class TestJobHealthCheck:
         await _job_health_check()
 
         # Nothing should change
-        pending = RedisJob.query.filter(project_key="test", status="pending")
+        pending = AgentSession.query.filter(project_key="test", status="pending")
         assert len(pending) == 1
 
 

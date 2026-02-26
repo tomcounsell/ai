@@ -823,8 +823,10 @@ async def main():
                             if is_abort
                             else "Adding to current task"
                         )
-                        await client.send_message(
-                            event.chat_id, ack_text, reply_to=message.id
+                        from bridge.markdown import send_markdown
+
+                        await send_markdown(
+                            client, event.chat_id, ack_text, reply_to=message.id
                         )
                         logger.info(
                             f"[{project_name}] Steered message into active session "
@@ -853,7 +855,9 @@ async def main():
                 if revival_info.get("plan_context"):
                     revival_msg += f"\n\n> {revival_info['plan_context']}"
                 revival_msg += "\n\nReply to this message to resume."
-                await client.send_message(event.chat_id, revival_msg)
+                from bridge.markdown import send_markdown
+
+                await send_markdown(client, event.chat_id, revival_msg)
                 record_revival_cooldown(telegram_chat_id)
                 logger.info(
                     f"[{project_name}] Sent revival prompt for branch {revival_info['branch']}"
@@ -906,7 +910,10 @@ async def main():
                 classification_type=classification_result.get("type"),
             )
             if depth > 1:
-                await client.send_message(
+                from bridge.markdown import send_markdown
+
+                await send_markdown(
+                    client,
                     event.chat_id,
                     f"Queued (position {depth}). Working on a previous task first.",
                     reply_to=message.id,

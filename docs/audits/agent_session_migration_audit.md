@@ -3,9 +3,9 @@
 **Date:** 2026-02-26
 **Scope:** How the unified `AgentSession` Popoto Redis model (merged via PR #180) is used across the `/ai` repo. Checks for migration issues from the old `RedisJob` + `SessionLog` split.
 
-## Migration Grade: A-
+## Migration Grade: A
 
-No broken code found. The refactor is functionally complete.
+No broken code found. The refactor is functionally complete. All stale imports resolved (issue #198).
 
 ---
 
@@ -28,16 +28,17 @@ No broken code found. The refactor is functionally complete.
 
 ## STALE (Old Patterns, Functional But Should Migrate)
 
-| File | Import Used | Should Be |
-|------|-------------|-----------|
-| `scripts/daydream.py` (lines 195, 1337) | `from models.agent_session import AgentSession as SessionLog` | `import AgentSession` directly |
-| `tests/test_daydream_redis.py` | `from models.session_log import SessionLog` | `from models.agent_session import AgentSession` |
-| `tests/unit/test_session_tags.py` | `from models.session_log import SessionLog` | `from models.agent_session import AgentSession` |
-| `tests/test_job_health_monitor.py` | `from agent.job_queue import RedisJob` | `from models.agent_session import AgentSession` |
-| `tests/test_job_queue_race.py` | `from agent.job_queue import RedisJob` | `from models.agent_session import AgentSession` |
-| `tests/test_reply_delivery.py` | `from agent.job_queue import RedisJob` | `from models.agent_session import AgentSession` |
+**✅ All resolved** (PR for issue #198 — continue_summarizer_migration branch)
 
-All functional via shims. Low-risk cleanup — just import changes.
+All 6 stale import sites migrated to use `AgentSession` directly:
+- `scripts/daydream.py` — alias removed, all references updated
+- `tests/test_daydream_redis.py` — imports `AgentSession` from `models.agent_session`
+- `tests/unit/test_session_tags.py` — imports `AgentSession` from `models.agent_session`
+- `tests/test_job_health_monitor.py` — imports `AgentSession` from `models.agent_session`
+- `tests/test_job_queue_race.py` — imports `AgentSession` from `models.agent_session`
+- `tests/test_reply_delivery.py` — imports `AgentSession` from `models.agent_session`
+
+Additionally, 3 `client.send_message()` calls in `bridge/telegram_bridge.py` replaced with `send_markdown()` for consistent Telegram formatting.
 
 ---
 
@@ -71,7 +72,7 @@ This works but is fragile — if `_JOB_FIELDS` misses a field, data is silently 
 
 ## Recommendations
 
-1. **Migrate stale imports** — Change the 6 test files + daydream.py to use `AgentSession` directly. Low risk, improves clarity.
+1. ~~**Migrate stale imports**~~ — ✅ Done (issue #198). All 6 test files + daydream.py now use `AgentSession` directly.
 2. **Keep shims** — `models/session_log.py` and `RedisJob` alias should stay for now. External code may depend on them.
 3. **Monitor orphan recovery** — If `_recover_orphaned_jobs()` fires frequently in production, investigate Popoto KeyField behavior further.
 4. **Document `_JOB_FIELDS`** — Add a comment or test verifying the field list matches all AgentSession fields, to prevent silent data loss in the delete-recreate pattern.
