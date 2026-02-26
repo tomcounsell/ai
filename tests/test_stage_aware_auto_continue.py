@@ -1,0 +1,406 @@
+"""Tests for stage-aware auto-continue logic.
+
+Verifies that SDLC jobs use pipeline stage progress from AgentSession.history
+as the primary auto-continue signal, falling back to the classifier for
+non-SDLC jobs.
+
+Decision matrix:
+  | Pipeline state       | Output classification | Action            |
+  |----------------------|-----------------------|-------------------|
+  | Stages remaining     | (skipped)             | Auto-continue     |
+  | All stages done      | Completion            | Deliver to user   |
+  | All stages done      | Status (no evidence)  | Coach + continue  |
+  | Any stage failed     | Error/blocker         | Deliver to user   |
+  | No stages (non-SDLC) | Question              | Deliver to user   |
+  | No stages (non-SDLC) | Status                | Auto-continue     |
+
+Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
+"""
+
+import sys
+from unittest.mock import MagicMock
+
+# Mock the claude_agent_sdk before agent package tries to import it
+if "claude_agent_sdk" not in sys.modules:
+    _mock_sdk = MagicMock()
+    sys.modules["claude_agent_sdk"] = _mock_sdk
+
+from agent.job_queue import MAX_AUTO_CONTINUES, MAX_AUTO_CONTINUES_SDLC
+from models.agent_session import AgentSession
+
+# === AgentSession helper method tests ===
+
+
+class TestIsSDLCJob:
+    """Tests for AgentSession.is_sdlc_job()."""
+
+    def test_no_history_returns_false(self):
+        """Session with no history is not an SDLC job."""
+        session = AgentSession()
+        session.history = None
+        assert session.is_sdlc_job() is False
+
+    def test_empty_history_returns_false(self):
+        """Session with empty history is not an SDLC job."""
+        session = AgentSession()
+        session.history = []
+        assert session.is_sdlc_job() is False
+
+    def test_non_stage_history_returns_false(self):
+        """Session with only non-stage history entries is not SDLC."""
+        session = AgentSession()
+        session.history = [
+            "[user] Hello world",
+            "[system] Processing request",
+        ]
+        assert session.is_sdlc_job() is False
+
+    def test_stage_entry_returns_true(self):
+        """Session with a [stage] entry is an SDLC job."""
+        session = AgentSession()
+        session.history = [
+            "[user] /sdlc 178",
+            "[stage] ISSUE COMPLETED",
+        ]
+        assert session.is_sdlc_job() is True
+
+    def test_case_insensitive_stage_detection(self):
+        """Stage detection is case-insensitive."""
+        session = AgentSession()
+        session.history = ["[Stage] BUILD IN_PROGRESS"]
+        assert session.is_sdlc_job() is True
+
+    def test_mixed_history_with_stage_returns_true(self):
+        """Session with mixed entries including a stage is SDLC."""
+        session = AgentSession()
+        session.history = [
+            "[user] Start the build",
+            "[system] Running tests",
+            "[stage] PLAN COMPLETED",
+            "[summary] Plan phase done",
+        ]
+        assert session.is_sdlc_job() is True
+
+
+class TestHasRemainingStages:
+    """Tests for AgentSession.has_remaining_stages()."""
+
+    def test_no_history_returns_true(self):
+        """With no history, all stages are pending (remaining)."""
+        session = AgentSession()
+        session.history = None
+        assert session.has_remaining_stages() is True
+
+    def test_all_stages_completed(self):
+        """When all stages are completed, no remaining stages."""
+        session = AgentSession()
+        session.history = [
+            "[stage] ISSUE COMPLETED",
+            "[stage] PLAN COMPLETED",
+            "[stage] BUILD COMPLETED",
+            "[stage] TEST COMPLETED",
+            "[stage] REVIEW COMPLETED",
+            "[stage] DOCS COMPLETED",
+        ]
+        assert session.has_remaining_stages() is False
+
+    def test_some_stages_remaining(self):
+        """When some stages are completed, others remain."""
+        session = AgentSession()
+        session.history = [
+            "[stage] ISSUE COMPLETED",
+            "[stage] PLAN COMPLETED",
+            "[stage] BUILD IN_PROGRESS",
+        ]
+        assert session.has_remaining_stages() is True
+
+    def test_in_progress_counts_as_remaining(self):
+        """In-progress stages count as remaining."""
+        session = AgentSession()
+        session.history = [
+            "[stage] ISSUE COMPLETED",
+            "[stage] PLAN COMPLETED",
+            "[stage] BUILD COMPLETED",
+            "[stage] TEST COMPLETED",
+            "[stage] REVIEW COMPLETED",
+            "[stage] DOCS IN_PROGRESS",
+        ]
+        assert session.has_remaining_stages() is True
+
+    def test_failed_stage_not_remaining(self):
+        """Failed stages are NOT remaining (they're terminal)."""
+        session = AgentSession()
+        session.history = [
+            "[stage] ISSUE COMPLETED",
+            "[stage] PLAN COMPLETED",
+            "[stage] BUILD COMPLETED",
+            "[stage] TEST FAILED",
+            "[stage] REVIEW COMPLETED",
+            "[stage] DOCS COMPLETED",
+        ]
+        # TEST is failed, all others completed — no remaining (pending/in_progress)
+        assert session.has_remaining_stages() is False
+
+
+class TestHasFailedStage:
+    """Tests for AgentSession.has_failed_stage()."""
+
+    def test_no_history_returns_false(self):
+        """No history means no failed stages."""
+        session = AgentSession()
+        session.history = None
+        assert session.has_failed_stage() is False
+
+    def test_no_failures_returns_false(self):
+        """Completed stages only — no failures."""
+        session = AgentSession()
+        session.history = [
+            "[stage] ISSUE COMPLETED",
+            "[stage] PLAN COMPLETED",
+        ]
+        assert session.has_failed_stage() is False
+
+    def test_failed_stage_detected(self):
+        """FAILED keyword in stage entry is detected."""
+        session = AgentSession()
+        session.history = [
+            "[stage] ISSUE COMPLETED",
+            "[stage] BUILD FAILED",
+        ]
+        assert session.has_failed_stage() is True
+
+    def test_error_stage_detected(self):
+        """ERROR keyword in stage entry is detected."""
+        session = AgentSession()
+        session.history = [
+            "[stage] TEST ERROR: ModuleNotFoundError",
+        ]
+        assert session.has_failed_stage() is True
+
+    def test_non_stage_error_not_detected(self):
+        """Errors in non-stage entries don't count."""
+        session = AgentSession()
+        session.history = [
+            "[system] Error: something went wrong",
+            "[stage] BUILD COMPLETED",
+        ]
+        assert session.has_failed_stage() is False
+
+
+# === Stage-aware routing decision tests ===
+
+
+class TestStageAwareDecisionMatrix:
+    """Tests verifying the stage-aware auto-continue decision matrix.
+
+    These tests exercise the routing logic by simulating the conditions
+    that send_to_chat checks, verifying the correct action is taken.
+    """
+
+    def test_sdlc_stages_remaining_auto_continues(self):
+        """SDLC job with remaining stages should auto-continue without classifier."""
+        session = AgentSession()
+        session.history = [
+            "[stage] ISSUE COMPLETED",
+            "[stage] PLAN COMPLETED",
+            "[stage] BUILD IN_PROGRESS",
+        ]
+
+        assert session.is_sdlc_job() is True
+        assert session.has_remaining_stages() is True
+        assert session.has_failed_stage() is False
+
+        # Decision: auto-continue (stages remaining, no classifier needed)
+        auto_continue_count = 0
+        effective_max = MAX_AUTO_CONTINUES_SDLC
+
+        should_auto_continue = (
+            session.is_sdlc_job()
+            and session.has_remaining_stages()
+            and not session.has_failed_stage()
+            and auto_continue_count < effective_max
+        )
+        assert should_auto_continue is True
+
+    def test_sdlc_all_stages_done_falls_to_classifier(self):
+        """SDLC job with all stages done should use the classifier."""
+        session = AgentSession()
+        session.history = [
+            "[stage] ISSUE COMPLETED",
+            "[stage] PLAN COMPLETED",
+            "[stage] BUILD COMPLETED",
+            "[stage] TEST COMPLETED",
+            "[stage] REVIEW COMPLETED",
+            "[stage] DOCS COMPLETED",
+        ]
+
+        assert session.is_sdlc_job() is True
+        assert session.has_remaining_stages() is False
+        assert session.has_failed_stage() is False
+
+        # Decision: fall through to classifier (all stages done)
+        should_use_stage_routing = (
+            session.is_sdlc_job()
+            and session.has_remaining_stages()
+            and not session.has_failed_stage()
+        )
+        assert should_use_stage_routing is False
+
+    def test_sdlc_failed_stage_delivers_to_user(self):
+        """SDLC job with a failed stage should deliver immediately."""
+        session = AgentSession()
+        session.history = [
+            "[stage] ISSUE COMPLETED",
+            "[stage] PLAN COMPLETED",
+            "[stage] BUILD FAILED",
+        ]
+
+        assert session.is_sdlc_job() is True
+        assert session.has_failed_stage() is True
+
+        # Decision: deliver to user (failed stage)
+        should_deliver = session.is_sdlc_job() and session.has_failed_stage()
+        assert should_deliver is True
+
+    def test_non_sdlc_uses_classifier(self):
+        """Non-SDLC job should use the classifier-based routing."""
+        session = AgentSession()
+        session.history = [
+            "[user] Tell me about Python",
+            "[system] Processing casual question",
+        ]
+
+        assert session.is_sdlc_job() is False
+
+        # Decision: use classifier (not an SDLC job)
+        effective_max = MAX_AUTO_CONTINUES  # Non-SDLC gets lower cap
+        assert effective_max == 3
+
+    def test_sdlc_safety_cap_prevents_infinite_loop(self):
+        """SDLC auto-continue respects the safety cap even with stages remaining."""
+        session = AgentSession()
+        session.history = [
+            "[stage] ISSUE COMPLETED",
+            "[stage] PLAN IN_PROGRESS",
+        ]
+
+        assert session.is_sdlc_job() is True
+        assert session.has_remaining_stages() is True
+
+        # Simulate having hit the SDLC safety cap
+        auto_continue_count = MAX_AUTO_CONTINUES_SDLC
+        effective_max = MAX_AUTO_CONTINUES_SDLC
+
+        should_auto_continue = (
+            session.is_sdlc_job()
+            and session.has_remaining_stages()
+            and not session.has_failed_stage()
+            and auto_continue_count < effective_max
+        )
+        # Safety cap reached — falls through to classifier
+        assert should_auto_continue is False
+
+
+class TestMaxAutoContiuesConstants:
+    """Tests for the auto-continue constants."""
+
+    def test_max_auto_continues_value(self):
+        """Non-SDLC cap is 3."""
+        assert MAX_AUTO_CONTINUES == 3
+
+    def test_max_auto_continues_sdlc_value(self):
+        """SDLC cap is 10."""
+        assert MAX_AUTO_CONTINUES_SDLC == 10
+
+    def test_sdlc_cap_higher_than_standard(self):
+        """SDLC cap must be higher than the standard cap."""
+        assert MAX_AUTO_CONTINUES_SDLC > MAX_AUTO_CONTINUES
+
+    def test_both_caps_positive(self):
+        """Both caps must be positive integers."""
+        assert isinstance(MAX_AUTO_CONTINUES, int)
+        assert isinstance(MAX_AUTO_CONTINUES_SDLC, int)
+        assert MAX_AUTO_CONTINUES > 0
+        assert MAX_AUTO_CONTINUES_SDLC > 0
+
+
+class TestGetStageProgressWithFailures:
+    """Tests for get_stage_progress() including failure detection."""
+
+    def test_failed_stage_status(self):
+        """Failed stages show as 'failed' in progress dict."""
+        session = AgentSession()
+        session.history = [
+            "[stage] ISSUE COMPLETED",
+            "[stage] BUILD FAILED",
+        ]
+        progress = session.get_stage_progress()
+        assert progress["ISSUE"] == "completed"
+        assert progress["BUILD"] == "failed"
+        assert progress["PLAN"] == "pending"
+
+    def test_error_stage_status(self):
+        """Error stages show as 'failed' in progress dict."""
+        session = AgentSession()
+        session.history = [
+            "[stage] TEST ERROR: test suite crashed",
+        ]
+        progress = session.get_stage_progress()
+        assert progress["TEST"] == "failed"
+
+    def test_mixed_progress(self):
+        """Mix of completed, in_progress, pending, and failed stages."""
+        session = AgentSession()
+        session.history = [
+            "[stage] ISSUE COMPLETED",
+            "[stage] PLAN COMPLETED",
+            "[stage] BUILD COMPLETED",
+            "[stage] TEST FAILED",
+        ]
+        progress = session.get_stage_progress()
+        assert progress["ISSUE"] == "completed"
+        assert progress["PLAN"] == "completed"
+        assert progress["BUILD"] == "completed"
+        assert progress["TEST"] == "failed"
+        assert progress["REVIEW"] == "pending"
+        assert progress["DOCS"] == "pending"
+
+
+class TestStageAwareWithEmoji:
+    """Tests for stage detection using emoji markers (☑ and ▶)."""
+
+    def test_checkmark_emoji_completed(self):
+        """☑ emoji marks stage as completed."""
+        session = AgentSession()
+        session.history = ["[stage] ☑ ISSUE"]
+        assert session.is_sdlc_job() is True
+        progress = session.get_stage_progress()
+        assert progress["ISSUE"] == "completed"
+
+    def test_play_emoji_in_progress(self):
+        """▶ emoji marks stage as in_progress."""
+        session = AgentSession()
+        session.history = ["[stage] ▶ BUILD"]
+        progress = session.get_stage_progress()
+        assert progress["BUILD"] == "in_progress"
+        assert session.has_remaining_stages() is True
+
+
+class TestEffectiveMaxSelection:
+    """Tests verifying the correct max is chosen based on job type."""
+
+    def test_sdlc_job_gets_higher_cap(self):
+        """SDLC jobs should use MAX_AUTO_CONTINUES_SDLC."""
+        session = AgentSession()
+        session.history = ["[stage] ISSUE COMPLETED"]
+        is_sdlc = session.is_sdlc_job()
+        effective_max = MAX_AUTO_CONTINUES_SDLC if is_sdlc else MAX_AUTO_CONTINUES
+        assert effective_max == MAX_AUTO_CONTINUES_SDLC
+
+    def test_non_sdlc_job_gets_standard_cap(self):
+        """Non-SDLC jobs should use MAX_AUTO_CONTINUES."""
+        session = AgentSession()
+        session.history = ["[user] Hello"]
+        is_sdlc = session.is_sdlc_job()
+        effective_max = MAX_AUTO_CONTINUES_SDLC if is_sdlc else MAX_AUTO_CONTINUES
+        assert effective_max == MAX_AUTO_CONTINUES

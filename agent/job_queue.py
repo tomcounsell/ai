@@ -35,16 +35,13 @@ RedisJob = AgentSession
 
 MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent input
 MAX_AUTO_CONTINUES = 3  # Max status updates to auto-continue before sending to chat
+MAX_AUTO_CONTINUES_SDLC = 10  # Higher cap for SDLC jobs (stage progress is real signal)
 
 # Job health check constants
 JOB_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
 JOB_TIMEOUT_DEFAULT = 2700  # 45 minutes for standard jobs
-JOB_TIMEOUT_BUILD = (
-    9000  # 2.5 hours for build jobs (detected by /do-build in message_text)
-)
-JOB_HEALTH_MIN_RUNNING = (
-    300  # Don't recover jobs running less than 5 min (race condition guard)
-)
+JOB_TIMEOUT_BUILD = 9000  # 2.5 hours for build jobs (detected by /do-build in message_text)
+JOB_HEALTH_MIN_RUNNING = 300  # Don't recover jobs running less than 5 min (race condition guard)
 
 
 class Job:
@@ -273,9 +270,7 @@ async def _pop_job(project_key: str) -> Job | None:
     status index set but never REMOVEs from the old one, so mutating
     status and calling save() leaves a stale entry in the pending index.
     """
-    pending = await AgentSession.query.async_filter(
-        project_key=project_key, status="pending"
-    )
+    pending = await AgentSession.query.async_filter(project_key=project_key, status="pending")
     if not pending:
         return None
 
@@ -330,9 +325,7 @@ def _recover_interrupted_jobs(project_key: str) -> int:
     Uses delete-and-recreate to avoid KeyField index corruption.
     Returns the number of recovered jobs.
     """
-    running_jobs = list(
-        AgentSession.query.filter(project_key=project_key, status="running")
-    )
+    running_jobs = list(AgentSession.query.filter(project_key=project_key, status="running"))
     if not running_jobs:
         return 0
 
@@ -360,17 +353,13 @@ async def _reset_running_jobs(project_key: str) -> int:
     Uses delete-and-recreate to avoid KeyField index corruption.
     Returns the number of reset jobs.
     """
-    running_jobs = await AgentSession.query.async_filter(
-        project_key=project_key, status="running"
-    )
+    running_jobs = await AgentSession.query.async_filter(project_key=project_key, status="running")
     if not running_jobs:
         return 0
 
     for job in running_jobs:
         old_id = job.job_id
-        logger.info(
-            f"[{project_key}] Resetting in-flight job {old_id} to pending for next startup"
-        )
+        logger.info(f"[{project_key}] Resetting in-flight job {old_id} to pending for next startup")
         fields = _extract_job_fields(job)
         await job.async_delete()
         fields["status"] = "pending"
@@ -447,9 +436,7 @@ def _recover_orphaned_jobs(project_key: str) -> int:
                 fields = _extract_job_fields(orphan_job)
             except Exception:
                 # If decoding fails, skip this orphan
-                logger.warning(
-                    f"[{project_key}] Could not decode orphan {key_str}, skipping"
-                )
+                logger.warning(f"[{project_key}] Could not decode orphan {key_str}, skipping")
                 continue
 
             # Delete the orphan hash and class set entry
@@ -462,8 +449,7 @@ def _recover_orphaned_jobs(project_key: str) -> int:
             new_job = AgentSession.create(**fields)
             recovered += 1
             logger.warning(
-                f"[{project_key}] Recovered orphaned job from key {key_str} "
-                f"-> {new_job.job_id}"
+                f"[{project_key}] Recovered orphaned job from key {key_str} -> {new_job.job_id}"
             )
         except Exception as e:
             logger.error(f"[{project_key}] Failed to recover orphan {key}: {e}")
@@ -533,9 +519,7 @@ async def _job_health_check() -> None:
                 # Legacy job without started_at and no worker -- recover
                 should_recover = True
                 reason = "worker dead/missing, no started_at (legacy job)"
-            elif (
-                running_seconds is not None and running_seconds > JOB_HEALTH_MIN_RUNNING
-            ):
+            elif running_seconds is not None and running_seconds > JOB_HEALTH_MIN_RUNNING:
                 should_recover = True
                 reason = (
                     f"worker dead/missing, running for "
@@ -671,8 +655,7 @@ def _truncate_to_limit(text: str, label: str) -> str:
     original_len = len(text)
     text = "...[truncated]\n" + text[-(MSG_MAX_CHARS - 15) :]
     logger.warning(
-        f"Truncated {label}: {original_len} -> {len(text)} chars "
-        f"(kept last {MSG_MAX_CHARS} chars)"
+        f"Truncated {label}: {original_len} -> {len(text)} chars (kept last {MSG_MAX_CHARS} chars)"
     )
     return text
 
@@ -697,9 +680,7 @@ def _check_restart_flag() -> bool:
             return False
 
     flag_content = _RESTART_FLAG.read_text().strip()
-    logger.info(
-        f"Restart flag found ({flag_content}), no running jobs — restarting bridge"
-    )
+    logger.info(f"Restart flag found ({flag_content}), no running jobs — restarting bridge")
     return True
 
 
@@ -780,9 +761,7 @@ async def enqueue_job(
         auto_continue_count=auto_continue_count,
     )
     _ensure_worker(project_key)
-    logger.info(
-        f"[{project_key}] Enqueued job " f"(priority={priority}, depth={depth})"
-    )
+    logger.info(f"[{project_key}] Enqueued job (priority={priority}, depth={depth})")
     return depth
 
 
@@ -818,9 +797,7 @@ async def _worker_loop(project_key: str) -> None:
                     if _check_restart_flag():
                         _trigger_restart()
                     break
-                logger.info(
-                    f"[{project_key}] Drain guard caught job that would have been lost"
-                )
+                logger.info(f"[{project_key}] Drain guard caught job that would have been lost")
 
             try:
                 await _execute_job(job)
@@ -885,6 +862,77 @@ async def _calendar_heartbeat(slug: str, project: str | None = None) -> None:
 CALENDAR_HEARTBEAT_INTERVAL = 25 * 60  # 25 minutes (fits within 30-min segments)
 
 
+async def _enqueue_continuation(
+    job: "Job",
+    branch_name: str,
+    task_list_id: str,
+    auto_continue_count: int,
+    output_msg: str,
+    coaching_source: str = "stage_aware",
+) -> None:
+    """Enqueue a continuation job for stage-aware auto-continue.
+
+    Builds a coaching message and re-enqueues the job with the same
+    session_id so the SDK resumes the conversation. Used by both the
+    stage-aware path and the classifier path.
+
+    Args:
+        job: The current Job being executed.
+        branch_name: Git branch name for the session.
+        task_list_id: Task list ID for sub-agent isolation.
+        auto_continue_count: Current auto-continue count (already incremented).
+        output_msg: The agent output that triggered auto-continue.
+        coaching_source: Label for logging ("stage_aware" or "classifier").
+    """
+    from bridge.coach import build_coaching_message
+    from bridge.summarizer import ClassificationResult, OutputType
+
+    # For stage-aware continuations, build a minimal classification
+    # so the coach can still provide skill-aware coaching
+    classification = ClassificationResult(
+        output_type=OutputType.STATUS_UPDATE,
+        confidence=1.0,
+        reason=f"Stage-aware auto-continue ({coaching_source})",
+    )
+
+    # Resolve plan_file from WorkflowState if available
+    _plan_file = None
+    if job.workflow_id:
+        try:
+            from agent.workflow_state import WorkflowState
+
+            ws = WorkflowState.load(job.workflow_id)
+            if ws.data and ws.data.plan_file:
+                _plan_file = ws.data.plan_file
+        except Exception:
+            pass  # Degrade gracefully
+
+    coaching_message = build_coaching_message(
+        classification=classification,
+        plan_file=_plan_file,
+        job_message_text=job.message_text,
+    )
+
+    logger.info(
+        f"[{job.project_key}] Coaching message ({coaching_source}) "
+        f"({len(coaching_message)} chars): {coaching_message[:120]!r}"
+    )
+
+    await enqueue_job(
+        project_key=job.project_key,
+        session_id=job.session_id,
+        working_dir=job.working_dir,
+        message_text=coaching_message,
+        sender_name="System (auto-continue)",
+        chat_id=job.chat_id,
+        message_id=job.message_id,
+        priority="high",
+        work_item_slug=job.work_item_slug,
+        task_list_id=task_list_id,
+        auto_continue_count=auto_continue_count,
+    )
+
+
 async def _execute_job(job: Job) -> None:
     """
     Execute a single job:
@@ -934,9 +982,7 @@ async def _execute_job(job: Job) -> None:
     # Update the AgentSession (already created at enqueue time) with session-phase fields
     agent_session = None
     try:
-        sessions = list(
-            AgentSession.query.filter(project_key=job.project_key, status="running")
-        )
+        sessions = list(AgentSession.query.filter(project_key=job.project_key, status="running"))
         for s in sessions:
             if s.session_id == job.session_id:
                 agent_session = s
@@ -980,7 +1026,83 @@ async def _execute_job(job: Job) -> None:
             )
             return
 
-        # Classify the output to decide routing
+        # === Stage-aware auto-continue for SDLC jobs ===
+        # Decision matrix (see docs/plans/stage_aware_auto_continue.md):
+        #
+        # | Pipeline state      | Output classification | Action            |
+        # |---------------------|-----------------------|-------------------|
+        # | Stages remaining    | (skipped)             | Auto-continue     |
+        # | All stages done     | Completion            | Deliver to user   |
+        # | All stages done     | Status (no evidence)  | Coach + continue  |
+        # | Any stage failed    | Error/blocker         | Deliver to user   |
+        # | No stages (non-SDLC)| Question              | Deliver to user   |
+        # | No stages (non-SDLC)| Status                | Auto-continue     |
+        #
+        # For SDLC jobs, stage progress is the primary termination signal.
+        # The classifier is only consulted when all stages are done or for
+        # non-SDLC jobs.
+
+        _is_sdlc = False
+        _sdlc_has_remaining = False
+        _sdlc_has_failed = False
+        if agent_session:
+            _is_sdlc = agent_session.is_sdlc_job()
+            if _is_sdlc:
+                _sdlc_has_remaining = agent_session.has_remaining_stages()
+                _sdlc_has_failed = agent_session.has_failed_stage()
+
+        # Determine the effective auto-continue cap for this job
+        effective_max = MAX_AUTO_CONTINUES_SDLC if _is_sdlc else MAX_AUTO_CONTINUES
+
+        if _is_sdlc and _sdlc_has_failed:
+            # SDLC job with a failed stage — deliver to user immediately.
+            # Don't auto-continue; the failure needs human attention.
+            logger.info(f"[{job.project_key}] SDLC stage failed — delivering to user")
+            await send_cb(job.chat_id, msg, job.message_id)
+            _completion_sent = True
+            return
+
+        if _is_sdlc and _sdlc_has_remaining and auto_continue_count < effective_max:
+            # SDLC job with stages remaining — auto-continue without classifier.
+            # Stage progress is a stronger signal than prose classification.
+            auto_continue_count += 1
+            progress = agent_session.get_stage_progress()
+            logger.info(
+                f"[{job.project_key}] Stage-aware auto-continue "
+                f"({auto_continue_count}/{effective_max}), "
+                f"progress: {progress}"
+            )
+
+            save_session_snapshot(
+                session_id=job.session_id,
+                event="auto_continue",
+                project_key=job.project_key,
+                branch_name=branch_name,
+                task_summary=f"Stage-aware auto-continue ({auto_continue_count}/{effective_max})",
+                extra_context={
+                    "routing": "stage_aware",
+                    "stage_progress": str(progress),
+                    "message_preview": msg[:200],
+                },
+                working_dir=str(working_dir),
+            )
+
+            await _enqueue_continuation(
+                job,
+                branch_name,
+                task_list_id,
+                auto_continue_count,
+                msg,
+                coaching_source="stage_aware",
+            )
+
+            _completion_sent = True
+            _defer_reaction = True
+            return
+
+        # === Classifier-based routing ===
+        # Used for: non-SDLC jobs, SDLC jobs with all stages done,
+        # and SDLC jobs that hit the safety cap.
         from bridge.summarizer import OutputType, classify_output
 
         classification = await classify_output(msg)
@@ -994,20 +1116,18 @@ async def _execute_job(job: Job) -> None:
             # Without this, SDK crashes would be misclassified as status updates
             # and re-enqueued indefinitely, creating an infinite crash loop.
             # See docs/features/coaching-loop.md "Error-Classified Output Bypass".
-            logger.info(
-                f"[{job.project_key}] Error classified — skipping auto-continue"
-            )
+            logger.info(f"[{job.project_key}] Error classified — skipping auto-continue")
             # Fall through to send error to chat
 
         elif (
             classification.output_type == OutputType.STATUS_UPDATE
-            and auto_continue_count < MAX_AUTO_CONTINUES
+            and auto_continue_count < effective_max
         ):
             # Status update -- don't send to chat, re-enqueue job to continue session
             auto_continue_count += 1
             logger.info(
                 f"[{job.project_key}] Auto-continuing via job re-enqueue "
-                f"({auto_continue_count}/{MAX_AUTO_CONTINUES})"
+                f"({auto_continue_count}/{effective_max})"
             )
 
             # Log a session snapshot for audit trail
@@ -1016,8 +1136,9 @@ async def _execute_job(job: Job) -> None:
                 event="auto_continue",
                 project_key=job.project_key,
                 branch_name=branch_name,
-                task_summary=f"Auto-continued ({auto_continue_count}/{MAX_AUTO_CONTINUES})",
+                task_summary=f"Auto-continued ({auto_continue_count}/{effective_max})",
                 extra_context={
+                    "routing": "classifier",
                     "classification": classification.output_type.value,
                     "confidence": classification.confidence,
                     "reason": classification.reason,
@@ -1125,9 +1246,7 @@ async def _execute_job(job: Job) -> None:
                 _defer_reaction = True
 
             _completion_sent = True
-            logger.info(
-                f"[{job.project_key}] Completion sent — suppressing further outputs"
-            )
+            logger.info(f"[{job.project_key}] Completion sent — suppressing further outputs")
 
     messenger = BossMessenger(
         _send_callback=send_to_chat,
@@ -1156,9 +1275,7 @@ async def _execute_job(job: Job) -> None:
                 message_id=job.message_id,
             )
         except Exception as e:
-            logger.warning(
-                f"[{job.project_key}] Enrichment failed, using raw text: {e}"
-            )
+            logger.warning(f"[{job.project_key}] Enrichment failed, using raw text: {e}")
 
     # Run agent work directly in the project working directory
     project_config = {
@@ -1188,9 +1305,7 @@ async def _execute_job(job: Job) -> None:
     while task.is_running:
         await asyncio.sleep(2)
         if time.time() - last_heartbeat >= CALENDAR_HEARTBEAT_INTERVAL:
-            asyncio.create_task(
-                _calendar_heartbeat(job.project_key, project=job.project_key)
-            )
+            asyncio.create_task(_calendar_heartbeat(job.project_key, project=job.project_key))
             last_heartbeat = time.time()
 
     # Update session status in Redis via AgentSession
@@ -1200,9 +1315,7 @@ async def _execute_job(job: Job) -> None:
             from bridge.session_transcript import complete_transcript
 
             final_status = (
-                "active"
-                if _defer_reaction
-                else ("completed" if not task.error else "failed")
+                "active" if _defer_reaction else ("completed" if not task.error else "failed")
             )
             if not _defer_reaction:
                 complete_transcript(job.session_id, status=final_status)
@@ -1234,10 +1347,7 @@ async def _execute_job(job: Job) -> None:
 
         leftover = pop_all_steering_messages(job.session_id)
         if leftover:
-            texts = [
-                f"  [{m.get('sender', '?')}]: {m.get('text', '')[:120]}"
-                for m in leftover
-            ]
+            texts = [f"  [{m.get('sender', '?')}]: {m.get('text', '')[:120]}" for m in leftover]
             logger.warning(
                 f"[{job.project_key}] {len(leftover)} unconsumed steering "
                 f"message(s) dropped for session {job.session_id}:\n" + "\n".join(texts)
@@ -1420,8 +1530,7 @@ async def queue_revival_job(
     revival_text = f"Continue the unfinished work on branch `{revival_info['branch']}`."
     if additional_context:
         revival_text += (
-            "\n\nAsked user whether to resume and user "
-            f"responded with: {additional_context}"
+            f"\n\nAsked user whether to resume and user responded with: {additional_context}"
         )
 
     return await enqueue_job(
@@ -1437,9 +1546,7 @@ async def queue_revival_job(
     )
 
 
-async def cleanup_stale_branches(
-    working_dir: str, max_age_hours: float = 72
-) -> list[str]:
+async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) -> list[str]:
     """
     Clean up session branches older than max_age_hours.
     Returns list of cleaned branch names.
@@ -1458,11 +1565,7 @@ async def cleanup_stale_branches(
             text=True,
             timeout=10,
         )
-        branches = [
-            b.strip().lstrip("* ")
-            for b in result.stdout.strip().split("\n")
-            if b.strip()
-        ]
+        branches = [b.strip().lstrip("* ") for b in result.stdout.strip().split("\n") if b.strip()]
 
         for branch in branches:
             age_result = subprocess.run(
@@ -1614,12 +1717,8 @@ def _cli_main() -> None:
     parser = argparse.ArgumentParser(description="Job queue management CLI")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--status", action="store_true", help="Show current queue state")
-    group.add_argument(
-        "--flush-stuck", action="store_true", help="Recover all stuck running jobs"
-    )
-    group.add_argument(
-        "--flush-job", metavar="JOB_ID", help="Recover a specific job by ID"
-    )
+    group.add_argument("--flush-stuck", action="store_true", help="Recover all stuck running jobs")
+    group.add_argument("--flush-job", metavar="JOB_ID", help="Recover a specific job by ID")
 
     args = parser.parse_args()
 

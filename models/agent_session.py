@@ -161,7 +161,7 @@ class AgentSession(Model):
         """Parse history entries to determine SDLC stage completion status.
 
         Returns:
-            Dict mapping stage name to status: 'completed', 'in_progress', or 'pending'
+            Dict mapping stage name to status: 'completed', 'in_progress', 'failed', or 'pending'
         """
         progress = {stage: "pending" for stage in SDLC_STAGES}
         for entry in self._get_history_list():
@@ -170,11 +170,55 @@ class AgentSession(Model):
             entry_upper = entry.upper()
             for stage in SDLC_STAGES:
                 if stage in entry_upper:
-                    if "COMPLETED" in entry_upper or "☑" in entry:
+                    if "FAILED" in entry_upper or "ERROR" in entry_upper:
+                        progress[stage] = "failed"
+                    elif "COMPLETED" in entry_upper or "☑" in entry:
                         progress[stage] = "completed"
                     elif "IN_PROGRESS" in entry_upper or "▶" in entry:
                         progress[stage] = "in_progress"
         return progress
+
+    # === Stage-aware auto-continue helpers ===
+
+    def is_sdlc_job(self) -> bool:
+        """Check if this session is an SDLC pipeline job.
+
+        Returns True if the session's history contains at least one
+        [stage] entry, indicating it was created by an SDLC skill
+        invocation (e.g., /sdlc, /do-build, /do-test).
+
+        Used by the auto-continue logic to choose between stage-aware
+        routing (for SDLC jobs) and classifier-based routing (for
+        casual/ad-hoc jobs).
+        """
+        for entry in self._get_history_list():
+            if isinstance(entry, str) and "[stage]" in entry.lower():
+                return True
+        return False
+
+    def has_remaining_stages(self) -> bool:
+        """Check if any SDLC stages are not yet completed.
+
+        Returns True if at least one stage in the pipeline is still
+        'pending' or 'in_progress'. Returns False when all stages
+        are 'completed' (or 'failed').
+
+        Used by stage-aware auto-continue to decide whether to keep
+        going (stages remain) or consult the classifier (all done).
+        """
+        progress = self.get_stage_progress()
+        return any(status in ("pending", "in_progress") for status in progress.values())
+
+    def has_failed_stage(self) -> bool:
+        """Check if any SDLC stage has failed.
+
+        Returns True if a [stage] history entry contains FAILED or
+        ERROR for any stage. Failed stages are a hard stop signal --
+        the output should be delivered to the user immediately rather
+        than auto-continued.
+        """
+        progress = self.get_stage_progress()
+        return any(status == "failed" for status in progress.values())
 
     # === Cleanup ===
 
