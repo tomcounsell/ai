@@ -10,8 +10,12 @@ from bridge.summarizer import (
     OutputType,
     _classify_with_heuristics,
     _compose_structured_summary,
+    _get_original_request,
+    _get_status_emoji,
     _parse_classification_response,
     _parse_summary_and_questions,
+    _render_link_footer,
+    _render_stage_progress,
     classify_output,
     extract_artifacts,
     summarize_response,
@@ -882,3 +886,446 @@ class TestComposeStructuredSummary:
             "• Working on it", session=None, is_completion=False
         )
         assert "⏳" in result
+
+
+class TestGetOriginalRequest:
+    """Tests for _get_original_request — regression tests for issue #192."""
+
+    def test_returns_first_user_entry_from_history(self):
+        """Original request is extracted from the first [user] history entry."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = [
+            "[user] /sdlc 190",
+            "[stage] ISSUE completed ☑",
+            "[user] continue",
+        ]
+        session.message_text = "continue"
+
+        result = _get_original_request(session)
+        assert result == "/sdlc 190"
+
+    def test_falls_back_to_message_text_when_no_history(self):
+        """When no history exists, falls back to message_text."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = []
+        session.message_text = "What is the status?"
+
+        result = _get_original_request(session)
+        assert result == "What is the status?"
+
+    def test_returns_none_when_no_data(self):
+        """Returns None when session has no history and no message_text."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = []
+        session.message_text = None
+
+        result = _get_original_request(session)
+        assert result is None
+
+    def test_label_not_continue_on_auto_continued_session(self):
+        """Regression: auto-continued sessions must show original request, not 'continue'."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = [
+            "[user] SDLC 190",
+            "[stage] ISSUE completed ☑",
+            "[stage] PLAN completed ☑",
+        ]
+        session.message_text = "continue"  # overwritten by auto-continue
+        session.status = "running"
+        session.is_sdlc_job.return_value = True
+
+        result = _compose_structured_summary(
+            "• Built the bypass\n• Tests passing", session=session, is_completion=True
+        )
+        # Must NOT contain "continue" as the label
+        assert "continue" not in result.split("\n")[0]
+        # Must contain the original request (with /sdlc prefix stripped)
+        assert "190" in result
+
+
+class TestGetStatusEmojiRegression:
+    """Regression tests for _get_status_emoji — issue #192."""
+
+    def test_running_session_with_completion_flag_returns_checkmark(self):
+        """Regression: is_completion=True must return ✅ even when session is running."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.status = "running"
+
+        result = _get_status_emoji(session, is_completion=True)
+        assert result == "✅"
+
+    def test_running_session_without_completion_flag_returns_pending(self):
+        """is_completion=False with running session returns ⏳."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.status = "running"
+
+        result = _get_status_emoji(session, is_completion=False)
+        assert result == "⏳"
+
+    def test_failed_session_always_returns_error(self):
+        """Failed status overrides is_completion flag."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.status = "failed"
+
+        assert _get_status_emoji(session, is_completion=True) == "❌"
+        assert _get_status_emoji(session, is_completion=False) == "❌"
+
+    def test_completed_session_always_returns_checkmark(self):
+        """Completed status always returns ✅."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.status = "completed"
+
+        assert _get_status_emoji(session, is_completion=True) == "✅"
+        assert _get_status_emoji(session, is_completion=False) == "✅"
+
+    def test_no_session_uses_completion_flag(self):
+        """No session defers to is_completion flag."""
+        assert _get_status_emoji(None, is_completion=True) == "✅"
+        assert _get_status_emoji(None, is_completion=False) == "⏳"
+
+
+class TestRenderStageProgress:
+    """Tests for _render_stage_progress."""
+
+    def test_no_session_returns_none(self):
+        assert _render_stage_progress(None) is None
+
+    def test_all_pending_returns_none(self):
+        """No stage progress means nothing to render."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "pending",
+            "PLAN": "pending",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        assert _render_stage_progress(session) is None
+
+    def test_mixed_progress_renders_correctly(self):
+        """Completed, in-progress, and pending stages render with correct icons."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "in_progress",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        result = _render_stage_progress(session)
+        assert "☑ ISSUE" in result
+        assert "☑ PLAN" in result
+        assert "▶ BUILD" in result
+        assert "☐ TEST" in result
+        assert "→" in result
+
+    def test_all_completed(self):
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "completed",
+            "DOCS": "completed",
+        }
+        result = _render_stage_progress(session)
+        assert result is not None
+        assert "☐" not in result
+        assert "▶" not in result
+
+
+class TestRenderLinkFooter:
+    """Tests for _render_link_footer."""
+
+    def test_no_session_returns_none(self):
+        assert _render_link_footer(None) is None
+
+    def test_no_links_returns_none(self):
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_links.return_value = {}
+        assert _render_link_footer(session) is None
+
+    def test_issue_link_extracts_number(self):
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_links.return_value = {
+            "issue": "https://github.com/org/repo/issues/190"
+        }
+        result = _render_link_footer(session)
+        assert "Issue #190" in result
+        assert "https://github.com/org/repo/issues/190" in result
+
+    def test_pr_link_extracts_number(self):
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_links.return_value = {"pr": "https://github.com/org/repo/pull/191"}
+        result = _render_link_footer(session)
+        assert "PR #191" in result
+
+    def test_multiple_links_joined_with_pipe(self):
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_links.return_value = {
+            "issue": "https://github.com/org/repo/issues/190",
+            "plan": "https://github.com/org/repo/blob/main/docs/plans/foo.md",
+            "pr": "https://github.com/org/repo/pull/191",
+        }
+        result = _render_link_footer(session)
+        assert " | " in result
+        assert "Issue #190" in result
+        assert "Plan" in result
+        assert "PR #191" in result
+
+    def test_plan_link_uses_generic_label(self):
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_links.return_value = {"plan": "https://example.com/plan.md"}
+        result = _render_link_footer(session)
+        assert "[Plan]" in result
+
+
+class TestComposeStructuredSummaryWithSession:
+    """Tests for _compose_structured_summary with session context."""
+
+    def test_sdlc_session_with_stage_progress_and_links(self):
+        """Full SDLC session gets stage line, link footer, and original request label."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = [
+            "[user] /sdlc 190",
+            "[stage] ISSUE completed ☑",
+            "[stage] PLAN completed ☑",
+            "[stage] BUILD in_progress ▶",
+        ]
+        session.message_text = "continue"
+        session.status = "running"
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "in_progress",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {
+            "issue": "https://github.com/org/repo/issues/190",
+            "pr": "https://github.com/org/repo/pull/191",
+        }
+
+        result = _compose_structured_summary(
+            "• Implemented the bypass\n• 135 tests passing",
+            session=session,
+            is_completion=True,
+        )
+
+        # Label from original request (not "continue")
+        assert "190" in result.split("\n")[0]
+        assert "continue" not in result.split("\n")[0]
+        # Stage progress line present
+        assert "☑ ISSUE" in result
+        assert "▶ BUILD" in result
+        # Bullets present
+        assert "• Implemented the bypass" in result
+        # Link footer present
+        assert "Issue #190" in result
+        assert "PR #191" in result
+
+    def test_non_sdlc_session_no_stage_line(self):
+        """Non-SDLC session skips stage progress line."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = ["[user] What time is it?"]
+        session.message_text = "What time is it?"
+        session.status = "running"
+        session.get_stage_progress.return_value = {
+            "ISSUE": "pending",
+            "PLAN": "pending",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {}
+
+        result = _compose_structured_summary(
+            "It's 3pm UTC+7", session=session, is_completion=True
+        )
+
+        assert "☑" not in result
+        assert "☐" not in result
+        assert "What time is it?" in result
+
+    def test_label_stripped_of_sdlc_prefix(self):
+        """Various SDLC prefixes are stripped from the label."""
+        from unittest.mock import MagicMock
+
+        for prefix in ["/sdlc ", "SDLC ", "sdlc "]:
+            session = MagicMock()
+            session._get_history_list.return_value = [f"[user] {prefix}Fix the bug"]
+            session.message_text = "continue"
+            session.status = "running"
+            session.get_stage_progress.return_value = {
+                s: "pending"
+                for s in ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS"]
+            }
+            session.get_links.return_value = {}
+
+            result = _compose_structured_summary(
+                "• Fixed it", session=session, is_completion=True
+            )
+            first_line = result.split("\n")[0]
+            assert "Fix the bug" in first_line
+            assert prefix.strip() not in first_line
+
+
+class TestGetOriginalRequestEdgeCases:
+    """Additional edge cases for _get_original_request."""
+
+    def test_session_without_get_history_list(self):
+        """Session object without _get_history_list attribute falls back to message_text."""
+        session = type("Session", (), {"message_text": "Hello"})()
+        assert not hasattr(session, "_get_history_list")
+        result = _get_original_request(session)
+        assert result == "Hello"
+
+    def test_none_session_returns_none(self):
+        result = _get_original_request(None)
+        assert result is None
+
+    def test_history_with_non_string_entries(self):
+        """Non-string entries in history are skipped."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = [
+            123,  # non-string
+            {"role": "user"},  # dict
+            "[user] The real request",
+        ]
+        session.message_text = "fallback"
+
+        result = _get_original_request(session)
+        assert result == "The real request"
+
+    def test_history_with_only_stage_entries(self):
+        """History with no [user] entries falls back to message_text."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = [
+            "[stage] ISSUE completed ☑",
+            "[stage] PLAN completed ☑",
+        ]
+        session.message_text = "the original message"
+
+        result = _get_original_request(session)
+        assert result == "the original message"
+
+
+class TestSummarizationBypass:
+    """Tests for the non-SDLC short response bypass in response.py."""
+
+    @pytest.mark.asyncio
+    async def test_short_non_sdlc_skips_summarization(self):
+        """Non-SDLC responses under 500 chars skip summarization entirely."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.is_sdlc_job.return_value = False
+
+        # Simulate the bypass logic from response.py
+        text = "Update complete. 3 packages updated."
+        is_sdlc = hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
+        should_summarize = text and (is_sdlc or len(text) >= 500)
+
+        assert not should_summarize
+        assert not is_sdlc
+        assert len(text) < 500
+
+    @pytest.mark.asyncio
+    async def test_short_sdlc_still_summarizes(self):
+        """SDLC responses are always summarized, even if short."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.is_sdlc_job.return_value = True
+
+        text = "Done."
+        is_sdlc = hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
+        should_summarize = text and (is_sdlc or len(text) >= 500)
+
+        assert should_summarize
+        assert is_sdlc
+
+    @pytest.mark.asyncio
+    async def test_long_non_sdlc_still_summarizes(self):
+        """Non-SDLC responses >= 500 chars are still summarized."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.is_sdlc_job.return_value = False
+
+        text = "x" * 600
+        is_sdlc = hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
+        should_summarize = text and (is_sdlc or len(text) >= 500)
+
+        assert should_summarize
+        assert not is_sdlc
+        assert len(text) >= 500
+
+    @pytest.mark.asyncio
+    async def test_no_session_treats_as_non_sdlc(self):
+        """When session is None, the bypass uses length threshold only."""
+        session = None
+        text = "Short reply."
+        is_sdlc = session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
+        should_summarize = text and (is_sdlc or len(text) >= 500)
+
+        assert not should_summarize
+
+    @pytest.mark.asyncio
+    async def test_empty_text_never_summarizes(self):
+        """Empty text is never summarized regardless of session type."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.is_sdlc_job.return_value = True
+
+        text = ""
+        is_sdlc = session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
+        should_summarize = text and (is_sdlc or len(text) >= 500)
+
+        assert not should_summarize

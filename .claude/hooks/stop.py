@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
-"""Hook: Stop - Save session metadata and optionally copy transcript."""
+"""Hook: Stop - Save session metadata and back up JSONL transcript."""
 
 import argparse
 import shutil
 import sys
 from pathlib import Path
 
+# Add project root to path for model imports
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
 # Add utils to path
 sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
-from utils.constants import (
+from utils.constants import (  # noqa: E402
     ensure_session_log_dir,
     get_session_id,
     read_hook_input,
@@ -17,12 +21,28 @@ from utils.constants import (
 )
 
 
+def _update_agent_session_log_path(session_id: str, jsonl_path: str) -> None:
+    """Store the JSONL backup path in AgentSession.log_path."""
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if sessions:
+            s = sessions[0]
+            s.log_path = jsonl_path
+            s.save()
+    except Exception:
+        pass  # Non-fatal: hook must not break on Redis/model errors
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--chat", action="store_true", help="Copy transcript to session dir"
+        "--chat",
+        action="store_true",
+        help="Copy transcript to session dir (legacy flag, now always copies)",
     )
-    args = parser.parse_args()
+    parser.parse_args()  # consume args (--chat is legacy, always copies now)
 
     hook_input = read_hook_input()
     if not hook_input:
@@ -40,14 +60,14 @@ def main():
     }
     write_json_log(session_dir, "stop.json", metadata)
 
-    # Optionally copy transcript
-    if args.chat:
-        transcript_path = hook_input.get("transcript_path")
-        if transcript_path:
-            src = Path(transcript_path)
-            if src.exists():
-                dst = session_dir / "chat.json"
-                shutil.copy2(src, dst)
+    # Back up JSONL transcript (always, regardless of --chat flag)
+    transcript_path = hook_input.get("transcript_path")
+    if transcript_path:
+        src = Path(transcript_path)
+        if src.exists():
+            dst = session_dir / "transcript.jsonl"
+            shutil.copy2(src, dst)
+            _update_agent_session_log_path(session_id, str(dst))
 
 
 if __name__ == "__main__":

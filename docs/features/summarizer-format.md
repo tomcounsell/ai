@@ -4,7 +4,7 @@ Structured output format for Telegram delivery of agent work summaries. Every re
 
 ## Key Behaviors
 
-1. **Always summarize**: Every non-empty response goes through Haiku summarization. No character threshold — even short messages like "Done." are processed for consistent PM-quality output.
+1. **SDLC: always summarize. Non-SDLC: summarize if >= 500 chars.** SDLC sessions always go through Haiku (stage lines + link footers needed). Non-SDLC short responses (< 500 chars) pass through raw — this preserves programmatic skill output like `/update` that's already formatted.
 2. **SDLC template rendering**: Stage progress lines and link footers are rendered in Python code, not by the LLM. The LLM only generates bullet summaries and questions.
 3. **Question extraction**: The LLM can surface questions, decisions, and items needing human input using a `---` separator and `? ` prefix. These are parsed and rendered after the summary bullets.
 
