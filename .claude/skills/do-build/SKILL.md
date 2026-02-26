@@ -126,6 +126,7 @@ PLAN_ARG: $1
 - **SDLC enforcement** - All builder agents follow Plan → Branch → Implement → Test → Review → Document → PR with patch loops at Test and Review stages (up to 5 iterations)
 - **Definition of Done** - Tasks are complete only when: Built (code working), Tested (tests pass), Reviewed (review passes), Documented (docs created after review), Quality (lint/format pass)
 - **Commits at logical checkpoints** - Commits happen at logical checkpoints throughout Implement — not batched at end. The commit message hook enforces hygiene at each commit.
+- **Branch verification before commits** - Before any git commit, verify you are NOT on the main branch: `git rev-parse --abbrev-ref HEAD` must NOT return "main". If on main, create a worktree/branch first. This is enforced by user-level hooks but defense-in-depth requires explicit checks.
 
 ## Workflow
 

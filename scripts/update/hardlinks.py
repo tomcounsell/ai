@@ -1,7 +1,13 @@
-"""Hardlink sync for .claude/{skills,commands} to ~/.claude/."""
+"""Hardlink sync for .claude/{skills,commands} to ~/.claude/.
+
+Also deploys SDLC enforcement hooks to the user level (~/.claude/hooks/sdlc/)
+and merges their entries into ~/.claude/settings.json. This ensures SDLC rules
+(no commit to main, quality gate reminders) fire in every repo on every machine.
+"""
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -106,6 +112,11 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
         project_dir / ".claude" / "agents", user_claude / "agents", result
     )
 
+    # Deploy SDLC enforcement hooks to user level (~/.claude/hooks/sdlc/)
+    # and merge hook entries into ~/.claude/settings.json. This is the final
+    # step because it depends on no other sync operations.
+    sync_user_hooks(project_dir, result)
+
     if result.errors > 0:
         result.success = False
 
@@ -166,6 +177,158 @@ def _sync_commands(src_dir: Path, dst_dir: Path, result: HardlinkSyncResult) -> 
     for cmd_file in sorted(src_dir.glob("*.md")):
         dst_file = dst_dir / cmd_file.name
         _ensure_hardlink(cmd_file, dst_file, dst_dir, result)
+
+
+def sync_user_hooks(project_dir: Path, result: HardlinkSyncResult) -> None:
+    """Deploy SDLC hook scripts to ~/.claude/hooks/sdlc/ and merge into settings.
+
+    The three SDLC enforcement hooks (validate_commit_message, sdlc_reminder,
+    validate_sdlc_on_stop) are standalone scripts that detect SDLC context
+    automatically and no-op when not in an SDLC session. They are COPIED
+    (not hardlinked) because they must be self-contained with no project deps.
+
+    The hook entries are merged into ~/.claude/settings.json without clobbering
+    existing user hooks (e.g., calendar hooks). Deduplication is by command string.
+    """
+    user_hooks_dir = Path.home() / ".claude" / "hooks" / "sdlc"
+    user_hooks_dir.mkdir(parents=True, exist_ok=True)
+
+    # Source directory: standalone hook scripts with no project dependencies
+    src_hooks = project_dir / ".claude" / "hooks" / "user_level"
+    if not src_hooks.is_dir():
+        return
+
+    # Copy hook scripts to ~/.claude/hooks/sdlc/ (not hardlink — standalone)
+    for hook_file in sorted(src_hooks.glob("*.py")):
+        dst = user_hooks_dir / hook_file.name
+        rel_src = str(hook_file).replace(str(Path.home()), "~")
+        rel_dst = str(dst).replace(str(Path.home()), "~")
+        try:
+            shutil.copy2(hook_file, dst)
+            dst.chmod(0o755)
+            result.actions.append(LinkAction(rel_src, rel_dst, "created"))
+            result.created += 1
+        except OSError as e:
+            result.actions.append(LinkAction(rel_src, rel_dst, "error", str(e)))
+            result.errors += 1
+
+    # Merge SDLC hook entries into ~/.claude/settings.json
+    _merge_sdlc_hook_settings(user_hooks_dir, result)
+
+
+def _merge_sdlc_hook_settings(
+    user_hooks_dir: Path, result: HardlinkSyncResult
+) -> None:
+    """Merge SDLC hook entries into ~/.claude/settings.json.
+
+    Reads the existing settings, adds SDLC hook entries for PreToolUse(Bash),
+    PostToolUse(Write), PostToolUse(Edit), and Stop events. Deduplicates by
+    command string to avoid duplicate entries on repeated runs. Never clobbers
+    existing hooks (e.g., calendar hooks) — only appends new SDLC entries.
+    """
+    settings_path = Path.home() / ".claude" / "settings.json"
+
+    # Load existing settings (preserve all non-hook config)
+    settings: dict = {}
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            # Corrupt settings — start fresh but log it
+            rel = str(settings_path).replace(str(Path.home()), "~")
+            result.actions.append(
+                LinkAction("", rel, "error", "corrupt settings.json, recreating")
+            )
+            result.errors += 1
+
+    hooks = settings.setdefault("hooks", {})
+
+    # Define the SDLC hook entries to merge
+    # Each entry specifies an event type, matcher, and the hook command.
+    # Commands use absolute paths to ~/.claude/hooks/sdlc/ which resolves
+    # correctly on each machine (the update script runs locally).
+    sdlc_hooks: dict[str, list[dict]] = {
+        "PreToolUse": [
+            {
+                "matcher": "Bash",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"python {user_hooks_dir}/validate_commit_message.py",
+                        "timeout": 10,
+                    }
+                ],
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "Write",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"python {user_hooks_dir}/sdlc_reminder.py",
+                        "timeout": 10,
+                    }
+                ],
+            },
+            {
+                "matcher": "Edit",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"python {user_hooks_dir}/sdlc_reminder.py",
+                        "timeout": 10,
+                    }
+                ],
+            },
+        ],
+        "Stop": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": f"python {user_hooks_dir}/validate_sdlc_on_stop.py",
+                        "timeout": 15,
+                    }
+                ],
+            }
+        ],
+    }
+
+    # Merge without clobbering: for each event type, collect existing command
+    # strings and only append entries whose command is not already present.
+    for event, new_entries in sdlc_hooks.items():
+        existing = hooks.get(event, [])
+
+        # Collect all command strings from existing entries for dedup
+        existing_commands: set[str] = set()
+        for entry in existing:
+            for hook in entry.get("hooks", []):
+                cmd = hook.get("command", "")
+                if cmd:
+                    existing_commands.add(cmd)
+
+        for entry in new_entries:
+            cmd = entry["hooks"][0]["command"]
+            if cmd not in existing_commands:
+                existing.append(entry)
+                existing_commands.add(cmd)
+
+        hooks[event] = existing
+
+    # Write back atomically
+    try:
+        tmp_path = settings_path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(settings, indent=2) + "\n")
+        tmp_path.rename(settings_path)
+    except OSError as e:
+        rel = str(settings_path).replace(str(Path.home()), "~")
+        result.actions.append(LinkAction("", rel, "error", str(e)))
+        result.errors += 1
+        # Clean up temp file
+        if tmp_path.exists():
+            tmp_path.unlink()
 
 
 def _ensure_hardlink(

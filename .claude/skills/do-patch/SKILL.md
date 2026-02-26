@@ -44,6 +44,10 @@ The patch agent is re-entering the build loop. It needs the **same context** tha
 
 **If PATCH_ARG is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation — they invoked this as `/do-patch <argument>`. Extract whatever follows `/do-patch` as the value of PATCH_ARG. Do NOT stop or report an error; just use the argument from the message.
 
+## Critical Rules
+
+- **Branch verification before commits** - Before any git commit, verify you are NOT on the main branch: `git rev-parse --abbrev-ref HEAD` must NOT return "main". If on main, something is wrong — patches should always be applied to the feature branch, not main. This is enforced by user-level hooks but defense-in-depth requires explicit checks.
+
 ## Instructions
 
 ### Step 1: Identify What Is Broken
