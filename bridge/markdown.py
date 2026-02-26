@@ -84,12 +84,14 @@ async def send_markdown(client, chat_id: int, text: str, reply_to: int | None = 
     """
     import logging
 
+    from telethon import errors
+
     try:
         return await client.send_message(
             chat_id, text, reply_to=reply_to, parse_mode="md"
         )
-    except Exception:
-        # Markdown parse failed — strip markdown and send plain
+    except (errors.MessageParseError, errors.BadRequestError):
+        # Markdown parse failed — send plain text without parse mode
         logging.getLogger(__name__).debug(
             "Markdown send failed, falling back to plain text"
         )
