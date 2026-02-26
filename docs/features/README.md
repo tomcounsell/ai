@@ -24,6 +24,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |
 | [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, and structured reporting | Shipped |
 | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: hooks, pipeline stage model, session classification, resume | Shipped |
+| [SDLC User-Level Hooks](sdlc-user-hooks.md) | User-level Claude Code hooks enforcing SDLC rules across all repos and machines | Shipped |
 | [Documentation Lifecycle](documentation-lifecycle.md) | Automated validation and migration system for plan documentation tasks | Shipped |
 | [Google Calendar Integration](google-calendar-integration.md) | Work session logging as Google Calendar events with segment rounding | Shipped |
 | [Hooks & Session Logging](hooks-session-logging.md) | Claude Code hooks for session event capture and structured logging | Shipped |
