@@ -247,3 +247,7 @@ The **## Agent Integration** section should cover:
 | `docs/tools-reference.md` | Complete tool documentation |
 | `config/SOUL.md` | Valor persona and philosophy |
 | `docs/features/README.md` | Feature index — look up how things work |
+
+## Business Context
+
+For business context, project notes, and assets see the work vault: `~/src/work-vault/AI Valor Engels System/`
