@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
@@ -54,15 +54,16 @@ No prerequisites — this work has no external dependencies.
 
 Three self-contained scripts (no dependency on `utils/constants.py` or `$CLAUDE_PROJECT_DIR`):
 
-- `validate_commit_message.py` — PreToolUse(Bash): If the command is `git commit` and the current branch is `main`, check if we are in an SDLC context (session state exists or branch pattern matches). If yes, block with a clear error. If no SDLC context, allow silently.
+- `validate_commit_message.py` — PreToolUse(Bash): If the command is `git commit` and the current branch is `main`, check if we are in an SDLC context. If yes, block with a clear error. If no SDLC context (e.g. manual dev work), allow silently. Co-author trailer enforcement stays project-level only — the user-level hook only enforces "no commit to main in SDLC context".
 - `sdlc_reminder.py` — PostToolUse(Write|Edit): If a code file (.py/.js/.ts) was written and we are in an SDLC context, emit a one-time reminder about tests and branches.
 - `validate_sdlc_on_stop.py` — Stop: If code was modified and SDLC state exists, verify quality gates were run.
 
-**SDLC context detection** (shared logic, embedded in each script — no external imports):
+**SDLC context detection** (two-tier: lightweight branch check + AgentSession model):
 ```python
 def is_sdlc_context() -> bool:
     """Detect if we are in an SDLC-managed session."""
     # Check 1: On a session/ branch (inside do-build worktree)
+    # This is the primary, universal check — no dependencies
     try:
         branch = subprocess.check_output(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -73,18 +74,29 @@ def is_sdlc_context() -> bool:
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
-    # Check 2: SDLC state file exists for this session
-    # (written by post_tool_use.py when code is modified)
+    # Check 2: Query AgentSession model for active SDLC session
+    # The Popoto AgentSession model tracks job history and stage progress.
+    # If the current session has SDLC stages recorded, we're in SDLC context.
     session_id = os.environ.get("CLAUDE_SESSION_ID", "")
     if session_id:
-        # Check in the AI repo's data dir (if accessible)
-        ai_repo = Path.home() / "src" / "ai"
-        state_file = ai_repo / "data" / "sessions" / session_id / "sdlc_state.json"
-        if state_file.exists():
-            return True
+        try:
+            sys.path.insert(0, str(Path.home() / "src" / "ai"))
+            from models.agent_session import AgentSession
+            sessions = AgentSession.query.filter(
+                session_id=session_id, status="active"
+            )
+            for s in sessions:
+                # Check if session has SDLC stage history
+                history = getattr(s, "history", None)
+                if history and any("stage" in str(h) for h in history):
+                    return True
+        except Exception:
+            pass  # Redis unavailable, model not importable, etc.
 
     return False
 ```
+
+**Note:** Check 2 uses the Popoto `AgentSession` model which has job history and stage progress tracking. This is the canonical source of SDLC state. The import is wrapped in try/except so the hook degrades gracefully when the AI repo isn't accessible or Redis isn't running. A dev using the same machine outside of SDLC context won't be affected.
 
 **2. Settings merger (`hardlinks.py`)**
 
@@ -307,12 +319,3 @@ No agent integration required — this is a Claude Code hook and update system c
 - `ruff check .` — no errors
 - `black --check .` — no changes
 
----
-
-## Open Questions
-
-1. **Should the user-level hooks also enforce the co-author trailer ban?** The project-level `validate_commit_message.py` blocks co-author trailers. Should the user-level version enforce this too (it is repo-specific policy) or only enforce the "no commit to main in SDLC context" rule?
-
-2. **Should `is_sdlc_context()` check for the AI repo's data/sessions directory specifically, or should it only rely on git branch name?** The branch-based check is universal and requires no hardcoded paths. The session state check adds accuracy but creates a dependency on the AI repo's directory structure.
-
-3. **Should the settings merger back up `~/.claude/settings.json` before modifying it?** A `.bak` file provides a safety net but adds complexity. The current approach reads, modifies, and writes atomically — but a backup would help if the merge logic has a bug.
