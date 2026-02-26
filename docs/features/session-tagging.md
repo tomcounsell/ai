@@ -1,10 +1,10 @@
 # Session Tagging
 
-Automatic and manual tag management for SessionLog instances. Tags categorize sessions by activity type (e.g., "pr-created", "daydream", "sdlc") for querying and analytics.
+Automatic and manual tag management for AgentSession instances. Tags categorize sessions by activity type (e.g., "pr-created", "daydream", "sdlc") for querying and analytics.
 
 ## How It Works
 
-Tags are stored in the `SessionLog.tags` ListField (Redis via Popoto). Auto-tagging runs at session completion time inside `complete_transcript()` in `bridge/session_transcript.py`.
+Tags are stored in the `AgentSession.tags` ListField (Redis via Popoto). Auto-tagging runs at session completion time inside `complete_transcript()` in `bridge/session_transcript.py`.
 
 ### Auto-Tag Rules
 
@@ -44,8 +44,8 @@ auto_tag_session("session-123")
 
 ## Integration Points
 
-- **`bridge/session_transcript.py`**: `auto_tag_session()` is called in `complete_transcript()` before the SessionLog status update
-- **`models/session_log.py`**: Tags stored in `SessionLog.tags` ListField
+- **`bridge/session_transcript.py`**: `auto_tag_session()` is called in `complete_transcript()` before the AgentSession status update
+- **`models/agent_session.py`**: Tags stored in `AgentSession.tags` ListField
 - **`tools/session_tags.py`**: Public API module
 
 ## Design Decisions
@@ -65,7 +65,7 @@ auto_tag_session("session-123")
 |-----------|------|---------|
 | Session tags module | `tools/session_tags.py` | CRUD and auto-tagging API |
 | Transcript integration | `bridge/session_transcript.py` | Calls auto_tag_session at completion |
-| SessionLog model | `models/session_log.py` | Tags stored in ListField |
+| AgentSession model | `models/agent_session.py` | Tags stored in ListField |
 | Unit tests | `tests/unit/test_session_tags.py` | 33 tests covering all rules and edge cases |
 
 ## Related

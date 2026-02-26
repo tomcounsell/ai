@@ -7,7 +7,7 @@
 
 ## Overview
 
-Session transcripts capture the full content of each agent session — every turn, tool call, and tool result — in append-only `.txt` files on disk. A `SessionLog` Popoto model stores queryable metadata about each session.
+Session transcripts capture the full content of each agent session — every turn, tool call, and tool result — in append-only `.txt` files on disk. The `AgentSession` Popoto model stores queryable metadata about each session.
 
 This replaces the sparse JSON snapshot approach in `bridge/session_logs.py`.
 
@@ -31,9 +31,9 @@ Format (one line per event):
 
 Tool results are truncated to 2000 characters in the transcript to keep file sizes manageable.
 
-### SessionLog Model
+### AgentSession Model
 
-`models/session_log.py` — Replaces `AgentSession` entirely.
+`models/agent_session.py` — Unified model that replaced both `RedisJob` and `SessionLog`.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -68,7 +68,7 @@ from bridge.session_transcript import (
     complete_transcript,
 )
 
-# Start a session — creates SessionLog + opens transcript file
+# Start a session — creates AgentSession + opens transcript file
 log_path = start_transcript(
     session_id="abc123",
     project_key="valor",
@@ -109,8 +109,8 @@ The session transcript module is integrated at the job lifecycle boundaries in `
 - **Session start**: `start_transcript()` called when a job begins processing
 - **Session end**: `complete_transcript()` called when the job completes or fails
 
-The `SessionLog` model replaces `AgentSession` everywhere:
-- `agent/job_queue.py` - Creates/updates SessionLog at job boundaries
+The `AgentSession` model is used everywhere:
+- `agent/job_queue.py` - Creates/updates AgentSession at job boundaries
 - `agent/sdk_client.py` - Marks session as failed on SDK errors
 - `agent/health_check.py` - Updates tool_call_count during sessions
 - `monitoring/session_watchdog.py` - Monitors active sessions for health issues
@@ -123,10 +123,10 @@ The `tags` ListField stores session categorization tags (e.g., "bug", "sdlc", "p
 ## Cleanup
 
 ```python
-from models.session_log import SessionLog
+from models.agent_session import AgentSession
 
 # Clean up Redis metadata older than 90 days (transcript files preserved)
-deleted = SessionLog.cleanup_expired(max_age_days=90)
+deleted = AgentSession.cleanup_expired(max_age_days=90)
 ```
 
 This is called automatically by the daydream maintenance job (step 13: "Redis TTL Cleanup").

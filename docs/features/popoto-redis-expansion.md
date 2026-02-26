@@ -4,11 +4,11 @@ tracking: https://github.com/tomcounsell/ai/issues/22
 
 # Plan: Expand Popoto Redis Models for Messages and Queues
 
-> **Note**: This plan was partially superseded by the [Redis Migration](../plans/redis_migration.md) (PR #166), which consolidated all persistence into Redis/Popoto. The `AgentSession` model described here was replaced by `SessionLog`, and `TelegramMessage` became the sole source of truth (no longer a mirror alongside SQLite). `DeadLetter` and `BridgeEvent` models from this plan were implemented separately.
+> **Note**: This plan was partially superseded by the [Redis Migration](../plans/redis_migration.md) (PR #166), which consolidated all persistence into Redis/Popoto. The unified `AgentSession` model (`models/agent_session.py`) is the current source of truth for session and job lifecycle, replacing both the earlier `SessionLog` and `RedisJob` models. `TelegramMessage` became the sole source of truth for messages (no longer a mirror alongside SQLite). `DeadLetter` and `BridgeEvent` models from this plan were implemented separately.
 
 ## Problem Statement
 
-The codebase uses JSONL files and JSON files for temporary state in several places — dead letters, bridge events, calendar caches. These are susceptible to race conditions (read-modify-write on files), don't support atomic operations, and require parsing entire files for queries. Meanwhile, `RedisJob` in `agent/job_queue.py` already demonstrates popoto working well for the job queue.
+The codebase uses JSONL files and JSON files for temporary state in several places — dead letters, bridge events, calendar caches. These are susceptible to race conditions (read-modify-write on files), don't support atomic operations, and require parsing entire files for queries. Meanwhile, `AgentSession` (formerly `RedisJob`) in `agent/job_queue.py` already demonstrates popoto working well for the job queue.
 
 Additionally, all incoming/outgoing Telegram messages and agent session state exist only in SQLite (long-term archive) or ephemerally in memory. There's no fast, queryable, real-time view of current message flow and session activity.
 
