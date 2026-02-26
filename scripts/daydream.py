@@ -8,7 +8,7 @@ A long-running process that performs daily maintenance tasks:
 3. Check error logs via Sentry (skips gracefully if MCP unavailable)
 4. Clean up task management (per-project, via gh CLI)
 5. Update documentation
-6. Session analysis (thrash ratio, user corrections) - Redis-backed via SessionLog
+6. Session analysis (thrash ratio, user corrections) - Redis-backed via AgentSession
 7. LLM reflection (Claude Haiku categorization)
 8. Auto-fix high-confidence code bugs via plan-build-PR
 9. Memory consolidation (Redis LessonLearned model)
@@ -172,9 +172,9 @@ def load_local_projects() -> list[dict]:
 
 
 def analyze_sessions_from_redis(target_date: str) -> dict[str, Any]:
-    """Analyze sessions using Redis SessionLog and BridgeEvent models.
+    """Analyze sessions using Redis AgentSession and BridgeEvent models.
 
-    Queries SessionLog for sessions from the target date and BridgeEvent
+    Queries AgentSession for sessions from the target date and BridgeEvent
     for error patterns, replacing the flat-file session directory scan.
 
     Args:
@@ -192,10 +192,10 @@ def analyze_sessions_from_redis(target_date: str) -> dict[str, Any]:
 
     try:
         from models.bridge_event import BridgeEvent
-        from models.agent_session import AgentSession as SessionLog
+        from models.agent_session import AgentSession
 
-        # Query SessionLog for sessions from the target date
-        all_sessions = SessionLog.query.all()
+        # Query AgentSession for sessions from the target date
+        all_sessions = AgentSession.query.all()
         target_sessions = []
         for session in all_sessions:
             if session.started_at:
@@ -941,7 +941,7 @@ class DaydreamRunner:
     async def step_session_analysis(self) -> None:
         """Step 6: Analyze yesterday's sessions.
 
-        Tries Redis-backed analysis via SessionLog/BridgeEvent first,
+        Tries Redis-backed analysis via AgentSession/BridgeEvent first,
         falls back to file-based analysis.
         """
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -1231,7 +1231,7 @@ class DaydreamRunner:
     async def step_redis_cleanup(self) -> None:
         """Step 13: Run TTL cleanup on all Redis models.
 
-        Cleans up: TelegramMessage, Link, Chat, SessionLog (90-day),
+        Cleans up: TelegramMessage, Link, Chat, AgentSession (90-day),
         BridgeEvent (7-day), DaydreamRun (30-day), DaydreamIgnore (expired),
         LessonLearned (90-day).
         """
@@ -1240,13 +1240,13 @@ class DaydreamRunner:
             from models.chat import Chat
             from models.daydream import DaydreamIgnore, DaydreamRun, LessonLearned
             from models.link import Link
-            from models.agent_session import AgentSession as SessionLog
+            from models.agent_session import AgentSession
             from models.telegram import TelegramMessage
 
             msg_deleted = TelegramMessage.cleanup_expired(max_age_days=90)
             link_deleted = Link.cleanup_expired(max_age_days=90)
             chat_deleted = Chat.cleanup_expired(max_age_days=90)
-            session_deleted = SessionLog.cleanup_expired(max_age_days=90)
+            session_deleted = AgentSession.cleanup_expired(max_age_days=90)
             event_deleted = BridgeEvent.cleanup_old(max_age_seconds=7 * 86400)
             run_deleted = DaydreamRun.cleanup_expired(max_age_days=30)
             ignore_deleted = DaydreamIgnore.cleanup_expired()
@@ -1290,7 +1290,7 @@ class DaydreamRunner:
 
             from models.chat import Chat
             from models.link import Link
-            from models.agent_session import AgentSession as SessionLog
+            from models.agent_session import AgentSession
             from models.telegram import TelegramMessage
 
             # 1. Unsummarized links: shared in last 7 days, no ai_summary
@@ -1334,7 +1334,7 @@ class DaydreamRunner:
 
             # 3. Transcript error pattern analysis: find common errors in recent sessions
             recent_cutoff = _time.time() - (7 * 86400)
-            all_sessions = SessionLog.query.all()
+            all_sessions = AgentSession.query.all()
             recent_sessions = [
                 s for s in all_sessions if s.started_at and s.started_at > recent_cutoff
             ]

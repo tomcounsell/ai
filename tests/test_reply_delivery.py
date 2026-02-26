@@ -8,7 +8,7 @@ Covers:
 - Steering race condition: messages pushed after agent completion are drained
 - Reaction emoji constants: correct emojis in validated/invalid lists
 - filter_tool_logs: preserves real content, strips tool prefixes
-- RedisJob auto_continue_count: persistence across re-enqueued jobs
+- AgentSession auto_continue_count: persistence across re-enqueued jobs
 - BossMessenger has_communicated() tracking
 
 Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
@@ -233,14 +233,14 @@ class TestFilterToolLogsFallback:
 
 
 class TestAutoContineCountPersistence:
-    """Test that auto_continue_count persists on RedisJob."""
+    """Test that auto_continue_count persists on AgentSession."""
 
     @pytest.mark.asyncio
-    async def test_redis_job_stores_auto_continue_count(self):
-        """RedisJob should persist auto_continue_count when explicitly set."""
-        from agent.job_queue import RedisJob
+    async def test_agent_session_stores_auto_continue_count(self):
+        """AgentSession should persist auto_continue_count when explicitly set."""
+        from models.agent_session import AgentSession
 
-        job = await RedisJob.async_create(
+        job = await AgentSession.async_create(
             project_key="test_project_ac",
             status="pending",
             created_at=1000.0,
@@ -256,11 +256,11 @@ class TestAutoContineCountPersistence:
         await job.async_delete()
 
     @pytest.mark.asyncio
-    async def test_redis_job_default_auto_continue_count(self):
+    async def test_agent_session_default_auto_continue_count(self):
         """Default auto_continue_count should be 0 for fresh jobs."""
-        from agent.job_queue import RedisJob
+        from models.agent_session import AgentSession
 
-        job = await RedisJob.async_create(
+        job = await AgentSession.async_create(
             project_key="test_project_ac_default",
             status="pending",
             created_at=1000.0,

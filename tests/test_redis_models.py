@@ -1,4 +1,4 @@
-"""Tests for popoto Redis models (DeadLetter, BridgeEvent, TelegramMessage, SessionLog).
+"""Tests for popoto Redis models (DeadLetter, BridgeEvent, TelegramMessage, AgentSession).
 
 All tests use redis_test_db fixture (db=1) for isolation from production data.
 """
@@ -354,7 +354,7 @@ class TestAgentSession:
     """Tests for the AgentSession model."""
 
     def test_create_active_session(self):
-        from models.session_log import SessionLog as AgentSession
+        from models.agent_session import AgentSession
 
         s = AgentSession.create(
             session_id="tg_valor_100",
@@ -373,7 +373,7 @@ class TestAgentSession:
         assert s.tool_call_count == 0
 
     def test_update_status_to_completed(self):
-        from models.session_log import SessionLog as AgentSession
+        from models.agent_session import AgentSession
 
         now = time.time()
         s = AgentSession.create(
@@ -411,7 +411,7 @@ class TestAgentSession:
         assert found[0].status == "completed"
 
     def test_update_tool_call_count(self):
-        from models.session_log import SessionLog as AgentSession
+        from models.agent_session import AgentSession
 
         s = AgentSession.create(
             session_id="tg_valor_300",
@@ -432,7 +432,7 @@ class TestAgentSession:
         assert found[0].tool_call_count == 20
 
     def test_query_active_sessions(self):
-        from models.session_log import SessionLog as AgentSession
+        from models.agent_session import AgentSession
 
         now = time.time()
         AgentSession.create(
@@ -480,7 +480,7 @@ class TestAgentSession:
         assert valor_active[0].session_id == "s1"
 
     def test_query_by_project(self):
-        from models.session_log import SessionLog as AgentSession
+        from models.agent_session import AgentSession
 
         now = time.time()
         AgentSession.create(
@@ -510,7 +510,7 @@ class TestAgentSession:
         assert len(valor) == 1
 
     def test_failed_status(self):
-        from models.session_log import SessionLog as AgentSession
+        from models.agent_session import AgentSession
 
         now = time.time()
         s = AgentSession.create(
@@ -543,7 +543,7 @@ class TestAgentSession:
 
     @pytest.mark.asyncio
     async def test_async_create_and_save(self):
-        from models.session_log import SessionLog as AgentSession
+        from models.agent_session import AgentSession
 
         now = time.time()
         s = await AgentSession.async_create(

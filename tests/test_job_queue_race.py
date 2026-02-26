@@ -11,16 +11,16 @@ import time
 import pytest
 
 from agent.job_queue import (
-    RedisJob,
     _extract_job_fields,
     _pop_job,
     _recover_interrupted_jobs,
     _reset_running_jobs,
 )
+from models.agent_session import AgentSession
 
 
-def _create_test_job(**overrides) -> RedisJob:
-    """Create a RedisJob with sensible defaults for testing."""
+def _create_test_job(**overrides) -> AgentSession:
+    """Create an AgentSession with sensible defaults for testing."""
     defaults = {
         "project_key": "test",
         "status": "pending",
@@ -34,7 +34,7 @@ def _create_test_job(**overrides) -> RedisJob:
         "message_id": 1,
     }
     defaults.update(overrides)
-    return RedisJob.create(**defaults)
+    return AgentSession.create(**defaults)
 
 
 class TestExtractJobFields:
@@ -91,12 +91,12 @@ class TestExtractJobFields:
         assert fields["auto_continue_count"] == 2
 
     def test_extracted_fields_can_recreate_job(self):
-        """Extracted fields should be usable for RedisJob.create()."""
+        """Extracted fields should be usable for AgentSession.create()."""
         original = _create_test_job()
         fields = _extract_job_fields(original)
 
         # Should create successfully without errors
-        new_job = RedisJob.create(**fields)
+        new_job = AgentSession.create(**fields)
         assert new_job.job_id != original.job_id  # New auto-generated ID
         assert new_job.project_key == original.project_key
         assert new_job.message_text == original.message_text
@@ -111,7 +111,7 @@ class TestPopJobDeleteAndRecreate:
         _create_test_job()
 
         # Verify it's in pending
-        pending_before = RedisJob.query.filter(project_key="test", status="pending")
+        pending_before = AgentSession.query.filter(project_key="test", status="pending")
         assert len(pending_before) == 1
 
         # Pop the job
@@ -119,11 +119,11 @@ class TestPopJobDeleteAndRecreate:
         assert job is not None
 
         # The old pending entry should be gone
-        pending_after = RedisJob.query.filter(project_key="test", status="pending")
+        pending_after = AgentSession.query.filter(project_key="test", status="pending")
         assert len(pending_after) == 0, "Stale pending index entry found after _pop_job"
 
         # The job should be in the running index
-        running = RedisJob.query.filter(project_key="test", status="running")
+        running = AgentSession.query.filter(project_key="test", status="running")
         assert len(running) == 1
 
     @pytest.mark.asyncio
@@ -177,7 +177,7 @@ class TestRecoverInterruptedJobs:
         _create_test_job(status="running", session_id="crashed_session")
 
         # Verify it's in running
-        running_before = RedisJob.query.filter(project_key="test", status="running")
+        running_before = AgentSession.query.filter(project_key="test", status="running")
         assert len(running_before) == 1
 
         # Run recovery
@@ -185,13 +185,13 @@ class TestRecoverInterruptedJobs:
         assert recovered == 1
 
         # The running index should be empty
-        running_after = RedisJob.query.filter(project_key="test", status="running")
+        running_after = AgentSession.query.filter(project_key="test", status="running")
         assert (
             len(running_after) == 0
         ), "Stale running index entry found after _recover_interrupted_jobs"
 
         # The job should now be in pending with high priority
-        pending = RedisJob.query.filter(project_key="test", status="pending")
+        pending = AgentSession.query.filter(project_key="test", status="pending")
         assert len(pending) == 1
         assert pending[0].priority == "high"
         assert pending[0].session_id == "crashed_session"
@@ -204,10 +204,10 @@ class TestRecoverInterruptedJobs:
         recovered = _recover_interrupted_jobs("test")
         assert recovered == 2
 
-        running = RedisJob.query.filter(project_key="test", status="running")
+        running = AgentSession.query.filter(project_key="test", status="running")
         assert len(running) == 0
 
-        pending = RedisJob.query.filter(project_key="test", status="pending")
+        pending = AgentSession.query.filter(project_key="test", status="pending")
         assert len(pending) == 2
 
     def test_recover_returns_zero_when_nothing_to_recover(self):
@@ -224,18 +224,18 @@ class TestResetRunningJobs:
         """After reset, no jobs should remain in the running index."""
         _create_test_job(status="running", session_id="in_flight")
 
-        running_before = RedisJob.query.filter(project_key="test", status="running")
+        running_before = AgentSession.query.filter(project_key="test", status="running")
         assert len(running_before) == 1
 
         reset_count = await _reset_running_jobs("test")
         assert reset_count == 1
 
-        running_after = RedisJob.query.filter(project_key="test", status="running")
+        running_after = AgentSession.query.filter(project_key="test", status="running")
         assert (
             len(running_after) == 0
         ), "Stale running index entry found after _reset_running_jobs"
 
-        pending = RedisJob.query.filter(project_key="test", status="pending")
+        pending = AgentSession.query.filter(project_key="test", status="pending")
         assert len(pending) == 1
         assert pending[0].priority == "high"
 

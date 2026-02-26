@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from models.session_log import SessionLog
+from models.agent_session import AgentSession
 
 # Will be implemented in tools/session_tags.py
 from tools.session_tags import (
@@ -37,9 +37,9 @@ def _create_session(
     work_item_slug: str | None = None,
     turn_count: int = 5,
     tags: list | None = None,
-) -> SessionLog:
-    """Helper to create a SessionLog for testing."""
-    return SessionLog.create(
+) -> AgentSession:
+    """Helper to create a AgentSession for testing."""
+    return AgentSession.create(
         session_id=session_id,
         project_key=project_key,
         status="active",
