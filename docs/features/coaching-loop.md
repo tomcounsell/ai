@@ -93,12 +93,17 @@ Is SDLC job? (check AgentSession.history for [stage] entries)
 
 | Pipeline state | Output classification | Action |
 |---|---|---|
-| Stages remaining | (skipped) | Auto-continue |
+| Stages remaining, no error prose | (skipped) | Auto-continue |
+| Stages remaining, error prose detected | ERROR/BLOCKER (heuristic) | Fall through to classifier |
 | All stages done | Completion | Deliver to user |
 | All stages done | Status (no evidence) | Coach + continue |
 | Any stage failed | Error/blocker | Deliver to user |
 | No stages (non-SDLC) | Question | Deliver to user |
 | No stages (non-SDLC) | Status | Auto-continue (existing behavior) |
+
+### Stage-Aware Error Guard
+
+Before auto-continuing on the stage-aware path, a lightweight heuristic check (`_classify_with_heuristics(msg[:500])`) scans the first 500 characters for error/blocker patterns. If detected, the output falls through to the full classifier instead of being silently re-enqueued. This catches error prose (e.g., "Error: test suite timeout") that would otherwise be missed because stage history says "still in progress."
 
 ### Auto-Continue Caps
 
@@ -130,20 +135,36 @@ Without this guard, an SDK crash would produce output classified as a status upd
 - **Session cleanup on SDK error**: `agent/sdk_client.py` marks sessions as `failed` in the `except` block, preventing the watchdog from trying to interact with dead sessions
 - **ModelException handling**: `monitoring/session_watchdog.py` catches `popoto.exceptions.ModelException` from stale sessions (unique constraint violations, corrupted state) and marks them as `failed` to break the watchdog loop
 
+## Auto-Continue State Management
+
+The `SendToChatResult` dataclass (`agent/job_queue.py`) tracks mutable state across the `send_to_chat()` closure and outer `_execute_job()` scope:
+
+```python
+@dataclass
+class SendToChatResult:
+    completion_sent: bool = False   # Gate: suppress further outputs after completion
+    defer_reaction: bool = False    # Skip reaction when continuation job enqueued
+    auto_continue_count: int = 0    # Persisted across re-enqueued jobs
+```
+
+This replaces the previous `nonlocal` closure variables (`_defer_reaction`, `_completion_sent`) which were fragile — if an exception occurred between setting one flag and another, state could become inconsistent.
+
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `bridge/summarizer.py` | LLM classifier that produces `ClassificationResult` with optional `coaching_message` |
+| `bridge/summarizer.py` | LLM classifier, heuristic fallback, confidence gate, approval gate patterns, audit log |
 | `bridge/coach.py` | Tiered coaching resolution via `build_coaching_message()` |
-| `agent/job_queue.py` | Auto-continue wiring, stage-aware routing, WorkflowState resolution, duplicate suppression |
+| `agent/job_queue.py` | Auto-continue wiring, `SendToChatResult` state, stage-aware routing + error guard, WorkflowState resolution |
 | `models/agent_session.py` | `AgentSession` with `is_sdlc_job()`, `has_remaining_stages()`, `has_failed_stage()` helpers |
 | `agent/sdk_client.py` | Session cleanup on SDK errors (marks sessions as `failed`) |
 | `monitoring/session_watchdog.py` | Stale session detection with unique constraint handling |
+| `logs/classification_audit.jsonl` | JSONL audit log for classification decisions (auto-rotated at 10MB) |
 | `tests/test_coach.py` | Coach module tests (skill detection, criteria extraction, coaching tiers) |
-| `tests/test_summarizer.py` | Classifier tests including coaching_message extraction |
+| `tests/test_summarizer.py` | Classifier tests including approval gates, confidence gate, audit log |
 | `tests/test_auto_continue.py` | Auto-continue duplicate suppression tests |
 | `tests/test_stage_aware_auto_continue.py` | Stage-aware decision matrix tests (32 tests) |
+| `tests/test_enqueue_continuation.py` | `_enqueue_continuation` tests (coaching source, parameters, plan resolution) |
 
 ## Tuning Guide
 
@@ -154,6 +175,37 @@ The classifier prompt in `CLASSIFIER_SYSTEM_PROMPT` (`bridge/summarizer.py`) inc
 ### Heuristic Fallback
 
 The `_build_heuristic_rejection_coaching()` function in `bridge/coach.py` provides a static template used when the LLM classifier doesn't provide a `coaching_message`. This covers cases like permission errors, auth failures, and rate limiting.
+
+### Classification Safety Net
+
+The heuristic classifier (`_classify_with_heuristics`) has three layers of safety:
+
+1. **Conservative default**: When no pattern matches, defaults to `QUESTION` at the confidence threshold (0.80). This shows the message to the user rather than silently auto-continuing.
+
+2. **Approval gate patterns**: Detects permission-seeking language ("shall I proceed", "awaiting approval", "when approved", etc.) and classifies as `QUESTION` at 0.85 confidence. Added to both the heuristic patterns and the `CLASSIFIER_SYSTEM_PROMPT` examples.
+
+3. **Confidence gate**: `_apply_heuristic_confidence_gate()` applies the same `CLASSIFICATION_CONFIDENCE_THRESHOLD` (0.80) to heuristic results that the LLM path uses. Below-threshold heuristic results become `QUESTION`. This closes the asymmetry where heuristic results at low confidence would have been returned as-is while LLM results would have been converted to QUESTION.
+
+### Classification Audit Log
+
+Every `classify_output()` call appends a JSONL entry to `logs/classification_audit.jsonl`:
+
+```json
+{"ts": "2026-02-27T14:00:00+00:00", "text_preview": "first 200 chars...", "result": "status_update", "confidence": 0.92, "reason": "...", "source": "llm"}
+```
+
+| Field | Description |
+|-------|-------------|
+| `ts` | ISO 8601 timestamp (UTC) |
+| `text_preview` | First 200 characters of the classified text |
+| `result` | Classification output type value |
+| `confidence` | Confidence score (0-1), rounded to 3 decimals |
+| `reason` | Classifier reasoning |
+| `source` | `"llm"`, `"heuristic"`, or `"empty"` |
+
+**Rotation**: When the file exceeds 10MB, it's renamed to `.jsonl.1` (simple single-rotation). Single writer, no locking needed.
+
+**Non-fatal**: Write failures are logged at DEBUG level and do not affect classification behavior.
 
 ### Skill-Specific Coaching
 

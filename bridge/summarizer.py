@@ -165,6 +165,12 @@ Classification rules:
 QUESTION — The agent is directly asking the human for a decision or input.
   Examples: "Should I proceed?", "Which approach do you prefer?", "Do you want me to...?"
   Key signals: direct question marks aimed at the user, "should I", "would you like", "which do you"
+  IMPORTANT: Messages seeking permission or approval are QUESTION, not STATUS_UPDATE.
+  Examples of approval gates (classify as QUESTION):
+  - "Ready to build when approved"
+  - "Waiting for your go-ahead"
+  - "Shall I proceed with the implementation?"
+  - "Awaiting approval before merging"
 
   NOT a question (classify as STATUS_UPDATE instead):
   - Rhetorical questions in status reports ("What could cause this? Let me investigate...")
@@ -257,6 +263,25 @@ def _classify_with_heuristics(text: str) -> ClassificationResult:
     """
     text_lower = text.lower().strip()
 
+    # Check for approval gate patterns (permission-seeking language)
+    approval_patterns = [
+        r"\bwhen approved\b",
+        r"\bready to build\b.*\bapproved\b",
+        r"\bwaiting for.*\bgo-ahead\b",
+        r"\blet me know when\b",
+        r"\bshall i proceed\b",
+        r"\bawaiting.*\bapproval\b",
+        r"\bready to (?:proceed|start|begin)\b.*\bapproved\b",
+        r"\bwaiting for your\b.*\b(?:approval|confirmation|go-ahead)\b",
+    ]
+    for pattern in approval_patterns:
+        if re.search(pattern, text_lower):
+            return ClassificationResult(
+                output_type=OutputType.QUESTION,
+                confidence=0.85,
+                reason="Detected approval gate pattern — agent seeking permission",
+            )
+
     # Check for direct questions aimed at the user
     question_patterns = [
         r"\bshould i\b.*\?",
@@ -336,14 +361,83 @@ def _classify_with_heuristics(text: str) -> ClassificationResult:
                 has_workarounds=_detect_workarounds(text_lower),
             )
 
-    # Default: STATUS_UPDATE (conservative for auto-continue)
+    # Default: QUESTION (conservative — show to user rather than silently auto-continue)
+    # When no pattern matches, it's safer to pause for human review than to
+    # auto-continue what might be a question the heuristics didn't catch.
+    # Confidence is set at the threshold (0.80) so the confidence gate in
+    # classify_output() passes this through without redundant re-conversion.
     result = ClassificationResult(
-        output_type=OutputType.STATUS_UPDATE,
-        confidence=0.60,
-        reason="No strong signal detected, defaulting to status update",
+        output_type=OutputType.QUESTION,
+        confidence=CLASSIFICATION_CONFIDENCE_THRESHOLD,
+        reason="No strong signal detected — defaulting to show user",
     )
     result.has_workarounds = _detect_workarounds(text_lower)
     return result
+
+
+def _apply_heuristic_confidence_gate(
+    result: ClassificationResult,
+) -> ClassificationResult:
+    """Apply the same confidence threshold to heuristic results as the LLM path.
+
+    When heuristic confidence is below CLASSIFICATION_CONFIDENCE_THRESHOLD,
+    default to QUESTION (conservative). This closes the asymmetry where a
+    heuristic result at 0.60 would be returned as STATUS_UPDATE, while an
+    LLM result at 0.60 would become QUESTION.
+    """
+    if result.confidence < CLASSIFICATION_CONFIDENCE_THRESHOLD:
+        logger.info(
+            f"Heuristic confidence {result.confidence:.2f} below "
+            f"threshold {CLASSIFICATION_CONFIDENCE_THRESHOLD}, "
+            f"defaulting to QUESTION"
+        )
+        return ClassificationResult(
+            output_type=OutputType.QUESTION,
+            confidence=result.confidence,
+            reason=f"Low heuristic confidence ({result.confidence:.2f}): {result.reason}",
+        )
+    return result
+
+
+# Classification audit log — lightweight JSONL observability
+_AUDIT_LOG_PATH = Path(__file__).parent.parent / "logs" / "classification_audit.jsonl"
+_AUDIT_LOG_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
+
+
+def _write_classification_audit(
+    text: str, result: ClassificationResult, source: str
+) -> None:
+    """Append a JSONL entry to the classification audit log.
+
+    Provides structured observability for every classify_output() call.
+    Uses append mode, no locking needed (single writer). Rotates by
+    renaming to .1 when file exceeds 10 MB.
+    """
+    try:
+        from datetime import UTC, datetime
+
+        _AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        # Size-based rotation
+        if (
+            _AUDIT_LOG_PATH.exists()
+            and _AUDIT_LOG_PATH.stat().st_size > _AUDIT_LOG_MAX_SIZE
+        ):
+            rotated = _AUDIT_LOG_PATH.with_suffix(".jsonl.1")
+            _AUDIT_LOG_PATH.rename(rotated)
+
+        entry = {
+            "ts": datetime.now(UTC).isoformat(),
+            "text_preview": text[:200] if text else "",
+            "result": result.output_type.value,
+            "confidence": round(result.confidence, 3),
+            "reason": result.reason,
+            "source": source,
+        }
+        with open(_AUDIT_LOG_PATH, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception as e:
+        logger.debug(f"Classification audit log write failed (non-fatal): {e}")
 
 
 async def classify_output(text: str) -> ClassificationResult:
@@ -361,11 +455,13 @@ async def classify_output(text: str) -> ClassificationResult:
         ClassificationResult with the output type, confidence, and reason.
     """
     if not text or not text.strip():
-        return ClassificationResult(
+        result = ClassificationResult(
             output_type=OutputType.STATUS_UPDATE,
             confidence=1.0,
             reason="Empty output",
         )
+        _write_classification_audit(text or "", result, source="empty")
+        return result
 
     # Try LLM-based classification first
     try:
@@ -374,7 +470,10 @@ async def classify_output(text: str) -> ClassificationResult:
         api_key = get_anthropic_api_key()
         if not api_key:
             logger.warning("No API key for classification, using heuristics")
-            return _classify_with_heuristics(text)
+            result = _classify_with_heuristics(text)
+            result = _apply_heuristic_confidence_gate(result)
+            _write_classification_audit(text, result, source="heuristic")
+            return result
 
         client = anthropic.AsyncAnthropic(api_key=api_key)
 
@@ -401,11 +500,12 @@ async def classify_output(text: str) -> ClassificationResult:
                     f"threshold {CLASSIFICATION_CONFIDENCE_THRESHOLD}, "
                     f"defaulting to QUESTION"
                 )
-                return ClassificationResult(
+                result = ClassificationResult(
                     output_type=OutputType.QUESTION,
                     confidence=result.confidence,
                     reason=f"Low confidence ({result.confidence:.2f}): {result.reason}",
                 )
+            _write_classification_audit(text, result, source="llm")
             return result
 
         # LLM returned unparseable response — fall through to heuristics
@@ -415,7 +515,11 @@ async def classify_output(text: str) -> ClassificationResult:
         logger.warning(f"LLM classification failed: {e}")
 
     # Fallback to heuristic classification
-    return _classify_with_heuristics(text)
+    # Apply the same confidence threshold as the LLM path (Item 5)
+    result = _classify_with_heuristics(text)
+    result = _apply_heuristic_confidence_gate(result)
+    _write_classification_audit(text, result, source="heuristic")
+    return result
 
 
 def _parse_classification_response(raw: str) -> ClassificationResult | None:

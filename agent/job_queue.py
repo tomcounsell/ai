@@ -17,6 +17,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,22 @@ from bridge.session_logs import save_session_snapshot
 from models.agent_session import AgentSession
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SendToChatResult:
+    """Explicit state returned from send_to_chat instead of fragile nonlocal closures.
+
+    Replaces the _defer_reaction and _completion_sent nonlocal variables that were
+    set in send_to_chat() and read in the outer _execute_job() scope. Multiple code
+    paths previously set these via closure mutation; this dataclass makes the state
+    explicit and eliminates inconsistency if an exception occurs between set and read.
+    """
+
+    completion_sent: bool = False
+    defer_reaction: bool = False
+    auto_continue_count: int = 0
+
 
 # Backward compatibility alias
 RedisJob = AgentSession
@@ -1032,18 +1049,14 @@ async def _execute_job(job: Job) -> None:
     send_cb = _send_callbacks.get(job.project_key)
     react_cb = _reaction_callbacks.get(job.project_key)
 
-    # Auto-continue counter (max 3 per session, persisted across re-enqueued jobs)
-    auto_continue_count = job.auto_continue_count or 0
-    # Flag to skip reaction when a continuation job is enqueued
-    _defer_reaction = False
-    # Gate: once a COMPLETION is sent, suppress all further outputs
-    _completion_sent = False
+    # Explicit state object replaces fragile nonlocal closures (_defer_reaction,
+    # _completion_sent, auto_continue_count). State is passed as a mutable object
+    # rather than mutated through shared closure references.
+    chat_state = SendToChatResult(
+        auto_continue_count=job.auto_continue_count or 0,
+    )
 
     async def send_to_chat(msg: str) -> None:
-        nonlocal auto_continue_count
-        nonlocal _defer_reaction
-        nonlocal _completion_sent
-
         if not send_cb:
             return
 
@@ -1055,12 +1068,12 @@ async def _execute_job(job: Job) -> None:
                 f"delivering without auto-continue ({len(msg)} chars)"
             )
             await send_cb(job.chat_id, msg, job.message_id, agent_session)
-            _completion_sent = True
+            chat_state.completion_sent = True
             return
 
         # If we already sent a completion, drop all subsequent outputs.
         # The work is done — further messages are noise that spams the chat.
-        if _completion_sent:
+        if chat_state.completion_sent:
             logger.info(
                 f"[{job.project_key}] Dropping suppressed output "
                 f"(completion sent or auto-continued) "
@@ -1101,50 +1114,72 @@ async def _execute_job(job: Job) -> None:
             # Don't auto-continue; the failure needs human attention.
             logger.info(f"[{job.project_key}] SDLC stage failed — delivering to user")
             await send_cb(job.chat_id, msg, job.message_id, agent_session)
-            _completion_sent = True
+            chat_state.completion_sent = True
             return
 
-        if _is_sdlc and _sdlc_has_remaining and auto_continue_count < effective_max:
-            # SDLC job with stages remaining — auto-continue without classifier.
-            # Stage progress is a stronger signal than prose classification.
-            auto_continue_count += 1
-            progress = agent_session.get_stage_progress()
-            logger.info(
-                f"[{job.project_key}] Stage-aware auto-continue "
-                f"({auto_continue_count}/{effective_max}), "
-                f"progress: {progress}"
-            )
+        if (
+            _is_sdlc
+            and _sdlc_has_remaining
+            and chat_state.auto_continue_count < effective_max
+        ):
+            # Stage-aware error guard: before auto-continuing, check if the
+            # output looks like an error. Error prose should reach the user
+            # even when stage history says "still in progress".
+            from bridge.summarizer import OutputType, _classify_with_heuristics
 
-            save_session_snapshot(
-                session_id=job.session_id,
-                event="auto_continue",
-                project_key=job.project_key,
-                branch_name=branch_name,
-                task_summary=f"Stage-aware auto-continue ({auto_continue_count}/{effective_max})",
-                extra_context={
-                    "routing": "stage_aware",
-                    "stage_progress": str(progress),
-                    "message_preview": msg[:200],
-                },
-                working_dir=str(working_dir),
-            )
+            quick_check = _classify_with_heuristics(msg[:500])
+            if quick_check.output_type in (OutputType.ERROR, OutputType.BLOCKER):
+                logger.warning(
+                    f"[{job.project_key}] Stage-aware path detected "
+                    f"{quick_check.output_type.value} in prose, "
+                    f"routing to classifier instead of auto-continuing"
+                )
+                # Fall through to classifier-based routing below
+            else:
+                # SDLC job with stages remaining — auto-continue without classifier.
+                # Stage progress is a stronger signal than prose classification.
+                chat_state.auto_continue_count += 1
+                progress = agent_session.get_stage_progress()
+                logger.info(
+                    f"[{job.project_key}] Stage-aware auto-continue "
+                    f"({chat_state.auto_continue_count}/{effective_max}), "
+                    f"progress: {progress}"
+                )
 
-            await _enqueue_continuation(
-                job,
-                branch_name,
-                task_list_id,
-                auto_continue_count,
-                msg,
-                coaching_source="stage_aware",
-            )
+                save_session_snapshot(
+                    session_id=job.session_id,
+                    event="auto_continue",
+                    project_key=job.project_key,
+                    branch_name=branch_name,
+                    task_summary=(
+                        f"Stage-aware auto-continue "
+                        f"({chat_state.auto_continue_count}/{effective_max})"
+                    ),
+                    extra_context={
+                        "routing": "stage_aware",
+                        "stage_progress": str(progress),
+                        "message_preview": msg[:200],
+                    },
+                    working_dir=str(working_dir),
+                )
 
-            _completion_sent = True
-            _defer_reaction = True
-            return
+                await _enqueue_continuation(
+                    job,
+                    branch_name,
+                    task_list_id,
+                    chat_state.auto_continue_count,
+                    msg,
+                    coaching_source="stage_aware",
+                )
+
+                chat_state.completion_sent = True
+                chat_state.defer_reaction = True
+                return
 
         # === Classifier-based routing ===
         # Used for: non-SDLC jobs, SDLC jobs with all stages done,
-        # and SDLC jobs that hit the safety cap.
+        # SDLC jobs that hit the safety cap, and SDLC jobs where the
+        # stage-aware error guard detected error prose.
         from bridge.summarizer import OutputType, classify_output
 
         classification = await classify_output(msg)
@@ -1165,13 +1200,13 @@ async def _execute_job(job: Job) -> None:
 
         elif (
             classification.output_type == OutputType.STATUS_UPDATE
-            and auto_continue_count < effective_max
+            and chat_state.auto_continue_count < effective_max
         ):
             # Status update -- don't send to chat, re-enqueue job to continue session
-            auto_continue_count += 1
+            chat_state.auto_continue_count += 1
             logger.info(
                 f"[{job.project_key}] Auto-continuing via job re-enqueue "
-                f"({auto_continue_count}/{effective_max})"
+                f"({chat_state.auto_continue_count}/{effective_max})"
             )
 
             # Log a session snapshot for audit trail
@@ -1180,14 +1215,17 @@ async def _execute_job(job: Job) -> None:
                 event="auto_continue",
                 project_key=job.project_key,
                 branch_name=branch_name,
-                task_summary=f"Auto-continued ({auto_continue_count}/{effective_max})",
+                task_summary=(
+                    f"Auto-continued "
+                    f"({chat_state.auto_continue_count}/{effective_max})"
+                ),
                 extra_context={
                     "routing": "classifier",
                     "classification": classification.output_type.value,
                     "confidence": classification.confidence,
                     "reason": classification.reason,
                     "message_preview": msg[:200],
-                    "coaching_context": "pending",  # Updated below after coaching builds
+                    "coaching_context": "pending",
                 },
                 working_dir=str(working_dir),
             )
@@ -1197,7 +1235,7 @@ async def _execute_job(job: Job) -> None:
                 job=job,
                 branch_name=branch_name,
                 task_list_id=task_list_id,
-                auto_continue_count=auto_continue_count,
+                auto_continue_count=chat_state.auto_continue_count,
                 output_msg=msg,
                 coaching_source="classifier",
             )
@@ -1206,17 +1244,17 @@ async def _execute_job(job: Job) -> None:
             # Without this, _run_work() re-sends the SDK result through
             # send_to_chat after we already auto-continued, causing duplicate
             # messages in chat.
-            _completion_sent = True
+            chat_state.completion_sent = True
 
             # Signal that this job should NOT set a reaction
             # (defer to the continuation job)
-            _defer_reaction = True
+            chat_state.defer_reaction = True
             return
 
         # For all other types (question, completion, blocker, error,
         # or max auto-continues reached), send to chat normally
         if (
-            auto_continue_count >= effective_max
+            chat_state.auto_continue_count >= effective_max
             and classification.output_type == OutputType.STATUS_UPDATE
         ):
             logger.info(
@@ -1254,9 +1292,9 @@ async def _execute_job(job: Job) -> None:
                     task_list_id=job.task_list_id,
                     auto_continue_count=MAX_AUTO_CONTINUES,  # No further auto-continues
                 )
-                _defer_reaction = True
+                chat_state.defer_reaction = True
 
-            _completion_sent = True
+            chat_state.completion_sent = True
             logger.info(
                 f"[{job.project_key}] Completion sent — suppressing further outputs"
             )
@@ -1333,10 +1371,10 @@ async def _execute_job(job: Job) -> None:
 
             final_status = (
                 "active"
-                if _defer_reaction
+                if chat_state.defer_reaction
                 else ("completed" if not task.error else "failed")
             )
-            if not _defer_reaction:
+            if not chat_state.defer_reaction:
                 complete_transcript(job.session_id, status=final_status)
             else:
                 agent_session.last_activity = time.time()
@@ -1379,7 +1417,7 @@ async def _execute_job(job: Job) -> None:
 
     # Set reaction based on result and delivery state
     # Skip if a continuation job was enqueued (defer reaction to that job)
-    if react_cb and not _defer_reaction:
+    if react_cb and not chat_state.defer_reaction:
         if task.error:
             emoji = REACTION_ERROR
         elif messenger.has_communicated():
@@ -1393,7 +1431,7 @@ async def _execute_job(job: Job) -> None:
 
     # Auto-mark session as done after successful completion
     # Skip when auto-continue deferred — continuation job will handle cleanup
-    if not task.error and not _defer_reaction:
+    if not task.error and not chat_state.defer_reaction:
         try:
             from agent.branch_manager import mark_work_done
 
@@ -1424,10 +1462,10 @@ async def _execute_job(job: Job) -> None:
             },
             working_dir=str(working_dir),
         )
-    elif _defer_reaction:
+    elif chat_state.defer_reaction:
         logger.info(
             f"[{job.project_key}] Skipping session cleanup — "
-            f"continuation job enqueued (auto-continue {auto_continue_count})"
+            f"continuation job enqueued (auto-continue {chat_state.auto_continue_count})"
         )
 
 
