@@ -325,10 +325,17 @@ class TestGetStatusEmoji:
 
         assert _get_status_emoji(sdlc_session) == "✅"
 
-    def test_active_session(self, session):
+    def test_active_session_completion(self, session):
+        """Active session with is_completion=True (default) returns ✅."""
         from bridge.summarizer import _get_status_emoji
 
-        assert _get_status_emoji(session) == "⏳"
+        assert _get_status_emoji(session) == "✅"
+
+    def test_active_session_non_completion(self, session):
+        """Active session with is_completion=False returns ⏳."""
+        from bridge.summarizer import _get_status_emoji
+
+        assert _get_status_emoji(session, is_completion=False) == "⏳"
 
     def test_failed_session(self, redis_test_db):
         from bridge.summarizer import _get_status_emoji

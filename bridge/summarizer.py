@@ -559,18 +559,22 @@ def _render_link_footer(session) -> str | None:
 
 
 def _get_status_emoji(session, is_completion: bool = True) -> str:
-    """Get the status emoji prefix based on session state."""
+    """Get the status emoji prefix based on completion flag and session state.
+
+    The is_completion flag takes priority for running/active sessions because
+    the session status hasn't been updated yet when the summary is composed.
+    Only hard terminal states (completed, failed) override the flag.
+    """
     if not session:
         return "✅" if is_completion else "⏳"
 
     status = session.status
-    if status in ("completed",):
-        return "✅"
-    elif status in ("failed",):
+    if status in ("failed",):
         return "❌"
-    elif status in ("running", "active"):
-        return "⏳"
+    elif status in ("completed",):
+        return "✅"
     else:
+        # For running/active/pending — trust the is_completion flag
         return "✅" if is_completion else "⏳"
 
 
@@ -738,6 +742,21 @@ def _parse_summary_and_questions(summary_text: str) -> tuple[str, str | None]:
     return summary_text, None
 
 
+def _get_original_request(session) -> str | None:
+    """Extract the original user request from session history.
+
+    Auto-continue overwrites message_text with "continue", so we look
+    at the first [user] entry in history which preserves the original request.
+    Falls back to message_text if no history exists.
+    """
+    if hasattr(session, "_get_history_list"):
+        for entry in session._get_history_list():
+            if isinstance(entry, str) and entry.startswith("[user] "):
+                return entry[len("[user] ") :]
+    # Fallback: use message_text (may be "continue" for auto-continued sessions)
+    return session.message_text if session and session.message_text else None
+
+
 def _compose_structured_summary(
     summary_text: str, session=None, is_completion: bool = True
 ) -> str:
@@ -759,16 +778,19 @@ def _compose_structured_summary(
 
     parts = []
 
-    # Status emoji + first-line label
+    # Status emoji + first-line label from the ORIGINAL request
+    # (not message_text, which gets overwritten by auto-continue "continue")
     emoji = _get_status_emoji(session, is_completion)
     label = ""
-    if session and session.message_text:
-        first_line = (session.message_text or "").split("\n")[0].strip()
-        for prefix in ("SDLC ", "sdlc ", "/sdlc ", "MESSAGE: "):
-            if first_line.startswith(prefix):
-                first_line = first_line[len(prefix) :].strip()
-        if first_line and len(first_line) <= 80:
-            label = first_line
+    if session:
+        original_request = _get_original_request(session)
+        if original_request:
+            first_line = original_request.split("\n")[0].strip()
+            for prefix in ("SDLC ", "sdlc ", "/sdlc ", "MESSAGE: "):
+                if first_line.startswith(prefix):
+                    first_line = first_line[len(prefix) :].strip()
+            if first_line and len(first_line) <= 80:
+                label = first_line
     if label:
         parts.append(f"{emoji} {label}")
     else:

@@ -10,6 +10,8 @@ from bridge.summarizer import (
     OutputType,
     _classify_with_heuristics,
     _compose_structured_summary,
+    _get_original_request,
+    _get_status_emoji,
     _parse_classification_response,
     _parse_summary_and_questions,
     classify_output,
@@ -882,3 +884,115 @@ class TestComposeStructuredSummary:
             "• Working on it", session=None, is_completion=False
         )
         assert "⏳" in result
+
+
+class TestGetOriginalRequest:
+    """Tests for _get_original_request — regression tests for issue #192."""
+
+    def test_returns_first_user_entry_from_history(self):
+        """Original request is extracted from the first [user] history entry."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = [
+            "[user] /sdlc 190",
+            "[stage] ISSUE completed ☑",
+            "[user] continue",
+        ]
+        session.message_text = "continue"
+
+        result = _get_original_request(session)
+        assert result == "/sdlc 190"
+
+    def test_falls_back_to_message_text_when_no_history(self):
+        """When no history exists, falls back to message_text."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = []
+        session.message_text = "What is the status?"
+
+        result = _get_original_request(session)
+        assert result == "What is the status?"
+
+    def test_returns_none_when_no_data(self):
+        """Returns None when session has no history and no message_text."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = []
+        session.message_text = None
+
+        result = _get_original_request(session)
+        assert result is None
+
+    def test_label_not_continue_on_auto_continued_session(self):
+        """Regression: auto-continued sessions must show original request, not 'continue'."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = [
+            "[user] SDLC 190",
+            "[stage] ISSUE completed ☑",
+            "[stage] PLAN completed ☑",
+        ]
+        session.message_text = "continue"  # overwritten by auto-continue
+        session.status = "running"
+        session.is_sdlc_job.return_value = True
+
+        result = _compose_structured_summary(
+            "• Built the bypass\n• Tests passing", session=session, is_completion=True
+        )
+        # Must NOT contain "continue" as the label
+        assert "continue" not in result.split("\n")[0]
+        # Must contain the original request (with /sdlc prefix stripped)
+        assert "190" in result
+
+
+class TestGetStatusEmojiRegression:
+    """Regression tests for _get_status_emoji — issue #192."""
+
+    def test_running_session_with_completion_flag_returns_checkmark(self):
+        """Regression: is_completion=True must return ✅ even when session is running."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.status = "running"
+
+        result = _get_status_emoji(session, is_completion=True)
+        assert result == "✅"
+
+    def test_running_session_without_completion_flag_returns_pending(self):
+        """is_completion=False with running session returns ⏳."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.status = "running"
+
+        result = _get_status_emoji(session, is_completion=False)
+        assert result == "⏳"
+
+    def test_failed_session_always_returns_error(self):
+        """Failed status overrides is_completion flag."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.status = "failed"
+
+        assert _get_status_emoji(session, is_completion=True) == "❌"
+        assert _get_status_emoji(session, is_completion=False) == "❌"
+
+    def test_completed_session_always_returns_checkmark(self):
+        """Completed status always returns ✅."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.status = "completed"
+
+        assert _get_status_emoji(session, is_completion=True) == "✅"
+        assert _get_status_emoji(session, is_completion=False) == "✅"
+
+    def test_no_session_uses_completion_flag(self):
+        """No session defers to is_completion flag."""
+        assert _get_status_emoji(None, is_completion=True) == "✅"
+        assert _get_status_emoji(None, is_completion=False) == "⏳"
