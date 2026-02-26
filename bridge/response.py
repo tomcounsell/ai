@@ -382,10 +382,13 @@ async def send_response_with_files(
 
     text, files = extract_files_from_response(response)
 
-    # Always summarize — no character threshold.
-    # The summarizer handles short messages gracefully and ensures
-    # consistent formatting (stage progress, link footers for SDLC jobs).
-    if text:
+    # Summarize SDK agent responses for consistent PM-quality output.
+    # SDLC sessions: always summarize (need stage lines + link footers).
+    # Non-SDLC short responses (< 500 chars): skip — these are typically
+    # programmatic skill output (e.g., /update) that's already formatted.
+    is_sdlc = session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
+    should_summarize = text and (is_sdlc or len(text) >= 500)
+    if should_summarize:
         try:
             from bridge.summarizer import summarize_response
 
