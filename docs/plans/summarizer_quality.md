@@ -60,8 +60,17 @@ No prerequisites — all code exists and is already merged.
 {emoji} {first_line_of_request}
 {stage_progress_line}
 {llm_summary_bullets}
+{questions_section}
 {link_footer}
 ```
+
+The `{questions_section}` is optional — only present when the agent's output contains questions, decisions, or items needing human input. These are extracted by the LLM alongside the summary bullets and rendered after them. Examples:
+- Open questions from a plan draft
+- Critical decisions during a build
+- Nits the agent wants to skip after PR review
+- Scope clarifications, tradeoff choices, etc.
+
+This ensures questions always surface to the PM and are never buried or dropped by summarization.
 
 For non-SDLC messages: LLM summarizes as prose, no template.
 
@@ -95,12 +104,21 @@ In `bridge/summarizer.py`, modify `_compose_structured_summary()`:
 - When `session.is_sdlc_job()` is True, ALWAYS render stage progress and link footer
 - Stage progress line is mandatory — if `get_stage_progress()` returns all pending, still render it (shows pipeline just started)
 - Link footer is mandatory — render whatever links exist (may be just Issue, may be Issue+Plan+PR)
-- The LLM only generates the bullet-point content (2-4 bullets)
+- The LLM generates two things: summary bullets (2-4) and any questions/decisions needing human input
 - Template concatenation happens in Python, not in the LLM prompt
+- Update `SUMMARIZER_SYSTEM_PROMPT` to instruct the LLM to extract questions separately. Output format:
+  ```
+  • Bullet 1
+  • Bullet 2
+  ---
+  ? Question or decision needing input 1
+  ? Question or decision needing input 2
+  ```
+  The `---` separator and `?` prefix are parsed in code. If no questions exist, the separator is omitted.
 
 Template logic (pseudocode):
 ```python
-def _compose_sdlc_message(session, bullets: str) -> str:
+def _compose_sdlc_message(session, bullets: str, questions: str | None) -> str:
     emoji = _get_status_emoji(session)
     label = _get_request_label(session)
     stage_line = _render_stage_progress(session)  # Always render for SDLC
@@ -110,6 +128,9 @@ def _compose_sdlc_message(session, bullets: str) -> str:
     if stage_line:
         parts.append(stage_line)
     parts.append(bullets.strip())
+    if questions:
+        parts.append("")  # blank line separator
+        parts.append(questions.strip())
     if link_footer:
         parts.append(link_footer)
     return "\n".join(parts)
@@ -196,6 +217,7 @@ No new MCP servers or tools needed. The changes are to the bridge response pipel
 - [ ] Every SDLC message includes stage progress line (rendered from AgentSession)
 - [ ] Every SDLC message includes link footer when links exist
 - [ ] Stage line and link footer are template-rendered (not LLM-generated)
+- [ ] Questions/decisions from agent output are extracted and rendered after bullets (never dropped)
 - [ ] AgentSession flows through callback chain: job_queue → bridge → summarizer
 - [ ] SDLC pipeline stops after REVIEW+DOCS and waits for human "merge" instruction
 - [ ] PR reviews are always posted to GitHub (verified by SDLC dispatcher)
