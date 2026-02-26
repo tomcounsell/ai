@@ -133,12 +133,13 @@ class TestCleanupAfterMerge:
         assert result["worktree_removed"] is False
         assert result["branch_deleted"] is True
         assert result["already_clean"] is False
+        assert "Failed to remove worktree" in result["errors"][0]
 
     @patch("agent.worktree_manager.subprocess.run")
     @patch("agent.worktree_manager._branch_exists")
     @patch("agent.worktree_manager.remove_worktree")
     def test_branch_deletion_fails(self, mock_remove_wt, mock_branch_exists, mock_run):
-        """If branch deletion fails, result reflects that."""
+        """If branch deletion fails, result reflects failure (not already_clean)."""
         repo = Path("/fake/repo")
         slug = "protected-feature"
 
@@ -153,9 +154,50 @@ class TestCleanupAfterMerge:
 
         assert result["worktree_removed"] is False
         assert result["branch_deleted"] is False
-        # Not already_clean because we attempted work (branch existed)
-        # but the deletion failed, so neither flag is True
-        assert result["already_clean"] is True
+        # Not already_clean: the branch existed but deletion failed.
+        # already_clean is only True when nothing needed cleanup at all.
+        assert result["already_clean"] is False
+        assert len(result["errors"]) == 1
+        assert "Failed to delete branch" in result["errors"][0]
+
+    @patch("agent.worktree_manager.subprocess.run")
+    @patch("agent.worktree_manager._branch_exists")
+    @patch("agent.worktree_manager.remove_worktree")
+    def test_worktree_removal_failure_recorded_in_errors(
+        self, mock_remove_wt, mock_branch_exists, mock_run
+    ):
+        """When worktree removal fails, the error is recorded."""
+        repo = Path("/fake/repo")
+        slug = "error-feature"
+
+        with patch.object(Path, "exists", return_value=True):
+            mock_remove_wt.return_value = False  # removal failed
+            mock_branch_exists.return_value = False
+            mock_run.return_value = MagicMock(returncode=0)
+
+            result = cleanup_after_merge(repo, slug)
+
+        assert result["worktree_removed"] is False
+        assert result["already_clean"] is False
+        assert len(result["errors"]) == 1
+        assert "Failed to remove worktree" in result["errors"][0]
+
+    @patch("agent.worktree_manager.subprocess.run")
+    @patch("agent.worktree_manager._branch_exists")
+    @patch("agent.worktree_manager.remove_worktree")
+    def test_errors_empty_on_success(
+        self, mock_remove_wt, mock_branch_exists, mock_run
+    ):
+        """Successful cleanup has an empty errors list."""
+        repo = Path("/fake/repo")
+        slug = "clean-feature"
+
+        mock_branch_exists.return_value = False
+        mock_run.return_value = MagicMock(returncode=0)
+
+        result = cleanup_after_merge(repo, slug)
+
+        assert result["errors"] == []
 
     @patch("agent.worktree_manager.subprocess.run")
     @patch("agent.worktree_manager._branch_exists")

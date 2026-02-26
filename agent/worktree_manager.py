@@ -235,23 +235,30 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
         "worktree_removed": False,
         "branch_deleted": False,
         "already_clean": False,
+        "errors": [],
     }
 
+    had_worktree = worktree_dir.exists()
+    had_branch = _branch_exists(repo_root, branch_name)
+
     # Step 1: Remove worktree if it exists
-    if worktree_dir.exists():
+    if had_worktree:
         removed = remove_worktree(repo_root, slug, delete_branch=False)
         result["worktree_removed"] = removed
         if removed:
             logger.info(f"Post-merge: removed worktree for {slug}")
         else:
-            logger.warning(f"Post-merge: failed to remove worktree for {slug}")
+            msg = f"Failed to remove worktree .worktrees/{slug}"
+            result["errors"].append(msg)
+            logger.warning(f"Post-merge: {msg}")
 
     # Step 2: Prune stale worktree references (handles cases where the
     # directory was manually deleted but git still tracks the worktree)
     prune_worktrees(repo_root)
 
     # Step 3: Delete local branch if it still exists
-    if _branch_exists(repo_root, branch_name):
+    # Re-check after prune -- pruning may unblock branch deletion
+    if had_branch or _branch_exists(repo_root, branch_name):
         branch_result = subprocess.run(
             ["git", "branch", "-D", branch_name],
             cwd=repo_root,
@@ -263,15 +270,16 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
             result["branch_deleted"] = True
             logger.info(f"Post-merge: deleted local branch {branch_name}")
         else:
-            logger.warning(
-                f"Post-merge: failed to delete branch {branch_name}: "
-                f"{branch_result.stderr.strip()}"
+            msg = (
+                f"Failed to delete branch {branch_name}: {branch_result.stderr.strip()}"
             )
+            result["errors"].append(msg)
+            logger.warning(f"Post-merge: {msg}")
     else:
         logger.info(f"Post-merge: branch {branch_name} already gone")
 
-    # If nothing was cleaned up, mark as already clean
-    if not result["worktree_removed"] and not result["branch_deleted"]:
+    # already_clean means nothing *needed* cleanup (not that cleanup failed)
+    if not had_worktree and not had_branch:
         result["already_clean"] = True
         logger.info(f"Post-merge: nothing to clean up for {slug}")
 
