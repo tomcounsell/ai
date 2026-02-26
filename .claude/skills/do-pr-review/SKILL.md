@@ -126,17 +126,19 @@ For each requirement/acceptance criterion in the plan:
   - Missing tests for critical paths
   - Crashes or severe errors
 
-- **tech_debt**: Should fix but doesn't block merge
+- **tech_debt**: Fix before merge (patched automatically by `/do-patch`)
   - Code quality issues
   - Missing tests for edge cases
   - Performance improvements
   - Refactoring opportunities
+  - These are NOT optional — the SDLC pipeline will invoke `/do-patch` to fix them
 
-- **nit**: Nice to have, non-critical
+- **nit**: Fix before merge unless purely subjective (patched automatically by `/do-patch`)
   - Style/formatting
   - Minor naming improvements
   - Documentation wording
   - Future enhancements
+  - Only skip nits that are genuinely subjective (e.g., naming preference) — requires human approval
 
 **For each issue found, use this format:**
 
@@ -244,6 +246,12 @@ Save this URL as `{review_url}` for the output summary.
 - Saved to `generated_images/pr-{pr_number}/` directory
 - Auto-detected and sent via Telegram bridge
 - Bridge uses RELATIVE_PATH_PATTERN to auto-detect generated_images/ files
+
+## Hard Rules
+
+1. **Reviews MUST be posted on GitHub.** A review that only exists in agent output is NOT a review. Always use `gh pr review` to post. The SDLC dispatcher verifies this before advancing.
+2. **Tech debt and nits get patched.** After review, `/do-patch` fixes all tech debt and non-subjective nits before proceeding to docs/merge. Only purely subjective nits may be skipped — and that requires human approval.
+3. **Never approve and skip issues.** If you found tech debt or nits, they appear in the review body. The pipeline will patch them. Don't omit findings to make the review look clean.
 
 ## Best Practices
 

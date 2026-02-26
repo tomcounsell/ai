@@ -65,9 +65,20 @@ Based on the assessment, invoke ONE sub-skill and let it run:
 | Plan exists, no branch/PR | `/do-build` with the plan path or issue number | Plan is ready, time to implement |
 | Branch exists, tests failing | `/do-patch` then `/do-test` | Fix what's broken |
 | Branch exists, tests passing, no PR | `/do-pr-review` | Code is ready for review |
+| PR exists, review has tech debt or nits | `/do-patch` to fix them, then `/do-test`, then re-review | Don't leave tech debt behind |
 | PR exists, review blockers | `/do-patch` to fix blockers, then `/do-test`, then re-review | Address feedback |
-| PR approved, docs not updated | `/do-docs` | Last step before merge |
-| PR approved, docs done | Report ready for human merge | Nothing left to automate |
+| PR approved (clean), docs not updated | `/do-docs` | Last step before merge |
+| PR approved, docs done | **STOP. Report completion. Wait for human to say "merge".** | Human gate required |
+
+**IMPORTANT: Never auto-merge.** After all automated stages are complete (REVIEW + DOCS), STOP and report to the user. Wait for an explicit "merge" instruction. The human decides when to merge.
+
+**IMPORTANT: PR reviews must be published on GitHub.** Before advancing past the REVIEW stage, verify a review exists on the PR:
+```bash
+gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews --jq length
+```
+If the count is 0, re-invoke `/do-pr-review`. A review that only exists in agent output is NOT a review.
+
+**IMPORTANT: Tech debt and nits get patched.** After REVIEW, if the review found ANY tech debt or nits, invoke `/do-patch` to fix them before proceeding to DOCS. Only skip the patch step if the review found zero issues (clean approval).
 
 **Do NOT restart from scratch if prior stages are already complete.**
 

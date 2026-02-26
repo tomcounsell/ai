@@ -29,7 +29,6 @@ from config.models import MODEL_FAST
 logger = logging.getLogger(__name__)
 
 # Thresholds
-SUMMARIZE_THRESHOLD = 500  # Anything longer gets summarized
 FILE_ATTACH_THRESHOLD = 3000  # Attach full output as file above this
 SAFETY_TRUNCATE = 4096  # Telegram hard limit
 
@@ -606,9 +605,7 @@ def _build_summary_prompt(
         if session.branch_name:
             context_parts.append(f"Branch: {session.branch_name}")
         if context_parts:
-            context_section = (
-                "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
-            )
+            context_section = "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
 
     return f"""/no_think
 Summarize this developer session output:{artifact_section}{context_section}
@@ -649,6 +646,17 @@ FORMAT RULES (adaptive based on content type):
    Do NOT include any emoji status prefix (✅, ⏳, etc.) — that is added automatically.
    Do NOT include any issue/PR URLs — those are rendered from session data automatically.
    Focus on WHAT was accomplished, not process details.
+
+   If the output contains questions, decisions needing input, or items requiring human approval, \
+   list them AFTER the bullets, separated by "---" on its own line. Prefix each with "? ":
+   Example:
+   • Built auth token rotation with retry
+   • 12 tests passing
+   ---
+   ? Should we use exponential backoff or fixed intervals?
+   ? 2 nits found in review — skip or patch?
+
+   If there are no questions, do NOT include the "---" separator.
 
 5. STATUS UPDATES / WORK WITH CONTEXT: 2-4 bullet points starting with "• "
 
@@ -706,30 +714,56 @@ async def _summarize_with_ollama(prompt: str) -> str | None:
         return None
 
 
+def _parse_summary_and_questions(summary_text: str) -> tuple[str, str | None]:
+    """Parse LLM summary output into bullets and optional questions.
+
+    The LLM may produce:
+        • Bullet 1
+        • Bullet 2
+        ---
+        ? Question 1
+        ? Question 2
+
+    Returns (bullets, questions) where questions is None if no --- separator found.
+    """
+    if "\n---\n" in summary_text:
+        bullets, questions = summary_text.split("\n---\n", 1)
+        questions = questions.strip()
+        if questions:
+            return bullets.strip(), questions
+        return bullets.strip(), None
+    # Also handle --- at the very start (edge case)
+    if summary_text.strip().startswith("---"):
+        return "", summary_text.strip().lstrip("-").strip() or None
+    return summary_text, None
+
+
 def _compose_structured_summary(
     summary_text: str, session=None, is_completion: bool = True
 ) -> str:
-    """Compose the full structured summary with emoji, stage line, bullets, and links.
+    """Compose the full structured summary with emoji, stage line, bullets, questions, and links.
 
     For SDLC sessions with history, produces:
         ✅ Original request summary
         ☑ ISSUE → ☑ PLAN → ☑ BUILD → ☑ TEST → ☑ REVIEW → ☑ DOCS
         • Bullet point 1
         • Bullet point 2
+
+        ? Question needing input
         Issue #168 | Plan | PR #176
 
     For non-SDLC sessions, returns the summary text with status emoji prepended.
     """
+    # Parse questions from LLM output
+    bullets, questions = _parse_summary_and_questions(summary_text)
+
     parts = []
 
     # Status emoji + first-line label
     emoji = _get_status_emoji(session, is_completion)
-    # Extract a short label from the original request if available
     label = ""
     if session and session.message_text:
-        # Use first line of message, truncated
         first_line = (session.message_text or "").split("\n")[0].strip()
-        # Strip common prefixes
         for prefix in ("SDLC ", "sdlc ", "/sdlc ", "MESSAGE: "):
             if first_line.startswith(prefix):
                 first_line = first_line[len(prefix) :].strip()
@@ -738,20 +772,23 @@ def _compose_structured_summary(
     if label:
         parts.append(f"{emoji} {label}")
     else:
-        # No label — put emoji before the summary text
-        # But only if summary doesn't already start with an emoji
-        if summary_text and summary_text[0] not in "✅⏳❌⚠️❓":
+        if bullets and bullets[0] not in "✅⏳❌⚠️❓":
             parts.append(f"{emoji}")
 
-    # Stage progress line (SDLC only)
+    # Stage progress line — mandatory for SDLC, optional for others
     stage_line = _render_stage_progress(session)
     if stage_line:
         parts.append(stage_line)
 
     # Summary text (bullets or prose)
-    parts.append(summary_text.strip())
+    parts.append(bullets.strip())
 
-    # Link footer
+    # Questions section (if any)
+    if questions:
+        parts.append("")  # blank line separator
+        parts.append(questions)
+
+    # Link footer — mandatory for SDLC jobs
     link_footer = _render_link_footer(session)
     if link_footer:
         parts.append(link_footer)
@@ -765,10 +802,10 @@ async def summarize_response(
 ) -> SummarizedResponse:
     """Summarize an agent response for Telegram delivery.
 
-    - Responses <= SUMMARIZE_THRESHOLD chars: returned as-is
-    - Longer responses: summarized via Haiku, then Ollama fallback
+    - All non-empty responses: summarized via Haiku, then Ollama fallback
     - Very long responses (> FILE_ATTACH_THRESHOLD): full output
       attached as file
+    - SDLC sessions: structured template with stage progress + link footer
 
     Args:
         raw_response: The raw agent output text.
@@ -776,7 +813,7 @@ async def summarize_response(
 
     Falls back to safety truncation if all summarization fails.
     """
-    if not raw_response or len(raw_response) <= SUMMARIZE_THRESHOLD:
+    if not raw_response or not raw_response.strip():
         return SummarizedResponse(text=raw_response or "", was_summarized=False)
 
     artifacts = extract_artifacts(raw_response)

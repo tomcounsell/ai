@@ -6,11 +6,12 @@ import pytest
 
 from bridge.summarizer import (
     CLASSIFICATION_CONFIDENCE_THRESHOLD,
-    SUMMARIZE_THRESHOLD,
     ClassificationResult,
     OutputType,
     _classify_with_heuristics,
+    _compose_structured_summary,
     _parse_classification_response,
+    _parse_summary_and_questions,
     classify_output,
     extract_artifacts,
     summarize_response,
@@ -88,13 +89,14 @@ class TestSummarizeResponse:
     """Tests for the main summarize_response function."""
 
     @pytest.mark.asyncio
-    async def test_short_response_not_summarized(self):
-        """Responses under threshold are returned as-is."""
+    async def test_short_response_still_summarized(self):
+        """All non-empty responses are summarized (no threshold)."""
         short_text = "Done. Committed abc1234."
-        result = await summarize_response(short_text)
-        assert result.text == short_text
-        assert result.was_summarized is False
-        assert result.full_output_file is None
+        mock_haiku = AsyncMock(return_value="Done ✅ `abc1234`")
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(short_text)
+        assert result.was_summarized is True
+        mock_haiku.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_empty_response(self):
@@ -106,13 +108,6 @@ class TestSummarizeResponse:
     async def test_none_response(self):
         result = await summarize_response(None)
         assert result.text == ""
-
-    @pytest.mark.asyncio
-    async def test_exactly_at_threshold(self):
-        """Response exactly at threshold is not summarized."""
-        text = "x" * SUMMARIZE_THRESHOLD
-        result = await summarize_response(text)
-        assert result.was_summarized is False
 
     @pytest.mark.asyncio
     async def test_long_response_calls_haiku(self):
@@ -821,3 +816,69 @@ class TestClassifyOutput:
     async def test_confidence_threshold_constant(self):
         """Verify the confidence threshold is set correctly."""
         assert CLASSIFICATION_CONFIDENCE_THRESHOLD == 0.80
+
+
+class TestParseSummaryAndQuestions:
+    """Tests for _parse_summary_and_questions."""
+
+    def test_bullets_only(self):
+        text = "• Built the feature\n• Pushed to main"
+        bullets, questions = _parse_summary_and_questions(text)
+        assert bullets == text
+        assert questions is None
+
+    def test_bullets_and_questions(self):
+        text = "• Built the feature\n• Pushed to main\n---\n? Should I merge?"
+        bullets, questions = _parse_summary_and_questions(text)
+        assert bullets == "• Built the feature\n• Pushed to main"
+        assert questions == "? Should I merge?"
+
+    def test_multiple_questions(self):
+        text = "• Done\n---\n? Q1\n? Q2\n? Q3"
+        bullets, questions = _parse_summary_and_questions(text)
+        assert bullets == "• Done"
+        assert "? Q1" in questions
+        assert "? Q2" in questions
+        assert "? Q3" in questions
+
+    def test_empty_questions_section(self):
+        text = "• Done\n---\n"
+        bullets, questions = _parse_summary_and_questions(text)
+        assert bullets == "• Done"
+        assert questions is None
+
+    def test_leading_separator(self):
+        text = "---\n? Only questions here"
+        bullets, questions = _parse_summary_and_questions(text)
+        assert bullets == ""
+        assert questions is not None
+        assert "Only questions here" in questions
+
+    def test_no_separator(self):
+        text = "Simple summary without questions."
+        bullets, questions = _parse_summary_and_questions(text)
+        assert bullets == text
+        assert questions is None
+
+
+class TestComposeStructuredSummary:
+    """Tests for _compose_structured_summary."""
+
+    def test_no_session_returns_emoji_and_bullets(self):
+        result = _compose_structured_summary("• Built it\n• Shipped it", session=None)
+        assert "✅" in result
+        assert "• Built it" in result
+        assert "• Shipped it" in result
+
+    def test_questions_appended(self):
+        result = _compose_structured_summary(
+            "• Done\n---\n? Should I merge?", session=None
+        )
+        assert "? Should I merge?" in result
+        assert "• Done" in result
+
+    def test_not_completion_uses_pending_emoji(self):
+        result = _compose_structured_summary(
+            "• Working on it", session=None, is_completion=False
+        )
+        assert "⏳" in result

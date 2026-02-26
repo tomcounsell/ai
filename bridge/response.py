@@ -382,8 +382,10 @@ async def send_response_with_files(
 
     text, files = extract_files_from_response(response)
 
-    # Summarize long responses before sending
-    if text and len(text) > 500:
+    # Always summarize — no character threshold.
+    # The summarizer handles short messages gracefully and ensures
+    # consistent formatting (stage progress, link footers for SDLC jobs).
+    if text:
         try:
             from bridge.summarizer import summarize_response
 
