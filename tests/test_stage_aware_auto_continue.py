@@ -301,7 +301,7 @@ class TestStageAwareDecisionMatrix:
         assert should_auto_continue is False
 
 
-class TestMaxAutoContiuesConstants:
+class TestMaxAutoContinuesConstants:
     """Tests for the auto-continue constants."""
 
     def test_max_auto_continues_value(self):
