@@ -139,6 +139,7 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 - [ ] [Criterion 3]
 - [ ] Tests pass (`/do-test`)
 - [ ] Documentation updated (`/do-docs`)
+- [ ] [If Agent Integration section specifies "X calls Y": grep confirms X references Y]
 
 ## Team Orchestration
 

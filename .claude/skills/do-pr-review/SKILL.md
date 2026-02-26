@@ -114,6 +114,7 @@ For each requirement/acceptance criterion in the plan:
 2. Verify behavior matches the plan specification
 3. Check that edge cases mentioned in the plan are handled
 4. Verify any "No-Gos" from the plan are respected
+5. If the plan has an Agent Integration section, verify integration points exist in the codebase (e.g., grep for expected tool calls, imports, or MCP references)
 
 ### 5. Issue Identification & Classification
 

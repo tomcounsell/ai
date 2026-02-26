@@ -218,6 +218,7 @@ python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}
 - [x] **Tested**: All unit tests passing, integration tests passing
 - [x] **Quality**: Ruff and Black checks pass, no lint errors
 - [x] **Reviewed**: Review passes (no blocking issues)
+- [x] **Demonstrated**: Feature produces intended user-visible output (e.g., rendered message, API response, UI state)
 
 If any criterion is not met, report the issue and do NOT proceed to the Document stage.
 

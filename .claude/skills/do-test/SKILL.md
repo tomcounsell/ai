@@ -89,6 +89,8 @@ When `--changed` is specified:
 |------|-------|-------------|
 | `PARALLEL_DISPATCH_THRESHOLD` | 50 | Number of test files above which parallel subagent dispatch is used instead of sequential execution. Below this threshold, run tests in-process to avoid subagent overhead. |
 
+**Integration test check:** If the plan has an Agent Integration section describing cross-component wiring (tool A feeds component B), verify at least one test exercises the full chain -- not just each component in isolation.
+
 ## Execution Strategy
 
 ### Single Target (specific type or file)

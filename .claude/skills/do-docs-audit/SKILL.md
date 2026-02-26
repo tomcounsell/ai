@@ -296,3 +296,4 @@ After committing, print the final audit report:
 5. **Transparent output**: Print the summary table before making changes so the human can see what's coming.
 6. **Structure enforcement**: After every audit, verify all docs are in canonical subdirs. Relocate misplaced docs and update cross-references.
 7. **Filename convention**: Filenames must be lowercase-with-hyphens (e.g. `telegram.md`, `tool-rebuild-requirements.md`). `README.md` is the only uppercase exception; `CHANGELOG.md`, `LICENSE.md`, and `CONTRIBUTING.md` are also exempt as standard project files. Any other uppercase filename must be normalized using `git mv`.
+8. **Data flow tracing:** When auditing output compliance, don't just check if the renderer works -- trace upstream. Is the data source being populated? Is the tool/function that writes the data actually being called? Grep for expected invocations.
