@@ -186,6 +186,54 @@ Sessions on `session/{slug}` branches — all `/do-build` builder agents — alw
 | **Structural** | SDK Stop hook (`_check_no_direct_main_push`) | Hard-blocks code-on-main at session end |
 | **Quality gate** | Claude Code Stop hook (`validate_sdlc_on_stop.py`) | Blocks if pytest/ruff/black not run |
 
+## User-Level Deployment
+
+SDLC enforcement hooks are deployed to `~/.claude/` so they fire in **every repo on every machine**, not just the AI repo.
+
+### How Hooks Are Deployed
+
+The update system (`scripts/update/hardlinks.py`) includes `sync_user_hooks()` which:
+
+1. Copies `.claude/hooks/sdlc/*.py` to `~/.claude/hooks/sdlc/` via hardlinks
+2. Merges hook entries into `~/.claude/settings.json` (deduplicated by command string)
+3. Never clobbers non-SDLC user hooks
+
+Running the update script on any machine automatically installs the hooks.
+
+### Shared Context Module
+
+All 3 hooks import from `sdlc_context.py` — the single source of truth for SDLC context detection. This replaces the previous approach where each hook had its own copy of `is_sdlc_context()`.
+
+The detection is two-tier:
+1. **Branch check**: Is the current git branch `session/*`? (Works in any repo)
+2. **AgentSession check**: Does the Redis-backed AgentSession have SDLC stages? (Requires AI repo + Redis)
+
+The AgentSession import is wrapped in try/except — on machines without Redis or the AI repo, detection falls back to branch-only, which is sufficient for worktree-based builds.
+
+### Hook Files at User Level
+
+```
+~/.claude/
+├── hooks/
+│   └── sdlc/
+│       ├── sdlc_context.py              # Shared detection utilities
+│       ├── validate_commit_message.py    # PreToolUse: blocks main commits
+│       ├── sdlc_reminder.py             # PostToolUse: one-time test reminder
+│       └── validate_sdlc_on_stop.py     # Stop: quality gate enforcement
+└── settings.json                         # Hook entries merged here
+```
+
+### Settings.json Hook Entries
+
+The merger adds these entries (if not already present):
+
+| Event | Matcher | Script | Timeout |
+|-------|---------|--------|---------|
+| PreToolUse | Bash | validate_commit_message.py | 10s |
+| PostToolUse | Write | sdlc_reminder.py | 10s |
+| PostToolUse | Edit | sdlc_reminder.py | 10s |
+| Stop | (all) | validate_sdlc_on_stop.py | 15s |
+
 ## Related
 
 - [do-patch Skill](do-patch-skill.md) — repair loop invoked on test failure or review blockers
