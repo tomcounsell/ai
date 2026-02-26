@@ -138,11 +138,31 @@ For each requirement/acceptance criterion in the plan:
   - Documentation wording
   - Future enhancements
 
-**For each issue found:**
-1. Reference the file and line number
-2. Write clear description of the problem
-3. Suggest a fix
-4. Classify severity
+**For each issue found, use this format:**
+
+```
+**File:** `path/to/file.py:42` (verified: read this file)
+**Code:** `the_actual_code_on_that_line()`
+**Issue:** [clear description of the problem]
+**Severity:** blocker | tech_debt | nit
+**Fix:** [suggested fix]
+```
+
+The `Code:` field MUST be a verbatim quote from the file, not paraphrased. The `File:` path MUST be a file you read with the Read tool during this review. If you cannot produce both of these, do not include the finding.
+
+### 5.5. Verify Findings (mandatory)
+
+Before posting, verify every blocker and tech_debt finding:
+
+1. **Confirm the file exists** — you must have read it with the Read tool during this review
+2. **Confirm the code exists** — the function, class, or pattern you're citing must appear in the file at or near the line you reference
+3. **Confirm the behavior** — re-read the relevant code to make sure your description of the problem is accurate
+
+**If a finding fails verification** (file doesn't exist, function not found, behavior described doesn't match actual code):
+- **Drop it entirely.** Do not include unverified findings in the review.
+- A false blocker is worse than a missed real issue — it wastes time and erodes trust.
+
+This step exists because of issue #181: a prior review hallucinated two "blocker" findings citing functions and files that did not exist.
 
 ### 6. Post Review
 
@@ -154,11 +174,11 @@ gh pr review {pr_number} --request-changes --body "$(cat <<'EOF'
 [summary of blockers]
 
 ### Blockers
-- [ ] [blocker 1 with file:line reference]
-- [ ] [blocker 2 with file:line reference]
+- [ ] **`file.py:42`** — `actual_code()` — [description of issue]
+- [ ] **`file.py:87`** — `actual_code()` — [description of issue]
 
 ### Tech Debt (non-blocking)
-- [tech debt items]
+- **`file.py:15`** — `code()` — [description]
 
 ### Screenshots
 [screenshot references if captured]
@@ -229,6 +249,7 @@ Save this URL as `{review_url}` for the output summary.
 
 1. **Always read the plan first**: The plan is the source of truth for what should have been built
 2. **Focus on correctness over style**: Don't nitpick formatting if the code works
-3. **Be specific in issue descriptions**: Include file paths and line numbers
-4. **Classify severity honestly**: Don't mark blockers as tech debt to speed up merge
-5. **Capture key UI paths**: 1-3 screenshots typical, focus on changed functionality
+3. **Quote actual code in every finding**: Include the verbatim code snippet, not a paraphrase — this makes hallucinated findings self-evident
+4. **Verify before posting**: Every blocker must cite a file you read and code you saw (Step 5.5)
+5. **Classify severity honestly**: Don't mark blockers as tech debt to speed up merge
+6. **Capture key UI paths**: 1-3 screenshots typical, focus on changed functionality
