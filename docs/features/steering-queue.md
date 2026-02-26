@@ -79,7 +79,7 @@ if is_reply_to_valor and message.reply_to_msg_id:
     session_id = f"tg_{project_key}_{event.chat_id}_{message.reply_to_msg_id}"
 
     # NEW: Check if this session is currently running
-    active_sessions = SessionLog.query.filter(session_id=session_id, status="active")
+    active_sessions = AgentSession.query.filter(session_id=session_id, status="active")
     if active_sessions:
         # Route to steering queue instead of job queue
         push_steering_message(session_id, clean_text, sender_name)
@@ -163,7 +163,7 @@ if client:
 **Crash/reboot safety**: The `_active_clients` dict is in-process memory only. It is NOT persisted. This is intentional and correct:
 
 - **On crash/reboot**: The dict is empty. The SDK subprocess (`claude` CLI) that was running is also dead. There is nothing to steer into — the session is gone.
-- **Recovery path**: On startup, `_recover_interrupted_jobs()` resets any `status="running"` RedisJobs back to `status="pending"`, and `_ensure_worker()` restarts them. The recovered job creates a **new** `ClaudeSDKClient` instance, which gets registered in `_active_clients` fresh. The `ClaudeAgentOptions.resume` field (set to the session_id) tells the SDK CLI to resume from its own persistent conversation history on disk (`~/.claude/`).
+- **Recovery path**: On startup, `_recover_interrupted_jobs()` resets any `status="running"` AgentSessions back to `status="pending"`, and `_ensure_worker()` restarts them. The recovered job creates a **new** `ClaudeSDKClient` instance, which gets registered in `_active_clients` fresh. The `ClaudeAgentOptions.resume` field (set to the session_id) tells the SDK CLI to resume from its own persistent conversation history on disk (`~/.claude/`).
 - **Steering queue on crash**: Any messages in `steering:{session_id}` survive in Redis (no TTL — they persist indefinitely). When the job resumes after crash, the watchdog will find and inject them on the first tool call of the new session. No messages are lost.
 - **No stale references**: The `finally` block in `ValorAgent.query()` guarantees cleanup even on exceptions. The only way to get a stale entry is if the process is killed (SIGKILL). On next startup, `_active_clients` is empty (fresh import), so there's zero risk of referencing a dead client.
 

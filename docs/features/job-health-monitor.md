@@ -4,7 +4,7 @@ Automatically detects and recovers stuck running jobs in the Redis-based job que
 
 ## Overview
 
-The job health monitor runs as a periodic async task alongside the bridge process. Every 5 minutes, it scans all `running` RedisJobs to check:
+The job health monitor runs as a periodic async task alongside the bridge process. Every 5 minutes, it scans all `running` AgentSessions to check:
 
 1. Whether the associated worker coroutine is still alive
 2. Whether the job has exceeded its maximum duration
@@ -33,7 +33,7 @@ Timeouts are measured from `started_at` (when the job begins processing), not `c
 When a stuck job is found:
 
 1. Log a warning with the job ID, project key, and reason (dead worker or timeout)
-2. Delete the orphaned RedisJob from Redis
+2. Delete the orphaned AgentSession from Redis
 3. Re-create it as `pending` with all original data preserved
 4. Call `_ensure_worker()` to restart the processing loop for that project
 
@@ -41,8 +41,8 @@ When a stuck job is found:
 
 The health check loop starts automatically with the bridge process, alongside the existing session watchdog. Both run at 5-minute intervals but monitor different concerns:
 
-- **Session watchdog** (`monitoring/session_watchdog.py`): Monitors `SessionLog` objects at the application level
-- **Job health monitor** (`agent/job_queue.py`): Monitors `RedisJob` status at the queue level
+- **Session watchdog** (`monitoring/session_watchdog.py`): Monitors `AgentSession` objects at the application level
+- **Job health monitor** (`agent/job_queue.py`): Monitors `AgentSession` status at the queue level
 
 ## CLI Usage
 
@@ -81,7 +81,7 @@ Constants in `agent/job_queue.py`:
 
 ## Related
 
-- [redis-job-queue.md](redis-job-queue.md) -- The underlying Redis job queue
+- [scale-job-queue-with-popoto-and-worktrees.md](scale-job-queue-with-popoto-and-worktrees.md) -- The underlying Redis job queue
 - [session-watchdog.md](session-watchdog.md) -- Session-level health monitoring (complementary layer)
 - [bridge-self-healing.md](bridge-self-healing.md) -- Bridge process-level health monitoring
 - `agent/job_queue.py` -- Implementation source

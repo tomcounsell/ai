@@ -14,7 +14,7 @@ All status transitions now use delete-and-recreate instead of in-place mutation:
 fields = _extract_job_fields(job)
 await job.async_delete()        # removes from old index via on_delete
 fields["status"] = "running"
-new_job = await RedisJob.async_create(**fields)  # adds to new index via on_save
+new_job = await AgentSession.async_create(**fields)  # adds to new index via on_save
 ```
 
 This is applied in three functions:
@@ -22,7 +22,7 @@ This is applied in three functions:
 - `_recover_interrupted_jobs()` -- running to pending (sync, startup)
 - `_reset_running_jobs()` -- running to pending (async, shutdown)
 
-The `_extract_job_fields()` helper reads all 24 non-auto fields from a RedisJob instance for recreation.
+The `_extract_job_fields()` helper reads all 24 non-auto fields from a AgentSession instance for recreation.
 
 ## Worker Drain Guard
 
@@ -30,7 +30,7 @@ The worker loop now includes a drain guard before exiting. When `_pop_job()` ret
 
 ## Startup Orphan Recovery
 
-`_recover_orphaned_jobs()` scans for RedisJob objects in the Redis class set that are not present in any status KeyField index. These orphans result from past index corruption or creation races. They are re-created with status `pending` and priority `high`. Called at bridge startup alongside `_recover_interrupted_jobs()`.
+`_recover_orphaned_jobs()` scans for AgentSession objects in the Redis class set that are not present in any status KeyField index. These orphans result from past index corruption or creation races. They are re-created with status `pending` and priority `high`. Called at bridge startup alongside `_recover_interrupted_jobs()`.
 
 ## Revival Chat Scoping Fix
 
@@ -42,7 +42,7 @@ Instead of scanning git branches globally, `check_revival()` queries Redis (Popo
 
 ```python
 for status in ("pending", "running"):
-    jobs = RedisJob.query.filter(project_key=project_key, status=status)
+    jobs = AgentSession.query.filter(project_key=project_key, status=status)
     for job in jobs:
         if str(job.chat_id) == chat_id_str:
             branch = _session_branch_name(job.session_id)

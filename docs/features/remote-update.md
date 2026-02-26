@@ -264,7 +264,7 @@ def _check_restart_flag(project_key: str) -> bool:
         return False
 
     # Don't restart if other jobs are still running
-    running = RedisJob.query.filter(project_key=project_key, status="running")
+    running = AgentSession.query.filter(project_key=project_key, status="running")
     if running:
         logger.info(f"[{project_key}] Restart requested but {len(running)} job(s) still running — deferring")
         return False
@@ -273,7 +273,7 @@ def _check_restart_flag(project_key: str) -> bool:
     for pkey in ACTIVE_PROJECTS:
         if pkey == project_key:
             continue
-        other_running = RedisJob.query.filter(project_key=pkey, status="running")
+        other_running = AgentSession.query.filter(project_key=pkey, status="running")
         if other_running:
             logger.info(f"[{project_key}] Restart requested but {pkey} has running jobs — deferring")
             return False

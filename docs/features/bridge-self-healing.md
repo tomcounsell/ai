@@ -138,4 +138,4 @@ rm data/auto-revert-enabled
 ## Related
 
 - [Message Pipeline](message-pipeline.md) — deferred enrichment and zero-loss restart mechanisms
-- [Session Transcripts](session-transcripts.md) — session lifecycle logging via SessionLog model
+- [Session Transcripts](session-transcripts.md) — session lifecycle logging via AgentSession model

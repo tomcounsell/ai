@@ -15,7 +15,7 @@ The runner (`scripts/daydream.py`) loads state from Redis, executes each step in
 | 3 | Check Error Logs (Sentry) | Queries Sentry for unresolved issues | AI repo only | Non-blocking, skips if MCP unavailable |
 | 4 | Clean Up Task Management | Lists open bug issues via `gh issue list` per project | Per-project | Non-blocking, requires `gh` auth |
 | 5 | Audit Documentation | Weekly LLM-powered accuracy audit of `docs/` (see [Documentation Audit](documentation-audit.md)) | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
-| 6 | Session Analysis | Queries Redis SessionLog and BridgeEvent; computes thrash ratio, detects user corrections | AI repo only | Non-blocking |
+| 6 | Session Analysis | Queries Redis AgentSession and BridgeEvent; computes thrash ratio, detects user corrections | AI repo only | Non-blocking |
 | 7 | LLM Reflection | Claude Haiku categorizes mistakes into 6 categories | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
 | 8 | Auto-Fix Bugs | For high-confidence `code_bug` reflections, spawns `/do-plan` + `/do-build` to open fix PRs | AI repo only | Non-blocking, requires `claude` CLI |
 | 9 | Memory Consolidation | Persists LessonLearned entries to Redis; deduplicates by pattern; prunes entries >90 days | AI repo only | Non-blocking |
@@ -91,7 +91,7 @@ Queries Redis for recent sessions and computes quality metrics.
 
 ### Data Sources
 
-- **SessionLog** — turn count, tool call count, log file path, session tags
+- **AgentSession** — turn count, tool call count, log file path, session tags
 - **BridgeEvent** — error events correlated to sessions
 
 ### Thrash Ratio
@@ -230,7 +230,7 @@ Prunes expired records to keep Redis lean:
 | TelegramMessage | 90 days | `cleanup_expired()` |
 | Link | 90 days | `cleanup_expired()` |
 | Chat | 90 days | `cleanup_expired()` |
-| SessionLog | 90 days | `cleanup_expired()` |
+| AgentSession | 90 days | `cleanup_expired()` |
 | BridgeEvent | 7 days | `cleanup_old()` |
 | DaydreamRun | 30 days | `cleanup_expired()` |
 | DaydreamIgnore | Per-entry TTL | `cleanup_expired()` |

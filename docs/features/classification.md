@@ -21,12 +21,11 @@ If classification fails, the field stays `null` and the user specifies the type 
 
 ### Session Metadata Fields
 
-**SessionLog** (`models/session_log.py`):
+**AgentSession** (`models/agent_session.py`):
 - `classification_type` - The classified type: `bug`, `feature`, or `chore` (nullable)
 - `classification_confidence` - Confidence score from 0.0 to 1.0 (nullable)
 
-**RedisJob** (`agent/job_queue.py`):
-- `classification_type` - Passthrough field so the worker can store the classification on the SessionLog
+The unified `AgentSession` model carries classification fields through the full lifecycle — from enqueue through completion — eliminating the previous need for a separate passthrough field.
 
 Both fields are nullable and backward-compatible with existing sessions/jobs.
 
@@ -67,7 +66,7 @@ Telegram message
      -> classify_request_async(clean_text)  [Haiku API]
      -> store in classification_result dict
   -> enqueue_job(classification_type=...)
-  -> _execute_job() stores on SessionLog
+  -> _execute_job() stores on AgentSession
   -> /do-plan reads classification_type from session context
   -> pre-populates type: in plan frontmatter
 ```
@@ -78,8 +77,8 @@ Telegram message
 |------|---------|
 | `bridge/telegram_bridge.py` | Auto-classification integration point |
 | `tools/classifier.py` | Classification engine (Haiku API) |
-| `models/session_log.py` | SessionLog with classification fields |
-| `agent/job_queue.py` | RedisJob with classification passthrough |
+| `models/agent_session.py` | AgentSession with classification fields |
+| `agent/job_queue.py` | Job queue using AgentSession model |
 | `.claude/hooks/validators/validate_type_immutability.py` | Immutability enforcement |
 | `.claude/skills/reclassify/SKILL.md` | Reclassification during Planning |
 | `.claude/skills/do-plan/SKILL.md` | Pre-population of type field |

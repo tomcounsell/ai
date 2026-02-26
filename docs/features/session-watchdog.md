@@ -19,7 +19,7 @@ Agent sessions can silently fail: the agent stops producing output, enters a loo
 
 The watchdog runs as an `asyncio.create_task()` in the bridge's `main()` function. Every 5 minutes it:
 
-1. Queries all sessions with `status="active"` via `SessionLog.query.filter()`
+1. Queries all sessions with `status="active"` via `AgentSession.query.filter()`
 2. For each session, reads the session log for recent activity
 3. Applies four detection heuristics (silence, loop, error cascade, duration)
 4. Sends a Telegram alert for any session showing issues, respecting cooldowns
