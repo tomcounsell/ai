@@ -216,9 +216,7 @@ def sync_user_hooks(project_dir: Path, result: HardlinkSyncResult) -> None:
     _merge_sdlc_hook_settings(user_hooks_dir, result)
 
 
-def _merge_sdlc_hook_settings(
-    user_hooks_dir: Path, result: HardlinkSyncResult
-) -> None:
+def _merge_sdlc_hook_settings(user_hooks_dir: Path, result: HardlinkSyncResult) -> None:
     """Merge SDLC hook entries into ~/.claude/settings.json.
 
     Reads the existing settings, adds SDLC hook entries for PreToolUse(Bash),
@@ -296,24 +294,30 @@ def _merge_sdlc_hook_settings(
         ],
     }
 
-    # Merge without clobbering: for each event type, collect existing command
-    # strings and only append entries whose command is not already present.
+    # Merge without clobbering: for each event type, collect existing
+    # (matcher, command) pairs and only append entries not already present.
+    # We key on (matcher, command) rather than command alone because the
+    # same command may legitimately appear with different matchers (e.g.,
+    # sdlc_reminder.py fires on both Write and Edit).
     for event, new_entries in sdlc_hooks.items():
         existing = hooks.get(event, [])
 
-        # Collect all command strings from existing entries for dedup
-        existing_commands: set[str] = set()
+        # Collect (matcher, command) pairs from existing entries for dedup
+        existing_keys: set[tuple[str, str]] = set()
         for entry in existing:
+            matcher = entry.get("matcher", "")
             for hook in entry.get("hooks", []):
                 cmd = hook.get("command", "")
                 if cmd:
-                    existing_commands.add(cmd)
+                    existing_keys.add((matcher, cmd))
 
         for entry in new_entries:
+            matcher = entry.get("matcher", "")
             cmd = entry["hooks"][0]["command"]
-            if cmd not in existing_commands:
+            key = (matcher, cmd)
+            if key not in existing_keys:
                 existing.append(entry)
-                existing_commands.add(cmd)
+                existing_keys.add(key)
 
         hooks[event] = existing
 
