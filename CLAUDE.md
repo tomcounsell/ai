@@ -96,7 +96,8 @@ The standard flow from conversation to shipped feature:
 - If there is no question — just a status update — the summarizer auto-sends "continue"
 - Status updates without questions or signs of completion are NOT stopping points
 - The agent keeps working until the phase is complete or it's genuinely blocked
-- Auto-continue is capped at **3 per session** (MAX_AUTO_CONTINUES) to prevent infinite loops
+- **SDLC jobs** use stage-aware routing: pipeline progress from `AgentSession.history` drives auto-continue decisions (cap: 10). The classifier is only consulted when all stages are complete.
+- **Non-SDLC jobs** use classifier-based routing with `MAX_AUTO_CONTINUES = 3`
 - The auto-continue counter resets when the human sends a new message
 
 ### Session Continuity

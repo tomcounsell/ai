@@ -32,9 +32,23 @@ When confidence falls below `CLASSIFICATION_CONFIDENCE_THRESHOLD` (0.80), the sy
 
 ## Auto-Continue
 
-When output is classified as `STATUS_UPDATE`, the bridge suppresses it from Telegram and injects `"continue"` into the agent's steering queue. This keeps the agent working without human intervention.
+The bridge uses a two-path auto-continue strategy based on whether the job is an SDLC pipeline job or a casual/ad-hoc job.
 
-### How It Works
+### Stage-Aware Path (SDLC Jobs)
+
+For jobs with `[stage]` entries in `AgentSession.history`, pipeline progress drives auto-continue instead of the classifier:
+
+1. Agent produces output
+2. `AgentSession.is_sdlc_job()` returns `True` (history has `[stage]` entries)
+3. `AgentSession.has_failed_stage()` checked — if any stage has FAILED/ERROR, deliver to user immediately
+4. `AgentSession.has_remaining_stages()` checked — if stages remain, auto-continue without consulting classifier
+5. If all stages complete, fall through to classifier as a final gate
+
+**Safety cap:** `MAX_AUTO_CONTINUES_SDLC = 10` (stage progress is the natural termination condition, so the cap is a safety net rather than the primary mechanism).
+
+### Classifier Path (Non-SDLC Jobs)
+
+For casual Q&A, one-off tasks, and non-pipeline messages, the existing classifier-based routing is unchanged:
 
 1. Agent produces output (e.g., "Running test suite, 4 of 12 passing so far...")
 2. `classify_output()` returns `STATUS_UPDATE`
@@ -42,10 +56,22 @@ When output is classified as `STATUS_UPDATE`, the bridge suppresses it from Tele
 4. If counter is at or below `MAX_AUTO_CONTINUES` (3), the bridge injects `"continue"` via the steering queue
 5. If counter exceeds the limit, the output is sent to Telegram as normal (safety valve)
 
+### Decision Matrix
+
+| Pipeline state | Output classification | Action |
+|---|---|---|
+| Stages remaining | (skipped) | Auto-continue |
+| All stages done | Completion | Deliver to user |
+| All stages done | Status (no evidence) | Coach + continue |
+| Any stage failed | Error/blocker | Deliver to user |
+| No stages (non-SDLC) | Question | Deliver to user |
+| No stages (non-SDLC) | Status | Auto-continue (existing behavior) |
+
 ### Safety Limits
 
 - **Error bypass (crash guard)** -- If output is classified as `ERROR`, auto-continue is skipped entirely and the error is sent straight to Telegram. This prevents cascading retry loops when the SDK crashes. See [Coaching Loop — Error Crash Guard](coaching-loop.md).
-- **MAX_AUTO_CONTINUES = 3** -- Prevents infinite loops where the agent generates only status updates. After 3 auto-continues, the next status update goes to Telegram so the human can see what is happening.
+- **MAX_AUTO_CONTINUES = 3** -- Safety cap for non-SDLC jobs. After 3 auto-continues, the next status update goes to Telegram.
+- **MAX_AUTO_CONTINUES_SDLC = 10** -- Higher safety cap for SDLC jobs where stage progress is the primary termination signal.
 - **Counter resets on human reply** -- When the human sends a new message to the session, the auto-continue counter resets to zero.
 - **Steering queue integration** -- Auto-continue uses the same steering queue mechanism as manual human input, so the agent sees it as a normal continuation signal.
 
@@ -93,7 +119,8 @@ The thumbs-up emoji reaction (👍) in Telegram serves as a **human-to-human** c
 |---|---|
 | `bridge/summarizer.py` | `OutputType` enum, `classify_output()`, heuristic fallback |
 | `bridge/session_logs.py` | `save_session_snapshot()`, `cleanup_old_snapshots()` |
-| `agent/job_queue.py` | Auto-continue logic in `send_to_chat`, session snapshot integration, `mark_work_done()` |
+| `agent/job_queue.py` | Auto-continue logic in `send_to_chat`, stage-aware routing, session snapshot integration, `mark_work_done()` |
+| `models/agent_session.py` | `is_sdlc_job()`, `has_remaining_stages()`, `has_failed_stage()` stage helpers |
 | `agent/steering.py` | Steering queue used by auto-continue |
 | `CLAUDE.md` | Auto-continue rules documentation |
 

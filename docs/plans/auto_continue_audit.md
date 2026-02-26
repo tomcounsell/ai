@@ -93,7 +93,7 @@ No prerequisites — this work has no external dependencies.
 
 - Full architecture replacement of re-enqueue pattern with in-process looping
 - Real-time classification accuracy monitoring dashboard
-- Changes to MAX_AUTO_CONTINUES value (separate decision)
+- ~~Changes to MAX_AUTO_CONTINUES value~~ — addressed by PR #185 (stage-aware auto-continue): SDLC jobs now use `MAX_AUTO_CONTINUES_SDLC = 10`, non-SDLC jobs remain at 3
 - Classifier model upgrade (Haiku is fine, the prompts need work)
 
 ## Update System
@@ -238,7 +238,7 @@ No agent integration required — this is a bridge-internal change. The agent do
 
 ## Open Questions
 
-1. **Should we raise MAX_AUTO_CONTINUES from 3?** The current limit seems reasonable, but some long-running tasks (like `/do-build`) legitimately produce many status updates. Should the limit be configurable per-task or per-session type?
+1. ~~**Should we raise MAX_AUTO_CONTINUES from 3?**~~ Resolved by PR #185: SDLC jobs now use `MAX_AUTO_CONTINUES_SDLC = 10` with stage-aware routing. Non-SDLC jobs stay at 3.
 
 2. **Should the "job outlives parent" case be a hard error or graceful degradation?** When a continuation job finds no active conversation, should it (a) send a summary to chat and stop, (b) log and discard, or (c) attempt to resume anyway?
 

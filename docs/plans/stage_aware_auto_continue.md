@@ -1,5 +1,5 @@
 ---
-status: In Progress
+status: Complete
 type: feature
 appetite: Medium
 owner: Valor

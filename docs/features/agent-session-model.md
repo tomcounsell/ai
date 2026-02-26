@@ -22,9 +22,22 @@ Unified Redis model tracking agent work from enqueue through completion. Replace
 - `[stage]` - SDLC stage transitions (e.g., `BUILD ☑`)
 - `[summary]` - Session summary notes
 
+## SDLC Stage Helpers
+
+Methods for querying pipeline state from history:
+
+| Method | Returns | Purpose |
+|---|---|---|
+| `is_sdlc_job()` | `bool` | `True` if history contains any `[stage]` entries |
+| `has_remaining_stages()` | `bool` | `True` if any SDLC stage is `pending` or `in_progress` |
+| `has_failed_stage()` | `bool` | `True` if any stage has `FAILED` or `ERROR` status |
+| `get_stage_progress()` | `dict` | Maps stage names to status (`completed`, `in_progress`, `pending`, `failed`) |
+
+These are used by the [stage-aware auto-continue](bridge-workflow-gaps.md#stage-aware-path-sdlc-jobs) routing in `agent/job_queue.py`.
+
 ## Link Accumulation
 
-`set_link(kind, url)` stores issue, plan, and PR URLs as each SDLC stage completes. `get_links()` returns all tracked links. `get_stage_progress()` parses history to determine which pipeline stages are complete.
+`set_link(kind, url)` stores issue, plan, and PR URLs as each SDLC stage completes. `get_links()` returns all tracked links.
 
 ## CLI Tool
 
