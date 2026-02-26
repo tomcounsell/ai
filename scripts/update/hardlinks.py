@@ -1,7 +1,8 @@
-"""Hardlink sync for .claude/{skills,commands} to ~/.claude/."""
+"""Hardlink sync for .claude/{skills,commands,hooks} to ~/.claude/."""
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from dataclasses import dataclass, field
@@ -105,6 +106,13 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     _cleanup_stale_commands(
         project_dir / ".claude" / "agents", user_claude / "agents", result
     )
+
+    # Sync SDLC enforcement hooks to user level
+    hook_result = sync_user_hooks(project_dir)
+    result.actions.extend(hook_result.actions)
+    result.created += hook_result.created
+    result.skipped += hook_result.skipped
+    result.errors += hook_result.errors
 
     if result.errors > 0:
         result.success = False
@@ -336,3 +344,112 @@ def _cleanup_stale_skills(
         except OSError as e:
             result.actions.append(LinkAction("", rel_dst, "error", str(e)))
             result.errors += 1
+
+
+def sync_user_hooks(project_dir: Path) -> HardlinkSyncResult:
+    """Copy SDLC hooks to ~/.claude/hooks/sdlc/ and merge into settings.json.
+
+    Only SDLC enforcement hooks are synced to user level. Other hooks
+    (validators, calendar, etc.) remain project-specific.
+    """
+    result = HardlinkSyncResult()
+    user_claude = Path.home() / ".claude"
+
+    src_hooks = project_dir / ".claude" / "hooks" / "sdlc"
+    dst_hooks = user_claude / "hooks" / "sdlc"
+
+    if not src_hooks.is_dir():
+        return result
+
+    dst_hooks.mkdir(parents=True, exist_ok=True)
+
+    # Copy hook scripts via hardlinks
+    for src_file in sorted(src_hooks.glob("*.py")):
+        dst_file = dst_hooks / src_file.name
+        _ensure_hardlink(src_file, dst_file, dst_hooks, result)
+
+    # Merge hook entries into ~/.claude/settings.json
+    _merge_hook_settings(user_claude / "settings.json", dst_hooks, result)
+
+    return result
+
+
+# SDLC hook definitions for ~/.claude/settings.json.
+# Each tuple: (hook_event, matcher, script_name, timeout)
+_SDLC_HOOK_DEFS: list[tuple[str, str, str, int]] = [
+    ("PreToolUse", "Bash", "validate_commit_message.py", 10),
+    ("PostToolUse", "Write", "sdlc_reminder.py", 10),
+    ("PostToolUse", "Edit", "sdlc_reminder.py", 10),
+    ("Stop", "", "validate_sdlc_on_stop.py", 15),
+]
+
+
+def _merge_hook_settings(
+    settings_path: Path, hooks_dir: Path, result: HardlinkSyncResult
+) -> None:
+    """Merge SDLC hook entries into ~/.claude/settings.json.
+
+    Reads existing settings, adds SDLC hook entries if not already present
+    (deduplicating by command string), and writes back. Never clobbers
+    non-SDLC user hooks.
+    """
+    rel_path = str(settings_path).replace(str(Path.home()), "~")
+
+    try:
+        if settings_path.exists():
+            settings = json.loads(settings_path.read_text())
+        else:
+            settings = {}
+    except (json.JSONDecodeError, OSError) as e:
+        result.actions.append(
+            LinkAction("", rel_path, "error", f"Failed to read settings: {e}")
+        )
+        result.errors += 1
+        return
+
+    hooks = settings.setdefault("hooks", {})
+    added = 0
+
+    for hook_event, matcher, script_name, timeout in _SDLC_HOOK_DEFS:
+        command = f"python {hooks_dir / script_name}"
+        hook_entry = {
+            "type": "command",
+            "command": command,
+            "timeout": timeout,
+        }
+        matcher_block = {
+            "matcher": matcher,
+            "hooks": [hook_entry],
+        }
+
+        event_hooks = hooks.setdefault(hook_event, [])
+
+        # Check if a hook with the same command already exists
+        already_exists = False
+        for existing_block in event_hooks:
+            for existing_hook in existing_block.get("hooks", []):
+                if existing_hook.get("command", "") == command:
+                    already_exists = True
+                    break
+            if already_exists:
+                break
+
+        if not already_exists:
+            event_hooks.append(matcher_block)
+            added += 1
+
+    if added > 0:
+        try:
+            settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+            result.actions.append(
+                LinkAction("", rel_path, "created", f"Merged {added} hook entries")
+            )
+            result.created += added
+        except OSError as e:
+            result.actions.append(
+                LinkAction("", rel_path, "error", f"Failed to write settings: {e}")
+            )
+            result.errors += 1
+    else:
+        result.actions.append(LinkAction("", rel_path, "exists"))
+        result.skipped += 1
