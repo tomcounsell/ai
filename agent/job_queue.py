@@ -383,7 +383,7 @@ async def _reset_running_jobs(project_key: str) -> int:
 
 def _recover_orphaned_jobs(project_key: str) -> int:
     """
-    Scan for RedisJob objects stranded by past index corruption.
+    Scan for AgentSession objects stranded by past index corruption.
 
     Orphans exist in the Redis class set but not in any status KeyField index.
     This can happen when a crash occurs between delete and recreate, or when
@@ -396,19 +396,19 @@ def _recover_orphaned_jobs(project_key: str) -> int:
     from popoto.models.db_key import DB_key
     from popoto.redis_db import POPOTO_REDIS_DB
 
-    # Get all RedisJob keys from the class set
+    # Get all AgentSession keys from the class set
     class_set_key = AgentSession._meta.db_class_set_key.redis_key
     all_keys = POPOTO_REDIS_DB.smembers(class_set_key)
     if not all_keys:
         return 0
 
     # Get all keys in status index sets
-    # KeyField index pattern: $KeyF:RedisJob:status:{value}
+    # KeyField index pattern: $KeyF:AgentSession:status:{value}
     indexed_keys: set[bytes] = set()
     for status in ["pending", "running", "completed", "failed"]:
         index_key = DB_key(
             AgentSession._meta.fields["status"].get_special_use_field_db_key(
-                RedisJob, "status"
+                AgentSession, "status"
             ),
             status,
         ).redis_key
@@ -437,7 +437,7 @@ def _recover_orphaned_jobs(project_key: str) -> int:
             if pk != project_key:
                 continue
 
-            # Try to load as a RedisJob object for proper field extraction
+            # Try to load as an AgentSession object for proper field extraction
             try:
                 from popoto.models.encoding import decode_popoto_model_hashmap
 
@@ -493,7 +493,7 @@ def _get_job_timeout(job) -> int:
 async def _job_health_check() -> None:
     """Check all running jobs for liveness and timeout, recovering stuck ones.
 
-    For each running RedisJob:
+    For each running AgentSession:
     1. If the worker asyncio.Task is dead/missing AND the job has been running
        longer than JOB_HEALTH_MIN_RUNNING seconds, recover it.
     2. If the job has exceeded its timeout (from started_at), recover it
@@ -501,7 +501,7 @@ async def _job_health_check() -> None:
     3. Legacy jobs without started_at and no worker are also recovered.
 
     Recovery follows the same delete-and-recreate pattern as
-    _recover_interrupted_jobs(): delete the stuck RedisJob, create a new
+    _recover_interrupted_jobs(): delete the stuck AgentSession, create a new
     one as pending with high priority, then ensure a worker is running.
     """
     running_jobs = list(AgentSession.query.filter(status="running"))

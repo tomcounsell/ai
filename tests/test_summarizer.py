@@ -124,7 +124,8 @@ class TestSummarizeResponse:
             result = await summarize_response(long_text)
 
         assert result.was_summarized is True
-        assert result.text == "Summary: did the work. `abc1234`"
+        # Structured composer prepends emoji prefix for non-session summaries
+        assert "Summary: did the work. `abc1234`" in result.text
         mock_haiku.assert_called_once()
 
     @pytest.mark.asyncio
@@ -141,7 +142,7 @@ class TestSummarizeResponse:
             result = await summarize_response(long_text)
 
         assert result.was_summarized is True
-        assert result.text == "Ollama summary of work."
+        assert "Ollama summary of work." in result.text
         mock_haiku.assert_called_once()
         mock_ollama.assert_called_once()
 
