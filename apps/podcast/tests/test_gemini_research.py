@@ -141,16 +141,9 @@ class TestGeminiResearchService:
 
         with (
             patch.dict("os.environ", {"GEMINI_API_KEY": "fake-key"}),
-            (
-                patch(
-                    "apps.podcast.services.research.run_gemini_research.__wrapped__",
-                    side_effect=None,
-                )
-                if False
-                else patch(
-                    "apps.podcast.tools.gemini_deep_research.run_gemini_research",
-                    side_effect=GeminiQuotaError("quota exceeded"),
-                )
+            patch(
+                "apps.podcast.tools.gemini_deep_research.run_gemini_research",
+                side_effect=GeminiQuotaError("quota exceeded"),
             ),
         ):
             from apps.podcast.services.research import run_gemini_research
