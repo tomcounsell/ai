@@ -364,11 +364,11 @@ def _classify_with_heuristics(text: str) -> ClassificationResult:
     # Default: QUESTION (conservative — show to user rather than silently auto-continue)
     # When no pattern matches, it's safer to pause for human review than to
     # auto-continue what might be a question the heuristics didn't catch.
-    # The LLM path also defaults to QUESTION for low confidence, so this
-    # keeps the fallback path equally conservative.
+    # Confidence is set at the threshold (0.80) so the confidence gate in
+    # classify_output() passes this through without redundant re-conversion.
     result = ClassificationResult(
         output_type=OutputType.QUESTION,
-        confidence=0.50,
+        confidence=CLASSIFICATION_CONFIDENCE_THRESHOLD,
         reason="No strong signal detected — defaulting to show user",
     )
     result.has_workarounds = _detect_workarounds(text_lower)
@@ -463,8 +463,6 @@ async def classify_output(text: str) -> ClassificationResult:
         _write_classification_audit(text or "", result, source="empty")
         return result
 
-    source = "unknown"
-
     # Try LLM-based classification first
     try:
         from utils.api_keys import get_anthropic_api_key
@@ -495,7 +493,6 @@ async def classify_output(text: str) -> ClassificationResult:
         raw_response = response.content[0].text.strip()
         result = _parse_classification_response(raw_response)
         if result is not None:
-            source = "llm"
             # If confidence is below threshold, default to QUESTION
             if result.confidence < CLASSIFICATION_CONFIDENCE_THRESHOLD:
                 logger.info(
@@ -508,7 +505,7 @@ async def classify_output(text: str) -> ClassificationResult:
                     confidence=result.confidence,
                     reason=f"Low confidence ({result.confidence:.2f}): {result.reason}",
                 )
-            _write_classification_audit(text, result, source=source)
+            _write_classification_audit(text, result, source="llm")
             return result
 
         # LLM returned unparseable response — fall through to heuristics
