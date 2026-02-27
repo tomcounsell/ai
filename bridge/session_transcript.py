@@ -68,15 +68,17 @@ def start_transcript(
     log_path = str(_transcript_path(session_id))
 
     try:
+        now = time.time()
         AgentSession.create(
             session_id=session_id,
             project_key=project_key,
             status="active",
             chat_id=str(chat_id) if chat_id is not None else None,
             sender_name=sender,
-            created_at=time.time(),
-            started_at=time.time(),
-            last_activity=time.time(),
+            created_at=now,
+            started_at=now,
+            last_activity=now,
+            last_transition_at=now,
             turn_count=0,
             tool_call_count=0,
             log_path=log_path,
@@ -247,8 +249,22 @@ def complete_transcript(
         sessions = list(AgentSession.query.filter(session_id=session_id))
         if sessions:
             s = sessions[0]
+
+            # Log lifecycle transition BEFORE status change
+            # so log_lifecycle_transition captures old_status→new_status correctly
+            try:
+                s.log_lifecycle_transition(status, f"transcript completed: {status}")
+            except Exception:
+                pass
+
             # status is a KeyField — delete and recreate if changed
             if s.status != status:
+                # Re-read after lifecycle log (it saved history/last_transition_at)
+                sessions = list(
+                    AgentSession.query.filter(session_id=session_id)
+                )
+                s = sessions[0] if sessions else s
+
                 old_data = {
                     "session_id": s.session_id,
                     "project_key": s.project_key,
@@ -283,13 +299,3 @@ def complete_transcript(
                 s.save()
     except Exception as e:
         logger.warning(f"Failed to update SessionLog completion for {session_id}: {e}")
-
-    # Log lifecycle transition
-    try:
-        sessions = list(AgentSession.query.filter(session_id=session_id))
-        if sessions:
-            sessions[0].log_lifecycle_transition(
-                status, f"transcript completed: {status}"
-            )
-    except Exception:
-        pass
