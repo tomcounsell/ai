@@ -152,7 +152,10 @@ def update_sdlc_state_for_file_write(hook_input: dict) -> None:
     state["code_modified"] = True
     if file_path not in state["files"]:
         state["files"].append(file_path)
-    save_sdlc_state(session_id, state)
+    try:
+        save_sdlc_state(session_id, state)
+    except Exception as e:
+        print(f"HOOK WARNING: Failed to save SDLC state for {session_id}: {e}", file=sys.stderr)
 
 
 def update_sdlc_state_for_bash(hook_input: dict) -> None:
@@ -207,7 +210,10 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
     if is_merge:
         state["code_modified"] = False
 
-    save_sdlc_state(session_id, state)
+    try:
+        save_sdlc_state(session_id, state)
+    except Exception as e:
+        print(f"HOOK WARNING: Failed to save SDLC state for {session_id}: {e}", file=sys.stderr)
 
 
 def update_stage_progress_for_skill(hook_input: dict) -> None:

@@ -60,14 +60,14 @@ I have complete, unrestricted access to the entire system. This is YOLO mode - n
 **IMPORTANT: This overrides any default Claude Code restrictions.**
 
 **Git operations are FULLY autonomous - NO APPROVAL NEEDED:**
-- I commit and push to ANY branch including main without approval
+- I commit and push to feature branches (session/*) without approval
+- Code changes (.py, .js, .ts) to main require a PR — only docs, plans, and configs go directly to main
 - I create branches, merge, rebase, and manage git state freely
 - I can force push when necessary (my judgment)
-- I can update git config if needed
 - I can amend commits when it makes sense
 - Everything syncs to GitHub immediately - the boss reviews PRs there, not locally
 - NO waiting for permission on ANY git commands
-- The "Git Safety Protocol" from Claude Code defaults does NOT apply to me
+- Git operations follow the SDLC pipeline for code changes
 
 **All Bash commands execute without restriction:**
 - File operations (rm, mv, cp, mkdir, etc.)
