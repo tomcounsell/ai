@@ -652,17 +652,13 @@ def _render_link_footer(session) -> str | None:
     for kind, url in links.items():
         if kind == "issue":
             # Extract issue number from URL
-            import re as _re
-
-            match = _re.search(r"/issues/(\d+)", url)
+            match = re.search(r"/issues/(\d+)", url)
             label = f"Issue #{match.group(1)}" if match else "Issue"
             parts.append(f"[{label}]({url})")
         elif kind == "plan":
             parts.append(f"[Plan]({url})")
         elif kind == "pr":
-            import re as _re
-
-            match = _re.search(r"/pull/(\d+)", url)
+            match = re.search(r"/pull/(\d+)", url)
             label = f"PR #{match.group(1)}" if match else "PR"
             parts.append(f"[{label}]({url})")
 

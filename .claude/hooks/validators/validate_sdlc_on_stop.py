@@ -66,7 +66,9 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
     # Fast path: non-code session — no state file means nothing to enforce
     state_path = get_sdlc_state_path(session_id)
     if not state_path.exists():
-        # Fallback: detect code changes on main without SDLC tracking
+        # Fallback: detect code changes on main without SDLC tracking.
+        # Check both uncommitted changes (working tree) AND the most recent
+        # commit — the bypass scenario involves code already committed to main.
         try:
             import subprocess
 
@@ -75,15 +77,32 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
                 capture_output=True, text=True, timeout=5,
             ).stdout.strip()
             if branch == "main":
-                diff = subprocess.run(
+                code_exts = (".py", ".js", ".ts")
+                code_files = []
+
+                # Check 1: uncommitted changes in working tree
+                wt_diff = subprocess.run(
                     ["git", "diff", "--name-only", "HEAD"],
                     capture_output=True, text=True, timeout=5,
                 ).stdout.strip()
-                code_exts = (".py", ".js", ".ts")
-                code_files = [
-                    f for f in diff.split("\n")
-                    if f and any(f.endswith(ext) for ext in code_exts)
-                ]
+                if wt_diff:
+                    code_files.extend(
+                        f for f in wt_diff.split("\n")
+                        if f and any(f.endswith(ext) for ext in code_exts)
+                    )
+
+                # Check 2: code files in the most recent commit
+                last_commit = subprocess.run(
+                    ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
+                    capture_output=True, text=True, timeout=5,
+                ).stdout.strip()
+                if last_commit:
+                    code_files.extend(
+                        f for f in last_commit.split("\n")
+                        if f and any(f.endswith(ext) for ext in code_exts)
+                        and f not in code_files
+                    )
+
                 if code_files:
                     return (
                         "SDLC Quality Gate: Code files modified on main "
