@@ -2,6 +2,7 @@
 """Hook: PostToolUse - Log after tool execution and track SDLC session state."""
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from utils.constants import (
     append_to_log,
     ensure_session_log_dir,
     get_data_sessions_dir,
+    get_project_dir,
     get_session_id,
     read_hook_input,
 )
@@ -32,6 +34,18 @@ CODE_EXTENSIONS = {".py", ".js", ".ts"}
 
 # Quality commands to track in the SDLC state
 QUALITY_COMMANDS = ("pytest", "ruff", "black")
+
+# Map SDLC skill names to their pipeline stage
+SKILL_TO_STAGE = {
+    "sdlc": "ISSUE",
+    "do-plan": "PLAN",
+    "do-build": "BUILD",
+    "do-test": "TEST",
+    "do-pr-review": "REVIEW",
+    "do-patch": None,  # Patch doesn't have its own stage
+    "do-docs": "DOCS",
+    "do-docs-audit": None,
+}
 
 
 def is_code_file(file_path: str) -> bool:
@@ -195,6 +209,83 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
     save_sdlc_state(session_id, state)
 
 
+def update_stage_progress_for_skill(hook_input: dict) -> None:
+    """Update SDLC stage progress when a Skill tool completes an SDLC skill.
+
+    Detects Skill tool calls for SDLC skills (sdlc, do-plan, do-build, etc.)
+    and calls session_progress.py to mark the stage as completed. This runs
+    deterministically in the hook — no agent cooperation needed.
+    """
+    tool_name = hook_input.get("tool_name", "")
+    if tool_name != "Skill":
+        return
+
+    tool_input = hook_input.get("tool_input", {})
+    skill_name = tool_input.get("skill", "")
+
+    # Only track SDLC skills
+    if skill_name not in SKILL_TO_STAGE:
+        return
+
+    stage = SKILL_TO_STAGE[skill_name]
+    if stage is None:
+        return  # do-patch etc. don't have their own stage
+
+    session_id = hook_input.get("session_id", "")
+    if not session_id:
+        return
+
+    # Extract links from tool output if present
+    tool_output = str(hook_input.get("tool_output", ""))
+    link_args = []
+
+    # Try to find PR URL in output
+    pr_match = re.search(r"https://github\.com/[^/]+/[^/]+/pull/\d+", tool_output)
+    if pr_match and stage == "BUILD":
+        link_args.extend(["--pr-url", pr_match.group(0)])
+
+    issue_match = re.search(
+        r"https://github\.com/[^/]+/[^/]+/issues/\d+", tool_output
+    )
+    if issue_match and stage == "ISSUE":
+        link_args.extend(["--issue-url", issue_match.group(0)])
+
+    # Determine status - check if output suggests failure
+    output_lower = tool_output.lower()
+    if any(
+        kw in output_lower
+        for kw in ["failed", "stuck", "error", "blocker", "changes requested"]
+    ):
+        status = "failed" if stage in ("TEST",) else "in_progress"
+    else:
+        status = "completed"
+
+    # Call session_progress.py - fire and forget
+    project_dir = get_project_dir()
+    cmd = [
+        sys.executable,
+        "-m",
+        "tools.session_progress",
+        "--session-id",
+        session_id,
+        "--stage",
+        stage,
+        "--status",
+        status,
+    ] + link_args
+
+    try:
+        subprocess.run(
+            cmd,
+            cwd=str(project_dir),
+            capture_output=True,
+            timeout=5,
+            env={**os.environ, "PYTHONPATH": str(project_dir)},
+        )
+    except Exception:
+        pass  # Fire and forget - never block the agent
+
+
 def check_file_reminders(hook_input: dict) -> None:
     """Print reminders when specific files are modified."""
     tool_name = hook_input.get("tool_name", "")
@@ -220,6 +311,7 @@ def main():
     # Update SDLC session state based on tool type
     update_sdlc_state_for_file_write(hook_input)
     update_sdlc_state_for_bash(hook_input)
+    update_stage_progress_for_skill(hook_input)
 
     session_id = get_session_id(hook_input)
     session_dir = ensure_session_log_dir(session_id)

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Hook: PreToolUse - Log before tool execution."""
+"""Hook: PreToolUse - Log before tool execution and mark SDLC stages in_progress."""
 
+import os
+import subprocess
 import sys
 import time
 
@@ -10,15 +12,76 @@ sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 from utils.constants import (
     append_to_log,
     ensure_session_log_dir,
+    get_project_dir,
     get_session_id,
     read_hook_input,
 )
+
+# Map SDLC skill names to their pipeline stage
+SKILL_TO_STAGE = {
+    "sdlc": "ISSUE",
+    "do-plan": "PLAN",
+    "do-build": "BUILD",
+    "do-test": "TEST",
+    "do-pr-review": "REVIEW",
+    "do-patch": None,
+    "do-docs": "DOCS",
+    "do-docs-audit": None,
+}
+
+
+def mark_stage_in_progress(hook_input: dict) -> None:
+    """Mark an SDLC stage as in_progress when its skill starts."""
+    tool_name = hook_input.get("tool_name", "")
+    if tool_name != "Skill":
+        return
+
+    tool_input = hook_input.get("tool_input", {})
+    skill_name = tool_input.get("skill", "")
+
+    if skill_name not in SKILL_TO_STAGE:
+        return
+
+    stage = SKILL_TO_STAGE[skill_name]
+    if stage is None:
+        return
+
+    session_id = hook_input.get("session_id", "")
+    if not session_id:
+        return
+
+    project_dir = get_project_dir()
+    cmd = [
+        sys.executable,
+        "-m",
+        "tools.session_progress",
+        "--session-id",
+        session_id,
+        "--stage",
+        stage,
+        "--status",
+        "in_progress",
+    ]
+
+    try:
+        subprocess.run(
+            cmd,
+            cwd=str(project_dir),
+            capture_output=True,
+            timeout=5,
+            env={**os.environ, "PYTHONPATH": str(project_dir)},
+        )
+    except Exception:
+        pass  # Fire and forget
 
 
 def main():
     hook_input = read_hook_input()
     if not hook_input:
         return
+
+    # Mark SDLC stages in_progress when skills start
+    mark_stage_in_progress(hook_input)
 
     session_id = get_session_id(hook_input)
     session_dir = ensure_session_log_dir(session_id)
