@@ -67,25 +67,20 @@ def start_transcript(
 
     log_path = str(_transcript_path(session_id))
 
+    # Update the existing AgentSession (created by _push_job at enqueue time)
+    # instead of creating a duplicate. The job queue is the single source of
+    # truth for AgentSession creation.
     try:
-        AgentSession.create(
-            session_id=session_id,
-            project_key=project_key,
-            status="active",
-            chat_id=str(chat_id) if chat_id is not None else None,
-            sender_name=sender,
-            created_at=time.time(),
-            started_at=time.time(),
-            last_activity=time.time(),
-            turn_count=0,
-            tool_call_count=0,
-            log_path=log_path,
-            branch_name=branch_name,
-            work_item_slug=work_item_slug,
-            classification_type=classification_type,
-        )
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if sessions:
+            s = sessions[0]
+            s.log_path = log_path
+            s.started_at = time.time()
+            s.last_activity = time.time()
+            s.save()
+        # If no session exists yet (race condition), the job queue will create one
     except Exception as e:
-        logger.warning(f"Failed to create AgentSession for {session_id}: {e}")
+        logger.warning(f"Failed to update AgentSession for {session_id}: {e}")
 
     # Write transcript header
     try:
@@ -242,29 +237,22 @@ def complete_transcript(
             s = sessions[0]
             # status is a KeyField — delete and recreate if changed
             if s.status != status:
-                old_data = {
-                    "session_id": s.session_id,
-                    "project_key": s.project_key,
-                    "chat_id": s.chat_id,
-                    "sender_name": s.sender_name,
-                    "created_at": s.created_at,
-                    "started_at": s.started_at,
-                    "last_activity": time.time(),
-                    "completed_at": time.time(),
-                    "turn_count": s.turn_count,
-                    "tool_call_count": s.tool_call_count,
-                    "log_path": s.log_path,
-                    "summary": summary,
-                    "branch_name": s.branch_name,
-                    "work_item_slug": s.work_item_slug,
-                    "tags": s.tags,
-                    "classification_type": s.classification_type,
-                    "classification_confidence": s.classification_confidence,
-                    "history": s.history,
-                    "issue_url": s.issue_url,
-                    "plan_url": s.plan_url,
-                    "pr_url": s.pr_url,
-                }
+                # Dynamically extract ALL model fields to avoid losing
+                # data during delete-and-recreate. Previous hardcoded
+                # subset dropped task_list_id, working_dir, message_text,
+                # sender_id, message_id, chat_title, and other fields.
+                old_data = {}
+                for field_name in AgentSession._meta.fields:
+                    if field_name == "job_id":  # AutoKeyField — skip
+                        continue
+                    if field_name == "status":  # KeyField being changed
+                        continue
+                    old_data[field_name] = getattr(s, field_name)
+                # Override specific fields for the transition
+                old_data["completed_at"] = time.time()
+                old_data["last_activity"] = time.time()
+                if summary:
+                    old_data["summary"] = summary
                 s.delete()
                 AgentSession.create(status=status, **old_data)
             else:

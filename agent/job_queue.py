@@ -1038,6 +1038,8 @@ async def _execute_job(job: Job) -> None:
         if agent_session:
             agent_session.last_activity = time.time()
             agent_session.branch_name = branch_name
+            agent_session.task_list_id = task_list_id
+            agent_session.save()
             agent_session.append_history("user", (job.message_text or "")[:200])
     except Exception as e:
         logger.debug(f"AgentSession update failed (non-fatal): {e}")
