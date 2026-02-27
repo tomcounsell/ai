@@ -264,33 +264,16 @@ def complete_transcript(
             # status is a KeyField — delete and recreate if changed
             if s.status != status:
                 # Dynamically extract ALL fields to avoid dropping data.
-                # Popoto models define fields as class attributes; we iterate
-                # over the model's declared fields instead of hardcoding a
-                # subset. This prevents future field additions from being
+                # Uses Popoto's _meta.fields registry instead of hardcoding
+                # a subset. This prevents future field additions from being
                 # silently dropped during status transitions.
-                skip_fields = {
-                    "status",
-                    "job_id",
-                }  # KeyField/AutoKeyField handled separately
-                old_data = {}
-                for attr_name in dir(s.__class__):
-                    attr = getattr(s.__class__, attr_name, None)
-                    if attr is None:
-                        continue
-                    # Popoto fields are descriptor instances from popoto module
-                    attr_type_name = type(attr).__name__
-                    if attr_type_name in (
-                        "Field",
-                        "KeyField",
-                        "AutoKeyField",
-                        "SortedField",
-                        "IntField",
-                        "ListField",
-                    ):
-                        if attr_name not in skip_fields:
-                            val = getattr(s, attr_name, None)
-                            if val is not None:
-                                old_data[attr_name] = val
+                skip_fields = {"status", "job_id"}
+                old_data = {
+                    name: getattr(s, name)
+                    for name in AgentSession._meta.fields
+                    if name not in skip_fields
+                    and getattr(s, name, None) is not None
+                }
 
                 # Override specific fields for the transition
                 old_data["last_activity"] = time.time()
