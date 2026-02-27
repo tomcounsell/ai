@@ -35,10 +35,6 @@ Extract the session ID for progress tracking. The bridge injects a line like `SE
 # Look for a line containing "SESSION_ID: " and extract the value after it
 # Store in a variable for use throughout the pipeline:
 # SESSION_ID="abc123"
-
-# If SESSION_ID was found, mark ISSUE stage complete after issue verification below
-# This call is non-fatal - if session_progress fails or SESSION_ID is missing, continue anyway
-python -m tools.session_progress --session-id "$SESSION_ID" --stage ISSUE --status completed 2>/dev/null || true
 ```
 
 **Pass SESSION_ID to every sub-skill invocation** by including `SESSION_ID: $SESSION_ID` in the prompt text when invoking sub-skills (do-plan, do-build, do-test, etc.). This ensures progress tracking flows through the entire pipeline.
