@@ -40,12 +40,11 @@ def is_sdlc_context() -> bool:
     session_id = os.environ.get("CLAUDE_SESSION_ID", "")
     if session_id:
         try:
+            # Standalone script — sys.path mutation is safe (never imported as library)
             sys.path.insert(0, str(Path.home() / "src" / "ai"))
             from models.agent_session import AgentSession
 
-            sessions = AgentSession.query.filter(
-                session_id=session_id, status="active"
-            )
+            sessions = AgentSession.query.filter(session_id=session_id, status="active")
             for s in sessions:
                 history = getattr(s, "history", None)
                 if history and any("stage" in str(h) for h in history):

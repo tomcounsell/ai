@@ -23,6 +23,7 @@ import os
 import sys
 from pathlib import Path
 
+# Standalone script — sys.path mutation is safe (never imported as library)
 # Import shared utilities from sibling module
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sdlc_context import is_sdlc_context, read_stdin
@@ -60,8 +61,23 @@ def mark_reminder_sent(session_id: str) -> None:
         pass  # Best effort — don't fail if /tmp is weird
 
 
+def cleanup_stale_reminders(max_age_hours: int = 24) -> None:
+    """Remove stale /tmp/sdlc_reminder_* files older than max_age_hours."""
+    import glob
+    import time
+
+    cutoff = time.time() - (max_age_hours * 3600)
+    for path in glob.glob("/tmp/sdlc_reminder_*"):
+        try:
+            if os.path.getmtime(path) < cutoff:
+                os.unlink(path)
+        except OSError:
+            pass
+
+
 def main():
     try:
+        cleanup_stale_reminders()
         hook_input = read_stdin()
         if not hook_input:
             sys.exit(0)

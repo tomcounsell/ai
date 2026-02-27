@@ -21,6 +21,7 @@ from pathlib import Path
 # Path helpers
 # ---------------------------------------------------------------------------
 
+# Standalone script — sys.path mutation is safe (never imported as library)
 # Add hooks dir to path so utils.constants is importable when run directly
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

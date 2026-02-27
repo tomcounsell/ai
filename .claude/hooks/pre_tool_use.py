@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 
+# Standalone script — sys.path mutation is safe (never imported as library)
 # Add utils to path
 sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
