@@ -78,6 +78,17 @@ Key properties:
 - **Review blocker loop**: capped at 3 patch→test→review iterations, then escalates to human
 - **Docs** is a dedicated phase *after* review passes, right before merge
 
+### Stage Tracking via task_list_id
+
+SDLC stage tracking works through the `tools/session_progress.py` CLI tool, which is called by hooks during pipeline execution. The tool resolves sessions using a two-step lookup:
+
+1. **Direct match**: Look up `session_id` in Redis
+2. **Fallback**: If no match, scan all sessions for a matching `task_list_id`
+
+The fallback is necessary because Claude Code's hooks fire with its internal UUID as the session ID, not the Telegram-style session ID stored on the AgentSession. The `task_list_id` field is set during `_execute_job()` in `agent/job_queue.py`, enabling the bridge between hook-generated session IDs and the actual AgentSession.
+
+Without this bridge, stage progress lines and link footers never appear in Telegram summaries because the hooks cannot find the correct session to update.
+
 ## Pipeline State Persistence
 
 State is persisted to `data/pipeline/{slug}/state.json`:
