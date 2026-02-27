@@ -10,8 +10,6 @@ These tests use real Redis (db=1 via conftest) — no mocks on _find_session().
 
 import time
 
-import pytest
-
 from models.agent_session import AgentSession
 from tools.session_progress import _find_session
 
@@ -25,7 +23,7 @@ class TestFindSessionViaTaskListId:
         Call _find_session() with the task_list_id value (simulating a hook
         that passes Claude Code's internal UUID). Verify it finds the session."""
         # Create session as the job queue would — Telegram-style session_id
-        session = AgentSession.create(
+        AgentSession.create(
             session_id="telegram_chat_12345_msg_67890",
             project_key="test",
             status="running",
@@ -123,9 +121,7 @@ class TestCompleteTranscriptPreservesAllFields:
         complete_transcript(session_id, status="completed", summary="Test summary")
 
         # Find the recreated session
-        completed_sessions = list(
-            AgentSession.query.filter(session_id=session_id)
-        )
+        completed_sessions = list(AgentSession.query.filter(session_id=session_id))
         assert len(completed_sessions) == 1
         s = completed_sessions[0]
 
