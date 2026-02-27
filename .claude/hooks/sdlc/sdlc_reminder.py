@@ -62,12 +62,12 @@ def mark_reminder_sent(session_id: str) -> None:
 
 
 def cleanup_stale_reminders(max_age_hours: int = 24) -> None:
-    """Remove stale /tmp/.claude_sdlc_reminder_* files older than max_age_hours."""
+    """Remove stale /tmp/sdlc_reminder_* files older than max_age_hours."""
     import glob
     import time
 
     cutoff = time.time() - (max_age_hours * 3600)
-    for path in glob.glob("/tmp/.claude_sdlc_reminder_*"):
+    for path in glob.glob("/tmp/sdlc_reminder_*"):
         try:
             if os.path.getmtime(path) < cutoff:
                 os.unlink(path)

@@ -412,6 +412,7 @@ def _merge_hook_settings(
 
     hooks = settings.setdefault("hooks", {})
     added = 0
+    updated = 0
 
     for hook_event, matcher, script_name, timeout in _SDLC_HOOK_DEFS:
         command = f"python {hooks_dir / script_name}"
@@ -436,6 +437,7 @@ def _merge_hook_settings(
                     # Update matcher if it changed
                     if existing_block.get("matcher", "") != matcher:
                         existing_block["matcher"] = matcher
+                        updated += 1
                     break
             if already_exists:
                 break
@@ -444,11 +446,16 @@ def _merge_hook_settings(
             event_hooks.append(matcher_block)
             added += 1
 
-    if added > 0:
+    if added > 0 or updated > 0:
         try:
             settings_path.write_text(json.dumps(settings, indent=2) + "\n")
+            parts = []
+            if added:
+                parts.append(f"added {added}")
+            if updated:
+                parts.append(f"updated {updated}")
             result.actions.append(
-                LinkAction("", rel_path, "created", f"Merged {added} hook entries")
+                LinkAction("", rel_path, "created", f"Merged hooks: {', '.join(parts)}")
             )
             result.created += added
         except OSError as e:
