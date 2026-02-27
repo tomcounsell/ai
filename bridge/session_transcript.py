@@ -67,25 +67,46 @@ def start_transcript(
 
     log_path = str(_transcript_path(session_id))
 
+    # Look up existing session (created by _push_job at enqueue time) and
+    # update it with transcript-phase fields. Only create a new one if no
+    # session exists (defensive fallback for standalone transcript usage).
     try:
-        AgentSession.create(
-            session_id=session_id,
-            project_key=project_key,
-            status="active",
-            chat_id=str(chat_id) if chat_id is not None else None,
-            sender_name=sender,
-            created_at=time.time(),
-            started_at=time.time(),
-            last_activity=time.time(),
-            turn_count=0,
-            tool_call_count=0,
-            log_path=log_path,
-            branch_name=branch_name,
-            work_item_slug=work_item_slug,
-            classification_type=classification_type,
-        )
+        existing = list(AgentSession.query.filter(session_id=session_id))
+        if existing:
+            s = existing[0]
+            s.log_path = log_path
+            s.last_activity = time.time()
+            if sender:
+                s.sender_name = sender
+            if branch_name:
+                s.branch_name = branch_name
+            if work_item_slug:
+                s.work_item_slug = work_item_slug
+            if classification_type:
+                s.classification_type = classification_type
+            if chat_id is not None:
+                s.chat_id = str(chat_id)
+            s.save()
+        else:
+            # No existing session — create one (standalone transcript case)
+            AgentSession.create(
+                session_id=session_id,
+                project_key=project_key,
+                status="active",
+                chat_id=str(chat_id) if chat_id is not None else None,
+                sender_name=sender,
+                created_at=time.time(),
+                started_at=time.time(),
+                last_activity=time.time(),
+                turn_count=0,
+                tool_call_count=0,
+                log_path=log_path,
+                branch_name=branch_name,
+                work_item_slug=work_item_slug,
+                classification_type=classification_type,
+            )
     except Exception as e:
-        logger.warning(f"Failed to create AgentSession for {session_id}: {e}")
+        logger.warning(f"Failed to update/create AgentSession for {session_id}: {e}")
 
     # Write transcript header
     try:
@@ -242,29 +263,38 @@ def complete_transcript(
             s = sessions[0]
             # status is a KeyField — delete and recreate if changed
             if s.status != status:
-                old_data = {
-                    "session_id": s.session_id,
-                    "project_key": s.project_key,
-                    "chat_id": s.chat_id,
-                    "sender_name": s.sender_name,
-                    "created_at": s.created_at,
-                    "started_at": s.started_at,
-                    "last_activity": time.time(),
-                    "completed_at": time.time(),
-                    "turn_count": s.turn_count,
-                    "tool_call_count": s.tool_call_count,
-                    "log_path": s.log_path,
-                    "summary": summary,
-                    "branch_name": s.branch_name,
-                    "work_item_slug": s.work_item_slug,
-                    "tags": s.tags,
-                    "classification_type": s.classification_type,
-                    "classification_confidence": s.classification_confidence,
-                    "history": s.history,
-                    "issue_url": s.issue_url,
-                    "plan_url": s.plan_url,
-                    "pr_url": s.pr_url,
-                }
+                # Dynamically extract ALL fields to avoid dropping data.
+                # Popoto models define fields as class attributes; we iterate
+                # over the model's declared fields instead of hardcoding a
+                # subset. This prevents future field additions from being
+                # silently dropped during status transitions.
+                skip_fields = {"status", "job_id"}  # KeyField/AutoKeyField handled separately
+                old_data = {}
+                for attr_name in dir(s.__class__):
+                    attr = getattr(s.__class__, attr_name, None)
+                    if attr is None:
+                        continue
+                    # Popoto fields are descriptor instances from popoto module
+                    attr_type_name = type(attr).__name__
+                    if attr_type_name in (
+                        "Field",
+                        "KeyField",
+                        "AutoKeyField",
+                        "SortedField",
+                        "IntField",
+                        "ListField",
+                    ):
+                        if attr_name not in skip_fields:
+                            val = getattr(s, attr_name, None)
+                            if val is not None:
+                                old_data[attr_name] = val
+
+                # Override specific fields for the transition
+                old_data["last_activity"] = time.time()
+                old_data["completed_at"] = time.time()
+                if summary:
+                    old_data["summary"] = summary
+
                 s.delete()
                 AgentSession.create(status=status, **old_data)
             else:

@@ -493,6 +493,11 @@ class ValorAgent:
         if self.task_list_id:
             env["CLAUDE_CODE_TASK_LIST_ID"] = self.task_list_id
 
+        # Pass bridge session_id so hooks can resolve the AgentSession
+        # without relying on Claude Code's internal UUID matching.
+        if session_id:
+            env["VALOR_SESSION_ID"] = session_id
+
         # Build system prompt with workflow context if workflow_id is present
         system_prompt = self.system_prompt
         if self.workflow_id and self.workflow_state and self.workflow_state.data:
