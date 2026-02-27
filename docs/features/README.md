@@ -40,6 +40,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [SDK Modernization](sdk-modernization.md) | Upgrade to SDK v0.1.35 with programmatic agents, expanded hooks, and cost budgeting | Shipped |
 | [Semantic Doc Impact Finder](semantic-doc-impact-finder.md) | Two-stage semantic search (embedding recall + LLM reranking) for finding docs affected by code changes | Shipped |
 | [Session Isolation](session-isolation.md) | Two-tier task list scoping and git worktrees for parallel session isolation | Shipped |
+| [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) | Structured LIFECYCLE logging at every state transition with stall detection and CLI status report | Shipped |
 | [Session Tagging](session-tagging.md) | Auto-tagging and CRUD for session categorization based on activity, classification, and transcript patterns | Shipped |
 | [Session Transcripts](session-transcripts.md) | Append-only session transcript files with AgentSession Redis model for metadata | Shipped |
 | [Summarizer Format](summarizer-format.md) | Structured bullet-point output with SDLC stage progress and markdown links for Telegram delivery | Shipped |
