@@ -29,9 +29,7 @@ def _find_session(session_id: str):
         # 1. Check VALOR_SESSION_ID env var first (set by SDK client for hooks)
         valor_session_id = os.environ.get("VALOR_SESSION_ID")
         if valor_session_id:
-            sessions = list(
-                AgentSession.query.filter(session_id=valor_session_id)
-            )
+            sessions = list(AgentSession.query.filter(session_id=valor_session_id))
             if sessions:
                 return sessions[0]
 

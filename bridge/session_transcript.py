@@ -268,7 +268,10 @@ def complete_transcript(
                 # over the model's declared fields instead of hardcoding a
                 # subset. This prevents future field additions from being
                 # silently dropped during status transitions.
-                skip_fields = {"status", "job_id"}  # KeyField/AutoKeyField handled separately
+                skip_fields = {
+                    "status",
+                    "job_id",
+                }  # KeyField/AutoKeyField handled separately
                 old_data = {}
                 for attr_name in dir(s.__class__):
                     attr = getattr(s.__class__, attr_name, None)

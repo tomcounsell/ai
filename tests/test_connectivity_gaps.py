@@ -12,9 +12,8 @@ validation. Mock-based tests are used only where SDK imports are needed.
 """
 
 import os
-import sys
 import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -134,9 +133,7 @@ class TestCompleteTranscriptFieldPreservation:
         original_message_text = running_session.message_text
 
         # Perform status transition
-        complete_transcript(
-            original_session_id, status="completed", summary="All done"
-        )
+        complete_transcript(original_session_id, status="completed", summary="All done")
 
         # Find the new session (recreated with status=completed)
         found = list(AgentSession.query.filter(session_id=original_session_id))
@@ -166,9 +163,7 @@ class TestCompleteTranscriptFieldPreservation:
 
         complete_transcript(running_session.session_id, status="completed")
 
-        found = list(
-            AgentSession.query.filter(session_id=running_session.session_id)
-        )
+        found = list(AgentSession.query.filter(session_id=running_session.session_id))
         s = found[0]
         history = s._get_history_list()
         assert len(history) >= 2
@@ -183,9 +178,7 @@ class TestCompleteTranscriptFieldPreservation:
             running_session.session_id, status="running", summary="Still going"
         )
 
-        found = list(
-            AgentSession.query.filter(session_id=running_session.session_id)
-        )
+        found = list(AgentSession.query.filter(session_id=running_session.session_id))
         assert len(found) == 1
         assert found[0].summary == "Still going"
         assert found[0].task_list_id == running_session.task_list_id
@@ -196,9 +189,7 @@ class TestCompleteTranscriptFieldPreservation:
 
         complete_transcript(running_session.session_id, status="completed")
 
-        found = list(
-            AgentSession.query.filter(session_id=running_session.session_id)
-        )
+        found = list(AgentSession.query.filter(session_id=running_session.session_id))
         s = found[0]
         assert s.turn_count == 5
         assert s.tool_call_count == 12
@@ -225,9 +216,7 @@ class TestNoDualSessionCreation:
         )
 
         # Should only have ONE session with this session_id
-        found = list(
-            AgentSession.query.filter(session_id=pending_session.session_id)
-        )
+        found = list(AgentSession.query.filter(session_id=pending_session.session_id))
         assert len(found) == 1, f"Expected 1 session, found {len(found)}"
 
         # The single session should have updated fields
@@ -246,9 +235,7 @@ class TestNoDualSessionCreation:
             sender="Alice",
         )
 
-        found = list(
-            AgentSession.query.filter(session_id="standalone-session-1")
-        )
+        found = list(AgentSession.query.filter(session_id="standalone-session-1"))
         assert len(found) == 1
         assert found[0].sender_name == "Alice"
         assert found[0].log_path == log_path
@@ -263,9 +250,7 @@ class TestNoDualSessionCreation:
             sender="Tom",
         )
 
-        found = list(
-            AgentSession.query.filter(session_id=pending_session.session_id)
-        )
+        found = list(AgentSession.query.filter(session_id=pending_session.session_id))
         s = found[0]
         # Queue fields from _push_job should still be present
         assert s.message_text == "SDLC 209"
@@ -284,9 +269,7 @@ class TestValorSessionIdEnvVar:
         from tools.session_progress import _find_session
 
         # Set VALOR_SESSION_ID to the bridge session_id
-        with patch.dict(
-            os.environ, {"VALOR_SESSION_ID": running_session.session_id}
-        ):
+        with patch.dict(os.environ, {"VALOR_SESSION_ID": running_session.session_id}):
             # Pass a UUID that doesn't match any session_id
             result = _find_session("claude-code-uuid-that-doesnt-match")
 
@@ -324,13 +307,13 @@ class TestValorSessionIdEnvVar:
         from tools.session_progress import _find_session
 
         # Create two sessions
-        target = AgentSession.create(
+        AgentSession.create(
             session_id="bridge-session-target",
             project_key="test",
             status="running",
             created_at=time.time(),
         )
-        decoy = AgentSession.create(
+        AgentSession.create(
             session_id="claude-code-uuid",
             project_key="test",
             status="running",
@@ -391,7 +374,9 @@ class TestSdkClientEnvVar:
             if found_condition and "VALOR_SESSION_ID" in line:
                 found_env_var = True
                 break
-        assert found_env_var, "VALOR_SESSION_ID should be set inside if session_id: block"
+        assert (
+            found_env_var
+        ), "VALOR_SESSION_ID should be set inside if session_id: block"
 
 
 # ── Fix 5: Full chain integration ────────────────────────────────────────────
@@ -477,9 +462,7 @@ class TestFullChainIntegration:
 
         # Hook receives Claude Code's internal UUID as session_id
         # but VALOR_SESSION_ID env var points to the bridge session_id
-        with patch.dict(
-            os.environ, {"VALOR_SESSION_ID": "tg_valor_-5051_env_test"}
-        ):
+        with patch.dict(os.environ, {"VALOR_SESSION_ID": "tg_valor_-5051_env_test"}):
             result = _find_session("some-claude-code-uuid-abcdef")
 
         assert result is not None
