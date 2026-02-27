@@ -227,7 +227,14 @@ Output: {"type": "status", "confidence": 0.91, \
 "reason": "Completion claim with hedging, no evidence", \
 "coaching_message": "You said 'I believe everything is working' — \
 that's hedging, not evidence. Show the commit hash, test output, \
-and any verification commands you ran."}"""
+and any verification commands you ran."}
+
+Input: "I'll implement a fix for this by adding a check in the hook..."
+Output: {"type": "status", "confidence": 0.93, \
+"reason": "Agent plans to write code outside SDLC pipeline", \
+"coaching_message": "Implementation work should go through /sdlc to ensure proper branch, \
+testing, and review. Use /sdlc to create an issue and start the pipeline instead of \
+writing code directly."}"""
 
 # False question detection explained:
 # Many agent outputs contain question-like text that should NOT pause for human input:
@@ -645,17 +652,13 @@ def _render_link_footer(session) -> str | None:
     for kind, url in links.items():
         if kind == "issue":
             # Extract issue number from URL
-            import re as _re
-
-            match = _re.search(r"/issues/(\d+)", url)
+            match = re.search(r"/issues/(\d+)", url)
             label = f"Issue #{match.group(1)}" if match else "Issue"
             parts.append(f"[{label}]({url})")
         elif kind == "plan":
             parts.append(f"[Plan]({url})")
         elif kind == "pr":
-            import re as _re
-
-            match = _re.search(r"/pull/(\d+)", url)
+            match = re.search(r"/pull/(\d+)", url)
             label = f"PR #{match.group(1)}" if match else "PR"
             parts.append(f"[{label}]({url})")
 

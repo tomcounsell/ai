@@ -27,7 +27,7 @@ Before a code session ends, these commands must have been run:
 
 The stop hook reads `data/sessions/{session_id}/sdlc_state.json` and blocks exit (exit code 2) if any command was skipped.
 
-**Absence of `sdlc_state.json` = non-code session = stop hook exits 0 immediately.**
+**Absence of `sdlc_state.json` triggers a fallback check:** on `main`, the hook examines both uncommitted changes (`git diff HEAD`) and the most recent commit (`git diff HEAD~1 HEAD`) for code files. If code is found on main without SDLC tracking, the hook blocks with a remediation message. On feature branches, absence of `sdlc_state.json` = non-code session = exit 0 immediately.
 
 ## The Three Hooks
 
@@ -36,7 +36,8 @@ The stop hook reads `data/sessions/{session_id}/sdlc_state.json` and blocks exit
 Fires when Claude attempts to end a session.
 
 - Reads `data/sessions/{session_id}/sdlc_state.json`
-- If file doesn't exist: exit 0 immediately (< 200ms)
+- If file doesn't exist AND on `main`: runs fallback — checks both uncommitted working tree changes and most recent commit for code files. Blocks if code found without SDLC tracking.
+- If file doesn't exist AND on feature branch: exit 0 immediately (< 200ms)
 - If `code_modified: true` and any quality command missing: exit 2 with list of what's missing
 - If all quality commands present: exit 0
 
@@ -44,6 +45,7 @@ Fires when Claude attempts to end a session.
 
 Fires before any Bash tool call containing `git commit`.
 
+- **Blocks code file commits on main unconditionally**: If on `main` branch and staged files include `.py`, `.js`, or `.ts` files, the commit is blocked regardless of SDLC context. Non-code files (docs, plans, configs) are allowed on main.
 - Blocks commits with `Co-Authored-By:` trailers (case-insensitive)
 - Blocks commits with empty messages
 - All other Bash commands pass through immediately
@@ -202,9 +204,9 @@ Running the update script on any machine automatically installs the hooks.
 
 ### Shared Context Module
 
-All 3 hooks import from `sdlc_context.py` — the single source of truth for SDLC context detection. This replaces the previous approach where each hook had its own copy of `is_sdlc_context()`.
+All 3 hooks import shared utilities from `sdlc_context.py` (`read_stdin`, `allow`, `block`). The `sdlc_reminder.py` and `validate_sdlc_on_stop.py` hooks also use `is_sdlc_context()` for context-aware behavior. `validate_commit_message.py` does **not** use `is_sdlc_context()` — it blocks code commits on main unconditionally based on staged file extensions.
 
-The detection is two-tier:
+The `is_sdlc_context()` detection is two-tier:
 1. **Branch check**: Is the current git branch `session/*`? (Works in any repo)
 2. **AgentSession check**: Does the Redis-backed AgentSession have SDLC stages? (Requires AI repo + Redis)
 
@@ -217,7 +219,7 @@ The AgentSession import is wrapped in try/except — on machines without Redis o
 ├── hooks/
 │   └── sdlc/
 │       ├── sdlc_context.py              # Shared detection utilities
-│       ├── validate_commit_message.py    # PreToolUse: blocks main commits
+│       ├── validate_commit_message.py    # PreToolUse: blocks code commits on main
 │       ├── sdlc_reminder.py             # PostToolUse: one-time test reminder
 │       └── validate_sdlc_on_stop.py     # Stop: quality gate enforcement
 └── settings.json                         # Hook entries merged here
