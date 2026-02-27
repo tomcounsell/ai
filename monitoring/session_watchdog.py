@@ -187,7 +187,7 @@ def check_stalled_sessions() -> list[dict]:
 
                 # Determine reference timestamp based on status
                 ref_time = (
-                    getattr(session, "last_transition_at", None)
+                    session.last_transition_at
                     or session.started_at
                     or session.created_at
                     or now
@@ -195,7 +195,7 @@ def check_stalled_sessions() -> list[dict]:
 
                 # For active sessions, use last_activity as reference
                 if status_val == "active":
-                    last_activity = getattr(session, "last_activity", None)
+                    last_activity = session.last_activity
                     if last_activity is not None:
                         # If last_activity is recent, session is not stalled
                         activity_age = now - last_activity
@@ -489,6 +489,12 @@ async def fix_unhealthy_session(
 
     # Most common case: session is stuck/silent - just abandon it
     if silence_duration > ABANDON_THRESHOLD:
+        try:
+            session.log_lifecycle_transition(
+                "abandoned", f"watchdog: silent for {int(silence_duration / 60)}min"
+            )
+        except Exception:
+            pass
         session.status = "abandoned"
         session.save()
         logger.info(
@@ -501,6 +507,13 @@ async def fix_unhealthy_session(
     # Long-running session - abandon it
     session_duration = now - session.started_at
     if session_duration > DURATION_THRESHOLD:
+        try:
+            session.log_lifecycle_transition(
+                "abandoned",
+                f"watchdog: running for {int(session_duration / 3600)}h",
+            )
+        except Exception:
+            pass
         session.status = "abandoned"
         session.save()
         logger.info(
@@ -512,6 +525,12 @@ async def fix_unhealthy_session(
 
     # Critical issues (looping, error cascades) - abandon and maybe create issue
     if severity == "critical":
+        try:
+            session.log_lifecycle_transition(
+                "abandoned", f"watchdog: critical issues: {', '.join(issues)}"
+            )
+        except Exception:
+            pass
         session.status = "abandoned"
         session.save()
 
@@ -524,6 +543,12 @@ async def fix_unhealthy_session(
         return True
 
     # Warning-level issues - just abandon for now
+    try:
+        session.log_lifecycle_transition(
+            "abandoned", f"watchdog: {', '.join(issues)}"
+        )
+    except Exception:
+        pass
     session.status = "abandoned"
     session.save()
     return True
