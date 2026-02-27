@@ -48,6 +48,27 @@ python -m tools.session_progress --session-id $ID --stage BUILD --status complet
 python -m tools.session_progress --session-id $ID --pr-url https://github.com/.../pull/42
 ```
 
+### SDLC Skill Wiring
+
+Each SDLC skill calls `session_progress.py` to record stage transitions. The SESSION_ID is extracted from the `SESSION_ID: xxx` line injected by `sdk_client.py` into enriched messages.
+
+| Skill | Stage | Transitions | Links Set |
+|-------|-------|-------------|-----------|
+| `/sdlc` | ISSUE | `completed` after issue verified | `issue-url` |
+| `/do-plan` | PLAN | `in_progress` → `completed` | `plan-url` |
+| `/do-build` | BUILD | `in_progress` → `completed` | `pr-url` |
+| `/do-test` | TEST | `in_progress` → `completed` or `failed` | — |
+| `/do-pr-review` | REVIEW | `in_progress` → `completed` | — |
+| `/do-docs` | DOCS | `in_progress` → `completed` | — |
+
+All calls use `2>/dev/null || true` for fire-and-forget behavior — stage tracking failures never block pipeline work.
+
+### Error Handling
+
+- `_find_session()` catches Redis connection errors and returns `None`
+- `main()` exits 0 when no session is found (fire-and-forget)
+- Debug logging on `append_history()`, `set_link()`, `get_stage_progress()` via `logging.getLogger(__name__)`
+
 ## Backward Compatibility
 
 - `models/session_log.py` exports `SessionLog = AgentSession` (shim)

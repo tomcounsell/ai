@@ -26,6 +26,19 @@ TaskCreate({ description: "9. MERGE: Ready for human merge", status: "pending" }
 
 As you assess state (Step 2), mark already-completed stages as `completed` and set the current stage to `in_progress`. Use `TaskUpdate` to advance one stage at a time as each sub-skill finishes. Never skip ahead.
 
+## Step 0.5: Session Progress Tracking
+
+Extract the session ID for progress tracking. The bridge injects a line like `SESSION_ID: abc123` into the enriched message context. Look for this pattern in the message you received.
+
+```bash
+# Extract SESSION_ID from context (example pattern - adapt to actual message format)
+# Look for a line containing "SESSION_ID: " and extract the value after it
+# Store in a variable for use throughout the pipeline:
+# SESSION_ID="abc123"
+```
+
+**Pass SESSION_ID to every sub-skill invocation** by including `SESSION_ID: $SESSION_ID` in the prompt text when invoking sub-skills (do-plan, do-build, do-test, etc.). This ensures progress tracking flows through the entire pipeline.
+
 ## Step 1: Ensure a GitHub Issue Exists
 
 If an issue number was provided, fetch it:
@@ -39,6 +52,11 @@ gh issue create --title "Brief title" --body "Description from the user's reques
 ```
 
 **Do not proceed without an issue number.**
+
+After the issue is verified or created, mark the ISSUE stage as completed (if SESSION_ID exists):
+```bash
+python -m tools.session_progress --session-id "$SESSION_ID" --stage ISSUE --status completed --issue-url "https://github.com/{owner}/{repo}/issues/{number}" 2>/dev/null || true
+```
 
 ## Step 2: Assess Current State
 

@@ -14,6 +14,29 @@ TEST_ARGS: $ARGUMENTS
 
 **If TEST_ARGS is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation — they invoked this as `/do-test <argument>`. Extract whatever follows `/do-test` as the value of TEST_ARGS. Do NOT stop or report an error; just use the argument from the message.
 
+## Session Progress Tracking
+
+Extract the session ID from the conversation context. The bridge injects `SESSION_ID: {id}` into enriched messages. Look for this pattern and store it:
+
+```bash
+# Extract SESSION_ID from context
+# Look for a line like "SESSION_ID: abc123" in the message you received
+# Store in variable: SESSION_ID="abc123"
+
+# Mark TEST stage as in_progress at the start
+python -m tools.session_progress --session-id "$SESSION_ID" --stage TEST --status in_progress 2>/dev/null || true
+```
+
+After tests complete:
+
+```bash
+# On success (all tests passed):
+python -m tools.session_progress --session-id "$SESSION_ID" --stage TEST --status completed 2>/dev/null || true
+
+# On failure (any tests failed):
+python -m tools.session_progress --session-id "$SESSION_ID" --stage TEST --status failed 2>/dev/null || true
+```
+
 ## Step 0: Discover Additional Test Skills
 
 Before running tests, scan for any additional test-related skill docs in the project:

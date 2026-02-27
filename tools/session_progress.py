@@ -17,18 +17,22 @@ def _find_session(session_id: str):
     """Look up an AgentSession by session_id or task_list_id."""
     from models.agent_session import AgentSession
 
-    # Try session_id first
-    sessions = list(AgentSession.query.filter(session_id=session_id))
-    if sessions:
-        return sessions[0]
+    try:
+        # Try session_id first
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if sessions:
+            return sessions[0]
 
-    # Try matching task_list_id
-    all_sessions = AgentSession.query.all()
-    for s in all_sessions:
-        if s.task_list_id == session_id:
-            return s
+        # Try matching task_list_id
+        all_sessions = AgentSession.query.all()
+        for s in all_sessions:
+            if s.task_list_id == session_id:
+                return s
 
-    return None
+        return None
+    except Exception as e:
+        print(f"Warning: Redis connection error: {e}", file=sys.stderr)
+        return None
 
 
 def main():

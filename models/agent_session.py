@@ -10,6 +10,7 @@ New fields: history (lifecycle events), issue_url, plan_url, pr_url
 Status lifecycle: pending -> running -> active -> dormant -> completed | failed
 """
 
+import logging
 import time
 
 from popoto import (
@@ -21,6 +22,8 @@ from popoto import (
     Model,
     SortedField,
 )
+
+logger = logging.getLogger(__name__)
 
 MSG_MAX_CHARS = 20_000
 HISTORY_MAX_ENTRIES = 20
@@ -115,6 +118,7 @@ class AgentSession(Model):
             role: Event type (user, classify, stage, summary, system)
             text: Event description
         """
+        logger.debug(f"append_history({role!r}, {text!r}) on session {self.session_id}")
         entry = f"[{role}] {text}"
         current = self._get_history_list()
         current.append(entry)
@@ -133,6 +137,7 @@ class AgentSession(Model):
             kind: Link type - 'issue', 'plan', or 'pr'
             url: The URL to store
         """
+        logger.debug(f"set_link({kind!r}, {url!r}) on session {self.session_id}")
         field_map = {
             "issue": "issue_url",
             "plan": "plan_url",
@@ -176,6 +181,7 @@ class AgentSession(Model):
                         progress[stage] = "completed"
                     elif "IN_PROGRESS" in entry_upper or "▶" in entry:
                         progress[stage] = "in_progress"
+        logger.debug(f"get_stage_progress() on session {self.session_id}: {progress}")
         return progress
 
     # === Stage-aware auto-continue helpers ===
