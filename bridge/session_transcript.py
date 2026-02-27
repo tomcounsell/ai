@@ -84,6 +84,13 @@ def start_transcript(
             work_item_slug=work_item_slug,
             classification_type=classification_type,
         )
+        # Log lifecycle transition
+        try:
+            sessions = list(AgentSession.query.filter(session_id=session_id))
+            if sessions:
+                sessions[0].log_lifecycle_transition("active", "transcript started")
+        except Exception:
+            pass
     except Exception as e:
         logger.warning(f"Failed to create AgentSession for {session_id}: {e}")
 
@@ -251,6 +258,7 @@ def complete_transcript(
                     "started_at": s.started_at,
                     "last_activity": time.time(),
                     "completed_at": time.time(),
+                    "last_transition_at": s.last_transition_at,
                     "turn_count": s.turn_count,
                     "tool_call_count": s.tool_call_count,
                     "log_path": s.log_path,
@@ -275,3 +283,13 @@ def complete_transcript(
                 s.save()
     except Exception as e:
         logger.warning(f"Failed to update SessionLog completion for {session_id}: {e}")
+
+    # Log lifecycle transition
+    try:
+        sessions = list(AgentSession.query.filter(session_id=session_id))
+        if sessions:
+            sessions[0].log_lifecycle_transition(
+                status, f"transcript completed: {status}"
+            )
+    except Exception:
+        pass

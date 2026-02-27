@@ -35,6 +35,17 @@ ERROR_CASCADE_WINDOW = 20
 DURATION_THRESHOLD = 7200  # 2 hours
 ABANDON_THRESHOLD = 1800  # 30 minutes silent = auto-abandon
 
+# Stall detection thresholds (seconds)
+STALL_THRESHOLD_PENDING = 300  # 5 minutes
+STALL_THRESHOLD_RUNNING = 2700  # 45 minutes
+STALL_THRESHOLD_ACTIVE = 600  # 10 minutes
+
+STALL_THRESHOLDS = {
+    "pending": STALL_THRESHOLD_PENDING,
+    "running": STALL_THRESHOLD_RUNNING,
+    "active": STALL_THRESHOLD_ACTIVE,
+}
+
 
 async def watchdog_loop(telegram_client=None) -> None:
     """Run the watchdog monitoring loop indefinitely.
@@ -53,6 +64,11 @@ async def watchdog_loop(telegram_client=None) -> None:
             await check_all_sessions()
         except Exception as e:
             logger.error("[watchdog] Error in watchdog loop: %s", e, exc_info=True)
+
+        try:
+            check_stalled_sessions()
+        except Exception as e:
+            logger.error("[watchdog] Error in stall check: %s", e, exc_info=True)
 
         await asyncio.sleep(WATCHDOG_INTERVAL)
 
@@ -128,6 +144,110 @@ async def check_all_sessions() -> None:
             "[watchdog] Checked %d active sessions: all healthy",
             len(active_sessions),
         )
+
+
+def check_stalled_sessions() -> list[dict]:
+    """Check for sessions that appear stalled based on status-specific thresholds.
+
+    Queries all sessions with status in (pending, running, active) and checks
+    how long they've been in that state. Uses last_transition_at (falling back
+    to started_at or created_at) as the reference timestamp.
+
+    For active sessions, also checks last_activity -- if last_activity is recent
+    (within the active threshold), the session is not considered stalled.
+
+    Thresholds:
+        - pending > 300s (5 min) = stalled
+        - running > 2700s (45 min) = stalled
+        - active with no recent last_activity > 600s (10 min) = stalled
+
+    Returns:
+        List of dicts for stalled sessions, each containing:
+        session_id, status, duration, threshold, project_key, last_history.
+    """
+    stalled: list[dict] = []
+    now = time.time()
+
+    for status_val in ("pending", "running", "active"):
+        try:
+            sessions = list(AgentSession.query.filter(status=status_val))
+        except Exception as e:
+            logger.error(
+                "[watchdog] Failed to query %s sessions for stall check: %s",
+                status_val,
+                e,
+            )
+            continue
+
+        threshold = STALL_THRESHOLDS[status_val]
+
+        for session in sessions:
+            try:
+                session_id = session.session_id or session.job_id or "unknown"
+
+                # Determine reference timestamp based on status
+                ref_time = (
+                    getattr(session, "last_transition_at", None)
+                    or session.started_at
+                    or session.created_at
+                    or now
+                )
+
+                # For active sessions, use last_activity as reference
+                if status_val == "active":
+                    last_activity = getattr(session, "last_activity", None)
+                    if last_activity is not None:
+                        # If last_activity is recent, session is not stalled
+                        activity_age = now - last_activity
+                        if activity_age < threshold:
+                            continue
+                        # Use last_activity as the reference for duration
+                        ref_time = last_activity
+
+                duration = now - ref_time
+
+                if duration > threshold:
+                    # Get last history entry for diagnostic context
+                    last_history = "no history"
+                    try:
+                        if hasattr(session, "_get_history_list"):
+                            history = session._get_history_list()
+                            if history:
+                                last_history = str(history[-1])[:120]
+                    except Exception:
+                        pass
+
+                    stalled_info = {
+                        "session_id": session_id,
+                        "status": status_val,
+                        "duration": duration,
+                        "threshold": threshold,
+                        "project_key": getattr(session, "project_key", "?"),
+                        "last_history": last_history,
+                    }
+                    stalled.append(stalled_info)
+
+                    logger.warning(
+                        "LIFECYCLE_STALL session=%s status=%s duration=%.0fs "
+                        "threshold=%ds project=%s last_history=%s",
+                        session_id,
+                        status_val,
+                        duration,
+                        threshold,
+                        getattr(session, "project_key", "?"),
+                        last_history,
+                    )
+            except Exception as e:
+                logger.error("[watchdog] Error checking session for stall: %s", e)
+
+    if stalled:
+        logger.warning(
+            "[watchdog] %d stalled session(s) detected: %s",
+            len(stalled),
+            ", ".join(s["session_id"] for s in stalled),
+        )
+
+    return stalled
 
 
 def assess_session_health(session: AgentSession) -> dict[str, Any]:
