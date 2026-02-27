@@ -20,10 +20,11 @@ Claude Code hook protocol:
   To ALLOW: print nothing, exit 0
 """
 
+import os
 import subprocess
 import sys
-import os
 
+# Standalone script — sys.path mutation is safe (never imported as library)
 # Import shared utilities from sibling module
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sdlc_context import allow, block, is_sdlc_context, read_stdin

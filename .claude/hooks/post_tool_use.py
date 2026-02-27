@@ -9,6 +9,7 @@ import sys
 import time
 from pathlib import Path
 
+# Standalone script — sys.path mutation is safe (never imported as library)
 # Add utils to path
 sys.path.insert(0, str(__file__).rsplit("/", 1)[0])
 
@@ -244,9 +245,7 @@ def update_stage_progress_for_skill(hook_input: dict) -> None:
     if pr_match and stage == "BUILD":
         link_args.extend(["--pr-url", pr_match.group(0)])
 
-    issue_match = re.search(
-        r"https://github\.com/[^/]+/[^/]+/issues/\d+", tool_output
-    )
+    issue_match = re.search(r"https://github\.com/[^/]+/[^/]+/issues/\d+", tool_output)
     if issue_match and stage == "ISSUE":
         link_args.extend(["--issue-url", issue_match.group(0)])
 

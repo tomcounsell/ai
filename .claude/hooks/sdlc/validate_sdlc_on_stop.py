@@ -24,10 +24,12 @@ Claude Code hook protocol:
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
+# Standalone script — sys.path mutation is safe (never imported as library)
 # Import shared utilities from sibling module
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from sdlc_context import is_sdlc_context, read_stdin
@@ -118,7 +120,7 @@ def check_quality_gates_from_transcript(hook_input: dict) -> list[str]:
     # Scan for quality command evidence
     missing = []
     for cmd_name in ("pytest", "ruff", "black"):
-        if cmd_name not in transcript_text:
+        if not re.search(r"\b" + cmd_name + r"\b", transcript_text):
             missing.append(cmd_name)
 
     return missing

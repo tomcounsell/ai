@@ -112,6 +112,7 @@ def sync_claude_dirs(project_dir: Path) -> HardlinkSyncResult:
     result.actions.extend(hook_result.actions)
     result.created += hook_result.created
     result.skipped += hook_result.skipped
+    result.removed += hook_result.removed
     result.errors += hook_result.errors
 
     if result.errors > 0:
@@ -390,8 +391,10 @@ def _merge_hook_settings(
     """Merge SDLC hook entries into ~/.claude/settings.json.
 
     Reads existing settings, adds SDLC hook entries if not already present
-    (deduplicating by command string), and writes back. Never clobbers
-    non-SDLC user hooks.
+    (deduplicating by command string with matcher-aware updates), and writes
+    back. When a hook command already exists but its matcher has changed, the
+    existing block's matcher is updated in place. Never clobbers non-SDLC
+    user hooks.
     """
     rel_path = str(settings_path).replace(str(Path.home()), "~")
 
@@ -430,6 +433,9 @@ def _merge_hook_settings(
             for existing_hook in existing_block.get("hooks", []):
                 if existing_hook.get("command", "") == command:
                     already_exists = True
+                    # Update matcher if it changed
+                    if existing_block.get("matcher", "") != matcher:
+                        existing_block["matcher"] = matcher
                     break
             if already_exists:
                 break
