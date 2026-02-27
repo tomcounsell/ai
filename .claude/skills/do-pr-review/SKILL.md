@@ -19,6 +19,29 @@ Review a pull request by analyzing its changes against the plan, checking code q
 
 - `pr_number` (required): The PR number to review (e.g., `42` or `#42`)
 
+## Session Progress Tracking
+
+Extract the session ID from the conversation context. The bridge injects `SESSION_ID: {id}` into enriched messages. Look for this pattern and store it:
+
+```bash
+# Extract SESSION_ID from context
+# Look for a line like "SESSION_ID: abc123" in the message you received
+# Store in variable: SESSION_ID="abc123"
+
+# Mark REVIEW stage as in_progress at the start
+python -m tools.session_progress --session-id "$SESSION_ID" --stage REVIEW --status in_progress 2>/dev/null || true
+```
+
+After posting the review (Step 6):
+
+```bash
+# On approval (no blockers):
+python -m tools.session_progress --session-id "$SESSION_ID" --stage REVIEW --status completed 2>/dev/null || true
+
+# Note: If blockers found, leave as in_progress - the SDLC dispatcher will invoke /do-patch
+# and then re-run review, which will complete the stage after fixes
+```
+
 ## Goal Alignment
 
 Every PR review must be grounded in the original intent. Before reviewing code, find and read the plan and tracking issue to understand *what was supposed to be built and why*.

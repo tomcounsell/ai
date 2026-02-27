@@ -57,6 +57,28 @@ PLAN_ARG: $1
 **Step 3: Set PLAN_PATH**
 - `PLAN_PATH` now contains the resolved absolute path to the plan document
 
+## Session Progress Tracking
+
+Extract the session ID from the conversation context. The bridge injects `SESSION_ID: {id}` into enriched messages. Look for this pattern and store it:
+
+```bash
+# Extract SESSION_ID from context
+# Look for a line like "SESSION_ID: abc123" in the message you received
+# Store in variable: SESSION_ID="abc123"
+
+# Mark BUILD stage as in_progress at the start
+python -m tools.session_progress --session-id "$SESSION_ID" --stage BUILD --status in_progress 2>/dev/null || true
+```
+
+After the PR is successfully created (Step 7):
+
+```bash
+# Mark BUILD stage complete and set PR link
+python -m tools.session_progress --session-id "$SESSION_ID" --stage BUILD --status completed --pr-url "$PR_URL" 2>/dev/null || true
+```
+
+Where `$PR_URL` is the full GitHub PR URL returned by `gh pr create`.
+
 ## Instructions
 
 1. **Resolve the plan path** using the Plan Resolution logic above

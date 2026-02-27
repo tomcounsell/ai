@@ -31,6 +31,30 @@ Creates structured feature plans in `docs/plans/` following Shape Up principles:
 - Scoping unclear or large requests
 - Before starting significant implementation work
 
+## Session Progress Tracking
+
+Extract the session ID from the conversation context. The bridge injects `SESSION_ID: {id}` into enriched messages. Look for this pattern and store it:
+
+```bash
+# Extract SESSION_ID from context
+# Look for a line like "SESSION_ID: abc123" in the message you received
+# Store in variable: SESSION_ID="abc123"
+
+# Mark PLAN stage as in_progress at the start
+python -m tools.session_progress --session-id "$SESSION_ID" --stage PLAN --status in_progress 2>/dev/null || true
+```
+
+After the plan is committed and tracking issue is linked:
+
+```bash
+# Mark PLAN stage complete and set links
+python -m tools.session_progress --session-id "$SESSION_ID" --stage PLAN --status completed --issue-url "$ISSUE_URL" --plan-url "$PLAN_URL" 2>/dev/null || true
+```
+
+Where:
+- `$ISSUE_URL` is the full GitHub issue URL (e.g., `https://github.com/owner/repo/issues/42`)
+- `$PLAN_URL` is the full plan document URL (e.g., `https://github.com/owner/repo/blob/main/docs/plans/{slug}.md`)
+
 ## Quick Start Workflow
 
 ### Phase 1: Flesh Out at High Level
