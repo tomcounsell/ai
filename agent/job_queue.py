@@ -200,6 +200,7 @@ _JOB_FIELDS = [
     # Session-phase fields preserved across delete-and-recreate
     "last_activity",
     "completed_at",
+    "last_transition_at",
     "turn_count",
     "tool_call_count",
     "log_path",
@@ -278,6 +279,15 @@ async def _push_job(
         classification_type=classification_type,
         auto_continue_count=auto_continue_count,
     )
+
+    # Log lifecycle transition for newly created pending job
+    try:
+        sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
+        if sessions:
+            sessions[0].log_lifecycle_transition("pending", "job enqueued")
+    except Exception:
+        pass  # Non-fatal: don't break enqueue on logging errors
+
     return await AgentSession.query.async_count(
         project_key=project_key, status="pending"
     )
@@ -314,6 +324,13 @@ async def _pop_job(project_key: str) -> Job | None:
     fields["status"] = "running"
     fields["started_at"] = time.time()
     new_job = await AgentSession.async_create(**fields)
+
+    # Log lifecycle transition for job starting execution
+    try:
+        new_job.log_lifecycle_transition("running", "worker picked up job")
+    except Exception:
+        pass  # Non-fatal: don't break pop on logging errors
+
     return Job(new_job)
 
 

@@ -106,6 +106,8 @@ Runs for the lifetime of the bridge process. No separate service or process mana
 
 **Relationship to PostToolUse health check**: The existing health check fires every 20 tool calls and can kill sessions. The watchdog is complementary — it catches sessions that go *silent* (no tool calls happening), which the PostToolUse hook cannot detect.
 
+**Stall detection**: The watchdog also runs `check_stalled_sessions()` each cycle, which flags sessions stuck in transitional states (pending >5min, running >45min, active >10min with no activity). See [Session Lifecycle Diagnostics](session-lifecycle-diagnostics.md) for details.
+
 ## Files
 
 | File | Purpose |
