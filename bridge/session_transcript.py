@@ -67,34 +67,65 @@ def start_transcript(
 
     log_path = str(_transcript_path(session_id))
 
+    # Look up existing session (created by _push_job at enqueue time) and
+    # update it with transcript-phase fields. Only create a new one if no
+    # session exists (defensive fallback for standalone transcript usage).
     try:
         now = time.time()
-        AgentSession.create(
-            session_id=session_id,
-            project_key=project_key,
-            status="active",
-            chat_id=str(chat_id) if chat_id is not None else None,
-            sender_name=sender,
-            created_at=now,
-            started_at=now,
-            last_activity=now,
-            last_transition_at=now,
-            turn_count=0,
-            tool_call_count=0,
-            log_path=log_path,
-            branch_name=branch_name,
-            work_item_slug=work_item_slug,
-            classification_type=classification_type,
-        )
-        # Log lifecycle transition
-        try:
-            sessions = list(AgentSession.query.filter(session_id=session_id))
-            if sessions:
-                sessions[0].log_lifecycle_transition("active", "transcript started")
-        except Exception:
-            pass
+        existing = list(AgentSession.query.filter(session_id=session_id))
+        if existing:
+            s = existing[0]
+            s.log_path = log_path
+            s.last_activity = now
+            s.last_transition_at = now
+            if sender:
+                s.sender_name = sender
+            if branch_name:
+                s.branch_name = branch_name
+            if work_item_slug:
+                s.work_item_slug = work_item_slug
+            if classification_type:
+                s.classification_type = classification_type
+            if chat_id is not None:
+                s.chat_id = str(chat_id)
+            s.save()
+            # Log lifecycle transition
+            try:
+                s.log_lifecycle_transition("active", "transcript started")
+            except Exception:
+                pass
+        else:
+            # No existing session — create one (standalone transcript case)
+            AgentSession.create(
+                session_id=session_id,
+                project_key=project_key,
+                status="active",
+                chat_id=str(chat_id) if chat_id is not None else None,
+                sender_name=sender,
+                created_at=now,
+                started_at=now,
+                last_activity=now,
+                last_transition_at=now,
+                turn_count=0,
+                tool_call_count=0,
+                log_path=log_path,
+                branch_name=branch_name,
+                work_item_slug=work_item_slug,
+                classification_type=classification_type,
+            )
+            # Log lifecycle transition
+            try:
+                sessions = list(
+                    AgentSession.query.filter(session_id=session_id)
+                )
+                if sessions:
+                    sessions[0].log_lifecycle_transition(
+                        "active", "transcript started"
+                    )
+            except Exception:
+                pass
     except Exception as e:
-        logger.warning(f"Failed to create AgentSession for {session_id}: {e}")
+        logger.warning(f"Failed to update/create AgentSession for {session_id}: {e}")
 
     # Write transcript header
     try:
@@ -265,30 +296,24 @@ def complete_transcript(
                 )
                 s = sessions[0] if sessions else s
 
+                # Dynamically extract ALL fields to avoid dropping data.
+                # Uses Popoto's _meta.fields registry instead of hardcoding
+                # a subset. This prevents future field additions from being
+                # silently dropped during status transitions.
+                skip_fields = {"status", "job_id"}
                 old_data = {
-                    "session_id": s.session_id,
-                    "project_key": s.project_key,
-                    "chat_id": s.chat_id,
-                    "sender_name": s.sender_name,
-                    "created_at": s.created_at,
-                    "started_at": s.started_at,
-                    "last_activity": time.time(),
-                    "completed_at": time.time(),
-                    "last_transition_at": s.last_transition_at,
-                    "turn_count": s.turn_count,
-                    "tool_call_count": s.tool_call_count,
-                    "log_path": s.log_path,
-                    "summary": summary,
-                    "branch_name": s.branch_name,
-                    "work_item_slug": s.work_item_slug,
-                    "tags": s.tags,
-                    "classification_type": s.classification_type,
-                    "classification_confidence": s.classification_confidence,
-                    "history": s.history,
-                    "issue_url": s.issue_url,
-                    "plan_url": s.plan_url,
-                    "pr_url": s.pr_url,
+                    name: getattr(s, name)
+                    for name in AgentSession._meta.fields
+                    if name not in skip_fields
+                    and getattr(s, name, None) is not None
                 }
+
+                # Override specific fields for the transition
+                old_data["last_activity"] = time.time()
+                old_data["completed_at"] = time.time()
+                if summary:
+                    old_data["summary"] = summary
+
                 s.delete()
                 AgentSession.create(status=status, **old_data)
             else:

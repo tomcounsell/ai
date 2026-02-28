@@ -63,11 +63,54 @@ Each SDLC skill calls `session_progress.py` to record stage transitions. The SES
 
 All calls use `2>/dev/null || true` for fire-and-forget behavior — stage tracking failures never block pipeline work.
 
+### Session Lookup Chain
+
+`_find_session()` resolves an AgentSession using a three-tier lookup:
+
+| Priority | Source | Description |
+|----------|--------|-------------|
+| 1 | `VALOR_SESSION_ID` env var | Bridge session_id, set by `sdk_client.py` |
+| 2 | Direct `session_id` match | Works when caller has the bridge session_id |
+| 3 | `task_list_id` match | Fallback for hook contexts with Claude Code UUID |
+
+**Why three tiers?** Claude Code hooks receive Claude Code's internal UUID as `session_id`, which does not match the bridge's `AgentSession.session_id` (format: `tg_valor_{chat_id}_{msg_id}`). The `VALOR_SESSION_ID` env var bridges this gap by giving hooks a direct path to the correct session. The `task_list_id` fallback provides belt-and-suspenders redundancy.
+
+### VALOR_SESSION_ID Environment Variable
+
+Set by `agent/sdk_client.py` in `_create_options()` alongside `CLAUDE_CODE_TASK_LIST_ID`. Propagated to all Claude Code subprocesses including hooks.
+
+```python
+# In sdk_client.py _create_options():
+if session_id:
+    env["VALOR_SESSION_ID"] = session_id
+```
+
+The env var is only set when `session_id` is non-None (i.e., when the SDK is invoked from the bridge with a real session). Local Claude Code sessions without bridge context will not have this env var set, and `_find_session()` falls back to the other lookup paths.
+
+### task_list_id Persistence
+
+`task_list_id` is computed in `_execute_job()` and persisted to the `AgentSession` immediately after the session is found:
+
+- **Tier 1 (ad-hoc):** `thread-{chat_id}-{root_msg_id}`
+- **Tier 2 (planned work):** The work item slug (e.g., `bridge-sdk-fix`)
+
+This ensures hooks can resolve sessions via `task_list_id` even if `VALOR_SESSION_ID` is not available.
+
 ### Error Handling
 
 - `_find_session()` catches Redis connection errors and returns `None`
 - `main()` exits 0 when no session is found (fire-and-forget)
 - Debug logging on `append_history()`, `set_link()`, `get_stage_progress()` via `logging.getLogger(__name__)`
+
+## Session Lifecycle Integrity
+
+### Single-Session Guarantee
+
+Each `session_id` has exactly one `AgentSession` at any time. The `_push_job()` function creates the session at enqueue time. `start_transcript()` updates the existing session with transcript-phase fields (log_path, branch_name, etc.) instead of creating a duplicate. A defensive fallback creates a new session only when no existing one is found (standalone transcript edge case).
+
+### Field Preservation on Status Change
+
+`status` is a Popoto `KeyField`, so changing it requires delete-and-recreate. `complete_transcript()` uses dynamic field extraction via Popoto model introspection to copy ALL non-None fields from the old session to the new one. This prevents fields like `task_list_id`, `message_text`, and `sender_id` from being silently dropped during status transitions.
 
 ## Backward Compatibility
 

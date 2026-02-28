@@ -14,16 +14,31 @@ import sys
 
 
 def _find_session(session_id: str):
-    """Look up an AgentSession by session_id or task_list_id."""
+    """Look up an AgentSession by session_id, VALOR_SESSION_ID env var, or task_list_id.
+
+    Resolution order:
+    1. VALOR_SESSION_ID env var (bridge session_id, most reliable)
+    2. Direct session_id match (works when caller has the bridge session_id)
+    3. task_list_id match (fallback for hook contexts with Claude Code UUID)
+    """
+    import os
+
     from models.agent_session import AgentSession
 
     try:
-        # Try session_id first
+        # 1. Check VALOR_SESSION_ID env var first (set by SDK client for hooks)
+        valor_session_id = os.environ.get("VALOR_SESSION_ID")
+        if valor_session_id:
+            sessions = list(AgentSession.query.filter(session_id=valor_session_id))
+            if sessions:
+                return sessions[0]
+
+        # 2. Try direct session_id match
         sessions = list(AgentSession.query.filter(session_id=session_id))
         if sessions:
             return sessions[0]
 
-        # Try matching task_list_id
+        # 3. Try matching task_list_id (fallback)
         all_sessions = AgentSession.query.all()
         for s in all_sessions:
             if s.task_list_id == session_id:
