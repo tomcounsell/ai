@@ -81,6 +81,7 @@ class AgentSession(Model):
     # === Session fields (from SessionLog) ===
     last_activity = Field(type=float, null=True)
     completed_at = Field(type=float, null=True)
+    last_transition_at = Field(type=float, null=True)
     turn_count = IntField(default=0)
     tool_call_count = IntField(default=0)
     log_path = Field(null=True, max_length=1000)
@@ -150,6 +151,39 @@ class AgentSession(Model):
                 self.save()
             except Exception:
                 pass  # Non-fatal: don't break callers on save errors
+
+    def log_lifecycle_transition(self, new_status: str, context: str = "") -> None:
+        """Log a structured lifecycle transition and update session state.
+
+        Emits a structured log line and appends to history.
+
+        Args:
+            new_status: The status being transitioned to
+            context: Brief description of why the transition happened
+        """
+        old_status = self.status or "none"
+        now = time.time()
+
+        # Calculate duration in previous state
+        prev_time = self.last_transition_at or self.started_at or self.created_at
+        duration = now - prev_time if prev_time else 0
+
+        # Structured log entry
+        logger.info(
+            f"LIFECYCLE session={self.session_id} transition={old_status}\u2192{new_status} "
+            f"job_id={self.job_id} project={self.project_key} "
+            f"duration_in_prev_state={duration:.1f}s"
+            + (f' context="{context}"' if context else "")
+        )
+
+        # Update fields
+        self.last_transition_at = now
+
+        # Append to history
+        self.append_history(
+            "lifecycle",
+            f"{old_status}\u2192{new_status}" + (f": {context}" if context else ""),
+        )
 
     def get_links(self) -> dict[str, str]:
         """Return all non-None tracked links."""

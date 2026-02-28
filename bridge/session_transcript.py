@@ -71,11 +71,13 @@ def start_transcript(
     # update it with transcript-phase fields. Only create a new one if no
     # session exists (defensive fallback for standalone transcript usage).
     try:
+        now = time.time()
         existing = list(AgentSession.query.filter(session_id=session_id))
         if existing:
             s = existing[0]
             s.log_path = log_path
-            s.last_activity = time.time()
+            s.last_activity = now
+            s.last_transition_at = now
             if sender:
                 s.sender_name = sender
             if branch_name:
@@ -87,6 +89,11 @@ def start_transcript(
             if chat_id is not None:
                 s.chat_id = str(chat_id)
             s.save()
+            # Log lifecycle transition
+            try:
+                s.log_lifecycle_transition("active", "transcript started")
+            except Exception:
+                pass
         else:
             # No existing session — create one (standalone transcript case)
             AgentSession.create(
@@ -95,9 +102,10 @@ def start_transcript(
                 status="active",
                 chat_id=str(chat_id) if chat_id is not None else None,
                 sender_name=sender,
-                created_at=time.time(),
-                started_at=time.time(),
-                last_activity=time.time(),
+                created_at=now,
+                started_at=now,
+                last_activity=now,
+                last_transition_at=now,
                 turn_count=0,
                 tool_call_count=0,
                 log_path=log_path,
@@ -105,6 +113,17 @@ def start_transcript(
                 work_item_slug=work_item_slug,
                 classification_type=classification_type,
             )
+            # Log lifecycle transition
+            try:
+                sessions = list(
+                    AgentSession.query.filter(session_id=session_id)
+                )
+                if sessions:
+                    sessions[0].log_lifecycle_transition(
+                        "active", "transcript started"
+                    )
+            except Exception:
+                pass
     except Exception as e:
         logger.warning(f"Failed to update/create AgentSession for {session_id}: {e}")
 
@@ -261,8 +280,22 @@ def complete_transcript(
         sessions = list(AgentSession.query.filter(session_id=session_id))
         if sessions:
             s = sessions[0]
+
+            # Log lifecycle transition BEFORE status change
+            # so log_lifecycle_transition captures old_status→new_status correctly
+            try:
+                s.log_lifecycle_transition(status, f"transcript completed: {status}")
+            except Exception:
+                pass
+
             # status is a KeyField — delete and recreate if changed
             if s.status != status:
+                # Re-read after lifecycle log (it saved history/last_transition_at)
+                sessions = list(
+                    AgentSession.query.filter(session_id=session_id)
+                )
+                s = sessions[0] if sessions else s
+
                 # Dynamically extract ALL fields to avoid dropping data.
                 # Uses Popoto's _meta.fields registry instead of hardcoding
                 # a subset. This prevents future field additions from being
