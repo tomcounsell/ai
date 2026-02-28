@@ -96,13 +96,17 @@ You are a specialized AI expert in error monitoring, performance analysis, and a
 ## Common Tasks & Patterns
 
 ### Error Investigation
+
+For multi-component bugs or non-obvious root causes, use the **Trace & Verify** protocol (see `docs/features/trace-and-verify.md`): trace actual data at each component boundary, write a failing test, identify the fix from the divergence point, verify forward, and check for mocks hiding reality.
+
 ```
 1. Retrieve issue details (frequency, users affected, first/last seen)
 2. Parse stack trace - identify failing line, function, file
 3. Look for patterns - same error in multiple places?
 4. Check user impact - how many users? which segments?
-5. Suggest root cause - based on error type and context
-6. Provide debugging steps - logs to check, variables to inspect
+5. Trace data flow across component boundaries (Trace & Verify Phase 1)
+6. Suggest root cause - based on error type, context, and data trace
+7. Provide debugging steps - logs to check, variables to inspect
 ```
 
 ### Stack Trace Analysis

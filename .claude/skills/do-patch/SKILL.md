@@ -58,6 +58,18 @@ Parse the input to classify the fix type:
 - **Test failure**: pytest output with `FAILED`, `ERROR`, or traceback lines
 - **Review blocker**: prose describing a code issue, race condition, logic bug, or style violation
 
+#### Root Cause Analysis: Trace & Verify
+
+Before jumping to a fix, apply the Trace & Verify protocol (see `docs/features/trace-and-verify.md` for the full reference). This replaces narrative-only reasoning with data-driven verification:
+
+1. **Trace the data flow** from input to expected output. At each boundary between components, capture the actual values being passed. Where does the data diverge from expectations?
+2. **Write a failing test** that reproduces the exact broken behavior. The test must fail for the right reason (the bug), not a setup issue.
+3. **Identify the fix** based on where the trace diverged.
+4. **Verify forward**: After applying the fix, re-run the trace. Show that every step now produces correct values and the test passes.
+5. **Check for mocks hiding reality**: If existing tests pass but the bug exists in production, identify which mocks are hiding the real behavior and add integration tests that exercise the actual code paths.
+
+For single-component bugs with obvious fixes (typo, missing import, off-by-one), skip straight to the fix. Use Trace & Verify when the failure involves multiple components or when the root cause is not immediately obvious.
+
 ### Step 2: Deploy a Single Builder Agent
 
 Deploy **one** builder agent to make the targeted fix. Do NOT spawn multiple agents or orchestrate a team — this is a single-focus repair.
