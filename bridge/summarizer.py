@@ -880,6 +880,24 @@ def _compose_structured_summary(
 
     For non-SDLC sessions, returns the summary text with status emoji prepended.
     """
+    # Re-read session from Redis to pick up stage data written during execution.
+    # The session object passed in may have been loaded before session_progress.py
+    # wrote [stage] entries and link URLs — re-reading ensures we get fresh data.
+    if session and hasattr(session, "session_id") and session.session_id:
+        try:
+            from models.agent_session import AgentSession
+
+            fresh_sessions = list(
+                AgentSession.query.filter(session_id=session.session_id)
+            )
+            if fresh_sessions:
+                session = fresh_sessions[0]
+                logger.debug(
+                    f"Refreshed session {session.session_id} for structured summary"
+                )
+        except Exception as e:
+            logger.debug(f"Could not refresh session for summary: {e}")
+
     # Parse questions from LLM output
     bullets, questions = _parse_summary_and_questions(summary_text)
 
@@ -908,6 +926,14 @@ def _compose_structured_summary(
     stage_line = _render_stage_progress(session)
     if stage_line:
         parts.append(stage_line)
+        logger.info(
+            f"Rendered stage progress for session "
+            f"{session.session_id if session else 'N/A'}: {stage_line}"
+        )
+    elif session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job():
+        logger.warning(
+            f"SDLC session {session.session_id} has no stage progress to render"
+        )
 
     # Summary text (bullets or prose)
     parts.append(bullets.strip())

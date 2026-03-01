@@ -59,6 +59,23 @@ Simple prose format, no stage line or link footer. Still summarized via Haiku.
 - `agent/job_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` passes `agent_session`
 - `bridge/markdown.py`: `send_markdown()` with plain-text fallback
 
+## Session Freshness
+
+Stage data (`[stage] BUILD completed ☑`) and links (`issue_url`, `pr_url`) are written to Redis by `tools/session_progress.py` during agent execution. By the time the summarizer runs, the session object passed through the callback chain may be stale (loaded before stages were recorded).
+
+Both `response.py` and `summarizer.py` re-read the session from Redis before composing structured output:
+
+```python
+# Re-read for fresh stage/link data
+fresh = list(AgentSession.query.filter(session_id=session.session_id))
+if fresh:
+    session = fresh[0]
+```
+
+Diagnostic logging in `_compose_structured_summary()` confirms when stage progress is rendered vs missing:
+- `INFO "Rendered stage progress for session ..."` — template applied successfully
+- `WARNING "SDLC session ... has no stage progress to render"` — stage data not found
+
 ## Callback Chain
 
 ```
@@ -66,8 +83,10 @@ agent/job_queue.py send_to_chat()
   → send_cb(chat_id, msg, message_id, agent_session)
   → bridge/telegram_bridge.py _send(chat_id, text, reply_to, session)
   → bridge/response.py send_response_with_files(..., session=session)
+      ↳ re-reads session from Redis for fresh stage/link data
   → bridge/summarizer.py summarize_response(text, session=session)
   → _compose_structured_summary(summary, session=session)
+      ↳ re-reads session from Redis for fresh stage/link data
 ```
 
 ## Adaptive Format Rules
