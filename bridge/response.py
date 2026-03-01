@@ -386,6 +386,17 @@ async def send_response_with_files(
     # SDLC sessions: always summarize (need stage lines + link footers).
     # Non-SDLC short responses (< 500 chars): skip — these are typically
     # programmatic skill output (e.g., /update) that's already formatted.
+    # Re-read session from Redis for fresh stage/link data written during execution
+    if session and hasattr(session, "session_id") and session.session_id:
+        try:
+            from models.agent_session import AgentSession
+
+            fresh = list(AgentSession.query.filter(session_id=session.session_id))
+            if fresh:
+                session = fresh[0]
+        except Exception:
+            pass  # Fall back to existing session object
+
     is_sdlc = session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
     should_summarize = text and (is_sdlc or len(text) >= 500)
     if should_summarize:

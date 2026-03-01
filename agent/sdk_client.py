@@ -513,7 +513,7 @@ class ValorAgent:
             permission_mode=self.permission_mode,  # type: ignore[arg-type]
             continue_conversation=session_id is not None,
             resume=session_id,
-            setting_sources=["local", "project"],
+            setting_sources=["user", "local", "project"],
             env=env,
             hooks=build_hooks_config(),
             agents=get_agent_definitions(),
