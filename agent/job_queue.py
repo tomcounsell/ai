@@ -282,7 +282,9 @@ async def _push_job(
 
     # Log lifecycle transition for newly created pending job
     try:
-        sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
+        sessions = list(
+            AgentSession.query.filter(session_id=session_id, status="pending")
+        )
         if sessions:
             sessions[0].log_lifecycle_transition("pending", "job enqueued")
     except Exception:
@@ -467,9 +469,7 @@ def _recover_orphaned_jobs(project_key: str) -> int:
             # Use errors='replace' to handle corrupted UTF-8 data in Redis keys
             # gracefully. Corrupted bytes get replaced with U+FFFD rather than
             # crashing the recovery loop.
-            key_str = (
-                key.decode(errors="replace") if isinstance(key, bytes) else key
-            )
+            key_str = key.decode(errors="replace") if isinstance(key, bytes) else key
 
             # Load the object data from Redis hash
             data = POPOTO_REDIS_DB.hgetall(key_str)
