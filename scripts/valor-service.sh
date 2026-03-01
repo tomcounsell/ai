@@ -87,12 +87,49 @@ is_launchd_loaded() {
     launchctl list "$PLIST_NAME" &>/dev/null
 }
 
+# Log rotation constants
+LOG_MAX_SIZE=$((10 * 1024 * 1024))  # 10MB
+LOG_MAX_BACKUPS=3
+
+rotate_log() {
+    # Rotate a log file if it exceeds LOG_MAX_SIZE.
+    # Keeps LOG_MAX_BACKUPS rotated copies (e.g. bridge.error.log.1, .2, .3).
+    local log_file="$1"
+    if [ ! -f "$log_file" ]; then
+        return 0
+    fi
+
+    local file_size
+    file_size=$(stat -f%z "$log_file" 2>/dev/null || stat --printf="%s" "$log_file" 2>/dev/null || echo 0)
+
+    if [ "$file_size" -gt "$LOG_MAX_SIZE" ]; then
+        echo "Rotating $log_file (${file_size} bytes > ${LOG_MAX_SIZE} limit)"
+        # Shift existing backups: .3 -> deleted, .2 -> .3, .1 -> .2
+        local i=$LOG_MAX_BACKUPS
+        while [ "$i" -gt 1 ]; do
+            local prev=$((i - 1))
+            if [ -f "${log_file}.${prev}" ]; then
+                mv "${log_file}.${prev}" "${log_file}.${i}"
+            fi
+            i=$prev
+        done
+        # Current -> .1
+        mv "$log_file" "${log_file}.1"
+        # Create fresh empty file
+        touch "$log_file"
+    fi
+}
+
 start_bridge() {
     # Warn about pending critical dependency upgrades
     if [ -f "$PROJECT_DIR/data/upgrade-pending" ]; then
         echo "WARNING: Critical dependency upgrade pending. Run /update to apply."
         cat "$PROJECT_DIR/data/upgrade-pending"
     fi
+
+    # Rotate oversized log files before starting
+    rotate_log "$LOG_DIR/bridge.error.log"
+    rotate_log "$LOG_DIR/bridge.log"
 
     echo "Starting Valor bridge..."
 

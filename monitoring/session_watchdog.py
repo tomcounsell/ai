@@ -463,6 +463,44 @@ def detect_error_cascade(
     return (is_cascading, error_count)
 
 
+def _safe_abandon_session(session: AgentSession, reason: str) -> bool:
+    """Safely mark a session as abandoned, handling duplicate key errors.
+
+    The watchdog frequently encounters ModelException (duplicate key / unique
+    constraint violations) when saving sessions that were concurrently modified
+    or cleaned up by another process. This helper wraps the save() call to
+    catch those errors locally instead of letting them propagate to the
+    watchdog loop where they spam the error log.
+
+    Args:
+        session: The session to abandon
+        reason: Human-readable reason for the abandonment
+
+    Returns:
+        True if the session was successfully saved, False if the save failed
+        (session may have been deleted by another process).
+    """
+    try:
+        session.log_lifecycle_transition("abandoned", reason)
+    except Exception:
+        pass
+
+    session.status = "abandoned"
+    try:
+        session.save()
+        return True
+    except ModelException as e:
+        # Session was likely deleted or modified by another process between
+        # our read and this save. Log at WARNING (not ERROR) since this is
+        # a known race condition, not a bug.
+        logger.warning(
+            "[watchdog] Could not save session %s (duplicate key / stale): %s",
+            session.session_id,
+            e,
+        )
+        return False
+
+
 async def fix_unhealthy_session(
     session: AgentSession, assessment: dict[str, Any]
 ) -> bool:
@@ -489,50 +527,39 @@ async def fix_unhealthy_session(
 
     # Most common case: session is stuck/silent - just abandon it
     if silence_duration > ABANDON_THRESHOLD:
-        try:
-            session.log_lifecycle_transition(
-                "abandoned", f"watchdog: silent for {int(silence_duration / 60)}min"
-            )
-        except Exception:
-            pass
-        session.status = "abandoned"
-        session.save()
-        logger.info(
-            "[watchdog] Abandoned stuck session %s (silent for %d min)",
-            session.session_id,
-            int(silence_duration / 60),
+        saved = _safe_abandon_session(
+            session,
+            f"watchdog: silent for {int(silence_duration / 60)}min",
         )
+        if saved:
+            logger.info(
+                "[watchdog] Abandoned stuck session %s (silent for %d min)",
+                session.session_id,
+                int(silence_duration / 60),
+            )
         return True
 
     # Long-running session - abandon it
     session_duration = now - session.started_at
     if session_duration > DURATION_THRESHOLD:
-        try:
-            session.log_lifecycle_transition(
-                "abandoned",
-                f"watchdog: running for {int(session_duration / 3600)}h",
-            )
-        except Exception:
-            pass
-        session.status = "abandoned"
-        session.save()
-        logger.info(
-            "[watchdog] Abandoned long session %s (running for %d hours)",
-            session.session_id,
-            int(session_duration / 3600),
+        saved = _safe_abandon_session(
+            session,
+            f"watchdog: running for {int(session_duration / 3600)}h",
         )
+        if saved:
+            logger.info(
+                "[watchdog] Abandoned long session %s (running for %d hours)",
+                session.session_id,
+                int(session_duration / 3600),
+            )
         return True
 
     # Critical issues (looping, error cascades) - abandon and maybe create issue
     if severity == "critical":
-        try:
-            session.log_lifecycle_transition(
-                "abandoned", f"watchdog: critical issues: {', '.join(issues)}"
-            )
-        except Exception:
-            pass
-        session.status = "abandoned"
-        session.save()
+        _safe_abandon_session(
+            session,
+            f"watchdog: critical issues: {', '.join(issues)}",
+        )
 
         # Create GitHub issue for investigation
         try:
@@ -543,14 +570,10 @@ async def fix_unhealthy_session(
         return True
 
     # Warning-level issues - just abandon for now
-    try:
-        session.log_lifecycle_transition(
-            "abandoned", f"watchdog: {', '.join(issues)}"
-        )
-    except Exception:
-        pass
-    session.status = "abandoned"
-    session.save()
+    _safe_abandon_session(
+        session,
+        f"watchdog: {', '.join(issues)}",
+    )
     return True
 
 
