@@ -68,13 +68,48 @@ A separate process that monitors bridge health and executes recovery. Runs via l
 - Creates a git revert commit and pushes to remote
 - Sends Telegram alert about the revert
 
-### 4. Service Installation
+### 4. Session Watchdog Duplicate Key Guard (`monitoring/session_watchdog.py`)
+
+**Problem**: The session watchdog calls `session.save()` in `fix_unhealthy_session()` to mark stuck sessions as abandoned. When a session has been concurrently deleted or modified by another process, popoto raises a `ModelException` (duplicate key / unique constraint violation). These errors accounted for 98% of all error log entries (~22,400 occurrences).
+
+**Solution**: The `_safe_abandon_session()` helper wraps each `session.save()` call in `fix_unhealthy_session()` with a `ModelException` catch. When the save fails due to a stale/duplicate key:
+1. The error is logged at WARNING level (visible in `bridge.log` for monitoring, but not spamming `bridge.error.log`)
+2. The watchdog continues processing the next session instead of propagating the error up to the loop-level handler
+3. The outer `check_all_sessions()` still has a `ModelException` catch as a safety net for any other save paths
+
+This is distinct from the loop-level crash guard (which marks sessions as `failed`). The `_safe_abandon_session()` helper handles the common case of race conditions during the abandon flow itself.
+
+### 5. Log Rotation (`scripts/valor-service.sh`)
+
+**Problem**: `bridge.error.log` is stderr redirected by launchd, so Python's `RotatingFileHandler` cannot manage it. The file grows unbounded.
+
+**Solution**: The `rotate_log()` function in `valor-service.sh` runs at bridge startup and rotates any log file exceeding 10MB. It keeps 3 backup copies (`.1`, `.2`, `.3`) using a shift pattern. Both `bridge.log` and `bridge.error.log` are rotated.
+
+### 6. Startup Redis Key Cleanup (`bridge/telegram_bridge.py`)
+
+**Problem**: Stale Redis entries with non-standard 60-character `job_id` keys (from historical data or crashes) trigger popoto validation errors on every query scan, generating thousands of error log entries.
+
+**Solution**: On bridge startup, before recovering interrupted/orphaned jobs, the bridge calls `AgentSession.query.keys(clean=True)` to purge Redis set entries that point to missing or invalid objects. This is a one-time cleanup that prevents the validation errors from recurring.
+
+### 7. Orphan Recovery Hardening (`agent/job_queue.py`)
+
+**Problem**: The `_recover_orphaned_jobs()` function calls `.decode()` on Redis byte data without error handling. Corrupted UTF-8 data in orphaned sessions causes `UnicodeDecodeError` crashes that abort the entire recovery loop.
+
+**Solution**: All `.decode()` calls in `_recover_orphaned_jobs()` now use `errors='replace'`, which substitutes U+FFFD for corrupted bytes instead of crashing. The decode error context and raw key bytes are included in warning logs for forensic analysis.
+
+### 8. Perplexity Provider Error Handling (`tools/web/providers/perplexity.py`)
+
+**Problem**: The Perplexity search provider had a bare `except Exception` that silently swallowed all errors, including 401 Unauthorized responses from expired API keys.
+
+**Solution**: Added explicit `httpx.HTTPStatusError` handling before the generic catch. 401 errors now log a clear warning message directing the operator to refresh credentials in `.env`. Other HTTP errors are also logged with their status code.
+
+### 9. Service Installation
 
 The watchdog is installed alongside the bridge:
 ```bash
 ./scripts/valor-service.sh install
 # Installs:
-# - com.valor.bridge (main bridge)
+# - com.valor.bridge (main bridge, with log rotation on startup)
 # - com.valor.update (cron at 06:00/18:00)
 # - com.valor.bridge-watchdog (every 60s)
 ```
