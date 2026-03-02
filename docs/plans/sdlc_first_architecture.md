@@ -164,13 +164,12 @@ def classify_work_request(message: str) -> str:
     """
 ```
 
-**Classification approach:** Use local Ollama (fast, no API cost) with a focused prompt. Fall back to regex patterns if Ollama is down.
+**Classification approach:** Ollama (fast, local) with fallback to Haiku (cheap, reliable). Must reuse a single Ollama session — never spawn per-request. If Ollama shows any memory leak risk, default to Haiku.
 
-**Regex fallback patterns for "sdlc":**
+**Fast-path patterns (before LLM):**
 - Starts with `/sdlc`, `/do-plan`, `/do-build` → "passthrough" (already routed)
-- Contains "fix", "add", "implement", "create", "refactor", "build", "update", "change" + code/feature/bug context → "sdlc"
-- Contains "?", "what", "how", "why", "can you explain" → "question"
 - "continue", "merge", "👍" → "passthrough"
+- These bypass the LLM entirely for zero-latency routing.
 
 ### Layer 2: System Prompt SDLC Dominance
 
@@ -269,7 +268,7 @@ Telegram message → classify_work_request() → "question"
 
 ## Rabbit Holes
 
-- **Do NOT build a complex NLP classifier** — regex + Ollama fallback is sufficient for v1. The patterns are obvious: "fix", "add", "implement" = work.
+- **Do NOT build a complex NLP classifier** — Ollama with Haiku fallback is sufficient for v1. Keep the prompt simple and focused.
 - **Do NOT add SDK-level skill filtering** — the SDK has no API for this, and building a wrapper is overengineered. Prompt-level enforcement is sufficient.
 - **Do NOT redesign the summarizer architecture** — the LLM-generates-bullets + Python-renders-structure pattern is sound. Fix the inputs (session freshness, process stripping), not the architecture.
 - **Do NOT try to intercept every possible edge case** — a few false positives (question classified as work) or false negatives (work classified as question) are fine. The agent still has agency.
@@ -371,7 +370,9 @@ The orchestrator pattern means SDLC skills and their tool dependencies (`tools/s
 - **Agent Type**: builder
 - **Parallel**: true
 - Add `classify_work_request()` to `bridge/routing.py`
-- Implement Ollama-based classification with regex fallback
+- Implement Ollama-based classification with Haiku fallback
+- Reuse single Ollama session (no per-request spawning) — verify no memory leaks
+- Fast-path patterns for `/sdlc`, `continue`, `👍` bypass LLM entirely
 - Add unit tests for classification accuracy
 
 ### 2. Implement thin orchestrator routing in SDK client
@@ -449,10 +450,10 @@ The orchestrator pattern means SDLC skills and their tool dependencies (`tools/s
 
 ---
 
-## Open Questions
+## Open Questions (Resolved)
 
-1. **Should the work request classifier be Ollama-only, regex-only, or hybrid?** Hybrid recommended — Ollama for nuance, regex as fast fallback when Ollama is down.
+1. **Classifier approach:** Ollama with fallback to Haiku (not regex). Must verify Ollama sessions don't leak memory — if any risk, default to Haiku which is cheap enough. Single Ollama session reuse, not per-request spawning.
 
-2. **Should false-positive SDLC routing be correctable?** e.g., if the agent gets a work directive but realizes it's a question, should it be able to skip SDLC? Recommended yes — the directive is a strong nudge, not a hard gate.
+2. **False-positive SDLC routing correctable?** Yes, very rare (VR). The directive is a strong nudge, not a hard gate — agent can skip SDLC if it determines the message is actually a question.
 
-3. **Should the orchestrator also handle "continue" messages for SDLC sessions?** When Tom replies "continue" to an SDLC thread, the session should resume in ai/ (not the target project). The session context from Redis should carry the original classification. Recommended yes, this falls naturally from session-based routing.
+3. **"Continue" messages for SDLC sessions:** Yes, falls naturally from session-based routing — session context in Redis carries the original classification.
