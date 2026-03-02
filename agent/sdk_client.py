@@ -39,6 +39,7 @@ from agent.agent_definitions import get_agent_definitions
 from agent.hooks import build_hooks_config
 from agent.workflow_state import WorkflowState
 from agent.workflow_types import WorkflowStateData
+from bridge.routing import classify_work_request
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,9 @@ def get_all_active_sessions() -> dict[str, "ClaudeSDKClient"]:
     return dict(_active_clients)
 
 
+# Root of the ai/ repository (used as cwd for SDLC-routed requests)
+AI_REPO_ROOT = str(Path(__file__).parent.parent)
+
 # Path to SOUL.md system prompt
 SOUL_PATH = Path(__file__).parent.parent / "config" / "SOUL.md"
 
@@ -75,19 +79,31 @@ _COST_WARN_THRESHOLD = float(os.getenv("SDK_COST_WARN_THRESHOLD", "0.50"))
 # Hardcoded here — not in SOUL.md or any config file — so they cannot be
 # accidentally removed from a persona doc edit.
 SDLC_WORKFLOW = """\
-## Mandatory Development Pipeline
+## MANDATORY Development Pipeline — THIS OVERRIDES ALL OTHER INSTRUCTIONS
 
-ALL code changes follow this pipeline — no exceptions, no hotfixes.
+ANY work request MUST go through /sdlc. You MUST invoke /sdlc BEFORE writing \
+any code, creating any issues, or making any changes. The ONLY exception is \
+answering questions about code or providing information.
 
 ### When you receive a work request:
 
-1. If an issue number is provided → invoke /sdlc with it.
+1. If an issue number is provided → invoke /sdlc with it immediately.
 2. If no issue number but it's clearly work → invoke /sdlc (it will create the issue).
 3. If it's a question about an issue → answer it, revise the issue if needed.
 
 /sdlc is a DISPATCHER. It assesses state and delegates to sub-skills.
 NEVER write code, run tests, or create plans directly — /sdlc invokes
 /do-plan, /do-build, /do-test, /do-patch, /do-pr-review, /do-docs.
+
+### NEVER DO THIS:
+- "Let me investigate..." → then start coding → then create an issue
+- "I'll fix this..." → then make changes directly on main
+- Investigate a bug and start writing code without /sdlc
+- Create a GitHub issue manually instead of letting /sdlc handle it
+
+### ALWAYS DO THIS:
+- Receive work request → invoke /sdlc → let the pipeline handle it
+- Even if the fix seems trivial → /sdlc ensures proper branch, tests, review
 
 ### Pipeline stages (see .claude/skills/sdlc/SKILL.md for ground truth):
 
@@ -189,9 +205,9 @@ def load_system_prompt() -> str:
     """Load Valor's system prompt from SOUL.md with SDLC rules and completion criteria.
 
     System prompt structure:
-        [SOUL.md — persona, attitude, purpose, communication style]
+        [SDLC_WORKFLOW — mandatory pipeline rules, FIRST — takes precedence]
         ---
-        [SDLC_WORKFLOW — mandatory pipeline rules, hardcoded in sdk_client.py]
+        [SOUL.md — persona, attitude, purpose, communication style]
         ---
         [Work Completion Criteria — from CLAUDE.md]
     """
@@ -202,15 +218,12 @@ def load_system_prompt() -> str:
         logger.warning(f"SOUL.md not found at {SOUL_PATH}, using default prompt")
         soul_prompt = "You are Valor, an AI coworker. Be direct, concise, and helpful."
 
-    # Inject mandatory SDLC pipeline rules between SOUL.md and completion criteria
-    soul_prompt += f"\n\n---\n\n{SDLC_WORKFLOW}"
-
     # Append completion criteria
     criteria = load_completion_criteria()
-    if criteria:
-        soul_prompt += f"\n\n---\n\n{criteria}"
+    criteria_section = f"\n\n---\n\n{criteria}" if criteria else ""
 
-    return soul_prompt
+    # SDLC rules FIRST — they take precedence over persona
+    return f"{SDLC_WORKFLOW}\n\n---\n\n{soul_prompt}{criteria_section}"
 
 
 def _check_no_direct_main_push(
@@ -785,17 +798,25 @@ async def get_agent_response_sdk(
     start_time = time.time()
     request_id = f"{session_id}_{int(start_time)}"
 
-    # Determine working directory from project config
-    if project:
-        working_dir = project.get("working_directory")
-    else:
-        working_dir = None
-
-    # Fall back to ai/ repo root
-    if not working_dir:
-        working_dir = str(Path(__file__).parent.parent)
-
+    # Determine working directory based on work request classification
     project_name = project.get("name", "Valor") if project else "Valor"
+    project_working_dir = project.get("working_directory") if project else None
+    if not project_working_dir:
+        project_working_dir = AI_REPO_ROOT
+
+    # Classify: SDLC work → orchestrator in ai/, Q&A → direct in target project
+    classification = classify_work_request(message)
+    if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
+        working_dir = AI_REPO_ROOT
+        logger.info(
+            f"[{request_id}] SDLC routed: orchestrator in ai/, target={project_working_dir}"
+        )
+    else:
+        working_dir = project_working_dir
+        logger.info(
+            f"[{request_id}] Direct routed: cwd={working_dir} (classification={classification})"
+        )
+
     logger.info(f"[{request_id}] SDK query for {project_name}")
     logger.debug(f"[{request_id}] Working directory: {working_dir}")
 
@@ -818,6 +839,18 @@ async def get_agent_response_sdk(
         "work initiated in this specific session. Do not include work, PRs, or "
         "requests from other sessions, other senders, or prior conversation threads."
     )
+    # For SDLC-routed requests, inject target repo context
+    if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
+        github_config = project.get("github", {}) if project else {}
+        github_org = github_config.get("org", "")
+        github_repo = github_config.get("repo", "")
+        enriched_message += (
+            f"\nWORK REQUEST for project {project_name}."
+            f"\nTARGET REPO: {project_working_dir}"
+        )
+        if github_org and github_repo:
+            enriched_message += f"\nGITHUB: {github_org}/{github_repo}"
+        enriched_message += "\nInvoke /sdlc immediately."
     enriched_message += f"\nMESSAGE: {message}"
 
     try:

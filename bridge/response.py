@@ -398,7 +398,7 @@ async def send_response_with_files(
             pass  # Fall back to existing session object
 
     is_sdlc = session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job()
-    should_summarize = text and (is_sdlc or len(text) >= 500)
+    should_summarize = text and (is_sdlc or len(text) >= 200)
     if should_summarize:
         try:
             from bridge.summarizer import summarize_response
