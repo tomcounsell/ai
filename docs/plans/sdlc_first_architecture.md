@@ -46,19 +46,149 @@ The SDLC pipeline is supposed to be the mandatory development workflow, but it's
 
 No prerequisites — all changes are internal to the bridge and agent code.
 
+## Architectural Decision: Orchestrator vs Flat Session
+
+### The Cross-Repo Problem
+
+The current architecture launches ONE SDK session with `cwd=target_project`. When Tom messages in Dev: PsyOptimal, the bridge sets `cwd=/Users/valorengels/src/psyoptimal`. This creates a fundamental problem:
+
+**What breaks when cwd != ai/:**
+1. `python -m tools.session_progress` — every SDLC skill calls this, but `tools/` lives in the ai/ repo, not psyoptimal/
+2. `agent/worktree_manager.py` — referenced by do-build, exists only in ai/
+3. `scripts/post_merge_cleanup.py` — called by SDLC merge phase, exists only in ai/
+4. `.claude/hooks/` — pre/post tool hooks reference ai/ repo paths
+5. Session transcript storage, crash tracking, monitoring — all wired to ai/ repo's data/ directory
+6. **On another machine entirely** — none of the ai/ infrastructure exists. User-level skills at `~/.claude/skills/` only work if the update script installed them AND if the tools they reference are accessible.
+
+**What works regardless of cwd:**
+- User-level skills discovery (with `setting_sources=["user", ...]`)
+- The SDLC skill text itself (it's just markdown instructions)
+- gh CLI commands (global)
+- git operations (per-repo)
+
+### Option A: Flat Session (Current) — Fix tools paths
+
+Keep one session, but make all tool paths absolute:
+```python
+# Instead of: python -m tools.session_progress
+# Use:        python -m tools.session_progress  (with PYTHONPATH set to ai/)
+```
+
+**Pros:** Minimal change, no architectural shift
+**Cons:** Fragile. Every skill must know about ai/ paths. On another machine, PYTHONPATH won't resolve. Couples all projects to the ai/ repo's filesystem layout.
+
+### Option B: Orchestrator + Worker Architecture (Recommended)
+
+The top-level SDK session ALWAYS runs with `cwd=ai/`. This is the **orchestrator**. It has full access to:
+- All SDLC skills and their tool dependencies
+- Session progress tracking
+- Worktree management
+- Hooks and monitoring
+
+For code-touching SDLC stages (BUILD, TEST, PATCH), the orchestrator spawns **worker agents** via Task tool with the target project's working directory:
+
+```
+Message: "Fix the auth bug in PsyOptimal"
+  ↓
+Orchestrator (cwd=ai/)
+  ├─ ISSUE: gh issue create --repo yudame/psyoptimal (runs from ai/, uses gh CLI)
+  ├─ PLAN: writes docs/plans/ in ai/ (orchestrator's concern)
+  ├─ BUILD: Task(cwd=psyoptimal/, prompt="implement the plan...")
+  │    └─ Worker agent operates in psyoptimal/, creates branch, writes code
+  ├─ TEST: Task(cwd=psyoptimal/, prompt="run tests...")
+  ├─ REVIEW: gh pr view (runs from ai/, uses gh CLI)
+  ├─ DOCS: Task(cwd=psyoptimal/, prompt="update docs in the project...")
+  └─ MERGE: gh pr merge (runs from ai/, uses gh CLI)
+```
+
+**Pros:**
+- SDLC infrastructure always works (it's in its home repo)
+- Clean separation: orchestration logic vs project code
+- Works on any machine — orchestrator just needs the ai/ repo
+- Worker agents are disposable — they only need the target repo
+- Already partially implemented — do-build spawns Task agents with worktree paths
+
+**Cons:**
+- Requires changing how `get_agent_response_sdk()` determines working directory
+- Plan docs live in ai/ repo, not the target project
+- Extra agent spawn overhead for simple tasks
+
+### Option C: Hybrid — Orchestrator for SDLC, Direct for Q&A
+
+Combine A and B:
+- **Q&A / non-work messages**: Launch directly in the target project's cwd (fast, no overhead)
+- **Work requests (SDLC)**: Launch orchestrator in ai/ cwd, which spawns workers in target project
+
+This maps naturally to the work request classifier from Layer 1:
+```python
+classification = classify_work_request(message)
+if classification == "sdlc":
+    working_dir = AI_REPO_ROOT  # Orchestrator in ai/
+else:
+    working_dir = project["working_directory"]  # Direct in target
+```
+
+### Recommendation: Option C (Hybrid)
+
+Option C gives us the best of both worlds:
+- SDLC work is reliable because the orchestrator always runs from ai/ where all infrastructure lives
+- Q&A is fast because it runs directly in the target project (no orchestrator overhead)
+- The work request classifier (Layer 1) naturally doubles as the routing decision for cwd
+- On another machine, SDLC still works as long as the ai/ repo is cloned and updated
+- Backward compatible — the change is in `get_agent_response_sdk()`, not the SDK itself
+
+**Key implementation detail:** The orchestrator doesn't need to "spin up a separate agent" for every SDLC stage. Most stages (ISSUE, PLAN, REVIEW, MERGE) use gh CLI and git, which work from any directory. Only BUILD, TEST, and PATCH need worker agents in the target project's directory. The do-build skill ALREADY spawns Task agents with explicit working directories — we just need to make this the consistent pattern.
+
 ## Solution
 
 ### Key Elements
 
-Three layers of improvement, each independent and shippable:
+Four layers of improvement, each independent and shippable:
 
-- **Layer 1: Bridge-side work request pre-routing** — Classify incoming messages and auto-prepend SDLC directive for work requests
+- **Layer 0: Orchestrator architecture** — SDLC sessions run from ai/ repo, spawning workers in target project for code stages
+- **Layer 1: Bridge-side work request pre-routing** — Classify incoming messages and route SDLC to orchestrator vs Q&A to target project
 - **Layer 2: System prompt SDLC dominance** — Move SDLC from "guidance" to "hard constraint" in the prompt hierarchy
 - **Layer 3: Summarizer reliability** — Eliminate process narration, ensure template always renders for SDLC work
 
+### Layer 0: Orchestrator Architecture
+
+**The key change:** In `agent/sdk_client.py` `get_agent_response_sdk()`, the working directory decision becomes classification-dependent:
+
+```python
+AI_REPO_ROOT = str(Path(__file__).parent.parent)  # /Users/valorengels/src/ai
+
+classification = classify_work_request(message)
+if classification == "sdlc":
+    # Orchestrator runs in ai/ repo where all SDLC infrastructure lives
+    working_dir = AI_REPO_ROOT
+    # Tell the agent which project it's working on and where the code lives
+    enriched_message = (
+        f"WORK REQUEST for project {project_name}.\n"
+        f"TARGET REPO: {project['working_directory']}\n"
+        f"GITHUB: {project['github']['org']}/{project['github']['repo']}\n"
+        f"Invoke /sdlc immediately.\n\n{enriched_message}"
+    )
+else:
+    # Q&A runs directly in the target project for fast context
+    working_dir = project.get("working_directory", AI_REPO_ROOT)
+```
+
+**What this enables:**
+- `tools/session_progress.py` always resolves (it's in ai/)
+- SDLC skills can call `python -m tools.*` without path hacks
+- Hooks in `.claude/hooks/` fire correctly
+- do-build already spawns Task agents with explicit worktree paths — same pattern works for cross-repo builds where the Task agent gets `cwd=psyoptimal/`
+- For the ai/ project itself (Valor), behavior is unchanged since cwd was already ai/
+
+**What changes for SDLC skills:**
+- `/sdlc` SKILL.md needs to know the target repo (passed via enriched message context)
+- `gh issue create` / `gh pr create` need `--repo` flag when target != ai/
+- `/do-build` spawns workers in the target project's directory (already does this via worktrees)
+- Plans still live in ai/ `docs/plans/` (they're orchestration artifacts, not project code)
+
 ### Layer 1: Bridge-Side Work Request Pre-Routing
 
-Add a lightweight classifier in the bridge that runs BEFORE the message reaches Claude. This is the most impactful change.
+Add a lightweight classifier in the bridge that runs BEFORE the message reaches Claude. This serves double duty: it determines the SDLC directive AND the working directory.
 
 **Location:** New function in `bridge/routing.py`
 
@@ -67,8 +197,8 @@ def classify_work_request(message: str) -> str:
     """Classify if a message is a work request that should go through SDLC.
 
     Returns:
-        "sdlc" - Work request → prepend SDLC directive
-        "question" - Q&A → pass through as-is
+        "sdlc" - Work request → orchestrator in ai/, prepend SDLC directive
+        "question" - Q&A → direct in target project, pass through as-is
         "passthrough" - Already has skill invocation or is conversational
     """
 ```
@@ -81,18 +211,7 @@ def classify_work_request(message: str) -> str:
 - Contains "?", "what", "how", "why", "can you explain" → "question"
 - "continue", "merge", "👍" → "passthrough"
 
-**Integration point:** `agent/sdk_client.py` `get_agent_response_sdk()` — after building `enriched_message`, before calling `agent.query()`:
-
-```python
-from bridge.routing import classify_work_request
-
-classification = classify_work_request(message)
-if classification == "sdlc":
-    # Prepend SDLC directive so the agent's first action is /sdlc
-    enriched_message = f"WORK REQUEST DETECTED — invoke /sdlc immediately.\n\n{enriched_message}"
-```
-
-**Why this works:** The agent still has agency, but the message framing makes SDLC the default action instead of an option. It's a nudge, not a hard gate — questions and conversations flow normally.
+**Why this works:** The classifier naturally splits the routing: work goes to the orchestrator (ai/ cwd), questions go to the target project (direct cwd). The agent still has agency within each path.
 
 ### Layer 2: System Prompt SDLC Dominance
 
@@ -156,28 +275,32 @@ Change `should_summarize` from `len(text) >= 500` to ALWAYS summarize for SDLC s
 
 ### Flow
 
-**Work request arrives:**
+**Work request for any project:**
 ```
-Telegram message → bridge/routing.py classify_work_request()
-  → "sdlc" → prepend directive → SDK client → Agent sees "WORK REQUEST DETECTED — invoke /sdlc"
-  → Agent invokes /sdlc skill → Pipeline runs → Output produced
-  → send_to_chat() → response.py strips process narration → summarizer re-reads session
-  → _compose_structured_summary() renders template → Telegram delivery
+Telegram message → bridge/routing.py classify_work_request() → "sdlc"
+  → SDK launches with cwd=ai/ (orchestrator)
+  → Enriched message includes TARGET REPO path + GITHUB org/repo
+  → Orchestrator invokes /sdlc skill → Pipeline runs:
+    - ISSUE/PLAN/REVIEW/MERGE: orchestrator handles directly (gh CLI, docs/)
+    - BUILD/TEST/PATCH: Task agent spawned with cwd=target_project/
+  → Output produced → summarizer renders SDLC template → Telegram
 ```
 
-**Question arrives:**
+**Question for any project:**
 ```
-Telegram message → bridge/routing.py classify_work_request()
-  → "question" → pass through unchanged → SDK client → Agent answers directly
-  → send_to_chat() → summarizer condenses if long → Telegram delivery
+Telegram message → classify_work_request() → "question"
+  → SDK launches with cwd=target_project/ (direct access)
+  → Agent answers using project's codebase context
+  → summarizer condenses if long → Telegram
 ```
 
 ### Technical Approach
 
-- Layer 1 is the highest-impact change — auto-routing makes SDLC the default without removing agent autonomy
-- Layer 2 reinforces Layer 1 at the prompt level — belt and suspenders
+- Layer 0 is the architectural foundation — ensures SDLC infrastructure is always accessible regardless of target project
+- Layer 1 determines both the SDLC directive and the cwd routing — one classifier, two decisions
+- Layer 2 reinforces at the prompt level — belt and suspenders
 - Layer 3 is output quality — ensures the template renders when it should
-- Each layer is independently shippable and testable
+- Layers can be built incrementally: 0+1 together (they're coupled), then 2, then 3
 
 ## Rabbit Holes
 
@@ -200,13 +323,17 @@ Telegram message → bridge/routing.py classify_work_request()
 **Impact:** "Let me explain..." lines that ARE the answer get stripped
 **Mitigation:** Only strip lines that match process patterns AND are followed by more content. Don't strip if the line is the only content. Test with real examples from the audit.
 
+### Risk 4: Orchestrator loses target project context
+**Impact:** Agent running in ai/ doesn't have psyoptimal's CLAUDE.md, .claude/settings.json, or project-specific context
+**Mitigation:** Worker agents spawned via Task for BUILD/TEST/PATCH run in the target project's directory and get full project context. The orchestrator only needs the GitHub repo identifier and working directory path, both of which are in `config/projects.json`.
+
 ## No-Gos (Out of Scope)
 
-- Per-project skill visibility (all user-level skills remain shared)
 - SDK modifications or custom wrappers
 - Redesigning the summarizer's LLM+Python architecture
 - Adding new SDLC stages or changing the pipeline itself
 - Building a complex ML-based message classifier
+- Moving plan docs into target project repos (plans stay in ai/)
 
 ## Update System
 
@@ -216,11 +343,13 @@ No update system changes required — these are bridge-internal code changes tha
 
 No new MCP server or tool needed. Changes are to:
 - `bridge/routing.py` — new `classify_work_request()` function
-- `agent/sdk_client.py` — prompt ordering + pre-routing integration
+- `agent/sdk_client.py` — orchestrator cwd routing + prompt ordering + pre-routing integration
 - `bridge/summarizer.py` — process stripping pre-pass + threshold change
 - `bridge/response.py` — threshold change
+- `.claude/skills/sdlc/SKILL.md` — update to accept TARGET_REPO context from enriched message
+- `.claude/skills/do-build/WORKFLOW.md` — ensure worker agents use target project cwd
 
-The agent calls these indirectly through the existing bridge pipeline.
+The orchestrator pattern means SDLC skills and their tool dependencies (`tools/session_progress.py`, etc.) are always accessible because the orchestrator runs from ai/. Worker agents spawned for BUILD/TEST/PATCH run in the target project's directory.
 
 ## Documentation
 
@@ -231,7 +360,10 @@ The agent calls these indirectly through the existing bridge pipeline.
 
 ## Success Criteria
 
+- [ ] SDLC work requests run orchestrator in ai/ cwd (not target project)
+- [ ] Q&A messages run directly in target project cwd
 - [ ] Work requests in natural language auto-route through SDLC without explicit "/sdlc" command
+- [ ] SDLC works for non-ai projects (PsyOptimal, Django Template, etc.) — tools resolve correctly
 - [ ] SDLC responses consistently show stage progress line + link footer (>80% compliance)
 - [ ] Process narration ("Let me...", "Now let me...") stripped before reaching Telegram
 - [ ] Questions and conversational messages still flow normally (no false-positive SDLC routing)
@@ -274,15 +406,16 @@ The agent calls these indirectly through the existing bridge pipeline.
 - Implement Ollama-based classification with regex fallback
 - Add unit tests for classification accuracy
 
-### 2. Integrate pre-routing in SDK client
-- **Task ID**: build-prerouting
+### 2. Implement orchestrator routing + pre-routing in SDK client
+- **Task ID**: build-orchestrator
 - **Depends On**: build-classifier
 - **Assigned To**: routing-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- Wire classifier into `get_agent_response_sdk()` in `agent/sdk_client.py`
-- Prepend SDLC directive for work requests
-- Add logging for routing decisions
+- In `get_agent_response_sdk()`: use classifier result to set cwd (ai/ for sdlc, target for question)
+- Prepend SDLC directive with TARGET_REPO context for work requests
+- Update SDLC skill to read TARGET_REPO from enriched message and pass `--repo` to gh commands
+- Add logging for routing decisions (cwd chosen, classification result)
 
 ### 3. Reorder system prompt
 - **Task ID**: build-prompt
@@ -353,3 +486,7 @@ The agent calls these indirectly through the existing bridge pipeline.
 2. **Should we log classification decisions to Redis for later analysis?** Useful for tuning the classifier. Recommended yes, lightweight.
 
 3. **Should false-positive SDLC routing be correctable?** e.g., if the agent gets a work directive but realizes it's a question, should it be able to skip SDLC? Recommended yes — the directive is a strong nudge, not a hard gate.
+
+4. **Where should plan docs live for non-ai projects?** Currently all plans live in ai/ `docs/plans/`. This makes sense — plans are orchestration artifacts, not project code. But should we eventually support project-local plans? Recommendation: keep in ai/ for now, revisit later.
+
+5. **Should the orchestrator also handle "continue" messages for SDLC sessions?** When Tom replies "continue" to an SDLC thread, the session should resume in ai/ (not the target project). The session context from Redis should carry the original classification. Recommendation: yes, this falls naturally from session-based routing.
