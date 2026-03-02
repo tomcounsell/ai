@@ -66,7 +66,7 @@ Work request: "Fix the auth bug in PsyOptimal"
   ↓
 Thin Orchestrator (cwd=ai/) — dispatch + progress tracking ONLY
   ├─ ISSUE: gh issue create --repo yudame/psyoptimal (gh CLI, no project context needed)
-  ├─ PLAN: Worker(cwd=psyoptimal/) reads CLAUDE.md, docs/*, architecture → writes plan
+  ├─ PLAN: Worker(cwd=psyoptimal/) reads CLAUDE.md, docs/* → writes plan to psyoptimal/docs/plans/
   ├─ BUILD: Worker(cwd=psyoptimal/) implements plan, creates branch, writes code
   ├─ TEST: Worker(cwd=psyoptimal/) runs test suite
   ├─ PATCH: Worker(cwd=psyoptimal/) fixes failures
@@ -134,7 +134,7 @@ else:
 - Session management: logging, crash tracking, monitoring
 
 **What workers handle (in target project cwd):**
-- PLAN: Read target's CLAUDE.md, docs/*, architecture → write plan (orchestrator stores it in ai/docs/plans/)
+- PLAN: Read target's CLAUDE.md, docs/*, architecture → write plan in target project's docs/plans/
 - BUILD: Create branch, write code using target project's patterns and conventions
 - TEST: Run target project's test suite
 - PATCH: Fix failures using target project context
@@ -145,7 +145,7 @@ else:
 - `/do-plan` runs as worker in target project — sees all project docs and conventions
 - `/do-build` already spawns workers in target directory (via worktrees) — same pattern
 - `gh` commands use `--repo` flag when target != ai/
-- Plans stored in ai/ `docs/plans/` but written by workers who understand the target project
+- Plans stored in the target project's `docs/plans/` directory (not ai/ unless working on ai/)
 
 ### Layer 1: Bridge-Side Work Request Pre-Routing
 
@@ -203,6 +203,8 @@ ALWAYS DO THIS:
 - Receive work request → invoke /sdlc → let the pipeline handle it
 ```
 
+4. Update SOUL.md (`config/SOUL.md`) to reinforce identity as a responsible senior developer who can answer questions directly, but defaults to the professional SDLC process for any meaningful work. This is character-level reinforcement — Valor WANTS to use SDLC because it's the right thing to do, not because he's forced to.
+
 ### Layer 3: Summarizer Reliability
 
 Three sub-fixes:
@@ -240,7 +242,7 @@ Telegram message → bridge/routing.py classify_work_request() → "sdlc"
   → Enriched message includes TARGET REPO path + GITHUB org/repo
   → Orchestrator invokes /sdlc skill → Pipeline runs:
     - ISSUE: orchestrator runs gh CLI (no project context needed)
-    - PLAN: Worker(cwd=target/) reads codebase → writes plan → orchestrator stores
+    - PLAN: Worker(cwd=target/) reads codebase → writes plan in target/docs/plans/
     - BUILD: Worker(cwd=target/) implements plan, creates branch
     - TEST: Worker(cwd=target/) runs test suite
     - PATCH: Worker(cwd=target/) fixes failures
@@ -297,7 +299,7 @@ Telegram message → classify_work_request() → "question"
 - Redesigning the summarizer's LLM+Python architecture
 - Adding new SDLC stages or changing the pipeline itself
 - Building a complex ML-based message classifier
-- Moving plan docs into target project repos (plans are orchestration artifacts, stored in ai/ but written by workers who read the target project)
+- Storing non-ai project plans in ai/docs/plans/ (plans live in the target project's repo alongside their GitHub issues)
 - **Flat session with absolute paths** — fragile, couples all projects to ai/ filesystem layout, breaks on other machines
 - **Full orchestrator (all stages in ai/)** — causes ai/ context pollution in planning/building stages that need target project context
 
@@ -310,10 +312,12 @@ No update system changes required — these are bridge-internal code changes tha
 No new MCP server or tool needed. Changes are to:
 - `bridge/routing.py` — new `classify_work_request()` function
 - `agent/sdk_client.py` — orchestrator cwd routing + prompt ordering + pre-routing integration
+- `config/SOUL.md` — reinforce SDLC-first identity (responsible senior dev who defaults to process)
 - `bridge/summarizer.py` — process stripping pre-pass + threshold change
 - `bridge/response.py` — threshold change
 - `.claude/skills/sdlc/SKILL.md` — update to accept TARGET_REPO context from enriched message
 - `.claude/skills/do-build/WORKFLOW.md` — ensure worker agents use target project cwd
+- `.claude/skills/do-plan/` — update to write plans in target project's docs/plans/
 
 The orchestrator pattern means SDLC skills and their tool dependencies (`tools/session_progress.py`, etc.) are always accessible because the orchestrator runs from ai/. Worker agents spawned for PLAN/BUILD/TEST/PATCH/DOCS run in the target project's directory.
 
@@ -388,7 +392,7 @@ The orchestrator pattern means SDLC skills and their tool dependencies (`tools/s
 - Log classification decisions to Redis for later analysis
 - Add logging for routing decisions (cwd chosen, classification result)
 
-### 3. Reorder system prompt
+### 3. Reorder system prompt + update SOUL.md
 - **Task ID**: build-prompt
 - **Depends On**: none
 - **Assigned To**: prompt-builder
@@ -397,6 +401,7 @@ The orchestrator pattern means SDLC skills and their tool dependencies (`tools/s
 - Move SDLC_WORKFLOW to top of system prompt in `load_system_prompt()`
 - Strengthen SDLC language from "if" to "must"
 - Add negative examples
+- Update `config/SOUL.md` to reinforce Valor as a responsible senior developer who defaults to SDLC for meaningful work
 
 ### 4. Add process narration stripping
 - **Task ID**: build-strip
@@ -452,8 +457,12 @@ The orchestrator pattern means SDLC skills and their tool dependencies (`tools/s
 
 ## Open Questions (Resolved)
 
-1. **Classifier approach:** Ollama with fallback to Haiku (not regex). Must verify Ollama sessions don't leak memory — if any risk, default to Haiku which is cheap enough. Single Ollama session reuse, not per-request spawning.
+1. **Classifier approach:** Ollama with fallback to Haiku. Must verify Ollama sessions don't leak memory — if any risk, default to Haiku (cheap enough). Single Ollama session reuse, not per-request spawning.
 
-2. **False-positive SDLC routing correctable?** Yes, very rare (VR). The directive is a strong nudge, not a hard gate — agent can skip SDLC if it determines the message is actually a question.
+2. **False-positive SDLC routing correctable?** Yes, VERY lightweight — the directive is a strong nudge, not a hard gate. Agent can skip SDLC if it determines the message is actually a question.
 
-3. **"Continue" messages for SDLC sessions:** Yes, falls naturally from session-based routing — session context in Redis carries the original classification.
+3. **SOUL.md reinforcement:** Update SOUL.md to reinforce that Valor is a responsible senior developer who can answer questions directly, but defaults to using the professional SDLC process for any meaningful work.
+
+4. **Plan doc location:** Plans live in the TARGET PROJECT's directory, NOT in ai/docs/plans/ (unless we're working on the ai/ repo itself). This matters because plan links appear in GitHub issues of the same repo and should live within the same contextual area.
+
+5. **"Continue" command routing:** Continue commands work identically whether from Tom or the stop hook. Session context in Redis carries the original classification — both sources trigger the same resume path.
