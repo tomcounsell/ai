@@ -562,7 +562,9 @@ class TestClassifyWithHeuristics:
         """
         result = _classify_with_heuristics("Analyzing the codebase structure now")
         assert result.output_type == OutputType.QUESTION
-        assert result.confidence == 0.80  # At threshold to avoid redundant gate re-conversion
+        assert (
+            result.confidence == 0.80
+        )  # At threshold to avoid redundant gate re-conversion
 
     def test_default_running_tests(self):
         """No explicit status pattern — falls to conservative QUESTION default."""
@@ -1324,7 +1326,6 @@ class TestComposeStructuredSummaryWithSession:
         assert "☐" not in result
         # No echo of user message (Telegram reply-to provides context)
         assert result.split("\n")[0].strip() in ("✅", "⏳", "❌")
-
 
 
 class TestSummarizationBypass:
