@@ -1102,6 +1102,15 @@ async def _execute_job(job: Job) -> None:
             agent_session.task_list_id = task_list_id
             agent_session.save()
             agent_session.append_history("user", (job.message_text or "")[:200])
+            # Force SDLC mode when classification says so (issue #246).
+            # This guarantees is_sdlc_job() returns True from the start,
+            # even if sub-skills fail to call session_progress.
+            if agent_session.classification_type == "sdlc":
+                agent_session.append_history("stage", "SDLC_MODE activated")
+                logger.info(
+                    f"[{job.project_key}] Forced SDLC mode for session "
+                    f"{job.session_id} (classification=sdlc)"
+                )
     except Exception as e:
         logger.debug(f"AgentSession update failed (non-fatal): {e}")
 
