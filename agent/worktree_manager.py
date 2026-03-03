@@ -16,6 +16,56 @@ WORKTREES_DIR = ".worktrees"
 VALID_SLUG_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]*$")
 
 
+def resolve_repo_root(file_path: str | Path) -> Path:
+    """Determine which git repository a file belongs to.
+
+    Used by the /do-build skill to detect when a plan document lives in a
+    different repo than the orchestrator (ai repo). The plan path is the
+    source of truth for which repo should receive the worktree, branch,
+    and PR.
+
+    Runs ``git rev-parse --show-toplevel`` from the file's parent directory
+    to find the enclosing git repository root.
+
+    Args:
+        file_path: Absolute or relative path to a file (e.g., a plan doc).
+            If a directory is given, it is used directly. If a file is given,
+            its parent directory is used.
+
+    Returns:
+        Absolute Path to the git repository root containing the file.
+
+    Raises:
+        FileNotFoundError: If the file or its parent directory does not exist.
+        ValueError: If the path is not inside any git repository.
+    """
+    path = Path(file_path).resolve()
+
+    # Use the directory containing the file, or the path itself if it's a dir
+    search_dir = path if path.is_dir() else path.parent
+
+    if not search_dir.exists():
+        raise FileNotFoundError(
+            f"Cannot resolve repo root: directory {search_dir} does not exist"
+        )
+
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=search_dir,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    if result.returncode != 0:
+        raise ValueError(
+            f"Path {file_path} is not inside a git repository. "
+            f"git error: {result.stderr.strip()}"
+        )
+
+    return Path(result.stdout.strip())
+
+
 def _validate_slug(slug: str) -> None:
     """Validate slug to prevent path traversal and invalid directory names.
 
