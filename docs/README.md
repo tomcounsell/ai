@@ -41,7 +41,7 @@ tail -f logs/bridge.log
 | Document | Description |
 |----------|-------------|
 | [Deployment](deployment.md) | Multi-instance deployment configuration |
-| [Daydream System](features/daydream.md) | Autonomous maintenance process |
+| [Reflections System](features/reflections.md) | Autonomous maintenance process |
 
 ### Features
 

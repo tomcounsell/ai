@@ -55,7 +55,7 @@ Tool results are truncated to 2000 characters in the transcript to keep file siz
 | `classification_type` | Field | bug, feature, or chore |
 | `classification_confidence` | Field | 0.0-1.0 |
 
-**TTL**: Redis metadata expires after 90 days (cleaned by daydream step 13).
+**TTL**: Redis metadata expires after 90 days (cleaned by reflections step 13).
 **Transcript files**: Kept indefinitely on disk.
 
 ## API Reference
@@ -118,7 +118,7 @@ The `AgentSession` model is used everywhere:
 
 ## Session Tagging
 
-The `tags` ListField stores session categorization tags (e.g., "bug", "sdlc", "pr-created", "daydream"). Auto-tagging runs automatically at session completion inside `complete_transcript()` via `tools/session_tags.py`. See [Session Tagging](session-tagging.md) for the full tagging system documentation.
+The `tags` ListField stores session categorization tags (e.g., "bug", "sdlc", "pr-created", "reflections"). Auto-tagging runs automatically at session completion inside `complete_transcript()` via `tools/session_tags.py`. See [Session Tagging](session-tagging.md) for the full tagging system documentation.
 
 ## Cleanup
 
@@ -129,4 +129,4 @@ from models.agent_session import AgentSession
 deleted = AgentSession.cleanup_expired(max_age_days=90)
 ```
 
-This is called automatically by the daydream maintenance job (step 13: "Redis TTL Cleanup").
+This is called automatically by the reflections maintenance job (step 13: "Redis TTL Cleanup").

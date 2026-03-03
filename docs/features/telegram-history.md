@@ -32,7 +32,7 @@ All data is stored in **Redis** via Popoto ORM models. SQLite was removed as of 
 - `content` - Full message content (up to 50,000 chars, no truncation)
 - `timestamp` - Unix timestamp (SortedField, partitioned by chat_id)
 - `message_type` - text, photo, voice, response, etc. (KeyField)
-- TTL: 90 days (cleaned by daydream step 13)
+- TTL: 90 days (cleaned by reflections step 13)
 
 **`Link`** (`models/link.py`) - URLs shared in chats
 - `link_id` - Auto-generated key
@@ -44,18 +44,18 @@ All data is stored in **Redis** via Popoto ORM models. SQLite was removed as of 
 - `timestamp` - Unix timestamp (SortedField)
 - `tags` - ListField for categorization
 - `ai_summary` - AI-generated summary (up to 50,000 chars)
-- TTL: 90 days (cleaned by daydream step 13)
+- TTL: 90 days (cleaned by reflections step 13)
 
 **`Chat`** (`models/chat.py`) - Chat ID to name mapping
 - `chat_id` - Telegram chat ID (UniqueKeyField)
 - `chat_name` - Human-readable name (KeyField)
 - `chat_type` - private, group, supergroup, channel (KeyField)
 - `updated_at` - Unix timestamp (SortedField)
-- TTL: 90 days (cleaned by daydream step 13)
+- TTL: 90 days (cleaned by reflections step 13)
 
 ### Data Retention
 
-- Redis models: 90-day TTL, cleaned by daydream `step_redis_cleanup()` (step 13)
+- Redis models: 90-day TTL, cleaned by reflections `step_redis_cleanup()` (step 13)
 - No SQLite backup after 2026-02-24 migration
 
 ## Configuration
