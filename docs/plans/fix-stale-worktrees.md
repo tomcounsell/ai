@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
@@ -207,8 +207,8 @@ No agent integration required -- this is a fix to the build pipeline's internal 
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Should we also update `/do-build` to invoke `create_worktree()` via Python instead of raw git commands?** The SKILL.md currently uses `git worktree add` directly, bypassing the worktree manager's recovery logic. Updating this seems essential for the fix to actually take effect, but it changes the build skill's documented workflow.
+1. **Should we also update `/do-build` to invoke `create_worktree()` via Python instead of raw git commands?** Yes — the SKILL.md must reference `create_worktree()` so the recovery logic is always invoked. Already captured in task #2.
 
-2. **Should force-removal check for uncommitted work?** If a stale worktree directory has uncommitted changes, should we attempt to commit them as a safety net before force-removing, or just log a warning and proceed? The uncommitted work is likely from a crashed session and may be incomplete/broken.
+2. **Should force-removal check for uncommitted work?** No — just log a warning and proceed. Stale worktrees are from crashed/timed-out sessions; uncommitted work there is incomplete/broken by definition. Keep it simple.
