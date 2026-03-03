@@ -45,11 +45,34 @@ Plan context: [relevant plan sections]
 Your assignment:
 - [specific actions from task]
 
-When complete, commit your changes and update your task status.`,
+When complete, commit your changes and update your task status.
+
+SELF-CHECK (mandatory before marking task complete):
+1. Run \`git status\` in the worktree and include the output in your response
+2. Run \`git log --oneline main..HEAD\` and include the output
+3. If you made zero file changes, explicitly state "NO CHANGES MADE" and explain why`,
   subagent_type: "[agent type from task]",
   run_in_background: [true if Parallel: true]
 })
 ```
+
+## Step 3.5: Post-Task Output Verification
+
+After each **builder** agent task completes (agent type = `builder`), verify that it actually produced changes. Skip this check for `validator`, `code-reviewer`, and `documentarian` agent types — they may legitimately produce no file changes.
+
+```bash
+# Check if the builder agent produced any file changes in the worktree
+DIFF_STAT=$(git -C .worktrees/{slug} diff --stat HEAD)
+UNCOMMITTED=$(git -C .worktrees/{slug} status --porcelain)
+```
+
+**If both `DIFF_STAT` and `UNCOMMITTED` are empty** (no committed changes AND no uncommitted changes):
+1. Log the failure: "BUILDER AGENT PRODUCED NO CHANGES: task=[task name], agent=[agent name], worktree=.worktrees/{slug}"
+2. Check the agent's response output for "NO CHANGES MADE" — if present, include the agent's explanation
+3. **Mark the task as FAILED** — do not proceed as if it succeeded
+4. Report the failure to the user with diagnostic info: task name, agent type, worktree path, and agent response summary
+
+**If changes exist**: Log the diff stat and proceed normally.
 
 ## Step 4: Monitor and Coordinate
 
@@ -73,6 +96,22 @@ After deploying background agents, actively monitor their health:
    ```bash
    git -C .worktrees/{slug} add -A && git -C .worktrees/{slug} commit -m "[WIP] partial work before agent failure" || true
    ```
+
+## Step 4.5: Pre-Validation Commit Check
+
+Before proceeding to final validation, verify that the session branch has at least one commit beyond main. This catches the case where all builder agents silently failed to produce work.
+
+```bash
+COMMIT_COUNT=$(git -C .worktrees/{slug} log --oneline main..HEAD | wc -l | tr -d ' ')
+```
+
+**If `COMMIT_COUNT` is 0:**
+1. **ABORT the build** — do not proceed to validation or PR creation
+2. Report a clear error: "BUILD FAILED: Zero commits on session/{slug} after all builder tasks completed. No code was produced."
+3. List all builder tasks that were deployed, their completion status, and whether they reported changes
+4. Suggest: "Re-run /do-build or investigate why builder agents produced no output"
+
+**If `COMMIT_COUNT` > 0:** Log "session/{slug} has {COMMIT_COUNT} commit(s) beyond main" and proceed.
 
 ## Step 5: Final Validation and Definition of Done
 
