@@ -36,9 +36,10 @@ Task({
   description: "[Task subject]",
   prompt: `Execute task: [Task Name]
 
-IMPORTANT: You MUST work in the worktree directory: {absolute_path_to}/.worktrees/{slug}/
-Run \`cd {absolute_path_to}/.worktrees/{slug}/\` before doing any work.
+IMPORTANT: You MUST work in the worktree directory: {TARGET_REPO}/.worktrees/{slug}/
+Run \`cd {TARGET_REPO}/.worktrees/{slug}/\` before doing any work.
 All file reads, writes, and commands should use this worktree path, not the main repo.
+Note: {TARGET_REPO} is the target repository root (which may differ from the orchestrator repo for cross-repo builds).
 
 Plan context: [relevant plan sections]
 
@@ -62,12 +63,12 @@ After each **builder** agent task completes (agent type = `builder`), verify tha
 
 ```bash
 # Check if the builder agent produced any file changes in the worktree
-DIFF_STAT=$(git -C .worktrees/{slug} diff --stat HEAD)
-UNCOMMITTED=$(git -C .worktrees/{slug} status --porcelain)
+DIFF_STAT=$(git -C $TARGET_REPO/.worktrees/{slug} diff --stat HEAD)
+UNCOMMITTED=$(git -C $TARGET_REPO/.worktrees/{slug} status --porcelain)
 ```
 
 **If both `DIFF_STAT` and `UNCOMMITTED` are empty** (no committed changes AND no uncommitted changes):
-1. Log the failure: "BUILDER AGENT PRODUCED NO CHANGES: task=[task name], agent=[agent name], worktree=.worktrees/{slug}"
+1. Log the failure: "BUILDER AGENT PRODUCED NO CHANGES: task=[task name], agent=[agent name], worktree=$TARGET_REPO/.worktrees/{slug}"
 2. Check the agent's response output for "NO CHANGES MADE" — if present, include the agent's explanation
 3. **Mark the task as FAILED** — do not proceed as if it succeeded
 4. Report the failure to the user with diagnostic info: task name, agent type, worktree path, and agent response summary
@@ -94,7 +95,7 @@ After deploying background agents, actively monitor their health:
    - Report the failure prominently so the user is aware
 6. **On any agent failure:** Commit whatever work exists in the worktree as a safety net:
    ```bash
-   git -C .worktrees/{slug} add -A && git -C .worktrees/{slug} commit -m "[WIP] partial work before agent failure" || true
+   git -C $TARGET_REPO/.worktrees/{slug} add -A && git -C $TARGET_REPO/.worktrees/{slug} commit -m "[WIP] partial work before agent failure" || true
    ```
 
 ## Step 4.5: Pre-Validation Commit Check
@@ -102,7 +103,7 @@ After deploying background agents, actively monitor their health:
 Before proceeding to final validation, verify that the session branch has at least one commit beyond main. This catches the case where all builder agents silently failed to produce work.
 
 ```bash
-COMMIT_COUNT=$(git -C .worktrees/{slug} log --oneline main..HEAD | wc -l | tr -d ' ')
+COMMIT_COUNT=$(git -C $TARGET_REPO/.worktrees/{slug} log --oneline main..HEAD | wc -l | tr -d ' ')
 ```
 
 **If `COMMIT_COUNT` is 0:**

@@ -119,7 +119,12 @@ def save(state: dict) -> None:
         raise
 
 
-def initialize(slug: str, branch: str, worktree: str) -> dict:
+def initialize(
+    slug: str,
+    branch: str,
+    worktree: str,
+    target_repo: str | None = None,
+) -> dict:
     """Create a fresh pipeline state starting at the "plan" stage.
 
     Call this when starting a brand-new build for a slug that has no
@@ -129,6 +134,9 @@ def initialize(slug: str, branch: str, worktree: str) -> dict:
         slug: Build identifier, e.g. "my-feature"
         branch: Git branch name, e.g. "session/my-feature"
         worktree: Relative path to the git worktree, e.g. ".worktrees/my-feature"
+        target_repo: Absolute path to the target repository root when the
+            build targets a repo other than the ai (orchestrator) repo.
+            None means the build targets the current (ai) repo.
 
     Returns:
         Newly created state dict (already persisted to disk).
@@ -144,6 +152,8 @@ def initialize(slug: str, branch: str, worktree: str) -> dict:
         "started_at": now,
         "updated_at": now,
     }
+    if target_repo is not None:
+        state["target_repo"] = str(target_repo)
     save(state)
     return state
 

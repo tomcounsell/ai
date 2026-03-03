@@ -13,7 +13,7 @@ After all validation tasks pass, run the documentation lifecycle checks.
 Run the doc validation script to verify documentation was created/updated. This script runs `git diff` internally and needs the worktree as CWD to see the session branch changes.
 
 ```bash
-(cd .worktrees/{slug} && python scripts/validate_docs_changed.py {PLAN_PATH})
+(cd $TARGET_REPO/.worktrees/{slug} && python scripts/validate_docs_changed.py {PLAN_PATH})
 ```
 
 - **Exit 0**: Documentation requirements met, proceed to next step
@@ -26,7 +26,7 @@ Run the doc validation script to verify documentation was created/updated. This 
 Collect all changed files from git and scan for related docs:
 
 ```bash
-(cd .worktrees/{slug} && CHANGED_FILES=$(git diff --name-only main...HEAD | tr '\n' ' ') && python scripts/scan_related_docs.py --json $CHANGED_FILES > /tmp/related_docs.json)
+(cd $TARGET_REPO/.worktrees/{slug} && CHANGED_FILES=$(git diff --name-only main...HEAD | tr '\n' ' ') && python scripts/scan_related_docs.py --json $CHANGED_FILES > /tmp/related_docs.json)
 ```
 
 This identifies existing documentation that may need updates based on code changes.
@@ -46,7 +46,7 @@ This creates tracking issues for documentation that should be reviewed for updat
 Before creating the PR, verify that the session branch has actual commits. This is the final safety net against silent build failures where all agents completed but produced no work.
 
 ```bash
-COMMIT_COUNT=$(git -C .worktrees/{slug} log --oneline main..HEAD | wc -l | tr -d ' ')
+COMMIT_COUNT=$(git -C $TARGET_REPO/.worktrees/{slug} log --oneline main..HEAD | wc -l | tr -d ' ')
 echo "Commits on session/{slug}: $COMMIT_COUNT"
 ```
 
@@ -63,7 +63,8 @@ echo "Commits on session/{slug}: $COMMIT_COUNT"
 After documentation gate passes and pre-PR verification succeeds, push and create the PR:
 
 ```bash
-git -C .worktrees/{slug} push -u origin session/{slug}
+git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}
+# For cross-repo builds, add: --repo $TARGET_GH_REPO
 gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
 ## Summary
 [Brief description of what was built]
@@ -101,7 +102,8 @@ After pushing and creating the PR, clean up the worktree using `worktree_manager
 python -c "
 from pathlib import Path
 from agent.worktree_manager import remove_worktree, prune_worktrees
-repo = Path('$(git rev-parse --show-toplevel)')
+# Use TARGET_REPO for cross-repo builds, orchestrator repo for same-repo builds
+repo = Path('$TARGET_REPO')
 remove_worktree(repo, '{slug}', delete_branch=False)
 prune_worktrees(repo)
 "

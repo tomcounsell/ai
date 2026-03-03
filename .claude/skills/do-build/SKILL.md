@@ -57,6 +57,36 @@ PLAN_ARG: $1
 **Step 3: Set PLAN_PATH**
 - `PLAN_PATH` now contains the resolved absolute path to the plan document
 
+## Target Repo Resolution (Cross-Repo Support)
+
+After resolving `PLAN_PATH`, determine which git repository the plan belongs to. This is critical for cross-repo builds where the plan lives in a different repo than the orchestrator.
+
+```bash
+# Resolve the target repo root from the plan file's location
+TARGET_REPO=$(git -C "$(dirname "$PLAN_PATH")" rev-parse --show-toplevel)
+ORCHESTRATOR_REPO=$(git rev-parse --show-toplevel)
+
+# Check if this is a cross-repo build
+if [ "$TARGET_REPO" != "$ORCHESTRATOR_REPO" ]; then
+    echo "CROSS-REPO BUILD: Plan is in $TARGET_REPO (orchestrator is $ORCHESTRATOR_REPO)"
+    # Resolve the target repo's GitHub identity for PR creation
+    TARGET_GH_REPO=$(git -C "$TARGET_REPO" remote get-url origin | sed 's/.*github.com[:/]//' | sed 's/\.git$//')
+fi
+```
+
+Or using Python:
+```bash
+python -c "from agent.worktree_manager import resolve_repo_root; print(resolve_repo_root('$PLAN_PATH'))"
+```
+
+**All subsequent git, worktree, and PR operations must use `TARGET_REPO` as the repo root**, not the orchestrator repo. Specifically:
+- `create_worktree(Path(TARGET_REPO), slug)` instead of `create_worktree(Path('.'), slug)`
+- `git -C $TARGET_REPO/.worktrees/{slug}` for all git commands in the worktree
+- `gh pr create --repo $TARGET_GH_REPO` when creating the PR
+- Pipeline state is still stored in the orchestrator repo but includes `target_repo` in the state dict
+
+If `TARGET_REPO == ORCHESTRATOR_REPO`, this is a same-repo build and no special handling is needed (all existing behavior works as-is).
+
 ## Session Progress Tracking
 
 Extract the session ID from the conversation context. The bridge injects `SESSION_ID: {id}` into enriched messages. Look for this pattern and store it:
@@ -90,52 +120,56 @@ Where `$PR_URL` is the full GitHub PR URL returned by `gh pr create`.
    - If state exists and `stage != "plan"`: resume from that stage, skip already-completed stages listed in `completed_stages`
    - If no state (output is `null`): proceed normally — initialize state after worktree creation
 4. **Run prerequisite validation** - `python scripts/check_prerequisites.py {PLAN_PATH}`. If any check fails, report the failures and stop. Do not proceed to task execution. If no Prerequisites section exists, this passes automatically.
-5. **Create an isolated worktree** - Create `.worktrees/{slug}/` with branch `session/{slug}` using the worktree manager (handles stale worktrees automatically):
+5. **Resolve target repo** - Determine which repo the plan belongs to (see "Target Repo Resolution" above):
    ```bash
-   python -c "from agent.worktree_manager import create_worktree; from pathlib import Path; create_worktree(Path('.'), '{slug}')"
+   TARGET_REPO=$(git -C "$(dirname "$PLAN_PATH")" rev-parse --show-toplevel)
+   ```
+6. **Create an isolated worktree** - Create `.worktrees/{slug}/` with branch `session/{slug}` in the **target repo** using the worktree manager (handles stale worktrees automatically):
+   ```bash
+   python -c "from agent.worktree_manager import create_worktree; from pathlib import Path; create_worktree(Path('$TARGET_REPO'), '{slug}')"
    ```
    This handles all edge cases: stale worktrees from crashed sessions, missing directories with lingering git references, and branch-already-in-use errors. Settings files are copied automatically.
-   All subsequent agent work happens inside `.worktrees/{slug}/`, NOT the main repo directory.
-6. **Initialize pipeline state** - For fresh builds (no prior state), initialize now:
+   All subsequent agent work happens inside `$TARGET_REPO/.worktrees/{slug}/`, NOT the orchestrator repo directory.
+7. **Initialize pipeline state** - For fresh builds (no prior state), initialize now:
    ```bash
-   python -c "from agent.pipeline_state import initialize; initialize('{slug}', 'session/{slug}', '.worktrees/{slug}')"
+   python -c "from agent.pipeline_state import initialize; initialize('{slug}', 'session/{slug}', '$TARGET_REPO/.worktrees/{slug}', target_repo='$TARGET_REPO')"
    ```
    Skip this step if state already existed from step 3.
-7. **Advance to branch stage** after worktree is ready:
+8. **Advance to branch stage** after worktree is ready:
    ```bash
    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'branch')"
    ```
-8. **Parse the Team Members** and Step by Step Tasks sections
-9. **Create all tasks** using `TaskCreate` before starting execution
-10. **Deploy agents** in order, respecting dependencies and parallel flags (agents follow SDLC: Build → Test loop with up to 5 iterations)
-11. **Advance to implement stage** before deploying builder agents:
+9. **Parse the Team Members** and Step by Step Tasks sections
+10. **Create all tasks** using `TaskCreate` before starting execution
+11. **Deploy agents** in order, respecting dependencies and parallel flags (agents follow SDLC: Build → Test loop with up to 5 iterations)
+12. **Advance to implement stage** before deploying builder agents:
     ```bash
     python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'implement')"
     ```
-12. **Monitor progress** and handle any issues
-13. **Advance to test stage** after implementation tasks complete:
+13. **Monitor progress** and handle any issues
+14. **Advance to test stage** after implementation tasks complete:
     ```bash
     python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'test')"
     ```
-14. **Verify Definition of Done** - Ensure all tasks completed with: code working, tests passing, quality checks pass
-15. **Advance to review stage** after tests pass:
+15. **Verify Definition of Done** - Ensure all tasks completed with: code working, tests passing, quality checks pass
+16. **Advance to review stage** after tests pass:
     ```bash
     python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'review')"
     ```
-16. **Advance to document stage** after review passes:
+17. **Advance to document stage** after review passes:
     ```bash
     python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'document')"
     ```
-17. **Run documentation gate** - Validate docs changed, scan related docs, create review issues
-18. **Advance to pr stage** after documentation gate passes:
+18. **Run documentation gate** - Validate docs changed, scan related docs, create review issues
+19. **Advance to pr stage** after documentation gate passes:
     ```bash
     python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'pr')"
     ```
-19. **Verify commits exist before PR** - Run `git -C .worktrees/{slug} log --oneline main..HEAD` and count the output lines. If zero commits exist on the session branch, **ABORT with error**: "BUILD FAILED: No commits on session/{slug}. Builder agents produced no code changes." Do NOT proceed to push or PR creation.
-20. **Push and open a PR** - `git -C .worktrees/{slug} push -u origin session/{slug}` then `gh pr create`
-21. **Run documentation cascade** - Invoke `/do-docs {PR-number}` to surgically update affected docs
-22. **Migrate completed plan** - Delete plan file and close tracking issue
-23. **Report completion** with PR URL when all tasks are done
+20. **Verify commits exist before PR** - Run `git -C $TARGET_REPO/.worktrees/{slug} log --oneline main..HEAD` and count the output lines. If zero commits exist on the session branch, **ABORT with error**: "BUILD FAILED: No commits on session/{slug}. Builder agents produced no code changes." Do NOT proceed to push or PR creation.
+21. **Push and open a PR** - `git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}` then `gh pr create --repo $TARGET_GH_REPO` (use `--repo` only for cross-repo builds)
+22. **Run documentation cascade** - Invoke `/do-docs {PR-number}` to surgically update affected docs
+23. **Migrate completed plan** - Delete plan file and close tracking issue
+24. **Report completion** with PR URL when all tasks are done
 
 ## Critical Rules
 
@@ -145,7 +179,7 @@ Where `$PR_URL` is the full GitHub PR URL returned by `gh pr create`.
 - **Run parallel tasks together** - Tasks with `Parallel: true` and no blocking dependencies can run simultaneously
 - **Validators wait for builders** - A `validate-*` task always waits for its corresponding `build-*` task
 - **No temporary files** - Agents must not create temporary documentation, test results, or scratch files in the repo. Use /tmp for any temporary work. Only create files that are part of the deliverable.
-- **Never cd into worktrees** - The orchestrator's CWD must stay in the main repo. Use `git -C .worktrees/{slug}` for git commands, subshells `(cd .worktrees/{slug} && ...)` when Python scripts need worktree CWD, and `--head session/{slug}` for `gh pr create`. Only subagents (Task tool) should have bare `cd` into worktrees — their shell sessions are independent and disposable. If the orchestrator's CWD ends up inside a worktree and that worktree is deleted, the shell breaks permanently and cannot recover.
+- **Never cd into worktrees** - The orchestrator's CWD must stay in the main repo. Use `git -C $TARGET_REPO/.worktrees/{slug}` for git commands, subshells `(cd $TARGET_REPO/.worktrees/{slug} && ...)` when Python scripts need worktree CWD, and `--head session/{slug}` for `gh pr create`. For cross-repo builds, use `--repo $TARGET_GH_REPO` with `gh pr create`. Only subagents (Task tool) should have bare `cd` into worktrees — their shell sessions are independent and disposable. If the orchestrator's CWD ends up inside a worktree and that worktree is deleted, the shell breaks permanently and cannot recover.
 - **SDLC enforcement** - All builder agents follow Plan → Branch → Implement → Test → Review → Document → PR with patch loops at Test and Review stages (up to 5 iterations)
 - **Definition of Done** - Tasks are complete only when: Built (code working), Tested (tests pass), Reviewed (review passes), Documented (docs created after review), Quality (lint/format pass)
 - **Commits at logical checkpoints** - Commits happen at logical checkpoints throughout Implement — not batched at end. The commit message hook enforces hygiene at each commit.
@@ -315,10 +349,11 @@ After documentation gate passes, advance to the `pr` stage and push:
 python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'pr')"
 ```
 
-Then push and create the PR:
+Then push and create the PR. For cross-repo builds, use `$TARGET_REPO` and `--repo $TARGET_GH_REPO`:
 
 ```bash
-git -C .worktrees/{slug} push -u origin session/{slug}
+git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}
+# For cross-repo builds, add: --repo $TARGET_GH_REPO
 gh pr create --head session/{slug} --title "[plan title]" --body "$(cat <<'EOF'
 ## Summary
 [Brief description of what was built]
@@ -356,7 +391,8 @@ After pushing and creating the PR, clean up the worktree using `worktree_manager
 python -c "
 from pathlib import Path
 from agent.worktree_manager import remove_worktree, prune_worktrees
-repo = Path('$(git rev-parse --show-toplevel)')
+# Use TARGET_REPO for cross-repo builds, orchestrator repo for same-repo builds
+repo = Path('$TARGET_REPO')
 remove_worktree(repo, '{slug}', delete_branch=False)
 prune_worktrees(repo)
 "
