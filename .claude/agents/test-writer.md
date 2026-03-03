@@ -88,7 +88,7 @@ class TestDataFactory:
     def create_promise(self, **overrides) -> dict:
         base = {
             'id': str(uuid.uuid4()),
-            'type': random.choice(['daydream', 'search', 'update']),
+            'type': random.choice(['reflections', 'search', 'update']),
             'status': 'pending',
             'data': {'query': self.fake.sentence()},
             'created_at': datetime.now().isoformat(),

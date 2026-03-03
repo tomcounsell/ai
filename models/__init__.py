@@ -7,17 +7,17 @@ Provides fast, queryable Redis models for all persistent data:
 - AgentSession: unified agent work lifecycle (replaces RedisJob + SessionLog)
 - BridgeEvent: structured bridge events for analytics
 - DeadLetter: failed message queue
-- DaydreamRun: per-day daydream execution state
-- DaydreamIgnore: ignored bug patterns with TTL-based expiry
+- ReflectionRun: per-day reflection execution state
+- ReflectionIgnore: ignored bug patterns with TTL-based expiry
 - LessonLearned: institutional memory from session reflections
 """
 
 from models.agent_session import AgentSession
 from models.bridge_event import BridgeEvent
 from models.chat import Chat
-from models.daydream import DaydreamIgnore, DaydreamRun, LessonLearned
 from models.dead_letter import DeadLetter
 from models.link import Link
+from models.reflections import LessonLearned, ReflectionIgnore, ReflectionRun
 from models.telegram import TelegramMessage
 
 # Backward compatibility alias
@@ -28,8 +28,8 @@ __all__ = [
     "SessionLog",
     "DeadLetter",
     "BridgeEvent",
-    "DaydreamIgnore",
-    "DaydreamRun",
+    "ReflectionIgnore",
+    "ReflectionRun",
     "LessonLearned",
     "TelegramMessage",
     "Chat",

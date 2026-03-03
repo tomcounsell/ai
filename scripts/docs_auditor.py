@@ -6,7 +6,7 @@ Analyzes all .md files in docs/ (excluding docs/plans/) against the actual
 codebase. Uses the Anthropic API (Haiku for initial analysis, Sonnet for
 uncertain cases) to produce KEEP / UPDATE / DELETE verdicts, then applies them.
 
-Integrated into daydream.py as a weekly maintenance step.
+Integrated into reflections.py as a weekly maintenance step.
 
 Usage:
     python scripts/docs_auditor.py [--dry-run]
@@ -910,15 +910,15 @@ CORRECTIONS:
             return False
 
     def _load_state(self) -> dict[str, Any]:
-        """Load audit state from Redis via DaydreamRun model.
+        """Load audit state from Redis via ReflectionRun model.
 
-        Uses a DaydreamRun with date='__docs_audit_meta__' as a singleton
+        Uses a ReflectionRun with date='__docs_audit_meta__' as a singleton
         to store cross-run metadata like last_audit_date.
         """
         try:
-            from models.daydream import DaydreamRun
+            from models.reflections import ReflectionRun
 
-            runs = DaydreamRun.query.filter(date="__docs_audit_meta__")
+            runs = ReflectionRun.query.filter(date="__docs_audit_meta__")
             if runs:
                 return runs[0].step_progress or {}
             return {}
@@ -926,17 +926,17 @@ CORRECTIONS:
             return {}
 
     def _record_audit_date(self) -> None:
-        """Write today's date as last_audit_date in Redis via DaydreamRun."""
+        """Write today's date as last_audit_date in Redis via ReflectionRun."""
         try:
-            from models.daydream import DaydreamRun
+            from models.reflections import ReflectionRun
 
             state = self._load_state()
             state["last_audit_date"] = datetime.now().isoformat()
             # Delete existing singleton and recreate with updated state
-            existing = DaydreamRun.query.filter(date="__docs_audit_meta__")
+            existing = ReflectionRun.query.filter(date="__docs_audit_meta__")
             for run in existing:
                 run.delete()
-            DaydreamRun.create(
+            ReflectionRun.create(
                 date="__docs_audit_meta__",
                 step_progress=state,
                 started_at=0.0,

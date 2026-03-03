@@ -60,9 +60,9 @@ Your job: Extract all concrete references and verify them against the codebase.
 
 REFERENCE TYPES TO EXTRACT:
 - File paths (e.g., "scripts/foo.py", "bridge/telegram_bridge.py", ".claude/skills/bar/SKILL.md")
-- Python class names (e.g., "DocsAuditor", "DaydreamRunner")
+- Python class names (e.g., "DocsAuditor", "ReflectionsRunner")
 - Python function names (e.g., "analyze_doc", "run_llm_reflection")
-- CLI commands (e.g., "./scripts/start_bridge.sh", "valor-telegram", "python scripts/daydream.py")
+- CLI commands (e.g., "./scripts/start_bridge.sh", "valor-telegram", "python scripts/reflections.py")
 - Environment variables (e.g., "ANTHROPIC_API_KEY", "TELEGRAM_API_ID")
 - Package/module names (e.g., "telethon", "anthropic", "claude-agent-sdk")
 - Config file keys (e.g., "USE_CLAUDE_SDK", "SENTRY_DSN")

@@ -14,7 +14,7 @@ Valor is an AI coworker - not an assistant, not a tool, but a colleague with its
 | Telegram Integration | **Working** | User account via Telethon, responds to @valor mentions |
 | Self-Management | **Working** | Can restart himself, survives reboots |
 | MCP Skills | **Working** | Sentry, Notion (MCP); GitHub via `gh` CLI |
-| Daydream (Cron) | **Working** | Daily autonomous maintenance at 6 AM Pacific |
+| Reflections (Cron) | **Working** | Daily autonomous maintenance at 6 AM Pacific |
 
 ## Architecture
 
@@ -136,9 +136,9 @@ Skills are available via MCP servers registered in `.mcp.json`:
 |-------|---------|
 | Sentry | Error monitoring, performance analysis |
 | GitHub | Repository operations, PRs, issues |
-| Daydream | Daily autonomous maintenance |
+| Reflections | Daily autonomous maintenance |
 
-## Daydream (Daily Maintenance)
+## Reflections (Daily Maintenance)
 
 Valor runs autonomous maintenance daily at 6 AM Pacific:
 

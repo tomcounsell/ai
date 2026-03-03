@@ -8,7 +8,7 @@ Auto-tag rules are pattern-based (no LLM):
 - classification_type -> bug/feature/chore tags
 - branch name starting with session/ -> sdlc tag
 - transcript patterns -> pr-created, tested tags
-- daydream signals -> daydream tag
+- reflections signals -> reflections tag
 - work_item_slug set -> planned-work tag
 - turn_count >= 20 -> long-session tag
 
@@ -191,10 +191,10 @@ def auto_tag_session(session_id: str) -> None:
         if "pytest" in transcript_tail or "Skill(do-test" in transcript_tail:
             new_tags.append("tested")
 
-    # Rule 4: Daydream detection
+    # Rule 4: Reflections detection
     sender = session.sender or ""
-    if "daydream" in sender.lower() or "daydream" in session_id.lower():
-        new_tags.append("daydream")
+    if "reflections" in sender.lower() or "reflections" in session_id.lower():
+        new_tags.append("reflections")
 
     # Rule 5: work_item_slug set -> planned-work
     if session.work_item_slug:

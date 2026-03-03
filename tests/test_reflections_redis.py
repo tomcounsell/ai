@@ -1,4 +1,4 @@
-"""Tests for daydream Redis integration: DaydreamRun, DaydreamIgnore, LessonLearned models."""
+"""Tests for reflections Redis integration: ReflectionRun, ReflectionIgnore, LessonLearned."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ import time
 import pytest
 
 
-class TestDaydreamRunModel:
-    """Tests for DaydreamRun Popoto model."""
+class TestReflectionRunModel:
+    """Tests for ReflectionRun Popoto model."""
 
     def test_create_and_query(self):
-        """Create a DaydreamRun and query it back."""
-        from models.daydream import DaydreamRun
+        """Create a ReflectionRun and query it back."""
+        from models.reflections import ReflectionRun
 
-        run = DaydreamRun.create(
+        run = ReflectionRun.create(
             date="2026-02-25",
             current_step=3,
             completed_steps=[1, 2],
@@ -31,24 +31,24 @@ class TestDaydreamRunModel:
         assert run.current_step == 3
 
         # Query back
-        results = DaydreamRun.query.filter(date="2026-02-25")
+        results = ReflectionRun.query.filter(date="2026-02-25")
         assert len(results) == 1
         assert results[0].completed_steps == [1, 2]
 
     def test_load_or_create_new(self):
         """load_or_create creates a new run if none exists."""
-        from models.daydream import DaydreamRun
+        from models.reflections import ReflectionRun
 
-        run = DaydreamRun.load_or_create("2026-03-01")
+        run = ReflectionRun.load_or_create("2026-03-01")
         assert run.date == "2026-03-01"
         assert run.current_step == 1
         assert run.completed_steps == []
 
     def test_load_or_create_existing(self):
         """load_or_create returns existing run for same date."""
-        from models.daydream import DaydreamRun
+        from models.reflections import ReflectionRun
 
-        DaydreamRun.create(
+        ReflectionRun.create(
             date="2026-03-02",
             current_step=5,
             completed_steps=[1, 2, 3, 4],
@@ -62,30 +62,30 @@ class TestDaydreamRunModel:
             dry_run=False,
         )
 
-        run = DaydreamRun.load_or_create("2026-03-02")
+        run = ReflectionRun.load_or_create("2026-03-02")
         assert run.current_step == 5
         assert run.completed_steps == [1, 2, 3, 4]
 
     def test_save_checkpoint(self):
         """save_checkpoint persists updated state."""
-        from models.daydream import DaydreamRun
+        from models.reflections import ReflectionRun
 
-        run = DaydreamRun.load_or_create("2026-03-03")
+        run = ReflectionRun.load_or_create("2026-03-03")
         run.current_step = 7
         run.completed_steps = [1, 2, 3, 4, 5, 6]
         run.save_checkpoint()
 
         # Query back to verify
-        results = DaydreamRun.query.filter(date="2026-03-03")
+        results = ReflectionRun.query.filter(date="2026-03-03")
         assert len(results) == 1
         assert results[0].current_step == 7
 
     def test_cleanup_expired(self):
         """cleanup_expired removes old runs."""
-        from models.daydream import DaydreamRun
+        from models.reflections import ReflectionRun
 
         # Create old run
-        DaydreamRun.create(
+        ReflectionRun.create(
             date="2025-01-01",
             current_step=1,
             completed_steps=[],
@@ -99,7 +99,7 @@ class TestDaydreamRunModel:
             dry_run=False,
         )
         # Create recent run
-        DaydreamRun.create(
+        ReflectionRun.create(
             date="2026-02-25",
             current_step=1,
             completed_steps=[],
@@ -113,74 +113,76 @@ class TestDaydreamRunModel:
             dry_run=False,
         )
 
-        deleted = DaydreamRun.cleanup_expired(max_age_days=30)
+        deleted = ReflectionRun.cleanup_expired(max_age_days=30)
         assert deleted == 1
-        assert len(DaydreamRun.query.all()) == 1
+        assert len(ReflectionRun.query.all()) == 1
 
 
-class TestDaydreamIgnoreModel:
-    """Tests for DaydreamIgnore Popoto model."""
+class TestReflectionIgnoreModel:
+    """Tests for ReflectionIgnore Popoto model."""
 
     def test_add_ignore(self):
         """Add an ignore entry and verify it's active."""
-        from models.daydream import DaydreamIgnore
+        from models.reflections import ReflectionIgnore
 
-        entry = DaydreamIgnore.add_ignore("null pointer", reason="known issue", days=14)
+        entry = ReflectionIgnore.add_ignore(
+            "null pointer", reason="known issue", days=14
+        )
         assert entry.pattern == "null pointer"
 
-        active = DaydreamIgnore.get_active()
+        active = ReflectionIgnore.get_active()
         assert len(active) == 1
         assert active[0].pattern == "null pointer"
 
     def test_expired_entries_excluded(self):
         """Expired entries are not returned by get_active()."""
-        from models.daydream import DaydreamIgnore
+        from models.reflections import ReflectionIgnore
 
         # Create expired entry
-        DaydreamIgnore.create(
+        ReflectionIgnore.create(
             pattern="old bug",
             reason="",
             created_at=time.time() - (30 * 86400),
             expires_at=time.time() - 86400,  # expired yesterday
         )
         # Create active entry
-        DaydreamIgnore.add_ignore("new bug", days=14)
+        ReflectionIgnore.add_ignore("new bug", days=14)
 
-        active = DaydreamIgnore.get_active()
+        active = ReflectionIgnore.get_active()
         patterns = [e.pattern for e in active]
         assert "old bug" not in patterns
         assert "new bug" in patterns
 
     def test_cleanup_expired(self):
         """cleanup_expired removes only expired entries."""
-        from models.daydream import DaydreamIgnore
+        from models.reflections import ReflectionIgnore
 
-        DaydreamIgnore.create(
+        ReflectionIgnore.create(
             pattern="expired",
             reason="",
             created_at=time.time() - 86400,
             expires_at=time.time() - 3600,  # expired 1 hour ago
         )
-        DaydreamIgnore.add_ignore("active", days=14)
+        ReflectionIgnore.add_ignore("active", days=14)
 
-        deleted = DaydreamIgnore.cleanup_expired()
+        deleted = ReflectionIgnore.cleanup_expired()
         assert deleted == 1
-        assert len(DaydreamIgnore.query.all()) == 1
+        assert len(ReflectionIgnore.query.all()) == 1
 
     def test_is_ignored_case_insensitive(self):
         """is_ignored does case-insensitive substring matching."""
-        from models.daydream import DaydreamIgnore
+        from models.reflections import ReflectionIgnore
 
-        DaydreamIgnore.add_ignore("NULL POINTER", days=14)
-        assert DaydreamIgnore.is_ignored("null pointer error") is True
-        assert DaydreamIgnore.is_ignored("unrelated") is False
+        ReflectionIgnore.add_ignore("NULL POINTER", days=14)
+        assert ReflectionIgnore.is_ignored("null pointer error") is True
+        assert ReflectionIgnore.is_ignored("unrelated") is False
 
     def test_is_ignored_substring_match(self):
         """is_ignored matches when entry pattern is substring of query."""
-        from models.daydream import DaydreamIgnore
+        from models.reflections import ReflectionIgnore
 
-        DaydreamIgnore.add_ignore("timeout", days=14)
-        assert DaydreamIgnore.is_ignored("connection timeout in bridge") is True
+        ReflectionIgnore.add_ignore("timeout", days=14)
+        assert ReflectionIgnore.is_ignored("connection timeout in bridge") is True
 
 
 class TestLessonLearnedModel:
@@ -188,7 +190,7 @@ class TestLessonLearnedModel:
 
     def test_add_lesson(self):
         """Add a lesson and query it back."""
-        from models.daydream import LessonLearned
+        from models.reflections import LessonLearned
 
         lesson = LessonLearned.add_lesson(
             date="2026-02-25",
@@ -203,7 +205,7 @@ class TestLessonLearnedModel:
 
     def test_deduplication_by_pattern(self):
         """Duplicate patterns are rejected."""
-        from models.daydream import LessonLearned
+        from models.reflections import LessonLearned
 
         LessonLearned.add_lesson(
             date="2026-02-25",
@@ -222,7 +224,7 @@ class TestLessonLearnedModel:
 
     def test_cleanup_expired(self):
         """cleanup_expired removes old lessons."""
-        from models.daydream import LessonLearned
+        from models.reflections import LessonLearned
 
         # Create old lesson
         LessonLearned.create(
@@ -251,7 +253,7 @@ class TestLessonLearnedModel:
 
     def test_get_recent(self):
         """get_recent returns only recent lessons."""
-        from models.daydream import LessonLearned
+        from models.reflections import LessonLearned
 
         # Old lesson
         LessonLearned.create(
@@ -283,7 +285,7 @@ class TestAnalyzeSessionsFromRedis:
     def test_analyzes_sessions_from_redis(self):
         """analyze_sessions_from_redis queries AgentSession model."""
         from models.agent_session import AgentSession
-        from scripts.daydream import analyze_sessions_from_redis
+        from scripts.reflections import analyze_sessions_from_redis
 
         # Create a session for today
         AgentSession.create(
@@ -305,7 +307,7 @@ class TestAnalyzeSessionsFromRedis:
     def test_detects_failed_sessions(self):
         """Failed sessions appear in error_patterns."""
         from models.agent_session import AgentSession
-        from scripts.daydream import analyze_sessions_from_redis
+        from scripts.reflections import analyze_sessions_from_redis
 
         AgentSession.create(
             session_id="failed-session",
@@ -325,7 +327,7 @@ class TestAnalyzeSessionsFromRedis:
 
     def test_empty_when_no_sessions(self):
         """Returns empty analysis when no sessions match."""
-        from scripts.daydream import analyze_sessions_from_redis
+        from scripts.reflections import analyze_sessions_from_redis
 
         result = analyze_sessions_from_redis("2099-01-01")
         assert result["sessions_analyzed"] == 0
@@ -336,8 +338,8 @@ class TestConsolidateMemoryRedis:
 
     def test_consolidate_to_redis(self):
         """consolidate_memory writes to LessonLearned model."""
-        from models.daydream import LessonLearned
-        from scripts.daydream import consolidate_memory
+        from models.reflections import LessonLearned
+        from scripts.reflections import consolidate_memory
 
         reflections = [
             {
@@ -358,8 +360,8 @@ class TestConsolidateMemoryRedis:
 
     def test_consolidate_deduplicates(self):
         """consolidate_memory skips duplicate patterns."""
-        from models.daydream import LessonLearned
-        from scripts.daydream import consolidate_memory
+        from models.reflections import LessonLearned
+        from scripts.reflections import consolidate_memory
 
         reflections = [
             {
@@ -382,11 +384,11 @@ class TestIgnoreLogRedis:
     """Tests for Redis-backed ignore log functions."""
 
     def test_load_ignore_log_from_redis(self):
-        """load_ignore_log reads from DaydreamIgnore model."""
-        from models.daydream import DaydreamIgnore
-        from scripts.daydream import load_ignore_log
+        """load_ignore_log reads from ReflectionIgnore model."""
+        from models.reflections import ReflectionIgnore
+        from scripts.reflections import load_ignore_log
 
-        DaydreamIgnore.add_ignore("test pattern", reason="testing", days=14)
+        ReflectionIgnore.add_ignore("test pattern", reason="testing", days=14)
 
         entries = load_ignore_log()
         assert len(entries) == 1
@@ -394,11 +396,11 @@ class TestIgnoreLogRedis:
 
     def test_prune_ignore_log_uses_redis(self):
         """prune_ignore_log cleans up expired entries in Redis."""
-        from models.daydream import DaydreamIgnore
-        from scripts.daydream import prune_ignore_log
+        from models.reflections import ReflectionIgnore
+        from scripts.reflections import prune_ignore_log
 
         # Create expired entry
-        DaydreamIgnore.create(
+        ReflectionIgnore.create(
             pattern="expired",
             reason="",
             created_at=time.time() - 86400,
@@ -406,26 +408,26 @@ class TestIgnoreLogRedis:
         )
 
         prune_ignore_log()
-        assert len(DaydreamIgnore.query.all()) == 0
+        assert len(ReflectionIgnore.query.all()) == 0
 
 
-class TestDaydreamStateSave:
-    """Tests for DaydreamState Redis-backed save."""
+class TestReflectionsStateSave:
+    """Tests for ReflectionsState Redis-backed save."""
 
     def test_save_to_redis(self):
-        """DaydreamState.save() persists to Redis DaydreamRun model."""
-        from models.daydream import DaydreamRun
-        from scripts.daydream import DaydreamState
+        """ReflectionsState.save() persists to Redis ReflectionRun model."""
+        from models.reflections import ReflectionRun
+        from scripts.reflections import ReflectionsState
 
         # Create initial run so save can find it
-        DaydreamRun.load_or_create("2026-02-25")
+        ReflectionRun.load_or_create("2026-02-25")
 
-        state = DaydreamState(date="2026-02-25")
+        state = ReflectionsState(date="2026-02-25")
         state.current_step = 5
         state.completed_steps = [1, 2, 3, 4]
         state.save()
 
-        runs = DaydreamRun.query.filter(date="2026-02-25")
+        runs = ReflectionRun.query.filter(date="2026-02-25")
         assert len(runs) == 1
         assert runs[0].current_step == 5
 
@@ -435,9 +437,9 @@ class TestRedisDataQuality:
 
     def test_step_registered_as_step_14(self):
         """step_redis_data_quality is registered as step 14."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionRunner()
         step_names = {s[0]: s[1] for s in runner.steps}
         assert step_names.get(14) == "Redis Data Quality"
 
@@ -447,7 +449,7 @@ class TestRedisDataQuality:
         import time
 
         from models.link import Link
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionRunner
 
         # Create a recent link with no summary
         Link.create(
@@ -469,7 +471,7 @@ class TestRedisDataQuality:
             ai_summary="This is a summary",
         )
 
-        runner = DaydreamRunner()
+        runner = ReflectionRunner()
         runner.state.findings = {}
         await runner.step_redis_data_quality()
 
@@ -482,7 +484,7 @@ class TestRedisDataQuality:
         import time
 
         from models.chat import Chat
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionRunner
 
         # Create a stale chat (40 days old)
         Chat.create(
@@ -499,7 +501,7 @@ class TestRedisDataQuality:
             updated_at=time.time(),
         )
 
-        runner = DaydreamRunner()
+        runner = ReflectionRunner()
         runner.state.findings = {}
         await runner.step_redis_data_quality()
 
@@ -509,9 +511,9 @@ class TestRedisDataQuality:
     @pytest.mark.asyncio
     async def test_empty_when_no_data(self):
         """No findings when Redis has no data."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionRunner()
         runner.state.findings = {}
         await runner.step_redis_data_quality()
 

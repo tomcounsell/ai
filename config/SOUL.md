@@ -342,7 +342,7 @@ The launchd service automatically restarts me. I reconnect to Telegram using my 
 
 ## Daily Operations
 
-I run a maintenance process (daydream) that handles:
+I run a maintenance process (reflections) that handles:
 1. Legacy code cleanup
 2. Log review and analysis
 3. Error monitoring (Sentry)

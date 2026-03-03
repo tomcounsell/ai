@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Daydream - Autonomous Daily Maintenance System
+Reflections - Autonomous Daily Maintenance System
 
-A long-running process that performs daily maintenance tasks:
+A long-running process that performs daily self-directed maintenance tasks:
 1. Clean up legacy code
 2. Review previous day's logs (per-project, with structured error extraction)
 3. Check error logs via Sentry (skips gracefully if MCP unavailable)
@@ -13,15 +13,15 @@ A long-running process that performs daily maintenance tasks:
 8. Auto-fix high-confidence code bugs via plan-build-PR
 9. Memory consolidation (Redis LessonLearned model)
 10. Produce daily report (local markdown)
-11. GitHub issue creation (per-project, via daydream_report module)
+11. GitHub issue creation (per-project, via reflections_report module)
 12. Skills audit (validate all SKILL.md files against template standards)
-13. Redis TTL cleanup (all models including daydream models)
+13. Redis TTL cleanup (all models including reflections models)
 14. Redis data quality checks (unsummarized links, dead channels)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
-State: DaydreamRun | Ignore patterns: DaydreamIgnore | Lessons: LessonLearned
+State: ReflectionRun | Ignore patterns: ReflectionIgnore | Lessons: LessonLearned
 
-See docs/features/daydream.md for full documentation.
+See docs/features/reflections.md for full documentation.
 """
 
 from __future__ import annotations
@@ -47,21 +47,24 @@ try:
 except ImportError:
     anthropic = None  # type: ignore[assignment]
 
-from scripts.daydream_report import create_daydream_issue, reset_dedup_guard  # noqa: E402
 from scripts.docs_auditor import DocsAuditor  # noqa: E402
+from scripts.reflections_report import (  # noqa: E402
+    create_reflections_issue,
+    reset_dedup_guard,
+)
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger("daydream")
+logger = logging.getLogger("reflections")
 
 # Paths — resolved at import time so they stay absolute even if cwd changes
 PROJECT_ROOT = Path(__file__).parent.parent
 AI_ROOT = PROJECT_ROOT  # Preserved alias; do not reassign in production code
 LOGS_DIR = PROJECT_ROOT / "logs"
-DAYDREAM_DIR = LOGS_DIR / "daydream"
+REFLECTIONS_DIR = LOGS_DIR / "reflections"
 DATA_DIR = PROJECT_ROOT / "data"
 SESSIONS_DIR = LOGS_DIR / "sessions"
 
@@ -71,9 +74,9 @@ SESSIONS_DIR = LOGS_DIR / "sessions"
 
 def load_ignore_log() -> list[dict]:
     """Load active (non-expired) ignore entries from Redis."""
-    from models.daydream import DaydreamIgnore
+    from models.reflections import ReflectionIgnore
 
-    active = DaydreamIgnore.get_active()
+    active = ReflectionIgnore.get_active()
     return [
         {
             "pattern": entry.pattern,
@@ -90,9 +93,9 @@ def load_ignore_log() -> list[dict]:
 
 def prune_ignore_log() -> None:
     """Remove expired entries from the ignore log via Redis."""
-    from models.daydream import DaydreamIgnore
+    from models.reflections import ReflectionIgnore
 
-    deleted = DaydreamIgnore.cleanup_expired()
+    deleted = ReflectionIgnore.cleanup_expired()
     if deleted:
         logger.info(f"Pruned {deleted} expired ignore entries from Redis")
 
@@ -102,7 +105,9 @@ def is_ignored(pattern: str, ignore_entries: list[dict]) -> bool:
     pattern_lower = pattern.lower()
     for entry in ignore_entries:
         entry_pattern = entry.get("pattern", "").lower()
-        if entry_pattern and (entry_pattern in pattern_lower or pattern_lower in entry_pattern):
+        if entry_pattern and (
+            entry_pattern in pattern_lower or pattern_lower in entry_pattern
+        ):
             return True
     return False
 
@@ -125,7 +130,9 @@ def has_existing_github_work(pattern: str, cwd: str) -> bool:
         ["gh", "pr", "list", "--state", "open", "--search", search_term],
     ]:
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, cwd=cwd)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=15, cwd=cwd
+            )
             if result.returncode == 0 and result.stdout.strip():
                 return True
         except Exception:
@@ -195,7 +202,9 @@ def analyze_sessions_from_redis(target_date: str) -> dict[str, Any]:
         target_sessions = []
         for session in all_sessions:
             if session.started_at:
-                session_date = datetime.fromtimestamp(session.started_at).strftime("%Y-%m-%d")
+                session_date = datetime.fromtimestamp(session.started_at).strftime(
+                    "%Y-%m-%d"
+                )
                 if session_date == target_date:
                     target_sessions.append(session)
 
@@ -258,7 +267,9 @@ def analyze_sessions_from_redis(target_date: str) -> dict[str, Any]:
             all_events = BridgeEvent.query.filter(event_type="error")
             for event in all_events:
                 if event.timestamp:
-                    event_date = datetime.fromtimestamp(event.timestamp).strftime("%Y-%m-%d")
+                    event_date = datetime.fromtimestamp(event.timestamp).strftime(
+                        "%Y-%m-%d"
+                    )
                     if event_date == target_date:
                         result["error_patterns"].append(
                             {
@@ -366,7 +377,7 @@ def consolidate_memory(
         reflections: List of reflection dicts from run_llm_reflection().
         date: Date string (YYYY-MM-DD) for new entries.
     """
-    from models.daydream import LessonLearned
+    from models.reflections import LessonLearned
 
     # Prune old entries
     pruned = LessonLearned.cleanup_expired(max_age_days=90)
@@ -456,16 +467,20 @@ def extract_errors_from_redis(target_date: str) -> list[dict[str, str]]:
         all_events = BridgeEvent.query.filter(event_type="error")
         for event in all_events:
             if event.timestamp:
-                event_date = datetime.fromtimestamp(event.timestamp).strftime("%Y-%m-%d")
+                event_date = datetime.fromtimestamp(event.timestamp).strftime(
+                    "%Y-%m-%d"
+                )
                 if event_date == target_date:
                     data = event.data or {}
                     errors.append(
                         {
-                            "timestamp": datetime.fromtimestamp(event.timestamp).strftime(
-                                "%Y-%m-%d %H:%M:%S"
-                            ),
+                            "timestamp": datetime.fromtimestamp(
+                                event.timestamp
+                            ).strftime("%Y-%m-%d %H:%M:%S"),
                             "level": "ERROR",
-                            "message": data.get("error", data.get("message", str(data))),
+                            "message": data.get(
+                                "error", data.get("message", str(data))
+                            ),
                             "context": f"project={event.project_key or 'unknown'} "
                             f"chat={event.chat_id or 'unknown'}",
                         }
@@ -476,10 +491,10 @@ def extract_errors_from_redis(target_date: str) -> list[dict[str, str]]:
     return errors
 
 
-class DaydreamRunner:
-    """Runs the daydream maintenance process.
+class ReflectionRunner:
+    """Runs the reflections maintenance process.
 
-    State is persisted in Redis via DaydreamRun model. Falls back to
+    State is persisted in Redis via ReflectionRun model. Falls back to
     local JSON file if Redis is unavailable.
     """
 
@@ -503,14 +518,14 @@ class DaydreamRunner:
             (14, "Redis Data Quality", self.step_redis_data_quality),
         ]
 
-    def _load_state(self) -> DaydreamState:
-        """Load state from Redis DaydreamRun model."""
+    def _load_state(self) -> ReflectionsState:
+        """Load state from Redis ReflectionRun model."""
         today = datetime.now().strftime("%Y-%m-%d")
-        from models.daydream import DaydreamRun
+        from models.reflections import ReflectionRun
 
-        run = DaydreamRun.load_or_create(today)
-        # Wrap in DaydreamState for API compatibility
-        state = DaydreamState(
+        run = ReflectionRun.load_or_create(today)
+        # Wrap in ReflectionsState for API compatibility
+        state = ReflectionsState(
             current_step=run.current_step or 1,
             completed_steps=run.completed_steps or [],
             daily_report=run.daily_report or [],
@@ -524,15 +539,17 @@ class DaydreamRunner:
         return state
 
     async def run(self) -> None:
-        """Run all daydream steps."""
-        logger.info(f"Starting Daydream for {self.state.date}")
+        """Run all reflections steps."""
+        logger.info(f"Starting Reflections for {self.state.date}")
         logger.info(f"Resuming from step {self.state.current_step}")
 
-        DAYDREAM_DIR.mkdir(parents=True, exist_ok=True)
+        REFLECTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
         for step_num, step_name, step_func in self.steps:
             if step_num in self.state.completed_steps:
-                logger.info(f"Step {step_num} ({step_name}) already completed, skipping")
+                logger.info(
+                    f"Step {step_num} ({step_name}) already completed, skipping"
+                )
                 continue
 
             if step_num < self.state.current_step:
@@ -555,7 +572,7 @@ class DaydreamRunner:
                 self.state.save()
                 continue
 
-        logger.info("Daydream completed successfully")
+        logger.info("Reflections completed successfully")
 
     async def step_clean_legacy(self) -> None:
         """Step 1: Clean up legacy code (ai-repo specific)."""
@@ -569,7 +586,9 @@ class DaydreamRunner:
                 text=True,
                 timeout=30,
             )
-            todo_count = len(result.stdout.strip().split("\n")) if result.stdout.strip() else 0
+            todo_count = (
+                len(result.stdout.strip().split("\n")) if result.stdout.strip() else 0
+            )
             if todo_count > 0:
                 findings.append(f"Found {todo_count} TODO comments to review")
         except Exception:
@@ -630,7 +649,9 @@ class DaydreamRunner:
             # Query Redis BridgeEvent for structured errors
             redis_errors = extract_errors_from_redis(yesterday)
             if redis_errors:
-                findings.append(f"Redis BridgeEvent: {len(redis_errors)} error events yesterday")
+                findings.append(
+                    f"Redis BridgeEvent: {len(redis_errors)} error events yesterday"
+                )
                 for error in redis_errors[-5:]:
                     msg = error["message"][:200]
                     findings.append(f"  [BridgeEvent] {error['timestamp']}: {msg}")
@@ -652,7 +673,9 @@ class DaydreamRunner:
                 try:
                     mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
                     if mtime < datetime.now() - timedelta(days=7):
-                        findings.append(f"Log file {log_file.name} is older than 7 days")
+                        findings.append(
+                            f"Log file {log_file.name} is older than 7 days"
+                        )
 
                     size_mb = log_file.stat().st_size / (1024 * 1024)
                     if size_mb > 10:
@@ -669,14 +692,18 @@ class DaydreamRunner:
                         # Include up to 5 most recent errors in findings
                         for error in errors[-5:]:
                             msg = error["message"][:200]
-                            findings.append(f"  [{error['level']}] {error['timestamp']}: {msg}")
+                            findings.append(
+                                f"  [{error['level']}] {error['timestamp']}: {msg}"
+                            )
 
                     # Also count warnings
                     with open(log_file) as f:
                         lines = f.readlines()[-1000:]
                     warning_count = sum(1 for line in lines if "WARNING" in line)
                     if warning_count > 10:
-                        findings.append(f"{log_file.name}: {warning_count} warnings in recent logs")
+                        findings.append(
+                            f"{log_file.name}: {warning_count} warnings in recent logs"
+                        )
 
                 except Exception as e:
                     findings.append(f"Could not analyze {log_file.name}: {str(e)}")
@@ -758,7 +785,9 @@ class DaydreamRunner:
             total_findings += len(findings)
 
         # Also check local todo files in AI_ROOT
-        todo_files = list(PROJECT_ROOT.glob("**/TODO.md")) + list(PROJECT_ROOT.glob("**/todo.md"))
+        todo_files = list(PROJECT_ROOT.glob("**/TODO.md")) + list(
+            PROJECT_ROOT.glob("**/todo.md")
+        )
         for todo_file in todo_files:
             try:
                 content = todo_file.read_text()
@@ -784,7 +813,9 @@ class DaydreamRunner:
 
         # Record findings
         if summary.skipped:
-            self.state.add_finding("documentation", f"Docs audit skipped: {summary.skip_reason}")
+            self.state.add_finding(
+                "documentation", f"Docs audit skipped: {summary.skip_reason}"
+            )
         else:
             if len(summary.updated) > 0:
                 self.state.add_finding(
@@ -796,7 +827,11 @@ class DaydreamRunner:
                     "documentation",
                     f"Deleted {len(summary.deleted)} stale/inaccurate docs",
                 )
-            if len(summary.kept) > 0 and len(summary.updated) == 0 and len(summary.deleted) == 0:
+            if (
+                len(summary.kept) > 0
+                and len(summary.updated) == 0
+                and len(summary.deleted) == 0
+            ):
                 self.state.add_finding(
                     "documentation", f"All {len(summary.kept)} docs verified accurate"
                 )
@@ -814,7 +849,7 @@ class DaydreamRunner:
         """Step 10: Produce daily report to local markdown file."""
         total_steps = len(self.steps)
         report_lines = [
-            f"# Daydream Report - {self.state.date}",
+            f"# Reflections Report - {self.state.date}",
             "",
             "## Summary",
             f"- Steps completed: {len(self.state.completed_steps)}/{total_steps}",
@@ -834,7 +869,9 @@ class DaydreamRunner:
         if self.state.session_analysis:
             report_lines.append("## Session Analysis")
             sa = self.state.session_analysis
-            report_lines.append(f"- Sessions analyzed: {sa.get('sessions_analyzed', 0)}")
+            report_lines.append(
+                f"- Sessions analyzed: {sa.get('sessions_analyzed', 0)}"
+            )
             corrections = sa.get("corrections", [])
             if corrections:
                 report_lines.append(f"- User corrections detected: {len(corrections)}")
@@ -868,7 +905,9 @@ class DaydreamRunner:
         if self.state.reflections:
             report_lines.append("## LLM Reflections")
             for r in self.state.reflections:
-                report_lines.append(f"- **{r.get('category', 'unknown')}**: {r.get('summary', '')}")
+                report_lines.append(
+                    f"- **{r.get('category', 'unknown')}**: {r.get('summary', '')}"
+                )
                 report_lines.append(f"  - Pattern: {r.get('pattern', '')}")
                 report_lines.append(f"  - Prevention: {r.get('prevention', '')}")
             report_lines.append("")
@@ -876,7 +915,9 @@ class DaydreamRunner:
         # Add progress details
         report_lines.append("## Step Progress")
         for key, value in self.state.step_progress.items():
-            report_lines.append(f"- **{key.replace('_', ' ').title()}**: {json.dumps(value)}")
+            report_lines.append(
+                f"- **{key.replace('_', ' ').title()}**: {json.dumps(value)}"
+            )
 
         report_lines.append("")
         report_lines.append("---")
@@ -884,8 +925,8 @@ class DaydreamRunner:
 
         # Write report
         report_content = "\n".join(report_lines)
-        DAYDREAM_DIR.mkdir(parents=True, exist_ok=True)
-        report_file = DAYDREAM_DIR / f"report_{self.state.date}.md"
+        REFLECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+        report_file = REFLECTIONS_DIR / f"report_{self.state.date}.md"
         report_file.write_text(report_content)
 
         logger.info(f"Report written to {report_file}")
@@ -956,9 +997,9 @@ class DaydreamRunner:
 
     async def step_auto_fix_bugs(self) -> None:
         """Step 8: Auto-fix high-confidence code bugs via plan-build-PR."""
-        enabled = os.environ.get("DAYDREAM_AUTO_FIX_ENABLED", "true").lower()
+        enabled = os.environ.get("REFLECTIONS_AUTO_FIX_ENABLED", "true").lower()
         if enabled not in ("true", "1", "yes"):
-            logger.info("DAYDREAM_AUTO_FIX_ENABLED is false, skipping auto-fix step")
+            logger.info("REFLECTIONS_AUTO_FIX_ENABLED is false, skipping auto-fix step")
             self.state.step_progress["auto_fix_bugs"] = {
                 "skipped": True,
                 "reason": "disabled",
@@ -986,7 +1027,9 @@ class DaydreamRunner:
             if is_ignored(pattern, ignore_entries):
                 logger.info(f"Auto-fix: skipping ignored pattern: {pattern[:60]}")
                 attempts.append({"pattern": pattern, "status": "ignored"})
-                self.state.add_finding("auto_fix", f"Ignored (in ignore log): {summary[:80]}")
+                self.state.add_finding(
+                    "auto_fix", f"Ignored (in ignore log): {summary[:80]}"
+                )
                 continue
 
             # Check for existing GitHub work (use first project with github config)
@@ -999,13 +1042,17 @@ class DaydreamRunner:
             if project_wd and has_existing_github_work(pattern, project_wd):
                 logger.info(f"Auto-fix: duplicate found for pattern: {pattern[:60]}")
                 attempts.append({"pattern": pattern, "status": "duplicate"})
-                self.state.add_finding("auto_fix", f"Skipped (existing PR/issue): {summary[:80]}")
+                self.state.add_finding(
+                    "auto_fix", f"Skipped (existing PR/issue): {summary[:80]}"
+                )
                 continue
 
             if dry_run:
                 logger.info(f"Auto-fix: [DRY RUN] would trigger for: {summary[:80]}")
                 attempts.append({"pattern": pattern, "status": "dry_run"})
-                self.state.add_finding("auto_fix", f"[DRY RUN] Would auto-fix: {summary[:80]}")
+                self.state.add_finding(
+                    "auto_fix", f"[DRY RUN] Would auto-fix: {summary[:80]}"
+                )
                 continue
 
             # Trigger auto-fix
@@ -1028,27 +1075,41 @@ class DaydreamRunner:
                 )
                 status = "success" if result.returncode == 0 else "failed"
                 output_snippet = (result.stdout or result.stderr or "")[:200]
-                attempts.append({"pattern": pattern, "status": status, "output": output_snippet})
+                attempts.append(
+                    {"pattern": pattern, "status": status, "output": output_snippet}
+                )
 
                 if status == "success":
-                    self.state.add_finding("auto_fix", f"Auto-fix triggered: {summary[:80]}")
+                    self.state.add_finding(
+                        "auto_fix", f"Auto-fix triggered: {summary[:80]}"
+                    )
                     # Try to extract PR URL from output and post to Telegram
-                    pr_match = re.search(r"https://github\.com/\S+/pull/\d+", result.stdout)
+                    pr_match = re.search(
+                        r"https://github\.com/\S+/pull/\d+", result.stdout
+                    )
                     if pr_match and self.projects:
                         for project in self.projects:
                             if project.get("github"):
-                                await self.step_post_to_telegram(project, pr_match.group())
+                                await self.step_post_to_telegram(
+                                    project, pr_match.group()
+                                )
                                 break
                 else:
                     logger.warning(f"Auto-fix subprocess failed: {output_snippet}")
-                    self.state.add_finding("auto_fix", f"Auto-fix failed: {summary[:80]}")
+                    self.state.add_finding(
+                        "auto_fix", f"Auto-fix failed: {summary[:80]}"
+                    )
             except subprocess.TimeoutExpired:
                 logger.warning(f"Auto-fix timed out for: {summary[:80]}")
                 attempts.append({"pattern": pattern, "status": "timeout"})
-                self.state.add_finding("auto_fix", f"Auto-fix timed out: {summary[:80]}")
+                self.state.add_finding(
+                    "auto_fix", f"Auto-fix timed out: {summary[:80]}"
+                )
             except Exception as e:
                 logger.warning(f"Auto-fix error: {e}")
-                attempts.append({"pattern": pattern, "status": "error", "error": str(e)})
+                attempts.append(
+                    {"pattern": pattern, "status": "error", "error": str(e)}
+                )
 
         self.state.auto_fix_attempts = attempts
         self.state.step_progress["auto_fix_bugs"] = {
@@ -1099,7 +1160,7 @@ class DaydreamRunner:
                 continue
 
             project_wd = project["working_directory"]
-            issue_url_or_bool = create_daydream_issue(
+            issue_url_or_bool = create_reflections_issue(
                 project_findings,
                 self.state.date,
                 cwd=project_wd,
@@ -1122,7 +1183,12 @@ class DaydreamRunner:
     async def step_skills_audit(self) -> None:
         """Step 12: Run skills audit to validate all SKILL.md files."""
         audit_script = (
-            PROJECT_ROOT / ".claude" / "skills" / "do-skills-audit" / "scripts" / "audit_skills.py"
+            PROJECT_ROOT
+            / ".claude"
+            / "skills"
+            / "do-skills-audit"
+            / "scripts"
+            / "audit_skills.py"
         )
         if not audit_script.exists():
             logger.warning("Skills audit script not found, skipping")
@@ -1167,15 +1233,19 @@ class DaydreamRunner:
         """Step 13: Run TTL cleanup on all Redis models.
 
         Cleans up: TelegramMessage, Link, Chat, AgentSession (90-day),
-        BridgeEvent (7-day), DaydreamRun (30-day), DaydreamIgnore (expired),
+        BridgeEvent (7-day), ReflectionRun (30-day), ReflectionIgnore (expired),
         LessonLearned (90-day).
         """
         try:
             from models.agent_session import AgentSession
             from models.bridge_event import BridgeEvent
             from models.chat import Chat
-            from models.daydream import DaydreamIgnore, DaydreamRun, LessonLearned
             from models.link import Link
+            from models.reflections import (
+                LessonLearned,
+                ReflectionIgnore,
+                ReflectionRun,
+            )
             from models.telegram import TelegramMessage
 
             msg_deleted = TelegramMessage.cleanup_expired(max_age_days=90)
@@ -1183,8 +1253,8 @@ class DaydreamRunner:
             chat_deleted = Chat.cleanup_expired(max_age_days=90)
             session_deleted = AgentSession.cleanup_expired(max_age_days=90)
             event_deleted = BridgeEvent.cleanup_old(max_age_seconds=7 * 86400)
-            run_deleted = DaydreamRun.cleanup_expired(max_age_days=30)
-            ignore_deleted = DaydreamIgnore.cleanup_expired()
+            run_deleted = ReflectionRun.cleanup_expired(max_age_days=30)
+            ignore_deleted = ReflectionIgnore.cleanup_expired()
             lesson_deleted = LessonLearned.cleanup_expired(max_age_days=90)
 
             total = (
@@ -1204,7 +1274,9 @@ class DaydreamRunner:
                 f"events={event_deleted}, runs={run_deleted}, "
                 f"ignores={ignore_deleted}, lessons={lesson_deleted})"
             )
-            self.state.daily_report.append(f"Redis cleanup: {total} expired records removed")
+            self.state.daily_report.append(
+                f"Redis cleanup: {total} expired records removed"
+            )
         except Exception as e:
             logger.warning(f"Redis TTL cleanup failed (non-fatal): {e}")
 
@@ -1248,10 +1320,14 @@ class DaydreamRunner:
             month_ago = _time.time() - (30 * 86400)
             all_chats = Chat.query.all()
             dead_chats = [
-                chat for chat in all_chats if chat.updated_at and chat.updated_at < month_ago
+                chat
+                for chat in all_chats
+                if chat.updated_at and chat.updated_at < month_ago
             ]
             if dead_chats:
-                findings.append(f"{len(dead_chats)} chat(s) with no activity in 30+ days")
+                findings.append(
+                    f"{len(dead_chats)} chat(s) with no activity in 30+ days"
+                )
                 for chat in dead_chats[:5]:
                     days_inactive = int((_time.time() - chat.updated_at) / 86400)
                     findings.append(
@@ -1288,12 +1364,16 @@ class DaydreamRunner:
                     ]:
                         count = content.count(keyword)
                         if count > 0:
-                            error_keywords[keyword] = error_keywords.get(keyword, 0) + count
+                            error_keywords[keyword] = (
+                                error_keywords.get(keyword, 0) + count
+                            )
                 except OSError:
                     continue
 
             if error_keywords:
-                sorted_errors = sorted(error_keywords.items(), key=lambda x: x[1], reverse=True)
+                sorted_errors = sorted(
+                    error_keywords.items(), key=lambda x: x[1], reverse=True
+                )
                 findings.append(
                     f"Error patterns across {len(recent_sessions)} recent session transcripts:"
                 )
@@ -1306,14 +1386,18 @@ class DaydreamRunner:
             # on TelegramMessage, so we fetch and filter in Python (same pattern
             # as cleanup_expired in models/telegram.py -- bounded dataset).
             all_messages = TelegramMessage.query.all()[:10000]
-            recent_messages = [m for m in all_messages if m.timestamp and m.timestamp > week_ago]
+            recent_messages = [
+                m for m in all_messages if m.timestamp and m.timestamp > week_ago
+            ]
             chat_volumes: dict[str, int] = {}
             for msg in recent_messages:
                 chat_id = msg.chat_id or "unknown"
                 chat_volumes[chat_id] = chat_volumes.get(chat_id, 0) + 1
 
             if chat_volumes:
-                sorted_chats = sorted(chat_volumes.items(), key=lambda x: x[1], reverse=True)
+                sorted_chats = sorted(
+                    chat_volumes.items(), key=lambda x: x[1], reverse=True
+                )
                 findings.append(
                     f"Message volume (last 7 days): "
                     f"{len(recent_messages)} messages across "
@@ -1339,7 +1423,7 @@ class DaydreamRunner:
         }
 
     async def step_post_to_telegram(self, project: dict, issue_url: str = "") -> None:
-        """Post daydream summary to project's Telegram chat.
+        """Post reflections summary to project's Telegram chat.
 
         Args:
             project: Project dict from load_local_projects().
@@ -1347,7 +1431,9 @@ class DaydreamRunner:
         """
         groups = project.get("telegram", {}).get("groups", [])
         if not groups:
-            logger.info(f"No telegram groups configured for {project['slug']}, skipping")
+            logger.info(
+                f"No telegram groups configured for {project['slug']}, skipping"
+            )
             return
 
         session_file = AI_ROOT / "data" / "valor.session"
@@ -1368,9 +1454,11 @@ class DaydreamRunner:
             # Build summary message
             slug = project["slug"]
             findings_count = sum(
-                len(v) for k, v in self.state.findings.items() if k.startswith(f"{slug}:")
+                len(v)
+                for k, v in self.state.findings.items()
+                if k.startswith(f"{slug}:")
             )
-            msg_lines = [f"Daydream Report — {self.state.date}"]
+            msg_lines = [f"Reflections Report — {self.state.date}"]
             msg_lines.append(f"Project: {project.get('name', slug)}")
             if findings_count:
                 msg_lines.append(f"Findings: {findings_count} items")
@@ -1384,7 +1472,7 @@ class DaydreamRunner:
                 for group_name in groups[:1]:  # only post to first group
                     try:
                         await client.send_message(group_name, message)
-                        logger.info(f"Posted daydream summary to {group_name}")
+                        logger.info(f"Posted reflections summary to {group_name}")
                     except Exception as e:
                         logger.warning(f"Could not post to {group_name}: {e}")
         except ImportError:
@@ -1393,14 +1481,14 @@ class DaydreamRunner:
             logger.warning(f"Telegram post failed for {project['slug']}: {e}")
 
 
-# --- DaydreamState: compatibility wrapper ---
+# --- ReflectionsState: compatibility wrapper ---
 
 from dataclasses import dataclass, field  # noqa: E402
 
 
 @dataclass
-class DaydreamState:
-    """Persisted state for resumability via Redis DaydreamRun model."""
+class ReflectionsState:
+    """Persisted state for resumability via Redis ReflectionRun model."""
 
     current_step: int = 1
     step_started_at: str | None = None
@@ -1414,18 +1502,18 @@ class DaydreamState:
     auto_fix_attempts: list[dict] = field(default_factory=list)
 
     def save(self) -> None:
-        """Save state to Redis DaydreamRun model."""
+        """Save state to Redis ReflectionRun model."""
         import time as _time
 
-        from models.daydream import DaydreamRun
+        from models.reflections import ReflectionRun
 
-        existing = DaydreamRun.query.filter(date=self.date)
+        existing = ReflectionRun.query.filter(date=self.date)
         started_at = _time.time()
         if existing:
             started_at = existing[0].started_at or started_at
             existing[0].delete()
 
-        DaydreamRun.create(
+        ReflectionRun.create(
             date=self.date,
             current_step=self.current_step,
             completed_steps=self.completed_steps,
@@ -1450,7 +1538,7 @@ async def main() -> None:
     """Main entry point."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Daydream autonomous maintenance")
+    parser = argparse.ArgumentParser(description="Reflections autonomous maintenance")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -1470,14 +1558,16 @@ async def main() -> None:
     args = parser.parse_args()
 
     if args.ignore:
-        from models.daydream import DaydreamIgnore
+        from models.reflections import ReflectionIgnore
 
-        entry = DaydreamIgnore.add_ignore(pattern=args.ignore, reason=args.reason, days=14)
+        entry = ReflectionIgnore.add_ignore(
+            pattern=args.ignore, reason=args.reason, days=14
+        )
         ignored_until = datetime.fromtimestamp(entry.expires_at).date().isoformat()
         print(f"Added ignore entry: {args.ignore!r} (until {ignored_until})")
         return
 
-    runner = DaydreamRunner()
+    runner = ReflectionRunner()
     if args.dry_run:
         runner.state._dry_run = True
         logger.info("DRY RUN mode — no side effects will be triggered")
