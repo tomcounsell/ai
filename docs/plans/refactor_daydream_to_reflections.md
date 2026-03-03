@@ -4,7 +4,7 @@ type: chore
 appetite: Medium
 owner: Valor
 created: 2026-03-03
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/233
 ---
 
 # Refactor "Daydream" into "Reflections"
