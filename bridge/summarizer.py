@@ -104,15 +104,9 @@ class ClassificationResult:
     output_type: OutputType
     confidence: float  # 0.0-1.0
     reason: str  # Brief explanation
-    was_rejected_completion: bool = (
-        False  # True when COMPLETION → STATUS_UPDATE downgrade
-    )
-    coaching_message: str | None = (
-        None  # LLM-generated coaching for rejected completions
-    )
-    has_workarounds: bool = (
-        False  # True when agent encountered problems it worked around
-    )
+    was_rejected_completion: bool = False  # True when COMPLETION → STATUS_UPDATE downgrade
+    coaching_message: str | None = None  # LLM-generated coaching for rejected completions
+    has_workarounds: bool = False  # True when agent encountered problems it worked around
 
 
 @dataclass
@@ -153,9 +147,7 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
     files_changed = re.findall(file_pat, text, re.IGNORECASE)
     files_changed += re.findall(r"^\s*[MADR]\s+(\S+)", text, re.MULTILINE)
     if files_changed:
-        artifacts["files_changed"] = list(
-            dict.fromkeys(f.strip() for f in files_changed)
-        )
+        artifacts["files_changed"] = list(dict.fromkeys(f.strip() for f in files_changed))
 
     # Test results
     test_pat = r"(\d+\s+passed" r"(?:,\s*\d+\s+(?:failed|error|warning|skipped))*)"
@@ -483,9 +475,7 @@ _AUDIT_LOG_PATH = Path(__file__).parent.parent / "logs" / "classification_audit.
 _AUDIT_LOG_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
-def _write_classification_audit(
-    text: str, result: ClassificationResult, source: str
-) -> None:
+def _write_classification_audit(text: str, result: ClassificationResult, source: str) -> None:
     """Append a JSONL entry to the classification audit log.
 
     Provides structured observability for every classify_output() call.
@@ -498,10 +488,7 @@ def _write_classification_audit(
         _AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
         # Size-based rotation
-        if (
-            _AUDIT_LOG_PATH.exists()
-            and _AUDIT_LOG_PATH.stat().st_size > _AUDIT_LOG_MAX_SIZE
-        ):
+        if _AUDIT_LOG_PATH.exists() and _AUDIT_LOG_PATH.stat().st_size > _AUDIT_LOG_MAX_SIZE:
             rotated = _AUDIT_LOG_PATH.with_suffix(".jsonl.1")
             _AUDIT_LOG_PATH.rename(rotated)
 
@@ -680,7 +667,9 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
 def _render_stage_progress(session) -> str | None:
     """Render SDLC stage progress line from session history.
 
-    Returns a line like: ☑ ISSUE → ☑ PLAN → ▶ BUILD → ☐ TEST → ☐ REVIEW → ☐ DOCS
+    Returns a line like: ISSUE 243 → PLAN → ▶ BUILD → TEST → REVIEW → DOCS
+    No checkbox icons — completed stages show plain name, in-progress shows ▶ prefix,
+    pending stages show plain name. The ISSUE stage includes the issue number when available.
     Returns None if no stage data is available.
     """
     if not session:
@@ -694,15 +683,29 @@ def _render_stage_progress(session) -> str | None:
 
     from models.agent_session import SDLC_STAGES
 
+    # Extract issue number from session links for the ISSUE stage label
+    issue_number = None
+    links = session.get_links() if hasattr(session, "get_links") else {}
+    if links and "issue" in links:
+        match = re.search(r"/issues/(\d+)", links["issue"])
+        if match:
+            issue_number = match.group(1)
+
     parts = []
     for stage in SDLC_STAGES:
         status = progress.get(stage, "pending")
-        if status == "completed":
-            parts.append(f"☑ {stage}")
-        elif status == "in_progress":
-            parts.append(f"▶ {stage}")
+        # Build the label — ISSUE stage gets the issue number appended
+        if stage == "ISSUE" and issue_number:
+            label = f"ISSUE {issue_number}"
         else:
-            parts.append(f"☐ {stage}")
+            label = stage
+
+        if status == "in_progress":
+            parts.append(f"▶ {label}")
+        else:
+            # Both completed and pending show plain label
+            # Position in the sequence (before/after ▶) implies completion state
+            parts.append(label)
 
     return " → ".join(parts)
 
@@ -710,8 +713,9 @@ def _render_stage_progress(session) -> str | None:
 def _render_link_footer(session) -> str | None:
     """Render link footer from session's tracked links.
 
-    Returns a line like: Issue #168 | Plan | PR #176
-    with markdown links. Returns None if no links exist.
+    Returns a line like: Issue #168 | PR #176
+    with markdown links. Plan links are excluded — only issue and PR links
+    are rendered. Returns None if no links exist.
     """
     if not session:
         return None
@@ -727,12 +731,11 @@ def _render_link_footer(session) -> str | None:
             match = re.search(r"/issues/(\d+)", url)
             label = f"Issue #{match.group(1)}" if match else "Issue"
             parts.append(f"[{label}]({url})")
-        elif kind == "plan":
-            parts.append(f"[Plan]({url})")
         elif kind == "pr":
             match = re.search(r"/pull/(\d+)", url)
             label = f"PR #{match.group(1)}" if match else "PR"
             parts.append(f"[{label}]({url})")
+        # Plan links are intentionally excluded
 
     return " | ".join(parts) if parts else None
 
@@ -772,17 +775,13 @@ def _build_summary_prompt(
         parts = []
         for key, values in artifacts.items():
             parts.append(f"- {key}: {', '.join(values[:10])}")
-        artifact_section = (
-            "\n\nPreserve these artifacts verbatim:\n" + "\n".join(parts) + "\n"
-        )
+        artifact_section = "\n\nPreserve these artifacts verbatim:\n" + "\n".join(parts) + "\n"
 
     context_section = ""
     if session:
         context_parts = []
         if session.message_text:
-            context_parts.append(
-                f"Original request: {(session.message_text or '')[:200]}"
-            )
+            context_parts.append(f"Original request: {(session.message_text or '')[:200]}")
         if session.classification_type:
             context_parts.append(f"Work type: {session.classification_type}")
         if session.branch_name:
@@ -850,7 +849,12 @@ GENERAL RULES:
 access, policy decisions). Do NOT flag: implementation choices, internal obstacles, things \
 the agent could resolve with its tools
 - Tone: direct, no preamble, no filler
-- Do NOT include bare URLs at the end — link rendering is handled separately"""
+- Do NOT include bare URLs at the end — link rendering is handled separately
+- OMIT obvious process bullets that describe routine agent activity rather than outcomes. \
+Examples of what to OMIT: "Analyzed the codebase", "Read through the plan", \
+"Created execution plan", "Examined the existing code", "Reviewed the implementation", \
+"Investigated the issue". These are process noise — the PM only cares about WHAT was \
+accomplished, not THAT you read files or analyzed code."""
 
 # Blocker flag logic explained:
 # The ⚠️ flag is meant to alert the PM only when human intervention is truly required.
@@ -921,9 +925,7 @@ def _parse_summary_and_questions(summary_text: str) -> tuple[str, str | None]:
     return summary_text, None
 
 
-def _compose_structured_summary(
-    summary_text: str, session=None, is_completion: bool = True
-) -> str:
+def _compose_structured_summary(summary_text: str, session=None, is_completion: bool = True) -> str:
     """Compose the full structured summary with emoji, stage line, bullets, questions, and links.
 
     Two modes:
@@ -936,13 +938,13 @@ def _compose_structured_summary(
         ? Question needing input
 
     SDLC:
-        ✅
-        ☑ ISSUE → ☑ PLAN → ☑ BUILD → ☑ TEST → ☑ REVIEW → ☑ DOCS
+        ⏳
+        ISSUE 243 → PLAN → ▶ BUILD → TEST → REVIEW → DOCS
         • Bullet point 1
         • Bullet point 2
 
         ? Question needing input
-        Issue #168 | Plan | PR #176
+        Issue #243 | PR #250
     """
     # Re-read session from Redis to pick up stage data written during execution.
     # The session object passed in may have been loaded before session_progress.py
@@ -951,14 +953,10 @@ def _compose_structured_summary(
         try:
             from models.agent_session import AgentSession
 
-            fresh_sessions = list(
-                AgentSession.query.filter(session_id=session.session_id)
-            )
+            fresh_sessions = list(AgentSession.query.filter(session_id=session.session_id))
             if fresh_sessions:
                 session = fresh_sessions[0]
-                logger.debug(
-                    f"Refreshed session {session.session_id} for structured summary"
-                )
+                logger.debug(f"Refreshed session {session.session_id} for structured summary")
         except Exception as e:
             logger.debug(f"Could not refresh session for summary: {e}")
 
@@ -980,9 +978,7 @@ def _compose_structured_summary(
             f"{session.session_id if session else 'N/A'}: {stage_line}"
         )
     elif session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job():
-        logger.warning(
-            f"SDLC session {session.session_id} has no stage progress to render"
-        )
+        logger.warning(f"SDLC session {session.session_id} has no stage progress to render")
 
     # Summary text (bullets or prose)
     parts.append(bullets.strip())
@@ -1020,9 +1016,7 @@ async def summarize_response(
     if not raw_response or not raw_response.strip():
         # Even with empty response, render SDLC progress if available
         if session:
-            fallback = _compose_structured_summary(
-                "", session=session, is_completion=True
-            )
+            fallback = _compose_structured_summary("", session=session, is_completion=True)
             if fallback.strip():
                 return SummarizedResponse(text=fallback, was_summarized=True)
         return SummarizedResponse(text=raw_response or "", was_summarized=False)

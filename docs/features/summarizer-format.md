@@ -13,22 +13,22 @@ Structured output format for Telegram delivery of agent work summaries. Every re
 ### SDLC Completions
 ```
 ✅
-☑ ISSUE → ☑ PLAN → ☑ BUILD → ☑ TEST → ☑ REVIEW → ☑ DOCS
+ISSUE 168 → PLAN → BUILD → TEST → REVIEW → DOCS
 • Two-layer defense: branch tracking + merge detection
 • 10 new tests, 63 passing
-Issue #168 | Plan | PR #176
+Issue #168 | PR #176
 ```
 
 ### SDLC Mid-Pipeline with Questions
 ```
 ⏳
-☑ ISSUE → ☑ PLAN → ☑ BUILD → ▶ TEST → ☐ REVIEW → ☐ DOCS
+ISSUE 273 → PLAN → ▶ BUILD → TEST → REVIEW → DOCS
 • Replaced upgrade flow with plan picker UI
 • Running test suite...
 
 ? Should we use modal or inline picker?
 ? 2 nits found in review — skip or patch?
-Issue #273 | Plan
+Issue #273
 ```
 
 ### Conversational (Chat)
@@ -51,13 +51,17 @@ Simple emoji + bullets format, no stage line or link footer. Still summarized vi
 | ❌ | Failed |
 | ⚠️ | External blocker |
 
-## Stage Progress Symbols
+## Stage Progress Format
 
-| Symbol | Meaning |
+Stages are rendered as plain text names joined with ` → `. Position relative to the `▶` marker indicates completion state:
+
+| Format | Meaning |
 |--------|---------|
-| ☑ | Stage completed |
-| ▶ | Stage in progress |
-| ☐ | Stage pending |
+| `STAGE` | Completed (before ▶) or pending (after ▶) |
+| `▶ STAGE` | Currently in progress |
+| `ISSUE NNN` | ISSUE stage with issue number embedded |
+
+No checkbox icons are used. The ISSUE stage label includes the issue number when available from session links (e.g., `ISSUE 243`). Plan links are excluded from the link footer — only issue and PR links are rendered.
 
 ## Implementation
 
@@ -69,7 +73,7 @@ Simple emoji + bullets format, no stage line or link footer. Still summarized vi
 
 ## Session Freshness
 
-Stage data (`[stage] BUILD completed ☑`) and links (`issue_url`, `pr_url`) are written to Redis by `tools/session_progress.py` during agent execution. By the time the summarizer runs, the session object passed through the callback chain may be stale (loaded before stages were recorded).
+Stage data (`[stage] BUILD completed`) and links (`issue_url`, `pr_url`) are written to Redis by `tools/session_progress.py` during agent execution. By the time the summarizer runs, the session object passed through the callback chain may be stale (loaded before stages were recorded).
 
 Both `response.py` and `summarizer.py` re-read the session from Redis before composing structured output:
 
