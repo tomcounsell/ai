@@ -45,9 +45,21 @@ Each tier 2 work item gets its own git worktree for filesystem isolation:
 - Created at `/do-build` time via `agent/worktree_manager.py`
 - `settings.local.json` is copied into the worktree's `.claude/` directory (since it's not tracked by git)
 - On completion: changes are merged back, worktree is removed
-- Stale worktree references are pruned on startup via `git worktree prune`
+- Stale worktree references are automatically detected and cleaned up by `create_worktree()`
 
 The worktree manager provides five operations: `create_worktree()`, `remove_worktree()`, `list_worktrees()`, `prune_worktrees()`, and `cleanup_after_merge()`.
+
+### Stale Worktree Recovery
+
+When a session crashes or times out, it may leave a stale worktree that blocks future builds for the same slug. The `create_worktree()` function handles this automatically by detecting and cleaning up stale worktrees before creation. Three recovery cases are handled:
+
+1. **Worktree directory exists and is valid**: Returns the existing path as a no-op.
+2. **Worktree directory is gone but git still tracks it**: Runs `git worktree prune` to clean the stale reference, then creates a fresh worktree.
+3. **Branch is locked by a worktree at a different path**: Force-removes the stale worktree via `git worktree remove --force`, then creates at the expected path. Falls back to `shutil.rmtree` + prune if force-remove fails.
+
+Detection uses `git worktree list --porcelain` to find branches already associated with a worktree (via the `_find_worktree_for_branch()` helper). All recovery actions are logged with warnings so operators can see what was cleaned up.
+
+This makes the SDLC pipeline resilient to stale worktree state -- no manual `git worktree remove --force` is needed.
 
 ### Post-Merge Worktree Cleanup
 

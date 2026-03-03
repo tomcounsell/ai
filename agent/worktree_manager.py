@@ -40,8 +40,110 @@ def _branch_exists(repo_root: Path, branch_name: str) -> bool:
     return result.returncode == 0
 
 
+def _find_worktree_for_branch(repo_root: Path, branch_name: str) -> str | None:
+    """Find if a branch is already associated with a git worktree.
+
+    Parses ``git worktree list --porcelain`` to check whether *branch_name*
+    (e.g. ``session/my-feature``) is checked out in any existing worktree.
+
+    Args:
+        repo_root: Path to the main repository.
+        branch_name: Full branch name to search for (e.g. ``session/slug``).
+
+    Returns:
+        The worktree path as a string if found, or ``None`` if the branch
+        is not associated with any worktree.
+    """
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return None
+
+    # Porcelain format: blocks separated by blank lines, each block has
+    # "worktree <path>" and "branch refs/heads/<name>" lines.
+    current_path: str | None = None
+    full_ref = f"refs/heads/{branch_name}"
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line.split(" ", 1)[1]
+        elif line.startswith("branch ") and current_path is not None:
+            if line.split(" ", 1)[1] == full_ref:
+                return current_path
+    return None
+
+
+def _cleanup_stale_worktree(
+    repo_root: Path, branch_name: str, worktree_path: str
+) -> None:
+    """Remove a stale worktree that is blocking branch checkout.
+
+    Handles two cases:
+    1. Worktree directory is missing but git still tracks it -- ``git worktree
+       prune`` cleans the reference.
+    2. Worktree directory exists but is stale (leftover from a crashed session)
+       -- ``git worktree remove --force`` removes it.
+
+    Args:
+        repo_root: Path to the main repository.
+        branch_name: The branch name locked by the stale worktree.
+        worktree_path: Path string from ``git worktree list``.
+    """
+    wt = Path(worktree_path)
+
+    if not wt.exists():
+        # Directory is gone but git still references it -- prune fixes this.
+        logger.warning(
+            f"Stale worktree reference for branch {branch_name} "
+            f"at {worktree_path} (directory missing). Pruning."
+        )
+        prune_worktrees(repo_root)
+        return
+
+    # Directory exists -- force-remove the worktree.
+    logger.warning(
+        f"Stale worktree for branch {branch_name} at {worktree_path}. "
+        "Force-removing to unblock checkout."
+    )
+    try:
+        subprocess.run(
+            ["git", "worktree", "remove", "--force", worktree_path],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        )
+        logger.info(f"Removed stale worktree: {worktree_path}")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to remove stale worktree {worktree_path}: {e.stderr}")
+        # As a last resort, prune and manually remove the directory.
+        prune_worktrees(repo_root)
+        if wt.exists():
+            shutil.rmtree(wt, ignore_errors=True)
+            logger.info(f"Manually removed stale worktree directory: {worktree_path}")
+            # Prune again to clean up the now-missing reference.
+            prune_worktrees(repo_root)
+
+
 def create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Path:
     """Create a git worktree for a work item.
+
+    Handles stale worktrees automatically: if a previous session left a
+    worktree referencing the target branch (``session/{slug}``), it is
+    detected, cleaned up, and creation proceeds. This makes the function
+    resilient to crashed or abandoned sessions.
+
+    Recovery cases handled:
+    - Worktree directory exists and is valid: returns existing path (no-op).
+    - Worktree directory is gone but git still tracks it: prunes the stale
+      reference, then creates a fresh worktree.
+    - Worktree directory exists at a *different* path for the same branch:
+      force-removes the stale worktree, then creates at the expected path.
 
     Args:
         repo_root: Path to the main repository
@@ -53,7 +155,8 @@ def create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Pa
 
     Raises:
         ValueError: If slug contains path traversal or invalid characters
-        subprocess.CalledProcessError: If git worktree creation fails
+        subprocess.CalledProcessError: If git worktree creation fails after
+            recovery attempts
     """
     _validate_slug(slug)
 
@@ -66,6 +169,24 @@ def create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Pa
 
     # Ensure .worktrees/ parent exists
     (repo_root / WORKTREES_DIR).mkdir(exist_ok=True)
+
+    # Check if the branch is already locked by a stale worktree. This is the
+    # core fix for issue #237: a previous session may have created a worktree
+    # that was never cleaned up, blocking checkout of the same branch.
+    existing_wt = _find_worktree_for_branch(repo_root, branch_name)
+    if existing_wt is not None:
+        expected = str(worktree_dir)
+        if existing_wt != expected:
+            # Branch is locked by a worktree at a different path -- stale.
+            _cleanup_stale_worktree(repo_root, branch_name, existing_wt)
+        else:
+            # Git thinks the worktree exists at the expected path but the
+            # directory is missing (we checked above). Prune the reference.
+            logger.warning(
+                f"Git tracks worktree at {existing_wt} but directory is missing. "
+                "Pruning stale reference."
+            )
+            prune_worktrees(repo_root)
 
     # If the branch already exists (e.g., from a previous session), reuse it
     if _branch_exists(repo_root, branch_name):
