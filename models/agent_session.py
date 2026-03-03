@@ -223,14 +223,23 @@ class AgentSession(Model):
     def is_sdlc_job(self) -> bool:
         """Check if this session is an SDLC pipeline job.
 
-        Returns True if the session's history contains at least one
-        [stage] entry, indicating it was created by an SDLC skill
-        invocation (e.g., /sdlc, /do-build, /do-test).
+        Returns True if:
+        1. The session was classified as "sdlc" at input routing time, OR
+        2. The session's history contains at least one [stage] entry
+
+        The classification_type check (added for issue #246) is the primary
+        signal — it's set at classification time and cannot be lost. The
+        history check is the legacy fallback for sessions that have stage
+        entries from session_progress calls.
 
         Used by the auto-continue logic to choose between stage-aware
         routing (for SDLC jobs) and classifier-based routing (for
         casual/ad-hoc jobs).
         """
+        # Primary: classification_type set at input routing time
+        if self.classification_type == "sdlc":
+            return True
+        # Fallback: check for [stage] entries in history
         for entry in self._get_history_list():
             if isinstance(entry, str) and "[stage]" in entry.lower():
                 return True
