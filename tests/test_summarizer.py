@@ -1159,7 +1159,7 @@ class TestRenderStageProgress:
         assert _render_stage_progress(session) is None
 
     def test_mixed_progress_renders_correctly(self):
-        """Completed, in-progress, and pending stages render with correct icons."""
+        """Completed, in-progress, and pending stages render without checkbox icons."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
@@ -1171,11 +1171,16 @@ class TestRenderStageProgress:
             "REVIEW": "pending",
             "DOCS": "pending",
         }
+        session.get_links.return_value = {}
         result = _render_stage_progress(session)
-        assert "☑ ISSUE" in result
-        assert "☑ PLAN" in result
+        # No checkbox icons in new format
+        assert "☑" not in result
+        assert "☐" not in result
+        # Completed stages show plain name
+        assert "PLAN" in result
+        # In-progress shows ▶ prefix
         assert "▶ BUILD" in result
-        assert "☐ TEST" in result
+        # Stages joined with arrows
         assert "→" in result
 
     def test_all_completed(self):
@@ -1190,10 +1195,50 @@ class TestRenderStageProgress:
             "REVIEW": "completed",
             "DOCS": "completed",
         }
+        session.get_links.return_value = {}
         result = _render_stage_progress(session)
         assert result is not None
         assert "☐" not in result
+        assert "☑" not in result
         assert "▶" not in result
+
+    def test_issue_number_embedded_in_label(self):
+        """ISSUE stage shows the issue number when available in session links."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "in_progress",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {
+            "issue": "https://github.com/org/repo/issues/243"
+        }
+        result = _render_stage_progress(session)
+        assert "ISSUE 243" in result
+        assert "▶ BUILD" in result
+
+    def test_no_issue_number_without_links(self):
+        """ISSUE stage shows plain 'ISSUE' when no issue link exists."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_stage_progress.return_value = {
+            "ISSUE": "completed",
+            "PLAN": "in_progress",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        session.get_links.return_value = {}
+        result = _render_stage_progress(session)
+        # Should start with plain "ISSUE" not "ISSUE None" or similar
+        assert result.startswith("ISSUE →") or result.startswith("ISSUE →")
 
 
 class TestRenderLinkFooter:
@@ -1234,22 +1279,36 @@ class TestRenderLinkFooter:
         session = MagicMock()
         session.get_links.return_value = {
             "issue": "https://github.com/org/repo/issues/190",
-            "plan": "https://github.com/org/repo/blob/main/docs/plans/foo.md",
             "pr": "https://github.com/org/repo/pull/191",
         }
         result = _render_link_footer(session)
         assert " | " in result
         assert "Issue #190" in result
-        assert "Plan" in result
         assert "PR #191" in result
 
-    def test_plan_link_uses_generic_label(self):
+    def test_plan_link_excluded(self):
+        """Plan links are intentionally excluded from the footer."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.get_links.return_value = {
+            "issue": "https://github.com/org/repo/issues/190",
+            "plan": "https://github.com/org/repo/blob/main/docs/plans/foo.md",
+            "pr": "https://github.com/org/repo/pull/191",
+        }
+        result = _render_link_footer(session)
+        assert "Plan" not in result
+        assert "Issue #190" in result
+        assert "PR #191" in result
+
+    def test_plan_only_returns_none(self):
+        """Session with only a plan link returns None (no visible links)."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
         session.get_links.return_value = {"plan": "https://example.com/plan.md"}
         result = _render_link_footer(session)
-        assert "[Plan]" in result
+        assert result is None
 
 
 class TestComposeStructuredSummaryWithSession:
@@ -1262,9 +1321,9 @@ class TestComposeStructuredSummaryWithSession:
         session = MagicMock()
         session._get_history_list.return_value = [
             "[user] /sdlc 190",
-            "[stage] ISSUE completed ☑",
-            "[stage] PLAN completed ☑",
-            "[stage] BUILD in_progress ▶",
+            "[stage] ISSUE completed",
+            "[stage] PLAN completed",
+            "[stage] BUILD in_progress",
         ]
         session.message_text = "continue"
         session.status = "running"
@@ -1291,14 +1350,17 @@ class TestComposeStructuredSummaryWithSession:
         first_line = result.split("\n")[0]
         assert first_line.strip() in ("✅", "⏳", "❌")
         assert "continue" not in first_line
-        # Stage progress line present
-        assert "☑ ISSUE" in result
+        # Stage progress line present — new format without checkboxes
+        assert "☑" not in result
+        assert "☐" not in result
+        assert "ISSUE 190" in result
         assert "▶ BUILD" in result
         # Bullets present
         assert "• Implemented the bypass" in result
-        # Link footer present
+        # Link footer present (no plan link)
         assert "Issue #190" in result
         assert "PR #191" in result
+        assert "Plan" not in result
 
     def test_non_sdlc_session_no_stage_line(self):
         """Non-SDLC session skips stage progress line."""
@@ -1322,8 +1384,9 @@ class TestComposeStructuredSummaryWithSession:
             "It's 3pm UTC+7", session=session, is_completion=True
         )
 
-        assert "☑" not in result
-        assert "☐" not in result
+        # No stage-related content for non-SDLC
+        assert "ISSUE" not in result
+        assert "BUILD" not in result
         # No echo of user message (Telegram reply-to provides context)
         assert result.split("\n")[0].strip() in ("✅", "⏳", "❌")
 
