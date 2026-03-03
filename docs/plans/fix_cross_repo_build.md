@@ -4,7 +4,7 @@ type: bug
 appetite: Small
 owner: Valor
 created: 2026-03-03
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/249
 ---
 
 # Fix /do-build Cross-Repo Dispatch
