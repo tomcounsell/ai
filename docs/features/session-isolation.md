@@ -58,7 +58,6 @@ When a session crashes, times out, or is abandoned, it may leave a stale worktre
 2. **Recovery**: If a stale worktree is found:
    - If the worktree directory is missing but git still tracks it: `git worktree prune` cleans the stale reference.
    - If the worktree directory exists at a different path: `git worktree remove --force` removes it, with a fallback to `shutil.rmtree` + prune if force-remove fails.
-   - If the worktree directory exists at the expected path: returns the existing path as-is (no-op).
 3. **Retry**: After cleanup, creation proceeds normally.
 
 This makes `create_worktree()` idempotent and resilient -- the SDLC pipeline never blocks on stale worktree state from prior sessions. All recovery actions are logged at WARNING level for visibility.
