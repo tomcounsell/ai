@@ -61,6 +61,8 @@ Detection uses `git worktree list --porcelain` to find branches already associat
 
 This makes the SDLC pipeline resilient to stale worktree state -- no manual `git worktree remove --force` is needed.
 
+See GitHub issue [#237](https://github.com/tomcounsell/ai/issues/237) for the original bug report.
+
 ### Post-Merge Worktree Cleanup
 
 When a PR is merged via `gh pr merge --squash --delete-branch`, the remote branch is deleted but local branch deletion fails if a git worktree still references it. The `cleanup_after_merge()` function handles this:
