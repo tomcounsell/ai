@@ -4,7 +4,7 @@ type: chore
 appetite: Small
 owner: Valor Engels
 created: 2026-03-03
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/243
 ---
 
 # SDLC Summary Improvements
