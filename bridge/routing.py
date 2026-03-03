@@ -296,6 +296,156 @@ async def classify_needs_response_async(text: str) -> bool:
 
 
 # =============================================================================
+# Work Request Classification (SDLC Routing)
+# =============================================================================
+
+# Lazy singleton for Anthropic client (avoid per-call instantiation)
+_anthropic_client = None
+
+
+def _get_anthropic_client():
+    """Get or create a singleton Anthropic client for classification."""
+    global _anthropic_client
+    if _anthropic_client is None:
+        import anthropic
+
+        from utils.api_keys import get_anthropic_api_key
+
+        api_key = get_anthropic_api_key()
+        if not api_key:
+            return None
+        _anthropic_client = anthropic.Anthropic(api_key=api_key)
+    return _anthropic_client
+
+
+# Fast-path patterns that bypass LLM classification entirely
+_PASSTHROUGH_PREFIXES = (
+    "/sdlc",
+    "/do-plan",
+    "/do-build",
+    "/do-test",
+    "/do-patch",
+    "/do-pr-review",
+    "/do-docs",
+    "/prime",
+    "/setup",
+    "/update",
+)
+
+_PASSTHROUGH_EXACT = {
+    "continue",
+    "merge",
+    "\U0001f44d",  # 👍
+    "yes",
+    "no",
+    "ok",
+    "lgtm",
+}
+
+
+def classify_work_request(message: str) -> str:
+    """Classify if a message is a work request that should go through SDLC.
+
+    Returns:
+        "sdlc" - Work request -> orchestrator in ai/, prepend SDLC directive
+        "question" - Q&A -> direct in target project, pass through as-is
+        "passthrough" - Already has skill invocation or is conversational
+    """
+    if not message or not message.strip():
+        return "passthrough"
+
+    text = message.strip()
+    text_lower = text.lower()
+
+    # Fast path: already routed (slash commands)
+    for prefix in _PASSTHROUGH_PREFIXES:
+        if text_lower.startswith(prefix):
+            return "passthrough"
+
+    # Fast path: short acknowledgments / continuation commands
+    first_word = text_lower.split()[0] if text_lower.split() else ""
+    if (
+        first_word in _PASSTHROUGH_EXACT
+        or text_lower.rstrip("!.,") in _PASSTHROUGH_EXACT
+    ):
+        return "passthrough"
+
+    # Fast path: issue references like "issue 123" or "#123"
+    if re.match(r"^(?:issue\s+#?\d+|#\d+)$", text_lower):
+        return "sdlc"
+
+    # Use Ollama for nuanced classification with Haiku fallback
+    try:
+        return _classify_work_request_llm(text)
+    except Exception as e:
+        logger.warning(f"Work request classification failed: {e}")
+        # Conservative default: treat as question (no SDLC overhead)
+        return "question"
+
+
+def _classify_work_request_llm(text: str) -> str:
+    """Use LLM to classify whether a message is a work request.
+
+    Tries Ollama first (fast, local), falls back to Haiku (cheap, reliable).
+    """
+    prompt = (
+        'Classify this message. Reply with ONLY one word: "sdlc" or "question".\n\n'
+        '- "sdlc" = work request: fix bug, add feature, implement, refactor,\n'
+        "  investigate issue, create/update codebase, deploy, resolve problem\n"
+        '- "question" = asking for info, explanation, opinion, status check,\n'
+        "  how does X work, what is Y, conversational/social\n\n"
+        f"Message: {text[:300]}\n\n"
+        "Classification:"
+    )
+
+    # Try Ollama first (fast, local)
+    try:
+        import ollama
+
+        response = ollama.chat(
+            model="llama3.2:3b",
+            messages=[{"role": "user", "content": prompt}],
+            options={"temperature": 0, "num_predict": 10},
+        )
+        result = response["message"]["content"].strip().lower()
+        if "sdlc" in result:
+            return "sdlc"
+        if "question" in result:
+            return "question"
+        logger.debug(f"Ollama returned ambiguous classification: {result}")
+    except Exception as e:
+        logger.debug(f"Ollama classification failed, trying Haiku: {e}")
+
+    # Fallback: Haiku via Anthropic API (singleton client)
+    try:
+        from config.models import MODEL_FAST
+
+        client = _get_anthropic_client()
+        if not client:
+            logger.debug("No API key for Haiku classification fallback")
+            return "question"
+
+        response = client.messages.create(
+            model=MODEL_FAST,
+            max_tokens=10,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        result = response.content[0].text.strip().lower()
+        if "sdlc" in result:
+            return "sdlc"
+        return "question"
+    except Exception as e:
+        logger.debug(f"Haiku classification fallback also failed: {e}")
+        return "question"
+
+
+async def classify_work_request_async(message: str) -> str:
+    """Async wrapper for work request classification."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, classify_work_request, message)
+
+
+# =============================================================================
 # Response Decision Logic
 # =============================================================================
 

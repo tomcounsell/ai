@@ -39,6 +39,43 @@ OLLAMA_MODEL = os.environ.get("OLLAMA_SUMMARIZER_MODEL", "qwen3:4b")
 # (conservative: pauses for human input rather than auto-continuing)
 CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.80
 
+# Process narration patterns — stripped before summarization
+_PROCESS_NARRATION_PATTERNS = [
+    re.compile(r"^Let me (check|look|read|examine|review|investigate|search|explore)"),
+    re.compile(r"^Now let me (check|look|read|examine|review|investigate|search)"),
+    re.compile(r"^I'll (start|begin|proceed|continue|check|look|read|examine) "),
+    re.compile(r"^First,? (?:let me|I'll) (check|look|read|examine|review)"),
+    re.compile(r"^Good\.$"),
+    re.compile(r"^Now I (need to |will |'ll )?(check|look|read|examine|review)"),
+    re.compile(r"^Looking at (the |this |that )"),
+    re.compile(r"^Alright,? (let me|I'll)"),
+    re.compile(r"^Sure,? (let me|I'll)"),
+    re.compile(r"^OK,? (let me|I'll)"),
+]
+
+
+def _strip_process_narration(text: str) -> str:
+    """Strip process narration lines from agent output before summarization.
+
+    Removes lines like "Let me check...", "Now let me read..." that are
+    process noise, not meaningful content. Only strips if meaningful content
+    remains after filtering.
+    """
+    lines = text.split("\n")
+    filtered = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            filtered.append(line)
+            continue
+        is_narration = any(p.match(stripped) for p in _PROCESS_NARRATION_PATTERNS)
+        if not is_narration:
+            filtered.append(line)
+
+    result = "\n".join(filtered).strip()
+    # Don't return empty string if everything was stripped
+    return result if result else text
+
 
 class OutputType(Enum):
     """Classification of agent output for routing decisions.
@@ -981,8 +1018,11 @@ async def summarize_response(
         except Exception as e:
             logger.warning(f"Failed to write full output file: {e}")
 
+    # Strip process narration before summarization
+    cleaned_response = _strip_process_narration(raw_response)
+
     # Build prompt once, try multiple backends
-    prompt = _build_summary_prompt(raw_response, artifacts, session=session)
+    prompt = _build_summary_prompt(cleaned_response, artifacts, session=session)
 
     # Try Haiku first, then Ollama
     summary_text = await _summarize_with_haiku(prompt)
