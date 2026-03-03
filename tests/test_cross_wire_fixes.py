@@ -78,7 +78,7 @@ class TestClassifierQACompletion:
 
 
 try:
-    from agent.sdk_client import _has_prior_session, ValorAgent
+    import agent.sdk_client  # noqa: F401
 
     _SDK_AVAILABLE = True
 except ImportError:
