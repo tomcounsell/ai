@@ -47,8 +47,8 @@ try:
 except ImportError:
     anthropic = None  # type: ignore[assignment]
 
-from scripts.reflections_report import create_reflections_issue, reset_dedup_guard  # noqa: E402
 from scripts.docs_auditor import DocsAuditor  # noqa: E402
+from scripts.reflections_report import create_reflections_issue, reset_dedup_guard  # noqa: E402
 
 # Configure logging
 logging.basicConfig(
@@ -1174,8 +1174,8 @@ class ReflectionRunner:
             from models.agent_session import AgentSession
             from models.bridge_event import BridgeEvent
             from models.chat import Chat
-            from models.reflections import ReflectionIgnore, ReflectionRun, LessonLearned
             from models.link import Link
+            from models.reflections import LessonLearned, ReflectionIgnore, ReflectionRun
             from models.telegram import TelegramMessage
 
             msg_deleted = TelegramMessage.cleanup_expired(max_age_days=90)

@@ -1,4 +1,4 @@
-"""Tests for reflections Redis integration: ReflectionRun, ReflectionIgnore, LessonLearned models."""
+"""Tests for reflections Redis integration: ReflectionRun, ReflectionIgnore, LessonLearned."""
 
 from __future__ import annotations
 
