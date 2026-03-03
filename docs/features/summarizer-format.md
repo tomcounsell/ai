@@ -4,7 +4,7 @@ Structured output format for Telegram delivery of agent work summaries. Every re
 
 ## Key Behaviors
 
-1. **SDLC: always summarize. Non-SDLC: summarize if >= 200 chars.** SDLC sessions always go through Haiku (stage lines + link footers needed). Non-SDLC short responses (< 200 chars) pass through raw — this preserves programmatic skill output like `/update` that's already formatted.
+1. **SDLC: always summarize (even empty responses). Non-SDLC: summarize if >= 200 chars.** SDLC sessions always go through Haiku (stage lines + link footers needed). Even empty SDK responses render SDLC stage progress if session data is available. Non-SDLC short responses (< 200 chars) pass through raw -- this preserves programmatic skill output like `/update` that's already formatted.
 2. **SDLC template rendering**: Stage progress lines and link footers are rendered in Python code, not by the LLM. The LLM only generates bullet summaries and questions.
 3. **Question extraction**: The LLM can surface questions, decisions, and items needing human input using a `---` separator and `? ` prefix. These are parsed and rendered after the summary bullets.
 
@@ -12,7 +12,7 @@ Structured output format for Telegram delivery of agent work summaries. Every re
 
 ### SDLC Completions
 ```
-✅ Infinite false-positive loop after squash merge
+✅
 ☑ ISSUE → ☑ PLAN → ☑ BUILD → ☑ TEST → ☑ REVIEW → ☑ DOCS
 • Two-layer defense: branch tracking + merge detection
 • 10 new tests, 63 passing
@@ -21,7 +21,7 @@ Issue #168 | Plan | PR #176
 
 ### SDLC Mid-Pipeline with Questions
 ```
-⏳ Plan picker for free teams
+⏳
 ☑ ISSUE → ☑ PLAN → ☑ BUILD → ▶ TEST → ☐ REVIEW → ☐ DOCS
 • Replaced upgrade flow with plan picker UI
 • Running test suite...
@@ -31,8 +31,16 @@ Issue #168 | Plan | PR #176
 Issue #273 | Plan
 ```
 
-### Conversational
-Simple prose format, no stage line or link footer. Still summarized via Haiku.
+### Conversational (Chat)
+```
+✅
+• Summary bullet 1
+• Summary bullet 2
+
+? Question needing input
+```
+
+Simple emoji + bullets format, no stage line or link footer. Still summarized via Haiku. No message echo -- Telegram's reply-to feature provides context about what the response is answering.
 
 ## Emoji Vocabulary
 
@@ -108,7 +116,7 @@ The stripping runs inside `summarize_response()` before the text is passed to `_
 1. **Simple completions**: "Done ✅" (still summarized for consistency)
 2. **Conversational**: Prose, preserving tone
 3. **Questions**: Preserved exactly, surfaced after bullets via `---` separator
-4. **SDLC work**: Emoji + stage line + bullets + questions + link footer
+4. **SDLC work**: Emoji + stage line + bullets + questions + link footer (no message echo)
 5. **Status updates**: 2-4 bullet points
 
 ## Telegram Markdown
