@@ -99,15 +99,32 @@ Is SDLC job? (check AgentSession.history for [stage] entries)
 | All stages done | Status (no evidence) | Coach + continue |
 | Any stage failed | Error/blocker | Deliver to user |
 | No stages (non-SDLC) | Question | Deliver to user |
-| No stages (non-SDLC) | Status | Auto-continue (existing behavior) |
+| No stages (non-SDLC) | Completion (Q&A answer) | Deliver to user |
+| No stages (non-SDLC) | Status + planning language | Auto-continue |
+| No stages (non-SDLC) | Status + substantive content | Deliver to user |
 
 ### Stage-Aware Error Guard
 
 Before auto-continuing on the stage-aware path, a lightweight heuristic check (`_classify_with_heuristics(msg[:500])`) scans the first 500 characters for error/blocker patterns. If detected, the output falls through to the full classifier instead of being silently re-enqueued. This catches error prose (e.g., "Error: test suite timeout") that would otherwise be missed because stage history says "still in progress."
 
+### Non-SDLC Planning Language Guard
+
+For non-SDLC jobs (casual chat, Q&A), status updates only auto-continue if the output contains **planning language** -- phrases indicating the agent is sharing its approach before executing work (e.g., "I'll check...", "Let me investigate...", "First I need to..."). Substantive answers and informational content are delivered immediately to the user.
+
+This guard (`_is_planning_language()` in `agent/job_queue.py`) checks the first 500 characters for planning prefixes. It was introduced to fix the cross-wire bug (#232) where a Q&A answer was misclassified as a status update and auto-continued, causing it to resume the wrong session context.
+
+### Q&A Completion Classification (Path B)
+
+The classifier prompt defines two paths to COMPLETION:
+
+- **Path A (SDLC/work completion)**: Requires evidence -- test output, numbers, URLs, commit hashes
+- **Path B (Conversational/Q&A completion)**: No evidence needed. When the user asked a question and the agent answered with factual, substantive content, the answer itself is the deliverable
+
+Path B was added to prevent informational answers (e.g., "The summarizer works by...") from being classified as STATUS_UPDATE simply because they lack test output or URLs. See few-shot examples in `CLASSIFIER_SYSTEM_PROMPT` in `bridge/summarizer.py`.
+
 ### Auto-Continue Caps
 
-- **Non-SDLC jobs**: `MAX_AUTO_CONTINUES = 3` (classifier is the primary signal; counter prevents runaway loops)
+- **Non-SDLC jobs**: `MAX_AUTO_CONTINUES = 3` (classifier + planning language guard are the primary signals; counter prevents runaway loops)
 - **SDLC jobs**: `MAX_AUTO_CONTINUES_SDLC = 10` (stage progress is the real termination signal; counter is a safety net)
 
 Both caps are defined in `agent/job_queue.py`. The effective cap is selected based on `AgentSession.is_sdlc_job()`.
@@ -165,6 +182,7 @@ This replaces the previous `nonlocal` closure variables (`_defer_reaction`, `_co
 | `tests/test_auto_continue.py` | Auto-continue duplicate suppression tests |
 | `tests/test_stage_aware_auto_continue.py` | Stage-aware decision matrix tests (32 tests) |
 | `tests/test_enqueue_continuation.py` | `_enqueue_continuation` tests (coaching source, parameters, plan resolution) |
+| `tests/test_cross_wire_fixes.py` | Cross-wire bug fix tests: classifier Q&A, session isolation, planning language guard |
 
 ## Tuning Guide
 

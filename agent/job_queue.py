@@ -55,6 +55,37 @@ MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent inpu
 MAX_AUTO_CONTINUES = 3  # Max status updates to auto-continue before sending to chat
 MAX_AUTO_CONTINUES_SDLC = 10  # Higher cap for SDLC jobs (stage progress is real signal)
 
+# Planning language patterns — signals that the agent is sharing its approach
+# before executing, not delivering a substantive answer. Used by the non-SDLC
+# auto-continue guard to distinguish "here's my plan" from "here's the answer".
+_PLANNING_PREFIXES = (
+    "i'll ",
+    "i will ",
+    "let me ",
+    "first i need to ",
+    "first, i need to ",
+    "first i'll ",
+    "first, i'll ",
+    "i'm going to ",
+    "i need to ",
+    "let's ",
+)
+
+
+def _is_planning_language(msg: str) -> bool:
+    """Check if an output contains planning language indicating the agent is
+    sharing its approach before executing work.
+
+    Non-SDLC status updates that are "here's my plan" should auto-continue,
+    but informational answers should be delivered to the user. This heuristic
+    checks for planning prefixes in the first 500 chars of the output.
+
+    See issue #232 and docs/plans/fix_chat_cross_wire.md for design rationale.
+    """
+    # Check a reasonable prefix — planning language appears early
+    prefix = msg[:500].lower().strip()
+    return any(prefix.startswith(p) for p in _PLANNING_PREFIXES)
+
 # Job health check constants
 JOB_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
 JOB_TIMEOUT_DEFAULT = 2700  # 45 minutes for standard jobs
@@ -1233,8 +1264,13 @@ async def _execute_job(job: Job) -> None:
         elif (
             classification.output_type == OutputType.STATUS_UPDATE
             and chat_state.auto_continue_count < effective_max
+            and (_is_sdlc or _is_planning_language(msg))
         ):
             # Status update -- don't send to chat, re-enqueue job to continue session
+            # For non-SDLC jobs, only auto-continue if the output contains planning
+            # language (agent sharing its approach before executing). Substantive
+            # answers and informational content should be delivered immediately.
+            # See issue #232 for the cross-wire bug this prevents.
             chat_state.auto_continue_count += 1
             logger.info(
                 f"[{job.project_key}] Auto-continuing via job re-enqueue "

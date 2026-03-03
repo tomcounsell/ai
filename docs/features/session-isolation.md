@@ -94,6 +94,14 @@ Sessions transition to the **Complete** state when work is finished. Two mechani
 
 Note: **Telethon cannot receive emoji reaction events** for user accounts (Telegram API limitation). The 👍 reaction is purely a human-to-human signal -- it does not trigger any programmatic state change. No reaction handler is needed in the bridge.
 
+## Session Continuation Gate
+
+When spawning a Claude Code subprocess, `_create_options()` in `agent/sdk_client.py` decides whether to set `continue_conversation=True`. Previously, this was set for any non-None `session_id`, which could cause fresh sessions to reuse stale Claude Code session files on disk -- leaking context between unrelated conversations (see issue #232).
+
+Now, `_has_prior_session(session_id)` queries the AgentSession Redis model to check if a prior job ran for this session_id with a status of `completed`, `running`, `active`, or `dormant`. Only when a prior session exists is `continue_conversation` (and `resume`) set to True. This prevents cross-contamination between concurrent DM and group conversations while preserving reply-thread continuation (which reuses the original session_id and thus has a prior AgentSession record).
+
+The check fails safe: if Redis is unavailable, `_has_prior_session()` returns False (don't continue), ensuring fresh sessions never accidentally inherit stale context.
+
 ## Auto-Continue and Session Scope
 
 The auto-continue system uses job re-enqueue rather than steering queue injection. When a status update triggers auto-continue, a new job is enqueued through the normal job queue with the same session context:

@@ -50,6 +50,34 @@ logger = logging.getLogger(__name__)
 _active_clients: dict[str, "ClaudeSDKClient"] = {}
 
 
+def _has_prior_session(session_id: str) -> bool:
+    """Check if a prior AgentSession exists for this session_id.
+
+    Used by _create_options() to decide whether to set continue_conversation=True.
+    Only returns True if an AgentSession with this session_id has been previously
+    saved (i.e., a prior job ran for this conversation thread). This prevents
+    fresh sessions from reusing stale Claude Code session files on disk.
+
+    See issue #232 for the cross-wire bug this fixes.
+    """
+    try:
+        from models.agent_session import AgentSession
+
+        sessions = [
+            s
+            for s in AgentSession.query.filter(session_id=session_id)
+            if s.status in ("completed", "running", "active", "dormant")
+        ]
+        return len(sessions) > 0
+    except Exception:
+        # If Redis is down or model unavailable, fail safe: don't continue
+        logger.warning(
+            f"_has_prior_session({session_id!r}) failed, defaulting to False",
+            exc_info=True,
+        )
+        return False
+
+
 def get_active_client(session_id: str) -> ClaudeSDKClient | None:
     """Get the live SDK client for a running session, if any.
 
@@ -519,12 +547,18 @@ class ValorAgent:
                 f"Including workflow context in system prompt: {self.workflow_id}"
             )
 
+        # Only continue a conversation if we have evidence of a prior session.
+        # Without this check, fresh sessions set continue_conversation=True which
+        # can cause Claude Code to reuse the most recent session file on disk,
+        # leaking context between unrelated conversations (see issue #232).
+        should_continue = session_id is not None and _has_prior_session(session_id)
+
         return ClaudeAgentOptions(
             system_prompt=system_prompt,
             cwd=str(self.working_dir),
             permission_mode=self.permission_mode,  # type: ignore[arg-type]
-            continue_conversation=session_id is not None,
-            resume=session_id,
+            continue_conversation=should_continue,
+            resume=session_id if should_continue else None,
             setting_sources=["user", "local", "project"],
             env=env,
             hooks=build_hooks_config(),
