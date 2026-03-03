@@ -1,4 +1,4 @@
-"""Tests for daydream multi-repo support.
+"""Tests for reflections multi-repo support.
 
 Tests cover:
 - load_local_projects() filters to directories that exist on this machine
@@ -7,7 +7,7 @@ Tests cover:
 - step_create_github_issue() creates issues per-project with cwd support
 - step_post_to_telegram() posts per-project (skips gracefully when unconfigured)
 - step_clean_legacy() bug fix (cache_dirs and pyc_files variables)
-- DaydreamRunner.__init__ loads self.projects
+- ReflectionsRunner.__init__ loads self.projects
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ class TestLoadLocalProjects:
 
     def test_returns_projects_whose_directory_exists(self, tmp_path):
         """Only projects with existing working_directory are returned."""
-        from scripts.daydream import load_local_projects
+        from scripts.reflections import load_local_projects
 
         existing_dir = tmp_path / "project_a"
         existing_dir.mkdir()
@@ -46,13 +46,13 @@ class TestLoadLocalProjects:
         config_path = tmp_path / "projects.json"
         config_path.write_text(json.dumps(config))
 
-        with patch("scripts.daydream.AI_ROOT", tmp_path):
+        with patch("scripts.reflections.AI_ROOT", tmp_path):
             # Patch config path resolution
-            with patch("scripts.daydream.load_local_projects.__wrapped__", create=True):
+            with patch("scripts.reflections.load_local_projects.__wrapped__", create=True):
                 pass
 
         # Call directly with monkeypatched config file
-        import scripts.daydream as dmod
+        import scripts.reflections as dmod
 
         orig_ai_root = dmod.AI_ROOT
         dmod.AI_ROOT = tmp_path
@@ -71,7 +71,7 @@ class TestLoadLocalProjects:
 
     def test_includes_slug_in_project_dict(self, tmp_path):
         """Each project dict includes 'slug' key from config key."""
-        from scripts.daydream import load_local_projects
+        from scripts.reflections import load_local_projects
 
         existing_dir = tmp_path / "my_project"
         existing_dir.mkdir()
@@ -85,7 +85,7 @@ class TestLoadLocalProjects:
             }
         }
 
-        import scripts.daydream as dmod
+        import scripts.reflections as dmod
 
         orig_ai_root = dmod.AI_ROOT
         dmod.AI_ROOT = tmp_path
@@ -103,7 +103,7 @@ class TestLoadLocalProjects:
 
     def test_returns_empty_list_when_no_projects_exist(self, tmp_path):
         """Returns empty list when no configured projects have existing dirs."""
-        from scripts.daydream import load_local_projects
+        from scripts.reflections import load_local_projects
 
         config = {
             "projects": {
@@ -114,7 +114,7 @@ class TestLoadLocalProjects:
             }
         }
 
-        import scripts.daydream as dmod
+        import scripts.reflections as dmod
 
         orig_ai_root = dmod.AI_ROOT
         dmod.AI_ROOT = tmp_path
@@ -129,25 +129,25 @@ class TestLoadLocalProjects:
         assert projects == []
 
 
-# --- DaydreamRunner.projects attribute ---
+# --- ReflectionsRunner.projects attribute ---
 
 
-class TestDaydreamRunnerProjects:
-    """Tests that DaydreamRunner loads self.projects on init."""
+class TestReflectionsRunnerProjects:
+    """Tests that ReflectionsRunner loads self.projects on init."""
 
     def test_runner_has_projects_attribute(self):
-        """DaydreamRunner has self.projects populated on init."""
-        from scripts.daydream import DaydreamRunner
+        """ReflectionsRunner has self.projects populated on init."""
+        from scripts.reflections import ReflectionsRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         assert hasattr(runner, "projects")
         assert isinstance(runner.projects, list)
 
     def test_runner_projects_are_dicts(self):
         """Each project in self.projects is a dict with at least 'slug' and 'working_directory'."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         for project in runner.projects:
             assert isinstance(project, dict)
             assert "slug" in project
@@ -161,14 +161,14 @@ class TestStepCleanLegacyBugFix:
     """Tests that step_clean_legacy no longer crashes with undefined cache_dirs/pyc_files."""
 
     @pytest.mark.asyncio
-    @patch("scripts.daydream.subprocess.run")
+    @patch("scripts.reflections.subprocess.run")
     async def test_step_clean_legacy_runs_without_error(self, mock_run):
         """step_clean_legacy completes without NameError."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         mock_run.return_value = MagicMock(returncode=0, stdout="")
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.state.findings = {}
         runner.state.step_progress = {}
 
@@ -179,14 +179,14 @@ class TestStepCleanLegacyBugFix:
         assert "findings" in runner.state.step_progress["clean_legacy"]
 
     @pytest.mark.asyncio
-    @patch("scripts.daydream.subprocess.run")
+    @patch("scripts.reflections.subprocess.run")
     async def test_step_clean_legacy_records_counts(self, mock_run):
         """step_clean_legacy records findings count."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         mock_run.return_value = MagicMock(returncode=0, stdout="")
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.state.step_progress = {}
         await runner.step_clean_legacy()
 
@@ -204,7 +204,7 @@ class TestStepReviewLogsMultiRepo:
     @pytest.mark.asyncio
     async def test_review_logs_iterates_per_project(self, tmp_path):
         """step_review_logs checks logs dir for each project."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         # Create two project dirs with logs
         proj_a = tmp_path / "proj_a"
@@ -224,7 +224,7 @@ class TestStepReviewLogsMultiRepo:
             {"slug": "proj-b", "working_directory": str(proj_b)},
         ]
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.projects = projects
         runner.state.findings = {}
         runner.state.step_progress = {}
@@ -238,12 +238,12 @@ class TestStepReviewLogsMultiRepo:
     @pytest.mark.asyncio
     async def test_review_logs_skips_project_without_logs_dir(self, tmp_path):
         """Projects without a logs directory are noted and skipped."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         proj = tmp_path / "proj_no_logs"
         proj.mkdir()  # No logs subdir
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.projects = [{"slug": "proj-no-logs", "working_directory": str(proj)}]
         runner.state.findings = {}
         runner.state.step_progress = {}
@@ -254,7 +254,7 @@ class TestStepReviewLogsMultiRepo:
     @pytest.mark.asyncio
     async def test_review_logs_namespaces_findings(self, tmp_path):
         """Findings are namespaced with '{slug}:log_review'."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         proj = tmp_path / "proj_ns"
         logs = proj / "logs"
@@ -263,7 +263,7 @@ class TestStepReviewLogsMultiRepo:
             "2026-02-16 10:00:00 - mod - ERROR - Test error\n"
         )
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.projects = [{"slug": "my-proj", "working_directory": str(proj)}]
         runner.state.findings = {}
         runner.state.step_progress = {}
@@ -280,10 +280,10 @@ class TestStepCleanTasksMultiRepo:
     """Tests for per-project task cleanup."""
 
     @pytest.mark.asyncio
-    @patch("scripts.daydream.subprocess.run")
+    @patch("scripts.reflections.subprocess.run")
     async def test_clean_tasks_runs_gh_per_project(self, mock_run, tmp_path):
         """step_clean_tasks calls gh issue list for each project with github config."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         proj_dir = tmp_path / "proj"
         proj_dir.mkdir()
@@ -301,7 +301,7 @@ class TestStepCleanTasksMultiRepo:
             }
         ]
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.projects = projects
         runner.state.findings = {}
         runner.state.step_progress = {}
@@ -314,10 +314,10 @@ class TestStepCleanTasksMultiRepo:
         assert call_kwargs.get("cwd") == str(proj_dir)
 
     @pytest.mark.asyncio
-    @patch("scripts.daydream.subprocess.run")
+    @patch("scripts.reflections.subprocess.run")
     async def test_clean_tasks_skips_project_without_github(self, mock_run, tmp_path):
         """Projects without github config are skipped for gh CLI calls."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         proj_dir = tmp_path / "proj_no_gh"
         proj_dir.mkdir()
@@ -330,7 +330,7 @@ class TestStepCleanTasksMultiRepo:
             }
         ]
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.projects = projects
         runner.state.findings = {}
         runner.state.step_progress = {}
@@ -345,12 +345,12 @@ class TestStepCleanTasksMultiRepo:
                 assert call[1].get("cwd") != str(proj_dir)
 
     @pytest.mark.asyncio
-    @patch("scripts.daydream.subprocess.run")
+    @patch("scripts.reflections.subprocess.run")
     async def test_clean_tasks_namespaces_findings_per_project(
         self, mock_run, tmp_path
     ):
         """Findings are namespaced with '{slug}:tasks'."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         proj_dir = tmp_path / "proj_tasks"
         proj_dir.mkdir()
@@ -368,7 +368,7 @@ class TestStepCleanTasksMultiRepo:
             }
         ]
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.projects = projects
         runner.state.findings = {}
         runner.state.step_progress = {}
@@ -385,10 +385,10 @@ class TestStepCreateGithubIssueMultiRepo:
     """Tests for per-project GitHub issue creation."""
 
     @pytest.mark.asyncio
-    @patch("scripts.daydream.create_daydream_issue")
+    @patch("scripts.reflections.create_reflections_issue")
     async def test_creates_issue_per_project_with_github(self, mock_create, tmp_path):
         """Creates an issue for each project that has github config."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         proj_dir = tmp_path / "proj_gh"
         proj_dir.mkdir()
@@ -403,7 +403,7 @@ class TestStepCreateGithubIssueMultiRepo:
             }
         ]
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.projects = projects
         runner.state.findings = {"gh-proj:log_review": ["some finding"]}
         runner.state.step_progress = {}
@@ -412,15 +412,15 @@ class TestStepCreateGithubIssueMultiRepo:
             await runner.step_create_github_issue()
 
         mock_create.assert_called_once()
-        # cwd should be passed to create_daydream_issue
+        # cwd should be passed to create_reflections_issue
         call_kwargs = mock_create.call_args[1]
         assert "cwd" in call_kwargs
 
     @pytest.mark.asyncio
-    @patch("scripts.daydream.create_daydream_issue")
+    @patch("scripts.reflections.create_reflections_issue")
     async def test_skips_project_without_github_config(self, mock_create, tmp_path):
         """Skips issue creation for projects without github config."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         proj_dir = tmp_path / "proj_no_gh"
         proj_dir.mkdir()
@@ -433,7 +433,7 @@ class TestStepCreateGithubIssueMultiRepo:
             }
         ]
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.projects = projects
         runner.state.findings = {"no-gh:log_review": ["something"]}
         runner.state.step_progress = {}
@@ -443,10 +443,10 @@ class TestStepCreateGithubIssueMultiRepo:
         mock_create.assert_not_called()
 
     @pytest.mark.asyncio
-    @patch("scripts.daydream.create_daydream_issue")
+    @patch("scripts.reflections.create_reflections_issue")
     async def test_skips_when_no_per_project_findings(self, mock_create, tmp_path):
         """Skips issue creation when project has no findings."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         proj_dir = tmp_path / "proj_empty"
         proj_dir.mkdir()
@@ -459,7 +459,7 @@ class TestStepCreateGithubIssueMultiRepo:
             }
         ]
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.projects = projects
         runner.state.findings = {}  # No findings
         runner.state.step_progress = {}
@@ -478,9 +478,9 @@ class TestStepPostToTelegram:
     @pytest.mark.asyncio
     async def test_skips_when_no_telegram_groups(self):
         """Skips posting when project has no telegram.groups configured."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         project = {
             "slug": "no-tg",
             "working_directory": "/tmp",
@@ -492,9 +492,9 @@ class TestStepPostToTelegram:
     @pytest.mark.asyncio
     async def test_skips_when_no_session_file(self, tmp_path):
         """Skips when valor.session file does not exist."""
-        import scripts.daydream as dmod
+        import scripts.reflections as dmod
 
-        # Set up a minimal config dir so DaydreamRunner() can be constructed
+        # Set up a minimal config dir so ReflectionsRunner() can be constructed
         config_dir = tmp_path / "config"
         config_dir.mkdir()
         (config_dir / "projects.json").write_text(json.dumps({"projects": {}}))
@@ -502,7 +502,7 @@ class TestStepPostToTelegram:
         orig_ai_root = dmod.AI_ROOT
         dmod.AI_ROOT = tmp_path  # No data/valor.session here
         try:
-            runner = dmod.DaydreamRunner()
+            runner = dmod.ReflectionsRunner()
             project = {
                 "slug": "tg-proj",
                 "working_directory": "/tmp",
@@ -518,7 +518,7 @@ class TestStepPostToTelegram:
         """Skips when TELEGRAM_API_ID or TELEGRAM_API_HASH is missing."""
         import os
 
-        import scripts.daydream as dmod
+        import scripts.reflections as dmod
 
         # Set up config dir and fake session file
         config_dir = tmp_path / "config"
@@ -532,7 +532,7 @@ class TestStepPostToTelegram:
         orig_ai_root = dmod.AI_ROOT
         dmod.AI_ROOT = tmp_path
         try:
-            runner = dmod.DaydreamRunner()
+            runner = dmod.ReflectionsRunner()
             project = {
                 "slug": "tg-proj",
                 "working_directory": "/tmp",
@@ -555,23 +555,23 @@ class TestStepPostToTelegram:
             dmod.AI_ROOT = orig_ai_root
 
 
-# --- daydream_report.py cwd parameter ---
+# --- reflections_report.py cwd parameter ---
 
 
-class TestCreateDaydreamIssueCwd:
-    """Tests that create_daydream_issue accepts and uses cwd parameter."""
+class TestCreateReflectionsIssueCwd:
+    """Tests that create_reflections_issue accepts and uses cwd parameter."""
 
-    @patch("scripts.daydream_report.subprocess.run")
-    @patch("scripts.daydream_report.issue_exists_for_date", return_value=False)
+    @patch("scripts.reflections_report.subprocess.run")
+    @patch("scripts.reflections_report.issue_exists_for_date", return_value=False)
     def test_create_issue_passes_cwd_to_subprocess(self, mock_exists, mock_run):
-        """create_daydream_issue passes cwd to subprocess.run calls."""
-        from scripts.daydream_report import create_daydream_issue
+        """create_reflections_issue passes cwd to subprocess.run calls."""
+        from scripts.reflections_report import create_reflections_issue
 
         mock_run.return_value = MagicMock(
             returncode=0, stdout="https://github.com/org/repo/issues/1\n"
         )
         findings = {"test": ["finding"]}
-        result = create_daydream_issue(findings, "2026-02-16", cwd="/tmp/myproject")
+        result = create_reflections_issue(findings, "2026-02-16", cwd="/tmp/myproject")
 
         assert result is not None  # URL or True
         # The subprocess call for issue create should use the given cwd
@@ -584,15 +584,15 @@ class TestCreateDaydreamIssueCwd:
         assert create_call is not None
         assert create_call[1].get("cwd") == "/tmp/myproject"
 
-    @patch("scripts.daydream_report.subprocess.run")
-    @patch("scripts.daydream_report.issue_exists_for_date", return_value=False)
+    @patch("scripts.reflections_report.subprocess.run")
+    @patch("scripts.reflections_report.issue_exists_for_date", return_value=False)
     def test_create_issue_without_cwd_still_works(self, mock_exists, mock_run):
-        """create_daydream_issue works without cwd (backward compatible)."""
-        from scripts.daydream_report import create_daydream_issue
+        """create_reflections_issue works without cwd (backward compatible)."""
+        from scripts.reflections_report import create_reflections_issue
 
         mock_run.return_value = MagicMock(
             returncode=0, stdout="https://github.com/org/repo/issues/2\n"
         )
         findings = {"test": ["finding"]}
-        result = create_daydream_issue(findings, "2026-02-16")
+        result = create_reflections_issue(findings, "2026-02-16")
         assert result is not None

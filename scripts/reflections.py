@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Daydream - Autonomous Daily Maintenance System
+Reflections - Autonomous Daily Maintenance System
 
-A long-running process that performs daily maintenance tasks:
+A long-running process that performs daily self-directed maintenance tasks:
 1. Clean up legacy code
 2. Review previous day's logs (per-project, with structured error extraction)
 3. Check error logs via Sentry (skips gracefully if MCP unavailable)
@@ -13,15 +13,15 @@ A long-running process that performs daily maintenance tasks:
 8. Auto-fix high-confidence code bugs via plan-build-PR
 9. Memory consolidation (Redis LessonLearned model)
 10. Produce daily report (local markdown)
-11. GitHub issue creation (per-project, via daydream_report module)
+11. GitHub issue creation (per-project, via reflections_report module)
 12. Skills audit (validate all SKILL.md files against template standards)
-13. Redis TTL cleanup (all models including daydream models)
+13. Redis TTL cleanup (all models including reflections models)
 14. Redis data quality checks (unsummarized links, dead channels)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
-State: DaydreamRun | Ignore patterns: DaydreamIgnore | Lessons: LessonLearned
+State: ReflectionRun | Ignore patterns: ReflectionIgnore | Lessons: LessonLearned
 
-See docs/features/daydream.md for full documentation.
+See docs/features/reflections.md for full documentation.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ try:
 except ImportError:
     anthropic = None  # type: ignore[assignment]
 
-from scripts.daydream_report import create_daydream_issue, reset_dedup_guard  # noqa: E402
+from scripts.reflections_report import create_reflections_issue, reset_dedup_guard  # noqa: E402
 from scripts.docs_auditor import DocsAuditor  # noqa: E402
 
 # Configure logging
@@ -55,13 +55,13 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
-logger = logging.getLogger("daydream")
+logger = logging.getLogger("reflections")
 
 # Paths — resolved at import time so they stay absolute even if cwd changes
 PROJECT_ROOT = Path(__file__).parent.parent
 AI_ROOT = PROJECT_ROOT  # Preserved alias; do not reassign in production code
 LOGS_DIR = PROJECT_ROOT / "logs"
-DAYDREAM_DIR = LOGS_DIR / "daydream"
+REFLECTIONS_DIR = LOGS_DIR / "reflections"
 DATA_DIR = PROJECT_ROOT / "data"
 SESSIONS_DIR = LOGS_DIR / "sessions"
 
@@ -71,9 +71,9 @@ SESSIONS_DIR = LOGS_DIR / "sessions"
 
 def load_ignore_log() -> list[dict]:
     """Load active (non-expired) ignore entries from Redis."""
-    from models.daydream import DaydreamIgnore
+    from models.reflections import ReflectionIgnore
 
-    active = DaydreamIgnore.get_active()
+    active = ReflectionIgnore.get_active()
     return [
         {
             "pattern": entry.pattern,
@@ -90,9 +90,9 @@ def load_ignore_log() -> list[dict]:
 
 def prune_ignore_log() -> None:
     """Remove expired entries from the ignore log via Redis."""
-    from models.daydream import DaydreamIgnore
+    from models.reflections import ReflectionIgnore
 
-    deleted = DaydreamIgnore.cleanup_expired()
+    deleted = ReflectionIgnore.cleanup_expired()
     if deleted:
         logger.info(f"Pruned {deleted} expired ignore entries from Redis")
 
@@ -366,7 +366,7 @@ def consolidate_memory(
         reflections: List of reflection dicts from run_llm_reflection().
         date: Date string (YYYY-MM-DD) for new entries.
     """
-    from models.daydream import LessonLearned
+    from models.reflections import LessonLearned
 
     # Prune old entries
     pruned = LessonLearned.cleanup_expired(max_age_days=90)
@@ -476,10 +476,10 @@ def extract_errors_from_redis(target_date: str) -> list[dict[str, str]]:
     return errors
 
 
-class DaydreamRunner:
-    """Runs the daydream maintenance process.
+class ReflectionRunner:
+    """Runs the reflections maintenance process.
 
-    State is persisted in Redis via DaydreamRun model. Falls back to
+    State is persisted in Redis via ReflectionRun model. Falls back to
     local JSON file if Redis is unavailable.
     """
 
@@ -503,14 +503,14 @@ class DaydreamRunner:
             (14, "Redis Data Quality", self.step_redis_data_quality),
         ]
 
-    def _load_state(self) -> DaydreamState:
-        """Load state from Redis DaydreamRun model."""
+    def _load_state(self) -> ReflectionsState:
+        """Load state from Redis ReflectionRun model."""
         today = datetime.now().strftime("%Y-%m-%d")
-        from models.daydream import DaydreamRun
+        from models.reflections import ReflectionRun
 
-        run = DaydreamRun.load_or_create(today)
-        # Wrap in DaydreamState for API compatibility
-        state = DaydreamState(
+        run = ReflectionRun.load_or_create(today)
+        # Wrap in ReflectionsState for API compatibility
+        state = ReflectionsState(
             current_step=run.current_step or 1,
             completed_steps=run.completed_steps or [],
             daily_report=run.daily_report or [],
@@ -524,11 +524,11 @@ class DaydreamRunner:
         return state
 
     async def run(self) -> None:
-        """Run all daydream steps."""
-        logger.info(f"Starting Daydream for {self.state.date}")
+        """Run all reflections steps."""
+        logger.info(f"Starting Reflections for {self.state.date}")
         logger.info(f"Resuming from step {self.state.current_step}")
 
-        DAYDREAM_DIR.mkdir(parents=True, exist_ok=True)
+        REFLECTIONS_DIR.mkdir(parents=True, exist_ok=True)
 
         for step_num, step_name, step_func in self.steps:
             if step_num in self.state.completed_steps:
@@ -555,7 +555,7 @@ class DaydreamRunner:
                 self.state.save()
                 continue
 
-        logger.info("Daydream completed successfully")
+        logger.info("Reflections completed successfully")
 
     async def step_clean_legacy(self) -> None:
         """Step 1: Clean up legacy code (ai-repo specific)."""
@@ -814,7 +814,7 @@ class DaydreamRunner:
         """Step 10: Produce daily report to local markdown file."""
         total_steps = len(self.steps)
         report_lines = [
-            f"# Daydream Report - {self.state.date}",
+            f"# Reflections Report - {self.state.date}",
             "",
             "## Summary",
             f"- Steps completed: {len(self.state.completed_steps)}/{total_steps}",
@@ -884,8 +884,8 @@ class DaydreamRunner:
 
         # Write report
         report_content = "\n".join(report_lines)
-        DAYDREAM_DIR.mkdir(parents=True, exist_ok=True)
-        report_file = DAYDREAM_DIR / f"report_{self.state.date}.md"
+        REFLECTIONS_DIR.mkdir(parents=True, exist_ok=True)
+        report_file = REFLECTIONS_DIR / f"report_{self.state.date}.md"
         report_file.write_text(report_content)
 
         logger.info(f"Report written to {report_file}")
@@ -956,9 +956,9 @@ class DaydreamRunner:
 
     async def step_auto_fix_bugs(self) -> None:
         """Step 8: Auto-fix high-confidence code bugs via plan-build-PR."""
-        enabled = os.environ.get("DAYDREAM_AUTO_FIX_ENABLED", "true").lower()
+        enabled = os.environ.get("REFLECTIONS_AUTO_FIX_ENABLED", "true").lower()
         if enabled not in ("true", "1", "yes"):
-            logger.info("DAYDREAM_AUTO_FIX_ENABLED is false, skipping auto-fix step")
+            logger.info("REFLECTIONS_AUTO_FIX_ENABLED is false, skipping auto-fix step")
             self.state.step_progress["auto_fix_bugs"] = {
                 "skipped": True,
                 "reason": "disabled",
@@ -1099,7 +1099,7 @@ class DaydreamRunner:
                 continue
 
             project_wd = project["working_directory"]
-            issue_url_or_bool = create_daydream_issue(
+            issue_url_or_bool = create_reflections_issue(
                 project_findings,
                 self.state.date,
                 cwd=project_wd,
@@ -1167,14 +1167,14 @@ class DaydreamRunner:
         """Step 13: Run TTL cleanup on all Redis models.
 
         Cleans up: TelegramMessage, Link, Chat, AgentSession (90-day),
-        BridgeEvent (7-day), DaydreamRun (30-day), DaydreamIgnore (expired),
+        BridgeEvent (7-day), ReflectionRun (30-day), ReflectionIgnore (expired),
         LessonLearned (90-day).
         """
         try:
             from models.agent_session import AgentSession
             from models.bridge_event import BridgeEvent
             from models.chat import Chat
-            from models.daydream import DaydreamIgnore, DaydreamRun, LessonLearned
+            from models.reflections import ReflectionIgnore, ReflectionRun, LessonLearned
             from models.link import Link
             from models.telegram import TelegramMessage
 
@@ -1183,8 +1183,8 @@ class DaydreamRunner:
             chat_deleted = Chat.cleanup_expired(max_age_days=90)
             session_deleted = AgentSession.cleanup_expired(max_age_days=90)
             event_deleted = BridgeEvent.cleanup_old(max_age_seconds=7 * 86400)
-            run_deleted = DaydreamRun.cleanup_expired(max_age_days=30)
-            ignore_deleted = DaydreamIgnore.cleanup_expired()
+            run_deleted = ReflectionRun.cleanup_expired(max_age_days=30)
+            ignore_deleted = ReflectionIgnore.cleanup_expired()
             lesson_deleted = LessonLearned.cleanup_expired(max_age_days=90)
 
             total = (
@@ -1339,7 +1339,7 @@ class DaydreamRunner:
         }
 
     async def step_post_to_telegram(self, project: dict, issue_url: str = "") -> None:
-        """Post daydream summary to project's Telegram chat.
+        """Post reflections summary to project's Telegram chat.
 
         Args:
             project: Project dict from load_local_projects().
@@ -1370,7 +1370,7 @@ class DaydreamRunner:
             findings_count = sum(
                 len(v) for k, v in self.state.findings.items() if k.startswith(f"{slug}:")
             )
-            msg_lines = [f"Daydream Report — {self.state.date}"]
+            msg_lines = [f"Reflections Report — {self.state.date}"]
             msg_lines.append(f"Project: {project.get('name', slug)}")
             if findings_count:
                 msg_lines.append(f"Findings: {findings_count} items")
@@ -1384,7 +1384,7 @@ class DaydreamRunner:
                 for group_name in groups[:1]:  # only post to first group
                     try:
                         await client.send_message(group_name, message)
-                        logger.info(f"Posted daydream summary to {group_name}")
+                        logger.info(f"Posted reflections summary to {group_name}")
                     except Exception as e:
                         logger.warning(f"Could not post to {group_name}: {e}")
         except ImportError:
@@ -1393,14 +1393,14 @@ class DaydreamRunner:
             logger.warning(f"Telegram post failed for {project['slug']}: {e}")
 
 
-# --- DaydreamState: compatibility wrapper ---
+# --- ReflectionsState: compatibility wrapper ---
 
 from dataclasses import dataclass, field  # noqa: E402
 
 
 @dataclass
-class DaydreamState:
-    """Persisted state for resumability via Redis DaydreamRun model."""
+class ReflectionsState:
+    """Persisted state for resumability via Redis ReflectionRun model."""
 
     current_step: int = 1
     step_started_at: str | None = None
@@ -1414,18 +1414,18 @@ class DaydreamState:
     auto_fix_attempts: list[dict] = field(default_factory=list)
 
     def save(self) -> None:
-        """Save state to Redis DaydreamRun model."""
+        """Save state to Redis ReflectionRun model."""
         import time as _time
 
-        from models.daydream import DaydreamRun
+        from models.reflections import ReflectionRun
 
-        existing = DaydreamRun.query.filter(date=self.date)
+        existing = ReflectionRun.query.filter(date=self.date)
         started_at = _time.time()
         if existing:
             started_at = existing[0].started_at or started_at
             existing[0].delete()
 
-        DaydreamRun.create(
+        ReflectionRun.create(
             date=self.date,
             current_step=self.current_step,
             completed_steps=self.completed_steps,
@@ -1450,7 +1450,7 @@ async def main() -> None:
     """Main entry point."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Daydream autonomous maintenance")
+    parser = argparse.ArgumentParser(description="Reflections autonomous maintenance")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -1470,14 +1470,14 @@ async def main() -> None:
     args = parser.parse_args()
 
     if args.ignore:
-        from models.daydream import DaydreamIgnore
+        from models.reflections import ReflectionIgnore
 
-        entry = DaydreamIgnore.add_ignore(pattern=args.ignore, reason=args.reason, days=14)
+        entry = ReflectionIgnore.add_ignore(pattern=args.ignore, reason=args.reason, days=14)
         ignored_until = datetime.fromtimestamp(entry.expires_at).date().isoformat()
         print(f"Added ignore entry: {args.ignore!r} (until {ignored_until})")
         return
 
-    runner = DaydreamRunner()
+    runner = ReflectionRunner()
     if args.dry_run:
         runner.state._dry_run = True
         logger.info("DRY RUN mode — no side effects will be triggered")

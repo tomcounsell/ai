@@ -1,4 +1,4 @@
-"""Tests for daydream core: LLM reflection, memory consolidation, auto-fix, data quality."""
+"""Tests for reflections core: LLM reflection, memory consolidation, auto-fix, data quality."""
 
 from __future__ import annotations
 
@@ -16,10 +16,10 @@ class TestLLMReflection:
     """Tests for LLM reflection step."""
 
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
-    @patch("scripts.daydream.anthropic")
+    @patch("scripts.reflections.anthropic")
     def test_reflection_calls_haiku(self, mock_anthropic_module):
         """Calls Claude Haiku with session analysis data."""
-        from scripts.daydream import run_llm_reflection
+        from scripts.reflections import run_llm_reflection
 
         mock_client = MagicMock()
         mock_anthropic_module.Anthropic.return_value = mock_client
@@ -57,7 +57,7 @@ class TestLLMReflection:
     @patch.dict(os.environ, {}, clear=True)
     def test_reflection_skips_without_api_key(self):
         """Skips gracefully when no ANTHROPIC_API_KEY."""
-        from scripts.daydream import run_llm_reflection
+        from scripts.reflections import run_llm_reflection
 
         # Remove the key if present
         os.environ.pop("ANTHROPIC_API_KEY", None)
@@ -67,10 +67,10 @@ class TestLLMReflection:
         assert result == []
 
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
-    @patch("scripts.daydream.anthropic")
+    @patch("scripts.reflections.anthropic")
     def test_reflection_handles_api_error(self, mock_anthropic_module):
         """Returns empty list on API failure."""
-        from scripts.daydream import run_llm_reflection
+        from scripts.reflections import run_llm_reflection
 
         mock_client = MagicMock()
         mock_anthropic_module.Anthropic.return_value = mock_client
@@ -82,10 +82,10 @@ class TestLLMReflection:
         assert result == []
 
     @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"})
-    @patch("scripts.daydream.anthropic")
+    @patch("scripts.reflections.anthropic")
     def test_reflection_handles_malformed_response(self, mock_anthropic_module):
         """Returns empty list when API response is not valid JSON."""
-        from scripts.daydream import run_llm_reflection
+        from scripts.reflections import run_llm_reflection
 
         mock_client = MagicMock()
         mock_anthropic_module.Anthropic.return_value = mock_client
@@ -100,7 +100,7 @@ class TestLLMReflection:
 
     def test_reflection_skips_when_no_findings(self):
         """Skips LLM call when analysis has nothing interesting."""
-        from scripts.daydream import run_llm_reflection
+        from scripts.reflections import run_llm_reflection
 
         result = run_llm_reflection(
             {"sessions_analyzed": 0, "corrections": [], "thrash_sessions": []}
@@ -116,8 +116,8 @@ class TestMemoryConsolidation:
 
     def test_appends_lessons_to_redis(self):
         """Writes reflection output to Redis LessonLearned model."""
-        from models.daydream import LessonLearned
-        from scripts.daydream import consolidate_memory
+        from models.reflections import LessonLearned
+        from scripts.reflections import consolidate_memory
 
         reflections = [
             {
@@ -139,8 +139,8 @@ class TestMemoryConsolidation:
 
     def test_deduplicates_by_pattern(self):
         """Does not add duplicate patterns."""
-        from models.daydream import LessonLearned
-        from scripts.daydream import consolidate_memory
+        from models.reflections import LessonLearned
+        from scripts.reflections import consolidate_memory
 
         # Add first entry
         reflections1 = [
@@ -173,8 +173,8 @@ class TestMemoryConsolidation:
         """Removes entries older than 90 days."""
         import time
 
-        from models.daydream import LessonLearned
-        from scripts.daydream import consolidate_memory
+        from models.reflections import LessonLearned
+        from scripts.reflections import consolidate_memory
 
         # Create old lesson directly in Redis
         LessonLearned.create(
@@ -207,8 +207,8 @@ class TestMemoryConsolidation:
 
     def test_creates_lesson_in_redis(self):
         """Creates lesson in Redis even when no prior entries exist."""
-        from models.daydream import LessonLearned
-        from scripts.daydream import consolidate_memory
+        from models.reflections import LessonLearned
+        from scripts.reflections import consolidate_memory
 
         reflections = [
             {
@@ -225,8 +225,8 @@ class TestMemoryConsolidation:
 
     def test_handles_empty_reflections(self):
         """No-op with empty reflections (but still prunes)."""
-        from models.daydream import LessonLearned
-        from scripts.daydream import consolidate_memory
+        from models.reflections import LessonLearned
+        from scripts.reflections import consolidate_memory
 
         consolidate_memory([], "2026-02-16")
         # No lessons should exist
@@ -242,9 +242,9 @@ class TestSentryCheck:
     @pytest.mark.asyncio
     async def test_sentry_skips_gracefully(self, tmp_path):
         """Sentry check logs skip message and continues."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.state.findings = {}
         await runner.step_check_sentry()
         assert "sentry" in runner.state.findings
@@ -258,17 +258,17 @@ class TestTaskCleanup:
     """Tests for task cleanup step using gh CLI."""
 
     @pytest.mark.asyncio
-    @patch("scripts.daydream.subprocess.run")
+    @patch("scripts.reflections.subprocess.run")
     async def test_task_cleanup_calls_gh(self, mock_run):
         """Step 4 calls gh issue list."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="42\tbug title\topen\tbug\n",
         )
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.state.findings = {}
         await runner.step_clean_tasks()
 
@@ -280,14 +280,14 @@ class TestTaskCleanup:
         assert "list" in call_args
 
     @pytest.mark.asyncio
-    @patch("scripts.daydream.subprocess.run")
+    @patch("scripts.reflections.subprocess.run")
     async def test_task_cleanup_handles_gh_failure(self, mock_run):
         """Step 4 handles gh CLI failure gracefully."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         mock_run.side_effect = FileNotFoundError("gh not found")
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.state.findings = {}
         await runner.step_clean_tasks()
         # Should not raise
@@ -300,15 +300,15 @@ class TestGitHubIssueStep:
     """Tests for GitHub issue creation step."""
 
     @pytest.mark.asyncio
-    @patch("scripts.daydream.create_daydream_issue")
+    @patch("scripts.reflections.create_reflections_issue")
     async def test_creates_issue_per_project_with_findings(self, mock_create):
         """Step 10 creates GitHub issue for each project that has namespaced findings."""
         from unittest.mock import AsyncMock
 
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         mock_create.return_value = "https://github.com/org/repo/issues/1"
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
 
         # Inject a fake project with github config
         runner.projects = [
@@ -327,12 +327,12 @@ class TestGitHubIssueStep:
         mock_create.assert_called_once()
 
     @pytest.mark.asyncio
-    @patch("scripts.daydream.create_daydream_issue")
+    @patch("scripts.reflections.create_reflections_issue")
     async def test_skips_issue_when_no_findings(self, mock_create):
         """Step 10 skips when no findings."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.state.findings = {}
         await runner.step_create_github_issue()
         mock_create.assert_not_called()
@@ -346,21 +346,21 @@ class TestStepAuditDocs:
 
     def test_step_audit_docs_is_registered(self):
         """step_audit_docs is registered as step 5 in runner.steps."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         assert (5, "Audit Documentation", runner.step_audit_docs) in runner.steps
 
     @pytest.mark.asyncio
-    @patch("scripts.daydream.asyncio.to_thread")
-    @patch("scripts.daydream.DocsAuditor")
+    @patch("scripts.reflections.asyncio.to_thread")
+    @patch("scripts.reflections.DocsAuditor")
     async def test_step_audit_docs_calls_docs_auditor(
         self, mock_docs_auditor_cls, mock_to_thread
     ):
         """step_audit_docs instantiates DocsAuditor and delegates to run() via asyncio.to_thread."""
         from unittest.mock import MagicMock
 
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
         # Build a fake summary with the attributes step_audit_docs inspects
         mock_summary = MagicMock()
@@ -372,7 +372,7 @@ class TestStepAuditDocs:
 
         mock_to_thread.return_value = mock_summary
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.state.findings = {}
         await runner.step_audit_docs()
 
@@ -393,7 +393,7 @@ class TestIgnoreLog:
 
     def test_load_ignore_log_empty_when_no_entries(self):
         """load_ignore_log returns empty list when no entries exist in Redis."""
-        from scripts.daydream import load_ignore_log
+        from scripts.reflections import load_ignore_log
 
         result = load_ignore_log()
         assert result == []
@@ -402,20 +402,20 @@ class TestIgnoreLog:
         """load_ignore_log excludes expired entries via Redis."""
         import time
 
-        from models.daydream import DaydreamIgnore
-        from scripts.daydream import load_ignore_log
+        from models.reflections import ReflectionIgnore
+        from scripts.reflections import load_ignore_log
 
         # Create expired entry
-        DaydreamIgnore.create(
+        ReflectionIgnore.create(
             pattern="expired",
             reason="",
             created_at=time.time() - (2 * 86400),
             expires_at=time.time() - 86400,  # expired yesterday
         )
         # Create active entry
-        DaydreamIgnore.add_ignore("active", days=14)
+        ReflectionIgnore.add_ignore("active", days=14)
         # Create entry expiring today (still active)
-        DaydreamIgnore.create(
+        ReflectionIgnore.create(
             pattern="today",
             reason="",
             created_at=time.time() - 86400,
@@ -432,29 +432,29 @@ class TestIgnoreLog:
         """prune_ignore_log removes expired entries and keeps active ones in Redis."""
         import time
 
-        from models.daydream import DaydreamIgnore
-        from scripts.daydream import prune_ignore_log
+        from models.reflections import ReflectionIgnore
+        from scripts.reflections import prune_ignore_log
 
         # Create expired entry
-        DaydreamIgnore.create(
+        ReflectionIgnore.create(
             pattern="expired",
             reason="",
             created_at=time.time() - (2 * 86400),
             expires_at=time.time() - 86400,
         )
         # Create active entry
-        DaydreamIgnore.add_ignore("active", days=14)
+        ReflectionIgnore.add_ignore("active", days=14)
 
         prune_ignore_log()
 
-        remaining = DaydreamIgnore.query.all()
+        remaining = ReflectionIgnore.query.all()
         patterns = [e.pattern for e in remaining]
         assert "expired" not in patterns
         assert "active" in patterns
 
     def test_is_ignored_matches_substring(self):
         """is_ignored returns True when entry_pattern is a substring of pattern."""
-        from scripts.daydream import is_ignored
+        from scripts.reflections import is_ignored
 
         entries = [{"pattern": "null pointer"}]
         assert is_ignored("causes null pointer dereference", entries) is True
@@ -462,7 +462,7 @@ class TestIgnoreLog:
 
     def test_is_ignored_case_insensitive(self):
         """is_ignored does case-insensitive matching."""
-        from scripts.daydream import is_ignored
+        from scripts.reflections import is_ignored
 
         entries = [{"pattern": "NULL POINTER"}]
         assert is_ignored("null pointer error", entries) is True
@@ -473,7 +473,7 @@ class TestConfidenceScorer:
 
     def test_high_confidence_all_three_criteria(self):
         """Returns True when all three criteria are met."""
-        from scripts.daydream import is_high_confidence
+        from scripts.reflections import is_high_confidence
 
         r = {
             "category": "code_bug",
@@ -484,7 +484,7 @@ class TestConfidenceScorer:
 
     def test_high_confidence_two_of_three(self):
         """Returns True when exactly two criteria are met."""
-        from scripts.daydream import is_high_confidence
+        from scripts.reflections import is_high_confidence
 
         # code_bug + long pattern, no prevention
         r = {
@@ -496,7 +496,7 @@ class TestConfidenceScorer:
 
     def test_not_high_confidence_one_criterion(self):
         """Returns False when only one criterion is met."""
-        from scripts.daydream import is_high_confidence
+        from scripts.reflections import is_high_confidence
 
         r = {
             "category": "misunderstanding",
@@ -507,7 +507,7 @@ class TestConfidenceScorer:
 
     def test_not_high_confidence_all_missing(self):
         """Returns False when no criteria are met."""
-        from scripts.daydream import is_high_confidence
+        from scripts.reflections import is_high_confidence
 
         r = {"category": "misunderstanding", "prevention": "", "pattern": ""}
         assert is_high_confidence(r) is False
@@ -518,11 +518,11 @@ class TestAutoFixStep:
 
     @pytest.mark.asyncio
     async def test_auto_fix_disabled_by_env(self, monkeypatch):
-        """step_auto_fix_bugs skips when DAYDREAM_AUTO_FIX_ENABLED=false."""
-        monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "false")
-        from scripts.daydream import DaydreamRunner
+        """step_auto_fix_bugs skips when REFLECTIONS_AUTO_FIX_ENABLED=false."""
+        monkeypatch.setenv("REFLECTIONS_AUTO_FIX_ENABLED", "false")
+        from scripts.reflections import ReflectionsRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.state.reflections = [
             {
                 "category": "code_bug",
@@ -538,12 +538,12 @@ class TestAutoFixStep:
     @pytest.mark.asyncio
     async def test_auto_fix_dry_run_does_not_invoke_claude(self, monkeypatch):
         """Dry run logs intent without calling claude subprocess."""
-        monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "true")
+        monkeypatch.setenv("REFLECTIONS_AUTO_FIX_ENABLED", "true")
         from unittest.mock import patch
 
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.state._dry_run = True
         runner.state.reflections = [
             {
@@ -555,10 +555,10 @@ class TestAutoFixStep:
         ]
 
         with (
-            patch("scripts.daydream.subprocess.run") as mock_run,
-            patch("scripts.daydream.has_existing_github_work", return_value=False),
-            patch("scripts.daydream.load_ignore_log", return_value=[]),
-            patch("scripts.daydream.prune_ignore_log"),
+            patch("scripts.reflections.subprocess.run") as mock_run,
+            patch("scripts.reflections.has_existing_github_work", return_value=False),
+            patch("scripts.reflections.load_ignore_log", return_value=[]),
+            patch("scripts.reflections.prune_ignore_log"),
         ):
             await runner.step_auto_fix_bugs()
             # subprocess.run should NOT have been called for the fix (only gh dedup checks)
@@ -574,12 +574,12 @@ class TestAutoFixStep:
     @pytest.mark.asyncio
     async def test_auto_fix_skips_ignored_pattern(self, monkeypatch):
         """Skips a reflection whose pattern is in the ignore log."""
-        monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "true")
+        monkeypatch.setenv("REFLECTIONS_AUTO_FIX_ENABLED", "true")
         from unittest.mock import patch
 
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.state._dry_run = False
         runner.state.reflections = [
             {
@@ -593,9 +593,9 @@ class TestAutoFixStep:
         ignore_entries = [{"pattern": "null pointer", "ignored_until": "2099-01-01"}]
 
         with (
-            patch("scripts.daydream.load_ignore_log", return_value=ignore_entries),
-            patch("scripts.daydream.prune_ignore_log"),
-            patch("scripts.daydream.subprocess.run") as mock_run,
+            patch("scripts.reflections.load_ignore_log", return_value=ignore_entries),
+            patch("scripts.reflections.prune_ignore_log"),
+            patch("scripts.reflections.subprocess.run") as mock_run,
         ):
             await runner.step_auto_fix_bugs()
             # subprocess.run should NOT be called with claude
@@ -611,12 +611,12 @@ class TestAutoFixStep:
     @pytest.mark.asyncio
     async def test_auto_fix_skips_low_confidence(self, monkeypatch):
         """Skips reflections that don't meet the 2-of-3 confidence criteria."""
-        monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "true")
+        monkeypatch.setenv("REFLECTIONS_AUTO_FIX_ENABLED", "true")
         from unittest.mock import patch
 
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.state._dry_run = True
         runner.state.reflections = [
             {
@@ -628,8 +628,8 @@ class TestAutoFixStep:
         ]
 
         with (
-            patch("scripts.daydream.load_ignore_log", return_value=[]),
-            patch("scripts.daydream.prune_ignore_log"),
+            patch("scripts.reflections.load_ignore_log", return_value=[]),
+            patch("scripts.reflections.prune_ignore_log"),
         ):
             await runner.step_auto_fix_bugs()
 
@@ -641,9 +641,9 @@ class TestAutoFixStep:
     @pytest.mark.asyncio
     async def test_auto_fix_step_registered_as_step_8(self):
         """step_auto_fix_bugs is registered as step 8."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         step_nums = [s[0] for s in runner.steps]
         step_names = {s[0]: s[1] for s in runner.steps}
         assert 8 in step_nums
@@ -652,9 +652,9 @@ class TestAutoFixStep:
     @pytest.mark.asyncio
     async def test_steps_renumbered_correctly(self):
         """Memory Consolidation is step 9, Produce Daily Report is 10, GitHub is 11."""
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         step_names = {s[0]: s[1] for s in runner.steps}
         assert step_names.get(9) == "Memory Consolidation"
         assert step_names.get(10) == "Produce Daily Report"
@@ -663,12 +663,12 @@ class TestAutoFixStep:
     @pytest.mark.asyncio
     async def test_auto_fix_skips_duplicate_github_work(self, monkeypatch):
         """Skips patterns with an existing open issue or PR."""
-        monkeypatch.setenv("DAYDREAM_AUTO_FIX_ENABLED", "true")
+        monkeypatch.setenv("REFLECTIONS_AUTO_FIX_ENABLED", "true")
         from unittest.mock import patch
 
-        from scripts.daydream import DaydreamRunner
+        from scripts.reflections import ReflectionsRunner
 
-        runner = DaydreamRunner()
+        runner = ReflectionsRunner()
         runner.state._dry_run = False
         runner.state.reflections = [
             {
@@ -687,10 +687,10 @@ class TestAutoFixStep:
         ]
 
         with (
-            patch("scripts.daydream.load_ignore_log", return_value=[]),
-            patch("scripts.daydream.prune_ignore_log"),
-            patch("scripts.daydream.has_existing_github_work", return_value=True),
-            patch("scripts.daydream.subprocess.run") as mock_run,
+            patch("scripts.reflections.load_ignore_log", return_value=[]),
+            patch("scripts.reflections.prune_ignore_log"),
+            patch("scripts.reflections.has_existing_github_work", return_value=True),
+            patch("scripts.reflections.subprocess.run") as mock_run,
         ):
             await runner.step_auto_fix_bugs()
             claude_calls = [
@@ -703,23 +703,23 @@ class TestAutoFixStep:
         assert attempts[0]["status"] == "duplicate"
 
 
-class TestDaydreamStateAutoFixField:
-    """Tests for new auto_fix_attempts field on DaydreamState."""
+class TestReflectionsStateAutoFixField:
+    """Tests for new auto_fix_attempts field on ReflectionsState."""
 
     def test_auto_fix_attempts_defaults_to_empty_list(self):
-        """DaydreamState.auto_fix_attempts defaults to []."""
-        from scripts.daydream import DaydreamState
+        """ReflectionsState.auto_fix_attempts defaults to []."""
+        from scripts.reflections import ReflectionsState
 
-        state = DaydreamState()
+        state = ReflectionsState()
         assert state.auto_fix_attempts == []
 
     def test_auto_fix_attempts_persisted_in_serialization(self):
         """auto_fix_attempts survives asdict round-trip."""
         from dataclasses import asdict
 
-        from scripts.daydream import DaydreamState
+        from scripts.reflections import ReflectionsState
 
-        state = DaydreamState()
+        state = ReflectionsState()
         state.auto_fix_attempts = [{"pattern": "foo", "status": "dry_run"}]
         d = asdict(state)
         assert d["auto_fix_attempts"] == [{"pattern": "foo", "status": "dry_run"}]
@@ -729,18 +729,18 @@ class TestCLIFlags:
     """Tests for CLI --dry-run and --ignore flags."""
 
     def test_ignore_flag_appends_to_redis(self, tmp_path, monkeypatch):
-        """--ignore appends a new entry to Redis DaydreamIgnore model."""
+        """--ignore appends a new entry to Redis ReflectionIgnore model."""
         import sys
 
-        import scripts.daydream as daydream_mod
-        from models.daydream import DaydreamIgnore
+        import scripts.reflections as reflections_mod
+        from models.reflections import ReflectionIgnore
 
-        # Simulate CLI: python daydream.py --ignore "some bug pattern" --reason "known issue"
+        # Simulate CLI: python reflections.py --ignore "some bug pattern" --reason "known issue"
         monkeypatch.setattr(
             sys,
             "argv",
             [
-                "daydream.py",
+                "reflections.py",
                 "--ignore",
                 "some bug pattern",
                 "--reason",
@@ -750,9 +750,9 @@ class TestCLIFlags:
 
         import asyncio
 
-        asyncio.run(daydream_mod.main())
+        asyncio.run(reflections_mod.main())
 
-        entries = DaydreamIgnore.query.all()
+        entries = ReflectionIgnore.query.all()
         assert len(entries) == 1
         assert entries[0].pattern == "some bug pattern"
         assert entries[0].reason == "known issue"
@@ -763,16 +763,16 @@ class TestCLIFlags:
         import sys
         from unittest.mock import patch
 
-        import scripts.daydream as daydream_mod
+        import scripts.reflections as reflections_mod
 
-        monkeypatch.setattr(sys, "argv", ["daydream.py", "--dry-run"])
+        monkeypatch.setattr(sys, "argv", ["reflections.py", "--dry-run"])
 
         captured_runner = {}
 
         async def fake_run(self):
             captured_runner["instance"] = self
 
-        with patch.object(daydream_mod.DaydreamRunner, "run", fake_run):
-            asyncio.run(daydream_mod.main())
+        with patch.object(reflections_mod.ReflectionsRunner, "run", fake_run):
+            asyncio.run(reflections_mod.main())
 
         assert captured_runner["instance"].state._dry_run is True
