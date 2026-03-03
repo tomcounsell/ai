@@ -250,9 +250,12 @@ class TestRenderStageProgress:
 
         line = _render_stage_progress(sdlc_session)
         assert line is not None
-        assert "☑ ISSUE" in line
-        assert "☑ DOCS" in line
+        assert "ISSUE 177" in line
+        assert "DOCS" in line
         assert "→" in line
+        # No checkbox icons in new format
+        assert "☑" not in line
+        assert "☐" not in line
 
     def test_partial_progress(self, session):
         from bridge.summarizer import _render_stage_progress
@@ -260,11 +263,16 @@ class TestRenderStageProgress:
         session.append_history("stage", "ISSUE completed ☑")
         session.append_history("stage", "PLAN completed ☑")
         session.append_history("stage", "BUILD in_progress ▶")
+        # Need issue link for issue number embedding
+        session.set_link("issue", "https://github.com/tomcounsell/ai/issues/177")
         line = _render_stage_progress(session)
-        assert "☑ ISSUE" in line
-        assert "☑ PLAN" in line
+        assert "ISSUE 177" in line
+        assert "PLAN" in line
         assert "▶ BUILD" in line
-        assert "☐ TEST" in line
+        assert "TEST" in line
+        # No checkbox icons in new format
+        assert "☑" not in line
+        assert "☐" not in line
 
 
 class TestRenderLinkFooter:
@@ -302,7 +310,8 @@ class TestRenderLinkFooter:
         assert " | " in footer
         assert "Issue #177" in footer
         assert "PR #180" in footer
-        assert "Plan" in footer
+        # Plan links are excluded from the footer
+        assert "Plan" not in footer
 
 
 class TestGetStatusEmoji:
@@ -366,17 +375,20 @@ class TestComposeStructuredSummary:
             is_completion=True,
         )
         lines = result.split("\n")
-        # Line 1: emoji + label from message_text
+        # Line 1: emoji only (no message echo)
         assert "✅" in lines[0]
-        assert "177" in lines[0]
-        # Line 2: stage progress
-        assert "☑ ISSUE" in result
-        assert "☑ DOCS" in result
+        # Stage progress line includes issue number
+        assert "ISSUE 177" in result
+        assert "DOCS" in result
+        # No checkbox icons
+        assert "☑" not in result
+        assert "☐" not in result
         # Bullets present
         assert "• Unified AgentSession model" in result
-        # Link footer
+        # Link footer (no plan link)
         assert "Issue #177" in result
         assert "PR #180" in result
+        assert "Plan" not in result
 
     def test_qa_session_no_stages(self, qa_session):
         from bridge.summarizer import _compose_structured_summary
@@ -403,21 +415,21 @@ class TestComposeStructuredSummary:
         )
         assert "Hey! All good here." in result
 
-    def test_strips_sdlc_prefix_from_label(self, sdlc_session):
+    def test_no_message_echo_in_summary(self, sdlc_session):
         from bridge.summarizer import _compose_structured_summary
 
-        # message_text is "SDLC 177" — the "SDLC " prefix should be stripped
+        # New format: no message echo on first line, just emoji
         result = _compose_structured_summary("• Work done", session=sdlc_session)
         first_line = result.split("\n")[0]
-        assert not first_line.startswith("✅ SDLC")
-        assert "177" in first_line
+        # First line is just the emoji, no message text
+        assert first_line.strip() == "✅"
 
     def test_emoji_not_doubled(self):
         from bridge.summarizer import _compose_structured_summary
 
         result = _compose_structured_summary("✅ Already has emoji")
-        # Should NOT have two ✅
-        assert result.count("✅") == 1
+        # Emoji is on its own line, the text follows — but only one emoji prefix
+        assert result.startswith("✅\n")
 
 
 # ── Summarizer with Session Context ──────────────────────────────────────────
@@ -448,10 +460,13 @@ class TestSummarizeWithSession:
             result = await summarize_response(long_text, session=sdlc_session)
 
         assert result.was_summarized is True
-        # Structured composition adds stage progress and links
-        assert "☑ ISSUE" in result.text
+        # Structured composition adds stage progress and links (new format)
+        assert "ISSUE 177" in result.text
         assert "Issue #177" in result.text
         assert "PR #180" in result.text
+        # No checkbox icons
+        assert "☑" not in result.text
+        assert "☐" not in result.text
         # The haiku output is included
         assert "Built the feature" in result.text
 
@@ -683,10 +698,11 @@ class TestSDLCLifecycle:
             is_completion=True,
         )
 
-        # Verify full structured output
-        assert "177" in result
-        assert "☑ ISSUE" in result
-        assert "☑ DOCS" in result
+        # Verify full structured output (new format, no checkboxes)
+        assert "ISSUE 177" in result
+        assert "DOCS" in result
+        assert "☑" not in result
+        assert "☐" not in result
         assert "• Unified AgentSession model" in result
         assert "Issue #177" in result
         assert "PR #180" in result
