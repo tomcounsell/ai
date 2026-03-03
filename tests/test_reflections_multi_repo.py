@@ -7,7 +7,7 @@ Tests cover:
 - step_create_github_issue() creates issues per-project with cwd support
 - step_post_to_telegram() posts per-project (skips gracefully when unconfigured)
 - step_clean_legacy() bug fix (cache_dirs and pyc_files variables)
-- ReflectionsRunner.__init__ loads self.projects
+- ReflectionRunner.__init__ loads self.projects
 """
 
 from __future__ import annotations
@@ -129,25 +129,25 @@ class TestLoadLocalProjects:
         assert projects == []
 
 
-# --- ReflectionsRunner.projects attribute ---
+# --- ReflectionRunner.projects attribute ---
 
 
-class TestReflectionsRunnerProjects:
-    """Tests that ReflectionsRunner loads self.projects on init."""
+class TestReflectionRunnerProjects:
+    """Tests that ReflectionRunner loads self.projects on init."""
 
     def test_runner_has_projects_attribute(self):
-        """ReflectionsRunner has self.projects populated on init."""
-        from scripts.reflections import ReflectionsRunner
+        """ReflectionRunner has self.projects populated on init."""
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         assert hasattr(runner, "projects")
         assert isinstance(runner.projects, list)
 
     def test_runner_projects_are_dicts(self):
         """Each project in self.projects is a dict with at least 'slug' and 'working_directory'."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         for project in runner.projects:
             assert isinstance(project, dict)
             assert "slug" in project
@@ -164,11 +164,11 @@ class TestStepCleanLegacyBugFix:
     @patch("scripts.reflections.subprocess.run")
     async def test_step_clean_legacy_runs_without_error(self, mock_run):
         """step_clean_legacy completes without NameError."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         mock_run.return_value = MagicMock(returncode=0, stdout="")
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state.findings = {}
         runner.state.step_progress = {}
 
@@ -182,11 +182,11 @@ class TestStepCleanLegacyBugFix:
     @patch("scripts.reflections.subprocess.run")
     async def test_step_clean_legacy_records_counts(self, mock_run):
         """step_clean_legacy records findings count."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         mock_run.return_value = MagicMock(returncode=0, stdout="")
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state.step_progress = {}
         await runner.step_clean_legacy()
 
@@ -204,7 +204,7 @@ class TestStepReviewLogsMultiRepo:
     @pytest.mark.asyncio
     async def test_review_logs_iterates_per_project(self, tmp_path):
         """step_review_logs checks logs dir for each project."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         # Create two project dirs with logs
         proj_a = tmp_path / "proj_a"
@@ -224,7 +224,7 @@ class TestStepReviewLogsMultiRepo:
             {"slug": "proj-b", "working_directory": str(proj_b)},
         ]
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.projects = projects
         runner.state.findings = {}
         runner.state.step_progress = {}
@@ -238,12 +238,12 @@ class TestStepReviewLogsMultiRepo:
     @pytest.mark.asyncio
     async def test_review_logs_skips_project_without_logs_dir(self, tmp_path):
         """Projects without a logs directory are noted and skipped."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         proj = tmp_path / "proj_no_logs"
         proj.mkdir()  # No logs subdir
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.projects = [{"slug": "proj-no-logs", "working_directory": str(proj)}]
         runner.state.findings = {}
         runner.state.step_progress = {}
@@ -254,7 +254,7 @@ class TestStepReviewLogsMultiRepo:
     @pytest.mark.asyncio
     async def test_review_logs_namespaces_findings(self, tmp_path):
         """Findings are namespaced with '{slug}:log_review'."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         proj = tmp_path / "proj_ns"
         logs = proj / "logs"
@@ -263,7 +263,7 @@ class TestStepReviewLogsMultiRepo:
             "2026-02-16 10:00:00 - mod - ERROR - Test error\n"
         )
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.projects = [{"slug": "my-proj", "working_directory": str(proj)}]
         runner.state.findings = {}
         runner.state.step_progress = {}
@@ -283,7 +283,7 @@ class TestStepCleanTasksMultiRepo:
     @patch("scripts.reflections.subprocess.run")
     async def test_clean_tasks_runs_gh_per_project(self, mock_run, tmp_path):
         """step_clean_tasks calls gh issue list for each project with github config."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         proj_dir = tmp_path / "proj"
         proj_dir.mkdir()
@@ -301,7 +301,7 @@ class TestStepCleanTasksMultiRepo:
             }
         ]
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.projects = projects
         runner.state.findings = {}
         runner.state.step_progress = {}
@@ -317,7 +317,7 @@ class TestStepCleanTasksMultiRepo:
     @patch("scripts.reflections.subprocess.run")
     async def test_clean_tasks_skips_project_without_github(self, mock_run, tmp_path):
         """Projects without github config are skipped for gh CLI calls."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         proj_dir = tmp_path / "proj_no_gh"
         proj_dir.mkdir()
@@ -330,7 +330,7 @@ class TestStepCleanTasksMultiRepo:
             }
         ]
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.projects = projects
         runner.state.findings = {}
         runner.state.step_progress = {}
@@ -350,7 +350,7 @@ class TestStepCleanTasksMultiRepo:
         self, mock_run, tmp_path
     ):
         """Findings are namespaced with '{slug}:tasks'."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         proj_dir = tmp_path / "proj_tasks"
         proj_dir.mkdir()
@@ -368,7 +368,7 @@ class TestStepCleanTasksMultiRepo:
             }
         ]
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.projects = projects
         runner.state.findings = {}
         runner.state.step_progress = {}
@@ -388,7 +388,7 @@ class TestStepCreateGithubIssueMultiRepo:
     @patch("scripts.reflections.create_reflections_issue")
     async def test_creates_issue_per_project_with_github(self, mock_create, tmp_path):
         """Creates an issue for each project that has github config."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         proj_dir = tmp_path / "proj_gh"
         proj_dir.mkdir()
@@ -403,7 +403,7 @@ class TestStepCreateGithubIssueMultiRepo:
             }
         ]
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.projects = projects
         runner.state.findings = {"gh-proj:log_review": ["some finding"]}
         runner.state.step_progress = {}
@@ -420,7 +420,7 @@ class TestStepCreateGithubIssueMultiRepo:
     @patch("scripts.reflections.create_reflections_issue")
     async def test_skips_project_without_github_config(self, mock_create, tmp_path):
         """Skips issue creation for projects without github config."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         proj_dir = tmp_path / "proj_no_gh"
         proj_dir.mkdir()
@@ -433,7 +433,7 @@ class TestStepCreateGithubIssueMultiRepo:
             }
         ]
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.projects = projects
         runner.state.findings = {"no-gh:log_review": ["something"]}
         runner.state.step_progress = {}
@@ -446,7 +446,7 @@ class TestStepCreateGithubIssueMultiRepo:
     @patch("scripts.reflections.create_reflections_issue")
     async def test_skips_when_no_per_project_findings(self, mock_create, tmp_path):
         """Skips issue creation when project has no findings."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         proj_dir = tmp_path / "proj_empty"
         proj_dir.mkdir()
@@ -459,7 +459,7 @@ class TestStepCreateGithubIssueMultiRepo:
             }
         ]
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.projects = projects
         runner.state.findings = {}  # No findings
         runner.state.step_progress = {}
@@ -478,9 +478,9 @@ class TestStepPostToTelegram:
     @pytest.mark.asyncio
     async def test_skips_when_no_telegram_groups(self):
         """Skips posting when project has no telegram.groups configured."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         project = {
             "slug": "no-tg",
             "working_directory": "/tmp",
@@ -494,7 +494,7 @@ class TestStepPostToTelegram:
         """Skips when valor.session file does not exist."""
         import scripts.reflections as dmod
 
-        # Set up a minimal config dir so ReflectionsRunner() can be constructed
+        # Set up a minimal config dir so ReflectionRunner() can be constructed
         config_dir = tmp_path / "config"
         config_dir.mkdir()
         (config_dir / "projects.json").write_text(json.dumps({"projects": {}}))
@@ -502,7 +502,7 @@ class TestStepPostToTelegram:
         orig_ai_root = dmod.AI_ROOT
         dmod.AI_ROOT = tmp_path  # No data/valor.session here
         try:
-            runner = dmod.ReflectionsRunner()
+            runner = dmod.ReflectionRunner()
             project = {
                 "slug": "tg-proj",
                 "working_directory": "/tmp",
@@ -532,7 +532,7 @@ class TestStepPostToTelegram:
         orig_ai_root = dmod.AI_ROOT
         dmod.AI_ROOT = tmp_path
         try:
-            runner = dmod.ReflectionsRunner()
+            runner = dmod.ReflectionRunner()
             project = {
                 "slug": "tg-proj",
                 "working_directory": "/tmp",

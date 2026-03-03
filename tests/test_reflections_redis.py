@@ -435,9 +435,9 @@ class TestRedisDataQuality:
 
     def test_step_registered_as_step_14(self):
         """step_redis_data_quality is registered as step 14."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         step_names = {s[0]: s[1] for s in runner.steps}
         assert step_names.get(14) == "Redis Data Quality"
 
@@ -447,7 +447,7 @@ class TestRedisDataQuality:
         import time
 
         from models.link import Link
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         # Create a recent link with no summary
         Link.create(
@@ -469,7 +469,7 @@ class TestRedisDataQuality:
             ai_summary="This is a summary",
         )
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state.findings = {}
         await runner.step_redis_data_quality()
 
@@ -482,7 +482,7 @@ class TestRedisDataQuality:
         import time
 
         from models.chat import Chat
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         # Create a stale chat (40 days old)
         Chat.create(
@@ -499,7 +499,7 @@ class TestRedisDataQuality:
             updated_at=time.time(),
         )
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state.findings = {}
         await runner.step_redis_data_quality()
 
@@ -509,9 +509,9 @@ class TestRedisDataQuality:
     @pytest.mark.asyncio
     async def test_empty_when_no_data(self):
         """No findings when Redis has no data."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state.findings = {}
         await runner.step_redis_data_quality()
 

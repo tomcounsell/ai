@@ -242,9 +242,9 @@ class TestSentryCheck:
     @pytest.mark.asyncio
     async def test_sentry_skips_gracefully(self, tmp_path):
         """Sentry check logs skip message and continues."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state.findings = {}
         await runner.step_check_sentry()
         assert "sentry" in runner.state.findings
@@ -261,14 +261,14 @@ class TestTaskCleanup:
     @patch("scripts.reflections.subprocess.run")
     async def test_task_cleanup_calls_gh(self, mock_run):
         """Step 4 calls gh issue list."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         mock_run.return_value = MagicMock(
             returncode=0,
             stdout="42\tbug title\topen\tbug\n",
         )
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state.findings = {}
         await runner.step_clean_tasks()
 
@@ -283,11 +283,11 @@ class TestTaskCleanup:
     @patch("scripts.reflections.subprocess.run")
     async def test_task_cleanup_handles_gh_failure(self, mock_run):
         """Step 4 handles gh CLI failure gracefully."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         mock_run.side_effect = FileNotFoundError("gh not found")
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state.findings = {}
         await runner.step_clean_tasks()
         # Should not raise
@@ -305,10 +305,10 @@ class TestGitHubIssueStep:
         """Step 10 creates GitHub issue for each project that has namespaced findings."""
         from unittest.mock import AsyncMock
 
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         mock_create.return_value = "https://github.com/org/repo/issues/1"
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
 
         # Inject a fake project with github config
         runner.projects = [
@@ -330,9 +330,9 @@ class TestGitHubIssueStep:
     @patch("scripts.reflections.create_reflections_issue")
     async def test_skips_issue_when_no_findings(self, mock_create):
         """Step 10 skips when no findings."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state.findings = {}
         await runner.step_create_github_issue()
         mock_create.assert_not_called()
@@ -346,9 +346,9 @@ class TestStepAuditDocs:
 
     def test_step_audit_docs_is_registered(self):
         """step_audit_docs is registered as step 5 in runner.steps."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         assert (5, "Audit Documentation", runner.step_audit_docs) in runner.steps
 
     @pytest.mark.asyncio
@@ -360,7 +360,7 @@ class TestStepAuditDocs:
         """step_audit_docs instantiates DocsAuditor and delegates to run() via asyncio.to_thread."""
         from unittest.mock import MagicMock
 
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
         # Build a fake summary with the attributes step_audit_docs inspects
         mock_summary = MagicMock()
@@ -372,7 +372,7 @@ class TestStepAuditDocs:
 
         mock_to_thread.return_value = mock_summary
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state.findings = {}
         await runner.step_audit_docs()
 
@@ -520,9 +520,9 @@ class TestAutoFixStep:
     async def test_auto_fix_disabled_by_env(self, monkeypatch):
         """step_auto_fix_bugs skips when REFLECTIONS_AUTO_FIX_ENABLED=false."""
         monkeypatch.setenv("REFLECTIONS_AUTO_FIX_ENABLED", "false")
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state.reflections = [
             {
                 "category": "code_bug",
@@ -541,9 +541,9 @@ class TestAutoFixStep:
         monkeypatch.setenv("REFLECTIONS_AUTO_FIX_ENABLED", "true")
         from unittest.mock import patch
 
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state._dry_run = True
         runner.state.reflections = [
             {
@@ -577,9 +577,9 @@ class TestAutoFixStep:
         monkeypatch.setenv("REFLECTIONS_AUTO_FIX_ENABLED", "true")
         from unittest.mock import patch
 
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state._dry_run = False
         runner.state.reflections = [
             {
@@ -614,9 +614,9 @@ class TestAutoFixStep:
         monkeypatch.setenv("REFLECTIONS_AUTO_FIX_ENABLED", "true")
         from unittest.mock import patch
 
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state._dry_run = True
         runner.state.reflections = [
             {
@@ -641,9 +641,9 @@ class TestAutoFixStep:
     @pytest.mark.asyncio
     async def test_auto_fix_step_registered_as_step_8(self):
         """step_auto_fix_bugs is registered as step 8."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         step_nums = [s[0] for s in runner.steps]
         step_names = {s[0]: s[1] for s in runner.steps}
         assert 8 in step_nums
@@ -652,9 +652,9 @@ class TestAutoFixStep:
     @pytest.mark.asyncio
     async def test_steps_renumbered_correctly(self):
         """Memory Consolidation is step 9, Produce Daily Report is 10, GitHub is 11."""
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         step_names = {s[0]: s[1] for s in runner.steps}
         assert step_names.get(9) == "Memory Consolidation"
         assert step_names.get(10) == "Produce Daily Report"
@@ -666,9 +666,9 @@ class TestAutoFixStep:
         monkeypatch.setenv("REFLECTIONS_AUTO_FIX_ENABLED", "true")
         from unittest.mock import patch
 
-        from scripts.reflections import ReflectionsRunner
+        from scripts.reflections import ReflectionRunner
 
-        runner = ReflectionsRunner()
+        runner = ReflectionRunner()
         runner.state._dry_run = False
         runner.state.reflections = [
             {
@@ -772,7 +772,7 @@ class TestCLIFlags:
         async def fake_run(self):
             captured_runner["instance"] = self
 
-        with patch.object(reflections_mod.ReflectionsRunner, "run", fake_run):
+        with patch.object(reflections_mod.ReflectionRunner, "run", fake_run):
             asyncio.run(reflections_mod.main())
 
         assert captured_runner["instance"].state._dry_run is True
