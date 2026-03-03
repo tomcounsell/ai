@@ -14,6 +14,20 @@ import subprocess
 
 logger = logging.getLogger("daydream.report")
 
+# In-memory dedup guard: tracks (date, cwd) tuples created during the current
+# daydream run. Prevents duplicate issue creation when multiple projects are
+# processed rapidly and GitHub's search index hasn't updated yet.
+_created_this_run: set[tuple[str, str | None]] = set()
+
+
+def reset_dedup_guard() -> None:
+    """Clear the in-memory dedup guard.
+
+    Call at the start of each daydream run to ensure a clean slate,
+    and in tests to reset state between test cases.
+    """
+    _created_this_run.clear()
+
 
 def format_report_body(findings: dict[str, list[str]], date: str) -> str:
     """Format daydream findings into a GitHub issue body.
@@ -46,11 +60,13 @@ def format_report_body(findings: dict[str, list[str]], date: str) -> str:
     return "\n".join(lines)
 
 
-def issue_exists_for_date(date: str) -> bool:
+def issue_exists_for_date(date: str, cwd: str | None = None) -> bool:
     """Check if a daydream issue already exists for the given date.
 
     Args:
         date: The date string (YYYY-MM-DD) to check.
+        cwd: Optional working directory for the gh CLI subprocess. Must match
+            the cwd used for issue creation to check the correct repo.
 
     Returns:
         True if an issue already exists, False otherwise.
@@ -71,6 +87,7 @@ def issue_exists_for_date(date: str) -> bool:
             capture_output=True,
             text=True,
             timeout=30,
+            cwd=cwd,
         )
         return result.returncode == 0 and bool(result.stdout.strip())
     except Exception as e:
@@ -84,7 +101,8 @@ def create_daydream_issue(
     """Create a GitHub issue with daydream findings.
 
     Skips creation if:
-    - An issue already exists for this date
+    - An issue already exists for this date (checked via gh in the correct repo)
+    - The in-memory dedup guard already recorded a creation for this date+cwd
     - There are no real findings (all categories empty)
 
     Args:
@@ -102,8 +120,14 @@ def create_daydream_issue(
         logger.info("No findings to report, skipping issue creation")
         return False
 
-    # Skip if issue already exists
-    if issue_exists_for_date(date):
+    # Skip if already created during this run (race condition guard)
+    dedup_key = (date, cwd)
+    if dedup_key in _created_this_run:
+        logger.info(f"Daydream issue already created this run for {date} (cwd={cwd}), skipping")
+        return False
+
+    # Skip if issue already exists in the target repo
+    if issue_exists_for_date(date, cwd=cwd):
         logger.info(f"Daydream issue already exists for {date}, skipping")
         return False
 
@@ -132,6 +156,8 @@ def create_daydream_issue(
         if result.returncode == 0:
             issue_url = result.stdout.strip()
             logger.info(f"Created daydream issue: {issue_url}")
+            # Record in dedup guard to prevent race condition duplicates
+            _created_this_run.add(dedup_key)
             return issue_url
         else:
             logger.error(f"Failed to create issue: {result.stderr}")

@@ -9,6 +9,7 @@ from scripts.daydream_report import (
     create_daydream_issue,
     format_report_body,
     issue_exists_for_date,
+    reset_dedup_guard,
 )
 
 
@@ -76,9 +77,29 @@ class TestIssueExistsForDate:
         mock_run.side_effect = subprocess.SubprocessError("gh not found")
         assert issue_exists_for_date("2026-02-17") is False
 
+    @patch("scripts.daydream_report.subprocess.run")
+    def test_passes_cwd_to_subprocess(self, mock_run):
+        """issue_exists_for_date passes cwd to subprocess.run for correct repo targeting."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        issue_exists_for_date("2026-02-17", cwd="/tmp/myproject")
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs.get("cwd") == "/tmp/myproject"
+
+    @patch("scripts.daydream_report.subprocess.run")
+    def test_cwd_defaults_to_none(self, mock_run):
+        """Without cwd argument, subprocess.run gets cwd=None (default repo)."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        issue_exists_for_date("2026-02-17")
+        call_kwargs = mock_run.call_args[1]
+        assert call_kwargs.get("cwd") is None
+
 
 class TestCreateDaydreamIssue:
     """Tests for GitHub issue creation."""
+
+    def setup_method(self):
+        """Reset dedup guard before each test."""
+        reset_dedup_guard()
 
     @patch("scripts.daydream_report.subprocess.run")
     @patch("scripts.daydream_report.issue_exists_for_date", return_value=False)
@@ -119,3 +140,83 @@ class TestCreateDaydreamIssue:
         findings = {"test": ["finding"]}
         result = create_daydream_issue(findings, "2026-02-17")
         assert result is False
+
+    @patch("scripts.daydream_report.subprocess.run")
+    @patch("scripts.daydream_report.issue_exists_for_date", return_value=False)
+    def test_passes_cwd_to_issue_exists_check(self, mock_exists, mock_run):
+        """create_daydream_issue forwards cwd to issue_exists_for_date."""
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="https://github.com/org/repo/issues/1\n"
+        )
+        findings = {"test": ["finding"]}
+        create_daydream_issue(findings, "2026-02-17", cwd="/tmp/proj")
+        mock_exists.assert_called_once_with("2026-02-17", cwd="/tmp/proj")
+
+
+class TestDedupGuard:
+    """Tests for in-memory dedup guard preventing race condition duplicates."""
+
+    def setup_method(self):
+        """Reset dedup guard before each test."""
+        reset_dedup_guard()
+
+    @patch("scripts.daydream_report.subprocess.run")
+    @patch("scripts.daydream_report.issue_exists_for_date", return_value=False)
+    def test_second_create_same_date_cwd_is_skipped(self, mock_exists, mock_run):
+        """After creating an issue, a second call with same date+cwd is skipped."""
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="https://github.com/org/repo/issues/1\n"
+        )
+        findings = {"test": ["finding"]}
+
+        # First call succeeds
+        result1 = create_daydream_issue(findings, "2026-02-17", cwd="/tmp/proj")
+        assert isinstance(result1, str)
+
+        # Second call with same date+cwd is skipped by dedup guard
+        result2 = create_daydream_issue(findings, "2026-02-17", cwd="/tmp/proj")
+        assert result2 is False
+
+        # subprocess.run (for gh issue create) should only be called once
+        assert mock_run.call_count == 1
+
+    @patch("scripts.daydream_report.subprocess.run")
+    @patch("scripts.daydream_report.issue_exists_for_date", return_value=False)
+    def test_different_cwd_is_not_blocked(self, mock_exists, mock_run):
+        """Different cwd values create separate issues (different repos)."""
+        mock_run.return_value = MagicMock(
+            returncode=0, stdout="https://github.com/org/repo/issues/1\n"
+        )
+        findings = {"test": ["finding"]}
+
+        result1 = create_daydream_issue(findings, "2026-02-17", cwd="/tmp/proj-a")
+        result2 = create_daydream_issue(findings, "2026-02-17", cwd="/tmp/proj-b")
+
+        assert isinstance(result1, str)
+        assert isinstance(result2, str)
+        assert mock_run.call_count == 2
+
+    def test_reset_clears_guard(self):
+        """reset_dedup_guard clears all tracked entries."""
+        from scripts.daydream_report import _created_this_run
+
+        _created_this_run.add(("2026-02-17", "/tmp/proj"))
+        assert len(_created_this_run) == 1
+
+        reset_dedup_guard()
+        assert len(_created_this_run) == 0
+
+    @patch("scripts.daydream_report.subprocess.run")
+    @patch("scripts.daydream_report.issue_exists_for_date", return_value=False)
+    def test_failed_create_does_not_add_to_guard(self, mock_exists, mock_run):
+        """Failed gh issue create does not add to dedup guard, allowing retry."""
+        mock_run.return_value = MagicMock(returncode=1, stderr="auth error")
+        findings = {"test": ["finding"]}
+
+        result = create_daydream_issue(findings, "2026-02-17", cwd="/tmp/proj")
+        assert result is False
+
+        # Guard should be empty since creation failed
+        from scripts.daydream_report import _created_this_run
+
+        assert ("2026-02-17", "/tmp/proj") not in _created_this_run
