@@ -1,10 +1,10 @@
-# Daydream: Autonomous Maintenance System
+# Reflections: Autonomous Maintenance System
 
-The daydream system is an autonomous daily maintenance and self-reflection process. It runs every morning at 6 AM Pacific via macOS launchd, performing cleanup, analysis, reflection, reporting, and institutional memory management through 14 sequential steps. All persistence is Redis-backed via Popoto models.
+The reflections system is an autonomous daily maintenance and self-reflection process. It runs every morning at 6 AM Pacific via macOS launchd, performing cleanup, analysis, reflection, reporting, and institutional memory management through 14 sequential steps. All persistence is Redis-backed via Popoto models.
 
 ## How It Works
 
-The runner (`scripts/daydream.py`) loads state from Redis, executes each step in order, and checkpoints after every step. If interrupted, the next run resumes from where it left off. Each step is independently failable — a crash in one step does not block the rest.
+The runner (`scripts/reflections.py`) loads state from Redis, executes each step in order, and checkpoints after every step. If interrupted, the next run resumes from where it left off. Each step is independently failable — a crash in one step does not block the rest.
 
 ### 14-Step Pipeline
 
@@ -19,7 +19,7 @@ The runner (`scripts/daydream.py`) loads state from Redis, executes each step in
 | 7 | LLM Reflection | Claude Haiku categorizes mistakes into 6 categories | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
 | 8 | Auto-Fix Bugs | For high-confidence `code_bug` reflections, spawns `/do-plan` + `/do-build` to open fix PRs | AI repo only | Non-blocking, requires `claude` CLI |
 | 9 | Memory Consolidation | Persists LessonLearned entries to Redis; deduplicates by pattern; prunes entries >90 days | AI repo only | Non-blocking |
-| 10 | Report Generation | Writes local markdown report to `logs/daydream/report_YYYY-MM-DD.md` | AI repo only | Non-blocking |
+| 10 | Report Generation | Writes local markdown report to `logs/reflections/report_YYYY-MM-DD.md` | AI repo only | Non-blocking |
 | 11 | GitHub Issue Creation | Posts daily digest issue per project via `gh` CLI; posts summary to Telegram | Per-project | Non-blocking, requires `gh` auth |
 | 12 | Skills Audit | Validates all SKILL.md files against template standards (see [Skills Audit](do-skills-audit.md)) | AI repo only | Non-blocking |
 | 13 | Redis TTL Cleanup | Prunes expired records across all Redis models | AI repo only | Non-blocking |
@@ -27,9 +27,9 @@ The runner (`scripts/daydream.py`) loads state from Redis, executes each step in
 
 ## State & Persistence
 
-All daydream state lives in Redis via three Popoto models defined in `models/daydream.py`.
+All reflections state lives in Redis via three Popoto models defined in `models/reflections.py`.
 
-### DaydreamRun
+### ReflectionRun
 
 One record per calendar date. Acts as the primary state checkpoint for resumability.
 
@@ -47,11 +47,11 @@ One record per calendar date. Acts as the primary state checkpoint for resumabil
 | `started_at` | SortedField(float) | Unix timestamp, used for cleanup |
 | `dry_run` | Field(bool) | True if `--dry-run` mode |
 
-**Checkpoint cycle**: After each step completes (or fails), the runner saves all state to Redis via `DaydreamRun.save_checkpoint()`. This deletes and recreates the record to handle Popoto's KeyField constraints.
+**Checkpoint cycle**: After each step completes (or fails), the runner saves all state to Redis via `ReflectionRun.save_checkpoint()`. This deletes and recreates the record to handle Popoto's KeyField constraints.
 
-**Resume scenario**: If daydream crashes during step 7, the next run loads the DaydreamRun for today, sees `completed_steps = [1,2,3,4,5,6]`, and continues from step 7.
+**Resume scenario**: If reflections crashes during step 7, the next run loads the ReflectionRun for today, sees `completed_steps = [1,2,3,4,5,6]`, and continues from step 7.
 
-### DaydreamIgnore
+### ReflectionIgnore
 
 Suppresses auto-fix for specific patterns. Each entry has a TTL (default 14 days).
 
@@ -136,7 +136,7 @@ Each reflection output includes: `category`, `summary`, `pattern`, `prevention`,
 
 ## Auto-Fix Bugs (Step 8)
 
-When a reflection is categorized as `code_bug` and meets the confidence threshold, daydream spawns a subprocess to open a fix PR. It never pushes directly to `main` — human review and merge are always required.
+When a reflection is categorized as `code_bug` and meets the confidence threshold, reflections spawns a subprocess to open a fix PR. It never pushes directly to `main` — human review and merge are always required.
 
 ### Confidence Criteria
 
@@ -152,11 +152,11 @@ If fewer than 2 criteria are met, the issue is logged but no action is taken.
 
 ### Ignore Log
 
-The ignore log (Redis `DaydreamIgnore` model) suppresses auto-fix for specific patterns for 14 days:
+The ignore log (Redis `ReflectionIgnore` model) suppresses auto-fix for specific patterns for 14 days:
 
 ```bash
-python scripts/daydream.py --ignore "pattern text here"
-python scripts/daydream.py --ignore "pattern text here" --reason "Intentional design, not a bug"
+python scripts/reflections.py --ignore "pattern text here"
+python scripts/reflections.py --ignore "pattern text here" --reason "Intentional design, not a bug"
 ```
 
 ### Safety Properties
@@ -165,12 +165,12 @@ python scripts/daydream.py --ignore "pattern text here" --reason "Intentional de
 - **Dedup** — If an open PR already exists for the pattern, no duplicate is created.
 - **Ignore log** — Patterns can be silenced for 14 days with one CLI command.
 - **Dry-run** — All logic is testable without external side effects.
-- **Kill switch** — `DAYDREAM_AUTO_FIX_ENABLED=false` disables the feature entirely.
+- **Kill switch** — `REFLECTIONS_AUTO_FIX_ENABLED=false` disables the feature entirely.
 - **Timeout** — Each `/do-plan` + `/do-build` subprocess has a 10-minute timeout.
 
 ## Multi-Repo Support
 
-Daydream reads `config/projects.json`, filters to repos present on the current machine via `load_local_projects()`, and runs per-project analysis. A machine with only `ai` checked out analyzes only `ai`; a machine with four repos analyzes all four.
+Reflections reads `config/projects.json`, filters to repos present on the current machine via `load_local_projects()`, and runs per-project analysis. A machine with only `ai` checked out analyzes only `ai`; a machine with four repos analyzes all four.
 
 **Per-project steps**: 2 (Log Review), 4 (Task Cleanup), 11 (GitHub Issues + Telegram)
 **AI-only steps**: Everything else runs once from the AI repo root
@@ -195,14 +195,14 @@ Each project entry in `config/projects.json`:
 
 ### Subprocess Scoping
 
-Per-project subprocess calls (`gh issue list`, `gh issue create`) use `cwd=project["working_directory"]` rather than `os.chdir`. `gh` auto-detects the GitHub repo from the git remote of the given directory. Both `issue_exists_for_date()` and `create_daydream_issue()` accept and forward this `cwd` parameter to ensure dedup checks target the same repo as issue creation.
+Per-project subprocess calls (`gh issue list`, `gh issue create`) use `cwd=project["working_directory"]` rather than `os.chdir`. `gh` auto-detects the GitHub repo from the git remote of the given directory. Both `issue_exists_for_date()` and `create_reflections_issue()` accept and forward this `cwd` parameter to ensure dedup checks target the same repo as issue creation.
 
 ### Issue Dedup Guard
 
 Step 11 uses two layers of deduplication to prevent duplicate GitHub issues:
 
-1. **GitHub search** -- `issue_exists_for_date(date, cwd)` queries the target repo for existing issues with the same date title. This catches duplicates across separate daydream runs.
-2. **In-memory guard** -- A module-level `_created_this_run` set in `scripts/daydream_report.py` tracks `(date, cwd)` tuples created during the current process. This prevents race condition duplicates when multiple projects are processed rapidly and GitHub's search index hasn't updated yet. The guard is reset via `reset_dedup_guard()` at the start of each `step_create_github_issue()` call.
+1. **GitHub search** -- `issue_exists_for_date(date, cwd)` queries the target repo for existing issues with the same date title. This catches duplicates across separate reflections runs.
+2. **In-memory guard** -- A module-level `_created_this_run` set in `scripts/reflections_report.py` tracks `(date, cwd)` tuples created during the current process. This prevents race condition duplicates when multiple projects are processed rapidly and GitHub's search index hasn't updated yet. The guard is reset via `reset_dedup_guard()` at the start of each `step_create_github_issue()` call.
 
 ### Findings Namespacing
 
@@ -224,8 +224,8 @@ Every step can record findings via `state.add_finding(category, finding_string)`
 ### Findings Flow
 
 1. **Collected** — Steps append findings throughout execution
-2. **Checkpointed** — Saved to Redis DaydreamRun after each step
-3. **Reported** — Step 10 writes a local markdown report to `logs/daydream/`
+2. **Checkpointed** — Saved to Redis ReflectionRun after each step
+3. **Reported** — Step 10 writes a local markdown report to `logs/reflections/`
 4. **Published** — Step 11 creates per-project GitHub issues and posts to Telegram
 
 ## Redis TTL Cleanup (Step 13)
@@ -239,8 +239,8 @@ Prunes expired records to keep Redis lean:
 | Chat | 90 days | `cleanup_expired()` |
 | AgentSession | 90 days | `cleanup_expired()` |
 | BridgeEvent | 7 days | `cleanup_old()` |
-| DaydreamRun | 30 days | `cleanup_expired()` |
-| DaydreamIgnore | Per-entry TTL | `cleanup_expired()` |
+| ReflectionRun | 30 days | `cleanup_expired()` |
+| ReflectionIgnore | Per-entry TTL | `cleanup_expired()` |
 | LessonLearned | 90 days | `cleanup_expired()` |
 
 ## Redis Data Quality (Step 14)
@@ -258,59 +258,59 @@ Prunes expired records to keep Redis lean:
 
 | Component | Detail |
 |-----------|--------|
-| Plist | `com.valor.daydream.plist` |
+| Plist | `com.valor.reflections.plist` |
 | Schedule | Daily at 6:00 AM Pacific |
-| Location | `~/Library/LaunchAgents/com.valor.daydream.plist` |
-| Stdout | `logs/daydream.log` |
-| Stderr | `logs/daydream_error.log` |
+| Location | `~/Library/LaunchAgents/com.valor.reflections.plist` |
+| Stdout | `logs/reflections.log` |
+| Stderr | `logs/reflections_error.log` |
 | Environment | Sources `.env` before execution (all API keys available) |
 
-Install: `./scripts/install_daydream.sh`
+Install: `./scripts/install_reflections.sh`
 
 Reload after changes:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.valor.daydream.plist
-launchctl load ~/Library/LaunchAgents/com.valor.daydream.plist
+launchctl unload ~/Library/LaunchAgents/com.valor.reflections.plist
+launchctl load ~/Library/LaunchAgents/com.valor.reflections.plist
 ```
 
 ### Quick Commands
 
 | Command | Description |
 |---------|-------------|
-| `python scripts/daydream.py` | Run all 14 steps manually |
-| `python scripts/daydream.py --dry-run` | Run without side effects (no PRs, no Telegram) |
-| `python scripts/daydream.py --ignore "pattern"` | Suppress auto-fix for pattern for 14 days |
-| `python scripts/daydream.py --ignore "pattern" --reason "why"` | Suppress with reason |
-| `./scripts/install_daydream.sh` | Install/update launchd schedule |
-| `tail -f logs/daydream.log` | Stream daydream logs |
-| `python -c "from models.daydream import LessonLearned; [print(f'{l.date} [{l.category}] {l.summary}') for l in LessonLearned.get_recent()]"` | View institutional memory |
-| `python -c "from models.daydream import DaydreamIgnore; [print(f'{e.pattern} (expires {e.expires_at})') for e in DaydreamIgnore.get_active()]"` | View active ignore entries |
-| `launchctl list \| grep daydream` | Check launchd status |
+| `python scripts/reflections.py` | Run all 14 steps manually |
+| `python scripts/reflections.py --dry-run` | Run without side effects (no PRs, no Telegram) |
+| `python scripts/reflections.py --ignore "pattern"` | Suppress auto-fix for pattern for 14 days |
+| `python scripts/reflections.py --ignore "pattern" --reason "why"` | Suppress with reason |
+| `./scripts/install_reflections.sh` | Install/update launchd schedule |
+| `tail -f logs/reflections.log` | Stream reflections logs |
+| `python -c "from models.reflections import LessonLearned; [print(f'{l.date} [{l.category}] {l.summary}') for l in LessonLearned.get_recent()]"` | View institutional memory |
+| `python -c "from models.reflections import ReflectionIgnore; [print(f'{e.pattern} (expires {e.expires_at})') for e in ReflectionIgnore.get_active()]"` | View active ignore entries |
+| `launchctl list \| grep reflections` | Check launchd status |
 
 ### Output Locations
 
 | Path | Content |
 |------|---------|
-| `logs/daydream.log` | Runner stdout/stderr |
-| `logs/daydream/` | Generated reports (one per run) |
+| `logs/reflections.log` | Runner stdout/stderr |
+| `logs/reflections/` | Generated reports (one per run) |
 | Redis: LessonLearned model | Institutional memory (pruned to 90 days) |
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `scripts/daydream.py` | Main 14-step runner |
-| `scripts/daydream_report.py` | GitHub issue creation module |
-| `models/daydream.py` | Redis models (DaydreamRun, DaydreamIgnore, LessonLearned) |
-| `scripts/install_daydream.sh` | launchd installation script |
-| `com.valor.daydream.plist` | Schedule definition |
+| `scripts/reflections.py` | Main 14-step runner |
+| `scripts/reflections_report.py` | GitHub issue creation module |
+| `models/reflections.py` | Redis models (ReflectionRun, ReflectionIgnore, LessonLearned) |
+| `scripts/install_reflections.sh` | launchd installation script |
+| `com.valor.reflections.plist` | Schedule definition |
 | `config/projects.json` | Multi-repo project registry |
-| `logs/daydream/` | Local report output directory |
-| `tests/test_daydream.py` | Core daydream tests |
-| `tests/test_daydream_scheduling.py` | Scheduling tests |
-| `tests/test_daydream_multi_repo.py` | Multi-repo tests |
-| `tests/test_daydream_report.py` | Report generation tests |
-| `tests/test_daydream_redis.py` | Redis model tests |
+| `logs/reflections/` | Local report output directory |
+| `tests/test_reflections.py` | Core reflections tests |
+| `tests/test_reflections_scheduling.py` | Scheduling tests |
+| `tests/test_reflections_multi_repo.py` | Multi-repo tests |
+| `tests/test_reflections_report.py` | Report generation tests |
+| `tests/test_reflections_redis.py` | Redis model tests |
 
 ## Dependencies
 
@@ -323,20 +323,20 @@ launchctl load ~/Library/LaunchAgents/com.valor.daydream.plist
 | `telethon` | Step 11 | Conditional — Telegram notifications |
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Step 11 | Conditional — Telegram auth |
 | `data/valor.session` | Step 11 | Conditional — Telegram session file |
-| `DAYDREAM_AUTO_FIX_ENABLED` | Step 8 | Env var, default `true` |
+| `REFLECTIONS_AUTO_FIX_ENABLED` | Step 8 | Env var, default `true` |
 | `config/projects.json` | Multi-repo | Optional — defaults to AI repo only |
 
 ## Troubleshooting
 
 | Symptom | Diagnosis | Fix |
 |---------|-----------|-----|
-| Daydream did not run | `launchctl list \| grep daydream` | `./scripts/install_daydream.sh` |
-| No GitHub issue created | No findings, or `gh auth status` failed | Check `tail -20 logs/daydream.log` |
+| Reflections did not run | `launchctl list \| grep reflections` | `./scripts/install_reflections.sh` |
+| No GitHub issue created | No findings, or `gh auth status` failed | Check `tail -20 logs/reflections.log` |
 | LLM reflection skipped | `ANTHROPIC_API_KEY` not set | Add to `.env` |
 | Telegram post failed | Missing `data/valor.session` | Run `python scripts/telegram_login.py` |
 | Auto-fix not triggering | Confidence criteria not met | Check reflection has pattern >=10 chars and non-empty prevention |
 | State not resuming | Redis connection issue | Verify Redis is running |
-| Step stuck/timing out | Auto-fix subprocess hung | Check for 10-minute timeout; review `logs/daydream.log` |
+| Step stuck/timing out | Auto-fix subprocess hung | Check for 10-minute timeout; review `logs/reflections.log` |
 
 ## See Also
 

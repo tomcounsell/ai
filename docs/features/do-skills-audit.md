@@ -37,9 +37,9 @@ Fetches Anthropic's official skill documentation and compares against our templa
 - Generates delta report: alignments, drifts, recommendations
 - Optional `--apply` flag to update template automatically
 
-### Daydream Integration
+### Reflections Integration
 
-Added as step 12 in the daydream daily maintenance system. Runs `--no-sync --json` mode during automated maintenance and reports FAIL findings to the daydream state for GitHub issue creation.
+Added as step 12 in the reflections daily maintenance system. Runs `--no-sync --json` mode during automated maintenance and reports FAIL findings to the reflections state for GitHub issue creation.
 
 ## Usage
 

@@ -1,6 +1,6 @@
 # Documentation Audit
 
-The documentation audit system keeps docs accurate by verifying claims against the actual codebase. It checks file paths, environment variables, Python symbols, CLI commands, and package names referenced in each doc, then recommends whether to keep, update, or delete it. The audit runs weekly as part of daydream and is also available as the `/do-docs-audit` manual skill.
+The documentation audit system keeps docs accurate by verifying claims against the actual codebase. It checks file paths, environment variables, Python symbols, CLI commands, and package names referenced in each doc, then recommends whether to keep, update, or delete it. The audit runs weekly as part of reflections and is also available as the `/do-docs-audit` manual skill.
 
 ## Why It Exists
 
@@ -18,13 +18,13 @@ python scripts/docs_auditor.py --dry-run
 
 The `--dry-run` flag prints verdicts and reasons to stdout without writing, deleting, or committing anything (see `argparse` setup in `scripts/docs_auditor.py`, or the `dry_run` parameter on `DocsAuditor.__init__`).
 
-## Automatic Execution via Daydream
+## Automatic Execution via Reflections
 
-The audit is integrated into daydream as step 5 (`step_audit_docs`) in `scripts/daydream.py:L644`. It replaces the older `step_update_docs` approach, which used a 30-day timestamp check — a mechanism that was actively harmful (a freshly-written doc describing an unbuilt feature would pass; an accurate 60-day-old doc would be flagged).
+The audit is integrated into reflections as step 5 (`step_audit_docs`) in `scripts/reflections.py:L644`. It replaces the older `step_update_docs` approach, which used a 30-day timestamp check — a mechanism that was actively harmful (a freshly-written doc describing an unbuilt feature would pass; an accurate 60-day-old doc would be flagged).
 
-**Frequency gating.** The step reads `last_audit_date` from the Redis DaydreamRun model. If that date is fewer than 7 days ago, the step is skipped (`DocsAuditor._should_skip()`, `scripts/docs_auditor.py:L901`). This prevents redundant full-corpus scans during daily daydream runs while ensuring the audit runs at least weekly.
+**Frequency gating.** The step reads `last_audit_date` from the Redis ReflectionRun model. If that date is fewer than 7 days ago, the step is skipped (`DocsAuditor._should_skip()`, `scripts/docs_auditor.py:L901`). This prevents redundant full-corpus scans during daily reflections runs while ensuring the audit runs at least weekly.
 
-After a successful run, daydream records findings and writes back to state:
+After a successful run, reflections records findings and writes back to state:
 
 ```json
 {
@@ -164,6 +164,6 @@ API calls use the `ANTHROPIC_API_KEY` environment variable. In dry-run mode with
 ## See Also
 
 - `scripts/docs_auditor.py` — full implementation
-- `scripts/daydream.py` — daydream pipeline including `step_audit_docs`
-- `docs/features/daydream.md` — daydream system overview with step table
+- `scripts/reflections.py` — reflections pipeline including `step_audit_docs`
+- `docs/features/reflections.md` — reflections system overview with step table
 - `docs/features/README.md` — feature index

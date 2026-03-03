@@ -1,6 +1,6 @@
 # Session Tagging
 
-Automatic and manual tag management for AgentSession instances. Tags categorize sessions by activity type (e.g., "pr-created", "daydream", "sdlc") for querying and analytics.
+Automatic and manual tag management for AgentSession instances. Tags categorize sessions by activity type (e.g., "pr-created", "reflections", "sdlc") for querying and analytics.
 
 ## How It Works
 
@@ -16,7 +16,7 @@ Tags are stored in the `AgentSession.tags` ListField (Redis via Popoto). Auto-ta
 | Branch name starts with `session/` | `sdlc` |
 | Transcript contains `gh pr create` | `pr-created` |
 | Transcript contains `pytest` or `Skill(do-test` | `tested` |
-| Sender or session_id contains "daydream" | `daydream` |
+| Sender or session_id contains "reflections" | `reflections` |
 | `work_item_slug` is set | `planned-work` |
 | `turn_count >= 20` | `long-session` |
 

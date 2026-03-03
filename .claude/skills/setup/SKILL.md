@@ -278,22 +278,22 @@ ls data/*.session
 
 If no session file appeared, something went wrong. Ask the user what happened and help debug.
 
-## Step 8: Install Daydream Scheduler
+## Step 8: Install Reflections Scheduler
 
-Install the daydream daily maintenance plist (runs at 6 AM Pacific):
+Install the reflections daily maintenance plist (runs at 6 AM Pacific):
 
 ```bash
 cd /Users/valorengels/src/ai
-./scripts/install_daydream.sh
+./scripts/install_reflections.sh
 ```
 
 Verify it loaded:
 
 ```bash
-launchctl list | grep com.valor.daydream
+launchctl list | grep com.valor.reflections
 ```
 
-If the output shows the `com.valor.daydream` label, the scheduler is installed. It will run `scripts/daydream.py` daily at 6 AM, performing log review, session analysis, LLM reflection, and memory consolidation.
+If the output shows the `com.valor.reflections` label, the scheduler is installed. It will run `scripts/reflections.py` daily at 6 AM, performing log review, session analysis, LLM reflection, and memory consolidation.
 
 ## Step 9: Start the Bridge
 

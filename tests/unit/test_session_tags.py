@@ -271,25 +271,25 @@ class TestAutoTagTranscript:
 
 
 # ===================================================================
-# auto_tag_session — daydream detection
+# auto_tag_session — reflections detection
 # ===================================================================
 
 
-class TestAutoTagDaydream:
-    def test_sender_contains_daydream(self):
-        _create_session(session_id="dd-sender", sender="daydream-script")
+class TestAutoTagReflections:
+    def test_sender_contains_reflections(self):
+        _create_session(session_id="dd-sender", sender="reflections-script")
         auto_tag_session("dd-sender")
-        assert "daydream" in get_tags("dd-sender")
+        assert "reflections" in get_tags("dd-sender")
 
-    def test_session_id_contains_daydream(self):
-        _create_session(session_id="daydream-20250101")
-        auto_tag_session("daydream-20250101")
-        assert "daydream" in get_tags("daydream-20250101")
+    def test_session_id_contains_reflections(self):
+        _create_session(session_id="reflections-20250101")
+        auto_tag_session("reflections-20250101")
+        assert "reflections" in get_tags("reflections-20250101")
 
-    def test_no_daydream_signal(self):
+    def test_no_reflections_signal(self):
         _create_session(session_id="normal-session", sender="valor")
         auto_tag_session("normal-session")
-        assert "daydream" not in get_tags("normal-session")
+        assert "reflections" not in get_tags("normal-session")
 
 
 # ===================================================================

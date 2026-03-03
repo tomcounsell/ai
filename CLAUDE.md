@@ -14,12 +14,12 @@ Guidance for Claude Code when working with this repository.
 | `tail -f logs/bridge.log` | Stream bridge logs |
 | `pytest tests/` | Run all tests |
 | `black . && ruff check .` | Format and lint |
-| `python scripts/daydream.py` | Run daydream maintenance manually |
-| `python scripts/daydream.py --dry-run` | Test daydream without side effects |
-| `python scripts/daydream.py --ignore "pattern"` | Silence a bug pattern for 14 days |
-| `./scripts/install_daydream.sh` | Install daydream launchd schedule |
-| `tail -f logs/daydream.log` | Stream daydream logs |
-| `python -c "from models.daydream import LessonLearned; [print(f'{l.date} [{l.category}] {l.summary}') for l in LessonLearned.get_recent()]"` | View institutional memory (daydream) |
+| `python scripts/reflections.py` | Run reflections maintenance manually |
+| `python scripts/reflections.py --dry-run` | Test reflections without side effects |
+| `python scripts/reflections.py --ignore "pattern"` | Silence a bug pattern for 14 days |
+| `./scripts/install_reflections.sh` | Install reflections launchd schedule |
+| `tail -f logs/reflections.log` | Stream reflections logs |
+| `python -c "from models.reflections import LessonLearned; [print(f'{l.date} [{l.category}] {l.summary}') for l in LessonLearned.get_recent()]"` | View institutional memory (reflections) |
 
 ## Development Principles
 

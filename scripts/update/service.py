@@ -132,18 +132,26 @@ def restart_service(project_dir: Path) -> bool:
         return False
 
 
-def install_daydream(project_dir: Path) -> bool:
-    """Install/reload daydream plist. Returns True if successful."""
-    plist_src = project_dir / "com.valor.daydream.plist"
-    plist_dst = Path.home() / "Library" / "LaunchAgents" / "com.valor.daydream.plist"
-    label = "com.valor.daydream"
+def install_reflections(project_dir: Path) -> bool:
+    """Install/reload reflections plist. Returns True if successful."""
+    plist_src = project_dir / "com.valor.reflections.plist"
+    plist_dst = Path.home() / "Library" / "LaunchAgents" / "com.valor.reflections.plist"
+    label = "com.valor.reflections"
+    old_label = "com.valor.daydream"
+    old_plist_dst = Path.home() / "Library" / "LaunchAgents" / "com.valor.daydream.plist"
 
     if not plist_src.exists():
         return False
 
     try:
-        # Unload if currently loaded
         result = run_cmd(["launchctl", "list"])
+
+        # Unload old daydream service if present (migration)
+        if old_label in result.stdout:
+            run_cmd(["launchctl", "unload", str(old_plist_dst)])
+            old_plist_dst.unlink(missing_ok=True)
+
+        # Unload current if loaded
         if label in result.stdout:
             run_cmd(["launchctl", "unload", str(plist_dst)])
 
@@ -158,11 +166,11 @@ def install_daydream(project_dir: Path) -> bool:
         return False
 
 
-def is_daydream_installed() -> bool:
-    """Check if daydream scheduler is installed."""
+def is_reflections_installed() -> bool:
+    """Check if reflections scheduler is installed."""
     try:
         result = run_cmd(["launchctl", "list"])
-        return "com.valor.daydream" in result.stdout
+        return "com.valor.reflections" in result.stdout
     except Exception:
         return False
 

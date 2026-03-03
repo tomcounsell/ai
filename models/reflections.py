@@ -1,11 +1,11 @@
-"""Daydream Popoto models - Redis-backed state for the daydream maintenance system.
+"""Reflections Popoto models - Redis-backed state for the reflections maintenance system.
 
 Three models:
-- DaydreamRun: per-run state with resumability (one per day)
-- DaydreamIgnore: auto-fix suppression with TTL-based auto-expiry
+- ReflectionRun: per-run state with resumability (one per day)
+- ReflectionIgnore: auto-fix suppression with TTL-based auto-expiry
 - LessonLearned: queryable institutional memory from LLM reflection
 
-See docs/features/daydream.md for full documentation.
+See docs/features/reflections.md for full documentation.
 """
 
 import time
@@ -23,12 +23,11 @@ from popoto import (
 )
 
 
-class DaydreamRun(Model):
-    """Persisted state for a single daydream run (one per day).
+class ReflectionRun(Model):
+    """Persisted state for a single reflection run (one per day).
 
-    Replaces data/daydream_state.json. The date field is a UniqueKeyField
-    so only one run exists per date. State is checkpointed after each step
-    for resumability.
+    The date field is a UniqueKeyField so only one run exists per date.
+    State is checkpointed after each step for resumability.
     """
 
     date = UniqueKeyField()  # YYYY-MM-DD, one run per day
@@ -44,7 +43,7 @@ class DaydreamRun(Model):
     dry_run = Field(type=bool, default=False)
 
     @classmethod
-    def load_or_create(cls, date: str, dry_run: bool = False) -> "DaydreamRun":
+    def load_or_create(cls, date: str, dry_run: bool = False) -> "ReflectionRun":
         """Load existing run for date, or create a new one."""
         existing = cls.query.filter(date=date)
         if existing:
@@ -94,11 +93,11 @@ class DaydreamRun(Model):
         return deleted
 
 
-class DaydreamIgnore(Model):
+class ReflectionIgnore(Model):
     """An ignored bug pattern with automatic TTL-based expiry.
 
-    Replaces data/daydream_ignore.jsonl. The expires_at SortedField
-    enables efficient range queries to find/prune expired entries.
+    The expires_at SortedField enables efficient range queries to
+    find/prune expired entries.
     """
 
     ignore_id = AutoKeyField()
@@ -110,7 +109,7 @@ class DaydreamIgnore(Model):
     @classmethod
     def add_ignore(
         cls, pattern: str, reason: str = "", days: int = 14
-    ) -> "DaydreamIgnore":
+    ) -> "ReflectionIgnore":
         """Add a new ignore entry that expires after `days` days."""
         now = time.time()
         return cls.create(
@@ -121,7 +120,7 @@ class DaydreamIgnore(Model):
         )
 
     @classmethod
-    def get_active(cls) -> list["DaydreamIgnore"]:
+    def get_active(cls) -> list["ReflectionIgnore"]:
         """Return all non-expired ignore entries."""
         now = time.time()
         all_entries = cls.query.all()

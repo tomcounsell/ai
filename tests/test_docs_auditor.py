@@ -166,13 +166,13 @@ class TestFrequencyGate:
 
     def test_recent_audit_skips(self, repo: Path, auditor: DocsAuditor) -> None:
         state = {"last_audit_date": datetime.now().isoformat()}
-        (repo / "data" / "daydream_state.json").write_text(json.dumps(state))
+        (repo / "data" / "reflections_state.json").write_text(json.dumps(state))
         assert auditor._should_skip() is True
 
     def test_old_audit_does_not_skip(self, repo: Path, auditor: DocsAuditor) -> None:
         old_date = (datetime.now() - timedelta(days=8)).isoformat()
         state = {"last_audit_date": old_date}
-        (repo / "data" / "daydream_state.json").write_text(json.dumps(state))
+        (repo / "data" / "reflections_state.json").write_text(json.dumps(state))
         assert auditor._should_skip() is False
 
     def test_boundary_exactly_7_days_skips(
@@ -181,7 +181,7 @@ class TestFrequencyGate:
         # 6.9 days ago — still within window
         recent = (datetime.now() - timedelta(days=6, hours=23)).isoformat()
         state = {"last_audit_date": recent}
-        (repo / "data" / "daydream_state.json").write_text(json.dumps(state))
+        (repo / "data" / "reflections_state.json").write_text(json.dumps(state))
         assert auditor._should_skip() is True
 
 
@@ -308,7 +308,7 @@ class TestSweepIndexFiles:
 class TestRunFrequencyGate:
     def test_run_skips_if_recent(self, repo: Path) -> None:
         state = {"last_audit_date": datetime.now().isoformat()}
-        (repo / "data" / "daydream_state.json").write_text(json.dumps(state))
+        (repo / "data" / "reflections_state.json").write_text(json.dumps(state))
         auditor = DocsAuditor(repo_root=repo, dry_run=True)
         summary = auditor.run()
         assert summary.skipped is True

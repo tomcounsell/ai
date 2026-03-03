@@ -36,14 +36,20 @@ fi
 # Output goes directly to Telegram - keep it clean for PM-style summary
 "$PYTHON" "$PROJECT_DIR/scripts/update/run.py" --cron
 
-# ── Reload daydream plist if present ─────────────────────────────────
-DAYDREAM_PLIST="$PROJECT_DIR/com.valor.daydream.plist"
-DAYDREAM_DST="$HOME/Library/LaunchAgents/com.valor.daydream.plist"
-DAYDREAM_LABEL="com.valor.daydream"
-if [ -f "$DAYDREAM_PLIST" ]; then
-    if launchctl list | grep -q "$DAYDREAM_LABEL"; then
-        launchctl unload "$DAYDREAM_DST" 2>/dev/null || true
+# ── Reload reflections plist if present ──────────────────────────────
+REFLECTIONS_PLIST="$PROJECT_DIR/com.valor.reflections.plist"
+REFLECTIONS_DST="$HOME/Library/LaunchAgents/com.valor.reflections.plist"
+REFLECTIONS_LABEL="com.valor.reflections"
+# Unload old daydream service if still present (migration)
+OLD_DAYDREAM_DST="$HOME/Library/LaunchAgents/com.valor.daydream.plist"
+if launchctl list | grep -q "com.valor.daydream"; then
+    launchctl unload "$OLD_DAYDREAM_DST" 2>/dev/null || true
+    rm -f "$OLD_DAYDREAM_DST"
+fi
+if [ -f "$REFLECTIONS_PLIST" ]; then
+    if launchctl list | grep -q "$REFLECTIONS_LABEL"; then
+        launchctl unload "$REFLECTIONS_DST" 2>/dev/null || true
     fi
-    cp "$DAYDREAM_PLIST" "$DAYDREAM_DST"
-    launchctl load "$DAYDREAM_DST" 2>/dev/null || true
+    cp "$REFLECTIONS_PLIST" "$REFLECTIONS_DST"
+    launchctl load "$REFLECTIONS_DST" 2>/dev/null || true
 fi
