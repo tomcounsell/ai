@@ -10,7 +10,6 @@ from bridge.summarizer import (
     OutputType,
     _classify_with_heuristics,
     _compose_structured_summary,
-    _get_original_request,
     _get_status_emoji,
     _parse_classification_response,
     _parse_summary_and_questions,
@@ -1042,48 +1041,15 @@ class TestComposeStructuredSummary:
         assert "⏳" in result
 
 
-class TestGetOriginalRequest:
-    """Tests for _get_original_request — regression tests for issue #192."""
+class TestNoMessageEcho:
+    """Tests verifying that message echo has been removed (issue #241).
 
-    def test_returns_first_user_entry_from_history(self):
-        """Original request is extracted from the first [user] history entry."""
-        from unittest.mock import MagicMock
+    The summarizer previously echoed the user's original message on the first line.
+    This was removed because Telegram's reply-to feature already shows context.
+    """
 
-        session = MagicMock()
-        session._get_history_list.return_value = [
-            "[user] /sdlc 190",
-            "[stage] ISSUE completed ☑",
-            "[user] continue",
-        ]
-        session.message_text = "continue"
-
-        result = _get_original_request(session)
-        assert result == "/sdlc 190"
-
-    def test_falls_back_to_message_text_when_no_history(self):
-        """When no history exists, falls back to message_text."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session._get_history_list.return_value = []
-        session.message_text = "What is the status?"
-
-        result = _get_original_request(session)
-        assert result == "What is the status?"
-
-    def test_returns_none_when_no_data(self):
-        """Returns None when session has no history and no message_text."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session._get_history_list.return_value = []
-        session.message_text = None
-
-        result = _get_original_request(session)
-        assert result is None
-
-    def test_label_not_continue_on_auto_continued_session(self):
-        """Regression: auto-continued sessions must show original request, not 'continue'."""
+    def test_no_echo_on_auto_continued_session(self):
+        """Auto-continued sessions must not echo 'continue' or the original request."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
@@ -1092,17 +1058,32 @@ class TestGetOriginalRequest:
             "[stage] ISSUE completed ☑",
             "[stage] PLAN completed ☑",
         ]
-        session.message_text = "continue"  # overwritten by auto-continue
+        session.message_text = "continue"
         session.status = "running"
         session.is_sdlc_job.return_value = True
 
         result = _compose_structured_summary(
             "• Built the bypass\n• Tests passing", session=session, is_completion=True
         )
-        # Must NOT contain "continue" as the label
-        assert "continue" not in result.split("\n")[0]
-        # Must contain the original request (with /sdlc prefix stripped)
-        assert "190" in result
+        first_line = result.split("\n")[0]
+        assert first_line.strip() in ("✅", "⏳", "❌")
+        assert "continue" not in first_line
+
+    def test_no_echo_on_regular_session(self):
+        """Regular sessions should not echo the user's message."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session._get_history_list.return_value = ["[user] What time is it?"]
+        session.message_text = "What time is it?"
+        session.status = "completed"
+
+        result = _compose_structured_summary(
+            "It's 3pm UTC+7", session=session, is_completion=True
+        )
+        first_line = result.split("\n")[0]
+        assert first_line.strip() in ("✅", "⏳", "❌")
+        assert "What time is it?" not in first_line
 
 
 class TestGetStatusEmojiRegression:
@@ -1304,9 +1285,10 @@ class TestComposeStructuredSummaryWithSession:
             is_completion=True,
         )
 
-        # Label from original request (not "continue")
-        assert "190" in result.split("\n")[0]
-        assert "continue" not in result.split("\n")[0]
+        # First line is emoji only (no message echo)
+        first_line = result.split("\n")[0]
+        assert first_line.strip() in ("✅", "⏳", "❌")
+        assert "continue" not in first_line
         # Stage progress line present
         assert "☑ ISSUE" in result
         assert "▶ BUILD" in result
@@ -1340,73 +1322,9 @@ class TestComposeStructuredSummaryWithSession:
 
         assert "☑" not in result
         assert "☐" not in result
-        assert "What time is it?" in result
+        # No echo of user message (Telegram reply-to provides context)
+        assert result.split("\n")[0].strip() in ("✅", "⏳", "❌")
 
-    def test_label_stripped_of_sdlc_prefix(self):
-        """Various SDLC prefixes are stripped from the label."""
-        from unittest.mock import MagicMock
-
-        for prefix in ["/sdlc ", "SDLC ", "sdlc "]:
-            session = MagicMock()
-            session._get_history_list.return_value = [f"[user] {prefix}Fix the bug"]
-            session.message_text = "continue"
-            session.status = "running"
-            session.get_stage_progress.return_value = {
-                s: "pending"
-                for s in ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS"]
-            }
-            session.get_links.return_value = {}
-
-            result = _compose_structured_summary(
-                "• Fixed it", session=session, is_completion=True
-            )
-            first_line = result.split("\n")[0]
-            assert "Fix the bug" in first_line
-            assert prefix.strip() not in first_line
-
-
-class TestGetOriginalRequestEdgeCases:
-    """Additional edge cases for _get_original_request."""
-
-    def test_session_without_get_history_list(self):
-        """Session object without _get_history_list attribute falls back to message_text."""
-        session = type("Session", (), {"message_text": "Hello"})()
-        assert not hasattr(session, "_get_history_list")
-        result = _get_original_request(session)
-        assert result == "Hello"
-
-    def test_none_session_returns_none(self):
-        result = _get_original_request(None)
-        assert result is None
-
-    def test_history_with_non_string_entries(self):
-        """Non-string entries in history are skipped."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session._get_history_list.return_value = [
-            123,  # non-string
-            {"role": "user"},  # dict
-            "[user] The real request",
-        ]
-        session.message_text = "fallback"
-
-        result = _get_original_request(session)
-        assert result == "The real request"
-
-    def test_history_with_only_stage_entries(self):
-        """History with no [user] entries falls back to message_text."""
-        from unittest.mock import MagicMock
-
-        session = MagicMock()
-        session._get_history_list.return_value = [
-            "[stage] ISSUE completed ☑",
-            "[stage] PLAN completed ☑",
-        ]
-        session.message_text = "the original message"
-
-        result = _get_original_request(session)
-        assert result == "the original message"
 
 
 class TestSummarizationBypass:

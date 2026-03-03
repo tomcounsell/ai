@@ -921,36 +921,28 @@ def _parse_summary_and_questions(summary_text: str) -> tuple[str, str | None]:
     return summary_text, None
 
 
-def _get_original_request(session) -> str | None:
-    """Extract the original user request from session history.
-
-    Auto-continue overwrites message_text with "continue", so we look
-    at the first [user] entry in history which preserves the original request.
-    Falls back to message_text if no history exists.
-    """
-    if hasattr(session, "_get_history_list"):
-        for entry in session._get_history_list():
-            if isinstance(entry, str) and entry.startswith("[user] "):
-                return entry[len("[user] ") :]
-    # Fallback: use message_text (may be "continue" for auto-continued sessions)
-    return session.message_text if session and session.message_text else None
-
-
 def _compose_structured_summary(
     summary_text: str, session=None, is_completion: bool = True
 ) -> str:
     """Compose the full structured summary with emoji, stage line, bullets, questions, and links.
 
-    For SDLC sessions with history, produces:
-        ✅ Original request summary
+    Two modes:
+
+    Chat (non-SDLC):
+        ✅
+        • Bullet point 1
+        • Bullet point 2
+
+        ? Question needing input
+
+    SDLC:
+        ✅
         ☑ ISSUE → ☑ PLAN → ☑ BUILD → ☑ TEST → ☑ REVIEW → ☑ DOCS
         • Bullet point 1
         • Bullet point 2
 
         ? Question needing input
         Issue #168 | Plan | PR #176
-
-    For non-SDLC sessions, returns the summary text with status emoji prepended.
     """
     # Re-read session from Redis to pick up stage data written during execution.
     # The session object passed in may have been loaded before session_progress.py
@@ -975,24 +967,9 @@ def _compose_structured_summary(
 
     parts = []
 
-    # Status emoji + first-line label from the ORIGINAL request
-    # (not message_text, which gets overwritten by auto-continue "continue")
+    # Status emoji prefix (no message echo — Telegram reply-to provides context)
     emoji = _get_status_emoji(session, is_completion)
-    label = ""
-    if session:
-        original_request = _get_original_request(session)
-        if original_request:
-            first_line = original_request.split("\n")[0].strip()
-            for prefix in ("SDLC ", "sdlc ", "/sdlc ", "MESSAGE: "):
-                if first_line.startswith(prefix):
-                    first_line = first_line[len(prefix) :].strip()
-            if first_line and len(first_line) <= 80:
-                label = first_line
-    if label:
-        parts.append(f"{emoji} {label}")
-    else:
-        if bullets and bullets[0] not in "✅⏳❌⚠️❓":
-            parts.append(f"{emoji}")
+    parts.append(emoji)
 
     # Stage progress line — mandatory for SDLC, optional for others
     stage_line = _render_stage_progress(session)
@@ -1041,6 +1018,13 @@ async def summarize_response(
     Falls back to safety truncation if all summarization fails.
     """
     if not raw_response or not raw_response.strip():
+        # Even with empty response, render SDLC progress if available
+        if session:
+            fallback = _compose_structured_summary(
+                "", session=session, is_completion=True
+            )
+            if fallback.strip():
+                return SummarizedResponse(text=fallback, was_summarized=True)
         return SummarizedResponse(text=raw_response or "", was_summarized=False)
 
     artifacts = extract_artifacts(raw_response)
