@@ -90,11 +90,11 @@ Where `$PR_URL` is the full GitHub PR URL returned by `gh pr create`.
    - If state exists and `stage != "plan"`: resume from that stage, skip already-completed stages listed in `completed_stages`
    - If no state (output is `null`): proceed normally — initialize state after worktree creation
 4. **Run prerequisite validation** - `python scripts/check_prerequisites.py {PLAN_PATH}`. If any check fails, report the failures and stop. Do not proceed to task execution. If no Prerequisites section exists, this passes automatically.
-5. **Create an isolated worktree** - Create `.worktrees/{slug}/` with branch `session/{slug}`:
+5. **Create an isolated worktree** - Create `.worktrees/{slug}/` with branch `session/{slug}` using the worktree manager (handles stale worktrees automatically):
    ```bash
-   git worktree add .worktrees/{slug} -b session/{slug} main
-   cp .claude/settings.local.json .worktrees/{slug}/.claude/settings.local.json 2>/dev/null || true
+   python -c "from agent.worktree_manager import create_worktree; from pathlib import Path; create_worktree(Path('.'), '{slug}')"
    ```
+   This handles all edge cases: stale worktrees from crashed sessions, missing directories with lingering git references, and branch-already-in-use errors. Settings files are copied automatically.
    All subsequent agent work happens inside `.worktrees/{slug}/`, NOT the main repo directory.
 6. **Initialize pipeline state** - For fresh builds (no prior state), initialize now:
    ```bash
