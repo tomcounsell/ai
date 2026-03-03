@@ -46,8 +46,24 @@ Each tier 2 work item gets its own git worktree for filesystem isolation:
 - `settings.local.json` is copied into the worktree's `.claude/` directory (since it's not tracked by git)
 - On completion: changes are merged back, worktree is removed
 - Stale worktree references are pruned on startup via `git worktree prune`
+- Stale worktree recovery is built into `create_worktree()` (see below)
 
 The worktree manager provides five operations: `create_worktree()`, `remove_worktree()`, `list_worktrees()`, `prune_worktrees()`, and `cleanup_after_merge()`.
+
+### Stale Worktree Recovery
+
+When a session crashes, times out, or is abandoned, it may leave a stale worktree that blocks future sessions from checking out the same branch. The `create_worktree()` function handles this automatically via `_find_worktree_for_branch()` and `_cleanup_stale_worktree()`:
+
+1. **Detection**: Before creating a worktree, `create_worktree()` runs `git worktree list --porcelain` to check if the target branch (`session/{slug}`) is already associated with any worktree.
+2. **Recovery**: If a stale worktree is found:
+   - If the worktree directory is missing but git still tracks it: `git worktree prune` cleans the stale reference.
+   - If the worktree directory exists at a different path: `git worktree remove --force` removes it, with a fallback to `shutil.rmtree` + prune if force-remove fails.
+   - If the worktree directory exists at the expected path: returns the existing path as-is (no-op).
+3. **Retry**: After cleanup, creation proceeds normally.
+
+This makes `create_worktree()` idempotent and resilient -- the SDLC pipeline never blocks on stale worktree state from prior sessions. All recovery actions are logged at WARNING level for visibility.
+
+See GitHub issue [#237](https://github.com/tomcounsell/ai/issues/237) for the original bug report.
 
 ### Post-Merge Worktree Cleanup
 

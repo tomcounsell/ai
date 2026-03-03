@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Shipped
 type: bug
 appetite: Small
 owner: Valor
