@@ -4,7 +4,7 @@ Structured output format for Telegram delivery of agent work summaries. Every re
 
 ## Key Behaviors
 
-1. **SDLC: always summarize. Non-SDLC: summarize if >= 500 chars.** SDLC sessions always go through Haiku (stage lines + link footers needed). Non-SDLC short responses (< 500 chars) pass through raw — this preserves programmatic skill output like `/update` that's already formatted.
+1. **SDLC: always summarize. Non-SDLC: summarize if >= 200 chars.** SDLC sessions always go through Haiku (stage lines + link footers needed). Non-SDLC short responses (< 200 chars) pass through raw — this preserves programmatic skill output like `/update` that's already formatted.
 2. **SDLC template rendering**: Stage progress lines and link footers are rendered in Python code, not by the LLM. The LLM only generates bullet summaries and questions.
 3. **Question extraction**: The LLM can surface questions, decisions, and items needing human input using a `---` separator and `? ` prefix. These are parsed and rendered after the summary bullets.
 
@@ -53,7 +53,7 @@ Simple prose format, no stage line or link footer. Still summarized via Haiku.
 
 ## Implementation
 
-- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_compose_structured_summary()` (template renderer), `_parse_summary_and_questions()` (question extractor), `_render_stage_progress()`, `_render_link_footer()`
+- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer), `_parse_summary_and_questions()` (question extractor), `_render_stage_progress()`, `_render_link_footer()`
 - `bridge/response.py`: Always calls summarizer for non-empty text, passes `AgentSession` via `session=` kwarg
 - `bridge/telegram_bridge.py`: `_send` callback accepts and forwards `session` parameter
 - `agent/job_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` passes `agent_session`
@@ -88,6 +88,20 @@ agent/job_queue.py send_to_chat()
   → _compose_structured_summary(summary, session=session)
       ↳ re-reads session from Redis for fresh stage/link data
 ```
+
+## Process Narration Stripping
+
+Before summarization, `_strip_process_narration()` removes meta-action lines that describe the agent's internal process rather than meaningful outcomes. This addresses the most common audit finding — verbose "Let me check...", "Now reading..." lines passing through to Telegram.
+
+**Stripped patterns** (lines starting with):
+- "Let me check/look/read/examine/review..."
+- "I'll check/look/read/examine/review..."
+- "Now let me check/look/read/examine/review..."
+- "Checking/Looking/Reading/Examining/Reviewing..."
+
+**Preserved**: Lines containing substantive content (e.g., "I'll document the API changes" or "Let me explain the architecture") are NOT stripped — only meta-actions that describe tool invocations.
+
+The stripping runs inside `summarize_response()` before the text is passed to `_build_summary_prompt()`, reducing token usage and improving summary quality.
 
 ## Adaptive Format Rules
 
