@@ -131,10 +131,11 @@ Where `$PR_URL` is the full GitHub PR URL returned by `gh pr create`.
     ```bash
     python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'pr')"
     ```
-19. **Push and open a PR** - `git -C .worktrees/{slug} push -u origin session/{slug}` then `gh pr create`
-20. **Run documentation cascade** - Invoke `/do-docs {PR-number}` to surgically update affected docs
-21. **Migrate completed plan** - Delete plan file and close tracking issue
-22. **Report completion** with PR URL when all tasks are done
+19. **Verify commits exist before PR** - Run `git -C .worktrees/{slug} log --oneline main..HEAD` and count the output lines. If zero commits exist on the session branch, **ABORT with error**: "BUILD FAILED: No commits on session/{slug}. Builder agents produced no code changes." Do NOT proceed to push or PR creation.
+20. **Push and open a PR** - `git -C .worktrees/{slug} push -u origin session/{slug}` then `gh pr create`
+21. **Run documentation cascade** - Invoke `/do-docs {PR-number}` to surgically update affected docs
+22. **Migrate completed plan** - Delete plan file and close tracking issue
+23. **Report completion** with PR URL when all tasks are done
 
 ## Critical Rules
 
@@ -195,6 +196,11 @@ Your assignment:
 - [specific actions from task]
 
 Commit at logical checkpoints as you work — not as one batch at the end. The commit message hook enforces hygiene at each commit.
+
+SELF-CHECK (mandatory before marking task complete):
+1. Run \`git status\` in the worktree and include the output in your response
+2. Run \`git log --oneline main..HEAD\` and include the output
+3. If you made zero file changes, explicitly state "NO CHANGES MADE" and explain why
 
 When complete, update your task status.`,
   subagent_type: "[agent type from task]",

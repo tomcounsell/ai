@@ -41,9 +41,26 @@ cat /tmp/related_docs.json | python scripts/create_doc_review_issue.py
 
 This creates tracking issues for documentation that should be reviewed for updates.
 
+## Step 6.5: Pre-PR Commit Verification
+
+Before creating the PR, verify that the session branch has actual commits. This is the final safety net against silent build failures where all agents completed but produced no work.
+
+```bash
+COMMIT_COUNT=$(git -C .worktrees/{slug} log --oneline main..HEAD | wc -l | tr -d ' ')
+echo "Commits on session/{slug}: $COMMIT_COUNT"
+```
+
+**If `COMMIT_COUNT` is 0:**
+- **ABORT** -- do not push or create a PR
+- Report: "BUILD FAILED: No commits on session/{slug} branch. Builder agents completed but produced zero code changes."
+- Include a summary of which tasks ran and their reported status
+- This is a hard failure -- the orchestrator must stop and report, not silently succeed
+
+**If `COMMIT_COUNT` > 0:** Proceed to Step 7.
+
 ## Step 7: Create Pull Request
 
-After documentation gate passes, push and create the PR:
+After documentation gate passes and pre-PR verification succeeds, push and create the PR:
 
 ```bash
 git -C .worktrees/{slug} push -u origin session/{slug}
