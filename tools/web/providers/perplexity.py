@@ -1,10 +1,13 @@
 """Perplexity search provider."""
 
+import logging
 import os
 
 import httpx
 
 from tools.web.types import SearchResult, Source
+
+logger = logging.getLogger(__name__)
 
 name = "perplexity"
 
@@ -118,6 +121,23 @@ async def search(query: str, **kwargs) -> SearchResult | None:
                 provider=name,
             )
 
+    except httpx.HTTPStatusError as e:
+        # Handle HTTP errors explicitly so auth failures get a clear log message
+        # instead of being silently swallowed. 401 errors mean the API key is
+        # expired or invalid -- manual credential refresh is required.
+        if e.response.status_code == 401:
+            logger.warning(
+                "Perplexity API returned 401 Unauthorized. "
+                "The PERPLEXITY_API_KEY is likely expired or invalid. "
+                "Refresh credentials in .env and restart the bridge."
+            )
+        else:
+            logger.warning(
+                "Perplexity API HTTP error %d: %s",
+                e.response.status_code,
+                e,
+            )
+        return None
     except Exception:
-        # Any error returns None to trigger fallback
+        # Any other error returns None to trigger fallback to other providers
         return None

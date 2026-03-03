@@ -1165,6 +1165,17 @@ async def main():
             _recover_orphaned_jobs,
         )
 
+        # Clean up stale Redis keys with invalid job_id format (e.g. 60-char
+        # keys from old data). This silences the popoto "auto key value is length
+        # N" validation errors that spam the error log on every query.
+        try:
+            from models.agent_session import AgentSession
+
+            AgentSession.query.keys(clean=True)
+            logger.info("Cleaned stale Redis keys for AgentSession")
+        except Exception as _clean_err:
+            logger.warning(f"Redis key cleanup failed (non-fatal): {_clean_err}")
+
         for _pkey in ACTIVE_PROJECTS:
             recovered = _recover_interrupted_jobs(_pkey)
             if recovered:

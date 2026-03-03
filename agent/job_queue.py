@@ -282,7 +282,9 @@ async def _push_job(
 
     # Log lifecycle transition for newly created pending job
     try:
-        sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
+        sessions = list(
+            AgentSession.query.filter(session_id=session_id, status="pending")
+        )
         if sessions:
             sessions[0].log_lifecycle_transition("pending", "job enqueued")
     except Exception:
@@ -464,7 +466,10 @@ def _recover_orphaned_jobs(project_key: str) -> int:
     recovered = 0
     for key in orphan_keys:
         try:
-            key_str = key.decode() if isinstance(key, bytes) else key
+            # Use errors='replace' to handle corrupted UTF-8 data in Redis keys
+            # gracefully. Corrupted bytes get replaced with U+FFFD rather than
+            # crashing the recovery loop.
+            key_str = key.decode(errors="replace") if isinstance(key, bytes) else key
 
             # Load the object data from Redis hash
             data = POPOTO_REDIS_DB.hgetall(key_str)
@@ -473,9 +478,14 @@ def _recover_orphaned_jobs(project_key: str) -> int:
                 POPOTO_REDIS_DB.srem(class_set_key, key)
                 continue
 
-            # Check if this belongs to our project
+            # Check if this belongs to our project. Use errors='replace' to
+            # handle corrupted field values without crashing.
             pk_bytes = data.get(b"project_key", b"")
-            pk = pk_bytes.decode() if isinstance(pk_bytes, bytes) else pk_bytes
+            pk = (
+                pk_bytes.decode(errors="replace")
+                if isinstance(pk_bytes, bytes)
+                else pk_bytes
+            )
             if pk != project_key:
                 continue
 
@@ -487,10 +497,12 @@ def _recover_orphaned_jobs(project_key: str) -> int:
                 if orphan_job is None:
                     continue
                 fields = _extract_job_fields(orphan_job)
-            except Exception:
-                # If decoding fails, skip this orphan
+            except Exception as decode_err:
+                # Log the specific decode error and the raw key for forensics,
+                # then skip this orphan rather than crashing the whole recovery.
                 logger.warning(
-                    f"[{project_key}] Could not decode orphan {key_str}, skipping"
+                    f"[{project_key}] Could not decode orphan {key_str}: "
+                    f"{decode_err} (raw key bytes: {key!r}), skipping"
                 )
                 continue
 
@@ -507,7 +519,7 @@ def _recover_orphaned_jobs(project_key: str) -> int:
                 f"[{project_key}] Recovered orphaned job from key {key_str} -> {new_job.job_id}"
             )
         except Exception as e:
-            logger.error(f"[{project_key}] Failed to recover orphan {key}: {e}")
+            logger.error(f"[{project_key}] Failed to recover orphan {key!r}: {e}")
 
     if recovered:
         logger.warning(
@@ -1609,7 +1621,10 @@ async def queue_revival_job(
     """
     revival_text = f"Continue the unfinished work on branch `{revival_info['branch']}`."
     if additional_context:
-        revival_text += f"\n\nAsked user whether to resume and user responded with: {additional_context}"
+        revival_text += (
+            "\n\nAsked user whether to resume and user"
+            f" responded with: {additional_context}"
+        )
 
     return await enqueue_job(
         project_key=revival_info["project_key"],
