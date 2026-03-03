@@ -195,7 +195,14 @@ Each project entry in `config/projects.json`:
 
 ### Subprocess Scoping
 
-Per-project subprocess calls (`gh issue list`, `gh issue create`) use `cwd=project["working_directory"]` rather than `os.chdir`. `gh` auto-detects the GitHub repo from the git remote of the given directory.
+Per-project subprocess calls (`gh issue list`, `gh issue create`) use `cwd=project["working_directory"]` rather than `os.chdir`. `gh` auto-detects the GitHub repo from the git remote of the given directory. Both `issue_exists_for_date()` and `create_daydream_issue()` accept and forward this `cwd` parameter to ensure dedup checks target the same repo as issue creation.
+
+### Issue Dedup Guard
+
+Step 11 uses two layers of deduplication to prevent duplicate GitHub issues:
+
+1. **GitHub search** -- `issue_exists_for_date(date, cwd)` queries the target repo for existing issues with the same date title. This catches duplicates across separate daydream runs.
+2. **In-memory guard** -- A module-level `_created_this_run` set in `scripts/daydream_report.py` tracks `(date, cwd)` tuples created during the current process. This prevents race condition duplicates when multiple projects are processed rapidly and GitHub's search index hasn't updated yet. The guard is reset via `reset_dedup_guard()` at the start of each `step_create_github_issue()` call.
 
 ### Findings Namespacing
 
