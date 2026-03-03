@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor
@@ -63,32 +63,38 @@ The classifier prompt currently has no path for informational Q&A answers. These
 
 The existing `was_rejected_completion` field already handles downgraded completions. The fix is upstream in the prompt itself.
 
-#### Fix 2: Session isolation — Don't set `continue_conversation` for fresh sessions
+#### Fix 2: Session isolation — Check AgentSession before setting `continue_conversation`
 
 In `sdk_client.py`, line 526: `continue_conversation=session_id is not None`. This is always `True` because we always pass a session_id. For fresh (non-reply) messages, there's no previous Claude Code session to continue.
 
-**Approach**: Only set `continue_conversation=True` when we know there IS an existing session to resume:
+**Approach**: Query `AgentSession` in Redis to check if a session with this session_id has had prior activity (i.e., a previous completed or running job exists). Only set `continue_conversation=True` when the AgentSession DB confirms a prior session exists:
 
 ```python
-# Only continue conversation for reply-thread continuations
-# (session_id ending with a reply_to_msg_id that matches an existing session)
-continue_conversation = session_id is not None and self._has_existing_session(session_id)
+# Only continue conversation when AgentSession confirms prior activity
+continue_conversation = session_id is not None and _has_prior_session(session_id)
 ```
 
-The simplest implementation: track which session_ids have had at least one successful completion in a lightweight in-memory set. Or check if a Claude Code session file exists on disk for this session_id.
+Using AgentSession (our existing Redis model) is robust — survives restarts, doesn't couple to Claude Code internal file structure, and leverages data we already track.
 
-#### Fix 3: Non-SDLC auto-continue guard
+#### Fix 3: Non-SDLC auto-continue with different criteria
 
-The DM message was a simple Q&A — not an SDLC job. The auto-continue logic (`MAX_AUTO_CONTINUES = 3`) still ran because the classifier said "status". For non-SDLC conversational sessions, auto-continue is almost never correct.
+The DM message was a simple Q&A — not an SDLC job. The auto-continue logic (`MAX_AUTO_CONTINUES = 3`) still ran because the classifier said "status". Non-SDLC sessions need different auto-continue criteria than SDLC sessions.
 
-**Approach**: In `send_to_chat()` in `job_queue.py`, check if the job is SDLC before auto-continuing. Non-SDLC jobs should only auto-continue if the classification is explicitly STATUS_UPDATE with high confidence AND the job originated from a work request context (not a simple question/DM).
+**Approach**: In `send_to_chat()` in `job_queue.py`, apply different auto-continue rules for non-SDLC jobs:
+
+- **Auto-continue**: When the agent shares its plan/approach before executing (e.g., "I'm going to check X, Y, Z...") — these are genuine status updates that should continue
+- **Stop (deliver)**: When the agent asks a follow-up question, delivers an answer, or requests input — these need human attention
+- **Stop (deliver)**: When the classifier says COMPLETION, QUESTION, BLOCKER, or ERROR
+
+The key distinction: non-SDLC status updates that are "here's my plan" should auto-continue, but informational answers to user questions should not. The classifier needs to distinguish these — or the non-SDLC path should use a simpler heuristic (e.g., only auto-continue if the output is short AND contains planning language like "I'll", "Let me", "First I need to").
 
 ### Flow
 
 **Message arrives** → Classifier evaluates output →
   - If SDLC job: existing auto-continue logic (max 10)
   - If non-SDLC + completion/question/blocker/error: deliver immediately
-  - If non-SDLC + status_update: deliver immediately (no auto-continue for conversational sessions)
+  - If non-SDLC + status_update + planning language: auto-continue (agent sharing its approach)
+  - If non-SDLC + status_update + substantive content: deliver immediately (informational answer)
 
 ## Rabbit Holes
 
@@ -109,7 +115,7 @@ The DM message was a simple Q&A — not an SDLC job. The auto-continue logic (`M
 ## No-Gos (Out of Scope)
 
 - Rewriting the classifier from scratch — targeted prompt changes only
-- Building a session file manager or session registry
+- Building a new session registry — use existing AgentSession Redis model
 - Changing the Telegram session_id format
 - Modifying how reply-thread continuation works (that's working correctly)
 
@@ -188,19 +194,21 @@ No agent integration required — this is a bridge-internal change affecting mes
 - **Assigned To**: session-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- Change `continue_conversation` logic in `_create_options()` to only be True when resuming a known existing session
-- Simplest approach: only set True when `session_id` was previously seen (track in module-level set)
+- Change `continue_conversation` logic in `_create_options()` to query AgentSession Redis model
+- Only set `continue_conversation=True` when AgentSession confirms a prior session exists for this session_id
+- Add `_has_prior_session(session_id)` helper that queries AgentSession
 - Write tests verifying fresh sessions don't set `continue_conversation=True`
 
-### 3. Add non-SDLC auto-continue guard
+### 3. Add non-SDLC auto-continue with different criteria
 - **Task ID**: build-guard
 - **Depends On**: none
 - **Assigned To**: classifier-builder
 - **Agent Type**: builder
 - **Parallel**: true
-- In `send_to_chat()` in `job_queue.py`, skip auto-continue for non-SDLC jobs
-- Use `agent_session.is_sdlc_job()` to check — if not SDLC, deliver immediately regardless of classification
-- Write tests verifying non-SDLC status outputs are delivered, not auto-continued
+- In `send_to_chat()` in `job_queue.py`, add non-SDLC branch with different auto-continue criteria
+- Auto-continue when: output is short + contains planning language ("I'll", "Let me", "First I need to") — agent sharing its approach before executing
+- Deliver when: output is substantive answer, contains follow-up questions, or is a completion
+- Write tests verifying: (a) non-SDLC planning outputs auto-continue, (b) non-SDLC informational answers are delivered
 
 ### 4. Validate all fixes
 - **Task ID**: validate-fixes
@@ -240,7 +248,7 @@ No agent integration required — this is a bridge-internal change affecting mes
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Session isolation approach**: Should we track seen session_ids in a module-level set (simple, lost on restart) or check for Claude Code session files on disk (more robust but couples to internal file structure)?
-2. **Non-SDLC auto-continue**: Should we completely disable auto-continue for non-SDLC sessions, or keep it with a lower cap (e.g., 1 instead of 3)?
+1. **Session isolation approach**: Use AgentSession Redis model (our existing DB). Query it to check if a prior session exists before setting `continue_conversation=True`. Robust, survives restarts, no coupling to Claude Code internals.
+2. **Non-SDLC auto-continue**: Use different criteria, not a simple cap. Auto-continue when agent shares its plan/approach (planning language). Stop when agent delivers an answer or asks a follow-up question.
