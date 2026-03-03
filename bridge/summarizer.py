@@ -220,7 +220,10 @@ STATUS_UPDATE — Progress report with no question. The agent is still working.
   Examples: "Running tests...", "Found 3 issues, fixing now", "Analyzing the codebase"
   Key signals: present tense activity, no question directed at human, intermediate progress
 
-COMPLETION — The work is done AND evidence is provided.
+COMPLETION — The work is done AND evidence is provided, OR the user's question has been answered.
+  Two paths to COMPLETION:
+
+  Path A — SDLC/work completion (evidence required):
   REQUIRES at least one of:
   - Command output showing test results (N passed, 0 failed)
   - Specific numbers (test counts, error counts, line counts)
@@ -231,8 +234,18 @@ COMPLETION — The work is done AND evidence is provided.
 "PR created: https://... — CI green", "ruff check: 0 errors, black: reformatted 3 files"
   Key signals: specific numbers, command output pasted, exit codes mentioned
 
+  Path B — Conversational/Q&A completion (no evidence needed):
+  When the user asked a question and the agent answered it with factual, substantive content.
+  DOES NOT require test output, numbers, or URLs — the answer itself IS the deliverable.
+  Examples: "The summarizer works by...", "Here's how the routing system handles...", \
+"The bridge uses Telethon to...", "There are 3 main components: ..."
+  Key signals: explanatory prose, factual descriptions, architecture explanations, \
+direct answers to "how does X work?" or "what is X?" questions
+  IMPORTANT: If the output explains a system, answers a question, or provides information \
+the user asked for — that is COMPLETION, not STATUS_UPDATE. The user asked, the agent answered.
+
   NOT completion (classify as STATUS_UPDATE instead, and provide a coaching_message):
-  - "Done" or "Complete" without any evidence
+  - "Done" or "Complete" without any evidence (for work tasks)
   - "Should work now" (hedging = not verified)
   - "Committed and pushed" without test results
   - Hedging language: "should", "probably", "seems to", "looks like", "I think", "I believe"
@@ -271,7 +284,29 @@ Output: {"type": "status", "confidence": 0.93, \
 "reason": "Agent plans to write code outside SDLC pipeline", \
 "coaching_message": "Implementation work should go through /sdlc to ensure proper branch, \
 testing, and review. Use /sdlc to create an issue and start the pipeline instead of \
-writing code directly."}"""
+writing code directly."}
+
+Few-shot examples of Q&A completions (Path B — no evidence needed):
+
+Input: "The summarizer works by classifying agent output into types (question, status, \
+completion, blocker, error) using an LLM call. Status updates are auto-continued while \
+completions and questions are delivered to Telegram. The structured format uses bullet \
+points with stage progress lines for SDLC work."
+Output: {"type": "completion", "confidence": 0.92, \
+"reason": "Factual answer to user question about system architecture", \
+"coaching_message": null, "has_workarounds": false}
+
+Input: "There are two root causes: the classifier misclassifies Q&A answers as status \
+updates because they lack evidence like test output, and the shared Claude Code session \
+causes context to leak between concurrent conversations."
+Output: {"type": "completion", "confidence": 0.93, \
+"reason": "Direct analysis answering user's question about a bug", \
+"coaching_message": null, "has_workarounds": false}
+
+Input: "Let me investigate the logs to find out what happened..."
+Output: {"type": "status", "confidence": 0.90, \
+"reason": "Agent describing planned investigation, not yet answering", \
+"coaching_message": null, "has_workarounds": false}"""
 
 # False question detection explained:
 # Many agent outputs contain question-like text that should NOT pause for human input:
