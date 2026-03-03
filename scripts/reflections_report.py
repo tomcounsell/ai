@@ -123,7 +123,9 @@ def create_reflections_issue(
     # Skip if already created during this run (race condition guard)
     dedup_key = (date, cwd)
     if dedup_key in _created_this_run:
-        logger.info(f"Reflections issue already created this run for {date} (cwd={cwd}), skipping")
+        logger.info(
+            f"Reflections issue already created this run for {date} (cwd={cwd}), skipping"
+        )
         return False
 
     # Skip if issue already exists in the target repo

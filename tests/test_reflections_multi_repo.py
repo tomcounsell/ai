@@ -48,7 +48,9 @@ class TestLoadLocalProjects:
 
         with patch("scripts.reflections.AI_ROOT", tmp_path):
             # Patch config path resolution
-            with patch("scripts.reflections.load_local_projects.__wrapped__", create=True):
+            with patch(
+                "scripts.reflections.load_local_projects.__wrapped__", create=True
+            ):
                 pass
 
         # Call directly with monkeypatched config file
