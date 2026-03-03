@@ -680,7 +680,9 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
 def _render_stage_progress(session) -> str | None:
     """Render SDLC stage progress line from session history.
 
-    Returns a line like: ☑ ISSUE → ☑ PLAN → ▶ BUILD → ☐ TEST → ☐ REVIEW → ☐ DOCS
+    Returns a line like: ISSUE 243 → PLAN → ▶ BUILD → TEST → REVIEW → DOCS
+    No checkbox icons — completed stages show plain name, in-progress shows ▶ prefix,
+    pending stages show plain name. The ISSUE stage includes the issue number when available.
     Returns None if no stage data is available.
     """
     if not session:
@@ -694,15 +696,29 @@ def _render_stage_progress(session) -> str | None:
 
     from models.agent_session import SDLC_STAGES
 
+    # Extract issue number from session links for the ISSUE stage label
+    issue_number = None
+    links = session.get_links() if hasattr(session, "get_links") else {}
+    if links and "issue" in links:
+        match = re.search(r"/issues/(\d+)", links["issue"])
+        if match:
+            issue_number = match.group(1)
+
     parts = []
     for stage in SDLC_STAGES:
         status = progress.get(stage, "pending")
-        if status == "completed":
-            parts.append(f"☑ {stage}")
-        elif status == "in_progress":
-            parts.append(f"▶ {stage}")
+        # Build the label — ISSUE stage gets the issue number appended
+        if stage == "ISSUE" and issue_number:
+            label = f"ISSUE {issue_number}"
         else:
-            parts.append(f"☐ {stage}")
+            label = stage
+
+        if status == "in_progress":
+            parts.append(f"▶ {label}")
+        else:
+            # Both completed and pending show plain label
+            # Position in the sequence (before/after ▶) implies completion state
+            parts.append(label)
 
     return " → ".join(parts)
 
@@ -710,8 +726,9 @@ def _render_stage_progress(session) -> str | None:
 def _render_link_footer(session) -> str | None:
     """Render link footer from session's tracked links.
 
-    Returns a line like: Issue #168 | Plan | PR #176
-    with markdown links. Returns None if no links exist.
+    Returns a line like: Issue #168 | PR #176
+    with markdown links. Plan links are excluded — only issue and PR links
+    are rendered. Returns None if no links exist.
     """
     if not session:
         return None
@@ -727,12 +744,11 @@ def _render_link_footer(session) -> str | None:
             match = re.search(r"/issues/(\d+)", url)
             label = f"Issue #{match.group(1)}" if match else "Issue"
             parts.append(f"[{label}]({url})")
-        elif kind == "plan":
-            parts.append(f"[Plan]({url})")
         elif kind == "pr":
             match = re.search(r"/pull/(\d+)", url)
             label = f"PR #{match.group(1)}" if match else "PR"
             parts.append(f"[{label}]({url})")
+        # Plan links are intentionally excluded
 
     return " | ".join(parts) if parts else None
 
@@ -850,7 +866,12 @@ GENERAL RULES:
 access, policy decisions). Do NOT flag: implementation choices, internal obstacles, things \
 the agent could resolve with its tools
 - Tone: direct, no preamble, no filler
-- Do NOT include bare URLs at the end — link rendering is handled separately"""
+- Do NOT include bare URLs at the end — link rendering is handled separately
+- OMIT obvious process bullets that describe routine agent activity rather than outcomes. \
+Examples of what to OMIT: "Analyzed the codebase", "Read through the plan", \
+"Created execution plan", "Examined the existing code", "Reviewed the implementation", \
+"Investigated the issue". These are process noise — the PM only cares about WHAT was \
+accomplished, not THAT you read files or analyzed code."""
 
 # Blocker flag logic explained:
 # The ⚠️ flag is meant to alert the PM only when human intervention is truly required.
@@ -936,13 +957,13 @@ def _compose_structured_summary(
         ? Question needing input
 
     SDLC:
-        ✅
-        ☑ ISSUE → ☑ PLAN → ☑ BUILD → ☑ TEST → ☑ REVIEW → ☑ DOCS
+        ⏳
+        ISSUE 243 → PLAN → ▶ BUILD → TEST → REVIEW → DOCS
         • Bullet point 1
         • Bullet point 2
 
         ? Question needing input
-        Issue #168 | Plan | PR #176
+        Issue #243 | PR #250
     """
     # Re-read session from Redis to pick up stage data written during execution.
     # The session object passed in may have been loaded before session_progress.py
