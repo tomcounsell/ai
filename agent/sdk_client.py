@@ -39,7 +39,6 @@ from agent.agent_definitions import get_agent_definitions
 from agent.hooks import build_hooks_config
 from agent.workflow_state import WorkflowState
 from agent.workflow_types import WorkflowStateData
-from bridge.routing import classify_work_request
 
 logger = logging.getLogger(__name__)
 
@@ -805,6 +804,8 @@ async def get_agent_response_sdk(
         project_working_dir = AI_REPO_ROOT
 
     # Classify: SDLC work → orchestrator in ai/, Q&A → direct in target project
+    from bridge.routing import classify_work_request
+
     classification = classify_work_request(message)
     if classification == "sdlc" and project_working_dir != AI_REPO_ROOT:
         working_dir = AI_REPO_ROOT

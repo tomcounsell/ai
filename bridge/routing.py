@@ -299,6 +299,25 @@ async def classify_needs_response_async(text: str) -> bool:
 # Work Request Classification (SDLC Routing)
 # =============================================================================
 
+# Lazy singleton for Anthropic client (avoid per-call instantiation)
+_anthropic_client = None
+
+
+def _get_anthropic_client():
+    """Get or create a singleton Anthropic client for classification."""
+    global _anthropic_client
+    if _anthropic_client is None:
+        import anthropic
+
+        from utils.api_keys import get_anthropic_api_key
+
+        api_key = get_anthropic_api_key()
+        if not api_key:
+            return None
+        _anthropic_client = anthropic.Anthropic(api_key=api_key)
+    return _anthropic_client
+
+
 # Fast-path patterns that bypass LLM classification entirely
 _PASSTHROUGH_PREFIXES = (
     "/sdlc",
@@ -397,19 +416,15 @@ def _classify_work_request_llm(text: str) -> str:
     except Exception as e:
         logger.debug(f"Ollama classification failed, trying Haiku: {e}")
 
-    # Fallback: Haiku via Anthropic API
+    # Fallback: Haiku via Anthropic API (singleton client)
     try:
-        import anthropic
-
         from config.models import MODEL_FAST
-        from utils.api_keys import get_anthropic_api_key
 
-        api_key = get_anthropic_api_key()
-        if not api_key:
+        client = _get_anthropic_client()
+        if not client:
             logger.debug("No API key for Haiku classification fallback")
             return "question"
 
-        client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
             model=MODEL_FAST,
             max_tokens=10,

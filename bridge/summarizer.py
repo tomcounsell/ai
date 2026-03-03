@@ -41,16 +41,16 @@ CLASSIFICATION_CONFIDENCE_THRESHOLD = 0.80
 
 # Process narration patterns — stripped before summarization
 _PROCESS_NARRATION_PATTERNS = [
-    re.compile(r"^Let me .*[.:]$"),
-    re.compile(r"^Now let me .*[.:]$"),
-    re.compile(r"^I'll .*[.:]$"),
-    re.compile(r"^First,? (?:let me|I'll) .*[.:]$"),
+    re.compile(r"^Let me (check|look|read|examine|review|investigate|search|explore)"),
+    re.compile(r"^Now let me (check|look|read|examine|review|investigate|search)"),
+    re.compile(r"^I'll (start|begin|proceed|continue|check|look|read|examine) "),
+    re.compile(r"^First,? (?:let me|I'll) (check|look|read|examine|review)"),
     re.compile(r"^Good\.$"),
-    re.compile(r"^Now I .*[.:]$"),
-    re.compile(r"^Looking at .*[.:]$"),
-    re.compile(r"^Alright,? .*[.:]$"),
-    re.compile(r"^Sure,? .*[.:]$"),
-    re.compile(r"^OK,? .*[.:]$"),
+    re.compile(r"^Now I (need to |will |'ll )?(check|look|read|examine|review)"),
+    re.compile(r"^Looking at (the |this |that )"),
+    re.compile(r"^Alright,? (let me|I'll)"),
+    re.compile(r"^Sure,? (let me|I'll)"),
+    re.compile(r"^OK,? (let me|I'll)"),
 ]
 
 
