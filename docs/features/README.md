@@ -23,7 +23,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Design Review](do-design-review.md) | Review web UI against 10 premium design criteria with severity ratings | Shipped |
 | [Skills Audit](do-skills-audit.md) | Deterministic validation of all SKILL.md files with 12 rules and Anthropic best practices sync | Shipped |
 | [do-patch Skill](do-patch-skill.md) | Targeted fix skill for test failures and review blockers; called automatically by do-build | Shipped |
-| [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, and structured reporting | Shipped |
+| [Do Test](do-test.md) | Intelligent test orchestration with parallel dispatch, changed-file detection, structured reporting, and pytest plugin configuration | Shipped |
 | [SDLC Enforcement](sdlc-enforcement.md) | Quality gates for code sessions: user-level hooks, pipeline stage model, settings merger, cross-repo enforcement | Shipped |
 | [SDLC-First Routing](sdlc-first-routing.md) | Automatic work request classification (Ollama/Haiku) and orchestrator routing for SDLC vs conversational requests | Shipped |
 | [Documentation Lifecycle](documentation-lifecycle.md) | Automated validation and migration system for plan documentation tasks | Shipped |
