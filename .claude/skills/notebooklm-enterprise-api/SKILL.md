@@ -12,7 +12,7 @@ user-invocable: false
 
 **Reason:** The team decided against using the NotebookLM Enterprise API for podcast audio generation.
 
-**Current Approach:** The podcast production pipeline uses local audio generation via `notebooklm-mcp-cli` and the `local_audio_worker` management command. See `apps/podcast/tasks.py::step_audio_generation` for implementation details.
+**Current Approach:** The podcast production pipeline uses local audio generation via `notebooklm-py` and the `local_audio_worker` management command. See `apps/podcast/tasks.py::step_audio_generation` for implementation details.
 
 **Fallback Option:** For manual workflow, use the `notebooklm-audio` skill (web interface approach).
 

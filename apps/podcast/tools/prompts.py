@@ -1,9 +1,9 @@
 """
 System prompts for podcast audio generation.
 
-These prompts are used by generate_audio.py to:
-1. Generate structural outlines from research materials
-2. Guide audio generation with rich context (NotebookLM-style)
+These prompts are used for:
+1. Generating structural outlines from research materials
+2. Guiding audio generation with rich context
 """
 
 # =============================================================================

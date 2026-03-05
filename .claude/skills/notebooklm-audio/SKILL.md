@@ -8,7 +8,7 @@ user-invocable: false
 
 **Status:** Manual fallback workflow for podcast audio generation.
 
-**Primary Method:** The automated pipeline uses `local_audio_worker` with `notebooklm-mcp-cli`.
+**Primary Method:** The automated pipeline uses `local_audio_worker` with `notebooklm-py`.
 
 **Use This When:** The local audio worker is unavailable and you need to generate audio manually.
 

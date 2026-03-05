@@ -37,7 +37,7 @@ One real episode successfully published through the full pipeline, appearing in 
 | `OPENAI_API_KEY` in `.env.local` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env.local').get('OPENAI_API_KEY')"` | Whisper transcription |
 | `PERPLEXITY_API_KEY` in `.env.local` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env.local').get('PERPLEXITY_API_KEY')"` | Perplexity research |
 | `GEMINI_API_KEY` in `.env.local` | `python -c "from dotenv import dotenv_values; assert dotenv_values('.env.local').get('GEMINI_API_KEY')"` | Gemini research |
-| `notebooklm-mcp-cli` installed locally | `python -c "import notebooklm_mcp" 2>/dev/null && echo OK || pip show notebooklm-mcp-cli` | Local audio worker |
+| `notebooklm-py` installed locally | `python -c "import notebooklm" 2>/dev/null && echo OK || pip show notebooklm-py` | Local audio worker |
 | Supabase credentials | `python -c "from dotenv import dotenv_values; e=dotenv_values('.env.local'); assert e.get('SUPABASE_PROJECT_URL') and e.get('SUPABASE_SERVICE_ROLE_KEY')"` | File storage |
 
 ## Solution
@@ -90,9 +90,7 @@ Verify by calling `check_storage_config()` from a production shell.
 
 ### 5. Audio generation via local worker (operational)
 
-The task pipeline pauses at step 9 (`pause_for_human("audio_generation")`). A local machine runs `manage.py local_audio_worker`, which polls the API, generates audio via `notebooklm-mcp-cli`, uploads it, and resumes the workflow.
-
-This is the MVP path. Enterprise API integration exists in the codebase (`apps/podcast/tools/notebooklm_api.py` and `apps/podcast/services/audio.py::generate_audio()`) but is **NOT being used** — the team decided against this approach as of 2026-02-19. No action needed on the Enterprise API for this MVP.
+The task pipeline pauses at step 9 (`pause_for_human("audio_generation")`). A local machine runs `manage.py local_audio_worker`, which polls the API, generates audio via `notebooklm-py`, uploads it, and resumes the workflow.
 
 ### Flow
 

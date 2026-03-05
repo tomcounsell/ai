@@ -10,18 +10,20 @@ Usage:
 
 The worker:
   1. Polls GET {base_url}/api/podcast/pending-audio/ for episodes needing audio
-  2. For each pending episode, generates audio via notebooklm-mcp-cli
+  2. For each pending episode, generates audio via notebooklm-py
   3. Uploads the resulting MP3 to storage via store_file()
   4. Calls POST {base_url}/api/podcast/episodes/{id}/audio-callback/ with the audio URL
   5. Repeats until interrupted (Ctrl+C)
 
 Requires:
   - LOCAL_WORKER_API_KEY in environment/settings (must match production)
-  - notebooklm-mcp-cli installed and authenticated (nlm login)
+  - notebooklm-py installed and authenticated (notebooklm login)
   - Storage backend configured (Supabase for production uploads)
 """
 
+import asyncio
 import logging
+import re
 import signal
 import tempfile
 import time
@@ -184,9 +186,12 @@ class Command(BaseCommand):
             for filename, content in sources.items():
                 (tmpdir_path / filename).write_text(content, encoding="utf-8")
 
-            # Generate audio via notebooklm-mcp-cli
+            # Extract content plan for NotebookLM instructions
+            instructions = self._extract_instructions(sources)
+
+            # Generate audio via notebooklm-py
             output_path = tmpdir_path / f"{slug}.mp3"
-            self._generate_audio_nlm(tmpdir_path, title, output_path)
+            self._generate_audio_nlm(tmpdir_path, title, output_path, instructions)
 
             # Read the audio bytes
             audio_bytes = output_path.read_bytes()
@@ -203,48 +208,124 @@ class Command(BaseCommand):
                 base_url, api_key, episode_id, audio_url, len(audio_bytes)
             )
 
+    @staticmethod
+    def _extract_instructions(sources: dict[str, str]) -> str | None:
+        """Extract NotebookLM instructions from the content plan.
+
+        Looks for content_plan.md in the sources dict and extracts the
+        NotebookLM Guidance section if present. Falls back to the full
+        content plan text if the guidance section can't be isolated.
+
+        Returns None if no content plan is available.
+        """
+        content_plan = sources.get("content_plan.md")
+        if not content_plan:
+            return None
+
+        # Try to extract just the NotebookLM Guidance section
+        # The content plan is Markdown with a "## NotebookLM Guidance" or
+        # "## notebooklm_guidance" section header
+        match = re.search(
+            r"^##\s+(?:NotebookLM[_ ]Guidance|notebooklm_guidance)\s*\n(.*?)(?=\n##\s|\Z)",
+            content_plan,
+            re.MULTILINE | re.DOTALL | re.IGNORECASE,
+        )
+        if match:
+            return match.group(0).strip()
+
+        # Fall back to the full content plan as instructions
+        return content_plan
+
     def _generate_audio_nlm(
-        self, source_dir: Path, title: str, output_path: Path
+        self,
+        source_dir: Path,
+        title: str,
+        output_path: Path,
+        instructions: str | None = None,
     ) -> None:
-        """Generate audio using notebooklm-mcp-cli library."""
+        """Generate audio using notebooklm-py library.
+
+        Uses asyncio.run() to bridge the sync management command with the
+        async notebooklm-py client API. Each call creates its own event loop,
+        which is safe when called from ThreadPoolExecutor threads.
+
+        Args:
+            source_dir: Directory containing .md source files to upload.
+            title: Episode title for the NotebookLM notebook.
+            output_path: Where to save the generated MP3 file.
+            instructions: Optional episode focus instructions for NotebookLM.
+                Extracted from the content plan's NotebookLM Guidance section.
+        """
         try:
-            from notebooklm_mcp_cli.core import NotebookLMClient
+            import notebooklm  # noqa: F401
         except ImportError:
             raise CommandError(
-                "notebooklm-mcp-cli not installed. "
-                "Install with: pip install notebooklm-mcp-cli"
+                "notebooklm-py not installed. Install with: uv add notebooklm-py"
             )
 
-        client = NotebookLMClient()
+        asyncio.run(
+            self._generate_audio_async(source_dir, title, output_path, instructions)
+        )
 
-        # Create notebook and upload sources
-        notebook_id = client.create_notebook(f"Yudame Research: {title}")
+    @staticmethod
+    async def _generate_audio_async(
+        source_dir: Path,
+        title: str,
+        output_path: Path,
+        instructions: str | None = None,
+    ) -> None:
+        """Async implementation of audio generation via notebooklm-py.
 
-        try:
-            # Upload all source files from the temp directory
-            for source_file in source_dir.iterdir():
-                if source_file.is_file() and source_file.suffix == ".md":
-                    client.upload_source(
-                        notebook_id,
-                        source_file.name,
-                        source_file.read_text(encoding="utf-8"),
-                    )
+        Args:
+            source_dir: Directory containing .md source files to upload.
+            title: Episode title for the NotebookLM notebook.
+            output_path: Where to save the generated MP3 file.
+            instructions: Optional episode focus instructions passed to
+                NotebookLM's generate_audio(). Guides the two-host
+                conversation structure and content emphasis.
+        """
+        from notebooklm import NotebookLMClient
 
-            # Generate audio
-            client.generate_audio(notebook_id)
-            client.wait_for_audio(notebook_id, timeout_minutes=30)
+        async with await NotebookLMClient.from_storage() as client:
+            nb = await client.notebooks.create(f"Yudame Research: {title}")
 
-            # Download
-            client.download_audio(notebook_id, output_path)
-        finally:
             try:
-                client.delete_notebook(notebook_id)
-            except Exception:
-                logger.warning(
-                    "Failed to clean up notebook %s",
-                    notebook_id,
-                    exc_info=True,
+                # Upload all source files from the temp directory
+                for source_file in sorted(source_dir.iterdir()):
+                    if source_file.is_file() and source_file.suffix == ".md":
+                        await client.sources.add_text(
+                            nb.id,
+                            source_file.name,
+                            source_file.read_text(encoding="utf-8"),
+                            wait=True,
+                        )
+
+                # Generate audio overview with optional episode focus instructions
+                generate_kwargs: dict = {"notebook_id": nb.id}
+                if instructions:
+                    generate_kwargs["instructions"] = instructions
+                    logger.info(
+                        "Generating audio with instructions (%d chars)",
+                        len(instructions),
+                    )
+                status = await client.artifacts.generate_audio(**generate_kwargs)
+
+                # Wait for completion (30 minute timeout = 1800 seconds)
+                await client.artifacts.wait_for_completion(
+                    nb.id, status.task_id, timeout=1800.0
                 )
+
+                # Download the generated audio
+                await client.artifacts.download_audio(nb.id, str(output_path))
+            finally:
+                try:
+                    await client.notebooks.delete(nb.id)
+                except Exception:
+                    logger.warning(
+                        "Failed to clean up notebook %s",
+                        nb.id,
+                        exc_info=True,
+                    )
 
     def _send_callback(
         self,

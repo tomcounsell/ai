@@ -54,8 +54,8 @@ Core episode record. Services read and write these fields:
 | `report_text` | `synthesize_report` |
 | `sources_text` | `synthesize_report` |
 | `show_notes` | `write_episode_metadata` |
-| `audio_url` | `generate_audio` |
-| `audio_file_size_bytes` | `generate_audio` |
+| `audio_url` | `local_audio_worker` (via API callback) |
+| `audio_file_size_bytes` | `local_audio_worker` (via API callback) |
 | `transcript` | `transcribe_audio` |
 | `chapters` | `generate_episode_chapters` |
 | `cover_image_url` | `generate_cover_art` (stub) |
@@ -193,16 +193,7 @@ Reads `Episode.report_text` and `p3-briefing`, delegates to the `plan_episode` N
 
 ### `audio.py` -- Audio Pipeline
 
-**NOTE:** The `generate_audio()` function integrates with the NotebookLM Enterprise API, but this approach is **NOT currently in use** (as of 2026-02-19). The production pipeline uses `local_audio_worker` with `notebooklm-mcp-cli` instead. See `apps/podcast/tasks.py::step_audio_generation`.
-
-```python
-generate_audio(episode_id: int) -> str  # ARCHIVED - NOT IN USE
-```
-**Status:** Archived implementation (Enterprise API approach not being used)
-
-**Current Alternative:** `local_audio_worker` management command + `notebooklm-mcp-cli`
-
-Long-running operation (5-30 minutes). Creates a NotebookLM notebook, uploads source texts (report, briefing, content plan, sources), generates an episodeFocus prompt, triggers audio generation, polls until complete, downloads the audio, uploads to storage via `store_file`, and updates `Episode.audio_url` and `Episode.audio_file_size_bytes`. Returns the audio URL. Cleans up the notebook on completion.
+Audio generation is handled by the `local_audio_worker` management command using `notebooklm-py`. See `apps/podcast/management/commands/local_audio_worker.py`.
 
 ```python
 transcribe_audio(episode_id: int) -> str
@@ -339,7 +330,7 @@ result = produce_episode.enqueue(episode_id=42)
 | `step_master_briefing` | `analysis.write_briefing` | Quality Gate Wave 1 → `step_synthesis` |
 | `step_synthesis` | `synthesis.synthesize_report` | `step_episode_planning` |
 | `step_episode_planning` | `synthesis.plan_episode_content` | Quality Gate Wave 2 → `step_audio_generation` |
-| `step_audio_generation` | `audio.generate_audio` | `step_transcribe_audio` |
+| `step_audio_generation` | `workflow.pause_for_human` (local_audio_worker) | `step_transcribe_audio` |
 | `step_transcribe_audio` | `audio.transcribe_audio` | `step_generate_chapters` |
 | `step_generate_chapters` | `audio.generate_episode_chapters` | `step_cover_art` + `step_metadata` + `step_companions` (parallel) |
 | `step_cover_art` | `publishing.generate_cover_art` | _(signal fan-in)_ |
