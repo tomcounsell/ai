@@ -1,10 +1,10 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Small
 owner: Valor
 created: 2026-03-06
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/267
 ---
 
 # Fix Worktree Resume on Interrupted Sessions
