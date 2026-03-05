@@ -329,7 +329,7 @@ Return ONLY the JSON array, no other text. If no issues found, return [].
     try:
         client = anthropic.Anthropic()
         response = client.messages.create(
-            model="claude-haiku-4-20250414",
+            model="claude-haiku-4-5-20251001",
             max_tokens=2048,
             messages=[{"role": "user", "content": prompt}],
         )
