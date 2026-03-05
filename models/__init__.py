@@ -9,7 +9,6 @@ Provides fast, queryable Redis models for all persistent data:
 - DeadLetter: failed message queue
 - ReflectionRun: per-day reflection execution state
 - ReflectionIgnore: ignored bug patterns with TTL-based expiry
-- LessonLearned: institutional memory from session reflections
 """
 
 from models.agent_session import AgentSession
@@ -17,7 +16,7 @@ from models.bridge_event import BridgeEvent
 from models.chat import Chat
 from models.dead_letter import DeadLetter
 from models.link import Link
-from models.reflections import LessonLearned, ReflectionIgnore, ReflectionRun
+from models.reflections import ReflectionIgnore, ReflectionRun
 from models.telegram import TelegramMessage
 
 # Backward compatibility alias
@@ -30,7 +29,6 @@ __all__ = [
     "BridgeEvent",
     "ReflectionIgnore",
     "ReflectionRun",
-    "LessonLearned",
     "TelegramMessage",
     "Chat",
     "Link",

@@ -1,9 +1,8 @@
 """Reflections Popoto models - Redis-backed state for the reflections maintenance system.
 
-Three models:
+Two models:
 - ReflectionRun: per-run state with resumability (one per day)
 - ReflectionIgnore: auto-fix suppression with TTL-based auto-expiry
-- LessonLearned: queryable institutional memory from LLM reflection
 
 See docs/features/reflections.md for full documentation.
 """
@@ -145,73 +144,3 @@ class ReflectionIgnore(Model):
             if entry_pattern and (entry_pattern in pattern_lower or pattern_lower in entry_pattern):
                 return True
         return False
-
-
-class LessonLearned(Model):
-    """A learned lesson from session reflection.
-
-    Replaces data/lessons_learned.jsonl with a queryable Redis model.
-    Keyed by category for filtering. Deduplication by pattern field.
-    """
-
-    lesson_id = AutoKeyField()
-    date = KeyField()  # YYYY-MM-DD when the lesson was recorded
-    category = KeyField()  # misunderstanding, code_bug, poor_planning, etc.
-    summary = Field(max_length=2000)
-    pattern = Field(max_length=2000)  # the recurring pattern
-    prevention = Field(null=True, max_length=2000)
-    source_session = Field(null=True, max_length=200)
-    validated = IntField(default=0)  # 0 = unvalidated, 1+ = validated N times
-    created_at = SortedField(type=float)
-
-    @classmethod
-    def add_lesson(
-        cls,
-        date: str,
-        category: str,
-        summary: str,
-        pattern: str,
-        prevention: str = "",
-        source_session: str = "",
-    ) -> "LessonLearned | None":
-        """Add a lesson, skipping if the pattern already exists.
-
-        Returns the created LessonLearned or None if it was a duplicate.
-        """
-        # Deduplicate by exact pattern match
-        existing = cls.query.all()
-        for lesson in existing:
-            if lesson.pattern == pattern:
-                return None
-
-        return cls.create(
-            date=date,
-            category=category,
-            summary=summary,
-            pattern=pattern,
-            prevention=prevention,
-            source_session=source_session,
-            validated=0,
-            created_at=time.time(),
-        )
-
-    @classmethod
-    def cleanup_expired(cls, max_age_days: int = 90) -> int:
-        """Delete lessons older than max_age_days. Returns count deleted."""
-        cutoff = time.time() - (max_age_days * 86400)
-        all_lessons = cls.query.all()
-        deleted = 0
-        for lesson in all_lessons:
-            if lesson.created_at and lesson.created_at < cutoff:
-                lesson.delete()
-                deleted += 1
-        return deleted
-
-    @classmethod
-    def get_recent(cls, days: int = 90) -> list["LessonLearned"]:
-        """Get lessons from the last N days."""
-        cutoff = time.time() - (days * 86400)
-        all_lessons = cls.query.all()
-        return [
-            lesson for lesson in all_lessons if lesson.created_at and lesson.created_at > cutoff
-        ]

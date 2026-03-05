@@ -11,15 +11,15 @@ A long-running process that performs daily self-directed maintenance tasks:
 6. Session analysis (thrash ratio, user corrections) - Redis-backed via AgentSession
 7. LLM reflection (Claude Haiku categorization)
 8. File GitHub issues for high-confidence code bugs
-9. Memory consolidation (Redis LessonLearned model)
-10. Produce daily report (local markdown)
-11. GitHub issue creation (per-project, via reflections_report module)
-12. Skills audit (validate all SKILL.md files against template standards)
-13. Redis TTL cleanup (all models including reflections models)
-14. Redis data quality checks (unsummarized links, dead channels)
+9. Produce daily report (local markdown)
+10. GitHub issue creation (per-project, via reflections_report module)
+11. Skills audit (validate all SKILL.md files against template standards)
+12. Redis TTL cleanup (all models including reflections models)
+13. Redis data quality checks (unsummarized links, dead channels)
+14. Branch and plan cleanup (stale branches, orphaned plans)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
-State: ReflectionRun | Ignore patterns: ReflectionIgnore | Lessons: LessonLearned
+State: ReflectionRun | Ignore patterns: ReflectionIgnore
 
 See docs/features/reflections.md for full documentation.
 """
@@ -357,46 +357,6 @@ Return ONLY the JSON array, no other text. If no issues found, return [].
         return []
 
 
-def consolidate_memory(
-    reflections: list[dict[str, str]],
-    date: str,
-) -> None:
-    """Persist reflection output to Redis LessonLearned model.
-
-    Also prunes entries older than 90 days.
-
-    Args:
-        reflections: List of reflection dicts from run_llm_reflection().
-        date: Date string (YYYY-MM-DD) for new entries.
-    """
-    from models.reflections import LessonLearned
-
-    # Prune old entries
-    pruned = LessonLearned.cleanup_expired(max_age_days=90)
-    if pruned:
-        logger.info(f"Pruned {pruned} expired lessons from Redis")
-
-    # Add new entries (deduplication handled by add_lesson)
-    added = 0
-    for reflection in reflections:
-        pattern = reflection.get("pattern", "")
-        if not pattern:
-            continue
-        result = LessonLearned.add_lesson(
-            date=date,
-            category=reflection.get("category", "unknown"),
-            summary=reflection.get("summary", ""),
-            pattern=pattern,
-            prevention=reflection.get("prevention", ""),
-            source_session=reflection.get("source_session", ""),
-        )
-        if result is not None:
-            added += 1
-
-    if added:
-        logger.info(f"Added {added} new lessons to Redis")
-
-
 def extract_structured_errors(log_file: Path) -> list[dict[str, str]]:
     """Extract structured error information from a log file.
 
@@ -498,12 +458,12 @@ class ReflectionRunner:
             (6, "Session Analysis", self.step_session_analysis),
             (7, "LLM Reflection", self.step_llm_reflection),
             (8, "File Bug Issues", self.step_auto_fix_bugs),
-            (9, "Memory Consolidation", self.step_memory_consolidation),
-            (10, "Produce Daily Report", self.step_produce_report),
-            (11, "GitHub Issue Creation", self.step_create_github_issue),
-            (12, "Skills Audit", self.step_skills_audit),
-            (13, "Redis TTL Cleanup", self.step_redis_cleanup),
-            (14, "Redis Data Quality", self.step_redis_data_quality),
+            (9, "Produce Daily Report", self.step_produce_report),
+            (10, "GitHub Issue Creation", self.step_create_github_issue),
+            (11, "Skills Audit", self.step_skills_audit),
+            (12, "Redis TTL Cleanup", self.step_redis_cleanup),
+            (13, "Redis Data Quality", self.step_redis_data_quality),
+            (14, "Branch and Plan Cleanup", self.step_branch_plan_cleanup),
         ]
 
     def _load_state(self) -> ReflectionsState:
@@ -814,7 +774,7 @@ class ReflectionRunner:
         }
 
     async def step_produce_report(self) -> None:
-        """Step 10: Produce daily report to local markdown file."""
+        """Step 9: Produce daily report to local markdown file."""
         total_steps = len(self.steps)
         report_lines = [
             f"# Reflections Report - {self.state.date}",
@@ -1087,16 +1047,8 @@ class ReflectionRunner:
             "dry_run": dry_run,
         }
 
-    async def step_memory_consolidation(self) -> None:
-        """Step 9: Consolidate lessons learned to Redis."""
-        consolidate_memory(self.state.reflections, self.state.date)
-
-        self.state.step_progress["memory_consolidation"] = {
-            "lessons_written": len(self.state.reflections),
-        }
-
     async def step_create_github_issue(self) -> None:
-        """Step 11: Create GitHub issues per project with findings.
+        """Step 10: Create GitHub issues per project with findings.
 
         For each local project with a github config, filters findings
         namespaced to that project and creates a GitHub issue if findings
@@ -1150,7 +1102,7 @@ class ReflectionRunner:
         }
 
     async def step_skills_audit(self) -> None:
-        """Step 12: Run skills audit to validate all SKILL.md files."""
+        """Step 11: Run skills audit to validate all SKILL.md files."""
         audit_script = (
             PROJECT_ROOT / ".claude" / "skills" / "do-skills-audit" / "scripts" / "audit_skills.py"
         )
@@ -1194,11 +1146,11 @@ class ReflectionRunner:
             self.state.step_progress["skills_audit"] = {"error": str(e)}
 
     async def step_redis_cleanup(self) -> None:
-        """Step 13: Run TTL cleanup on all Redis models.
+        """Step 12: Run TTL cleanup on all Redis models.
 
         Cleans up: TelegramMessage, Link, Chat, AgentSession (90-day),
-        BridgeEvent (7-day), ReflectionRun (30-day), ReflectionIgnore (expired),
-        LessonLearned (90-day).
+        BridgeEvent (7-day), ReflectionRun (30-day), ReflectionIgnore (expired).
+
         """
         try:
             from models.agent_session import AgentSession
@@ -1206,7 +1158,6 @@ class ReflectionRunner:
             from models.chat import Chat
             from models.link import Link
             from models.reflections import (
-                LessonLearned,
                 ReflectionIgnore,
                 ReflectionRun,
             )
@@ -1219,7 +1170,6 @@ class ReflectionRunner:
             event_deleted = BridgeEvent.cleanup_old(max_age_seconds=7 * 86400)
             run_deleted = ReflectionRun.cleanup_expired(max_age_days=30)
             ignore_deleted = ReflectionIgnore.cleanup_expired()
-            lesson_deleted = LessonLearned.cleanup_expired(max_age_days=90)
 
             total = (
                 msg_deleted
@@ -1229,21 +1179,20 @@ class ReflectionRunner:
                 + event_deleted
                 + run_deleted
                 + ignore_deleted
-                + lesson_deleted
             )
             logger.info(
                 f"Redis TTL cleanup: {total} records deleted "
                 f"(msgs={msg_deleted}, links={link_deleted}, "
                 f"chats={chat_deleted}, sessions={session_deleted}, "
                 f"events={event_deleted}, runs={run_deleted}, "
-                f"ignores={ignore_deleted}, lessons={lesson_deleted})"
+                f"ignores={ignore_deleted})"
             )
             self.state.daily_report.append(f"Redis cleanup: {total} expired records removed")
         except Exception as e:
             logger.warning(f"Redis TTL cleanup failed (non-fatal): {e}")
 
     async def step_redis_data_quality(self) -> None:
-        """Step 14: Redis data quality checks.
+        """Step 13: Redis data quality checks.
 
         Queries Redis models to surface data quality issues:
         - Unsummarized links (shared but never summarized by AI)
@@ -1369,6 +1318,106 @@ class ReflectionRunner:
             self.state.add_finding("redis_data_quality", finding)
 
         self.state.step_progress["redis_data_quality"] = {
+            "findings": len(findings),
+        }
+
+    async def step_branch_plan_cleanup(self) -> None:
+        """Step 14: Clean up stale branches and orphaned plan files.
+
+        - Deletes local branches already merged into main
+        - Ensures every plan in docs/plans/ has a matching open GitHub issue
+        - For completed plans, logs a finding to run /do-docs and delete the plan
+        """
+        findings: list[str] = []
+
+        # --- Stale branch cleanup ---
+        try:
+            # Delete local branches that are fully merged into main
+            result = subprocess.run(
+                ["git", "branch", "--merged", "main"],
+                capture_output=True,
+                text=True,
+                timeout=15,
+                cwd=str(PROJECT_ROOT),
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    branch = line.strip().lstrip("* ")
+                    if branch and branch not in ("main", "master"):
+                        del_result = subprocess.run(
+                            ["git", "branch", "-d", branch],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                            cwd=str(PROJECT_ROOT),
+                        )
+                        if del_result.returncode == 0:
+                            findings.append(f"Deleted merged branch: {branch}")
+                            logger.info(f"Branch cleanup: deleted merged branch {branch}")
+                        else:
+                            logger.warning(
+                                f"Branch cleanup: failed to delete {branch}: "
+                                f"{del_result.stderr.strip()}"
+                            )
+        except Exception as e:
+            logger.warning(f"Branch cleanup failed (non-fatal): {e}")
+
+        # --- Plan file cleanup ---
+        plans_dir = PROJECT_ROOT / "docs" / "plans"
+        if plans_dir.exists():
+            plan_files = sorted(plans_dir.glob("*.md"))
+
+            # Find first project with github config for issue checks
+            project_wd = None
+            for project in self.projects:
+                if project.get("github"):
+                    project_wd = project["working_directory"]
+                    break
+
+            for plan_file in plan_files:
+                plan_name = plan_file.stem
+                plan_text = plan_file.read_text(errors="replace")
+
+                # Check if plan is complete (all checkboxes checked)
+                checkboxes = re.findall(r"- \[([ xX])\]", plan_text)
+                checked = sum(1 for c in checkboxes if c.lower() == "x")
+                is_complete = checkboxes and checked == len(checkboxes)
+
+                if is_complete:
+                    findings.append(
+                        f"Plan complete: {plan_name} — "
+                        f"run /do-docs then delete docs/plans/{plan_file.name}"
+                    )
+                    self.state.add_finding(
+                        "branch_plan_cleanup",
+                        f"Completed plan needs docs migration: {plan_file.name}",
+                    )
+                    continue
+
+                # For incomplete plans, ensure a matching open issue exists
+                if project_wd:
+                    try:
+                        result = subprocess.run(
+                            ["gh", "issue", "list", "--state", "open", "--search", plan_name],
+                            capture_output=True,
+                            text=True,
+                            timeout=15,
+                            cwd=project_wd,
+                        )
+                        has_issue = result.returncode == 0 and result.stdout.strip()
+                        if not has_issue:
+                            findings.append(f"Plan without issue: {plan_file.name}")
+                            self.state.add_finding(
+                                "branch_plan_cleanup",
+                                f"Orphaned plan (no open issue): {plan_file.name}",
+                            )
+                    except Exception as e:
+                        logger.warning(f"Could not check issue for plan {plan_name}: {e}")
+
+        for finding in findings:
+            logger.info(f"Branch/plan cleanup: {finding}")
+
+        self.state.step_progress["branch_plan_cleanup"] = {
             "findings": len(findings),
         }
 

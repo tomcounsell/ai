@@ -1,10 +1,9 @@
-"""Tests for reflections core: LLM reflection, memory consolidation, auto-fix, data quality."""
+"""Tests for reflections core: LLM reflection, bug issues, data quality."""
 
 from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -108,131 +107,6 @@ class TestLLMReflection:
         assert result == []
 
 
-# --- Memory Consolidation Tests (Step 9) ---
-
-
-class TestMemoryConsolidation:
-    """Tests for lessons learned consolidation."""
-
-    def test_appends_lessons_to_redis(self):
-        """Writes reflection output to Redis LessonLearned model."""
-        from models.reflections import LessonLearned
-        from scripts.reflections import consolidate_memory
-
-        reflections = [
-            {
-                "category": "misunderstanding",
-                "summary": "User correction needed",
-                "pattern": "Jumped to code before confirming",
-                "prevention": "Ask first",
-                "source_session": "abc",
-            }
-        ]
-
-        consolidate_memory(reflections, "2026-02-16")
-
-        lessons = LessonLearned.query.all()
-        assert len(lessons) == 1
-        assert lessons[0].date == "2026-02-16"
-        assert lessons[0].category == "misunderstanding"
-        assert lessons[0].validated == 0
-
-    def test_deduplicates_by_pattern(self):
-        """Does not add duplicate patterns."""
-        from models.reflections import LessonLearned
-        from scripts.reflections import consolidate_memory
-
-        # Add first entry
-        reflections1 = [
-            {
-                "category": "misunderstanding",
-                "summary": "Old entry",
-                "pattern": "Jumped to code before confirming",
-                "prevention": "Ask first",
-                "source_session": "old",
-            }
-        ]
-        consolidate_memory(reflections1, "2026-02-15")
-
-        # Try to add duplicate
-        reflections2 = [
-            {
-                "category": "misunderstanding",
-                "summary": "New but same pattern",
-                "pattern": "Jumped to code before confirming",
-                "prevention": "Ask first",
-                "source_session": "abc",
-            }
-        ]
-        consolidate_memory(reflections2, "2026-02-16")
-
-        lessons = LessonLearned.query.all()
-        assert len(lessons) == 1  # Still just one entry
-
-    def test_prunes_old_entries(self):
-        """Removes entries older than 90 days."""
-        import time
-
-        from models.reflections import LessonLearned
-        from scripts.reflections import consolidate_memory
-
-        # Create old lesson directly in Redis
-        LessonLearned.create(
-            date="2025-01-01",
-            category="old",
-            summary="Should be pruned",
-            pattern="old pattern",
-            prevention="n/a",
-            source_session="old",
-            validated=0,
-            created_at=time.time() - (100 * 86400),
-        )
-        # Create recent lesson
-        LessonLearned.create(
-            date=(datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d"),
-            category="recent",
-            summary="Should remain",
-            pattern="recent pattern",
-            prevention="n/a",
-            source_session="recent",
-            validated=0,
-            created_at=time.time() - (10 * 86400),
-        )
-
-        consolidate_memory([], "2026-02-16")
-
-        remaining = LessonLearned.query.all()
-        assert len(remaining) == 1
-        assert remaining[0].category == "recent"
-
-    def test_creates_lesson_in_redis(self):
-        """Creates lesson in Redis even when no prior entries exist."""
-        from models.reflections import LessonLearned
-        from scripts.reflections import consolidate_memory
-
-        reflections = [
-            {
-                "category": "test",
-                "summary": "Test entry",
-                "pattern": "test pattern",
-                "prevention": "n/a",
-                "source_session": "test",
-            }
-        ]
-        consolidate_memory(reflections, "2026-02-16")
-        lessons = LessonLearned.query.all()
-        assert len(lessons) == 1
-
-    def test_handles_empty_reflections(self):
-        """No-op with empty reflections (but still prunes)."""
-        from models.reflections import LessonLearned
-        from scripts.reflections import consolidate_memory
-
-        consolidate_memory([], "2026-02-16")
-        # No lessons should exist
-        assert len(LessonLearned.query.all()) == 0
-
-
 # --- Step 3 Sentry Check ---
 
 
@@ -293,7 +167,7 @@ class TestTaskCleanup:
         # Should not raise
 
 
-# --- Step 10 GitHub Issue ---
+# --- Step 10 GitHub Issue Creation ---
 
 
 class TestGitHubIssueStep:
@@ -643,14 +517,14 @@ class TestAutoFixStep:
 
     @pytest.mark.asyncio
     async def test_steps_renumbered_correctly(self):
-        """Memory Consolidation is step 9, Produce Daily Report is 10, GitHub is 11."""
+        """Produce Daily Report is step 9, GitHub Issue Creation is 10."""
         from scripts.reflections import ReflectionRunner
 
         runner = ReflectionRunner()
         step_names = {s[0]: s[1] for s in runner.steps}
-        assert step_names.get(9) == "Memory Consolidation"
-        assert step_names.get(10) == "Produce Daily Report"
-        assert step_names.get(11) == "GitHub Issue Creation"
+        assert step_names.get(9) == "Produce Daily Report"
+        assert step_names.get(10) == "GitHub Issue Creation"
+        assert step_names.get(14) == "Branch and Plan Cleanup"
 
     @pytest.mark.asyncio
     async def test_auto_fix_skips_duplicate_github_work(self, monkeypatch):
@@ -766,3 +640,138 @@ class TestCLIFlags:
             asyncio.run(reflections_mod.main())
 
         assert captured_runner["instance"].state._dry_run is True
+
+
+# --- Step 14 Branch and Plan Cleanup ---
+
+
+class TestBranchPlanCleanup:
+    """Tests for step 14: branch and plan cleanup."""
+
+    @pytest.mark.asyncio
+    async def test_deletes_merged_branches(self):
+        """Deletes local branches that are fully merged into main."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner()
+        runner.projects = []
+
+        # Mock subprocess to simulate merged branches
+        merged_output = MagicMock()
+        merged_output.returncode = 0
+        merged_output.stdout = "  feature/old-branch\n* main\n  session/done\n"
+
+        delete_output = MagicMock()
+        delete_output.returncode = 0
+
+        call_count = {"n": 0}
+
+        def fake_run(cmd, **kwargs):
+            call_count["n"] += 1
+            if cmd == ["git", "branch", "--merged", "main"]:
+                return merged_output
+            if cmd[0:3] == ["git", "branch", "-d"]:
+                return delete_output
+            return MagicMock(returncode=0, stdout="")
+
+        with patch("scripts.reflections.subprocess.run", side_effect=fake_run):
+            await runner.step_branch_plan_cleanup()
+
+        progress = runner.state.step_progress.get("branch_plan_cleanup", {})
+        assert progress["findings"] == 2  # two branches deleted (not main)
+
+    @pytest.mark.asyncio
+    async def test_skips_failed_branch_deletion(self):
+        """Does not report deletion when git branch -d fails."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner()
+        runner.projects = []
+
+        merged_output = MagicMock()
+        merged_output.returncode = 0
+        merged_output.stdout = "  worktree-branch\n* main\n"
+
+        delete_output = MagicMock()
+        delete_output.returncode = 1
+        delete_output.stderr = "error: branch is checked out in worktree"
+
+        def fake_run(cmd, **kwargs):
+            if cmd == ["git", "branch", "--merged", "main"]:
+                return merged_output
+            if cmd[0:3] == ["git", "branch", "-d"]:
+                return delete_output
+            return MagicMock(returncode=0, stdout="")
+
+        with patch("scripts.reflections.subprocess.run", side_effect=fake_run):
+            await runner.step_branch_plan_cleanup()
+
+        progress = runner.state.step_progress.get("branch_plan_cleanup", {})
+        assert progress["findings"] == 0  # deletion failed, not counted
+
+    @pytest.mark.asyncio
+    async def test_detects_completed_plans(self, tmp_path):
+        """Flags plans where all checkboxes are checked."""
+        from scripts.reflections import PROJECT_ROOT, ReflectionRunner
+
+        # Create a plan file with all boxes checked
+        plans_dir = tmp_path / "docs" / "plans"
+        plans_dir.mkdir(parents=True)
+        (plans_dir / "done_feature.md").write_text(
+            "# Done Feature\n- [x] Task 1\n- [x] Task 2\n- [X] Task 3\n"
+        )
+
+        runner = ReflectionRunner()
+        runner.projects = []
+
+        with patch("scripts.reflections.PROJECT_ROOT", tmp_path):
+            # Also mock subprocess for git branch --merged
+            with patch(
+                "scripts.reflections.subprocess.run",
+                return_value=MagicMock(returncode=1, stdout=""),
+            ):
+                await runner.step_branch_plan_cleanup()
+
+        progress = runner.state.step_progress.get("branch_plan_cleanup", {})
+        assert progress["findings"] == 1
+        # Check that finding was added to state
+        cleanup_findings = runner.state.findings.get("branch_plan_cleanup", [])
+        assert any("Completed plan" in f for f in cleanup_findings)
+
+    @pytest.mark.asyncio
+    async def test_detects_orphaned_plans(self, tmp_path):
+        """Flags incomplete plans with no matching open issue."""
+        from scripts.reflections import ReflectionRunner
+
+        # Create a plan file with unchecked boxes
+        plans_dir = tmp_path / "docs" / "plans"
+        plans_dir.mkdir(parents=True)
+        (plans_dir / "orphan_feature.md").write_text(
+            "# Orphan Feature\n- [ ] Task 1\n- [x] Task 2\n"
+        )
+
+        runner = ReflectionRunner()
+        runner.projects = [
+            {
+                "slug": "ai",
+                "working_directory": "/tmp",
+                "github": {"org": "test", "repo": "repo"},
+            }
+        ]
+
+        def fake_run(cmd, **kwargs):
+            if cmd == ["git", "branch", "--merged", "main"]:
+                return MagicMock(returncode=1, stdout="")
+            if cmd[0:2] == ["gh", "issue"]:
+                # No matching issue found
+                return MagicMock(returncode=0, stdout="")
+            return MagicMock(returncode=0, stdout="")
+
+        with patch("scripts.reflections.PROJECT_ROOT", tmp_path):
+            with patch("scripts.reflections.subprocess.run", side_effect=fake_run):
+                await runner.step_branch_plan_cleanup()
+
+        progress = runner.state.step_progress.get("branch_plan_cleanup", {})
+        assert progress["findings"] == 1
+        cleanup_findings = runner.state.findings.get("branch_plan_cleanup", [])
+        assert any("Orphaned plan" in f for f in cleanup_findings)
