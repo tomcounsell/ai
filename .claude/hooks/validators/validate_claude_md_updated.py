@@ -148,15 +148,9 @@ def validate_claude_md(tool_name: str, cli_name: str | None = None) -> tuple[boo
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Validate CLAUDE.md documents the tool"
-    )
-    parser.add_argument(
-        "-n", "--tool-name", help="Tool name (auto-detects if not provided)"
-    )
-    parser.add_argument(
-        "--cli-name", help="Expected CLI command name (defaults to valor-{tool})"
-    )
+    parser = argparse.ArgumentParser(description="Validate CLAUDE.md documents the tool")
+    parser.add_argument("-n", "--tool-name", help="Tool name (auto-detects if not provided)")
+    parser.add_argument("--cli-name", help="Expected CLI command name (defaults to valor-{tool})")
     parser.add_argument("-d", "--tools-dir", default=TOOLS_DIR, help="Tools directory")
     parser.add_argument(
         "--max-age",

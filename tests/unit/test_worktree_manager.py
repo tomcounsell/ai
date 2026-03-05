@@ -45,9 +45,7 @@ class TestCleanupAfterMerge:
     @patch("agent.worktree_manager.subprocess.run")
     @patch("agent.worktree_manager._branch_exists")
     @patch("agent.worktree_manager.remove_worktree")
-    def test_worktree_and_branch_exist(
-        self, mock_remove_wt, mock_branch_exists, mock_run
-    ):
+    def test_worktree_and_branch_exist(self, mock_remove_wt, mock_branch_exists, mock_run):
         """When both worktree and branch exist, both get cleaned up."""
         repo = Path("/fake/repo")
         slug = "my-feature"
@@ -71,9 +69,7 @@ class TestCleanupAfterMerge:
     @patch("agent.worktree_manager.subprocess.run")
     @patch("agent.worktree_manager._branch_exists")
     @patch("agent.worktree_manager.remove_worktree")
-    def test_worktree_gone_branch_exists(
-        self, mock_remove_wt, mock_branch_exists, mock_run
-    ):
+    def test_worktree_gone_branch_exists(self, mock_remove_wt, mock_branch_exists, mock_run):
         """When worktree is already removed but branch lingers."""
         repo = Path("/fake/repo")
         slug = "old-feature"
@@ -93,9 +89,7 @@ class TestCleanupAfterMerge:
     @patch("agent.worktree_manager.subprocess.run")
     @patch("agent.worktree_manager._branch_exists")
     @patch("agent.worktree_manager.remove_worktree")
-    def test_everything_already_clean(
-        self, mock_remove_wt, mock_branch_exists, mock_run
-    ):
+    def test_everything_already_clean(self, mock_remove_wt, mock_branch_exists, mock_run):
         """When nothing needs cleanup (worktree gone, branch gone)."""
         repo = Path("/fake/repo")
         slug = "done-feature"
@@ -188,9 +182,7 @@ class TestCleanupAfterMerge:
     @patch("agent.worktree_manager.subprocess.run")
     @patch("agent.worktree_manager._branch_exists")
     @patch("agent.worktree_manager.remove_worktree")
-    def test_errors_empty_on_success(
-        self, mock_remove_wt, mock_branch_exists, mock_run
-    ):
+    def test_errors_empty_on_success(self, mock_remove_wt, mock_branch_exists, mock_run):
         """Successful cleanup has an empty errors list."""
         repo = Path("/fake/repo")
         slug = "clean-feature"
@@ -245,7 +237,7 @@ class TestFindWorktreeForBranch:
         """Returns None when the branch is not in any worktree."""
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout=("worktree /repo\n" "branch refs/heads/main\n" "\n"),
+            stdout=("worktree /repo\nbranch refs/heads/main\n\n"),
         )
         result = _find_worktree_for_branch(Path("/repo"), "session/other")
         assert result is None
@@ -265,9 +257,7 @@ class TestCleanupStaleWorktree:
     def test_prunes_when_directory_missing(self, mock_prune):
         """When the worktree directory is gone, prune cleans the reference."""
         with patch.object(Path, "exists", return_value=False):
-            _cleanup_stale_worktree(
-                Path("/repo"), "session/feat", "/repo/.worktrees/feat"
-            )
+            _cleanup_stale_worktree(Path("/repo"), "session/feat", "/repo/.worktrees/feat")
         mock_prune.assert_called_once_with(Path("/repo"))
 
     @patch("agent.worktree_manager.prune_worktrees")
@@ -276,9 +266,7 @@ class TestCleanupStaleWorktree:
         """When the worktree directory exists, force-remove it."""
         mock_run.return_value = MagicMock(returncode=0)
         with patch.object(Path, "exists", return_value=True):
-            _cleanup_stale_worktree(
-                Path("/repo"), "session/feat", "/repo/.worktrees/old-feat"
-            )
+            _cleanup_stale_worktree(Path("/repo"), "session/feat", "/repo/.worktrees/old-feat")
         # Should call git worktree remove --force
         mock_run.assert_called_once()
         cmd = mock_run.call_args[0][0]
@@ -293,17 +281,13 @@ class TestCleanupStaleWorktree:
     @patch("agent.worktree_manager.shutil.rmtree")
     @patch("agent.worktree_manager.prune_worktrees")
     @patch("agent.worktree_manager.subprocess.run")
-    def test_fallback_rmtree_on_force_remove_failure(
-        self, mock_run, mock_prune, mock_rmtree
-    ):
+    def test_fallback_rmtree_on_force_remove_failure(self, mock_run, mock_prune, mock_rmtree):
         """Falls back to rmtree + prune if git worktree remove fails."""
         from subprocess import CalledProcessError
 
         mock_run.side_effect = CalledProcessError(1, "git", stderr="lock error")
         with patch.object(Path, "exists", return_value=True):
-            _cleanup_stale_worktree(
-                Path("/repo"), "session/feat", "/repo/.worktrees/stuck"
-            )
+            _cleanup_stale_worktree(Path("/repo"), "session/feat", "/repo/.worktrees/stuck")
         # prune called twice (fallback path)
         assert mock_prune.call_count == 2
         mock_rmtree.assert_called_once()
@@ -315,9 +299,7 @@ class TestCreateWorktreeStaleRecovery:
     @patch("agent.worktree_manager.subprocess.run")
     @patch("agent.worktree_manager._find_worktree_for_branch")
     @patch("agent.worktree_manager._branch_exists")
-    def test_creates_normally_when_no_stale(
-        self, mock_branch_exists, mock_find_wt, mock_run
-    ):
+    def test_creates_normally_when_no_stale(self, mock_branch_exists, mock_find_wt, mock_run):
         """Normal creation when no stale worktree exists."""
         repo = Path("/fake/repo")
         mock_find_wt.return_value = None

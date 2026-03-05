@@ -51,9 +51,7 @@ def sessions_dir(tmp_path):
 @pytest.fixture()
 def patch_sessions_dir(sessions_dir):
     """Patch get_data_sessions_dir in validate_sdlc_on_stop to use tmp dir."""
-    with patch(
-        "validate_sdlc_on_stop.get_data_sessions_dir", return_value=sessions_dir
-    ):
+    with patch("validate_sdlc_on_stop.get_data_sessions_dir", return_value=sessions_dir):
         yield sessions_dir
 
 
@@ -87,7 +85,7 @@ class TestCheckSdlcQualityGate:
             {
                 "code_modified": True,
                 "files": ["foo.py"],
-                "quality_commands": {"pytest": True, "ruff": True, "black": True},
+                "quality_commands": {"pytest": True, "ruff": True, "ruff-format": True},
             },
         )
         result = mod.check_sdlc_quality_gate("session-all-pass")
@@ -102,7 +100,7 @@ class TestCheckSdlcQualityGate:
             {
                 "code_modified": False,
                 "files": [],
-                "quality_commands": {"pytest": False, "ruff": False, "black": False},
+                "quality_commands": {"pytest": False, "ruff": False, "ruff-format": False},
             },
         )
         result = mod.check_sdlc_quality_gate("session-no-code")
@@ -112,19 +110,19 @@ class TestCheckSdlcQualityGate:
         "quality_commands,expected_missing",
         [
             (
-                {"pytest": False, "ruff": False, "black": False},
-                ["pytest", "ruff", "black"],
+                {"pytest": False, "ruff": False, "ruff-format": False},
+                ["pytest", "ruff", "ruff-format"],
             ),
             (
-                {"pytest": True, "ruff": False, "black": False},
-                ["ruff", "black"],
+                {"pytest": True, "ruff": False, "ruff-format": False},
+                ["ruff", "ruff-format"],
             ),
             (
-                {"pytest": True, "ruff": True, "black": False},
-                ["black"],
+                {"pytest": True, "ruff": True, "ruff-format": False},
+                ["ruff-format"],
             ),
             (
-                {"pytest": False, "ruff": True, "black": True},
+                {"pytest": False, "ruff": True, "ruff-format": True},
                 ["pytest"],
             ),
         ],
@@ -157,7 +155,7 @@ class TestCheckSdlcQualityGate:
             {
                 "code_modified": True,
                 "files": ["foo.py"],
-                "quality_commands": {"pytest": False, "ruff": False, "black": False},
+                "quality_commands": {"pytest": False, "ruff": False, "ruff-format": False},
             },
         )
         result = mod.check_sdlc_quality_gate("session-hints")
@@ -174,7 +172,7 @@ class TestCheckSdlcQualityGate:
             {
                 "code_modified": True,
                 "files": ["foo.py"],
-                "quality_commands": {"pytest": False, "ruff": True, "black": True},
+                "quality_commands": {"pytest": False, "ruff": True, "ruff-format": True},
             },
         )
         result = mod.check_sdlc_quality_gate("session-escape")
@@ -188,9 +186,7 @@ class TestCheckSdlcQualityGate:
 
 
 class TestSkipSdlcEscapeHatch:
-    def test_skip_sdlc_set_returns_none_even_when_gates_missing(
-        self, patch_sessions_dir, capsys
-    ):
+    def test_skip_sdlc_set_returns_none_even_when_gates_missing(self, patch_sessions_dir, capsys):
         """SKIP_SDLC=1 bypasses enforcement even if quality gates are incomplete."""
         os.environ["SKIP_SDLC"] = "1"
         mod = import_validator()
@@ -200,7 +196,7 @@ class TestSkipSdlcEscapeHatch:
             {
                 "code_modified": True,
                 "files": ["foo.py"],
-                "quality_commands": {"pytest": False, "ruff": False, "black": False},
+                "quality_commands": {"pytest": False, "ruff": False, "ruff-format": False},
             },
         )
         result = mod.check_sdlc_quality_gate("session-skip")
@@ -216,7 +212,7 @@ class TestSkipSdlcEscapeHatch:
             {
                 "code_modified": True,
                 "files": ["foo.py"],
-                "quality_commands": {"pytest": False, "ruff": False, "black": False},
+                "quality_commands": {"pytest": False, "ruff": False, "ruff-format": False},
             },
         )
         mod.check_sdlc_quality_gate("session-warn")
@@ -272,7 +268,7 @@ class TestMainExitCodes:
             {
                 "code_modified": True,
                 "files": ["foo.py"],
-                "quality_commands": {"pytest": True, "ruff": True, "black": True},
+                "quality_commands": {"pytest": True, "ruff": True, "ruff-format": True},
             },
         )
         code, _, _ = self._run_main(sessions_dir, "session-green")
@@ -288,13 +284,13 @@ class TestMainExitCodes:
             {
                 "code_modified": True,
                 "files": ["foo.py"],
-                "quality_commands": {"pytest": False, "ruff": True, "black": False},
+                "quality_commands": {"pytest": False, "ruff": True, "ruff-format": False},
             },
         )
         code, stderr, _ = self._run_main(sessions_dir, "session-red")
         assert code == 2
         assert "pytest" in stderr
-        assert "black" in stderr
+        assert "ruff-format" in stderr
 
     def test_skip_sdlc_exits_0_even_when_gates_missing(self, tmp_path):
         """SKIP_SDLC=1 forces exit 0 regardless of gate status."""
@@ -306,10 +302,8 @@ class TestMainExitCodes:
             {
                 "code_modified": True,
                 "files": ["foo.py"],
-                "quality_commands": {"pytest": False, "ruff": False, "black": False},
+                "quality_commands": {"pytest": False, "ruff": False, "ruff-format": False},
             },
         )
-        code, _, _ = self._run_main(
-            sessions_dir, "session-bypass", env_extra={"SKIP_SDLC": "1"}
-        )
+        code, _, _ = self._run_main(sessions_dir, "session-bypass", env_extra={"SKIP_SDLC": "1"})
         assert code == 0

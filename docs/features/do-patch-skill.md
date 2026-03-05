@@ -55,7 +55,7 @@ Capped at **3 patch→test→review iterations**. After 3 cycles, emits a struct
 2. For multi-component bugs or non-obvious root causes, apply the [Trace & Verify](trace-and-verify.md) protocol: trace actual data at each component boundary, write a failing test, identify the fix from the divergence point, and verify forward. Skip for single-component bugs with obvious fixes.
 3. Read the failing test output or review comment in full
 4. Deploy a **single builder agent** to make targeted edits
-5. Run `pytest` + `ruff` + `black` directly to verify the fix (no `/do-test` dispatch)
+5. Run `pytest` + `ruff check` + `ruff format` directly to verify the fix (no `/do-test` dispatch)
 6. If pass: report success, update pipeline state to next stage
    - Test failure context → advance to `review`
    - Review blocker context → advance to `document`

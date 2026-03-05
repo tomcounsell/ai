@@ -27,9 +27,7 @@ def format_duration(seconds: float) -> str:
         return f"{seconds / 3600:.1f}h"
 
 
-def get_session_report(
-    include_completed: bool = False, stalled_only: bool = False
-) -> str:
+def get_session_report(include_completed: bool = False, stalled_only: bool = False) -> str:
     """Generate session status report.
 
     Args:
@@ -48,9 +46,7 @@ def get_session_report(
     all_sessions = list(AgentSession.query.all())
 
     if not include_completed:
-        all_sessions = [
-            s for s in all_sessions if s.status not in ("completed", "failed")
-        ]
+        all_sessions = [s for s in all_sessions if s.status not in ("completed", "failed")]
 
     if not all_sessions:
         return "No active sessions."
@@ -73,10 +69,7 @@ def get_session_report(
             )
         else:
             transition_time = (
-                getattr(s, "last_transition_at", None)
-                or s.started_at
-                or s.created_at
-                or now
+                getattr(s, "last_transition_at", None) or s.started_at or s.created_at or now
             )
 
         duration = now - transition_time
@@ -123,12 +116,8 @@ def session_report():
 
 def main():
     parser = argparse.ArgumentParser(description="Session status report")
-    parser.add_argument(
-        "--all", action="store_true", help="Include completed/failed sessions"
-    )
-    parser.add_argument(
-        "--stalled", action="store_true", help="Only show stalled sessions"
-    )
+    parser.add_argument("--all", action="store_true", help="Include completed/failed sessions")
+    parser.add_argument("--stalled", action="store_true", help="Only show stalled sessions")
     args = parser.parse_args()
 
     print(get_session_report(include_completed=args.all, stalled_only=args.stalled))

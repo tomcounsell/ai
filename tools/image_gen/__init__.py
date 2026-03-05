@@ -60,9 +60,7 @@ def generate_image(
         return {"error": "Prompt cannot be empty"}
 
     if aspect_ratio not in IMAGE_ASPECT_RATIOS:
-        return {
-            "error": f"Invalid aspect ratio. Choose from: {list(IMAGE_ASPECT_RATIOS.keys())}"
-        }
+        return {"error": f"Invalid aspect ratio. Choose from: {list(IMAGE_ASPECT_RATIOS.keys())}"}
 
     dimensions = IMAGE_ASPECT_RATIOS[aspect_ratio]
 
@@ -80,9 +78,7 @@ def generate_image(
                 "modalities": ["text", "image"],
                 "n": 1,
                 "image_config": {"aspect_ratio": aspect_ratio},
-                "messages": [
-                    {"role": "user", "content": f"Generate an image: {prompt}"}
-                ],
+                "messages": [{"role": "user", "content": f"Generate an image: {prompt}"}],
             },
             timeout=120,
         )

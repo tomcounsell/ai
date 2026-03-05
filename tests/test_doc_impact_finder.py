@@ -72,9 +72,7 @@ class TestChunkMarkdown:
 
     def test_chunk_markdown_no_headings(self):
         """File with no ## headings returns a single chunk."""
-        content = (
-            "# Top Level Title\n\nJust some text\nwith no second-level headings.\n"
-        )
+        content = "# Top Level Title\n\nJust some text\nwith no second-level headings.\n"
         chunks = chunk_markdown(content, "simple.md")
 
         assert len(chunks) == 1
@@ -340,9 +338,7 @@ class TestFullPipelineIntegration:
 
         # Step 1: Index docs with mocked embeddings
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
-            with patch(
-                "tools.impact_finder_core._embed_openai", side_effect=fake_embed
-            ):
+            with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
                 index = index_docs(repo_root=tmp_path)
 
         assert index["version"] == 1
@@ -355,9 +351,7 @@ class TestFullPipelineIntegration:
             return (8.0, "Auth change affects login docs", chunk)
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
-            with patch(
-                "tools.impact_finder_core._embed_openai", side_effect=fake_embed
-            ):
+            with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
                 with patch(
                     "tools.impact_finder_core._rerank_single_candidate",
                     side_effect=mock_rerank,
@@ -391,9 +385,7 @@ class TestFullPipelineIntegration:
 
         # Step 1: Index
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
-            with patch(
-                "tools.impact_finder_core._embed_openai", side_effect=fake_embed
-            ):
+            with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
                 index_docs(repo_root=tmp_path)
 
         # Step 2: Find with Haiku failing (falls back to embedding-only)
@@ -408,9 +400,7 @@ class TestFullPipelineIntegration:
             return original_import(name, *args, **kwargs)
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake-key"}, clear=False):
-            with patch(
-                "tools.impact_finder_core._embed_openai", side_effect=fake_embed
-            ):
+            with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
                 with patch("builtins.__import__", side_effect=mock_import):
                     results = find_affected_docs(
                         "Some change",

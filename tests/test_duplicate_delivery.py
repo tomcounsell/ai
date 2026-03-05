@@ -56,9 +56,7 @@ class TestCatchupRedisDedup:
         enqueue_fn = AsyncMock()
 
         # KEY: is_duplicate_message returns True (already in Redis)
-        with patch(
-            "bridge.dedup.is_duplicate_message", new_callable=AsyncMock
-        ) as mock_dedup:
+        with patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock) as mock_dedup:
             mock_dedup.return_value = True
 
             queued = await scan_for_missed_messages(
@@ -110,15 +108,9 @@ class TestCatchupRedisDedup:
         enqueue_fn = AsyncMock()
 
         with (
-            patch(
-                "bridge.dedup.is_duplicate_message", new_callable=AsyncMock
-            ) as mock_dedup,
-            patch(
-                "bridge.dedup.record_message_processed", new_callable=AsyncMock
-            ) as mock_record,
-            patch(
-                "bridge.catchup._check_if_handled", new_callable=AsyncMock
-            ) as mock_handled,
+            patch("bridge.dedup.is_duplicate_message", new_callable=AsyncMock) as mock_dedup,
+            patch("bridge.dedup.record_message_processed", new_callable=AsyncMock) as mock_record,
+            patch("bridge.catchup._check_if_handled", new_callable=AsyncMock) as mock_handled,
         ):
             mock_dedup.return_value = False  # Not in Redis
             mock_handled.return_value = False  # No Telegram reply either
@@ -177,9 +169,9 @@ class TestCompletedSessionGuard:
 
         # Guard should be BEFORE stage-aware auto-continue logic
         assert guard_pos > 0, "completed-session guard not found in job_queue.py"
-        assert (
-            guard_pos < stage_aware_pos
-        ), "completed-session guard should be before stage-aware auto-continue"
+        assert guard_pos < stage_aware_pos, (
+            "completed-session guard should be before stage-aware auto-continue"
+        )
 
 
 class TestCatchupCodeStructure:
@@ -194,9 +186,9 @@ class TestCatchupCodeStructure:
         dedup_pos = catchup_code.find("is_duplicate_message")
         sender_pos = catchup_code.find("message.get_sender()")
 
-        assert (
-            dedup_pos < sender_pos
-        ), "Redis dedup check should be before sender lookup (save API calls)"
+        assert dedup_pos < sender_pos, (
+            "Redis dedup check should be before sender lookup (save API calls)"
+        )
 
     def test_dedup_record_after_enqueue(self):
         """Redis dedup record should be after successful enqueue."""
@@ -207,6 +199,6 @@ class TestCatchupCodeStructure:
         enqueue_pos = catchup_code.find("await enqueue_job_fn(")
         record_pos = catchup_code.find("record_message_processed")
 
-        assert (
-            record_pos > enqueue_pos
-        ), "Dedup record should be after enqueue (don't record if enqueue fails)"
+        assert record_pos > enqueue_pos, (
+            "Dedup record should be after enqueue (don't record if enqueue fails)"
+        )

@@ -56,7 +56,7 @@ class TestSdlcWorkflowConstant:
 
     def test_contains_mandatory_pipeline_header(self):
         """Must contain the 'Mandatory Development Pipeline' heading."""
-        assert "Mandatory Development Pipeline" in SDLC_WORKFLOW
+        assert "MANDATORY Development Pipeline" in SDLC_WORKFLOW
 
     def test_contains_never_push_to_main(self):
         """Must contain instruction not to push to main."""
@@ -87,12 +87,12 @@ class TestLoadSystemPromptInjection:
     def test_sdlc_workflow_present_in_prompt(self):
         """load_system_prompt() must include SDLC_WORKFLOW text."""
         prompt = load_system_prompt()
-        assert "Mandatory Development Pipeline" in prompt
+        assert "MANDATORY Development Pipeline" in prompt
 
     def test_sdlc_workflow_is_between_soul_and_criteria(self):
         """SDLC_WORKFLOW must appear after SOUL.md and before completion criteria."""
         prompt = load_system_prompt()
-        sdlc_pos = prompt.find("Mandatory Development Pipeline")
+        sdlc_pos = prompt.find("MANDATORY Development Pipeline")
         assert sdlc_pos > 0, "SDLC_WORKFLOW not found in prompt"
 
         # SOUL.md starts with '# Valor' — check it precedes SDLC
@@ -103,15 +103,15 @@ class TestLoadSystemPromptInjection:
         # Completion criteria section starts with 'Work is DONE'
         criteria_pos = prompt.find("Work is DONE")
         if criteria_pos > 0:
-            assert (
-                sdlc_pos < criteria_pos
-            ), "SDLC_WORKFLOW must appear before Work Completion Criteria"
+            assert sdlc_pos < criteria_pos, (
+                "SDLC_WORKFLOW must appear before Work Completion Criteria"
+            )
 
     def test_prompt_contains_separator_before_sdlc(self):
         """load_system_prompt() must use --- separator before SDLC section."""
         prompt = load_system_prompt()
         # Find position of SDLC content and verify --- appears just before it
-        sdlc_pos = prompt.find("Mandatory Development Pipeline")
+        sdlc_pos = prompt.find("MANDATORY Development Pipeline")
         assert sdlc_pos > 0
         preceding = prompt[max(0, sdlc_pos - 50) : sdlc_pos]
         assert "---" in preceding, "Separator '---' must precede SDLC_WORKFLOW block"

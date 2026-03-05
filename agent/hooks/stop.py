@@ -27,8 +27,7 @@ async def stop_hook(
     transcript_path = input_data.get("transcript_path", "")
 
     logger.info(
-        f"[stop_hook] Session completed: session_id={session_id}, "
-        f"transcript={transcript_path}"
+        f"[stop_hook] Session completed: session_id={session_id}, transcript={transcript_path}"
     )
 
     # SDLC enforcement: hard-block code pushed directly to main

@@ -115,13 +115,9 @@ def start_transcript(
             )
             # Log lifecycle transition
             try:
-                sessions = list(
-                    AgentSession.query.filter(session_id=session_id)
-                )
+                sessions = list(AgentSession.query.filter(session_id=session_id))
                 if sessions:
-                    sessions[0].log_lifecycle_transition(
-                        "active", "transcript started"
-                    )
+                    sessions[0].log_lifecycle_transition("active", "transcript started")
             except Exception:
                 pass
     except Exception as e:
@@ -235,9 +231,7 @@ def append_tool_result(
             s.last_activity = time.time()
             s.save()
     except Exception as e:
-        logger.debug(
-            f"Failed to update SessionLog tool_call_count for {session_id}: {e}"
-        )
+        logger.debug(f"Failed to update SessionLog tool_call_count for {session_id}: {e}")
 
 
 def complete_transcript(
@@ -291,9 +285,7 @@ def complete_transcript(
             # status is a KeyField — delete and recreate if changed
             if s.status != status:
                 # Re-read after lifecycle log (it saved history/last_transition_at)
-                sessions = list(
-                    AgentSession.query.filter(session_id=session_id)
-                )
+                sessions = list(AgentSession.query.filter(session_id=session_id))
                 s = sessions[0] if sessions else s
 
                 # Dynamically extract ALL fields to avoid dropping data.
@@ -304,8 +296,7 @@ def complete_transcript(
                 old_data = {
                     name: getattr(s, name)
                     for name in AgentSession._meta.fields
-                    if name not in skip_fields
-                    and getattr(s, name, None) is not None
+                    if name not in skip_fields and getattr(s, name, None) is not None
                 }
 
                 # Override specific fields for the transition

@@ -23,7 +23,7 @@ Before a code session ends, these commands must have been run:
 
 1. `pytest tests/` — full test suite
 2. `ruff check .` — linter
-3. `black .` — formatter
+3. `ruff format .` — formatter
 
 The stop hook reads `data/sessions/{session_id}/sdlc_state.json` and blocks exit (exit code 2) if any command was skipped.
 
@@ -105,7 +105,7 @@ Each code session gets `data/sessions/{session_id}/sdlc_state.json`:
 {
   "code_modified": true,
   "files": ["bridge/telegram_bridge.py"],
-  "quality_commands": {"pytest": true, "ruff": false, "black": false},
+  "quality_commands": {"pytest": true, "ruff": false, "ruff-format": false},
   "reminder_sent": true
 }
 ```
@@ -114,7 +114,7 @@ Each code session gets `data/sessions/{session_id}/sdlc_state.json`:
 
 **"SDLC Quality Gate" appears at session end:**
 ```bash
-pytest tests/ && ruff check . && black .
+pytest tests/ && ruff check . && ruff format --check .
 ```
 Then end the session normally.
 
@@ -186,7 +186,7 @@ Sessions on `session/{slug}` branches — all `/do-build` builder agents — alw
 |-------|-------|-------------|
 | **Behavioral** | Agent system prompt (`SDLC_WORKFLOW`) | Instructs the agent to follow the pipeline |
 | **Structural** | SDK Stop hook (`_check_no_direct_main_push`) | Hard-blocks code-on-main at session end |
-| **Quality gate** | Claude Code Stop hook (`validate_sdlc_on_stop.py`) | Blocks if pytest/ruff/black not run |
+| **Quality gate** | Claude Code Stop hook (`validate_sdlc_on_stop.py`) | Blocks if pytest/ruff/ruff-format not run |
 
 ## User-Level Deployment
 

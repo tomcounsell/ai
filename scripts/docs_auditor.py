@@ -394,9 +394,7 @@ class DocsAuditor:
         """
         if not deleted or self.dry_run:
             if self.dry_run and deleted:
-                print(
-                    f"[DRY RUN] Would sweep index files for {len(deleted)} deleted docs"
-                )
+                print(f"[DRY RUN] Would sweep index files for {len(deleted)} deleted docs")
             return
 
         deleted_names = {p.name for p in deleted}
@@ -420,9 +418,7 @@ class DocsAuditor:
                         should_remove = True
                         break
                 if should_remove:
-                    logger.info(
-                        "Removing broken link from %s: %s", index_rel, line.rstrip()
-                    )
+                    logger.info("Removing broken link from %s: %s", index_rel, line.rstrip())
                     changed = True
                 else:
                     new_lines.append(line)
@@ -469,9 +465,8 @@ class DocsAuditor:
         for doc_path, verdict in summary.verdicts.items():
             body_lines.append(f"- {verdict.action} {doc_path}: {verdict.rationale}")
 
-        commit_msg = (
-            "Docs audit: remove stale, correct outdated references\n\n"
-            + "\n".join(body_lines)
+        commit_msg = "Docs audit: remove stale, correct outdated references\n\n" + "\n".join(
+            body_lines
         )
 
         try:
@@ -613,9 +608,7 @@ CORRECTIONS:
             return self._parse_verdict(response_text)
         except Exception as e:
             logger.error("LLM call failed (%s): %s", model, e)
-            return Verdict(
-                action="KEEP", rationale=f"LLM error: {e}", low_confidence=True
-            )
+            return Verdict(action="KEEP", rationale=f"LLM error: {e}", low_confidence=True)
 
     def _parse_verdict(self, text: str) -> Verdict:
         """Parse LLM response into a Verdict dataclass."""
@@ -680,18 +673,12 @@ CORRECTIONS:
                 new_text = arrow_m.group(2).strip().strip("`'\"")
                 if old_text in content:
                     content = content.replace(old_text, new_text, 1)
-                    logger.info(
-                        "Applied correction in %s: %s → %s", path, old_text, new_text
-                    )
+                    logger.info("Applied correction in %s: %s → %s", path, old_text, new_text)
                 else:
-                    logger.warning(
-                        "Correction target not found in %s: %s", path, old_text
-                    )
+                    logger.warning("Correction target not found in %s: %s", path, old_text)
             else:
                 # Cannot auto-apply — log for visibility
-                logger.warning(
-                    "Cannot auto-apply correction to %s: %s", path, correction
-                )
+                logger.warning("Cannot auto-apply correction to %s: %s", path, correction)
 
         if content != original:
             full_path.write_text(content, encoding="utf-8")

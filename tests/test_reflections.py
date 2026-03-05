@@ -354,9 +354,7 @@ class TestStepAuditDocs:
     @pytest.mark.asyncio
     @patch("scripts.reflections.asyncio.to_thread")
     @patch("scripts.reflections.DocsAuditor")
-    async def test_step_audit_docs_calls_docs_auditor(
-        self, mock_docs_auditor_cls, mock_to_thread
-    ):
+    async def test_step_audit_docs_calls_docs_auditor(self, mock_docs_auditor_cls, mock_to_thread):
         """step_audit_docs instantiates DocsAuditor and delegates to run() via asyncio.to_thread."""
         from unittest.mock import MagicMock
 

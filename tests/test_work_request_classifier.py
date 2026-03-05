@@ -107,9 +107,7 @@ class TestLlmClassification:
     )
     def test_questions_classified_as_question(self, message):
         result = classify_work_request(message)
-        assert (
-            result == "question"
-        ), f"Expected 'question' for: {message}, got: {result}"
+        assert result == "question", f"Expected 'question' for: {message}, got: {result}"
 
 
 class TestProcessNarrationStripping:

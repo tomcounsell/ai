@@ -71,9 +71,7 @@ def classify_error(line: str) -> str | None:
 def parse_log_line(line: str) -> dict | None:
     """Parse a log line into components."""
     # Format: 2026-01-19 15:22:54,554 [LEVEL] message
-    match = re.match(
-        r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ \[(\w+)\] (.*)", line
-    )
+    match = re.match(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d+ \[(\w+)\] (.*)", line)
     if match:
         return {
             "timestamp": match.group(1),
@@ -154,7 +152,6 @@ def analyze_log(log_path: Path, since: str | None = None, top_n: int = 15):
             if in_traceback:
                 if parsed and parsed["level"] in ("ERROR", "WARNING", "INFO", "DEBUG"):
                     # Traceback ended, process it
-                    tb_text = "\n".join(traceback_buffer[-5:])  # Last 5 lines
                     sig = extract_error_signature(traceback_trigger_line)
                     error_signature_counts[sig] += 1
                     in_traceback = False
@@ -173,9 +170,7 @@ def analyze_log(log_path: Path, since: str | None = None, top_n: int = 15):
             # Filter by date
             if since_dt:
                 try:
-                    line_dt = datetime.strptime(
-                        parsed["timestamp"], "%Y-%m-%d %H:%M:%S"
-                    )
+                    line_dt = datetime.strptime(parsed["timestamp"], "%Y-%m-%d %H:%M:%S")
                     if line_dt < since_dt:
                         continue
                 except ValueError:
@@ -201,13 +196,9 @@ def analyze_log(log_path: Path, since: str | None = None, top_n: int = 15):
                 cause = classify_error(message)
                 if cause and cause != "telegram_sync_update":
                     root_cause_counts[cause] += 1
-                    root_cause_signatures[cause][
-                        extract_error_signature(line)
-                    ] += 1
+                    root_cause_signatures[cause][extract_error_signature(line)] += 1
                     if len(error_examples[cause]) < 3:
-                        error_examples[cause].append(
-                            parsed["timestamp"] + " " + message[:200]
-                        )
+                        error_examples[cause].append(parsed["timestamp"] + " " + message[:200])
 
                 # Track error signatures
                 sig = extract_error_signature(line)
@@ -229,15 +220,13 @@ def analyze_log(log_path: Path, since: str | None = None, top_n: int = 15):
         bar = "█" * int(pct / 2)
         print(f"  {level:10s} {count:>8,}  ({pct:5.1f}%)  {bar}")
 
-    print(f"\n### Error/Warning Rate")
+    print("\n### Error/Warning Rate")
     print(f"  Total errors:   {error_lines:,}")
     print(f"  Total warnings: {warning_lines:,}")
     if total_lines:
-        print(
-            f"  Error rate:     {error_lines / total_lines * 100:.2f}% of all log lines"
-        )
+        print(f"  Error rate:     {error_lines / total_lines * 100:.2f}% of all log lines")
 
-    print(f"\n### Daily Error+Warning Volume (last 14 days)")
+    print("\n### Daily Error+Warning Volume (last 14 days)")
     sorted_days = sorted(daily_errors.keys())[-14:]
     max_daily = max(daily_errors[d] for d in sorted_days) if sorted_days else 1
     for day in sorted_days:
@@ -245,9 +234,9 @@ def analyze_log(log_path: Path, since: str | None = None, top_n: int = 15):
         bar_len = int(count / max_daily * 40) if max_daily else 0
         print(f"  {day}  {count:>5}  {'█' * bar_len}")
 
-    print(f"\n### Root Causes (by frequency)")
+    print("\n### Root Causes (by frequency)")
     print(f"  {'Cause':<30s} {'Count':>7s}  {'%':>6s}  Description")
-    print(f"  {'-'*30} {'-'*7}  {'-'*6}  {'-'*30}")
+    print(f"  {'-' * 30} {'-' * 7}  {'-' * 6}  {'-' * 30}")
     total_classified = sum(root_cause_counts.values())
     for cause, count in root_cause_counts.most_common(top_n):
         pct = count / total_classified * 100 if total_classified else 0
@@ -281,13 +270,11 @@ def analyze_log(log_path: Path, since: str | None = None, top_n: int = 15):
         print(f"  {cause:<30s} {count:>7,}  {pct:5.1f}%  {desc}")
 
     print(f"\n### Top {top_n} Most Frequent ERROR Signatures")
-    for i, (sig, count) in enumerate(
-        error_signature_counts.most_common(top_n), 1
-    ):
+    for i, (sig, count) in enumerate(error_signature_counts.most_common(top_n), 1):
         print(f"\n  #{i} ({count:,} occurrences)")
         print(f"     {sig[:120]}")
 
-    print(f"\n### Root Cause Details (with examples)")
+    print("\n### Root Cause Details (with examples)")
     for cause, count in root_cause_counts.most_common(10):
         print(f"\n  ── {cause} ({count:,}) ──")
         # Show top signatures for this cause
@@ -298,58 +285,33 @@ def analyze_log(log_path: Path, since: str | None = None, top_n: int = 15):
         for ex in error_examples[cause][:2]:
             print(f"     e.g.: {ex[:120]}")
 
-    print(f"\n### Recommendations")
+    print("\n### Recommendations")
     print()
     if root_cause_counts.get("telegram_connection_drop", 0) > 50:
-        print(
-            "  1. TELEGRAM CONNECTION DROPS are the #1 noise source."
-        )
-        print(
-            "     These are normal — Telegram periodically resets idle connections."
-        )
-        print(
-            "     FIX: Downgrade these from WARNING to DEBUG to reduce log noise.\n"
-        )
+        print("  1. TELEGRAM CONNECTION DROPS are the #1 noise source.")
+        print("     These are normal — Telegram periodically resets idle connections.")
+        print("     FIX: Downgrade these from WARNING to DEBUG to reduce log noise.\n")
     if root_cause_counts.get("session_lock_conflict", 0) > 10:
-        print(
-            "  2. SESSION LOCK CONFLICTS indicate concurrent access to session files."
-        )
-        print(
-            "     FIX: The self-healing system should be cleaning these up.\n"
-        )
+        print("  2. SESSION LOCK CONFLICTS indicate concurrent access to session files.")
+        print("     FIX: The self-healing system should be cleaning these up.\n")
     if root_cause_counts.get("python_error", 0) > 20:
-        print(
-            "  3. PYTHON RUNTIME ERRORS need individual investigation."
-        )
-        print(
-            "     These are real bugs that should be fixed.\n"
-        )
+        print("  3. PYTHON RUNTIME ERRORS need individual investigation.")
+        print("     These are real bugs that should be fixed.\n")
     if root_cause_counts.get("timeout", 0) > 20:
-        print(
-            "  4. TIMEOUTS may indicate resource contention or slow APIs."
-        )
-        print(
-            "     Check if they correlate with high memory/CPU periods.\n"
-        )
+        print("  4. TIMEOUTS may indicate resource contention or slow APIs.")
+        print("     Check if they correlate with high memory/CPU periods.\n")
     if root_cause_counts.get("redis_model_error", 0) > 5:
-        print(
-            "  5. REDIS MODEL ERRORS indicate Popoto ORM issues."
-        )
-        print(
-            "     May need schema evolution or error handling improvements.\n"
-        )
+        print("  5. REDIS MODEL ERRORS indicate Popoto ORM issues.")
+        print("     May need schema evolution or error handling improvements.\n")
 
     # File size recommendation
     file_mb = log_path.stat().st_size / 1024 / 1024
     if file_mb > 10:
+        print(f"  ⚠️  LOG FILE IS {file_mb:.0f}MB. Consider rotation:")
+        print("     - Add logrotate config for bridge.error.log")
         print(
-            f"  ⚠️  LOG FILE IS {file_mb:.0f}MB. Consider rotation:"
-        )
-        print(
-            "     - Add logrotate config for bridge.error.log"
-        )
-        print(
-            "     - Or truncate old entries: tail -n 50000 bridge.error.log > bridge.error.log.tmp && mv bridge.error.log.tmp bridge.error.log"
+            "     - Or truncate old entries: tail -n 50000 bridge.error.log"
+            " > bridge.error.log.tmp && mv bridge.error.log.tmp bridge.error.log"
         )
 
     print("\n" + "=" * 80)

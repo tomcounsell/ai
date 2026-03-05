@@ -97,8 +97,7 @@ def _get_db_connection(db_path: Path | None = None) -> sqlite3.Connection:
 
     if not path.exists():
         raise SMSReaderError(
-            f"Messages database not found at {path}. "
-            "Make sure Messages app has been used.",
+            f"Messages database not found at {path}. Make sure Messages app has been used.",
             category="not_found",
         )
 

@@ -18,7 +18,7 @@ Invoked via `/do-test` with optional arguments. The skill determines what to run
 | `/do-test performance` | Run `tests/performance/` + lint |
 | `/do-test tests/unit/test_bridge_logic.py` | Run that specific file + lint |
 | `/do-test --changed` | Detect changed files, map to test files, run those + lint |
-| `/do-test --no-lint` | Run all tests, skip ruff/black checks |
+| `/do-test --no-lint` | Run all tests, skip ruff checks |
 | `/do-test unit --no-lint` | Run `tests/unit/` without lint |
 | `/do-test --changed --no-lint` | Changed-file tests without lint |
 | `/do-test --direct` | Force direct execution, skip parallel agent dispatch |
@@ -84,7 +84,7 @@ After all runners complete, the skill presents a structured summary:
 | integration | FAIL | 8 | 1 | 0 | 12.4s |
 | tools | PASS | 15 | 0 | 0 | 1.8s |
 | lint (ruff) | PASS | - | - | - | 0.5s |
-| lint (black) | PASS | - | - | - | 0.3s |
+| lint (ruff format) | PASS | - | - | - | 0.3s |
 
 ### Failures
 

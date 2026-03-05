@@ -87,9 +87,7 @@ class TestCoAuthorBlocking:
     """Co-author trailers must be blocked regardless of case."""
 
     def test_blocks_co_authored_by_exact(self):
-        cmd = (
-            'git commit -m "fix: thing\nCo-Authored-By: Claude <noreply@anthropic.com>"'
-        )
+        cmd = 'git commit -m "fix: thing\nCo-Authored-By: Claude <noreply@anthropic.com>"'
         inp = {"tool_name": "Bash", "tool_input": {"command": cmd}}
         code, out, _ = run_hook(inp)
         # Should block: either non-zero exit or decision=block in stdout
@@ -97,18 +95,14 @@ class TestCoAuthorBlocking:
         assert blocked, f"Expected block, got code={code}, out={out}"
 
     def test_blocks_co_authored_by_lowercase(self):
-        cmd = (
-            'git commit -m "fix: thing\nco-authored-by: Claude <noreply@anthropic.com>"'
-        )
+        cmd = 'git commit -m "fix: thing\nco-authored-by: Claude <noreply@anthropic.com>"'
         inp = {"tool_name": "Bash", "tool_input": {"command": cmd}}
         code, out, _ = run_hook(inp)
         blocked = code != 0 or (out and out.get("decision") == "block")
         assert blocked, f"Expected block, got code={code}, out={out}"
 
     def test_blocks_co_authored_by_mixed_case(self):
-        cmd = (
-            'git commit -m "fix: thing\nCO-AUTHORED-BY: Claude <noreply@anthropic.com>"'
-        )
+        cmd = 'git commit -m "fix: thing\nCO-AUTHORED-BY: Claude <noreply@anthropic.com>"'
         inp = {"tool_name": "Bash", "tool_input": {"command": cmd}}
         code, out, _ = run_hook(inp)
         blocked = code != 0 or (out and out.get("decision") == "block")
@@ -116,9 +110,7 @@ class TestCoAuthorBlocking:
 
     def test_blocks_co_authored_by_in_heredoc(self):
         trailer = "Co-Authored-By: Claude Sonnet <noreply@anthropic.com>"
-        cmd = (
-            f"git commit -m \"$(cat <<'EOF'\\nAdd feature\\n\\n{trailer}\\nEOF\\n)\"\\n"
-        )
+        cmd = f"git commit -m \"$(cat <<'EOF'\\nAdd feature\\n\\n{trailer}\\nEOF\\n)\"\\n"
         inp = {"tool_name": "Bash", "tool_input": {"command": cmd}}
         code, out, _ = run_hook(inp)
         blocked = code != 0 or (out and out.get("decision") == "block")
@@ -126,9 +118,7 @@ class TestCoAuthorBlocking:
 
     def test_block_reason_mentions_co_author(self):
         """Block reason should mention what was blocked."""
-        cmd = (
-            'git commit -m "fix: thing\nCo-Authored-By: Claude <noreply@anthropic.com>"'
-        )
+        cmd = 'git commit -m "fix: thing\nCo-Authored-By: Claude <noreply@anthropic.com>"'
         inp = {"tool_name": "Bash", "tool_input": {"command": cmd}}
         code, out, _ = run_hook(inp)
         if out and out.get("decision") == "block":

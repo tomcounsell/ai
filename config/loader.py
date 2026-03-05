@@ -192,9 +192,7 @@ class ConfigLoader:
         try:
             # Load JSON configuration
             if not config_path.exists():
-                raise ConfigurationError(
-                    f"Workspace config file not found: {config_path}"
-                )
+                raise ConfigurationError(f"Workspace config file not found: {config_path}")
 
             with open(config_path, encoding="utf-8") as f:
                 config_data = json.load(f)
@@ -283,9 +281,7 @@ class ConfigLoader:
             "data": self.settings.workspace.data_dir,
             "temp": self.settings.workspace.temp_dir,
             "logs": (
-                self.settings.logging.file_path.parent
-                if self.settings.logging.file_path
-                else None
+                self.settings.logging.file_path.parent if self.settings.logging.file_path else None
             ),
             "config": self.settings.workspace.config_path.parent,
             "database": self.settings.database.path.parent,
@@ -421,9 +417,7 @@ def validate_configuration() -> bool:
         # Check directories
         dir_validation = config_loader.validate_directories()
         if not all(dir_validation.values()):
-            failed_dirs = [
-                name for name, status in dir_validation.items() if not status
-            ]
+            failed_dirs = [name for name, status in dir_validation.items() if not status]
             logger.warning(f"Directory validation failed for: {', '.join(failed_dirs)}")
 
         logger.info("Configuration validation completed successfully")

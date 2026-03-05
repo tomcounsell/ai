@@ -64,9 +64,7 @@ def sdlc_session(redis_test_db):
     s.append_history("stage", "REVIEW completed ☑")
     s.append_history("stage", "DOCS completed ☑")
     s.set_link("issue", "https://github.com/tomcounsell/ai/issues/177")
-    s.set_link(
-        "plan", "https://github.com/tomcounsell/ai/blob/main/docs/plans/summarizer.md"
-    )
+    s.set_link("plan", "https://github.com/tomcounsell/ai/blob/main/docs/plans/summarizer.md")
     s.set_link("pr", "https://github.com/tomcounsell/ai/pull/180")
     return s
 
@@ -548,9 +546,7 @@ class TestSendMarkdown:
         mock_client.send_message = AsyncMock(return_value="sent")
 
         await send_markdown(mock_client, 123, "text", reply_to=456)
-        mock_client.send_message.assert_called_once_with(
-            123, "text", reply_to=456, parse_mode="md"
-        )
+        mock_client.send_message.assert_called_once_with(123, "text", reply_to=456, parse_mode="md")
 
 
 # ── Escape Markdown ──────────────────────────────────────────────────────────

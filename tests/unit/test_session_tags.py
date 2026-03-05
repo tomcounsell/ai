@@ -130,12 +130,8 @@ class TestTagCRUD:
 class TestSessionsByTag:
     def test_find_sessions_by_tag(self):
         _create_session(session_id="tag-search-1", project_key="proj-a", tags=["bug"])
-        _create_session(
-            session_id="tag-search-2", project_key="proj-a", tags=["feature"]
-        )
-        _create_session(
-            session_id="tag-search-3", project_key="proj-a", tags=["bug", "hotfix"]
-        )
+        _create_session(session_id="tag-search-2", project_key="proj-a", tags=["feature"])
+        _create_session(session_id="tag-search-3", project_key="proj-a", tags=["bug", "hotfix"])
 
         results = sessions_by_tag("bug")
         session_ids = [s.session_id for s in results]

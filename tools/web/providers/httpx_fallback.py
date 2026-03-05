@@ -65,9 +65,7 @@ async def fetch(url: str, **kwargs) -> FetchResult | None:
                 # Content too short, likely error page
                 return None
 
-            return FetchResult(
-                content=content, title=title, url=final_url, provider=name
-            )
+            return FetchResult(content=content, title=title, url=final_url, provider=name)
 
     except Exception:
         # Any error returns None to trigger fallback

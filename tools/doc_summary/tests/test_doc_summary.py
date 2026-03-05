@@ -57,8 +57,7 @@ class TestDocSummaryValidation:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY")
-    and not os.environ.get("OPENROUTER_API_KEY"),
+    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
     reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestDocSummaryCore:
@@ -117,8 +116,7 @@ class TestDocSummaryCore:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY")
-    and not os.environ.get("OPENROUTER_API_KEY"),
+    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
     reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestDocSummaryFile:
@@ -138,8 +136,7 @@ class TestDocSummaryFile:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY")
-    and not os.environ.get("OPENROUTER_API_KEY"),
+    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
     reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestExtractKeyPoints:

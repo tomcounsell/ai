@@ -36,7 +36,7 @@ Work is marked **COMPLETE** when:
 All must pass:
 
 - ✅ **Deliverable exists and works** - Code runs, feature behaves as specified
-- ✅ **Code quality met** - Linted (ruff/black), type-checked, no TODOs
+- ✅ **Code quality met** - Linted (ruff check/ruff format), type-checked, no TODOs
 - ✅ **Changes committed** - All work committed and pushed to remote
 - ✅ **Artifacts created** - Plans/docs/PRs exist as claimed
 - ✅ **Original request fulfilled** - Success criteria met, no blockers
@@ -230,7 +230,7 @@ print(result.format_summary())
 ## Future Enhancements
 
 1. **Programmatic tool call**: Once SDK supports custom tools, add `mark_complete()` as MCP tool
-2. **Automated quality checks**: Run ruff/black/mypy and include results
+2. **Automated quality checks**: Run ruff/mypy and include results
 3. **Test execution**: Run tests and report pass/fail
 4. **PR validation**: Check if PR is mergeable, approved, etc.
 5. **Time tracking**: Log how long work took from start to completion

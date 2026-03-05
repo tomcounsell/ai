@@ -107,9 +107,7 @@ class TestGetMetadata:
         assert "content_type" in result
 
 
-@pytest.mark.skipif(
-    not os.environ.get("PERPLEXITY_API_KEY"), reason="PERPLEXITY_API_KEY not set"
-)
+@pytest.mark.skipif(not os.environ.get("PERPLEXITY_API_KEY"), reason="PERPLEXITY_API_KEY not set")
 class TestAnalyzeUrl:
     """Test URL content analysis."""
 
@@ -117,9 +115,7 @@ class TestAnalyzeUrl:
         """Analyzes URL content."""
         result = analyze_url("https://example.com")
 
-        assert "error" not in result or "URL not accessible" not in result.get(
-            "error", ""
-        )
+        assert "error" not in result or "URL not accessible" not in result.get("error", "")
 
     def test_analyze_without_content(self):
         """Analysis without content fetch."""

@@ -188,8 +188,7 @@ def advance_stage(slug: str, next_stage: str) -> dict:
     state = load(slug)
     if state is None:
         raise FileNotFoundError(
-            f"No pipeline state found for slug {slug!r}. "
-            "Call initialize() before advance_stage()."
+            f"No pipeline state found for slug {slug!r}. Call initialize() before advance_stage()."
         )
 
     # Move current stage into the completed list before advancing

@@ -66,9 +66,7 @@ def cmd_search(args: argparse.Namespace) -> int:
                 chat_id = args.group
             else:
                 print(f"Error: Could not find group '{args.group}'", file=sys.stderr)
-                print(
-                    "Use 'valor-history groups' to list known groups", file=sys.stderr
-                )
+                print("Use 'valor-history groups' to list known groups", file=sys.stderr)
                 return 1
 
         result = search_history(
