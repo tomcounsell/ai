@@ -24,14 +24,14 @@ fi
 # Unload old daydream service if present (migration from daydream -> reflections)
 if launchctl list | grep -q "$OLD_LABEL"; then
     echo "Unloading old $OLD_LABEL service..."
-    launchctl unload "$OLD_PLIST_DST" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/$OLD_LABEL" 2>/dev/null || true
     rm -f "$OLD_PLIST_DST"
 fi
 
 # Unload current version if present
 if launchctl list | grep -q "$LABEL"; then
     echo "Unloading existing $LABEL..."
-    launchctl unload "$PLIST_DST" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 fi
 
 # Copy plist to LaunchAgents
@@ -40,7 +40,7 @@ cp "$PLIST_SRC" "$PLIST_DST"
 
 # Load new version
 echo "Loading $LABEL..."
-launchctl load "$PLIST_DST"
+launchctl bootstrap "gui/$(id -u)" "$PLIST_DST"
 
 echo ""
 echo "Reflections service installed successfully."

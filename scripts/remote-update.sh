@@ -43,13 +43,17 @@ REFLECTIONS_LABEL="com.valor.reflections"
 # Unload old daydream service if still present (migration)
 OLD_DAYDREAM_DST="$HOME/Library/LaunchAgents/com.valor.daydream.plist"
 if launchctl list | grep -q "com.valor.daydream"; then
-    launchctl unload "$OLD_DAYDREAM_DST" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/com.valor.daydream" 2>/dev/null || true
     rm -f "$OLD_DAYDREAM_DST"
 fi
 if [ -f "$REFLECTIONS_PLIST" ]; then
     if launchctl list | grep -q "$REFLECTIONS_LABEL"; then
-        launchctl unload "$REFLECTIONS_DST" 2>/dev/null || true
+        if ! launchctl bootout "gui/$(id -u)/$REFLECTIONS_LABEL"; then
+            echo "ERROR: Failed to bootout $REFLECTIONS_LABEL"
+        fi
     fi
     cp "$REFLECTIONS_PLIST" "$REFLECTIONS_DST"
-    launchctl load "$REFLECTIONS_DST" 2>/dev/null || true
+    if ! launchctl bootstrap "gui/$(id -u)" "$REFLECTIONS_DST"; then
+        echo "ERROR: Failed to bootstrap $REFLECTIONS_LABEL"
+    fi
 fi
