@@ -10,7 +10,7 @@ The runner (`scripts/reflections.py`) loads state from Redis, executes each step
 
 | Step | Name | Description | Scope | Failure Mode |
 |------|------|-------------|-------|--------------|
-| 1 | Clean Up Legacy Code | Scans for TODO comments, deprecated typing imports | AI repo only | Non-blocking |
+| 1 | Clean Up Legacy Code | Scans for TODO comments, old-style typing imports | AI repo only | Non-blocking |
 | 2 | Review Logs | Extracts structured errors from log files and Redis BridgeEvent records | Per-project | Non-blocking, skips if `logs/bridge.log` missing |
 | 3 | Check Error Logs (Sentry) | Queries Sentry for unresolved issues | AI repo only | Non-blocking, skips if MCP unavailable |
 | 4 | Clean Up Task Management | Lists open bug issues via `gh issue list` per project | Per-project | Non-blocking, requires `gh` auth |
