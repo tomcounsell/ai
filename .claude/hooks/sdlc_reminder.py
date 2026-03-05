@@ -23,7 +23,7 @@ CODE_EXTENSIONS = {".py", ".js", ".ts"}
 # The advisory message emitted once per session
 SDLC_REMINDER_MESSAGE = (
     "SDLC: Remember to run tests and linting before completing this task "
-    "(pytest tests/ && ruff check . && black .)"
+    "(pytest tests/ && ruff check . && ruff format --check .)"
 )
 
 

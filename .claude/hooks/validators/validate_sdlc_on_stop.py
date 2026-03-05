@@ -2,7 +2,7 @@
 """Hook: Stop validator — enforce SDLC quality gates at session end.
 
 Reads the session's sdlc_state.json. If code was modified this session,
-all three quality commands (pytest, ruff, black) must have been run.
+all three quality commands (pytest, ruff, ruff-format) must have been run.
 
 Exit codes:
   0 — pass (non-code session, or all gates satisfied)
@@ -40,7 +40,7 @@ def get_sdlc_state_path(session_id: str) -> Path:
 _QUALITY_RUN_HINTS = {
     "pytest": "pytest tests/",
     "ruff": "ruff check .",
-    "black": "black --check .",
+    "ruff-format": "ruff format --check .",
 }
 
 _ERROR_TEMPLATE = """\
@@ -136,7 +136,8 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
 
     # Determine which quality commands are missing
     quality_commands = state.get("quality_commands", {})
-    missing = [cmd for cmd in ("pytest", "ruff", "black") if not quality_commands.get(cmd, False)]
+    required = ("pytest", "ruff", "ruff-format")
+    missing = [cmd for cmd in required if not quality_commands.get(cmd, False)]
 
     if not missing:
         return None  # All gates passed

@@ -34,7 +34,7 @@ FILE_REMINDERS = {
 CODE_EXTENSIONS = {".py", ".js", ".ts"}
 
 # Quality commands to track in the SDLC state
-QUALITY_COMMANDS = ("pytest", "ruff", "black")
+QUALITY_COMMANDS = ("pytest", "ruff", "ruff-format")
 
 # Map SDLC skill names to their pipeline stage
 SKILL_TO_STAGE = {
@@ -66,7 +66,7 @@ def _default_sdlc_state() -> dict:
     return {
         "code_modified": False,
         "files": [],
-        "quality_commands": {"pytest": False, "ruff": False, "black": False},
+        "quality_commands": {"pytest": False, "ruff": False, "ruff-format": False},
     }
 
 
@@ -163,7 +163,7 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
 
     Tracks two categories of bash commands:
 
-    1. **Quality commands** (pytest, ruff, black): marks them as run in the
+    1. **Quality commands** (pytest, ruff, ruff-format): marks them as run in the
        session's quality_commands dict.
     2. **PR merge** (``gh pr merge``): resets ``code_modified`` to False,
        since the code has been properly merged via a PR and is no longer
@@ -186,10 +186,17 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
     # Check if this command runs any quality tool.
     # Use regex word boundary to avoid false positives like `echo "pytest"` or
     # `grep pytest` matching as if pytest was actually run.
+    # Map regex patterns to quality command keys (order matters: check
+    # "ruff format" before bare "ruff" to avoid premature match).
+    quality_patterns = [
+        (r"(?:^|&&|\|\||;|\s)ruff\s+format\b", "ruff-format"),
+        (r"(?:^|&&|\|\||;|\s)pytest\b", "pytest"),
+        (r"(?:^|&&|\|\||;|\s)ruff\b", "ruff"),
+    ]
     matched_command = None
-    for cmd in QUALITY_COMMANDS:
-        if re.search(r"(?:^|&&|\|\||;|\s)" + re.escape(cmd) + r"\b", command):
-            matched_command = cmd
+    for pattern, key in quality_patterns:
+        if re.search(pattern, command):
+            matched_command = key
             break
 
     if matched_command is None and not is_merge:
@@ -258,8 +265,7 @@ def update_stage_progress_for_skill(hook_input: dict) -> None:
     # Determine status - check if output suggests failure
     output_lower = tool_output.lower()
     if any(
-        kw in output_lower
-        for kw in ["failed", "stuck", "error", "blocker", "changes requested"]
+        kw in output_lower for kw in ["failed", "stuck", "error", "blocker", "changes requested"]
     ):
         status = "failed" if stage in ("TEST",) else "in_progress"
     else:
