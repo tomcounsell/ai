@@ -1,10 +1,9 @@
-"""Tests for reflections core: LLM reflection, memory consolidation, auto-fix, data quality."""
+"""Tests for reflections core: LLM reflection, bug issues, data quality."""
 
 from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -108,131 +107,6 @@ class TestLLMReflection:
         assert result == []
 
 
-# --- Memory Consolidation Tests (Step 9) ---
-
-
-class TestMemoryConsolidation:
-    """Tests for lessons learned consolidation."""
-
-    def test_appends_lessons_to_redis(self):
-        """Writes reflection output to Redis LessonLearned model."""
-        from models.reflections import LessonLearned
-        from scripts.reflections import consolidate_memory
-
-        reflections = [
-            {
-                "category": "misunderstanding",
-                "summary": "User correction needed",
-                "pattern": "Jumped to code before confirming",
-                "prevention": "Ask first",
-                "source_session": "abc",
-            }
-        ]
-
-        consolidate_memory(reflections, "2026-02-16")
-
-        lessons = LessonLearned.query.all()
-        assert len(lessons) == 1
-        assert lessons[0].date == "2026-02-16"
-        assert lessons[0].category == "misunderstanding"
-        assert lessons[0].validated == 0
-
-    def test_deduplicates_by_pattern(self):
-        """Does not add duplicate patterns."""
-        from models.reflections import LessonLearned
-        from scripts.reflections import consolidate_memory
-
-        # Add first entry
-        reflections1 = [
-            {
-                "category": "misunderstanding",
-                "summary": "Old entry",
-                "pattern": "Jumped to code before confirming",
-                "prevention": "Ask first",
-                "source_session": "old",
-            }
-        ]
-        consolidate_memory(reflections1, "2026-02-15")
-
-        # Try to add duplicate
-        reflections2 = [
-            {
-                "category": "misunderstanding",
-                "summary": "New but same pattern",
-                "pattern": "Jumped to code before confirming",
-                "prevention": "Ask first",
-                "source_session": "abc",
-            }
-        ]
-        consolidate_memory(reflections2, "2026-02-16")
-
-        lessons = LessonLearned.query.all()
-        assert len(lessons) == 1  # Still just one entry
-
-    def test_prunes_old_entries(self):
-        """Removes entries older than 90 days."""
-        import time
-
-        from models.reflections import LessonLearned
-        from scripts.reflections import consolidate_memory
-
-        # Create old lesson directly in Redis
-        LessonLearned.create(
-            date="2025-01-01",
-            category="old",
-            summary="Should be pruned",
-            pattern="old pattern",
-            prevention="n/a",
-            source_session="old",
-            validated=0,
-            created_at=time.time() - (100 * 86400),
-        )
-        # Create recent lesson
-        LessonLearned.create(
-            date=(datetime.now() - timedelta(days=10)).strftime("%Y-%m-%d"),
-            category="recent",
-            summary="Should remain",
-            pattern="recent pattern",
-            prevention="n/a",
-            source_session="recent",
-            validated=0,
-            created_at=time.time() - (10 * 86400),
-        )
-
-        consolidate_memory([], "2026-02-16")
-
-        remaining = LessonLearned.query.all()
-        assert len(remaining) == 1
-        assert remaining[0].category == "recent"
-
-    def test_creates_lesson_in_redis(self):
-        """Creates lesson in Redis even when no prior entries exist."""
-        from models.reflections import LessonLearned
-        from scripts.reflections import consolidate_memory
-
-        reflections = [
-            {
-                "category": "test",
-                "summary": "Test entry",
-                "pattern": "test pattern",
-                "prevention": "n/a",
-                "source_session": "test",
-            }
-        ]
-        consolidate_memory(reflections, "2026-02-16")
-        lessons = LessonLearned.query.all()
-        assert len(lessons) == 1
-
-    def test_handles_empty_reflections(self):
-        """No-op with empty reflections (but still prunes)."""
-        from models.reflections import LessonLearned
-        from scripts.reflections import consolidate_memory
-
-        consolidate_memory([], "2026-02-16")
-        # No lessons should exist
-        assert len(LessonLearned.query.all()) == 0
-
-
 # --- Step 3 Sentry Check ---
 
 
@@ -293,7 +167,7 @@ class TestTaskCleanup:
         # Should not raise
 
 
-# --- Step 10 GitHub Issue ---
+# --- Step 10 GitHub Issue Creation ---
 
 
 class TestGitHubIssueStep:
@@ -643,14 +517,14 @@ class TestAutoFixStep:
 
     @pytest.mark.asyncio
     async def test_steps_renumbered_correctly(self):
-        """Memory Consolidation is step 9, Produce Daily Report is 10, GitHub is 11."""
+        """Produce Daily Report is step 9, GitHub Issue Creation is 10."""
         from scripts.reflections import ReflectionRunner
 
         runner = ReflectionRunner()
         step_names = {s[0]: s[1] for s in runner.steps}
-        assert step_names.get(9) == "Memory Consolidation"
-        assert step_names.get(10) == "Produce Daily Report"
-        assert step_names.get(11) == "GitHub Issue Creation"
+        assert step_names.get(9) == "Produce Daily Report"
+        assert step_names.get(10) == "GitHub Issue Creation"
+        assert step_names.get(14) == "Branch and Plan Cleanup"
 
     @pytest.mark.asyncio
     async def test_auto_fix_skips_duplicate_github_work(self, monkeypatch):

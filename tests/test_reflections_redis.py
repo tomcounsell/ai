@@ -183,100 +183,6 @@ class TestReflectionIgnoreModel:
         assert ReflectionIgnore.is_ignored("connection timeout in bridge") is True
 
 
-class TestLessonLearnedModel:
-    """Tests for LessonLearned Popoto model."""
-
-    def test_add_lesson(self):
-        """Add a lesson and query it back."""
-        from models.reflections import LessonLearned
-
-        lesson = LessonLearned.add_lesson(
-            date="2026-02-25",
-            category="code_bug",
-            summary="Missing null check",
-            pattern="Always validate before dereferencing",
-            prevention="Add null check",
-            source_session="abc123",
-        )
-        assert lesson is not None
-        assert lesson.category == "code_bug"
-
-    def test_deduplication_by_pattern(self):
-        """Duplicate patterns are rejected."""
-        from models.reflections import LessonLearned
-
-        LessonLearned.add_lesson(
-            date="2026-02-25",
-            category="code_bug",
-            summary="First",
-            pattern="Same pattern",
-        )
-        result = LessonLearned.add_lesson(
-            date="2026-02-25",
-            category="code_bug",
-            summary="Second",
-            pattern="Same pattern",
-        )
-        assert result is None
-        assert len(LessonLearned.query.all()) == 1
-
-    def test_cleanup_expired(self):
-        """cleanup_expired removes old lessons."""
-        from models.reflections import LessonLearned
-
-        # Create old lesson
-        LessonLearned.create(
-            date="2025-01-01",
-            category="old",
-            summary="Ancient lesson",
-            pattern="old pattern",
-            prevention="",
-            source_session="",
-            validated=0,
-            created_at=time.time() - (100 * 86400),
-        )
-        # Create recent lesson
-        LessonLearned.add_lesson(
-            date="2026-02-25",
-            category="recent",
-            summary="Fresh lesson",
-            pattern="new pattern",
-        )
-
-        deleted = LessonLearned.cleanup_expired(max_age_days=90)
-        assert deleted == 1
-        remaining = LessonLearned.query.all()
-        assert len(remaining) == 1
-        assert remaining[0].category == "recent"
-
-    def test_get_recent(self):
-        """get_recent returns only recent lessons."""
-        from models.reflections import LessonLearned
-
-        # Old lesson
-        LessonLearned.create(
-            date="2025-01-01",
-            category="old",
-            summary="Old",
-            pattern="old pattern",
-            prevention="",
-            source_session="",
-            validated=0,
-            created_at=time.time() - (100 * 86400),
-        )
-        # Recent lesson
-        LessonLearned.add_lesson(
-            date="2026-02-25",
-            category="recent",
-            summary="Recent",
-            pattern="recent pattern",
-        )
-
-        recent = LessonLearned.get_recent(days=90)
-        assert len(recent) == 1
-        assert recent[0].category == "recent"
-
-
 class TestAnalyzeSessionsFromRedis:
     """Tests for Redis-backed session analysis."""
 
@@ -329,53 +235,6 @@ class TestAnalyzeSessionsFromRedis:
 
         result = analyze_sessions_from_redis("2099-01-01")
         assert result["sessions_analyzed"] == 0
-
-
-class TestConsolidateMemoryRedis:
-    """Tests for Redis-backed memory consolidation."""
-
-    def test_consolidate_to_redis(self):
-        """consolidate_memory writes to LessonLearned model."""
-        from models.reflections import LessonLearned
-        from scripts.reflections import consolidate_memory
-
-        reflections = [
-            {
-                "category": "code_bug",
-                "summary": "Missing check",
-                "pattern": "Always validate input before processing",
-                "prevention": "Add validation",
-                "source_session": "s1",
-            }
-        ]
-
-        consolidate_memory(reflections, "2026-02-25")
-
-        lessons = LessonLearned.query.all()
-        assert len(lessons) == 1
-        assert lessons[0].category == "code_bug"
-        assert lessons[0].pattern == "Always validate input before processing"
-
-    def test_consolidate_deduplicates(self):
-        """consolidate_memory skips duplicate patterns."""
-        from models.reflections import LessonLearned
-        from scripts.reflections import consolidate_memory
-
-        reflections = [
-            {
-                "category": "code_bug",
-                "summary": "First entry",
-                "pattern": "Duplicate pattern",
-                "prevention": "",
-                "source_session": "",
-            }
-        ]
-
-        consolidate_memory(reflections, "2026-02-25")
-        consolidate_memory(reflections, "2026-02-26")  # same pattern
-
-        lessons = LessonLearned.query.all()
-        assert len(lessons) == 1
 
 
 class TestIgnoreLogRedis:
@@ -433,13 +292,13 @@ class TestReflectionsStateSave:
 class TestRedisDataQuality:
     """Tests for step 14: Redis data quality checks."""
 
-    def test_step_registered_as_step_14(self):
-        """step_redis_data_quality is registered as step 14."""
+    def test_step_registered_as_step_13(self):
+        """step_redis_data_quality is registered as step 13."""
         from scripts.reflections import ReflectionRunner
 
         runner = ReflectionRunner()
         step_names = {s[0]: s[1] for s in runner.steps}
-        assert step_names.get(14) == "Redis Data Quality"
+        assert step_names.get(13) == "Redis Data Quality"
 
     @pytest.mark.asyncio
     async def test_detects_unsummarized_links(self):

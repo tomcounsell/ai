@@ -1,6 +1,6 @@
 # Reflections: Autonomous Maintenance System
 
-The reflections system is an autonomous daily maintenance and self-reflection process. It runs every morning at 6 AM Pacific via macOS launchd, performing cleanup, analysis, reflection, reporting, and institutional memory management through 14 sequential steps. All persistence is Redis-backed via Popoto models.
+The reflections system is an autonomous daily maintenance and self-reflection process. It runs every morning at 6 AM Pacific via macOS launchd, performing cleanup, analysis, reflection, and reporting through 14 sequential steps. All persistence is Redis-backed via Popoto models.
 
 ## How It Works
 
@@ -18,16 +18,16 @@ The runner (`scripts/reflections.py`) loads state from Redis, executes each step
 | 6 | Session Analysis | Queries Redis AgentSession and BridgeEvent; computes thrash ratio, detects user corrections | AI repo only | Non-blocking |
 | 7 | LLM Reflection | Claude Haiku categorizes mistakes into 6 categories | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
 | 8 | File Bug Issues | For high-confidence `code_bug` reflections, creates GitHub issues via `gh issue create` | AI repo only | Non-blocking, requires `gh` auth |
-| 9 | Memory Consolidation | Persists LessonLearned entries to Redis; deduplicates by pattern; prunes entries >90 days | AI repo only | Non-blocking |
-| 10 | Report Generation | Writes local markdown report to `logs/reflections/report_YYYY-MM-DD.md` | AI repo only | Non-blocking |
-| 11 | GitHub Issue Creation | Posts daily digest issue per project via `gh` CLI; posts summary to Telegram | Per-project | Non-blocking, requires `gh` auth |
-| 12 | Skills Audit | Validates all SKILL.md files against template standards (see [Skills Audit](do-skills-audit.md)) | AI repo only | Non-blocking |
-| 13 | Redis TTL Cleanup | Prunes expired records across all Redis models | AI repo only | Non-blocking |
-| 14 | Redis Data Quality | Surfaces data quality issues: unsummarized links, dead channels, error patterns | AI repo only | Non-blocking |
+| 9 | Report Generation | Writes local markdown report to `logs/reflections/report_YYYY-MM-DD.md` | AI repo only | Non-blocking |
+| 10 | GitHub Issue Creation | Posts daily digest issue per project via `gh` CLI; posts summary to Telegram | Per-project | Non-blocking, requires `gh` auth |
+| 11 | Skills Audit | Validates all SKILL.md files against template standards (see [Skills Audit](do-skills-audit.md)) | AI repo only | Non-blocking |
+| 12 | Redis TTL Cleanup | Prunes expired records across all Redis models | AI repo only | Non-blocking |
+| 13 | Redis Data Quality | Surfaces data quality issues: unsummarized links, dead channels, error patterns | AI repo only | Non-blocking |
+| 14 | Branch and Plan Cleanup | Deletes merged branches; ensures plans have open issues; flags completed plans for docs migration | AI repo only | Non-blocking, requires `gh` auth |
 
 ## State & Persistence
 
-All reflections state lives in Redis via three Popoto models defined in `models/reflections.py`.
+All reflections state lives in Redis via two Popoto models defined in `models/reflections.py`.
 
 ### ReflectionRun
 
@@ -67,23 +67,6 @@ Suppresses auto-fix for specific patterns. Each entry has a TTL (default 14 days
 
 **Cleanup**: Expired entries are pruned at the start of each auto-fix step and during Redis TTL cleanup (step 13).
 
-### LessonLearned
-
-Institutional memory from LLM reflection. Queryable by date, category, and recency.
-
-| Field | Type | Purpose |
-|-------|------|---------|
-| `lesson_id` | AutoKeyField | UUID |
-| `date` | KeyField | YYYY-MM-DD when recorded |
-| `category` | KeyField | misunderstanding, code_bug, poor_planning, tool_misuse, scope_creep, integration_failure |
-| `summary` | Field | Brief description of the lesson |
-| `pattern` | Field | Recurring pattern (used for deduplication) |
-| `prevention` | Field | Specific rule to prevent recurrence |
-| `source_session` | Field | Session ID where this was observed |
-| `validated` | IntField | 0=unvalidated, 1+=validated N times |
-| `created_at` | SortedField(float) | Unix timestamp, used for 90-day cleanup |
-
-**Deduplication**: Before creating a new entry, `add_lesson()` checks all existing entries for an exact pattern match. Duplicates are silently skipped.
 
 ## Session Analysis (Step 6)
 
@@ -189,8 +172,8 @@ Each project entry in `config/projects.json`:
 | Field | Required | Notes |
 |-------|----------|-------|
 | `working_directory` | Yes | Must exist on disk to be included |
-| `github.org` / `github.repo` | For issues/tasks | Steps 4 and 11 skip if absent |
-| `telegram.groups` | No | Step 11 skips if absent or empty |
+| `github.org` / `github.repo` | For issues/tasks | Steps 4 and 10 skip if absent |
+| `telegram.groups` | No | Step 10 skips if absent or empty |
 
 ### Subprocess Scoping
 
@@ -198,7 +181,7 @@ Per-project subprocess calls (`gh issue list`, `gh issue create`) use `cwd=proje
 
 ### Issue Dedup Guard
 
-Step 11 uses two layers of deduplication to prevent duplicate GitHub issues:
+Step 10 uses two layers of deduplication to prevent duplicate GitHub issues:
 
 1. **GitHub search** -- `issue_exists_for_date(date, cwd)` queries the target repo for existing issues with the same date title. This catches duplicates across separate reflections runs.
 2. **In-memory guard** -- A module-level `_created_this_run` set in `scripts/reflections_report.py` tracks `(date, cwd)` tuples created during the current process. This prevents race condition duplicates when multiple projects are processed rapidly and GitHub's search index hasn't updated yet. The guard is reset via `reset_dedup_guard()` at the start of each `step_create_github_issue()` call.
@@ -210,11 +193,11 @@ Step 11 uses two layers of deduplication to prevent duplicate GitHub issues:
 ### Graceful Fallbacks
 
 - `working_directory` absent from disk — project excluded from `load_local_projects()`
-- `github` key missing — steps 4 and 11 log a warning and skip that project
-- `telegram.groups` missing or empty — step 11 logs and skips
-- `data/valor.session` missing — step 11 skips silently
-- `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` not set — step 11 skips silently
-- `telethon` not installed — step 11 skips silently
+- `github` key missing — steps 4 and 10 log a warning and skip that project
+- `telegram.groups` missing or empty — step 10 logs and skips
+- `data/valor.session` missing — step 10 skips silently
+- `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` not set — step 10 skips silently
+- `telethon` not installed — step 10 skips silently
 
 ## Findings System
 
@@ -224,10 +207,10 @@ Every step can record findings via `state.add_finding(category, finding_string)`
 
 1. **Collected** — Steps append findings throughout execution
 2. **Checkpointed** — Saved to Redis ReflectionRun after each step
-3. **Reported** — Step 10 writes a local markdown report to `logs/reflections/`
-4. **Published** — Step 11 creates per-project GitHub issues and posts to Telegram
+3. **Reported** — Step 9 writes a local markdown report to `logs/reflections/`
+4. **Published** — Step 10 creates per-project GitHub issues and posts to Telegram
 
-## Redis TTL Cleanup (Step 13)
+## Redis TTL Cleanup (Step 12)
 
 Prunes expired records to keep Redis lean:
 
@@ -240,9 +223,16 @@ Prunes expired records to keep Redis lean:
 | BridgeEvent | 7 days | `cleanup_old()` |
 | ReflectionRun | 30 days | `cleanup_expired()` |
 | ReflectionIgnore | Per-entry TTL | `cleanup_expired()` |
-| LessonLearned | 90 days | `cleanup_expired()` |
 
-## Redis Data Quality (Step 14)
+## Branch and Plan Cleanup (Step 14)
+
+| Action | What It Does |
+|--------|--------------|
+| Delete merged branches | Removes local branches fully merged into main |
+| Orphaned plan check | Ensures every `docs/plans/*.md` file has a matching open GitHub issue |
+| Completed plan detection | Flags plans where all checkboxes are checked — needs `/do-docs` then deletion |
+
+## Redis Data Quality (Step 13)
 
 | Check | What It Finds |
 |-------|---------------|
@@ -282,7 +272,6 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.valor.reflections.pl
 | `python scripts/reflections.py --ignore "pattern" --reason "why"` | Suppress with reason |
 | `./scripts/install_reflections.sh` | Install/update launchd schedule |
 | `tail -f logs/reflections.log` | Stream reflections logs |
-| `python -c "from models.reflections import LessonLearned; [print(f'{l.date} [{l.category}] {l.summary}') for l in LessonLearned.get_recent()]"` | View institutional memory |
 | `python -c "from models.reflections import ReflectionIgnore; [print(f'{e.pattern} (expires {e.expires_at})') for e in ReflectionIgnore.get_active()]"` | View active ignore entries |
 | `launchctl list \| grep reflections` | Check launchd status |
 
@@ -292,7 +281,6 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.valor.reflections.pl
 |------|---------|
 | `logs/reflections.log` | Runner stdout/stderr |
 | `logs/reflections/` | Generated reports (one per run) |
-| Redis: LessonLearned model | Institutional memory (pruned to 90 days) |
 
 ## Key Files
 
@@ -300,7 +288,7 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.valor.reflections.pl
 |------|---------|
 | `scripts/reflections.py` | Main 14-step runner |
 | `scripts/reflections_report.py` | GitHub issue creation module |
-| `models/reflections.py` | Redis models (ReflectionRun, ReflectionIgnore, LessonLearned) |
+| `models/reflections.py` | Redis models (ReflectionRun, ReflectionIgnore) |
 | `scripts/install_reflections.sh` | launchd installation script |
 | `com.valor.reflections.plist` | Schedule definition |
 | `config/projects.json` | Multi-repo project registry |
@@ -317,11 +305,10 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.valor.reflections.pl
 |------------|---------|----------|
 | Redis (Popoto ORM) | All steps | Yes — all state persistence |
 | `ANTHROPIC_API_KEY` | Steps 5, 7 | Conditional — LLM reflection and docs audit |
-| `gh` CLI (authenticated) | Steps 4, 8, 11 | Conditional — task cleanup, dedup, issues |
-| `claude` CLI | Step 8 | Conditional — auto-fix subprocess |
-| `telethon` | Step 11 | Conditional — Telegram notifications |
-| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Step 11 | Conditional — Telegram auth |
-| `data/valor.session` | Step 11 | Conditional — Telegram session file |
+| `gh` CLI (authenticated) | Steps 4, 8, 10, 14 | Conditional — task cleanup, bug issues, daily issues, plan checks |
+| `telethon` | Step 10 | Conditional — Telegram notifications |
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Step 10 | Conditional — Telegram auth |
+| `data/valor.session` | Step 10 | Conditional — Telegram session file |
 | `REFLECTIONS_AUTO_FIX_ENABLED` | Step 8 | Env var, default `true` |
 | `config/projects.json` | Multi-repo | Optional — defaults to AI repo only |
 
