@@ -1,6 +1,7 @@
 ---
 name: documentation-specialist
 description: Expert in API documentation, code comments, architecture diagrams, and user guides
+model: sonnet
 tools:
   - read_file
   - write_file

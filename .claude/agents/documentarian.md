@@ -1,6 +1,7 @@
 ---
 name: documentarian
 description: Documentation specialist with deep knowledge of the full documentation structure, ensuring nothing gets missed
+model: sonnet
 tools:
   - read_file
   - write_file

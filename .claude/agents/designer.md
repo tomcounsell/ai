@@ -1,6 +1,7 @@
 ---
 name: designer
 description: UI/UX specialist following design briefs and style systems for consistent, accessible interfaces
+model: sonnet
 tools:
   - read_file
   - write_file

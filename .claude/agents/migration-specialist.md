@@ -1,6 +1,7 @@
 ---
 name: migration-specialist
 description: Handles data migration, configuration transfer, and service transition planning
+model: sonnet
 tools:
   - read_file
   - write_file

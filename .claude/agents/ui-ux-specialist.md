@@ -1,6 +1,7 @@
 ---
 name: ui-ux-specialist
 description: Expert in conversational UI patterns, error message crafting, user feedback mechanisms, and accessibility
+model: sonnet
 tools:
   - read_file
   - write_file
