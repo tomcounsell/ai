@@ -101,6 +101,17 @@ AssertionError: Expected 401, got 200
 
 The `/do-build` workflow invokes `/do-test` as its testing step. When called from `/do-build`, the CWD is already set to the worktree directory, so tests run against the correct code. The skill is read-only -- it runs tests but never modifies source or test files.
 
+## Pytest Configuration
+
+The project's pytest configuration is in `pyproject.toml` under `[tool.pytest.ini_options]`. Notable settings:
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| `addopts` | `-v --tb=short -p no:postgresql` | Verbose output with short tracebacks; disables pytest-postgresql plugin |
+| `asyncio_mode` | `auto` | Async tests run without explicit markers |
+
+The `-p no:postgresql` flag prevents the `pytest-postgresql` plugin (installed at the system level) from auto-loading. Without this flag, the plugin attempts to import `psycopg` which fails with an `ImportError` when `libpq` is not available, crashing the entire test runner before any tests execute. See [issue #265](https://github.com/valorengels/ai/issues/265).
+
 ## Design Decisions
 
 | Decision | Rationale |
