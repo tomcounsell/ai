@@ -17,7 +17,7 @@ The runner (`scripts/reflections.py`) loads state from Redis, executes each step
 | 5 | Audit Documentation | Weekly LLM-powered accuracy audit of `docs/` (see [Documentation Audit](documentation-audit.md)) | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
 | 6 | Session Analysis | Queries Redis AgentSession and BridgeEvent; computes thrash ratio, detects user corrections | AI repo only | Non-blocking |
 | 7 | LLM Reflection | Claude Haiku categorizes mistakes into 6 categories | AI repo only | Non-blocking, requires `ANTHROPIC_API_KEY` |
-| 8 | Auto-Fix Bugs | For high-confidence `code_bug` reflections, spawns `/do-plan` + `/do-build` to open fix PRs | AI repo only | Non-blocking, requires `claude` CLI |
+| 8 | File Bug Issues | For high-confidence `code_bug` reflections, creates GitHub issues via `gh issue create` | AI repo only | Non-blocking, requires `gh` auth |
 | 9 | Memory Consolidation | Persists LessonLearned entries to Redis; deduplicates by pattern; prunes entries >90 days | AI repo only | Non-blocking |
 | 10 | Report Generation | Writes local markdown report to `logs/reflections/report_YYYY-MM-DD.md` | AI repo only | Non-blocking |
 | 11 | GitHub Issue Creation | Posts daily digest issue per project via `gh` CLI; posts summary to Telegram | Per-project | Non-blocking, requires `gh` auth |
@@ -134,13 +134,13 @@ Each reflection output includes: `category`, `summary`, `pattern`, `prevention`,
 
 **Skip conditions**: Reflection is skipped if there are no session findings, if `ANTHROPIC_API_KEY` is not set, or if the `anthropic` package is not installed.
 
-## Auto-Fix Bugs (Step 8)
+## File Bug Issues (Step 8)
 
-When a reflection is categorized as `code_bug` and meets the confidence threshold, reflections spawns a subprocess to open a fix PR. It never pushes directly to `main` — human review and merge are always required.
+When a reflection is categorized as `code_bug` and meets the confidence threshold, reflections creates a GitHub issue via `gh issue create` with the `bug` label. No code changes are made — a human decides whether and how to fix it.
 
 ### Confidence Criteria
 
-Auto-fix triggers when a reflection meets **2 of 3** criteria:
+An issue is filed when a reflection meets **2 of 3** criteria:
 
 | Criterion | Condition |
 |-----------|----------|
@@ -148,11 +148,11 @@ Auto-fix triggers when a reflection meets **2 of 3** criteria:
 | Prevention | `prevention` field is non-empty |
 | Pattern length | `pattern` field is at least 10 characters |
 
-If fewer than 2 criteria are met, the issue is logged but no action is taken.
+If fewer than 2 criteria are met, the reflection is logged but no issue is created.
 
 ### Ignore Log
 
-The ignore log (Redis `ReflectionIgnore` model) suppresses auto-fix for specific patterns for 14 days:
+The ignore log (Redis `ReflectionIgnore` model) suppresses issue creation for specific patterns for 14 days:
 
 ```bash
 python scripts/reflections.py --ignore "pattern text here"
@@ -161,12 +161,11 @@ python scripts/reflections.py --ignore "pattern text here" --reason "Intentional
 
 ### Safety Properties
 
-- **PRs only** — Never pushes to `main`. Every fix requires human review.
-- **Dedup** — If an open PR already exists for the pattern, no duplicate is created.
+- **Issues only** — Creates GitHub issues, never modifies code or opens PRs.
+- **Dedup** — If an open issue or PR already exists for the pattern, no duplicate is created.
 - **Ignore log** — Patterns can be silenced for 14 days with one CLI command.
 - **Dry-run** — All logic is testable without external side effects.
 - **Kill switch** — `REFLECTIONS_AUTO_FIX_ENABLED=false` disables the feature entirely.
-- **Timeout** — Each `/do-plan` + `/do-build` subprocess has a 10-minute timeout.
 
 ## Multi-Repo Support
 

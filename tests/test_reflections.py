@@ -383,7 +383,7 @@ class TestStepAuditDocs:
         assert call_args[0] == mock_docs_auditor_cls.return_value.run
 
 
-# --- Step 8 Auto-Fix Bugs ---
+# --- Step 8 File Bug Issues ---
 
 
 class TestIgnoreLog:
@@ -534,8 +534,8 @@ class TestAutoFixStep:
         assert progress.get("skipped") is True
 
     @pytest.mark.asyncio
-    async def test_auto_fix_dry_run_does_not_invoke_claude(self, monkeypatch):
-        """Dry run logs intent without calling claude subprocess."""
+    async def test_auto_fix_dry_run_does_not_create_issue(self, monkeypatch):
+        """Dry run logs intent without creating a GitHub issue."""
         monkeypatch.setenv("REFLECTIONS_AUTO_FIX_ENABLED", "true")
         from unittest.mock import patch
 
@@ -559,11 +559,8 @@ class TestAutoFixStep:
             patch("scripts.reflections.prune_ignore_log"),
         ):
             await runner.step_auto_fix_bugs()
-            # subprocess.run should NOT have been called for the fix (only gh dedup checks)
-            claude_calls = [
-                c for c in mock_run.call_args_list if c[0][0] and c[0][0][0] == "claude"
-            ]
-            assert len(claude_calls) == 0
+            # subprocess.run should NOT have been called (no gh issue create in dry run)
+            assert mock_run.call_count == 0
 
         attempts = runner.state.auto_fix_attempts
         assert len(attempts) == 1
@@ -596,11 +593,8 @@ class TestAutoFixStep:
             patch("scripts.reflections.subprocess.run") as mock_run,
         ):
             await runner.step_auto_fix_bugs()
-            # subprocess.run should NOT be called with claude
-            claude_calls = [
-                c for c in mock_run.call_args_list if c[0][0] and c[0][0][0] == "claude"
-            ]
-            assert len(claude_calls) == 0
+            # subprocess.run should NOT be called (ignored pattern)
+            assert mock_run.call_count == 0
 
         attempts = runner.state.auto_fix_attempts
         assert len(attempts) == 1
@@ -645,7 +639,7 @@ class TestAutoFixStep:
         step_nums = [s[0] for s in runner.steps]
         step_names = {s[0]: s[1] for s in runner.steps}
         assert 8 in step_nums
-        assert step_names[8] == "Auto-Fix Bugs"
+        assert step_names[8] == "File Bug Issues"
 
     @pytest.mark.asyncio
     async def test_steps_renumbered_correctly(self):
@@ -691,10 +685,8 @@ class TestAutoFixStep:
             patch("scripts.reflections.subprocess.run") as mock_run,
         ):
             await runner.step_auto_fix_bugs()
-            claude_calls = [
-                c for c in mock_run.call_args_list if c[0][0] and c[0][0][0] == "claude"
-            ]
-            assert len(claude_calls) == 0
+            # subprocess.run should NOT be called (duplicate)
+            assert mock_run.call_count == 0
 
         attempts = runner.state.auto_fix_attempts
         assert len(attempts) == 1

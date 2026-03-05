@@ -10,7 +10,7 @@ A long-running process that performs daily self-directed maintenance tasks:
 5. Update documentation
 6. Session analysis (thrash ratio, user corrections) - Redis-backed via AgentSession
 7. LLM reflection (Claude Haiku categorization)
-8. Auto-fix high-confidence code bugs via plan-build-PR
+8. File GitHub issues for high-confidence code bugs
 9. Memory consolidation (Redis LessonLearned model)
 10. Produce daily report (local markdown)
 11. GitHub issue creation (per-project, via reflections_report module)
@@ -497,7 +497,7 @@ class ReflectionRunner:
             (5, "Audit Documentation", self.step_audit_docs),
             (6, "Session Analysis", self.step_session_analysis),
             (7, "LLM Reflection", self.step_llm_reflection),
-            (8, "Auto-Fix Bugs", self.step_auto_fix_bugs),
+            (8, "File Bug Issues", self.step_auto_fix_bugs),
             (9, "Memory Consolidation", self.step_memory_consolidation),
             (10, "Produce Daily Report", self.step_produce_report),
             (11, "GitHub Issue Creation", self.step_create_github_issue),
@@ -958,10 +958,10 @@ class ReflectionRunner:
         }
 
     async def step_auto_fix_bugs(self) -> None:
-        """Step 8: Auto-fix high-confidence code bugs via plan-build-PR."""
+        """Step 8: File GitHub issues for high-confidence code bugs."""
         enabled = os.environ.get("REFLECTIONS_AUTO_FIX_ENABLED", "true").lower()
         if enabled not in ("true", "1", "yes"):
-            logger.info("REFLECTIONS_AUTO_FIX_ENABLED is false, skipping auto-fix step")
+            logger.info("REFLECTIONS_AUTO_FIX_ENABLED is false, skipping bug issues step")
             self.state.step_progress["auto_fix_bugs"] = {
                 "skipped": True,
                 "reason": "disabled",
@@ -977,7 +977,7 @@ class ReflectionRunner:
         candidates = [r for r in reflections if is_high_confidence(r)]
 
         logger.info(
-            f"Auto-fix: {len(candidates)} candidate(s) from {len(reflections)} reflection(s)"
+            f"Bug issues: {len(candidates)} candidate(s) from {len(reflections)} reflection(s)"
         )
 
         attempts = []
@@ -987,7 +987,7 @@ class ReflectionRunner:
             prevention = r.get("prevention", "")
 
             if is_ignored(pattern, ignore_entries):
-                logger.info(f"Auto-fix: skipping ignored pattern: {pattern[:60]}")
+                logger.info(f"Bug issues: skipping ignored pattern: {pattern[:60]}")
                 attempts.append({"pattern": pattern, "status": "ignored"})
                 self.state.add_finding("auto_fix", f"Ignored (in ignore log): {summary[:80]}")
                 continue
@@ -1000,57 +1000,65 @@ class ReflectionRunner:
                     break
 
             if project_wd and has_existing_github_work(pattern, project_wd):
-                logger.info(f"Auto-fix: duplicate found for pattern: {pattern[:60]}")
+                logger.info(f"Bug issues: duplicate found for pattern: {pattern[:60]}")
                 attempts.append({"pattern": pattern, "status": "duplicate"})
                 self.state.add_finding("auto_fix", f"Skipped (existing PR/issue): {summary[:80]}")
                 continue
 
             if dry_run:
-                logger.info(f"Auto-fix: [DRY RUN] would trigger for: {summary[:80]}")
+                logger.info(f"Bug issues: [DRY RUN] would create issue for: {summary[:80]}")
                 attempts.append({"pattern": pattern, "status": "dry_run"})
-                self.state.add_finding("auto_fix", f"[DRY RUN] Would auto-fix: {summary[:80]}")
+                self.state.add_finding("auto_fix", f"[DRY RUN] Would file issue: {summary[:80]}")
                 continue
 
-            # Trigger auto-fix
-            prompt = (
-                f"Fix the following bug in the codebase. "
-                f"Use /do-plan to create a plan doc, then /do-build to implement it as a PR.\n\n"
-                f"Bug summary: {summary}\n"
-                f"Pattern: {pattern}\n"
-                f"Prevention: {prevention}"
+            if not project_wd:
+                logger.warning("Bug issues: no project with github config found, skipping")
+                attempts.append({
+                    "pattern": pattern, "status": "skipped", "reason": "no_github_project",
+                })
+                continue
+
+            # Create GitHub issue instead of auto-fixing
+            issue_body = (
+                f"## Bug Pattern\n\n{pattern}\n\n"
+                f"## Summary\n\n{summary}\n\n"
+                f"## Suggested Prevention\n\n{prevention}\n\n"
+                f"---\n*Filed automatically by the reflections system.*"
             )
-            logger.info(f"Auto-fix: triggering for: {summary[:80]}")
+            issue_title = f"Bug: {summary[:80]}"
+            logger.info(f"Bug issues: creating issue for: {summary[:80]}")
 
             try:
                 result = subprocess.run(
-                    ["claude", "--print", "--dangerously-skip-permissions", prompt],
+                    [
+                        "gh", "issue", "create",
+                        "--title", issue_title, "--body", issue_body, "--label", "bug",
+                    ],
                     capture_output=True,
                     text=True,
-                    timeout=600,
-                    cwd=str(PROJECT_ROOT),
+                    timeout=30,
+                    cwd=project_wd,
                 )
-                status = "success" if result.returncode == 0 else "failed"
-                output_snippet = (result.stdout or result.stderr or "")[:200]
-                attempts.append({"pattern": pattern, "status": status, "output": output_snippet})
-
-                if status == "success":
-                    self.state.add_finding("auto_fix", f"Auto-fix triggered: {summary[:80]}")
-                    # Try to extract PR URL from output and post to Telegram
-                    pr_match = re.search(r"https://github\.com/\S+/pull/\d+", result.stdout)
-                    if pr_match and self.projects:
-                        for project in self.projects:
-                            if project.get("github"):
-                                await self.step_post_to_telegram(project, pr_match.group())
-                                break
+                if result.returncode == 0:
+                    issue_url = result.stdout.strip()
+                    attempts.append({
+                        "pattern": pattern, "status": "success", "issue_url": issue_url,
+                    })
+                    self.state.add_finding("auto_fix", f"Issue created: {issue_url}")
+                    logger.info(f"Bug issues: created {issue_url}")
                 else:
-                    logger.warning(f"Auto-fix subprocess failed: {output_snippet}")
-                    self.state.add_finding("auto_fix", f"Auto-fix failed: {summary[:80]}")
+                    output_snippet = (result.stderr or result.stdout or "")[:200]
+                    attempts.append({
+                        "pattern": pattern, "status": "failed", "output": output_snippet,
+                    })
+                    logger.warning(f"Bug issues: gh issue create failed: {output_snippet}")
+                    self.state.add_finding("auto_fix", f"Issue creation failed: {summary[:80]}")
             except subprocess.TimeoutExpired:
-                logger.warning(f"Auto-fix timed out for: {summary[:80]}")
+                logger.warning(f"Bug issues: timed out for: {summary[:80]}")
                 attempts.append({"pattern": pattern, "status": "timeout"})
-                self.state.add_finding("auto_fix", f"Auto-fix timed out: {summary[:80]}")
+                self.state.add_finding("auto_fix", f"Issue creation timed out: {summary[:80]}")
             except Exception as e:
-                logger.warning(f"Auto-fix error: {e}")
+                logger.warning(f"Bug issues: error: {e}")
                 attempts.append({"pattern": pattern, "status": "error", "error": str(e)})
 
         self.state.auto_fix_attempts = attempts
