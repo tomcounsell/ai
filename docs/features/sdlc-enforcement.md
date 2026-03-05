@@ -64,7 +64,7 @@ Fires after any Write or Edit on a `.py`/`.js`/`.ts` file.
 SKIP_SDLC=1 claude
 ```
 
-Set `SKIP_SDLC=1` to bypass the stop gate. The hook exits 0 with a warning logged. Use for genuine emergencies only (production incidents, broken environments). Routine use defeats the gate.
+Set `SKIP_SDLC=1` to bypass **all** SDLC stop gates — both the Claude Code hook system and the Agent SDK stop hook. The hooks exit cleanly with a warning logged. Use for genuine emergencies only (production incidents, broken environments, recovery from false-positive infinite loops). Routine use defeats the gate.
 
 ## Pipeline Stage Model
 
@@ -104,11 +104,17 @@ Each code session gets `data/sessions/{session_id}/sdlc_state.json`:
 ```json
 {
   "code_modified": true,
+  "modified_on_branch": "session/my-feature",
   "files": ["bridge/telegram_bridge.py"],
   "quality_commands": {"pytest": true, "ruff": false, "ruff-format": false},
   "reminder_sent": true
 }
 ```
+
+The `modified_on_branch` field tracks where code was first written. It is updated dynamically:
+- **First code edit**: Records the current git branch (may be `main` if code is edited before branching)
+- **Branch switch**: `git checkout -b session/*` or `git switch -c session/*` updates the field to the new session branch, fixing stale "main" recording (issue #261)
+- **PR merge**: `gh pr merge` clears both `code_modified` and `modified_on_branch` to prevent stale state
 
 ## Troubleshooting
 
@@ -120,6 +126,14 @@ Then end the session normally.
 
 **False positive (non-code session blocked):**
 Set `SKIP_SDLC=1` to unblock, then file a GitHub issue with the session ID and `sdlc_state.json` contents. Do not patch the classification inline.
+
+**Stop hook infinite loop ("SDLC VIOLATION" fires repeatedly):**
+This occurs when code was edited on `main` before creating a feature branch, leaving `modified_on_branch: "main"` in the state file. The stop hook blocks, the agent responds, the hook fires again — an unrecoverable loop. **Fixed in issue #261** with three defenses:
+1. Branch switch detection updates `modified_on_branch` when `git checkout -b session/*` is run
+2. Live git diff check verifies actual uncommitted changes before reporting violations
+3. `SKIP_SDLC=1` escape hatch is available at the SDK layer for manual recovery
+
+If you encounter a stale loop, set `SKIP_SDLC=1` or manually edit `data/sessions/{session_id}/sdlc_state.json` to update `modified_on_branch`.
 
 **Stop hook is slow on non-code sessions:**
 Should not happen — the first check is a file existence test. If slow, verify `sdlc_state.json` doesn't exist for the session.
@@ -153,16 +167,18 @@ The `SDLC_WORKFLOW` block tells the agent:
 
 `agent/sdk_client.py` provides `_check_no_direct_main_push(session_id, repo_root)` which:
 
-1. Reads `data/sessions/{session_id}/sdlc_state.json`
-2. If no state file exists: passes (non-code session)
-3. If `code_modified: false`: passes (docs/ops session)
-4. If `code_modified: true`: checks current git branch via `git rev-parse --abbrev-ref HEAD`
-5. If branch is not `main`: passes (inside a `/do-build` worktree on `session/{slug}`)
-6. If branch IS `main`: returns a hard-block error with the list of modified files and remediation steps
+1. If `SKIP_SDLC=1` env var is set: passes immediately (escape hatch for recovery — issue #261)
+2. Reads `data/sessions/{session_id}/sdlc_state.json`
+3. If no state file exists: passes (non-code session)
+4. If `code_modified: false`: passes (docs/ops session)
+5. If `code_modified: true`: checks current git branch via `git rev-parse --abbrev-ref HEAD`
+6. If branch is not `main`: passes (inside a `/do-build` worktree on `session/{slug}`)
+7. If branch IS `main` and `modified_on_branch` starts with `session/`: passes (arrived via merge)
+8. If branch IS `main`: cross-checks live `git diff` for actual uncommitted code files
+9. If no actual uncommitted code changes: passes (stale state — issue #261)
+10. If actual code changes uncommitted on `main`: returns a hard-block error
 
-**Hard-block, no escape hatch at this layer.** The Claude Code hook system has `SKIP_SDLC=1` for genuine emergencies. The SDK stop hook does not — Telegram is free text and there is no mechanism for a user to signal an override through the message channel.
-
-**Fail-open on errors.** If the state file is corrupt or git fails, the check fails open (returns None) and logs a warning. The check never crashes a session.
+**Fail-open on errors.** If the state file is corrupt, git fails, or the diff check errors, the check fails open (returns None) and logs a warning. The check never crashes a session.
 
 ### Stop Hook Integration
 

@@ -440,3 +440,145 @@ class TestBranchRecording:
         assert state["code_modified"] is True
         # modified_on_branch should not be present since git failed
         assert "modified_on_branch" not in state
+
+
+# ---------------------------------------------------------------------------
+# Branch switch detection: git checkout -b session/* updates modified_on_branch
+# ---------------------------------------------------------------------------
+
+
+class TestBranchSwitchDetection:
+    """Tests for Fix 1 (issue #261): update modified_on_branch on branch switch."""
+
+    @pytest.mark.parametrize(
+        "command,expected_branch",
+        [
+            ("git checkout -b session/my-feature", "session/my-feature"),
+            ("git checkout -b session/fix-hook-loop", "session/fix-hook-loop"),
+            ("git switch -c session/new-work", "session/new-work"),
+        ],
+    )
+    def test_branch_switch_updates_modified_on_branch(
+        self, patch_project_dir, tmp_session, command, expected_branch
+    ):
+        """git checkout -b session/* should update modified_on_branch."""
+        session_id, _ = tmp_session
+        # Pre-create state with code_modified on main
+        state = _make_quality_state()
+        state["modified_on_branch"] = "main"
+        save_sdlc_state(session_id, state)
+
+        hook_input = {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": command},
+        }
+        update_sdlc_state_for_bash(hook_input)
+        state = load_sdlc_state(session_id)
+        assert state["modified_on_branch"] == expected_branch
+
+    def test_non_session_branch_does_not_update(self, patch_project_dir, tmp_session):
+        """git checkout -b non-session-branch should not update modified_on_branch."""
+        session_id, _ = tmp_session
+        state = _make_quality_state()
+        state["modified_on_branch"] = "main"
+        save_sdlc_state(session_id, state)
+
+        hook_input = {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "git checkout -b feature/something"},
+        }
+        update_sdlc_state_for_bash(hook_input)
+        state = load_sdlc_state(session_id)
+        assert state["modified_on_branch"] == "main"
+
+    def test_branch_switch_without_code_modified_is_noop(self, patch_project_dir, tmp_session):
+        """Branch switch when code_modified is False should not set modified_on_branch."""
+        session_id, _ = tmp_session
+        state = {
+            "code_modified": False,
+            "files": [],
+            "quality_commands": {"pytest": False, "ruff": False, "ruff-format": False},
+        }
+        save_sdlc_state(session_id, state)
+
+        hook_input = {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "git checkout -b session/foo"},
+        }
+        update_sdlc_state_for_bash(hook_input)
+        state = load_sdlc_state(session_id)
+        assert "modified_on_branch" not in state
+
+    def test_branch_switch_without_existing_state_is_noop(self, patch_project_dir, tmp_session):
+        """Branch switch without pre-existing state file should do nothing."""
+        sessions_dir = patch_project_dir
+        session_id, _ = tmp_session
+        hook_input = {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "git checkout -b session/foo"},
+        }
+        update_sdlc_state_for_bash(hook_input)
+        state_path = sessions_dir / session_id / "sdlc_state.json"
+        assert not state_path.exists()
+
+    def test_chained_branch_switch_and_quality_command(self, patch_project_dir, tmp_session):
+        """A chained command like 'git checkout -b session/foo && pytest' should update both."""
+        session_id, _ = tmp_session
+        state = _make_quality_state()
+        state["modified_on_branch"] = "main"
+        save_sdlc_state(session_id, state)
+
+        hook_input = {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "git checkout -b session/my-fix && pytest tests/"},
+        }
+        update_sdlc_state_for_bash(hook_input)
+        state = load_sdlc_state(session_id)
+        assert state["modified_on_branch"] == "session/my-fix"
+        assert state["quality_commands"]["pytest"] is True
+
+
+# ---------------------------------------------------------------------------
+# Merge cleanup: gh pr merge clears modified_on_branch (Fix 4, issue #261)
+# ---------------------------------------------------------------------------
+
+
+class TestMergeCleanupModifiedOnBranch:
+    """Tests for Fix 4 (issue #261): gh pr merge clears modified_on_branch."""
+
+    def test_merge_clears_modified_on_branch(self, patch_project_dir, tmp_session):
+        """gh pr merge should clear modified_on_branch along with code_modified."""
+        session_id, _ = tmp_session
+        state = _make_quality_state()
+        state["modified_on_branch"] = "session/my-feature"
+        save_sdlc_state(session_id, state)
+
+        hook_input = {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge --squash --delete-branch"},
+        }
+        update_sdlc_state_for_bash(hook_input)
+        state = load_sdlc_state(session_id)
+        assert state["code_modified"] is False
+        assert "modified_on_branch" not in state
+
+    def test_merge_without_modified_on_branch_does_not_error(self, patch_project_dir, tmp_session):
+        """gh pr merge on state without modified_on_branch should not crash."""
+        session_id, _ = tmp_session
+        save_sdlc_state(session_id, _make_quality_state())
+
+        hook_input = {
+            "session_id": session_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge --squash"},
+        }
+        update_sdlc_state_for_bash(hook_input)
+        state = load_sdlc_state(session_id)
+        assert state["code_modified"] is False
+        assert "modified_on_branch" not in state

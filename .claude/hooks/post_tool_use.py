@@ -159,15 +159,19 @@ def update_sdlc_state_for_file_write(hook_input: dict) -> None:
 
 
 def update_sdlc_state_for_bash(hook_input: dict) -> None:
-    """Update state when a Bash tool runs quality commands or merges a PR.
+    """Update state when a Bash tool runs quality commands, merges a PR, or switches branches.
 
-    Tracks two categories of bash commands:
+    Tracks three categories of bash commands:
 
     1. **Quality commands** (pytest, ruff, ruff-format): marks them as run in the
        session's quality_commands dict.
-    2. **PR merge** (``gh pr merge``): resets ``code_modified`` to False,
-       since the code has been properly merged via a PR and is no longer
-       "pending" on the session.
+    2. **PR merge** (``gh pr merge``): resets ``code_modified`` to False and
+       clears ``modified_on_branch``, since the code has been properly merged
+       via a PR and is no longer "pending" on the session.
+    3. **Branch switch** (``git checkout -b session/*`` or ``git switch -c session/*``):
+       updates ``modified_on_branch`` to the new session branch, fixing the
+       stale-state bug where code edited on main before branch creation would
+       permanently record ``modified_on_branch: "main"`` (see issue #261).
 
     Key principle: if no sdlc_state.json exists (non-code session), do nothing.
     We only track these when the session is already classified as a code session
@@ -179,6 +183,25 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
 
     tool_input = hook_input.get("tool_input", {})
     command = tool_input.get("command", "")
+
+    # Detect branch switch to a session/* branch (fixes stale modified_on_branch)
+    branch_match = re.search(r"\bgit\s+(?:checkout\s+-b|switch\s+-c)\s+(session/\S+)", command)
+    if branch_match:
+        session_id = hook_input.get("session_id", "unknown")
+        state_path = get_sdlc_state_path(session_id)
+        if state_path.exists():
+            state = load_sdlc_state(session_id)
+            if state.get("code_modified"):
+                state["modified_on_branch"] = branch_match.group(1)
+                try:
+                    save_sdlc_state(session_id, state)
+                except Exception as e:
+                    print(
+                        f"HOOK WARNING: Failed to save SDLC state for {session_id}: {e}",
+                        file=sys.stderr,
+                    )
+        # Branch switch is handled; fall through to also check for quality/merge
+        # in case the command is chained (e.g., "git checkout -b session/foo && pytest")
 
     # Detect gh pr merge commands (belt-and-suspenders cleanup after merge)
     is_merge = bool(re.search(r"\bgh\s+pr\s+merge\b", command))
@@ -216,6 +239,7 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
 
     if is_merge:
         state["code_modified"] = False
+        state.pop("modified_on_branch", None)  # Clear stale branch tracking
 
     try:
         save_sdlc_state(session_id, state)
