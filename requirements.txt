@@ -47,7 +47,7 @@ attrs==25.4.0
     #   outcome
     #   referencing
     #   trio
-authlib==1.6.6
+authlib==1.6.7
     # via fastmcp
 backports-tarfile==1.2.0 ; python_full_version < '3.12'
     # via jaraco-context
