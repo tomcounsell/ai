@@ -80,9 +80,9 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
                 code_exts = (".py", ".js", ".ts")
                 code_files = []
 
-                # Check 1: uncommitted changes in working tree
+                # Check 1: unstaged changes in working tree
                 wt_diff = subprocess.run(
-                    ["git", "diff", "--name-only", "HEAD"],
+                    ["git", "diff", "--name-only"],
                     capture_output=True, text=True, timeout=5,
                 ).stdout.strip()
                 if wt_diff:
@@ -91,14 +91,14 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
                         if f and any(f.endswith(ext) for ext in code_exts)
                     )
 
-                # Check 2: code files in the most recent commit
-                last_commit = subprocess.run(
-                    ["git", "diff", "--name-only", "HEAD~1", "HEAD"],
+                # Check 2: staged but not yet committed changes
+                staged_diff = subprocess.run(
+                    ["git", "diff", "--name-only", "--cached"],
                     capture_output=True, text=True, timeout=5,
                 ).stdout.strip()
-                if last_commit:
+                if staged_diff:
                     code_files.extend(
-                        f for f in last_commit.split("\n")
+                        f for f in staged_diff.split("\n")
                         if f and any(f.endswith(ext) for ext in code_exts)
                         and f not in code_files
                     )
