@@ -65,5 +65,7 @@ strict = true
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short"
+# -p no:postgresql: disable pytest-postgresql plugin which crashes on systems where
+# psycopg/libpq is not installed (see issue #265)
+addopts = "-v --tb=short -p no:postgresql"
 asyncio_mode = "auto"

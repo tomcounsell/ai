@@ -3,7 +3,7 @@
 Verifies that sessions classified as 'sdlc' are always detected as SDLC jobs,
 regardless of whether sub-skills call session_progress.
 
-Run with: pytest tests/test_sdlc_mode.py -v -p no:postgresql
+Run with: pytest tests/test_sdlc_mode.py -v
 """
 
 import os
