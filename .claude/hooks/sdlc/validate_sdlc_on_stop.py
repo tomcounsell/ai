@@ -66,19 +66,9 @@ def has_code_changes() -> bool:
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
-    # Also check commits on this branch vs main
-    try:
-        diff_output = subprocess.check_output(
-            ["git", "diff", "--name-only", "main...HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        if diff_output:
-            for f in diff_output.split("\n"):
-                if Path(f).suffix.lower() in code_extensions:
-                    return True
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        pass
+    # NOTE: We intentionally do NOT check main...HEAD here.
+    # That would flag already-committed changes from prior sessions,
+    # causing false positives when resuming a session/ branch.
 
     return False
 
