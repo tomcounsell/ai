@@ -110,9 +110,10 @@ No agent integration required -- this is a fix to shell scripts and a Python ser
 
 ## Documentation
 
-- [ ] Update `docs/features/bridge-self-healing.md` if it references launchctl load/unload
-- [ ] Verify `CLAUDE.md` emergency recovery section doesn't reference deprecated commands
-- [ ] No new feature docs needed -- this is a bug fix to existing infrastructure
+- [x] Update `docs/features/reflections.md` to use bootstrap/bootout in reload example
+- [x] Verified `docs/features/bridge-self-healing.md` does not reference launchctl load/unload (no changes needed)
+- [x] Verified `CLAUDE.md` emergency recovery section does not reference deprecated commands (no changes needed)
+- [x] No new feature docs needed -- this is a bug fix to existing infrastructure
 
 ## Success Criteria
 
