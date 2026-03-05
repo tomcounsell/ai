@@ -6,7 +6,7 @@ system. It imports shared utilities from sdlc_context.py in the same directory.
 
 Behavior:
 - If we are in SDLC context AND code was modified (detected via git diff),
-  check whether quality commands (pytest, ruff, black) appear in the session's
+  check whether quality commands (pytest, ruff, ruff-format) appear in the session's
   recent command history (from hook stdin transcript).
 - If quality gates were not run, emit a warning (exit 2 to block stop).
 - If not in SDLC context, silently allows.
@@ -77,7 +77,7 @@ def has_code_changes() -> bool:
 QUALITY_RUN_HINTS = {
     "pytest": "pytest tests/",
     "ruff": "ruff check .",
-    "black": "black --check .",
+    "ruff-format": "ruff format --check .",
 }
 
 ERROR_TEMPLATE = """\
@@ -94,7 +94,7 @@ def check_quality_gates_from_transcript(hook_input: dict) -> list[str]:
     """Check which quality commands are missing from the session transcript.
 
     The Stop hook receives the session transcript which includes all commands
-    run during the session. We scan for evidence of pytest, ruff, and black.
+    run during the session. We scan for evidence of pytest, ruff, and ruff-format.
 
     Returns list of missing command names.
     """
@@ -109,7 +109,7 @@ def check_quality_gates_from_transcript(hook_input: dict) -> list[str]:
 
     # Scan for quality command evidence
     missing = []
-    for cmd_name in ("pytest", "ruff", "black"):
+    for cmd_name in ("pytest", "ruff", "ruff-format"):
         if not re.search(r"\b" + cmd_name + r"\b", transcript_text):
             missing.append(cmd_name)
 

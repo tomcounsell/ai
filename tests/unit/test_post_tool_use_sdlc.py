@@ -47,7 +47,7 @@ def _make_quality_state() -> dict:
     return {
         "code_modified": True,
         "files": ["foo.py"],
-        "quality_commands": {"pytest": False, "ruff": False, "black": False},
+        "quality_commands": {"pytest": False, "ruff": False, "ruff-format": False},
     }
 
 
@@ -116,7 +116,7 @@ class TestLoadSaveSdlcState:
         assert state["quality_commands"] == {
             "pytest": False,
             "ruff": False,
-            "black": False,
+            "ruff-format": False,
         }
 
     def test_save_creates_parent_dirs(self, patch_project_dir):
@@ -125,7 +125,7 @@ class TestLoadSaveSdlcState:
         state = {
             "code_modified": True,
             "files": ["foo.py"],
-            "quality_commands": {"pytest": True, "ruff": False, "black": False},
+            "quality_commands": {"pytest": True, "ruff": False, "ruff-format": False},
         }
         save_sdlc_state(session_id, state)
         expected = sessions_dir / session_id / "sdlc_state.json"
@@ -136,7 +136,7 @@ class TestLoadSaveSdlcState:
         original = {
             "code_modified": True,
             "files": ["agent/foo.py", "tools/bar.py"],
-            "quality_commands": {"pytest": True, "ruff": True, "black": False},
+            "quality_commands": {"pytest": True, "ruff": True, "ruff-format": False},
         }
         save_sdlc_state(session_id, original)
         loaded = load_sdlc_state(session_id)
@@ -144,7 +144,7 @@ class TestLoadSaveSdlcState:
         assert loaded["files"] == ["agent/foo.py", "tools/bar.py"]
         assert loaded["quality_commands"]["pytest"] is True
         assert loaded["quality_commands"]["ruff"] is True
-        assert loaded["quality_commands"]["black"] is False
+        assert loaded["quality_commands"]["ruff-format"] is False
 
     def test_save_overwrites_existing(self, patch_project_dir):
         session_id = "overwrite-session"
@@ -153,7 +153,7 @@ class TestLoadSaveSdlcState:
             {
                 "code_modified": False,
                 "files": [],
-                "quality_commands": {"pytest": False, "ruff": False, "black": False},
+                "quality_commands": {"pytest": False, "ruff": False, "ruff-format": False},
             },
         )
         save_sdlc_state(
@@ -161,7 +161,7 @@ class TestLoadSaveSdlcState:
             {
                 "code_modified": True,
                 "files": ["x.py"],
-                "quality_commands": {"pytest": True, "ruff": False, "black": False},
+                "quality_commands": {"pytest": True, "ruff": False, "ruff-format": False},
             },
         )
         loaded = load_sdlc_state(session_id)
@@ -260,8 +260,8 @@ class TestUpdateSdlcStateForBash:
             ("pytest tests/", "pytest"),
             ("pytest tests/ -v -x", "pytest"),
             ("ruff check .", "ruff"),
-            ("black --check .", "black"),
-            ("black .", "black"),
+            ("ruff format --check .", "ruff-format"),
+            ("ruff format .", "ruff-format"),
         ],
     )
     def test_quality_command_updates_state(
