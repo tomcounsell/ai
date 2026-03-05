@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: In Review
 type: chore
 appetite: Medium
 owner: Valor
@@ -309,10 +309,10 @@ No agent integration required -- audio generation is triggered by the local_audi
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **Episode focus prompt in worker**: The `_generate_audio_nlm()` method currently doesn't pass an episode focus prompt -- it relies on NotebookLM's default behavior after uploading sources. The `notebooklm-py` `generate_audio()` accepts an `instructions` parameter. Should we pass the episode focus prompt (from `notebooklm_api.py::generate_episode_focus()`) as `instructions`, or keep the current behavior of no explicit instructions?
+1. **Episode focus prompt in worker**: **Resolved -- pass instructions.** The worker now extracts the `content_plan.md` source from the API response, isolates the NotebookLM Guidance section via regex, and passes it as the `instructions` parameter to `generate_audio()`. Falls back to the full content plan if the section header isn't found, or `None` if no content plan is available (NotebookLM uses its default behavior).
 
-2. **Auth storage location**: `notebooklm-py` stores auth in `~/.notebooklm/storage_state.json` by default, or reads `NOTEBOOKLM_AUTH_JSON` env var. For the Render worker machine, should we use the env var approach (paste JSON into Render env vars) or the file-based approach?
+2. **Auth storage location**: **Resolved -- env var for Render.** Use `NOTEBOOKLM_AUTH_JSON` environment variable on Render (paste the JSON content of `~/.notebooklm/storage_state.json`). For local development, use `notebooklm login` to generate the file directly. The `notebooklm-py` client checks the env var first, falling back to the file. Documented in `docs/features/local-audio-worker.md`.
 
-3. **prompts.py file**: `apps/podcast/tools/prompts.py` appears in the grep results for NotebookLM references. Should this be cleaned up as part of this migration, or is it a separate concern?
+3. **prompts.py file**: **Resolved -- updated references.** The `apps/podcast/tools/prompts.py` file contains episode focus prompt templates that are still used by standalone CLI tools. NotebookLM references in the file were updated to say `notebooklm-py` as part of the documentation cleanup. No functional changes needed.

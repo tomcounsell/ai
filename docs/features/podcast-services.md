@@ -54,8 +54,8 @@ Core episode record. Services read and write these fields:
 | `report_text` | `synthesize_report` |
 | `sources_text` | `synthesize_report` |
 | `show_notes` | `write_episode_metadata` |
-| `audio_url` | `generate_audio` |
-| `audio_file_size_bytes` | `generate_audio` |
+| `audio_url` | `local_audio_worker` (via API callback) |
+| `audio_file_size_bytes` | `local_audio_worker` (via API callback) |
 | `transcript` | `transcribe_audio` |
 | `chapters` | `generate_episode_chapters` |
 | `cover_image_url` | `generate_cover_art` (stub) |
@@ -330,7 +330,7 @@ result = produce_episode.enqueue(episode_id=42)
 | `step_master_briefing` | `analysis.write_briefing` | Quality Gate Wave 1 → `step_synthesis` |
 | `step_synthesis` | `synthesis.synthesize_report` | `step_episode_planning` |
 | `step_episode_planning` | `synthesis.plan_episode_content` | Quality Gate Wave 2 → `step_audio_generation` |
-| `step_audio_generation` | `audio.generate_audio` | `step_transcribe_audio` |
+| `step_audio_generation` | `workflow.pause_for_human` (local_audio_worker) | `step_transcribe_audio` |
 | `step_transcribe_audio` | `audio.transcribe_audio` | `step_generate_chapters` |
 | `step_generate_chapters` | `audio.generate_episode_chapters` | `step_cover_art` + `step_metadata` + `step_companions` (parallel) |
 | `step_cover_art` | `publishing.generate_cover_art` | _(signal fan-in)_ |

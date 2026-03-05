@@ -182,7 +182,7 @@ class ProcessEpisodeTestCase(TestCase):
         """_process_episode writes sources, generates audio, uploads, and calls back."""
 
         # Make _generate_audio_nlm create a fake audio file
-        def fake_generate(source_dir, title, output_path):
+        def fake_generate(source_dir, title, output_path, instructions=None):
             output_path.write_bytes(b"fake-audio-content")
 
         mock_generate.side_effect = fake_generate
@@ -201,11 +201,12 @@ class ProcessEpisodeTestCase(TestCase):
         cmd = Command()
         cmd._process_episode("https://ai.yuda.me", "test-key", episode_data)
 
-        # Verify generate was called
+        # Verify generate was called with None instructions (no content_plan.md)
         mock_generate.assert_called_once()
         call_args = mock_generate.call_args
         self.assertEqual(call_args[0][1], "Test Episode")
         self.assertTrue(str(call_args[0][2]).endswith("test-ep.mp3"))
+        self.assertIsNone(call_args[0][3])  # no content_plan.md = None instructions
 
         # Verify store_file was called with correct key and content type
         mock_store.assert_called_once()
@@ -237,7 +238,7 @@ class ProcessEpisodeTestCase(TestCase):
         """_process_episode writes all source files to temp directory."""
         written_files = {}
 
-        def fake_generate(source_dir, title, output_path):
+        def fake_generate(source_dir, title, output_path, instructions=None):
             # Capture which files were written to the temp dir
             for f in source_dir.iterdir():
                 if f.is_file():
@@ -286,6 +287,52 @@ class SignalHandlerTestCase(TestCase):
         cmd._signal_handler(signal.SIGTERM, None)
 
         self.assertTrue(cmd._shutdown)
+
+
+class ExtractInstructionsTestCase(TestCase):
+    """Test the _extract_instructions static method."""
+
+    def test_returns_none_without_content_plan(self):
+        """Returns None when sources dict has no content_plan.md."""
+        result = Command._extract_instructions({"report.md": "# Report"})
+        self.assertIsNone(result)
+
+    def test_returns_none_for_empty_sources(self):
+        """Returns None for empty sources dict."""
+        result = Command._extract_instructions({})
+        self.assertIsNone(result)
+
+    def test_extracts_guidance_section(self):
+        """Extracts the NotebookLM Guidance section from content plan."""
+        content_plan = (
+            "## Episode Structure\n\nStructure details.\n\n"
+            "## NotebookLM Guidance\n\n"
+            "Opening instructions here.\n"
+            "Key terms to define.\n\n"
+            "## Episode Arc\n\nArc details."
+        )
+        result = Command._extract_instructions({"content_plan.md": content_plan})
+        self.assertIn("NotebookLM Guidance", result)
+        self.assertIn("Opening instructions here.", result)
+        self.assertNotIn("Episode Arc", result)
+        self.assertNotIn("Structure details", result)
+
+    def test_falls_back_to_full_plan(self):
+        """Falls back to full content plan when no guidance section found."""
+        content_plan = "# Episode Plan\n\nSome plan without guidance section."
+        result = Command._extract_instructions({"content_plan.md": content_plan})
+        self.assertEqual(result, content_plan)
+
+    def test_handles_underscore_variant(self):
+        """Handles notebooklm_guidance section header variant."""
+        content_plan = (
+            "## notebooklm_guidance\n\n"
+            "Guidance content.\n\n"
+            "## Next Section\n\nOther."
+        )
+        result = Command._extract_instructions({"content_plan.md": content_plan})
+        self.assertIn("Guidance content.", result)
+        self.assertNotIn("Next Section", result)
 
 
 class GenerateAudioNLMTestCase(TestCase):

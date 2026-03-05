@@ -23,6 +23,7 @@ Requires:
 
 import asyncio
 import logging
+import re
 import signal
 import tempfile
 import time
@@ -185,9 +186,12 @@ class Command(BaseCommand):
             for filename, content in sources.items():
                 (tmpdir_path / filename).write_text(content, encoding="utf-8")
 
+            # Extract content plan for NotebookLM instructions
+            instructions = self._extract_instructions(sources)
+
             # Generate audio via notebooklm-py
             output_path = tmpdir_path / f"{slug}.mp3"
-            self._generate_audio_nlm(tmpdir_path, title, output_path)
+            self._generate_audio_nlm(tmpdir_path, title, output_path, instructions)
 
             # Read the audio bytes
             audio_bytes = output_path.read_bytes()
@@ -204,14 +208,53 @@ class Command(BaseCommand):
                 base_url, api_key, episode_id, audio_url, len(audio_bytes)
             )
 
+    @staticmethod
+    def _extract_instructions(sources: dict[str, str]) -> str | None:
+        """Extract NotebookLM instructions from the content plan.
+
+        Looks for content_plan.md in the sources dict and extracts the
+        NotebookLM Guidance section if present. Falls back to the full
+        content plan text if the guidance section can't be isolated.
+
+        Returns None if no content plan is available.
+        """
+        content_plan = sources.get("content_plan.md")
+        if not content_plan:
+            return None
+
+        # Try to extract just the NotebookLM Guidance section
+        # The content plan is Markdown with a "## NotebookLM Guidance" or
+        # "## notebooklm_guidance" section header
+        match = re.search(
+            r"^##\s+(?:NotebookLM[_ ]Guidance|notebooklm_guidance)\s*\n(.*?)(?=\n##\s|\Z)",
+            content_plan,
+            re.MULTILINE | re.DOTALL | re.IGNORECASE,
+        )
+        if match:
+            return match.group(0).strip()
+
+        # Fall back to the full content plan as instructions
+        return content_plan
+
     def _generate_audio_nlm(
-        self, source_dir: Path, title: str, output_path: Path
+        self,
+        source_dir: Path,
+        title: str,
+        output_path: Path,
+        instructions: str | None = None,
     ) -> None:
         """Generate audio using notebooklm-py library.
 
         Uses asyncio.run() to bridge the sync management command with the
         async notebooklm-py client API. Each call creates its own event loop,
         which is safe when called from ThreadPoolExecutor threads.
+
+        Args:
+            source_dir: Directory containing .md source files to upload.
+            title: Episode title for the NotebookLM notebook.
+            output_path: Where to save the generated MP3 file.
+            instructions: Optional episode focus instructions for NotebookLM.
+                Extracted from the content plan's NotebookLM Guidance section.
         """
         try:
             import notebooklm  # noqa: F401
@@ -220,13 +263,27 @@ class Command(BaseCommand):
                 "notebooklm-py not installed. Install with: uv add notebooklm-py"
             )
 
-        asyncio.run(self._generate_audio_async(source_dir, title, output_path))
+        asyncio.run(
+            self._generate_audio_async(source_dir, title, output_path, instructions)
+        )
 
     @staticmethod
     async def _generate_audio_async(
-        source_dir: Path, title: str, output_path: Path
+        source_dir: Path,
+        title: str,
+        output_path: Path,
+        instructions: str | None = None,
     ) -> None:
-        """Async implementation of audio generation via notebooklm-py."""
+        """Async implementation of audio generation via notebooklm-py.
+
+        Args:
+            source_dir: Directory containing .md source files to upload.
+            title: Episode title for the NotebookLM notebook.
+            output_path: Where to save the generated MP3 file.
+            instructions: Optional episode focus instructions passed to
+                NotebookLM's generate_audio(). Guides the two-host
+                conversation structure and content emphasis.
+        """
         from notebooklm import NotebookLMClient
 
         async with await NotebookLMClient.from_storage() as client:
@@ -243,8 +300,15 @@ class Command(BaseCommand):
                             wait=True,
                         )
 
-                # Generate audio overview
-                status = await client.artifacts.generate_audio(nb.id)
+                # Generate audio overview with optional episode focus instructions
+                generate_kwargs: dict = {"notebook_id": nb.id}
+                if instructions:
+                    generate_kwargs["instructions"] = instructions
+                    logger.info(
+                        "Generating audio with instructions (%d chars)",
+                        len(instructions),
+                    )
+                status = await client.artifacts.generate_audio(**generate_kwargs)
 
                 # Wait for completion (30 minute timeout = 1800 seconds)
                 await client.artifacts.wait_for_completion(

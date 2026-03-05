@@ -170,8 +170,27 @@ LOCAL_WORKER_API_KEY=<same key as production>
 ```
 
 Additional requirements:
-- `notebooklm-py` installed and authenticated (`notebooklm login`)
+- `notebooklm-py` installed and authenticated (see below)
 - Storage backend configured (Supabase credentials for production uploads)
+
+### NotebookLM Authentication
+
+`notebooklm-py` requires browser cookies for NotebookLM access. There are two authentication methods:
+
+**Method 1: Interactive login (local development)**
+
+Run `notebooklm login` to open a browser, sign in to Google, and save cookies to `~/.notebooklm/storage_state.json`. This is the simplest approach for local machines.
+
+**Method 2: Environment variable (headless/Render)**
+
+Set `NOTEBOOKLM_AUTH_JSON` to the JSON content of the storage state file. This is required for environments without a browser (e.g., Render workers).
+
+To set up:
+1. Run `notebooklm login` on a local machine to generate `~/.notebooklm/storage_state.json`
+2. Copy the file contents: `cat ~/.notebooklm/storage_state.json | pbcopy`
+3. Set the `NOTEBOOKLM_AUTH_JSON` environment variable on Render (paste the JSON as the value)
+
+The `notebooklm-py` client checks `NOTEBOOKLM_AUTH_JSON` first, falling back to the file-based storage state. Cookies may expire and require re-authentication (repeat the steps above).
 
 ## How It Works
 
@@ -181,7 +200,7 @@ Additional requirements:
 
 3. **Source files prepared**: The API returns episode source content (report, sources, briefing, content plan, brief). The worker writes these to a temporary directory as `.md` files.
 
-4. **Audio generated**: The worker calls `notebooklm-py` to create a NotebookLM notebook, upload the source files, generate audio, and download the resulting MP3. The notebook is cleaned up after download.
+4. **Audio generated**: The worker calls `notebooklm-py` to create a NotebookLM notebook, upload the source files, generate audio, and download the resulting MP3. If a `content_plan.md` source is present, the worker extracts the NotebookLM Guidance section and passes it as `instructions` to guide the two-host conversation. The notebook is cleaned up after download.
 
 5. **Audio uploaded**: The MP3 is uploaded to storage via `store_file()` with the key `podcast/{podcast_slug}/{slug}/audio.mp3`.
 
