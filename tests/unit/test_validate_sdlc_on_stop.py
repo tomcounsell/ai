@@ -161,7 +161,7 @@ class TestCheckSdlcQualityGate:
         result = mod.check_sdlc_quality_gate("session-hints")
         assert result is not None
         assert "pytest tests/" in result
-        assert "ruff check ." in result
+        assert "python -m ruff check ." in result
 
     def test_error_message_mentions_skip_sdlc(self, patch_sessions_dir):
         """Error message should mention SKIP_SDLC escape hatch."""

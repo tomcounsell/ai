@@ -262,6 +262,9 @@ class TestUpdateSdlcStateForBash:
             ("ruff check .", "ruff"),
             ("ruff format --check .", "ruff-format"),
             ("ruff format .", "ruff-format"),
+            ("python -m ruff check .", "ruff"),
+            ("python -m ruff format --check .", "ruff-format"),
+            ("python -m ruff format .", "ruff-format"),
         ],
     )
     def test_quality_command_updates_state(

@@ -140,7 +140,7 @@ Add to the appropriate tools section:
 ```bash
 pytest tools/<tool_name>/tests/ -v
 black tools/<tool_name>/
-ruff check tools/<tool_name>/
+python -m ruff check tools/<tool_name>/
 git add tools/<tool_name>/ pyproject.toml CLAUDE.md
 git commit -m "Add valor-<name> tool for <purpose>"
 git push

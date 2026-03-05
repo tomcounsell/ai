@@ -212,9 +212,9 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
     # Map regex patterns to quality command keys (order matters: check
     # "ruff format" before bare "ruff" to avoid premature match).
     quality_patterns = [
-        (r"(?:^|&&|\|\||;|\s)ruff\s+format\b", "ruff-format"),
+        (r"(?:^|&&|\|\||;|\s)(?:python\s+-m\s+)?ruff\s+format\b", "ruff-format"),
         (r"(?:^|&&|\|\||;|\s)pytest\b", "pytest"),
-        (r"(?:^|&&|\|\||;|\s)ruff\b", "ruff"),
+        (r"(?:^|&&|\|\||;|\s)(?:python\s+-m\s+)?ruff\b", "ruff"),
     ]
     matched_command = None
     for pattern, key in quality_patterns:

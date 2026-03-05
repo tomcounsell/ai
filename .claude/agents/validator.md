@@ -27,7 +27,7 @@ You are a read-only validation agent responsible for verifying that ONE task was
 For code changes:
 - [ ] Code compiles/runs without errors
 - [ ] Tests pass (if applicable)
-- [ ] Linting passes (`ruff check`)
+- [ ] Linting passes (`python -m ruff check`)
 - [ ] Formatting is correct (`black --check`)
 - [ ] Type hints present where appropriate
 
@@ -51,7 +51,7 @@ Do NOT trust the builder's self-reported output. You MUST verify independently:
 | Builder Claim | Your Verification |
 |---|---|
 | "Tests pass" | Run `pytest tests/ -v` — confirm 0 failures |
-| "Linting clean" | Run `ruff check .` — confirm 0 errors |
+| "Linting clean" | Run `python -m ruff check .` — confirm 0 errors |
 | "Formatting clean" | Run `black --check .` — confirm no reformats needed |
 | "File created at X" | Use Read tool on path X — confirm file exists and has expected content |
 | "Committed abc1234" | Run `git log --oneline -1` — confirm commit hash matches |

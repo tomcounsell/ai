@@ -133,7 +133,7 @@ pytest tests/unit/test_foo.py tests/tools/test_bar.py -v --tb=short
 
 If lint is enabled, run lint sequentially after tests:
 ```bash
-ruff check .
+python -m ruff check .
 black --check .
 ```
 
@@ -207,7 +207,7 @@ Task({
   prompt: "Run lint checks in [CWD]:
 
     cd [CWD]
-    ruff check .
+    python -m ruff check .
     black --check .
 
     Report: pass/fail for each tool, and any issues found.",
@@ -231,7 +231,7 @@ Monitor all background tasks. Set a **2-minute timeout** from dispatch.
 4. Use the direct execution output for Result Aggregation
 5. Run lint directly too if lint agents also timed out:
    ```bash
-   ruff check .
+   python -m ruff check .
    black --check .
    ```
 
