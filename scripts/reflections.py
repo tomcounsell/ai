@@ -1013,9 +1013,13 @@ class ReflectionRunner:
 
             if not project_wd:
                 logger.warning("Bug issues: no project with github config found, skipping")
-                attempts.append({
-                    "pattern": pattern, "status": "skipped", "reason": "no_github_project",
-                })
+                attempts.append(
+                    {
+                        "pattern": pattern,
+                        "status": "skipped",
+                        "reason": "no_github_project",
+                    }
+                )
                 continue
 
             # Create GitHub issue instead of auto-fixing
@@ -1031,8 +1035,15 @@ class ReflectionRunner:
             try:
                 result = subprocess.run(
                     [
-                        "gh", "issue", "create",
-                        "--title", issue_title, "--body", issue_body, "--label", "bug",
+                        "gh",
+                        "issue",
+                        "create",
+                        "--title",
+                        issue_title,
+                        "--body",
+                        issue_body,
+                        "--label",
+                        "bug",
                     ],
                     capture_output=True,
                     text=True,
@@ -1041,16 +1052,24 @@ class ReflectionRunner:
                 )
                 if result.returncode == 0:
                     issue_url = result.stdout.strip()
-                    attempts.append({
-                        "pattern": pattern, "status": "success", "issue_url": issue_url,
-                    })
+                    attempts.append(
+                        {
+                            "pattern": pattern,
+                            "status": "success",
+                            "issue_url": issue_url,
+                        }
+                    )
                     self.state.add_finding("auto_fix", f"Issue created: {issue_url}")
                     logger.info(f"Bug issues: created {issue_url}")
                 else:
                     output_snippet = (result.stderr or result.stdout or "")[:200]
-                    attempts.append({
-                        "pattern": pattern, "status": "failed", "output": output_snippet,
-                    })
+                    attempts.append(
+                        {
+                            "pattern": pattern,
+                            "status": "failed",
+                            "output": output_snippet,
+                        }
+                    )
                     logger.warning(f"Bug issues: gh issue create failed: {output_snippet}")
                     self.state.add_finding("auto_fix", f"Issue creation failed: {summary[:80]}")
             except subprocess.TimeoutExpired:
