@@ -1344,15 +1344,21 @@ class ReflectionRunner:
                 for line in result.stdout.splitlines():
                     branch = line.strip().lstrip("* ")
                     if branch and branch not in ("main", "master"):
-                        subprocess.run(
+                        del_result = subprocess.run(
                             ["git", "branch", "-d", branch],
                             capture_output=True,
                             text=True,
                             timeout=10,
                             cwd=str(PROJECT_ROOT),
                         )
-                        findings.append(f"Deleted merged branch: {branch}")
-                        logger.info(f"Branch cleanup: deleted merged branch {branch}")
+                        if del_result.returncode == 0:
+                            findings.append(f"Deleted merged branch: {branch}")
+                            logger.info(f"Branch cleanup: deleted merged branch {branch}")
+                        else:
+                            logger.warning(
+                                f"Branch cleanup: failed to delete {branch}: "
+                                f"{del_result.stderr.strip()}"
+                            )
         except Exception as e:
             logger.warning(f"Branch cleanup failed (non-fatal): {e}")
 
@@ -1370,7 +1376,7 @@ class ReflectionRunner:
 
             for plan_file in plan_files:
                 plan_name = plan_file.stem
-                plan_text = plan_file.read_text()
+                plan_text = plan_file.read_text(errors="replace")
 
                 # Check if plan is complete (all checkboxes checked)
                 checkboxes = re.findall(r"- \[([ xX])\]", plan_text)

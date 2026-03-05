@@ -640,3 +640,138 @@ class TestCLIFlags:
             asyncio.run(reflections_mod.main())
 
         assert captured_runner["instance"].state._dry_run is True
+
+
+# --- Step 14 Branch and Plan Cleanup ---
+
+
+class TestBranchPlanCleanup:
+    """Tests for step 14: branch and plan cleanup."""
+
+    @pytest.mark.asyncio
+    async def test_deletes_merged_branches(self):
+        """Deletes local branches that are fully merged into main."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner()
+        runner.projects = []
+
+        # Mock subprocess to simulate merged branches
+        merged_output = MagicMock()
+        merged_output.returncode = 0
+        merged_output.stdout = "  feature/old-branch\n* main\n  session/done\n"
+
+        delete_output = MagicMock()
+        delete_output.returncode = 0
+
+        call_count = {"n": 0}
+
+        def fake_run(cmd, **kwargs):
+            call_count["n"] += 1
+            if cmd == ["git", "branch", "--merged", "main"]:
+                return merged_output
+            if cmd[0:3] == ["git", "branch", "-d"]:
+                return delete_output
+            return MagicMock(returncode=0, stdout="")
+
+        with patch("scripts.reflections.subprocess.run", side_effect=fake_run):
+            await runner.step_branch_plan_cleanup()
+
+        progress = runner.state.step_progress.get("branch_plan_cleanup", {})
+        assert progress["findings"] == 2  # two branches deleted (not main)
+
+    @pytest.mark.asyncio
+    async def test_skips_failed_branch_deletion(self):
+        """Does not report deletion when git branch -d fails."""
+        from scripts.reflections import ReflectionRunner
+
+        runner = ReflectionRunner()
+        runner.projects = []
+
+        merged_output = MagicMock()
+        merged_output.returncode = 0
+        merged_output.stdout = "  worktree-branch\n* main\n"
+
+        delete_output = MagicMock()
+        delete_output.returncode = 1
+        delete_output.stderr = "error: branch is checked out in worktree"
+
+        def fake_run(cmd, **kwargs):
+            if cmd == ["git", "branch", "--merged", "main"]:
+                return merged_output
+            if cmd[0:3] == ["git", "branch", "-d"]:
+                return delete_output
+            return MagicMock(returncode=0, stdout="")
+
+        with patch("scripts.reflections.subprocess.run", side_effect=fake_run):
+            await runner.step_branch_plan_cleanup()
+
+        progress = runner.state.step_progress.get("branch_plan_cleanup", {})
+        assert progress["findings"] == 0  # deletion failed, not counted
+
+    @pytest.mark.asyncio
+    async def test_detects_completed_plans(self, tmp_path):
+        """Flags plans where all checkboxes are checked."""
+        from scripts.reflections import PROJECT_ROOT, ReflectionRunner
+
+        # Create a plan file with all boxes checked
+        plans_dir = tmp_path / "docs" / "plans"
+        plans_dir.mkdir(parents=True)
+        (plans_dir / "done_feature.md").write_text(
+            "# Done Feature\n- [x] Task 1\n- [x] Task 2\n- [X] Task 3\n"
+        )
+
+        runner = ReflectionRunner()
+        runner.projects = []
+
+        with patch("scripts.reflections.PROJECT_ROOT", tmp_path):
+            # Also mock subprocess for git branch --merged
+            with patch(
+                "scripts.reflections.subprocess.run",
+                return_value=MagicMock(returncode=1, stdout=""),
+            ):
+                await runner.step_branch_plan_cleanup()
+
+        progress = runner.state.step_progress.get("branch_plan_cleanup", {})
+        assert progress["findings"] == 1
+        # Check that finding was added to state
+        cleanup_findings = runner.state.findings.get("branch_plan_cleanup", [])
+        assert any("Completed plan" in f for f in cleanup_findings)
+
+    @pytest.mark.asyncio
+    async def test_detects_orphaned_plans(self, tmp_path):
+        """Flags incomplete plans with no matching open issue."""
+        from scripts.reflections import ReflectionRunner
+
+        # Create a plan file with unchecked boxes
+        plans_dir = tmp_path / "docs" / "plans"
+        plans_dir.mkdir(parents=True)
+        (plans_dir / "orphan_feature.md").write_text(
+            "# Orphan Feature\n- [ ] Task 1\n- [x] Task 2\n"
+        )
+
+        runner = ReflectionRunner()
+        runner.projects = [
+            {
+                "slug": "ai",
+                "working_directory": "/tmp",
+                "github": {"org": "test", "repo": "repo"},
+            }
+        ]
+
+        def fake_run(cmd, **kwargs):
+            if cmd == ["git", "branch", "--merged", "main"]:
+                return MagicMock(returncode=1, stdout="")
+            if cmd[0:2] == ["gh", "issue"]:
+                # No matching issue found
+                return MagicMock(returncode=0, stdout="")
+            return MagicMock(returncode=0, stdout="")
+
+        with patch("scripts.reflections.PROJECT_ROOT", tmp_path):
+            with patch("scripts.reflections.subprocess.run", side_effect=fake_run):
+                await runner.step_branch_plan_cleanup()
+
+        progress = runner.state.step_progress.get("branch_plan_cleanup", {})
+        assert progress["findings"] == 1
+        cleanup_findings = runner.state.findings.get("branch_plan_cleanup", [])
+        assert any("Orphaned plan" in f for f in cleanup_findings)
