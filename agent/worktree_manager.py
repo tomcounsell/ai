@@ -267,6 +267,39 @@ def create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Pa
     return worktree_dir
 
 
+def get_or_create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Path:
+    """Return an existing worktree path or create a new one.
+
+    This is the preferred entry point for the ``/do-build`` skill and any
+    code that needs a worktree for a given slug.  It is intentionally
+    idempotent: calling it when a worktree already exists is a no-op that
+    returns the existing path, and calling it when no worktree exists
+    creates one from scratch.
+
+    This function exists to make the "give me a worktree, I don't care if
+    it already exists" pattern explicit and self-documenting.  Under the
+    hood it delegates entirely to :func:`create_worktree`, which already
+    handles the resume-existing case (returns early when the directory is
+    present) as well as stale-worktree cleanup.
+
+    Args:
+        repo_root: Path to the main repository.
+        slug: Work item slug (used for directory name and branch).
+        base_branch: Branch to base a *new* worktree on (ignored when
+            the worktree already exists).
+
+    Returns:
+        Absolute path to the worktree directory
+        (``repo_root / .worktrees / slug``).
+
+    Raises:
+        ValueError: If the slug is invalid.
+        subprocess.CalledProcessError: If worktree creation fails after
+            recovery attempts.
+    """
+    return create_worktree(repo_root, slug, base_branch)
+
+
 def remove_worktree(repo_root: Path, slug: str, delete_branch: bool = True) -> bool:
     """Remove a git worktree and optionally its branch.
 

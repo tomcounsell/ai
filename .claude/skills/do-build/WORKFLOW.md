@@ -41,6 +41,8 @@ Run \`cd {TARGET_REPO}/.worktrees/{slug}/\` before doing any work.
 All file reads, writes, and commands should use this worktree path, not the main repo.
 Note: {TARGET_REPO} is the target repository root (which may differ from the orchestrator repo for cross-repo builds).
 
+NEVER use \`git checkout\` or \`git checkout -b\` on session/ branches. The worktree IS the checkout — just \`cd\` into it. Running \`git checkout session/{slug}\` will fail with a fatal error because the branch is locked by the worktree.
+
 Plan context: [relevant plan sections]
 
 Your assignment:

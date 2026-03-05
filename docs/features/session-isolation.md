@@ -46,8 +46,9 @@ Each tier 2 work item gets its own git worktree for filesystem isolation:
 - `settings.local.json` is copied into the worktree's `.claude/` directory (since it's not tracked by git)
 - On completion: changes are merged back, worktree is removed
 - Stale worktree references are automatically detected and cleaned up by `create_worktree()`
+- `get_or_create_worktree()` is the preferred idempotent entry point: it returns an existing worktree path or creates a new one, making session resumption seamless
 
-The worktree manager provides five operations: `create_worktree()`, `remove_worktree()`, `list_worktrees()`, `prune_worktrees()`, and `cleanup_after_merge()`.
+The worktree manager provides six operations: `get_or_create_worktree()`, `create_worktree()`, `remove_worktree()`, `list_worktrees()`, `prune_worktrees()`, and `cleanup_after_merge()`.
 
 ### Stale Worktree Recovery
 
