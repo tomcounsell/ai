@@ -250,6 +250,33 @@ class PodcastDetailViewTestCase(TestCase):
         self.assertNotContains(response, "Apple Podcasts")
         self.assertContains(response, "RSS Feed")
 
+    def test_detail_shows_drafts_for_owner(self):
+        """Owner sees draft episodes in a Drafts section."""
+        owner = User.objects.create_user(username="draftowner", password="testpass123")
+        self.podcast.owner = owner
+        self.podcast.save()
+        self.client.login(username="draftowner", password="testpass123")
+        response = self.client.get(f"/podcast/{self.podcast.slug}/")
+        self.assertContains(response, "Draft Episode")
+        self.assertContains(response, "Drafts")
+
+    def test_detail_shows_drafts_for_staff(self):
+        """Staff sees draft episodes in a Drafts section."""
+        User.objects.create_user(
+            username="draftstaff", password="testpass123", is_staff=True
+        )
+        self.client.login(username="draftstaff", password="testpass123")
+        response = self.client.get(f"/podcast/{self.podcast.slug}/")
+        self.assertContains(response, "Draft Episode")
+        self.assertContains(response, "Drafts")
+
+    def test_detail_hides_drafts_from_regular_user(self):
+        """Logged-in non-owner/non-staff does not see drafts."""
+        User.objects.create_user(username="regularviewer", password="testpass123")
+        self.client.login(username="regularviewer", password="testpass123")
+        response = self.client.get(f"/podcast/{self.podcast.slug}/")
+        self.assertNotContains(response, "Draft Episode")
+
 
 @override_settings(STORAGES=SIMPLE_STORAGES)
 class EpisodeDetailViewTestCase(TestCase):
@@ -319,6 +346,63 @@ class EpisodeDetailViewTestCase(TestCase):
         self.client.login(username="epowner", password="testpass123")
         response = self.client.get(f"/podcast/{private_podcast.slug}/{episode.slug}/")
         self.assertEqual(response.status_code, 200)
+
+    def test_episode_detail_200_for_draft_owner(self):
+        """Owner can access draft episode detail (200, not 404)."""
+        owner = User.objects.create_user(
+            username="draftepowner", password="testpass123"
+        )
+        self.podcast.owner = owner
+        self.podcast.save()
+        self.client.login(username="draftepowner", password="testpass123")
+        response = self.client.get(
+            f"/podcast/{self.podcast.slug}/{self.draft_episode.slug}/"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Draft Only Episode")
+
+    def test_episode_detail_200_for_draft_staff(self):
+        """Staff can access draft episode detail (200, not 404)."""
+        User.objects.create_user(
+            username="draftepstaff", password="testpass123", is_staff=True
+        )
+        self.client.login(username="draftepstaff", password="testpass123")
+        response = self.client.get(
+            f"/podcast/{self.podcast.slug}/{self.draft_episode.slug}/"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Draft Only Episode")
+
+    def test_episode_detail_edit_button_for_owner(self):
+        """Owner sees Edit button on episode detail page."""
+        owner = User.objects.create_user(username="editepowner", password="testpass123")
+        self.podcast.owner = owner
+        self.podcast.save()
+        self.client.login(username="editepowner", password="testpass123")
+        response = self.client.get(
+            f"/podcast/{self.podcast.slug}/{self.published_episode.slug}/"
+        )
+        self.assertContains(response, "Edit")
+        self.assertContains(response, "/edit/1/")
+
+    def test_episode_detail_edit_button_for_staff(self):
+        """Staff sees Edit button on episode detail page."""
+        User.objects.create_user(
+            username="editepstaff", password="testpass123", is_staff=True
+        )
+        self.client.login(username="editepstaff", password="testpass123")
+        response = self.client.get(
+            f"/podcast/{self.podcast.slug}/{self.published_episode.slug}/"
+        )
+        self.assertContains(response, "Edit")
+        self.assertContains(response, "/edit/1/")
+
+    def test_episode_detail_no_edit_button_for_anonymous(self):
+        """Anonymous user does not see Edit button on episode detail page."""
+        response = self.client.get(
+            f"/podcast/{self.podcast.slug}/{self.published_episode.slug}/"
+        )
+        self.assertNotContains(response, "/edit/1/")
 
     def test_episode_detail_404_for_non_owner(self):
         """Non-owner gets 404 for episode on private podcast."""

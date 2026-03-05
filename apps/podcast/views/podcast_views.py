@@ -87,7 +87,10 @@ class PodcastDetailView(MainContentView):
 
     def get(self, request, slug: str, *args, **kwargs):
         podcast = _get_accessible_podcast(request, slug)
-        episodes = (
+        is_owner = request.user.is_authenticated and podcast.owner == request.user
+        is_staff = request.user.is_authenticated and request.user.is_staff
+
+        published = (
             podcast.episodes.select_related("podcast")
             .filter(published_at__isnull=False)
             .filter(
@@ -95,11 +98,19 @@ class PodcastDetailView(MainContentView):
             )
             .order_by("-episode_number")
         )
-        self.context["is_owner"] = (
-            request.user.is_authenticated and podcast.owner == request.user
-        )
+
+        drafts = Episode.objects.none()
+        if is_owner or is_staff:
+            drafts = (
+                podcast.episodes.select_related("podcast")
+                .filter(Q(published_at__isnull=True))
+                .order_by("-created_at")
+            )
+
+        self.context["is_owner"] = is_owner
         self.context["podcast"] = podcast
-        self.context["episodes"] = episodes
+        self.context["episodes"] = published
+        self.context["drafts"] = drafts
         return self.render(request)
 
 
@@ -110,18 +121,24 @@ class EpisodeDetailView(MainContentView):
 
     def get(self, request, slug: str, episode_slug: str, *args, **kwargs):
         podcast = _get_accessible_podcast(request, slug)
-        episode = get_object_or_404(
-            Episode.objects.filter(
-                published_at__isnull=False,
-            ).filter(
-                Q(unpublished_at__isnull=True) | Q(unpublished_at__lt=F("published_at"))
-            ),
-            podcast=podcast,
-            slug=episode_slug,
-        )
-        self.context["is_owner"] = (
-            request.user.is_authenticated and podcast.owner == request.user
-        )
+        is_owner = request.user.is_authenticated and podcast.owner == request.user
+        is_staff = request.user.is_authenticated and request.user.is_staff
+
+        if is_owner or is_staff:
+            # Owner/staff can see any episode including drafts
+            episode = get_object_or_404(Episode, podcast=podcast, slug=episode_slug)
+        else:
+            episode = get_object_or_404(
+                Episode.objects.filter(
+                    published_at__isnull=False,
+                ).filter(
+                    Q(unpublished_at__isnull=True)
+                    | Q(unpublished_at__lt=F("published_at"))
+                ),
+                podcast=podcast,
+                slug=episode_slug,
+            )
+        self.context["is_owner"] = is_owner
         self.context["podcast"] = podcast
         self.context["episode"] = episode
         return self.render(request)

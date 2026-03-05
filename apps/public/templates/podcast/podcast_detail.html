@@ -85,6 +85,35 @@
     </a>
   </div>
 
+  <!-- Drafts (owner/staff only) -->
+  {% if drafts %}
+  <div class="border-t border-gray-200 pt-6 mb-8">
+    <h2 class="font-mono text-sm font-semibold text-gray-500 uppercase tracking-wider mb-4">
+      Drafts ({{ drafts|length }})
+    </h2>
+    <div class="space-y-3">
+      {% for episode in drafts %}
+      <div class="flex items-start gap-4 border border-dashed border-gray-300 p-4 bg-gray-50">
+        <div class="w-16 h-16 bg-gray-200 flex items-center justify-center flex-shrink-0">
+          <span class="font-mono text-xl text-gray-400 font-light">{{ episode.episode_number }}</span>
+        </div>
+        <div class="flex-grow min-w-0">
+          <span class="font-mono text-xs text-gray-400">Ep. {{ episode.episode_number }} &middot; Draft</span>
+          <h3 class="font-semibold text-gray-900 mb-1">{{ episode.title }}</h3>
+          {% if episode.description %}
+          <p class="text-sm text-gray-600 truncate">{{ episode.description|truncatewords:25 }}</p>
+          {% endif %}
+        </div>
+        <a href="{% url 'podcast:episode_workflow' slug=podcast.slug episode_slug=episode.slug step=1 %}"
+           class="flex-shrink-0 inline-flex items-center gap-1 border border-gray-300 px-3 py-1.5 text-xs font-mono text-gray-600 hover:bg-gray-100 transition-colors">
+          <i class="fas fa-pen"></i> Edit
+        </a>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
   <!-- Episodes -->
   <div class="border-t border-gray-200 pt-6">
     <h2 class="font-mono text-sm font-semibold text-gray-500 uppercase tracking-wider mb-4">
