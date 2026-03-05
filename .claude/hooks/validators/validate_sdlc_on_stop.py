@@ -74,7 +74,9 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
 
             branch = subprocess.run(
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             ).stdout.strip()
             if branch == "main":
                 code_exts = (".py", ".js", ".ts")
@@ -83,24 +85,29 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
                 # Check 1: unstaged changes in working tree
                 wt_diff = subprocess.run(
                     ["git", "diff", "--name-only"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                 ).stdout.strip()
                 if wt_diff:
                     code_files.extend(
-                        f for f in wt_diff.split("\n")
+                        f
+                        for f in wt_diff.split("\n")
                         if f and any(f.endswith(ext) for ext in code_exts)
                     )
 
                 # Check 2: staged but not yet committed changes
                 staged_diff = subprocess.run(
                     ["git", "diff", "--name-only", "--cached"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
                 ).stdout.strip()
                 if staged_diff:
                     code_files.extend(
-                        f for f in staged_diff.split("\n")
-                        if f and any(f.endswith(ext) for ext in code_exts)
-                        and f not in code_files
+                        f
+                        for f in staged_diff.split("\n")
+                        if f and any(f.endswith(ext) for ext in code_exts) and f not in code_files
                     )
 
                 if code_files:
@@ -129,11 +136,7 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
 
     # Determine which quality commands are missing
     quality_commands = state.get("quality_commands", {})
-    missing = [
-        cmd
-        for cmd in ("pytest", "ruff", "black")
-        if not quality_commands.get(cmd, False)
-    ]
+    missing = [cmd for cmd in ("pytest", "ruff", "black") if not quality_commands.get(cmd, False)]
 
     if not missing:
         return None  # All gates passed
@@ -148,9 +151,7 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
         return None
 
     # Build human-readable error listing missing checks with run hints
-    missing_lines = "\n".join(
-        f"  - {cmd} (run: {_QUALITY_RUN_HINTS[cmd]})" for cmd in missing
-    )
+    missing_lines = "\n".join(f"  - {cmd} (run: {_QUALITY_RUN_HINTS[cmd]})" for cmd in missing)
     return _ERROR_TEMPLATE.format(missing_lines=missing_lines)
 
 
