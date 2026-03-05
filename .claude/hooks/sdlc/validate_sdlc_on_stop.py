@@ -19,7 +19,7 @@ Escape hatch:
   Set SKIP_SDLC=1 to bypass enforcement. A warning is logged to stderr.
 
 Claude Code hook protocol:
-  Stdin: JSON with session_id and optional transcript
+  Stdin: JSON with session_id, transcript_path (JSONL file), cwd, etc.
 """
 
 import json
@@ -93,24 +93,29 @@ Set SKIP_SDLC=1 to bypass in genuine emergencies (logs warning).
 def check_quality_gates_from_transcript(hook_input: dict) -> list[str]:
     """Check which quality commands are missing from the session transcript.
 
-    The Stop hook receives the session transcript which includes all commands
-    run during the session. We scan for evidence of pytest, ruff, and ruff-format.
+    Claude Code provides a ``transcript_path`` (JSONL file) in the hook input.
+    We read that file and scan all lines for evidence of pytest, ruff, and
+    ruff-format having been run during the session.
 
     Returns list of missing command names.
     """
-    # Try to get transcript from hook input
-    transcript = hook_input.get("transcript", [])
-    transcript_text = json.dumps(transcript) if transcript else ""
+    # Read the transcript JSONL file — each line is a JSON object
+    transcript_text = ""
+    transcript_path = hook_input.get("transcript_path", "")
+    if transcript_path and Path(transcript_path).is_file():
+        try:
+            transcript_text = Path(transcript_path).read_text()
+        except OSError:
+            pass
 
-    # Also check the stop_hook_conversation if available
-    conversation = hook_input.get("stop_hook_conversation", "")
-    if conversation:
-        transcript_text += str(conversation)
+    if not transcript_text:
+        # No transcript available — cannot verify, fail open
+        return []
 
     # Scan for quality command evidence
     missing = []
     for cmd_name in ("pytest", "ruff", "ruff-format"):
-        if not re.search(r"\b" + cmd_name + r"\b", transcript_text):
+        if not re.search(r"\b" + re.escape(cmd_name) + r"\b", transcript_text):
             missing.append(cmd_name)
 
     return missing
