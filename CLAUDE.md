@@ -292,7 +292,7 @@ The podcast production system uses a **12-phase, database-backed workflow** for 
 | `gemini-deep-research/` | Policy/regulatory research |
 | `gpt-researcher/` | GPT-based deep research |
 
-**Note:** `notebooklm-enterprise-api` skill exists but is NOT in use. The production pipeline uses `local_audio_worker` with `notebooklm-mcp-cli` for automated audio generation.
+**Note:** `notebooklm-enterprise-api` skill exists but is NOT in use. The production pipeline uses `local_audio_worker` with `notebooklm-py` for automated audio generation.
 
 ### Service Layer (`apps/podcast/services/`)
 
@@ -357,8 +357,6 @@ Standalone CLI scripts for external service integrations and file processing.
 
 | Script | Purpose |
 |--------|---------|
-| `notebooklm_api.py` | NotebookLM Enterprise API with episodeFocus |
-| `notebooklm_prompt.py` | Generate episodeFocus prompts |
 | `transcribe_only.py` | Local Whisper transcription |
 | `generate_companion_resources.py` | Create summary, checklist, frameworks |
 | `generate_landing_page.py` | Generate HTML episode page |

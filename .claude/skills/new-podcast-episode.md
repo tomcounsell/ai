@@ -1310,86 +1310,27 @@ Return to content_plan.md and complete the missing sections.
 ✓ research/p3-briefing.md exists
 ✓ sources.md exists
 
-**NOTE: NotebookLM Enterprise API NOT IN USE (as of 2026-02-19)**
-
-The team decided against using the Enterprise API approach. The code exists in `apps/podcast/tools/notebooklm_api.py` but is archived and not actively used.
-
 **Current Approach: Local Audio Worker**
 
 The automated pipeline pauses at Phase 9 and waits for a local machine to run:
 
 ```bash
-# On a local machine with notebooklm-mcp-cli installed
+# On a local machine with notebooklm-py installed
 uv run python manage.py local_audio_worker
 ```
 
-The worker polls for episodes awaiting audio, generates audio via `notebooklm-mcp-cli`, uploads to storage, and resumes the workflow.
+The worker polls for episodes awaiting audio, generates audio via `notebooklm-py`, uploads to storage, and resumes the workflow.
 
 **Fallback: Manual NotebookLM Workflow**
 
-If the local audio worker is unavailable, use the manual workflow:
-
-```bash
-# Generate the NotebookLM prompt (auto-detects episode info)
-uv run python ~/src/cuttlefish/apps/podcast/tools/notebooklm_prompt.py apps/podcast/pending-episodes/YYYY-MM-DD-slug/ --copy
-```
-
-**Arguments:**
-- `episode_dir` - Path to episode directory (required)
-- `--series` - Series name for audio intro (optional)
-- `--title` - Episode title, defaults to directory name (optional)
-- `--cleanup` - Delete notebook after generation (optional)
-- `--timeout` - Timeout in minutes, default 30 (optional)
-
-**What the script does:**
-1. Creates notebook via Discovery Engine API
-2. Uploads 5 source files (p1-brief.md, report.md, p3-briefing.md, sources.md, content_plan.md)
-3. Generates audio with episodeFocus prompt (Yudame Research branding)
-4. Polls for completion (typically 5-15 minutes)
-5. Downloads MP3 to episode directory
-
-**Output files:**
-- `EPISODE_SLUG.mp3` - Final audio (typically 20-40 min)
-
-**Expected runtime:** 5-15 minutes
-
----
-
-### Fallback: Manual NotebookLM
-
-If API is unavailable, use the `notebooklm-audio` skill for manual workflow.
-
-**Step 1: Generate the prompt using the script (DO NOT make up a prompt):**
-
-```bash
-python ~/src/cuttlefish/apps/podcast/tools/notebooklm_prompt.py apps/podcast/pending-episodes/EPISODE_PATH/ --copy
-```
-
-This script:
-- Auto-detects episode title and series name from content_plan.md
-- Verifies all 5 required files exist
-- Outputs the correct prompt with proper branding
-- Copies to clipboard with `--copy` flag
-
-**Step 2: Show the user the script output and instructions:**
-
-Display the full output from the script, which includes:
-- File checklist (5 files to upload)
-- The ready-to-paste prompt
-- Settings reminder (Deep Dive, Long)
-- Link to NotebookLM
-
-**Step 3: User completes manual workflow:**
+If the local audio worker is unavailable, use the `notebooklm-audio` skill for manual workflow via the NotebookLM web interface:
 
 1. Go to https://notebooklm.google.com/
 2. Create new notebook
-3. Upload the 5 source files shown in the checklist
-4. Click "Audio Overview" → "Customize"
-5. Paste the prompt (already on clipboard)
-6. Settings: **Deep Dive** format, **Long** length
-7. Generate and download audio
-
-**⚠️ CRITICAL:** Always use `notebooklm_prompt.py` to generate the prompt. Never fabricate or modify the prompt template - the script is the single source of truth.
+3. Upload the 5 source files (p1-brief.md, report.md, p3-briefing.md, sources.md, content_plan.md)
+4. Click "Audio Overview" -> "Customize"
+5. Settings: **Deep Dive** format, **Long** length
+6. Generate and download audio
 
 After manual generation, process the audio with `podcast-audio-processing` skill for transcription.
 

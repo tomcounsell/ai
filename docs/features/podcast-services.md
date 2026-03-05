@@ -193,16 +193,7 @@ Reads `Episode.report_text` and `p3-briefing`, delegates to the `plan_episode` N
 
 ### `audio.py` -- Audio Pipeline
 
-**NOTE:** The `generate_audio()` function integrates with the NotebookLM Enterprise API, but this approach is **NOT currently in use** (as of 2026-02-19). The production pipeline uses `local_audio_worker` with `notebooklm-mcp-cli` instead. See `apps/podcast/tasks.py::step_audio_generation`.
-
-```python
-generate_audio(episode_id: int) -> str  # ARCHIVED - NOT IN USE
-```
-**Status:** Archived implementation (Enterprise API approach not being used)
-
-**Current Alternative:** `local_audio_worker` management command + `notebooklm-mcp-cli`
-
-Long-running operation (5-30 minutes). Creates a NotebookLM notebook, uploads source texts (report, briefing, content plan, sources), generates an episodeFocus prompt, triggers audio generation, polls until complete, downloads the audio, uploads to storage via `store_file`, and updates `Episode.audio_url` and `Episode.audio_file_size_bytes`. Returns the audio URL. Cleans up the notebook on completion.
+Audio generation is handled by the `local_audio_worker` management command using `notebooklm-py`. See `apps/podcast/management/commands/local_audio_worker.py`.
 
 ```python
 transcribe_audio(episode_id: int) -> str
