@@ -269,8 +269,8 @@ Install: `./scripts/install_reflections.sh`
 
 Reload after changes:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.valor.reflections.plist
-launchctl load ~/Library/LaunchAgents/com.valor.reflections.plist
+launchctl bootout gui/$(id -u)/com.valor.reflections
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.valor.reflections.plist
 ```
 
 ### Quick Commands
