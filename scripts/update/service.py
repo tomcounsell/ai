@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -144,23 +145,24 @@ def install_reflections(project_dir: Path) -> bool:
         return False
 
     try:
+        uid = os.getuid()
         result = run_cmd(["launchctl", "list"])
 
         # Unload old daydream service if present (migration)
         if old_label in result.stdout:
-            run_cmd(["launchctl", "unload", str(old_plist_dst)])
+            run_cmd(["launchctl", "bootout", f"gui/{uid}/{old_label}"])
             old_plist_dst.unlink(missing_ok=True)
 
         # Unload current if loaded
         if label in result.stdout:
-            run_cmd(["launchctl", "unload", str(plist_dst)])
+            run_cmd(["launchctl", "bootout", f"gui/{uid}/{label}"])
 
-        # Copy and load
+        # Copy and bootstrap
         plist_dst.parent.mkdir(parents=True, exist_ok=True)
         import shutil
 
         shutil.copy2(str(plist_src), str(plist_dst))
-        run_cmd(["launchctl", "load", str(plist_dst)])
+        run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_dst)])
         return True
     except Exception:
         return False
@@ -228,9 +230,10 @@ def install_caffeinate() -> bool:
 """
 
     try:
+        uid = os.getuid()
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         plist_path.write_text(plist_content)
-        run_cmd(["launchctl", "load", str(plist_path)])
+        run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)])
         return True
     except Exception:
         return False
