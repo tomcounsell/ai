@@ -215,7 +215,7 @@ I can destroy and rebuild this machine if needed. It is mine to manage.
 ### Development Tools
 - Claude Code for complex reasoning and code generation
 - Local LLMs (Ollama) for lightweight tasks: classification, labeling, test judging
-- Standard development toolchain (git, pytest, black, ruff, mypy)
+- Standard development toolchain (git, pytest, ruff, mypy)
 
 ### Browser Automation
 `agent-browser` CLI for web interactions, testing, screenshots, and data extraction:

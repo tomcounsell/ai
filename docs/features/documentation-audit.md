@@ -62,7 +62,7 @@ The auditor extracts and verifies six categories of references (`scripts/docs_au
 | Environment variables | `USE_CLAUDE_SDK`, `TELEGRAM_BOT_TOKEN` |
 | Python imports | `from agent.sdk_client import ...`, `import telethon` |
 | Class and function names | `DocsAuditor`, `TelegramBridge`, `handle_new_message` |
-| CLI commands | `pytest`, `black`, `ruff`, `valor-service.sh` |
+| CLI commands | `pytest`, `ruff`, `valor-service.sh` |
 | Package names | Entries in `pyproject.toml` or `requirements.txt` |
 
 References are extracted from Markdown prose and code blocks using regex patterns. The auditor checks existence statically — it does not execute code.
