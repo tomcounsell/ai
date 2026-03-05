@@ -247,6 +247,17 @@ def load_system_prompt() -> str:
     return f"{SDLC_WORKFLOW}\n\n---\n\n{soul_prompt}{criteria_section}"
 
 
+def _is_code_file(file_path: str) -> bool:
+    """Return True if the file path has a code extension (.py, .js, .ts).
+
+    Inlined here to avoid a cross-layer import from .claude/hooks/post_tool_use.py.
+    Keep in sync with ``post_tool_use.is_code_file`` — canonical version is there.
+    """
+    if not file_path:
+        return False
+    return Path(file_path).suffix.lower() in {".py", ".js", ".ts"}
+
+
 def _check_no_direct_main_push(session_id: str, repo_root: Path | None = None) -> str | None:
     """Check whether a session pushed code directly to main.
 
@@ -254,22 +265,34 @@ def _check_no_direct_main_push(session_id: str, repo_root: Path | None = None) -
     git branch is 'main', checks ``modified_on_branch`` to distinguish:
 
     - Code written on a ``session/*`` branch and now on main via PR merge
-      → **allowed** (no violation).
+      -> **allowed** (no violation).
     - Code written directly on main (or legacy state without the field)
-      → **hard-block** violation.
+      -> **hard-block** violation.
 
-    This is a hard-block — there is no escape hatch at the SDK layer.
-    Telegram is free text; there is no mechanism for a user to signal an
-    override through the message channel.
+    Escape hatches:
+    - ``SKIP_SDLC=1`` environment variable bypasses this check entirely,
+      matching the project-level hook escape hatch. Use for recovery from
+      false-positive infinite loops (see issue #261).
+
+    Before reporting a violation, this function cross-checks the live git
+    working tree to verify that code files actually have uncommitted changes.
+    If the state file is stale (no actual changes on main), the check passes.
 
     Args:
         session_id: The session ID to check.
         repo_root: Path to the git repo root. Defaults to the ai/ repo root.
 
     Returns:
-        None   — session is clear (non-code, on a feature branch, or docs-only)
-        str    — error message describing the violation (hard-block)
+        None   -- session is clear (non-code, on a feature branch, or docs-only)
+        str    -- error message describing the violation (hard-block)
     """
+    # Escape hatch: SKIP_SDLC=1 bypasses the main branch check (issue #261)
+    if os.environ.get("SKIP_SDLC") == "1":
+        logger.warning(
+            f"[sdlc-main-check] SKIP_SDLC=1 — bypassing main branch check for {session_id}"
+        )
+        return None
+
     if repo_root is None:
         repo_root = Path(__file__).parent.parent
 
@@ -332,6 +355,44 @@ def _check_no_direct_main_push(session_id: str, repo_root: Path | None = None) -
             "no violation."
         )
         return None
+
+    # Before reporting a violation, cross-check against live git state.
+    # If no code files actually have uncommitted changes on main, the
+    # sdlc_state.json is stale (code was committed and moved to a branch
+    # but the state was never updated). See issue #261.
+    try:
+        diff_result = subprocess.run(
+            ["git", "diff", "--name-only"],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+            timeout=5,
+        )
+        staged_result = subprocess.run(
+            ["git", "diff", "--name-only", "--cached"],
+            capture_output=True,
+            text=True,
+            cwd=str(repo_root),
+            timeout=5,
+        )
+        all_changed = set(
+            diff_result.stdout.strip().split("\n") + staged_result.stdout.strip().split("\n")
+        )
+        all_changed.discard("")
+
+        if not any(_is_code_file(f) for f in all_changed):
+            logger.info(
+                f"[sdlc-main-check] State says code modified on main for {session_id} "
+                "but no actual uncommitted code changes found — stale state, no violation."
+            )
+            return None
+    except Exception as e:
+        # If the git diff check fails, fall through to the violation path.
+        # This preserves the existing conservative behavior.
+        logger.warning(
+            f"[sdlc-main-check] Live git diff check failed for {session_id}: {e} "
+            "— proceeding with violation check"
+        )
 
     # Code modified on main (or legacy state) = SDLC violation
     modified_files = state.get("files", [])
