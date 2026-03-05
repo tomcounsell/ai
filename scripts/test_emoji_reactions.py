@@ -291,7 +291,7 @@ async def test_reactions_for_real(emojis_to_test: list[str], delay: float = 0.5)
             )
             valid.append(emoji)
             codepoints = " ".join(f"U+{ord(c):04X}" for c in emoji)
-            print(f"  [{i+1}/{len(emojis_to_test)}] ✓ VALID: {emoji}  ({codepoints})")
+            print(f"  [{i + 1}/{len(emojis_to_test)}] ✓ VALID: {emoji}  ({codepoints})")
 
             # Delay to avoid rate limiting
             await asyncio.sleep(delay)
@@ -302,7 +302,8 @@ async def test_reactions_for_real(emojis_to_test: list[str], delay: float = 0.5)
             invalid_reasons[emoji] = error_type
             codepoints = " ".join(f"U+{ord(c):04X}" for c in emoji)
             print(
-                f"  [{i+1}/{len(emojis_to_test)}] ✗ INVALID: {emoji}  ({codepoints}) - {error_type}"
+                f"  [{i + 1}/{len(emojis_to_test)}] ✗ INVALID:"
+                f" {emoji}  ({codepoints}) - {error_type}"
             )
 
             # If rate limited, wait the required time
@@ -315,9 +316,7 @@ async def test_reactions_for_real(emojis_to_test: list[str], delay: float = 0.5)
     # Clear reaction and delete test message
     print("\nCleaning up...")
     try:
-        await client(
-            SendReactionRequest(peer=TEST_CHAT_ID, msg_id=test_msg.id, reaction=[])
-        )
+        await client(SendReactionRequest(peer=TEST_CHAT_ID, msg_id=test_msg.id, reaction=[]))
         await asyncio.sleep(1)
         await test_msg.delete()
         print("Test message deleted.")

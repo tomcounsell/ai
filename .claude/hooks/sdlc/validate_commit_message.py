@@ -65,13 +65,14 @@ def main():
         try:
             result = subprocess.run(
                 ["git", "diff", "--cached", "--name-only"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
             code_extensions = {".py", ".js", ".ts"}
             staged_files = [f for f in result.stdout.strip().split("\n") if f]
             staged_code = [
-                f for f in staged_files
-                if any(f.endswith(ext) for ext in code_extensions)
+                f for f in staged_files if any(f.endswith(ext) for ext in code_extensions)
             ]
             if staged_code:
                 block(

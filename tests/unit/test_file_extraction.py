@@ -50,9 +50,7 @@ def extract_files_from_response(response: str) -> tuple[str, list[Path]]:
     cleaned_lines = []
     for line in lines:
         stripped = line.strip()
-        if stripped and any(
-            stripped == str(f) or stripped.endswith(str(f)) for f in files_to_send
-        ):
+        if stripped and any(stripped == str(f) or stripped.endswith(str(f)) for f in files_to_send):
             continue
         cleaned_lines.append(line)
 

@@ -193,8 +193,5 @@ class TestStopHookScript:
         for i, line in enumerate(lines):
             if "transcript_path" in line and "hook_input.get" in line:
                 # This line should not be indented under an if args.chat block
-                assert (
-                    "if args.chat"
-                    not in content.split("transcript_path")[0].split("\n")[-1]
-                )
+                assert "if args.chat" not in content.split("transcript_path")[0].split("\n")[-1]
                 break

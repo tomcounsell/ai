@@ -306,9 +306,7 @@ def extract_files_from_response(
     for line in lines:
         stripped = line.strip()
         # Skip lines that are just a detected file path
-        if stripped and any(
-            stripped == str(f) or stripped.endswith(str(f)) for f in files_to_send
-        ):
+        if stripped and any(stripped == str(f) or stripped.endswith(str(f)) for f in files_to_send):
             continue
         cleaned_lines.append(line)
 
@@ -357,9 +355,7 @@ async def send_response_with_files(
     """
     # Resolve chat_id and reply_to from event or explicit params
     _chat_id = chat_id or (event.chat_id if event else None)
-    _reply_to = reply_to or (
-        event.message.id if event and hasattr(event, "message") else None
-    )
+    _reply_to = reply_to or (event.message.id if event and hasattr(event, "message") else None)
 
     if not _chat_id:
         logger.error("send_response_with_files: no chat_id available")
@@ -408,9 +404,7 @@ async def send_response_with_files(
             if summarized.full_output_file:
                 files.append(summarized.full_output_file)
             if summarized.was_summarized:
-                logger.info(
-                    f"Summarized response: {len(response)} -> {len(text)} chars"
-                )
+                logger.info(f"Summarized response: {len(response)} -> {len(text)} chars")
         except Exception as e:
             logger.warning(f"Summarization failed, using original: {e}")
 
@@ -460,14 +454,16 @@ async def send_response_with_files(
             file_type = (
                 "image"
                 if is_image
-                else "video" if is_video else "audio" if is_audio else "document"
+                else "video"
+                if is_video
+                else "audio"
+                if is_audio
+                else "document"
             )
             logger.info(f"Sent file: {file_path} (type: {file_type})")
         except Exception as e:
             logger.error(f"Failed to send file {file_path}: {e}")
-            await client.send_message(
-                _chat_id, f"Failed to send file: {file_path.name}"
-            )
+            await client.send_message(_chat_id, f"Failed to send file: {file_path.name}")
 
     # Track if we sent anything
     sent_content = bool(files)
@@ -484,10 +480,7 @@ async def send_response_with_files(
             await send_markdown(client, _chat_id, text, reply_to=_reply_to)
             sent_content = True
         except Exception as e:
-            logger.error(
-                f"Failed to send text message to chat {_chat_id} "
-                f"({len(text)} chars): {e}"
-            )
+            logger.error(f"Failed to send text message to chat {_chat_id} ({len(text)} chars): {e}")
             # Persist to dead-letter queue for later retry
             try:
                 from bridge.dead_letters import persist_failed_delivery

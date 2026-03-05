@@ -449,9 +449,7 @@ class TestGetLinkByUrl:
 
         assert result is not None
         assert result["url"] == "https://example.com/article"
-        assert (
-            result["ai_summary"] == "This is a test article about Python programming."
-        )
+        assert result["ai_summary"] == "This is a test article about Python programming."
 
     def test_get_link_by_url_respects_max_age(self):
         old_time = datetime.now() - timedelta(hours=48)
@@ -499,9 +497,7 @@ class TestRegisterChat:
     """Test chat registration via Popoto/Redis."""
 
     def test_register_new_chat(self):
-        result = register_chat(
-            chat_id="12345", chat_name="Dev: Valor", chat_type="group"
-        )
+        result = register_chat(chat_id="12345", chat_name="Dev: Valor", chat_type="group")
         assert result.get("registered") is True
         assert result.get("chat_id") == "12345"
         assert result.get("chat_name") == "Dev: Valor"

@@ -51,9 +51,7 @@ def sessions_dir(tmp_path):
 @pytest.fixture()
 def patch_sessions_dir(sessions_dir):
     """Patch get_data_sessions_dir in validate_sdlc_on_stop to use tmp dir."""
-    with patch(
-        "validate_sdlc_on_stop.get_data_sessions_dir", return_value=sessions_dir
-    ):
+    with patch("validate_sdlc_on_stop.get_data_sessions_dir", return_value=sessions_dir):
         yield sessions_dir
 
 
@@ -188,9 +186,7 @@ class TestCheckSdlcQualityGate:
 
 
 class TestSkipSdlcEscapeHatch:
-    def test_skip_sdlc_set_returns_none_even_when_gates_missing(
-        self, patch_sessions_dir, capsys
-    ):
+    def test_skip_sdlc_set_returns_none_even_when_gates_missing(self, patch_sessions_dir, capsys):
         """SKIP_SDLC=1 bypasses enforcement even if quality gates are incomplete."""
         os.environ["SKIP_SDLC"] = "1"
         mod = import_validator()
@@ -309,7 +305,5 @@ class TestMainExitCodes:
                 "quality_commands": {"pytest": False, "ruff": False, "black": False},
             },
         )
-        code, _, _ = self._run_main(
-            sessions_dir, "session-bypass", env_extra={"SKIP_SDLC": "1"}
-        )
+        code, _, _ = self._run_main(sessions_dir, "session-bypass", env_extra={"SKIP_SDLC": "1"})
         assert code == 0

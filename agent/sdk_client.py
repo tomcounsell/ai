@@ -164,9 +164,7 @@ def _log_system_resources(context: str = "") -> dict:
 
         # Check for other heavy processes
         heavy_processes = []
-        for proc in psutil.process_iter(
-            ["pid", "name", "cpu_percent", "memory_percent"]
-        ):
+        for proc in psutil.process_iter(["pid", "name", "cpu_percent", "memory_percent"]):
             try:
                 if proc.info["cpu_percent"] and proc.info["cpu_percent"] > 20:
                     heavy_processes.append(
@@ -202,9 +200,7 @@ def _log_system_resources(context: str = "") -> dict:
         if memory.percent > 85:
             logger.warning(f"{prefix}High memory usage: {memory.percent:.1f}%")
         if memory.available < 1 * (1024**3):  # Less than 1GB free
-            logger.warning(
-                f"{prefix}Low available memory: {memory.available / (1024**3):.2f}GB"
-            )
+            logger.warning(f"{prefix}Low available memory: {memory.available / (1024**3):.2f}GB")
 
         return metrics
 
@@ -222,9 +218,7 @@ def load_completion_criteria() -> str:
     import re
 
     content = claude_md.read_text()
-    match = re.search(
-        r"## Work Completion Criteria\n\n(.*?)(?=\n## |\Z)", content, re.DOTALL
-    )
+    match = re.search(r"## Work Completion Criteria\n\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
     return match.group(0) if match else ""
 
 
@@ -253,9 +247,7 @@ def load_system_prompt() -> str:
     return f"{SDLC_WORKFLOW}\n\n---\n\n{soul_prompt}{criteria_section}"
 
 
-def _check_no_direct_main_push(
-    session_id: str, repo_root: Path | None = None
-) -> str | None:
+def _check_no_direct_main_push(session_id: str, repo_root: Path | None = None) -> str | None:
     """Check whether a session pushed code directly to main.
 
     Reads the session's sdlc_state.json. If code was modified and the current
@@ -343,11 +335,7 @@ def _check_no_direct_main_push(
 
     # Code modified on main (or legacy state) = SDLC violation
     modified_files = state.get("files", [])
-    files_list = (
-        "\n".join(f"  - {f}" for f in modified_files)
-        if modified_files
-        else "  (unknown)"
-    )
+    files_list = "\n".join(f"  - {f}" for f in modified_files) if modified_files else "  (unknown)"
     return (
         "SDLC VIOLATION: Code was modified directly on the main branch.\n\n"
         f"Modified files:\n{files_list}\n\n"
@@ -397,37 +385,27 @@ class ValorAgent:
             max_budget_usd: Maximum budget in USD for a single agent session.
                 Defaults to SDK_MAX_BUDGET_USD env var or 5.00.
         """
-        self.working_dir = (
-            Path(working_dir) if working_dir else Path(__file__).parent.parent
-        )
+        self.working_dir = Path(working_dir) if working_dir else Path(__file__).parent.parent
         self.system_prompt = system_prompt or load_system_prompt()
         self.permission_mode = permission_mode
         self.workflow_id = workflow_id
         self.task_list_id = task_list_id
-        self.max_budget_usd = max_budget_usd or float(
-            os.getenv("SDK_MAX_BUDGET_USD", "5.00")
-        )
+        self.max_budget_usd = max_budget_usd or float(os.getenv("SDK_MAX_BUDGET_USD", "5.00"))
         self.workflow_state: WorkflowState | None = None
 
         # Load workflow state if workflow_id provided
         if self.workflow_id:
             try:
                 self.workflow_state = WorkflowState.load(self.workflow_id)
-                phase = (
-                    self.workflow_state.data.phase if self.workflow_state.data else None
-                )
-                logger.info(
-                    f"Loaded workflow state: {self.workflow_id} (phase={phase})"
-                )
+                phase = self.workflow_state.data.phase if self.workflow_state.data else None
+                logger.info(f"Loaded workflow state: {self.workflow_id} (phase={phase})")
             except FileNotFoundError:
                 logger.warning(
                     f"Workflow ID {self.workflow_id} provided but no state file found. "
                     "Continuing without workflow state."
                 )
             except Exception as e:
-                logger.error(
-                    f"Failed to load workflow state for {self.workflow_id}: {e}"
-                )
+                logger.error(f"Failed to load workflow state for {self.workflow_id}: {e}")
                 # Continue without workflow state rather than failing initialization
 
     def _build_workflow_context(self) -> str:
@@ -521,9 +499,7 @@ class ValorAgent:
                 env["ANTHROPIC_API_KEY"] = api_key
                 logger.info("Auth: using API key billing (USE_API_BILLING=true)")
             else:
-                logger.warning(
-                    "Auth: USE_API_BILLING=true but no ANTHROPIC_API_KEY set"
-                )
+                logger.warning("Auth: USE_API_BILLING=true but no ANTHROPIC_API_KEY set")
         else:
             # Strip API key so CLI falls back to subscription/OAuth
             env["ANTHROPIC_API_KEY"] = ""
@@ -543,9 +519,7 @@ class ValorAgent:
         if self.workflow_id and self.workflow_state and self.workflow_state.data:
             workflow_context = self._build_workflow_context()
             system_prompt += f"\n\n{workflow_context}"
-            logger.debug(
-                f"Including workflow context in system prompt: {self.workflow_id}"
-            )
+            logger.debug(f"Including workflow context in system prompt: {self.workflow_id}")
 
         # Only continue a conversation if we have evidence of a prior session.
         # Without this check, fresh sessions set continue_conversation=True which
@@ -566,9 +540,7 @@ class ValorAgent:
             max_budget_usd=self.max_budget_usd,
         )
 
-    async def query(
-        self, message: str, session_id: str | None = None, max_retries: int = 2
-    ) -> str:
+    async def query(self, message: str, session_id: str | None = None, max_retries: int = 2) -> str:
         """
         Send a message and get a response. On error, feeds the error back
         to the agent so it can attempt a different approach.
@@ -597,9 +569,7 @@ class ValorAgent:
             async with ClaudeSDKClient(options) as client:
                 # Log successful initialization
                 init_elapsed = time.time() - init_start
-                logger.info(
-                    f"[SDK-init] SDK initialized successfully in {init_elapsed:.2f}s"
-                )
+                logger.info(f"[SDK-init] SDK initialized successfully in {init_elapsed:.2f}s")
                 _log_system_resources("SDK-init-post")
                 # Register client for steering access
                 if session_id:
@@ -682,10 +652,7 @@ class ValorAgent:
                     proc_attrs = ["pid", "name", "cmdline", "status", "create_time"]
                     for proc in psutil.process_iter(proc_attrs):
                         try:
-                            if (
-                                proc.info["name"]
-                                and "claude" in proc.info["name"].lower()
-                            ):
+                            if proc.info["name"] and "claude" in proc.info["name"].lower():
                                 age = time.time() - proc.info["create_time"]
                                 claude_procs.append(
                                     f"PID={proc.info['pid']} name={proc.info['name']} "
@@ -704,9 +671,7 @@ class ValorAgent:
 
                     if claude_procs:
                         procs_str = "\n  ".join(claude_procs)
-                        logger.error(
-                            f"[SDK-init] Found Claude processes:\n  {procs_str}"
-                        )
+                        logger.error(f"[SDK-init] Found Claude processes:\n  {procs_str}")
                     else:
                         logger.error(
                             "[SDK-init] No Claude processes found - CLI may have failed to start"
@@ -880,8 +845,7 @@ async def get_agent_response_sdk(
         github_org = github_config.get("org", "")
         github_repo = github_config.get("repo", "")
         enriched_message += (
-            f"\nWORK REQUEST for project {project_name}."
-            f"\nTARGET REPO: {project_working_dir}"
+            f"\nWORK REQUEST for project {project_name}.\nTARGET REPO: {project_working_dir}"
         )
         if github_org and github_repo:
             enriched_message += f"\nGITHUB: {github_org}/{github_repo}"
@@ -895,9 +859,7 @@ async def get_agent_response_sdk(
         response = await agent.query(enriched_message, session_id=session_id)
 
         elapsed = time.time() - start_time
-        logger.info(
-            f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)"
-        )
+        logger.info(f"[{request_id}] SDK responded in {elapsed:.1f}s ({len(response)} chars)")
 
         return response
 

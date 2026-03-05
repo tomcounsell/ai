@@ -48,9 +48,7 @@ class TestLoadLocalProjects:
 
         with patch("scripts.reflections.AI_ROOT", tmp_path):
             # Patch config path resolution
-            with patch(
-                "scripts.reflections.load_local_projects.__wrapped__", create=True
-            ):
+            with patch("scripts.reflections.load_local_projects.__wrapped__", create=True):
                 pass
 
         # Call directly with monkeypatched config file
@@ -261,9 +259,7 @@ class TestStepReviewLogsMultiRepo:
         proj = tmp_path / "proj_ns"
         logs = proj / "logs"
         logs.mkdir(parents=True)
-        (logs / "test.log").write_text(
-            "2026-02-16 10:00:00 - mod - ERROR - Test error\n"
-        )
+        (logs / "test.log").write_text("2026-02-16 10:00:00 - mod - ERROR - Test error\n")
 
         runner = ReflectionRunner()
         runner.projects = [{"slug": "my-proj", "working_directory": str(proj)}]
@@ -348,9 +344,7 @@ class TestStepCleanTasksMultiRepo:
 
     @pytest.mark.asyncio
     @patch("scripts.reflections.subprocess.run")
-    async def test_clean_tasks_namespaces_findings_per_project(
-        self, mock_run, tmp_path
-    ):
+    async def test_clean_tasks_namespaces_findings_per_project(self, mock_run, tmp_path):
         """Findings are namespaced with '{slug}:tasks'."""
         from scripts.reflections import ReflectionRunner
 
@@ -546,9 +540,7 @@ class TestStepPostToTelegram:
                 env_backup[key] = os.environ.pop(key, None)
 
             try:
-                await runner.step_post_to_telegram(
-                    project, "https://github.com/issue/1"
-                )
+                await runner.step_post_to_telegram(project, "https://github.com/issue/1")
             finally:
                 for key, val in env_backup.items():
                     if val is not None:

@@ -46,9 +46,7 @@ class TestImageTaggingValidation:
         assert "error" in result
 
 
-@pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set"
-)
+@pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set")
 class TestImageTaggingCore:
     """Test core tagging functionality."""
 
@@ -87,9 +85,7 @@ class TestImageTaggingCore:
         assert "error" not in result, f"Tagging failed: {result.get('error')}"
 
 
-@pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set"
-)
+@pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set")
 class TestBatchTagging:
     """Test batch tagging functionality."""
 

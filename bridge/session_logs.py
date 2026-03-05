@@ -111,9 +111,7 @@ def save_session_snapshot(
         snapshot_path = session_dir / filename
         snapshot_path.write_text(json.dumps(snapshot, indent=2, default=str))
 
-        logger.info(
-            f"Session snapshot saved: {event} for {session_id} -> {snapshot_path.name}"
-        )
+        logger.info(f"Session snapshot saved: {event} for {session_id} -> {snapshot_path.name}")
         return snapshot_path
 
     except Exception as e:
@@ -146,9 +144,7 @@ def cleanup_old_snapshots(max_age_hours: float = 168) -> int:
 
             # Use the newest file's mtime as the session's last activity
             try:
-                newest_mtime = max(
-                    f.stat().st_mtime for f in session_dir.iterdir() if f.is_file()
-                )
+                newest_mtime = max(f.stat().st_mtime for f in session_dir.iterdir() if f.is_file())
             except ValueError:
                 # Empty directory — treat as old
                 newest_mtime = 0

@@ -279,9 +279,7 @@ class TestUpdateSdlcStateForBash:
         state = load_sdlc_state(session_id)
         assert state["quality_commands"][expected_key] is True
 
-    def test_non_quality_bash_ignored_when_no_state(
-        self, patch_project_dir, tmp_session
-    ):
+    def test_non_quality_bash_ignored_when_no_state(self, patch_project_dir, tmp_session):
         sessions_dir = patch_project_dir
         session_id, _ = tmp_session
         hook_input = {
@@ -337,9 +335,7 @@ class TestMergeDetection:
             "gh pr merge --rebase",
         ],
     )
-    def test_gh_pr_merge_resets_code_modified(
-        self, patch_project_dir, tmp_session, command
-    ):
+    def test_gh_pr_merge_resets_code_modified(self, patch_project_dir, tmp_session, command):
         """gh pr merge commands should reset code_modified to false."""
         session_id, _ = tmp_session
         save_sdlc_state(session_id, _make_quality_state())
@@ -352,9 +348,7 @@ class TestMergeDetection:
         state = load_sdlc_state(session_id)
         assert state["code_modified"] is False
 
-    def test_non_merge_command_preserves_code_modified(
-        self, patch_project_dir, tmp_session
-    ):
+    def test_non_merge_command_preserves_code_modified(self, patch_project_dir, tmp_session):
         """Non-merge bash commands should not reset code_modified."""
         session_id, _ = tmp_session
         save_sdlc_state(session_id, _make_quality_state())
@@ -402,9 +396,7 @@ class TestBranchRecording:
         state = load_sdlc_state(session_id)
         assert state["modified_on_branch"] == "session/my-feature"
 
-    def test_branch_not_overwritten_on_subsequent_writes(
-        self, patch_project_dir, tmp_session
-    ):
+    def test_branch_not_overwritten_on_subsequent_writes(self, patch_project_dir, tmp_session):
         """modified_on_branch should only be set once (first write wins)."""
         session_id, _ = tmp_session
         # First write on session/first-branch

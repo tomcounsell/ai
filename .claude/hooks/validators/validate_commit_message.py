@@ -111,8 +111,7 @@ def main():
     message = extract_commit_message(command)
     if message is not None and is_empty_message(message):
         block(
-            "Empty commit messages are not allowed. "
-            "Provide a descriptive commit message with -m."
+            "Empty commit messages are not allowed. Provide a descriptive commit message with -m."
         )
 
     allow()

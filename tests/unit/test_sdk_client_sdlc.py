@@ -103,9 +103,9 @@ class TestLoadSystemPromptInjection:
         # Completion criteria section starts with 'Work is DONE'
         criteria_pos = prompt.find("Work is DONE")
         if criteria_pos > 0:
-            assert (
-                sdlc_pos < criteria_pos
-            ), "SDLC_WORKFLOW must appear before Work Completion Criteria"
+            assert sdlc_pos < criteria_pos, (
+                "SDLC_WORKFLOW must appear before Work Completion Criteria"
+            )
 
     def test_prompt_contains_separator_before_sdlc(self):
         """load_system_prompt() must use --- separator before SDLC section."""

@@ -202,7 +202,8 @@ def validate_documentation_section(filepath: str) -> tuple[bool, str]:
     is_complete, reason = is_section_complete(doc_section)
     if not is_complete:
         return False, INCOMPLETE_SECTION_ERROR.format(
-            file=filepath, content=doc_section[:500]  # Truncate for display
+            file=filepath,
+            content=doc_section[:500],  # Truncate for display
         )
 
     return True, f"Documentation section is complete: {reason}"

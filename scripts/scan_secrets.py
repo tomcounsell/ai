@@ -140,8 +140,7 @@ def scan_current_files(repo_root: str) -> list[dict]:
         dirs[:] = [
             d
             for d in dirs
-            if not d.startswith(".")
-            and d not in ("node_modules", "__pycache__", "venv", ".venv")
+            if not d.startswith(".") and d not in ("node_modules", "__pycache__", "venv", ".venv")
         ]
         for fname in files:
             filepath = os.path.join(root, fname)
@@ -234,9 +233,7 @@ def scan_git_history(repo_root: str) -> list[dict]:
 def main():
     parser = argparse.ArgumentParser(description="Scan for leaked secrets")
     parser.add_argument("--history", action="store_true", help="Also scan git history")
-    parser.add_argument(
-        "--staged", action="store_true", help="Scan only staged files (pre-commit)"
-    )
+    parser.add_argument("--staged", action="store_true", help="Scan only staged files (pre-commit)")
     args = parser.parse_args()
 
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -271,9 +268,7 @@ def main():
                 print(f"    Context: {f['context']}")
                 print()
             print("WARNING: Secrets in git history require key rotation.")
-            print(
-                "Consider using 'git filter-repo' or BFG Repo-Cleaner to remove them."
-            )
+            print("Consider using 'git filter-repo' or BFG Repo-Cleaner to remove them.")
         else:
             print("No secrets found in git history.")
 

@@ -190,9 +190,7 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
 
     # Check user bin
     if not calendar_found:
-        user_calendar = (
-            Path.home() / "Library" / "Python" / "3.12" / "bin" / "valor-calendar"
-        )
+        user_calendar = Path.home() / "Library" / "Python" / "3.12" / "bin" / "valor-calendar"
         if user_calendar.exists():
             try:
                 result = run_cmd([str(user_calendar), "--version"], timeout=10)
@@ -221,9 +219,7 @@ def check_ollama(model: str = "qwen3:4b") -> ToolCheck:
     try:
         result = run_cmd(["ollama", "list"], timeout=30)
         if result.returncode != 0:
-            return ToolCheck(
-                name="ollama", available=False, error="Failed to list models"
-            )
+            return ToolCheck(name="ollama", available=False, error="Failed to list models")
 
         has_model = model in result.stdout
         return ToolCheck(
@@ -300,9 +296,7 @@ def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
     }
 
     if not source.exists():
-        result["reason"] = (
-            "No source credentials at ~/Desktop/claude_code/claude_oauth_config.json"
-        )
+        result["reason"] = "No source credentials at ~/Desktop/claude_code/claude_oauth_config.json"
         return result
 
     try:
@@ -317,9 +311,7 @@ def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
         return result
 
     # First check if CLI auth is already working
-    claude_bin = shutil.which("claude") or str(
-        Path.home() / ".local" / "bin" / "claude"
-    )
+    claude_bin = shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
     try:
         auth_result = run_cmd([claude_bin, "auth", "status"], timeout=10)
         if auth_result.returncode == 0 and "loggedIn" in auth_result.stdout:
@@ -449,9 +441,7 @@ def check_gitignore_issues() -> list[GitignoreIssue]:
     return issues
 
 
-def verify_environment(
-    project_dir: Path, check_ollama_model: bool = True
-) -> VerificationResult:
+def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> VerificationResult:
     """Run all environment verification checks."""
     result = VerificationResult()
 

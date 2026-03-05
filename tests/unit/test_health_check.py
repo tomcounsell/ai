@@ -128,9 +128,7 @@ class TestWatchdogHook:
         # Fast-forward counter to CHECK_INTERVAL - 1
         _tool_counts["test-2"] = CHECK_INTERVAL - 1
 
-        with patch(
-            "agent.health_check._judge_health", new_callable=AsyncMock
-        ) as mock_judge:
+        with patch("agent.health_check._judge_health", new_callable=AsyncMock) as mock_judge:
             mock_judge.return_value = {"healthy": True, "reason": "making progress"}
             result = await watchdog_hook(input_data, None, None)
 
@@ -147,9 +145,7 @@ class TestWatchdogHook:
         input_data = {"session_id": "test-3", "transcript_path": str(transcript)}
         _tool_counts["test-3"] = CHECK_INTERVAL - 1
 
-        with patch(
-            "agent.health_check._judge_health", new_callable=AsyncMock
-        ) as mock_judge:
+        with patch("agent.health_check._judge_health", new_callable=AsyncMock) as mock_judge:
             mock_judge.return_value = {"healthy": False, "reason": "stuck in loop"}
             result = await watchdog_hook(input_data, None, None)
 
@@ -164,9 +160,7 @@ class TestWatchdogHook:
         input_data = {"session_id": "test-4", "transcript_path": "/nonexistent"}
         _tool_counts["test-4"] = CHECK_INTERVAL - 1
 
-        with patch(
-            "agent.health_check._judge_health", new_callable=AsyncMock
-        ) as mock_judge:
+        with patch("agent.health_check._judge_health", new_callable=AsyncMock) as mock_judge:
             mock_judge.side_effect = RuntimeError("API down")
             result = await watchdog_hook(input_data, None, None)
 

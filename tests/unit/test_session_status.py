@@ -174,10 +174,7 @@ class TestGetSessionReport:
 
     def test_report_includes_total_count(self):
         """Report footer shows total session count."""
-        sessions = [
-            _make_fake_session(session_id=f"sess-{i}", status="active")
-            for i in range(3)
-        ]
+        sessions = [_make_fake_session(session_id=f"sess-{i}", status="active") for i in range(3)]
         mock_query = MagicMock()
         mock_query.all.return_value = sessions
         with patch(_AGENT_SESSION_PATCH) as mock_cls:

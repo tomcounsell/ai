@@ -45,9 +45,7 @@ def resolve_repo_root(file_path: str | Path) -> Path:
     search_dir = path if path.is_dir() else path.parent
 
     if not search_dir.exists():
-        raise FileNotFoundError(
-            f"Cannot resolve repo root: directory {search_dir} does not exist"
-        )
+        raise FileNotFoundError(f"Cannot resolve repo root: directory {search_dir} does not exist")
 
     result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
@@ -59,8 +57,7 @@ def resolve_repo_root(file_path: str | Path) -> Path:
 
     if result.returncode != 0:
         raise ValueError(
-            f"Path {file_path} is not inside a git repository. "
-            f"git error: {result.stderr.strip()}"
+            f"Path {file_path} is not inside a git repository. git error: {result.stderr.strip()}"
         )
 
     return Path(result.stdout.strip())
@@ -127,9 +124,7 @@ def _find_worktree_for_branch(repo_root: Path, branch_name: str) -> str | None:
     return None
 
 
-def _cleanup_stale_worktree(
-    repo_root: Path, branch_name: str, worktree_path: str
-) -> None:
+def _cleanup_stale_worktree(repo_root: Path, branch_name: str, worktree_path: str) -> None:
     """Remove a stale worktree that is blocking branch checkout.
 
     Handles two cases:
@@ -442,9 +437,7 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
             result["branch_deleted"] = True
             logger.info(f"Post-merge: deleted local branch {branch_name}")
         else:
-            msg = (
-                f"Failed to delete branch {branch_name}: {branch_result.stderr.strip()}"
-            )
+            msg = f"Failed to delete branch {branch_name}: {branch_result.stderr.strip()}"
             result["errors"].append(msg)
             logger.warning(f"Post-merge: {msg}")
     else:

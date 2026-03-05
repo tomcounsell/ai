@@ -143,9 +143,7 @@ def format_issue_body(scan_data: dict, actionable: list[dict]) -> str:
     if med_high_confidence:
         lines.append("### MED-HIGH Confidence")
         lines.append("")
-        lines.append(
-            "These documents reference functions/classes from the changed files:"
-        )
+        lines.append("These documents reference functions/classes from the changed files:")
         lines.append("")
         med_high_grouped = group_by_document(med_high_confidence)
         for doc_path, results in sorted(med_high_grouped.items()):
@@ -195,9 +193,7 @@ def create_github_issue(title: str, body: str, label: str = "docs-review") -> st
             check=True,
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
-        raise RuntimeError(
-            "GitHub CLI (gh) not found. Install it: https://cli.github.com/"
-        )
+        raise RuntimeError("GitHub CLI (gh) not found. Install it: https://cli.github.com/")
 
     # Create issue
     try:
@@ -268,9 +264,7 @@ def main() -> int:
         else:
             changed_count = len(scan_data.get("changed_files", []))
             doc_count = len(set(r["doc_path"] for r in actionable))
-            title = (
-                f"Review {doc_count} doc(s) after changes to {changed_count} file(s)"
-            )
+            title = f"Review {doc_count} doc(s) after changes to {changed_count} file(s)"
 
         # Generate issue body
         body = format_issue_body(scan_data, actionable)

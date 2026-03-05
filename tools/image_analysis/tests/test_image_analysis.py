@@ -46,9 +46,7 @@ class TestImageAnalysisValidation:
         assert "error" in result
 
 
-@pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set"
-)
+@pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set")
 class TestImageAnalysisCore:
     """Test core analysis functionality."""
 
@@ -86,9 +84,7 @@ class TestImageAnalysisCore:
             assert "error" not in result, f"Analysis at {level} failed"
 
 
-@pytest.mark.skipif(
-    not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set"
-)
+@pytest.mark.skipif(not os.environ.get("OPENROUTER_API_KEY"), reason="OPENROUTER_API_KEY not set")
 class TestImageAnalysisHelpers:
     """Test helper functions."""
 

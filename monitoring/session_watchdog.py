@@ -187,10 +187,7 @@ def check_stalled_sessions() -> list[dict]:
 
                 # Determine reference timestamp based on status
                 ref_time = (
-                    session.last_transition_at
-                    or session.started_at
-                    or session.created_at
-                    or now
+                    session.last_transition_at or session.started_at or session.created_at or now
                 )
 
                 # For active sessions, use last_activity as reference
@@ -289,9 +286,7 @@ def assess_session_health(session: AgentSession) -> dict[str, Any]:
             # Check for repetition
             is_looping, repeated_tool, count = detect_repetition(tool_calls)
             if is_looping:
-                issues.append(
-                    f"Looping: {repeated_tool} called {count} times consecutively"
-                )
+                issues.append(f"Looping: {repeated_tool} called {count} times consecutively")
 
             # Check for error cascade
             is_cascading, error_count = detect_error_cascade(tool_calls)
@@ -501,9 +496,7 @@ def _safe_abandon_session(session: AgentSession, reason: str) -> bool:
         return False
 
 
-async def fix_unhealthy_session(
-    session: AgentSession, assessment: dict[str, Any]
-) -> bool:
+async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any]) -> bool:
     """Fix an unhealthy session. Either resolve it or create an issue.
 
     Args:

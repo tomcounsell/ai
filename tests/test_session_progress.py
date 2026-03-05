@@ -38,9 +38,7 @@ class TestFindSessionBySessionId:
 
         result = _find_session("sess-abc-123")
 
-        mock_agent_session_cls.query.filter.assert_called_once_with(
-            session_id="sess-abc-123"
-        )
+        mock_agent_session_cls.query.filter.assert_called_once_with(session_id="sess-abc-123")
         assert result is mock_session
 
     @patch(MOCK_TARGET)
@@ -101,9 +99,7 @@ class TestFindSessionRedisError:
     @patch(MOCK_TARGET)
     def test_returns_none_on_redis_error(self, mock_agent_session_cls, capsys):
         """_find_session returns None and prints warning when Redis is unavailable."""
-        mock_agent_session_cls.query.filter.side_effect = ConnectionError(
-            "Connection refused"
-        )
+        mock_agent_session_cls.query.filter.side_effect = ConnectionError("Connection refused")
 
         result = _find_session("sess-abc")
 
@@ -114,9 +110,7 @@ class TestFindSessionRedisError:
     @patch(MOCK_TARGET)
     def test_returns_none_on_generic_exception(self, mock_agent_session_cls, capsys):
         """_find_session returns None on any exception, not just ConnectionError."""
-        mock_agent_session_cls.query.filter.side_effect = RuntimeError(
-            "Unexpected failure"
-        )
+        mock_agent_session_cls.query.filter.side_effect = RuntimeError("Unexpected failure")
 
         result = _find_session("sess-abc")
 
@@ -248,9 +242,7 @@ class TestMainSetsLinks:
         ]
         main()
 
-        mock_session.set_link.assert_called_once_with(
-            "pr", "https://github.com/org/repo/pull/99"
-        )
+        mock_session.set_link.assert_called_once_with("pr", "https://github.com/org/repo/pull/99")
 
     @patch("tools.session_progress._find_session")
     def test_main_sets_multiple_links(self, mock_find):
@@ -274,9 +266,7 @@ class TestMainSetsLinks:
 
         assert mock_session.set_link.call_count == 3
         mock_session.set_link.assert_any_call("issue", "https://github.com/issues/1")
-        mock_session.set_link.assert_any_call(
-            "plan", "https://github.com/blob/plan.md"
-        )
+        mock_session.set_link.assert_any_call("plan", "https://github.com/blob/plan.md")
         mock_session.set_link.assert_any_call("pr", "https://github.com/pull/2")
 
 

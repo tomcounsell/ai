@@ -367,8 +367,8 @@ def judge_tool_selection(
 
     test_output = f"""
 User Request: {user_intent}
-Selected Tools: {', '.join(selected_tools)}
-Context: {json.dumps(context) if context else 'None'}
+Selected Tools: {", ".join(selected_tools)}
+Context: {json.dumps(context) if context else "None"}
 """
 
     return judge_test_result(
@@ -391,9 +391,7 @@ class AIJudgeTestRunner:
         """Add a judgment result."""
         self.results.append(result)
 
-    def run_test(
-        self, test_name: str, test_output: str, criteria: list[str]
-    ) -> JudgmentResult:
+    def run_test(self, test_name: str, test_output: str, criteria: list[str]) -> JudgmentResult:
         """Run a single test and record the result."""
         result = judge_test_result(
             test_output=test_output,

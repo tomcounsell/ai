@@ -186,9 +186,9 @@ class TestRecoverInterruptedJobs:
 
         # The running index should be empty
         running_after = AgentSession.query.filter(project_key="test", status="running")
-        assert (
-            len(running_after) == 0
-        ), "Stale running index entry found after _recover_interrupted_jobs"
+        assert len(running_after) == 0, (
+            "Stale running index entry found after _recover_interrupted_jobs"
+        )
 
         # The job should now be in pending with high priority
         pending = AgentSession.query.filter(project_key="test", status="pending")
@@ -231,9 +231,7 @@ class TestResetRunningJobs:
         assert reset_count == 1
 
         running_after = AgentSession.query.filter(project_key="test", status="running")
-        assert (
-            len(running_after) == 0
-        ), "Stale running index entry found after _reset_running_jobs"
+        assert len(running_after) == 0, "Stale running index entry found after _reset_running_jobs"
 
         pending = AgentSession.query.filter(project_key="test", status="pending")
         assert len(pending) == 1
