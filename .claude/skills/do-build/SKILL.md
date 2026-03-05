@@ -31,9 +31,9 @@ You are the **team lead** executing a plan document. You orchestrate work using 
 
 ## Variables
 
-PLAN_ARG: $1
+PLAN_ARG: $ARGUMENTS
 
-**If PLAN_ARG is empty or literally `$1`**: The skill argument substitution did not run. Look at the user's original message in the conversation — they invoked this as `/do-build <argument>`. Extract whatever follows `/do-build` as the value of PLAN_ARG. Do NOT stop or report an error; just use the argument from the message.
+**If PLAN_ARG is empty or literally `$ARGUMENTS`**: The skill argument substitution did not run. Look at the user's original message in the conversation — they invoked this as `/do-build <argument>`. Extract whatever follows `/do-build` as the value of PLAN_ARG. Do NOT stop or report an error; just use the argument from the message.
 
 ## Plan Resolution
 
