@@ -292,7 +292,7 @@ class GenerateAudioNLMTestCase(TestCase):
     """Test the _generate_audio_nlm method."""
 
     def test_raises_command_error_if_nlm_not_installed(self):
-        """_generate_audio_nlm raises CommandError when notebooklm-mcp-cli is missing."""
+        """_generate_audio_nlm raises CommandError when notebooklm-py is missing."""
         cmd = Command()
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -300,7 +300,7 @@ class GenerateAudioNLMTestCase(TestCase):
             with (  # noqa: SIM117
                 patch.dict(
                     "sys.modules",
-                    {"notebooklm_mcp_cli": None, "notebooklm_mcp_cli.core": None},
+                    {"notebooklm": None},
                 ),
                 self.assertRaises((CommandError, ImportError)),
             ):

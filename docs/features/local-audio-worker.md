@@ -1,6 +1,6 @@
 # Local Audio Worker
 
-The local audio worker offloads audio generation from the production server to a local machine. NotebookLM requires browser cookies for authentication, which cannot run on Render's headless environment. The worker polls the production API for episodes waiting on audio, generates audio locally via `notebooklm-mcp-cli`, uploads to storage, and calls back to resume the workflow.
+The local audio worker offloads audio generation from the production server to a local machine. NotebookLM requires browser cookies for authentication, which cannot run on Render's headless environment. The worker polls the production API for episodes waiting on audio, generates audio locally via `notebooklm-py`, uploads to storage, and calls back to resume the workflow.
 
 ## Architecture
 
@@ -17,7 +17,7 @@ pause_for_human(blocked_on="audio_generation")
 GET /api/podcast/pending-audio/  <--- local_audio_worker polls
     |
     v
-notebooklm-mcp-cli (local machine)
+notebooklm-py (local machine)
     |
     v
 store_file() --> storage (Supabase)
@@ -170,7 +170,7 @@ LOCAL_WORKER_API_KEY=<same key as production>
 ```
 
 Additional requirements:
-- `notebooklm-mcp-cli` installed and authenticated (`nlm login`)
+- `notebooklm-py` installed and authenticated (`notebooklm login`)
 - Storage backend configured (Supabase credentials for production uploads)
 
 ## How It Works
@@ -181,7 +181,7 @@ Additional requirements:
 
 3. **Source files prepared**: The API returns episode source content (report, sources, briefing, content plan, brief). The worker writes these to a temporary directory as `.md` files.
 
-4. **Audio generated**: The worker calls `notebooklm-mcp-cli` to create a NotebookLM notebook, upload the source files, generate audio, and download the resulting MP3. The notebook is cleaned up after download.
+4. **Audio generated**: The worker calls `notebooklm-py` to create a NotebookLM notebook, upload the source files, generate audio, and download the resulting MP3. The notebook is cleaned up after download.
 
 5. **Audio uploaded**: The MP3 is uploaded to storage via `store_file()` with the key `podcast/{podcast_slug}/{slug}/audio.mp3`.
 
@@ -203,9 +203,9 @@ The `LOCAL_WORKER_API_KEY` in `.env.local` does not match the value on the produ
 
 The local `.env.local` is missing the `LOCAL_WORKER_API_KEY` setting. Add it and ensure Django loads it into settings.
 
-### "notebooklm-mcp-cli not installed" (CommandError)
+### "notebooklm-py not installed" (CommandError)
 
-Install the package: `pip install notebooklm-mcp-cli`. Then authenticate: `nlm login`.
+Install the package: `uv add notebooklm-py`. Then authenticate: `notebooklm login`.
 
 ### Audio generation hangs or times out
 
@@ -213,7 +213,7 @@ NotebookLM audio generation can take 5-30 minutes. The worker waits up to 30 min
 
 ### Expired NotebookLM cookies
 
-If `notebooklm-mcp-cli` returns authentication errors, re-authenticate with `nlm login`. This refreshes the browser cookies required by NotebookLM.
+If `notebooklm-py` returns authentication errors, re-authenticate with `notebooklm login`. This refreshes the browser cookies stored in `~/.notebooklm/storage_state.json`.
 
 ### "Episode is not waiting for audio" (409)
 

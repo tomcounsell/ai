@@ -10,17 +10,18 @@ Usage:
 
 The worker:
   1. Polls GET {base_url}/api/podcast/pending-audio/ for episodes needing audio
-  2. For each pending episode, generates audio via notebooklm-mcp-cli
+  2. For each pending episode, generates audio via notebooklm-py
   3. Uploads the resulting MP3 to storage via store_file()
   4. Calls POST {base_url}/api/podcast/episodes/{id}/audio-callback/ with the audio URL
   5. Repeats until interrupted (Ctrl+C)
 
 Requires:
   - LOCAL_WORKER_API_KEY in environment/settings (must match production)
-  - notebooklm-mcp-cli installed and authenticated (nlm login)
+  - notebooklm-py installed and authenticated (notebooklm login)
   - Storage backend configured (Supabase for production uploads)
 """
 
+import asyncio
 import logging
 import signal
 import tempfile
@@ -184,7 +185,7 @@ class Command(BaseCommand):
             for filename, content in sources.items():
                 (tmpdir_path / filename).write_text(content, encoding="utf-8")
 
-            # Generate audio via notebooklm-mcp-cli
+            # Generate audio via notebooklm-py
             output_path = tmpdir_path / f"{slug}.mp3"
             self._generate_audio_nlm(tmpdir_path, title, output_path)
 
@@ -206,45 +207,61 @@ class Command(BaseCommand):
     def _generate_audio_nlm(
         self, source_dir: Path, title: str, output_path: Path
     ) -> None:
-        """Generate audio using notebooklm-mcp-cli library."""
+        """Generate audio using notebooklm-py library.
+
+        Uses asyncio.run() to bridge the sync management command with the
+        async notebooklm-py client API. Each call creates its own event loop,
+        which is safe when called from ThreadPoolExecutor threads.
+        """
         try:
-            from notebooklm_mcp_cli.core import NotebookLMClient
+            import notebooklm  # noqa: F401
         except ImportError:
             raise CommandError(
-                "notebooklm-mcp-cli not installed. "
-                "Install with: pip install notebooklm-mcp-cli"
+                "notebooklm-py not installed. Install with: uv add notebooklm-py"
             )
 
-        client = NotebookLMClient()
+        asyncio.run(self._generate_audio_async(source_dir, title, output_path))
 
-        # Create notebook and upload sources
-        notebook_id = client.create_notebook(f"Yudame Research: {title}")
+    @staticmethod
+    async def _generate_audio_async(
+        source_dir: Path, title: str, output_path: Path
+    ) -> None:
+        """Async implementation of audio generation via notebooklm-py."""
+        from notebooklm import NotebookLMClient
 
-        try:
-            # Upload all source files from the temp directory
-            for source_file in source_dir.iterdir():
-                if source_file.is_file() and source_file.suffix == ".md":
-                    client.upload_source(
-                        notebook_id,
-                        source_file.name,
-                        source_file.read_text(encoding="utf-8"),
-                    )
+        async with await NotebookLMClient.from_storage() as client:
+            nb = await client.notebooks.create(f"Yudame Research: {title}")
 
-            # Generate audio
-            client.generate_audio(notebook_id)
-            client.wait_for_audio(notebook_id, timeout_minutes=30)
-
-            # Download
-            client.download_audio(notebook_id, output_path)
-        finally:
             try:
-                client.delete_notebook(notebook_id)
-            except Exception:
-                logger.warning(
-                    "Failed to clean up notebook %s",
-                    notebook_id,
-                    exc_info=True,
+                # Upload all source files from the temp directory
+                for source_file in sorted(source_dir.iterdir()):
+                    if source_file.is_file() and source_file.suffix == ".md":
+                        await client.sources.add_text(
+                            nb.id,
+                            source_file.name,
+                            source_file.read_text(encoding="utf-8"),
+                            wait=True,
+                        )
+
+                # Generate audio overview
+                status = await client.artifacts.generate_audio(nb.id)
+
+                # Wait for completion (30 minute timeout = 1800 seconds)
+                await client.artifacts.wait_for_completion(
+                    nb.id, status.task_id, timeout=1800.0
                 )
+
+                # Download the generated audio
+                await client.artifacts.download_audio(nb.id, str(output_path))
+            finally:
+                try:
+                    await client.notebooks.delete(nb.id)
+                except Exception:
+                    logger.warning(
+                        "Failed to clean up notebook %s",
+                        nb.id,
+                        exc_info=True,
+                    )
 
     def _send_callback(
         self,
