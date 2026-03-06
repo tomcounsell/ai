@@ -206,9 +206,6 @@ def install_caffeinate() -> bool:
     """Install caffeinate service. Returns True if successful."""
     plist_path = Path.home() / "Library" / "LaunchAgents" / "com.valor.caffeinate.plist"
 
-    if plist_path.exists():
-        return True  # Already installed
-
     plist_content = """<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -224,13 +221,20 @@ def install_caffeinate() -> bool:
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <false/>
 </dict>
 </plist>
 """
 
     try:
         uid = os.getuid()
+        label = "com.valor.caffeinate"
+
+        # Unload existing service if loaded
+        result = run_cmd(["launchctl", "list"])
+        if label in result.stdout:
+            run_cmd(["launchctl", "bootout", f"gui/{uid}/{label}"])
+
         plist_path.parent.mkdir(parents=True, exist_ok=True)
         plist_path.write_text(plist_content)
         run_cmd(["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)])

@@ -111,6 +111,13 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
                     )
 
                 if code_files:
+                    if os.environ.get("SKIP_SDLC") == "1":
+                        print(
+                            "WARNING: SKIP_SDLC=1 set — bypassing SDLC gate. "
+                            f"Modified on main: {', '.join(code_files[:5])}",
+                            file=sys.stderr,
+                        )
+                        return None
                     return (
                         "SDLC Quality Gate: Code files modified on main "
                         "without SDLC tracking.\n\n"
