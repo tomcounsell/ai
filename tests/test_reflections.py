@@ -712,7 +712,7 @@ class TestBranchPlanCleanup:
     @pytest.mark.asyncio
     async def test_detects_completed_plans(self, tmp_path):
         """Flags plans where all checkboxes are checked."""
-        from scripts.reflections import PROJECT_ROOT, ReflectionRunner
+        from scripts.reflections import ReflectionRunner
 
         # Create a plan file with all boxes checked
         plans_dir = tmp_path / "docs" / "plans"
