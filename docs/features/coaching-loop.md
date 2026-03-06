@@ -135,9 +135,17 @@ Path B was added to prevent informational answers (e.g., "The summarizer works b
 
 Both caps are defined in `agent/job_queue.py`. The effective cap is selected based on `AgentSession.is_sdlc_job()`.
 
-### Classification Type Propagation
+### Session Reuse (Single Source of Truth)
 
-When `_enqueue_continuation()` re-enqueues a job for auto-continue, it passes `classification_type=job.classification_type` to `enqueue_job()`. This ensures the continuation job's `AgentSession` record inherits the original session's classification type. Without this propagation, continuation jobs would get `classification_type=None`, causing `is_sdlc_job()` to fail on the new record and losing the SDLC routing, stage progress display, and structured template rendering.
+When `_enqueue_continuation()` fires for auto-continue, it **reuses the existing `AgentSession`** instead of creating a new one. This eliminates the duplicate-session problem where metadata was lost across auto-continue boundaries.
+
+**How it works:** The function looks up the existing session by `session_id`, extracts all fields via `_extract_job_fields()`, deletes the old record, and recreates it with updated `status` ("pending"), `message_text` (coaching message), `auto_continue_count`, and `priority` ("high"). All other fields -- including `classification_type`, `history`, link URLs, `context_summary`, and `expectations` -- are preserved automatically.
+
+This follows the same delete-and-recreate pattern used by `_pop_job()` to work around Popoto's `KeyField` index corruption (where `on_save()` adds to the new index set but never removes from the old one).
+
+**Fallback:** If no session is found for the `session_id` (edge case), `_enqueue_continuation` falls back to calling `enqueue_job()` with explicit `classification_type` propagation.
+
+**Fresh session reads:** The `send_to_chat` closure re-reads the `AgentSession` from Redis before evaluating `is_sdlc_job()`, `has_remaining_stages()`, and `has_failed_stage()`. This ensures routing decisions use data written by `session_progress.py` in the agent subprocess, not the stale in-memory copy captured at job start.
 
 The `tools/classifier.py` module supports four classification types: `bug`, `feature`, `chore`, and `sdlc`. The `sdlc` type is used for messages that reference the SDLC pipeline (e.g., "SDLC issue 274", "/sdlc", "run the pipeline for issue #42").
 

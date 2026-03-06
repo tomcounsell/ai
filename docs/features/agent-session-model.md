@@ -12,6 +12,8 @@ Unified Redis model tracking agent work from enqueue through completion. Replace
 
 **Session-phase:** `turn_count`, `tool_call_count`, `log_path`, `summary`, `branch_name`, `tags`, `classification_type`
 
+**Semantic routing:** `context_summary` (what the session is about), `expectations` (what the agent needs from the human)
+
 **New:** `history` (ListField, append-only lifecycle events), `issue_url`, `plan_url`, `pr_url`
 
 ## History Tracking
@@ -28,7 +30,7 @@ Methods for querying pipeline state from history:
 
 | Method | Returns | Purpose |
 |---|---|---|
-| `is_sdlc_job()` | `bool` | `True` if history contains any `[stage]` entries |
+| `is_sdlc_job()` | `bool` | `True` if `classification_type == "sdlc"` OR history contains `[stage]` entries |
 | `has_remaining_stages()` | `bool` | `True` if any SDLC stage is `pending` or `in_progress` |
 | `has_failed_stage()` | `bool` | `True` if any stage has `FAILED` or `ERROR` status |
 | `get_stage_progress()` | `dict` | Maps stage names to status (`completed`, `in_progress`, `pending`, `failed`) |
@@ -104,13 +106,27 @@ This ensures hooks can resolve sessions via `task_list_id` even if `VALOR_SESSIO
 
 ## Session Lifecycle Integrity
 
-### Single-Session Guarantee
+### Single-Session Guarantee (Source of Truth Architecture)
 
-Each `session_id` has exactly one `AgentSession` at any time. The `_push_job()` function creates the session at enqueue time. `start_transcript()` updates the existing session with transcript-phase fields (log_path, branch_name, etc.) instead of creating a duplicate. A defensive fallback creates a new session only when no existing one is found (standalone transcript edge case).
+Each `session_id` has exactly one `AgentSession` at any time. The `AgentSession` is the single source of truth for all session metadata -- no state needs to be passed as parameters between functions.
+
+**Session creation:** `_push_job()` creates the session at enqueue time. `start_transcript()` updates the existing session with transcript-phase fields (log_path, branch_name, etc.) instead of creating a duplicate.
+
+**Auto-continue reuse:** When `_enqueue_continuation()` fires, it reuses the existing session via delete-and-recreate rather than calling `enqueue_job()` which would create a new orphaned record. This preserves all metadata automatically:
+- `classification_type` (SDLC routing decisions)
+- `history` (stage progress tracking)
+- `issue_url`, `plan_url`, `pr_url` (link accumulation)
+- `context_summary`, `expectations` (semantic routing)
+
+Only four fields change during continuation: `status` (reset to "pending"), `message_text` (coaching message), `auto_continue_count` (incremented), and `priority` (set to "high").
+
+**Fresh reads in routing:** The `send_to_chat` closure in `_execute_job()` re-reads the `AgentSession` from Redis before making routing decisions. This ensures `is_sdlc_job()`, `has_remaining_stages()`, and `has_failed_stage()` evaluate data written by `session_progress.py` in the agent subprocess, not the stale in-memory copy captured at job start.
 
 ### Field Preservation on Status Change
 
-`status` is a Popoto `KeyField`, so changing it requires delete-and-recreate. `complete_transcript()` uses dynamic field extraction via Popoto model introspection to copy ALL non-None fields from the old session to the new one. This prevents fields like `task_list_id`, `message_text`, and `sender_id` from being silently dropped during status transitions.
+`status` is a Popoto `KeyField`, so changing it requires delete-and-recreate. The `_JOB_FIELDS` list in `agent/job_queue.py` enumerates all fields that must be preserved during delete-and-recreate operations. This list must be kept in sync with `AgentSession` model fields -- missing fields are silently dropped.
+
+Fields preserved: all queue-phase fields, session-phase fields, semantic routing fields (`context_summary`, `expectations`), history, and link URLs. The `_extract_job_fields()` helper reads every field in `_JOB_FIELDS` from the old session and passes them to `async_create()` on the new one.
 
 ## Backward Compatibility
 
