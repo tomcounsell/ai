@@ -63,9 +63,9 @@ The auto-continue system uses a two-path routing strategy. SDLC jobs use pipelin
 
 An SDLC job is identified by `AgentSession.is_sdlc_job()`, which checks two signals in order:
 1. **Primary**: `classification_type == "sdlc"` -- set at input routing time by `tools/classifier.py`
-2. **Fallback**: `[stage]` entries in `AgentSession.history` -- for legacy sessions or sessions that have stage progress from `session_progress` calls
+2. **Fallback**: `[stage]` entries in `AgentSession.history` -- for sessions that have stage progress from `session_progress` calls
 
-The `classification_type` check is the authoritative signal because it is set once at classification time and propagated through auto-continue via `_enqueue_continuation()`. The history fallback catches sessions that predate the `sdlc` classification type.
+The `classification_type` check is the authoritative signal because it is set once at classification time and propagated through auto-continue via `_enqueue_continuation()`. The history fallback catches sessions where stage entries exist but `classification_type` was not set.
 
 ```
 Agent Output
