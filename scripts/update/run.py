@@ -379,6 +379,12 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if config.do_calendar:
         log("Checking calendar integration...", v)
 
+        # Verify hook model is still valid
+        model_error = cal_integration.verify_hook_model(project_dir)
+        if model_error:
+            log(f"WARN: {model_error}", v, always=True)
+            result.warnings.append(model_error)
+
         # Global hook
         result.calendar_hook = cal_integration.ensure_global_hook(project_dir)
         if result.calendar_hook.configured:

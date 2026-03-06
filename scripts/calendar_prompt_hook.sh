@@ -117,10 +117,17 @@ else
                 }]
             }')") || true
 
+        # Check for API error (model retired, auth failure, etc.)
+        API_ERROR=$(echo "$RESPONSE" | jq -r '.error.message // empty')
+        if [ -n "$API_ERROR" ]; then
+            echo "calendar_prompt_hook: API error: $API_ERROR" >&2
+        fi
+
         SLUG=$(echo "$RESPONSE" | jq -r '.content[0].text // empty' | tr -d '[:space:]' | head -c 60)
 
         # Validate: must be kebab-case, fallback to project name
         if ! echo "$SLUG" | grep -qE '^[a-z0-9][a-z0-9-]*[a-z0-9]$'; then
+            [ -z "$API_ERROR" ] && echo "calendar_prompt_hook: invalid slug '$SLUG', falling back to project name" >&2
             SLUG="$PROJECT"
         fi
     fi
