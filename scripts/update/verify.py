@@ -190,9 +190,7 @@ def check_valor_tools(project_dir: Path) -> list[ToolCheck]:
 
     # Check user bin
     if not calendar_found:
-        user_calendar = (
-            Path.home() / "Library" / "Python" / "3.12" / "bin" / "valor-calendar"
-        )
+        user_calendar = Path.home() / "Library" / "Python" / "3.12" / "bin" / "valor-calendar"
         if user_calendar.exists():
             try:
                 result = run_cmd([str(user_calendar), "--version"], timeout=10)
@@ -221,9 +219,7 @@ def check_ollama(model: str = "qwen3:4b") -> ToolCheck:
     try:
         result = run_cmd(["ollama", "list"], timeout=30)
         if result.returncode != 0:
-            return ToolCheck(
-                name="ollama", available=False, error="Failed to list models"
-            )
+            return ToolCheck(name="ollama", available=False, error="Failed to list models")
 
         has_model = model in result.stdout
         return ToolCheck(
@@ -300,9 +296,7 @@ def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
     }
 
     if not source.exists():
-        result["reason"] = (
-            "No source credentials at ~/Desktop/claude_code/claude_oauth_config.json"
-        )
+        result["reason"] = "No source credentials at ~/Desktop/claude_code/claude_oauth_config.json"
         return result
 
     try:
@@ -317,9 +311,7 @@ def sync_claude_oauth(project_dir: Path) -> dict[str, str | bool]:
         return result
 
     # First check if CLI auth is already working
-    claude_bin = shutil.which("claude") or str(
-        Path.home() / ".local" / "bin" / "claude"
-    )
+    claude_bin = shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
     try:
         auth_result = run_cmd([claude_bin, "auth", "status"], timeout=10)
         if auth_result.returncode == 0 and "loggedIn" in auth_result.stdout:
@@ -449,9 +441,99 @@ def check_gitignore_issues() -> list[GitignoreIssue]:
     return issues
 
 
-def verify_environment(
-    project_dir: Path, check_ollama_model: bool = True
-) -> VerificationResult:
+def _load_api_key(project_dir: Path) -> str:
+    """Load ANTHROPIC_API_KEY from env or .env file."""
+    import os
+
+    api_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not api_key:
+        env_file = project_dir / ".env"
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if line.startswith("ANTHROPIC_API_KEY="):
+                    api_key = line.split("=", 1)[1].strip()
+                    break
+    return api_key
+
+
+def _check_model_valid(model_id: str, api_key: str) -> str | None:
+    """Ping the Anthropic API with a model ID. Returns error string or None."""
+    import json
+
+    try:
+        result = run_cmd(
+            [
+                "curl",
+                "-s",
+                "--max-time",
+                "5",
+                "https://api.anthropic.com/v1/messages",
+                "-H",
+                f"x-api-key: {api_key}",
+                "-H",
+                "anthropic-version: 2023-06-01",
+                "-H",
+                "content-type: application/json",
+                "-d",
+                json.dumps(
+                    {
+                        "model": model_id,
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "hi"}],
+                    }
+                ),
+            ],
+            timeout=10,
+        )
+        response = json.loads(result.stdout)
+        if response.get("type") == "error":
+            err = response["error"]["message"]
+            # Only flag model-not-found errors, not rate limits etc.
+            if "model" in err.lower() or "not_found" in response["error"].get("type", ""):
+                return f"Model '{model_id}' is invalid: {err}"
+    except Exception:
+        pass  # Network issues aren't model problems
+    return None
+
+
+def verify_models(project_dir: Path) -> list[str]:
+    """Verify all Anthropic models in config/models.py are still valid.
+
+    Returns a list of error strings (empty if all OK).
+    """
+    import re
+
+    errors: list[str] = []
+
+    api_key = _load_api_key(project_dir)
+    if not api_key:
+        return []  # Can't check without key
+
+    # Load model IDs from config/models.py
+    models_file = project_dir / "config" / "models.py"
+    if not models_file.exists():
+        return []
+
+    content = models_file.read_text()
+    # Match lines like: HAIKU = "claude-haiku-4-5-20251001"
+    # Skip OPENROUTER_ models (different API)
+    seen = set()
+    for match in re.finditer(
+        r'^(?!OPENROUTER_)([A-Z_]+)\s*=\s*"(claude-[^"]+)"', content, re.MULTILINE
+    ):
+        name, model_id = match.group(1), match.group(2)
+        if model_id in seen:
+            continue
+        seen.add(model_id)
+
+        error = _check_model_valid(model_id, api_key)
+        if error:
+            errors.append(f"config/models.py {name}: {error}")
+
+    return errors
+
+
+def verify_environment(project_dir: Path, check_ollama_model: bool = True) -> VerificationResult:
     """Run all environment verification checks."""
     result = VerificationResult()
 

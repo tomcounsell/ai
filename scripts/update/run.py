@@ -373,9 +373,9 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     if config.do_calendar:
         log("Checking calendar integration...", v)
 
-        # Verify hook model is still valid
-        model_error = cal_integration.verify_hook_model(project_dir)
-        if model_error:
+        # Verify all Anthropic models are still valid
+        model_errors = verify.verify_models(project_dir)
+        for model_error in model_errors:
             log(f"WARN: {model_error}", v, always=True)
             result.warnings.append(model_error)
 

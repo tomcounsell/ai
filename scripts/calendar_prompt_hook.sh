@@ -103,13 +103,17 @@ else
     if [ -z "$ANTHROPIC_API_KEY" ]; then
         SLUG="$PROJECT"
     else
+        # Read model ID from central config (single source of truth)
+        HAIKU_MODEL=$(grep '^HAIKU = ' "$HOME/src/ai/config/models.py" | sed 's/.*"\(.*\)"/\1/' 2>/dev/null)
+        HAIKU_MODEL="${HAIKU_MODEL:-claude-haiku-4-5-20251001}"
+
         # Call Haiku to derive a short billing slug from the prompt
         RESPONSE=$(curl -s --max-time 5 https://api.anthropic.com/v1/messages \
             -H "x-api-key: $ANTHROPIC_API_KEY" \
             -H "anthropic-version: 2023-06-01" \
             -H "content-type: application/json" \
-            -d "$(jq -n --arg project "$PROJECT" --arg prompt "$PROMPT" '{
-                model: "claude-haiku-4-5-20251001",
+            -d "$(jq -n --arg project "$PROJECT" --arg prompt "$PROMPT" --arg model "$HAIKU_MODEL" '{
+                model: $model,
                 max_tokens: 30,
                 messages: [{
                     role: "user",

@@ -156,71 +156,11 @@ def setup_global_hook(project_dir: Path) -> CalendarHookResult:
 
 
 def verify_hook_model(project_dir: Path) -> str | None:
-    """Verify the Anthropic model used in the calendar prompt hook is still valid.
+    """Deprecated: use verify.verify_models() instead. Kept for API compat."""
+    from scripts.update.verify import verify_models
 
-    Returns None if OK, or an error string if the model is retired/invalid.
-    """
-    import re
-    import subprocess
-
-    hook_script = get_hook_script_path(project_dir)
-    if not hook_script.exists():
-        return None
-
-    content = hook_script.read_text()
-    match = re.search(r'"model":\s*"([^"]+)"', content)
-    if not match:
-        return None
-
-    model_id = match.group(1)
-
-    # Load API key
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not api_key:
-        env_file = project_dir / ".env"
-        if env_file.exists():
-            for line in env_file.read_text().splitlines():
-                if line.startswith("ANTHROPIC_API_KEY="):
-                    api_key = line.split("=", 1)[1].strip()
-                    break
-    if not api_key:
-        return None  # Can't check without key
-
-    # Minimal API call to verify the model exists
-    try:
-        result = subprocess.run(
-            [
-                "curl",
-                "-s",
-                "--max-time",
-                "5",
-                "https://api.anthropic.com/v1/messages",
-                "-H",
-                f"x-api-key: {api_key}",
-                "-H",
-                "anthropic-version: 2023-06-01",
-                "-H",
-                "content-type: application/json",
-                "-d",
-                json.dumps(
-                    {
-                        "model": model_id,
-                        "max_tokens": 1,
-                        "messages": [{"role": "user", "content": "hi"}],
-                    }
-                ),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        response = json.loads(result.stdout)
-        if response.get("type") == "error":
-            return f"Calendar hook model '{model_id}' is invalid: {response['error']['message']}"
-    except Exception:
-        pass  # Network issues aren't model problems
-
-    return None
+    errors = verify_models(project_dir)
+    return errors[0] if errors else None
 
 
 def ensure_global_hook(project_dir: Path) -> CalendarHookResult:
