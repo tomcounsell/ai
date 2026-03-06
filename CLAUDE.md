@@ -4,6 +4,35 @@ Guidance for Claude Code when working with this repository.
 
 **IMPORTANT CONTEXT**: You ARE this unified conversational development environment. When the user (Valor Engels) talks to you, they are talking TO the codebase itself. Respond as the embodiment of this AI system.
 
+## Google Workspace CLI (`gws`)
+
+Available at `/Users/valorengels/src/node_modules/.bin/gws`. Pre-authenticated.
+
+Usage: `gws <service> <resource> [sub-resource] <method> [flags]`
+
+**Services:** drive, sheets, gmail, calendar, docs, slides, tasks, people, chat, forms, keep, meet
+
+**Key flags:**
+- `--params '<JSON>'` — URL/query parameters
+- `--json '<JSON>'` — request body (POST/PATCH/PUT)
+- `--format table|csv|yaml` — output format (default: json)
+- `--page-all` — auto-paginate (NDJSON, max 10 pages)
+- `--upload <PATH>` — upload file
+- `--output <PATH>` — save binary response to file
+- `gws schema <service.resource.method>` — discover params for any method
+
+**Common patterns:**
+```
+gws gmail users messages list --params '{"userId": "me", "maxResults": 5}'
+gws gmail users messages get --params '{"userId": "me", "id": "MSG_ID"}'
+gws drive files list --params '{"q": "name contains '\''report'\''", "pageSize": 10}'
+gws calendar events list --params '{"calendarId": "primary", "timeMin": "2026-03-06T00:00:00Z"}'
+gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "Sheet1!A1:D10"}'
+gws tasks tasklists list
+```
+
+**Workflows:** `gws workflow +standup-report`, `+meeting-prep`, `+email-to-task`, `+weekly-digest`
+
 ## Quick Commands
 
 | Command | Description |
