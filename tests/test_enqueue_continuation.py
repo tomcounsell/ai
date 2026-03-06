@@ -239,6 +239,103 @@ class TestEnqueueContinuationParameters:
         assert call_kwargs["priority"] == "high"
 
 
+class TestEnqueueContinuationClassificationPropagation:
+    """Tests for classification_type propagation through auto-continue.
+
+    Verifies that _enqueue_continuation passes classification_type from the
+    original job to the continuation job, so SDLC sessions retain their type
+    across auto-continues (fixes issue #276, Bug 2).
+    """
+
+    @pytest.mark.asyncio
+    async def test_sdlc_classification_type_propagated(self):
+        """classification_type='sdlc' is passed to enqueue_job for SDLC sessions."""
+        job = _make_mock_job(classification_type="sdlc")
+
+        with (
+            patch("bridge.coach.build_coaching_message", return_value="continue"),
+            patch(
+                "agent.job_queue.enqueue_job", new_callable=AsyncMock
+            ) as mock_enqueue,
+        ):
+            await _enqueue_continuation(
+                job=job,
+                branch_name="session/test",
+                task_list_id="tl",
+                auto_continue_count=1,
+                output_msg="Building...",
+            )
+
+        call_kwargs = mock_enqueue.call_args[1]
+        assert call_kwargs["classification_type"] == "sdlc"
+
+    @pytest.mark.asyncio
+    async def test_feature_classification_type_propagated(self):
+        """classification_type='feature' is propagated for non-SDLC jobs."""
+        job = _make_mock_job(classification_type="feature")
+
+        with (
+            patch("bridge.coach.build_coaching_message", return_value="continue"),
+            patch(
+                "agent.job_queue.enqueue_job", new_callable=AsyncMock
+            ) as mock_enqueue,
+        ):
+            await _enqueue_continuation(
+                job=job,
+                branch_name="session/test",
+                task_list_id="tl",
+                auto_continue_count=1,
+                output_msg="Working...",
+            )
+
+        call_kwargs = mock_enqueue.call_args[1]
+        assert call_kwargs["classification_type"] == "feature"
+
+    @pytest.mark.asyncio
+    async def test_none_classification_type_propagated(self):
+        """classification_type=None is propagated (not dropped silently)."""
+        job = _make_mock_job(classification_type=None)
+
+        with (
+            patch("bridge.coach.build_coaching_message", return_value="continue"),
+            patch(
+                "agent.job_queue.enqueue_job", new_callable=AsyncMock
+            ) as mock_enqueue,
+        ):
+            await _enqueue_continuation(
+                job=job,
+                branch_name="session/test",
+                task_list_id="tl",
+                auto_continue_count=1,
+                output_msg="Working...",
+            )
+
+        call_kwargs = mock_enqueue.call_args[1]
+        assert call_kwargs["classification_type"] is None
+
+    @pytest.mark.asyncio
+    async def test_bug_classification_type_propagated(self):
+        """classification_type='bug' is propagated for bug-type jobs."""
+        job = _make_mock_job(classification_type="bug")
+
+        with (
+            patch("bridge.coach.build_coaching_message", return_value="continue"),
+            patch(
+                "agent.job_queue.enqueue_job", new_callable=AsyncMock
+            ) as mock_enqueue,
+        ):
+            await _enqueue_continuation(
+                job=job,
+                branch_name="session/test",
+                task_list_id="tl",
+                auto_continue_count=1,
+                output_msg="Fixing...",
+            )
+
+        call_kwargs = mock_enqueue.call_args[1]
+        assert call_kwargs["classification_type"] == "bug"
+
+
 class TestEnqueueContinuationPlanResolution:
     """Tests for plan file resolution from WorkflowState."""
 

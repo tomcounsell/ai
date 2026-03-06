@@ -715,6 +715,111 @@ class TestSDLCLifecycle:
         assert "PR #180" in result
 
 
+class TestSDLCClassificationTypeLifecycle:
+    """Simulate SDLC session using classification_type='sdlc' (issue #276 fix).
+
+    Verifies that sessions classified as 'sdlc' by the classifier render
+    with the structured SDLC template (stage progress line + link footer),
+    even before any [stage] history entries are added.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sdlc_classified_session_renders_structured(self, redis_test_db):
+        """Session with classification_type='sdlc' renders stage progress after stages are added."""
+        from bridge.summarizer import _compose_structured_summary
+
+        # Create session with classification_type='sdlc' (set by classifier)
+        s = AgentSession.create(
+            session_id="sdlc-classified-1",
+            project_key="test",
+            status="running",
+            chat_id="800",
+            sender_name="Valor",
+            created_at=time.time(),
+            started_at=time.time(),
+            last_activity=time.time(),
+            message_text="SDLC issue 276",
+            classification_type="sdlc",
+        )
+
+        # Verify is_sdlc_job works via classification_type alone
+        assert s.is_sdlc_job() is True
+
+        # Add stage progress and links
+        s.append_history("stage", "ISSUE completed ☑")
+        s.append_history("stage", "PLAN completed ☑")
+        s.append_history("stage", "BUILD in_progress ▶")
+        s.set_link("issue", "https://github.com/valorengels/ai/issues/276")
+
+        result = _compose_structured_summary(
+            "• Fixed classifier to support sdlc type\n• Fixed auto-continue propagation",
+            session=s,
+            is_completion=False,
+        )
+
+        # Stage progress should render
+        assert "ISSUE 276" in result
+        assert "☑ PLAN" in result
+        assert "▶ BUILD" in result
+        assert "☐ TEST" in result
+        # Link footer should render
+        assert "Issue #276" in result
+        # Content should be present
+        assert "Fixed classifier" in result
+
+    @pytest.mark.asyncio
+    async def test_sdlc_classified_continuation_retains_type(self, redis_test_db):
+        """Continuation session with classification_type='sdlc' still renders correctly.
+
+        Simulates what happens after _enqueue_continuation propagates the type:
+        a new AgentSession is created with classification_type='sdlc' and the
+        stage history from the original session.
+        """
+        from bridge.summarizer import _compose_structured_summary
+
+        # Simulate the continuation session (created by _push_job with propagated type)
+        s = AgentSession.create(
+            session_id="sdlc-continued-1",
+            project_key="test",
+            status="running",
+            chat_id="800",
+            sender_name="System (auto-continue)",
+            created_at=time.time(),
+            started_at=time.time(),
+            last_activity=time.time(),
+            message_text="[System Coach] continue building",
+            classification_type="sdlc",
+        )
+
+        # The continuation session starts fresh but has classification_type
+        assert s.is_sdlc_job() is True
+        # Even without stage history, is_sdlc_job returns True via classification_type
+        assert s._get_history_list() == []
+
+        # Add stage progress as the session progresses
+        s.append_history("stage", "ISSUE completed ☑")
+        s.append_history("stage", "PLAN completed ☑")
+        s.append_history("stage", "BUILD completed ☑")
+        s.append_history("stage", "TEST completed ☑")
+        s.append_history("stage", "REVIEW completed ☑")
+        s.append_history("stage", "DOCS completed ☑")
+        s.set_link("issue", "https://github.com/valorengels/ai/issues/276")
+        s.set_link("pr", "https://github.com/valorengels/ai/pull/277")
+
+        result = _compose_structured_summary(
+            "• All stages complete\n• PR created",
+            session=s,
+            is_completion=True,
+        )
+
+        # Full SDLC template should render
+        assert "ISSUE 276" in result
+        assert "☑ DOCS" in result
+        assert "Issue #276" in result
+        assert "PR #277" in result
+        assert "☐" not in result  # No pending stages
+
+
 class TestQALifecycle:
     """Simulate a Q&A session."""
 
