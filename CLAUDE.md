@@ -10,7 +10,7 @@ Available at `/Users/valorengels/src/node_modules/.bin/gws`. Pre-authenticated.
 
 Usage: `gws <service> <resource> [sub-resource] <method> [flags]`
 
-**Services:** drive, sheets, gmail, calendar, docs, slides, tasks, people, chat, forms, keep, meet
+**Services:** drive, sheets, gmail, calendar, docs, slides, people, chat, forms, keep, meet
 
 **Key flags:**
 - `--params '<JSON>'` — URL/query parameters
@@ -28,7 +28,6 @@ gws gmail users messages get --params '{"userId": "me", "id": "MSG_ID"}'
 gws drive files list --params '{"q": "name contains '\''report'\''", "pageSize": 10}'
 gws calendar events list --params '{"calendarId": "primary", "timeMin": "2026-03-06T00:00:00Z"}'
 gws sheets spreadsheets values get --params '{"spreadsheetId": "ID", "range": "Sheet1!A1:D10"}'
-gws tasks tasklists list
 ```
 
 **Workflows:** `gws workflow +standup-report`, `+meeting-prep`, `+email-to-task`, `+weekly-digest`
