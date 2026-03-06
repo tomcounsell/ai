@@ -7,7 +7,7 @@ hooks:
     - matcher: "Write|Edit"
       hooks:
         - type: command
-          command: "ruff check --fix $CLAUDE_PROJECT_DIR || true"
+          command: "python -m ruff check --fix $CLAUDE_PROJECT_DIR || true"
         - type: command
           command: "black $CLAUDE_PROJECT_DIR || true"
 ---
@@ -93,7 +93,7 @@ Write the smallest amount of code that makes the failing test pass. Nothing more
 ```bash
 # Run again to confirm the test passes
 pytest tests/ -v -x                 # Should see GREEN (pass)
-ruff check .                        # Linting
+python -m ruff check .              # Linting
 black --check .                     # Formatting
 ```
 
@@ -108,7 +108,7 @@ With all tests green, improve the design of both implementation and tests.
 ```bash
 # Confirm everything still passes after refactoring
 pytest tests/ -v                    # All tests still GREEN
-ruff check .                        # Linting
+python -m ruff check .              # Linting
 black --check .                     # Formatting
 mypy . --ignore-missing-imports     # Type checking (if applicable)
 ```

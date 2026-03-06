@@ -123,7 +123,7 @@ After the builder agent reports completion, run tests and lint directly — do N
 pytest tests/ -v --tb=short
 
 # Run lint checks
-ruff check .
+python -m ruff check .
 black --check .
 ```
 

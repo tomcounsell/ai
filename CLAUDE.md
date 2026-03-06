@@ -13,7 +13,7 @@ Guidance for Claude Code when working with this repository.
 | `./scripts/valor-service.sh restart` | Restart after code changes |
 | `tail -f logs/bridge.log` | Stream bridge logs |
 | `pytest tests/` | Run all tests |
-| `ruff format . && ruff check .` | Format and lint |
+| `python -m ruff format . && python -m ruff check .` | Format and lint |
 | `python scripts/reflections.py` | Run reflections maintenance manually |
 | `python scripts/reflections.py --dry-run` | Test reflections without side effects |
 | `python scripts/reflections.py --ignore "pattern"` | Silence a bug pattern for 14 days |
@@ -128,7 +128,7 @@ Telegram → Python Bridge (Telethon) → Claude Agent SDK → Claude API
 
 Work is DONE when:
 1. ✅ Deliverable exists and works
-2. ✅ Code quality standards met (`ruff check`, `ruff format`)
+2. ✅ Code quality standards met (`python -m ruff check`, `python -m ruff format`)
 3. ✅ Changes committed and pushed to git
 4. ✅ Original request fulfilled
 

@@ -19,7 +19,7 @@ Loaded when the project uses Python (pytest, pyproject.toml, setup.py, etc.).
 ### Lint Tools
 
 ```bash
-ruff check .
+python -m ruff check .
 black --check .
 ```
 

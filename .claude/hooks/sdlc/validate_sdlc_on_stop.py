@@ -75,8 +75,8 @@ def has_code_changes() -> bool:
 # Quality gate detection
 QUALITY_RUN_HINTS = {
     "pytest": "pytest tests/",
-    "ruff": "ruff check .",
-    "ruff-format": "ruff format --check .",
+    "ruff": "python -m ruff check .",
+    "ruff-format": "python -m ruff format --check .",
 }
 
 ERROR_TEMPLATE = """\

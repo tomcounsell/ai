@@ -39,8 +39,8 @@ def get_sdlc_state_path(session_id: str) -> Path:
 
 _QUALITY_RUN_HINTS = {
     "pytest": "pytest tests/",
-    "ruff": "ruff check .",
-    "ruff-format": "ruff format --check .",
+    "ruff": "python -m ruff check .",
+    "ruff-format": "python -m ruff format --check .",
 }
 
 _ERROR_TEMPLATE = """\
