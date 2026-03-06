@@ -124,11 +124,11 @@ Where `$PR_URL` is the full GitHub PR URL returned by `gh pr create`.
    ```bash
    TARGET_REPO=$(git -C "$(dirname "$PLAN_PATH")" rev-parse --show-toplevel)
    ```
-6. **Create an isolated worktree** - Create `.worktrees/{slug}/` with branch `session/{slug}` in the **target repo** using the worktree manager (handles stale worktrees automatically):
+6. **Get or create an isolated worktree** - Get the existing worktree or create `.worktrees/{slug}/` with branch `session/{slug}` in the **target repo** using the worktree manager (handles stale worktrees and session resumption automatically):
    ```bash
-   python -c "from agent.worktree_manager import create_worktree; from pathlib import Path; create_worktree(Path('$TARGET_REPO'), '{slug}')"
+   python -c "from agent.worktree_manager import get_or_create_worktree; from pathlib import Path; print(get_or_create_worktree(Path('$TARGET_REPO'), '{slug}'))"
    ```
-   This handles all edge cases: stale worktrees from crashed sessions, missing directories with lingering git references, and branch-already-in-use errors. Settings files are copied automatically.
+   This is idempotent: if the worktree already exists (e.g., from an interrupted session), it returns the existing path. If not, it creates a fresh one. It also handles stale worktrees from crashed sessions, missing directories with lingering git references, and branch-already-in-use errors. Settings files are copied automatically.
    All subsequent agent work happens inside `$TARGET_REPO/.worktrees/{slug}/`, NOT the orchestrator repo directory.
 7. **Initialize pipeline state** - For fresh builds (no prior state), initialize now:
    ```bash
@@ -223,6 +223,8 @@ Task({
 IMPORTANT: You MUST work in the worktree directory: {absolute_path_to}/.worktrees/{slug}/
 Run \`cd {absolute_path_to}/.worktrees/{slug}/\` before doing any work.
 All file reads, writes, and commands should use this worktree path, not the main repo.
+
+NEVER use \`git checkout\` or \`git checkout -b\` on session/ branches. The worktree IS the checkout — just \`cd\` into it. Running \`git checkout session/{slug}\` will fail with a fatal error because the branch is locked by the worktree.
 
 Plan context: [relevant plan sections]
 
