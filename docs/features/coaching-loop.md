@@ -59,13 +59,19 @@ To add a future skill, add an entry to `SKILL_DETECTORS` — the coach picks it 
 
 ## Flow
 
-The auto-continue system uses a two-path routing strategy. SDLC jobs (those with `[stage]` entries in `AgentSession.history`) use pipeline stage progress as the primary signal. Non-SDLC jobs (casual chat, Q&A) use the LLM classifier.
+The auto-continue system uses a two-path routing strategy. SDLC jobs use pipeline stage progress as the primary signal. Non-SDLC jobs (casual chat, Q&A) use the LLM classifier.
+
+An SDLC job is identified by `AgentSession.is_sdlc_job()`, which checks two signals in order:
+1. **Primary**: `classification_type == "sdlc"` -- set at input routing time by `tools/classifier.py`
+2. **Fallback**: `[stage]` entries in `AgentSession.history` -- for legacy sessions or sessions that have stage progress from `session_progress` calls
+
+The `classification_type` check is the authoritative signal because it is set once at classification time and propagated through auto-continue via `_enqueue_continuation()`. The history fallback catches sessions that predate the `sdlc` classification type.
 
 ```
 Agent Output
     |
     v
-Is SDLC job? (check AgentSession.history for [stage] entries)
+Is SDLC job? (classification_type == "sdlc" OR [stage] entries in history)
     |
     +-- YES: Stage-Aware Path
     |     |
@@ -128,6 +134,12 @@ Path B was added to prevent informational answers (e.g., "The summarizer works b
 - **SDLC jobs**: `MAX_AUTO_CONTINUES_SDLC = 10` (stage progress is the real termination signal; counter is a safety net)
 
 Both caps are defined in `agent/job_queue.py`. The effective cap is selected based on `AgentSession.is_sdlc_job()`.
+
+### Classification Type Propagation
+
+When `_enqueue_continuation()` re-enqueues a job for auto-continue, it passes `classification_type=job.classification_type` to `enqueue_job()`. This ensures the continuation job's `AgentSession` record inherits the original session's classification type. Without this propagation, continuation jobs would get `classification_type=None`, causing `is_sdlc_job()` to fail on the new record and losing the SDLC routing, stage progress display, and structured template rendering.
+
+The `tools/classifier.py` module supports four classification types: `bug`, `feature`, `chore`, and `sdlc`. The `sdlc` type is used for messages that reference the SDLC pipeline (e.g., "SDLC issue 274", "/sdlc", "run the pipeline for issue #42").
 
 ## Error-Classified Output Bypass (Crash Guard)
 
