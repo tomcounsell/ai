@@ -40,9 +40,7 @@ class TestExtractArtifacts:
         assert "https://sentry.io/issues/123" in artifacts["urls"]
 
     def test_extracts_files_changed(self):
-        text = (
-            "modified: src/main.py\ncreated: tests/test_new.py\ndeleted: old_file.txt"
-        )
+        text = "modified: src/main.py\ncreated: tests/test_new.py\ndeleted: old_file.txt"
         artifacts = extract_artifacts(text)
         assert "files_changed" in artifacts
         assert "src/main.py" in artifacts["files_changed"]
@@ -315,10 +313,7 @@ class TestClassificationResult:
             reason="Test",
             coaching_message="You said 'should work' but didn't show test output.",
         )
-        assert (
-            result.coaching_message
-            == "You said 'should work' but didn't show test output."
-        )
+        assert result.coaching_message == "You said 'should work' but didn't show test output."
 
     def test_confidence_range(self):
         """Confidence is a float between 0.0 and 1.0."""
@@ -364,18 +359,14 @@ class TestParseClassificationResponse:
 
     def test_markdown_code_fences(self):
         """Handles JSON wrapped in markdown code fences."""
-        raw = (
-            '```json\n{"type": "completion", "confidence": 0.88, "reason": "done"}\n```'
-        )
+        raw = '```json\n{"type": "completion", "confidence": 0.88, "reason": "done"}\n```'
         result = _parse_classification_response(raw)
         assert result is not None
         assert result.output_type == OutputType.COMPLETION
 
     def test_code_fences_no_language(self):
         """Handles code fences without language tag."""
-        raw = (
-            '```\n{"type": "status", "confidence": 0.75, "reason": "in progress"}\n```'
-        )
+        raw = '```\n{"type": "status", "confidence": 0.75, "reason": "in progress"}\n```'
         result = _parse_classification_response(raw)
         assert result is not None
         assert result.output_type == OutputType.STATUS_UPDATE
@@ -418,10 +409,7 @@ class TestParseClassificationResponse:
         )
         result = _parse_classification_response(raw)
         assert result is not None
-        assert (
-            result.coaching_message
-            == "You said 'should work' — run the tests and share output."
-        )
+        assert result.coaching_message == "You said 'should work' — run the tests and share output."
 
     def test_coaching_message_absent_defaults_none(self):
         """When coaching_message is missing from JSON, it defaults to None."""
@@ -467,12 +455,12 @@ class TestParseClassificationResponse:
             )
             result = _parse_classification_response(raw)
             assert result is not None
-            assert (
-                result.coaching_message is None
-            ), f"coaching_message should be None for {type_str}"
-            assert (
-                result.was_rejected_completion is False
-            ), f"was_rejected_completion should be False for {type_str}"
+            assert result.coaching_message is None, (
+                f"coaching_message should be None for {type_str}"
+            )
+            assert result.was_rejected_completion is False, (
+                f"was_rejected_completion should be False for {type_str}"
+            )
 
     def test_coaching_message_on_non_status_ignored_for_rejection(self):
         """Even if LLM mistakenly sets coaching_message on completion, was_rejected stays False."""
@@ -520,9 +508,7 @@ class TestClassifyWithHeuristics:
         assert result.output_type == OutputType.QUESTION
 
     def test_error_pattern(self):
-        result = _classify_with_heuristics(
-            "Error: ModuleNotFoundError: No module named 'foo'"
-        )
+        result = _classify_with_heuristics("Error: ModuleNotFoundError: No module named 'foo'")
         assert result.output_type == OutputType.ERROR
         assert result.confidence >= 0.80
 
@@ -540,15 +526,11 @@ class TestClassifyWithHeuristics:
         assert result.confidence >= 0.80
 
     def test_blocker_permission(self):
-        result = _classify_with_heuristics(
-            "Permission denied when accessing the deployment config"
-        )
+        result = _classify_with_heuristics("Permission denied when accessing the deployment config")
         assert result.output_type == OutputType.BLOCKER
 
     def test_blocker_cannot_proceed(self):
-        result = _classify_with_heuristics(
-            "Cannot proceed without database credentials"
-        )
+        result = _classify_with_heuristics("Cannot proceed without database credentials")
         assert result.output_type == OutputType.BLOCKER
 
     def test_completion_done(self):
@@ -557,9 +539,7 @@ class TestClassifyWithHeuristics:
         assert result.confidence >= 0.80
 
     def test_completion_pr_url(self):
-        result = _classify_with_heuristics(
-            "PR created: https://github.com/org/repo/pull/42"
-        )
+        result = _classify_with_heuristics("PR created: https://github.com/org/repo/pull/42")
         assert result.output_type == OutputType.COMPLETION
 
     def test_completion_pushed(self):
@@ -579,9 +559,7 @@ class TestClassifyWithHeuristics:
         """
         result = _classify_with_heuristics("Analyzing the codebase structure now")
         assert result.output_type == OutputType.QUESTION
-        assert (
-            result.confidence == 0.80
-        )  # At threshold to avoid redundant gate re-conversion
+        assert result.confidence == 0.80  # At threshold to avoid redundant gate re-conversion
 
     def test_default_running_tests(self):
         """No explicit status pattern — falls to conservative QUESTION default."""
@@ -629,23 +607,17 @@ class TestClassifyWithHeuristics:
 
     def test_approval_gate_shall_i_proceed(self):
         """'shall I proceed' triggers QUESTION."""
-        result = _classify_with_heuristics(
-            "Plan is ready. Shall I proceed with the build?"
-        )
+        result = _classify_with_heuristics("Plan is ready. Shall I proceed with the build?")
         assert result.output_type == OutputType.QUESTION
 
     def test_approval_gate_awaiting_approval(self):
         """'awaiting approval' triggers QUESTION."""
-        result = _classify_with_heuristics(
-            "PR is up, awaiting your approval before merging"
-        )
+        result = _classify_with_heuristics("PR is up, awaiting your approval before merging")
         assert result.output_type == OutputType.QUESTION
 
     def test_approval_gate_let_me_know_when(self):
         """'let me know when' triggers QUESTION."""
-        result = _classify_with_heuristics(
-            "Let me know when you want me to start the migration"
-        )
+        result = _classify_with_heuristics("Let me know when you want me to start the migration")
         assert result.output_type == OutputType.QUESTION
 
 
@@ -799,9 +771,7 @@ class TestClassifyOutput:
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch(
-                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
-            ),
+            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("Should I use approach A or B?")
 
@@ -820,9 +790,7 @@ class TestClassifyOutput:
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch(
-                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
-            ),
+            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("Some ambiguous output")
 
@@ -849,9 +817,7 @@ class TestClassifyOutput:
     async def test_no_api_key_falls_back_to_heuristics(self):
         """When no API key, heuristics are used."""
         with patch("utils.api_keys.get_anthropic_api_key", return_value=""):
-            result = await classify_output(
-                "Error: ModuleNotFoundError: No module named 'foo'"
-            )
+            result = await classify_output("Error: ModuleNotFoundError: No module named 'foo'")
 
         assert result.output_type == OutputType.ERROR
 
@@ -865,9 +831,7 @@ class TestClassifyOutput:
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch(
-                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
-            ),
+            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("Done. Committed abc1234.")
 
@@ -880,18 +844,14 @@ class TestClassifyOutput:
         long_text = "x" * 5000
         mock_response = AsyncMock()
         mock_response.content = [
-            AsyncMock(
-                text='{"type": "status", "confidence": 0.90, "reason": "progress report"}'
-            )
+            AsyncMock(text='{"type": "status", "confidence": 0.90, "reason": "progress report"}')
         ]
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch(
-                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
-            ),
+            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output(long_text)
 
@@ -918,9 +878,7 @@ class TestClassifyOutput:
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch(
-                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
-            ),
+            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("I think the bug is fixed now. Should work.")
 
@@ -944,16 +902,12 @@ class TestClassifyOutput:
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch(
-                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
-            ),
+            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output("All tests pass. Task complete.")
 
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert (
-            result.coaching_message == "Paste the pytest output with pass/fail counts."
-        )
+        assert result.coaching_message == "Paste the pytest output with pass/fail counts."
         assert result.was_rejected_completion is True
 
     @pytest.mark.asyncio
@@ -972,9 +926,7 @@ class TestClassifyOutput:
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch(
-                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
-            ),
+            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
         ):
             result = await classify_output(
                 "All 42 tests passed. Committed abc1234. PR: https://github.com/org/repo/pull/99"
@@ -1043,16 +995,12 @@ class TestComposeStructuredSummary:
         assert "• Shipped it" in result
 
     def test_questions_appended(self):
-        result = _compose_structured_summary(
-            "• Done\n---\n? Should I merge?", session=None
-        )
+        result = _compose_structured_summary("• Done\n---\n? Should I merge?", session=None)
         assert "? Should I merge?" in result
         assert "• Done" in result
 
     def test_not_completion_uses_pending_emoji(self):
-        result = _compose_structured_summary(
-            "• Working on it", session=None, is_completion=False
-        )
+        result = _compose_structured_summary("• Working on it", session=None, is_completion=False)
         assert "⏳" in result
 
 
@@ -1093,9 +1041,7 @@ class TestNoMessageEcho:
         session.message_text = "What time is it?"
         session.status = "completed"
 
-        result = _compose_structured_summary(
-            "It's 3pm UTC+7", session=session, is_completion=True
-        )
+        result = _compose_structured_summary("It's 3pm UTC+7", session=session, is_completion=True)
         first_line = result.split("\n")[0]
         assert first_line.strip() in ("✅", "⏳", "❌")
         assert "What time is it?" not in first_line
@@ -1231,9 +1177,7 @@ class TestRenderStageProgress:
             "REVIEW": "pending",
             "DOCS": "pending",
         }
-        session.get_links.return_value = {
-            "issue": "https://github.com/org/repo/issues/243"
-        }
+        session.get_links.return_value = {"issue": "https://github.com/org/repo/issues/243"}
         result = _render_stage_progress(session)
         assert "ISSUE 243" in result
         assert "☑ PLAN" in result
@@ -1277,9 +1221,7 @@ class TestRenderLinkFooter:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.get_links.return_value = {
-            "issue": "https://github.com/org/repo/issues/190"
-        }
+        session.get_links.return_value = {"issue": "https://github.com/org/repo/issues/190"}
         result = _render_link_footer(session)
         assert "Issue #190" in result
         assert "https://github.com/org/repo/issues/190" in result
@@ -1399,9 +1341,7 @@ class TestComposeStructuredSummaryWithSession:
         }
         session.get_links.return_value = {}
 
-        result = _compose_structured_summary(
-            "It's 3pm UTC+7", session=session, is_completion=True
-        )
+        result = _compose_structured_summary("It's 3pm UTC+7", session=session, is_completion=True)
 
         # No stage-related content for non-SDLC
         assert "ISSUE" not in result
@@ -1484,3 +1424,280 @@ class TestSummarizationBypass:
         should_summarize = text and (is_sdlc or len(text) >= 500)
 
         assert not should_summarize
+
+
+class TestQuestionFabricationPrevention:
+    """Tests for anti-fabrication rules in the summarizer (issue #280).
+
+    The summarizer must NEVER fabricate questions from declarative statements.
+    Only explicit questions (sentences ending in "?" directed at the human)
+    may appear in the "?" section or set the expectations field.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_questions_fabricated_from_declarative_statements(self):
+        """Declarative planned work must produce expectations=None, no '?' lines."""
+        agent_output = (
+            "I will add sdlc to classifier categories. "
+            "I will fix auto-continue to carry forward session state."
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Planning classifier and auto-continue fixes",
+                response=(
+                    "• Adding sdlc to classifier categories\n"
+                    "• Fixing auto-continue session state propagation"
+                ),
+                expectations=None,
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is None
+        # Verify no --- separator (which precedes questions)
+        assert "\n---\n" not in result.text
+
+    @pytest.mark.asyncio
+    async def test_explicit_questions_preserved_verbatim(self):
+        """Real questions in agent output must be preserved in expectations."""
+        # Input must be longer than the mock response to avoid the
+        # "summary longer than original" safety fallback
+        agent_output = (
+            "I've completed building the authentication module with token rotation, "
+            "session management, and retry logic. The implementation includes proper "
+            "error handling for all edge cases including network timeouts, invalid "
+            "tokens, and rate limiting. All 12 tests are passing with full coverage.\n\n"
+            "Should we use exponential backoff or fixed intervals?"
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Auth module with backoff decision",
+                response=(
+                    "• Built auth module with token rotation\n"
+                    "• 12 tests passing\n---\n"
+                    "? Should we use exponential backoff or fixed intervals?"
+                ),
+                expectations="Should we use exponential backoff or fixed intervals?",
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is not None
+        assert "exponential backoff" in result.expectations
+        assert "? Should we use exponential backoff or fixed intervals?" in result.text
+
+    @pytest.mark.asyncio
+    async def test_mixed_declarative_and_questions(self):
+        """Only explicit questions surfaced; declarative statements stay as bullets."""
+        agent_output = (
+            "Implemented retry logic with 3 attempts. "
+            "Refactored the error handler to use structured exceptions.\n\n"
+            "The API rate limit is 100/min — should we add client-side throttling?"
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Retry logic with rate limit question",
+                response=(
+                    "• Implemented retry logic with 3 attempts\n"
+                    "• Refactored error handler to structured exceptions\n---\n"
+                    "? Should we add client-side throttling?"
+                ),
+                expectations="Should we add client-side throttling?",
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is not None
+        assert "throttling" in result.expectations
+        # The retry logic should be a bullet, not a question
+        assert "retry" in result.text.lower()
+        # Only one question line
+        lines = result.text.split("\n")
+        question_lines = [line for line in lines if line.strip().startswith("?")]
+        assert len(question_lines) == 1
+        assert "throttling" in question_lines[0]
+
+    @pytest.mark.asyncio
+    async def test_future_tense_plans_not_turned_into_questions(self):
+        """'Will do X' statements must not become questions."""
+        agent_output = (
+            "Next steps: will update the migration script, "
+            "will add index to users table, will run load test."
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Planning migration and performance work",
+                response=(
+                    "• Will update migration script\n"
+                    "• Will add index to users table\n"
+                    "• Will run load test"
+                ),
+                expectations=None,
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is None
+        assert "\n---\n" not in result.text
+
+    @pytest.mark.asyncio
+    async def test_rhetorical_questions_not_surfaced(self):
+        """Rhetorical questions in agent reasoning must not set expectations."""
+        agent_output = (
+            "Why was this never caught? Because the test suite didn't cover "
+            "this path. Fixed by adding integration test."
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Fixed missing test coverage",
+                response="• Fixed missing test coverage by adding integration test",
+                expectations=None,
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is None
+
+    @pytest.mark.asyncio
+    async def test_code_snippet_with_question_marks_not_treated_as_questions(self):
+        """Question marks inside code snippets must not be extracted as questions."""
+        agent_output = (
+            "Fixed the regex: `if line.endswith('?'):` now handles edge cases. All 8 tests passing."
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Fixed regex edge case handling",
+                response="• Fixed regex `endswith('?')` edge case\n• 8 tests passing",
+                expectations=None,
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is None
+        assert "\n---\n" not in result.text
+
+    @pytest.mark.asyncio
+    async def test_conditional_statements_not_treated_as_questions(self):
+        """'If X' and 'whether Y' statements must not become questions."""
+        agent_output = (
+            "If the CI pipeline fails, the deploy will be blocked. "
+            "Whether to retry depends on the error type."
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="CI pipeline deployment notes",
+                response="• CI failure blocks deploy; retry depends on error type",
+                expectations=None,
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is None
+
+    def test_prompt_contains_anti_fabrication_instruction(self):
+        """Verify SUMMARIZER_SYSTEM_PROMPT includes anti-fabrication rules."""
+        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+
+        assert "NEVER fabricate questions" in SUMMARIZER_SYSTEM_PROMPT
+        assert "NEVER reframe declarative statements as questions" in SUMMARIZER_SYSTEM_PROMPT
+        assert "VERBATIM" in SUMMARIZER_SYSTEM_PROMPT
+
+    def test_prompt_contains_negative_examples(self):
+        """Verify SUMMARIZER_SYSTEM_PROMPT includes negative examples."""
+        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+
+        assert "WRONG" in SUMMARIZER_SYSTEM_PROMPT
+        assert "FABRICATED" in SUMMARIZER_SYSTEM_PROMPT
+        assert "I will add sdlc to classifier categories" in SUMMARIZER_SYSTEM_PROMPT
+
+    def test_expectations_tool_schema_updated(self):
+        """Verify the tool schema description for expectations reflects anti-fabrication."""
+        from bridge.summarizer import STRUCTURED_SUMMARY_TOOL
+
+        schema = STRUCTURED_SUMMARY_TOOL["input_schema"]
+        expectations_desc = schema["properties"]["expectations"]["description"]
+        assert "explicit question" in expectations_desc.lower()
+
+
+class TestQuestionFabricationIntegration:
+    """Integration tests using real Haiku API to validate anti-fabrication behavior."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        not __import__("os").environ.get("ANTHROPIC_API_KEY"),
+        reason="ANTHROPIC_API_KEY not set",
+    )
+    async def test_real_haiku_no_fabricated_questions(self):
+        """Real Haiku should not fabricate questions from declarative statements."""
+        # This is the actual raw output pattern that triggered the bug
+        agent_output = (
+            "I identified two root causes for the session tracking bugs:\n\n"
+            "1. The classifier doesn't have an 'sdlc' category. I will add sdlc "
+            "to the classifier categories so it can properly identify SDLC work.\n\n"
+            "2. Auto-continue doesn't carry forward session state. I will fix "
+            "auto-continue to propagate the classification_type and branch_name "
+            "from the parent session to the continued session.\n\n"
+            "Both fixes are straightforward — modifying the classifier prompt and "
+            "the auto-continue handler in the bridge."
+        )
+        result = await summarize_response(agent_output)
+
+        assert result.was_summarized is True
+        assert result.expectations is None, (
+            f"Haiku fabricated expectations from declarative output: {result.expectations}"
+        )
+        # No ? prefix lines should appear
+        lines = result.text.split("\n")
+        question_lines = [line for line in lines if line.strip().startswith("?")]
+        assert len(question_lines) == 0, f"Haiku fabricated question lines: {question_lines}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        not __import__("os").environ.get("ANTHROPIC_API_KEY"),
+        reason="ANTHROPIC_API_KEY not set",
+    )
+    async def test_real_haiku_preserves_real_questions(self):
+        """Real Haiku should preserve genuine questions in expectations."""
+        agent_output = (
+            "Completed the database schema refactor. All 15 tests passing.\n"
+            "Committed abc1234 and pushed to session/db-refactor.\n\n"
+            "Should I merge to main or wait for the design review?"
+        )
+        result = await summarize_response(agent_output)
+
+        assert result.was_summarized is True
+        assert result.expectations is not None, (
+            "Haiku failed to surface the genuine question about merging"
+        )
+        assert "merge" in result.expectations.lower() or "review" in result.expectations.lower()
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        not __import__("os").environ.get("ANTHROPIC_API_KEY"),
+        reason="ANTHROPIC_API_KEY not set",
+    )
+    async def test_real_haiku_sdlc_work_summary_no_questions(self):
+        """SDLC completion output without questions should have expectations=None."""
+        agent_output = (
+            "Plan execution complete for fix-session-tracking.\n\n"
+            "Changes made:\n"
+            "- Modified bridge/summarizer.py: updated classifier categories\n"
+            "- Modified bridge/telegram_bridge.py: fixed auto-continue propagation\n"
+            "- Created tests/test_session_tracking.py: 8 new tests\n\n"
+            "Test results: 135 passed, 0 failed\n"
+            "Committed def5678 and pushed to session/fix-session-tracking.\n"
+            "PR created: https://github.com/org/repo/pull/277"
+        )
+        result = await summarize_response(agent_output)
+
+        assert result.was_summarized is True
+        assert result.expectations is None, (
+            f"Haiku fabricated expectations from SDLC completion: {result.expectations}"
+        )

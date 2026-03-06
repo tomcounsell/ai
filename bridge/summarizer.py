@@ -10,6 +10,12 @@ for attachment.
 
 Output classification determines whether agent output needs human
 input (question/blocker) or can auto-continue (status/completion).
+
+Anti-fabrication rule: The summarizer must NEVER fabricate questions
+that are not verbatim present in the raw agent output. Only explicit
+questions (sentences ending in "?" directed at the human) may appear
+in the "?" section or set the expectations field. Declarative statements
+like "I will do X" must never be reframed as questions.
 """
 
 import json
@@ -145,8 +151,9 @@ STRUCTURED_SUMMARY_TOOL = {
             "expectations": {
                 "type": ["string", "null"],
                 "description": (
-                    "What specific input/decision/approval is needed from the human, "
-                    "or null if the work is self-contained and no input is needed."
+                    "Set ONLY when the raw output contains an explicit question directed "
+                    "at the human (a sentence ending in '?'). Copy it verbatim. "
+                    "Null when no explicit questions exist — declarative plans are NOT questions."
                 ),
             },
         },
@@ -888,10 +895,12 @@ Telegram messages") — NOT vague (e.g., "Working on a feature").
 
 2. **response**: The Telegram message text. Follow the FORMAT RULES below.
 
-3. **expectations**: What specific input, decision, or approval the agent needs from \
-the human. Set to null when the work is self-contained and no human input is needed. \
-Examples of non-null: "Approve the PR for merge", "Choose between approach A or B", \
-"Confirm the confidence threshold of 0.80 is acceptable".
+3. **expectations**: Set ONLY when the raw output contains an explicit question directed at \
+the human (a sentence ending in "?" that asks for a decision, approval, or input). Copy the \
+question verbatim. Set to null when no explicit questions exist — even if the agent describes \
+plans or next steps. Declarative statements are NOT questions. \
+Examples of non-null: "Should we use approach A or B?", "Approve the PR for merge?", \
+"Is the confidence threshold of 0.80 acceptable?".
 
 Input: ANY output from an autonomous developer — work summaries, conversational replies, \
 design discussions, Q&A answers, status updates, or technical analysis. May include \
@@ -916,8 +925,14 @@ FORMAT RULES for the **response** field (adaptive based on content type):
    Do NOT include any issue/PR URLs — those are rendered from session data automatically.
    Focus on WHAT was accomplished, not process details.
 
-   If the output contains questions, decisions needing input, or items requiring human approval, \
-   list them AFTER the bullets, separated by "---" on its own line. Prefix each with "? ":
+   If the output contains EXPLICIT questions directed at the human (sentences that literally \
+   end with "?" and ask the human to decide or provide input), list them AFTER the bullets, \
+   separated by "---" on its own line. Prefix each with "? ":
+
+   NEVER fabricate questions. NEVER reframe declarative statements as questions. \
+   If the agent says "I will do X", that is NOT a question — it is a plan. \
+   Only surface questions that are VERBATIM in the raw output.
+
    Example:
    • Built auth token rotation with retry
    • 12 tests passing
@@ -925,7 +940,15 @@ FORMAT RULES for the **response** field (adaptive based on content type):
    ? Should we use exponential backoff or fixed intervals?
    ? 2 nits found in review — skip or patch?
 
-   If there are no questions, do NOT include the "---" separator.
+   WRONG — do NOT do this:
+   Raw: "I will add sdlc to classifier categories"
+   Output: ? Should classifier be updated to output 'sdlc'?   <-- FABRICATED, WRONG
+
+   RIGHT:
+   Raw: "I will add sdlc to classifier categories"
+   Output: • Added sdlc to classifier categories   <-- No question, no "---"
+
+   If there are no explicit questions in the raw output, do NOT include the "---" separator.
 
 5. STATUS UPDATES / WORK WITH CONTEXT: 2-4 bullet points starting with "• "
 
