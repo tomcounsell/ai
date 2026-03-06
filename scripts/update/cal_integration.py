@@ -64,9 +64,7 @@ def verify_global_hook(project_dir: Path) -> CalendarHookResult:
 
         # Check UserPromptSubmit hook
         user_prompt_hooks = hooks.get("UserPromptSubmit", [])
-        has_user_prompt = any(
-            "calendar_prompt_hook" in str(h) for h in user_prompt_hooks
-        )
+        has_user_prompt = any("calendar_prompt_hook" in str(h) for h in user_prompt_hooks)
 
         # Check Stop hook
         stop_hooks = hooks.get("Stop", [])
@@ -192,18 +190,29 @@ def verify_hook_model(project_dir: Path) -> str | None:
     try:
         result = subprocess.run(
             [
-                "curl", "-s", "--max-time", "5",
+                "curl",
+                "-s",
+                "--max-time",
+                "5",
                 "https://api.anthropic.com/v1/messages",
-                "-H", f"x-api-key: {api_key}",
-                "-H", "anthropic-version: 2023-06-01",
-                "-H", "content-type: application/json",
-                "-d", json.dumps({
-                    "model": model_id,
-                    "max_tokens": 1,
-                    "messages": [{"role": "user", "content": "hi"}],
-                }),
+                "-H",
+                f"x-api-key: {api_key}",
+                "-H",
+                "anthropic-version: 2023-06-01",
+                "-H",
+                "content-type: application/json",
+                "-d",
+                json.dumps(
+                    {
+                        "model": model_id,
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "hi"}],
+                    }
+                ),
             ],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
         response = json.loads(result.stdout)
         if response.get("type") == "error":
@@ -267,9 +276,7 @@ def generate_calendar_config(project_dir: Path) -> CalendarConfigResult:
     existing_calendars: dict[str, str] = {}
     if config_path.exists():
         try:
-            existing_calendars = json.loads(config_path.read_text()).get(
-                "calendars", {}
-            )
+            existing_calendars = json.loads(config_path.read_text()).get("calendars", {})
         except (json.JSONDecodeError, KeyError):
             pass
 
@@ -309,9 +316,7 @@ def generate_calendar_config(project_dir: Path) -> CalendarConfigResult:
     from dotenv import load_dotenv
 
     load_dotenv(project_dir / ".env")
-    active_projects = [
-        p.strip() for p in os.getenv("ACTIVE_PROJECTS", "").split(",") if p.strip()
-    ]
+    active_projects = [p.strip() for p in os.getenv("ACTIVE_PROJECTS", "").split(",") if p.strip()]
 
     # Match each project to a calendar
     for project_key in active_projects:

@@ -145,9 +145,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
             return result
 
         if result.git_result.commit_count == 0:
-            log(
-                f"Already up to date ({git.get_short_sha(project_dir)})", v, always=True
-            )
+            log(f"Already up to date ({git.get_short_sha(project_dir)})", v, always=True)
         else:
             log(f"Pulled {result.git_result.commit_count} commit(s):", v, always=True)
             for commit in result.git_result.commits[:5]:
@@ -195,9 +193,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
     # Step 2: Check for pending critical upgrades
     pending = git.check_upgrade_pending(project_dir)
     if pending.pending:
-        log(
-            f"WARNING: Critical dependency upgrade pending since {pending.timestamp}", v
-        )
+        log(f"WARNING: Critical dependency upgrade pending since {pending.timestamp}", v)
         result.warnings.append(f"Critical upgrade pending: {pending.reason}")
 
     # Step 3: Dependency sync
@@ -272,9 +268,7 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
                 if verify.pull_ollama_model(ollama_model):
                     log(f"Ollama model {ollama_model} pulled", v)
                 else:
-                    result.warnings.append(
-                        f"Failed to pull Ollama model {ollama_model}"
-                    )
+                    result.warnings.append(f"Failed to pull Ollama model {ollama_model}")
             else:
                 log("Ollama not installed, skipping", v)
 
@@ -445,9 +439,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Valor update system")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--full", action="store_true", help="Full update (all checks)")
-    mode.add_argument(
-        "--cron", action="store_true", help="Telegram /update (summary + log file)"
-    )
+    mode.add_argument("--cron", action="store_true", help="Telegram /update (summary + log file)")
     mode.add_argument("--verify", action="store_true", help="Verify only (no changes)")
 
     parser.add_argument("--json", action="store_true", help="Output JSON")
