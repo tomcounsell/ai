@@ -96,6 +96,10 @@ class AgentSession(Model):
     plan_url = Field(null=True)
     pr_url = Field(null=True)
 
+    # === Semantic routing fields ===
+    context_summary = Field(null=True, max_length=200)  # What this session is about
+    expectations = Field(null=True, max_length=500)  # What the agent needs from the human
+
     # === Compatibility ===
 
     @property
