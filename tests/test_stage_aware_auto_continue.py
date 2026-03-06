@@ -55,8 +55,34 @@ class TestIsSDLCJob:
         ]
         assert session.is_sdlc_job() is False
 
+    def test_classification_type_sdlc_returns_true(self):
+        """Session with classification_type='sdlc' is an SDLC job (primary check).
+
+        This tests the fix for issue #276 Bug 1: the classifier now outputs
+        'sdlc' as a valid type, and is_sdlc_job() uses classification_type
+        as the primary signal before falling back to history checks.
+        """
+        session = AgentSession()
+        session.history = []  # No stage history
+        session.classification_type = "sdlc"
+        assert session.is_sdlc_job() is True
+
+    def test_classification_type_feature_with_no_stages_returns_false(self):
+        """Session classified as 'feature' with no stage history is not SDLC."""
+        session = AgentSession()
+        session.history = ["[user] Add a feature"]
+        session.classification_type = "feature"
+        assert session.is_sdlc_job() is False
+
+    def test_classification_type_sdlc_overrides_empty_history(self):
+        """classification_type='sdlc' is sufficient even with no history at all."""
+        session = AgentSession()
+        session.history = None
+        session.classification_type = "sdlc"
+        assert session.is_sdlc_job() is True
+
     def test_stage_entry_returns_true(self):
-        """Session with a [stage] entry is an SDLC job."""
+        """Session with a [stage] entry is an SDLC job (fallback check)."""
         session = AgentSession()
         session.history = [
             "[user] /sdlc 178",

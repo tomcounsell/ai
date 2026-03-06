@@ -107,9 +107,54 @@ class TestLlmClassification:
     )
     def test_questions_classified_as_question(self, message):
         result = classify_work_request(message)
-        assert (
-            result == "question"
-        ), f"Expected 'question' for: {message}, got: {result}"
+        assert result == "question", f"Expected 'question' for: {message}, got: {result}"
+
+
+class TestClassifierSdlcType:
+    """Tests for tools/classifier.py accepting 'sdlc' as a valid classification type.
+
+    These are unit tests that mock the Anthropic API to verify the classifier
+    accepts and validates 'sdlc' responses (fixes issue #276, Bug 1).
+    """
+
+    def test_sdlc_type_accepted_by_validator(self):
+        """The classifier validation logic accepts 'sdlc' as a valid type."""
+        from unittest.mock import MagicMock, patch
+
+        # Mock the Anthropic API to return an sdlc classification
+        mock_response = MagicMock()
+        mock_response.content = [
+            MagicMock(
+                text='{"type": "sdlc", "confidence": 0.95, "reason": "SDLC pipeline reference"}'
+            )
+        ]
+        mock_client = MagicMock()
+        mock_client.messages.create.return_value = mock_response
+
+        with (
+            patch("tools.classifier.anthropic.Anthropic", return_value=mock_client),
+            patch("utils.api_keys.get_anthropic_api_key", return_value="test-key"),
+        ):
+            from tools.classifier import classify_request
+
+            result = classify_request("SDLC issue 274")
+
+        assert result["type"] == "sdlc"
+        assert result["confidence"] == 0.95
+
+    def test_sdlc_prompt_includes_sdlc_category(self):
+        """The classification prompt includes the 'sdlc' category."""
+        from tools.classifier import CLASSIFICATION_PROMPT
+
+        assert "sdlc" in CLASSIFICATION_PROMPT.lower()
+        assert '"sdlc"' in CLASSIFICATION_PROMPT
+
+    def test_all_four_types_in_prompt(self):
+        """The prompt lists all four classification types."""
+        from tools.classifier import CLASSIFICATION_PROMPT
+
+        for type_name in ["bug", "feature", "chore", "sdlc"]:
+            assert type_name in CLASSIFICATION_PROMPT
 
 
 class TestProcessNarrationStripping:

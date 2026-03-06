@@ -1,6 +1,6 @@
 """Work request classification using Haiku.
 
-Classifies incoming work requests as bug, feature, or chore using
+Classifies incoming work requests as bug, feature, chore, or sdlc using
 the fast Haiku model (~$0.0001/request). Returns structured JSON
 with type, confidence score, and reasoning.
 
@@ -9,6 +9,9 @@ Usage:
 
     result = classify_request("Fix the broken login button")
     # Returns: {"type": "bug", "confidence": 0.95, "reason": "Reports broken functionality"}
+
+    result = classify_request("SDLC issue 274")
+    # Returns: {"type": "sdlc", "confidence": 0.95, "reason": "References SDLC pipeline work"}
 """
 
 import json
@@ -24,13 +27,15 @@ CLASSIFICATION_PROMPT = """Classify this work request into exactly one category:
 - bug: Something broken that previously worked
 - feature: New functionality or capability
 - chore: Maintenance, refactoring, documentation, dependencies
+- sdlc: References the SDLC pipeline, mentions "/sdlc", "issue #N", \
+"run the pipeline", or asks for pipeline/build/plan execution
 
 Request: {message}
 
 Additional context: {context}
 
 Respond with JSON only:
-{{"type": "bug"|"feature"|"chore", "confidence": 0.0-1.0, "reason": "brief explanation"}}"""
+{{"type": "bug"|"feature"|"chore"|"sdlc", "confidence": 0.0-1.0, "reason": "brief explanation"}}"""
 
 
 def classify_request(message: str, context: str = "") -> dict:
@@ -42,7 +47,7 @@ def classify_request(message: str, context: str = "") -> dict:
 
     Returns:
         Dict with keys:
-        - type: "bug"|"feature"|"chore"
+        - type: "bug"|"feature"|"chore"|"sdlc"
         - confidence: float between 0.0 and 1.0
         - reason: brief explanation of classification
 
@@ -88,7 +93,7 @@ def classify_request(message: str, context: str = "") -> dict:
         if "type" not in result or "confidence" not in result or "reason" not in result:
             raise ValueError(f"Invalid classification response structure: {result}")
 
-        if result["type"] not in ["bug", "feature", "chore"]:
+        if result["type"] not in ["bug", "feature", "chore", "sdlc"]:
             raise ValueError(f"Invalid classification type: {result['type']}")
 
         if not isinstance(result["confidence"], int | float) or not (
@@ -115,7 +120,7 @@ async def classify_request_async(message: str, context: str = "") -> dict:
 
     Returns:
         Dict with keys:
-        - type: "bug"|"feature"|"chore"
+        - type: "bug"|"feature"|"chore"|"sdlc"
         - confidence: float between 0.0 and 1.0
         - reason: brief explanation of classification
 
@@ -161,7 +166,7 @@ async def classify_request_async(message: str, context: str = "") -> dict:
         if "type" not in result or "confidence" not in result or "reason" not in result:
             raise ValueError(f"Invalid classification response structure: {result}")
 
-        if result["type"] not in ["bug", "feature", "chore"]:
+        if result["type"] not in ["bug", "feature", "chore", "sdlc"]:
             raise ValueError(f"Invalid classification type: {result['type']}")
 
         if not isinstance(result["confidence"], int | float) or not (
