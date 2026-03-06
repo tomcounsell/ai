@@ -96,6 +96,10 @@ class AgentSession(Model):
     plan_url = Field(null=True)
     pr_url = Field(null=True)
 
+    # === Semantic routing fields ===
+    context_summary = Field(null=True, max_length=200)  # What this session is about
+    expectations = Field(null=True, max_length=500)  # What the agent needs from the human
+
     # === Compatibility ===
 
     @property
@@ -172,8 +176,7 @@ class AgentSession(Model):
         logger.info(
             f"LIFECYCLE session={self.session_id} transition={old_status}\u2192{new_status} "
             f"job_id={self.job_id} project={self.project_key} "
-            f"duration_in_prev_state={duration:.1f}s"
-            + (f' context="{context}"' if context else "")
+            f"duration_in_prev_state={duration:.1f}s" + (f' context="{context}"' if context else "")
         )
 
         # Update fields

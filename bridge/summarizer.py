@@ -2,7 +2,7 @@
 Response summarization for Telegram delivery.
 
 Long agent responses are summarized into concise PM-facing messages
-using Haiku (primary) or local Ollama (fallback). Key artifacts
+using Haiku (primary) or OpenRouter (fallback). Key artifacts
 (commit hashes, URLs, PRs) are extracted and preserved.
 
 For very long responses, the full output is saved as a .txt file
@@ -22,9 +22,9 @@ from enum import Enum
 from pathlib import Path
 
 import anthropic
-import ollama as ollama_pkg
+import httpx
 
-from config.models import MODEL_FAST
+from config.models import MODEL_FAST, OPENROUTER_HAIKU
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +32,8 @@ logger = logging.getLogger(__name__)
 FILE_ATTACH_THRESHOLD = 3000  # Attach full output as file above this
 SAFETY_TRUNCATE = 4096  # Telegram hard limit
 
-# Ollama config — model can be overridden via env var
-OLLAMA_MODEL = os.environ.get("OLLAMA_SUMMARIZER_MODEL", "qwen3:4b")
+# OpenRouter config
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Classification confidence threshold — below this, default to QUESTION
 # (conservative: pauses for human input rather than auto-continuing)
@@ -104,15 +104,55 @@ class ClassificationResult:
     output_type: OutputType
     confidence: float  # 0.0-1.0
     reason: str  # Brief explanation
-    was_rejected_completion: bool = (
-        False  # True when COMPLETION → STATUS_UPDATE downgrade
-    )
-    coaching_message: str | None = (
-        None  # LLM-generated coaching for rejected completions
-    )
-    has_workarounds: bool = (
-        False  # True when agent encountered problems it worked around
-    )
+    was_rejected_completion: bool = False  # True when COMPLETION → STATUS_UPDATE downgrade
+    coaching_message: str | None = None  # LLM-generated coaching for rejected completions
+    has_workarounds: bool = False  # True when agent encountered problems it worked around
+
+
+@dataclass
+class StructuredSummary:
+    """Structured output from the summarizer's tool_use call.
+
+    Contains the three routing fields produced by the structured_summary tool:
+    - context_summary: one-sentence session topic for routing
+    - response: the Telegram-formatted message text
+    - expectations: what the agent needs from the human, or None
+    """
+
+    context_summary: str
+    response: str
+    expectations: str | None
+
+
+# Tool schema for structured summarizer output via tool_use
+STRUCTURED_SUMMARY_TOOL = {
+    "name": "structured_summary",
+    "description": "Produce a structured summary of the developer session output.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "context_summary": {
+                "type": "string",
+                "description": (
+                    "One sentence: what this session is about (for routing). "
+                    "Be specific about the topic and scope, not vague."
+                ),
+            },
+            "response": {
+                "type": "string",
+                "description": ("The Telegram message. Follow format rules from system prompt."),
+            },
+            "expectations": {
+                "type": ["string", "null"],
+                "description": (
+                    "What specific input/decision/approval is needed from the human, "
+                    "or null if the work is self-contained and no input is needed."
+                ),
+            },
+        },
+        "required": ["context_summary", "response", "expectations"],
+    },
+}
 
 
 @dataclass
@@ -123,6 +163,8 @@ class SummarizedResponse:
     full_output_file: Path | None = None
     was_summarized: bool = False
     artifacts: dict[str, list[str]] = field(default_factory=dict)
+    context_summary: str | None = None
+    expectations: str | None = None
 
 
 def extract_artifacts(text: str) -> dict[str, list[str]]:
@@ -153,9 +195,7 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
     files_changed = re.findall(file_pat, text, re.IGNORECASE)
     files_changed += re.findall(r"^\s*[MADR]\s+(\S+)", text, re.MULTILINE)
     if files_changed:
-        artifacts["files_changed"] = list(
-            dict.fromkeys(f.strip() for f in files_changed)
-        )
+        artifacts["files_changed"] = list(dict.fromkeys(f.strip() for f in files_changed))
 
     # Test results
     test_pat = r"(\d+\s+passed" r"(?:,\s*\d+\s+(?:failed|error|warning|skipped))*)"
@@ -483,9 +523,7 @@ _AUDIT_LOG_PATH = Path(__file__).parent.parent / "logs" / "classification_audit.
 _AUDIT_LOG_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
-def _write_classification_audit(
-    text: str, result: ClassificationResult, source: str
-) -> None:
+def _write_classification_audit(text: str, result: ClassificationResult, source: str) -> None:
     """Append a JSONL entry to the classification audit log.
 
     Provides structured observability for every classify_output() call.
@@ -498,10 +536,7 @@ def _write_classification_audit(
         _AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
         # Size-based rotation
-        if (
-            _AUDIT_LOG_PATH.exists()
-            and _AUDIT_LOG_PATH.stat().st_size > _AUDIT_LOG_MAX_SIZE
-        ):
+        if _AUDIT_LOG_PATH.exists() and _AUDIT_LOG_PATH.stat().st_size > _AUDIT_LOG_MAX_SIZE:
             rotated = _AUDIT_LOG_PATH.with_suffix(".jsonl.1")
             _AUDIT_LOG_PATH.rename(rotated)
 
@@ -797,21 +832,34 @@ def _build_summary_prompt(
         parts = []
         for key, values in artifacts.items():
             parts.append(f"- {key}: {', '.join(values[:10])}")
-        artifact_section = (
-            "\n\nPreserve these artifacts verbatim:\n" + "\n".join(parts) + "\n"
-        )
+        artifact_section = "\n\nPreserve these artifacts verbatim:\n" + "\n".join(parts) + "\n"
 
     context_section = ""
     if session:
         context_parts = []
         if session.message_text:
-            context_parts.append(
-                f"Original request: {(session.message_text or '')[:200]}"
-            )
+            context_parts.append(f"Original request: {(session.message_text or '')[:200]}")
         if session.classification_type:
             context_parts.append(f"Work type: {session.classification_type}")
         if session.branch_name:
             context_parts.append(f"Branch: {session.branch_name}")
+        if hasattr(session, "work_item_slug") and session.work_item_slug:
+            context_parts.append(f"Work item: {session.work_item_slug}")
+        # Include tracked links for context
+        if hasattr(session, "get_links"):
+            links = session.get_links()
+            if links.get("issue"):
+                context_parts.append(f"Issue: {links['issue']}")
+            if links.get("plan"):
+                context_parts.append(f"Plan: {links['plan']}")
+            if links.get("pr"):
+                context_parts.append(f"PR: {links['pr']}")
+        # Include recent history for context
+        if hasattr(session, "_get_history_list"):
+            history = session._get_history_list()
+            if history:
+                recent = history[-5:]  # Last 5 entries
+                context_parts.append("Recent history: " + " | ".join(str(e) for e in recent))
         if context_parts:
             context_section = "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
 
@@ -832,6 +880,19 @@ def _write_full_output_file(text: str) -> Path:
 SUMMARIZER_SYSTEM_PROMPT = """\
 You condense a developer's messages into Telegram-length updates for a project manager.
 
+You produce STRUCTURED OUTPUT with three fields via the structured_summary tool:
+
+1. **context_summary**: One sentence describing what this session is about. Be specific \
+about the topic and scope (e.g., "Implementing semantic session routing for unthreaded \
+Telegram messages") — NOT vague (e.g., "Working on a feature").
+
+2. **response**: The Telegram message text. Follow the FORMAT RULES below.
+
+3. **expectations**: What specific input, decision, or approval the agent needs from \
+the human. Set to null when the work is self-contained and no human input is needed. \
+Examples of non-null: "Approve the PR for merge", "Choose between approach A or B", \
+"Confirm the confidence threshold of 0.80 is acceptable".
+
 Input: ANY output from an autonomous developer — work summaries, conversational replies, \
 design discussions, Q&A answers, status updates, or technical analysis. May include \
 terminal output, commit messages, file diffs, opinions, or free-form notes.
@@ -840,7 +901,7 @@ CRITICAL: Never reject, editorialize, or add meta-commentary about the input. \
 Your job is to condense, not to judge whether the content is "valid". \
 If the input is a conversational reply or opinion, condense it faithfully.
 
-FORMAT RULES (adaptive based on content type):
+FORMAT RULES for the **response** field (adaptive based on content type):
 
 1. SIMPLE COMPLETIONS: Just "Done ✅" or "Yes" or "No"
 
@@ -890,8 +951,14 @@ accomplished, not THAT you read files or analyzed code."""
 # decisions (agent should decide), finding the right approach (agent's job).
 
 
-async def _summarize_with_haiku(prompt: str) -> str | None:
-    """Try summarization via Anthropic Haiku API."""
+async def _summarize_with_haiku(prompt: str) -> StructuredSummary | None:
+    """Try structured summarization via Anthropic Haiku API using tool_use.
+
+    Returns a StructuredSummary with context_summary, response, and expectations
+    fields extracted via the structured_summary tool. Falls back to text-only
+    Haiku if tool_use fails, wrapping the result in a StructuredSummary with
+    empty routing fields.
+    """
     try:
         from utils.api_keys import get_anthropic_api_key
 
@@ -899,31 +966,142 @@ async def _summarize_with_haiku(prompt: str) -> str | None:
         if not api_key:
             logger.warning("No Anthropic API key found for summarization")
             return None
+
         client = anthropic.AsyncAnthropic(api_key=api_key)
+
+        # Try tool_use for structured output
+        try:
+            response = await client.messages.create(
+                model=MODEL_FAST,
+                max_tokens=1024,
+                system=SUMMARIZER_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": prompt}],
+                tools=[STRUCTURED_SUMMARY_TOOL],
+                tool_choice={"type": "tool", "name": "structured_summary"},
+            )
+
+            # Parse tool_use response — tool_use returns the input dict directly
+            for block in response.content:
+                if block.type == "tool_use" and block.name == "structured_summary":
+                    tool_input = block.input
+                    return StructuredSummary(
+                        context_summary=tool_input.get("context_summary", ""),
+                        response=tool_input.get("response", ""),
+                        expectations=tool_input.get("expectations"),
+                    )
+
+            logger.warning("Haiku tool_use returned no tool_use block, falling back to text")
+        except Exception as e:
+            logger.warning(f"Haiku tool_use failed, falling back to text-only: {e}")
+
+        # Fallback: text-only Haiku (no structured routing fields)
         response = await client.messages.create(
             model=MODEL_FAST,
             max_tokens=512,
             system=SUMMARIZER_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.content[0].text
+        text_result = response.content[0].text
+        return StructuredSummary(
+            context_summary="",
+            response=text_result,
+            expectations=None,
+        )
     except Exception as e:
         logger.warning(f"Haiku summarization failed: {e}")
         return None
 
 
-async def _summarize_with_ollama(prompt: str) -> str | None:
-    """Fallback: summarize via local Ollama model."""
+async def _summarize_with_openrouter(prompt: str) -> StructuredSummary | None:
+    """Fallback: summarize via OpenRouter API (Haiku model).
+
+    Uses the OpenRouter chat completions endpoint with tool_use for structured
+    output. Falls back to text-only if tool_use fails. Requires OPENROUTER_API_KEY
+    environment variable.
+    """
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        logger.warning("No OPENROUTER_API_KEY found for summarization fallback")
+        return None
+
     try:
-        client = ollama_pkg.AsyncClient()
-        response = await client.generate(
-            model=OLLAMA_MODEL,
-            prompt=prompt,
-            options={"num_predict": 512},
-        )
-        return response.get("response", "").strip() or None
+        # OpenRouter uses OpenAI-compatible format for tools
+        openrouter_tool = {
+            "type": "function",
+            "function": {
+                "name": STRUCTURED_SUMMARY_TOOL["name"],
+                "description": STRUCTURED_SUMMARY_TOOL["description"],
+                "parameters": STRUCTURED_SUMMARY_TOOL["input_schema"],
+            },
+        }
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+
+        # Try with tool_use first
+        try:
+            payload = {
+                "model": OPENROUTER_HAIKU,
+                "messages": [
+                    {"role": "system", "content": SUMMARIZER_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                "tools": [openrouter_tool],
+                "tool_choice": {
+                    "type": "function",
+                    "function": {"name": "structured_summary"},
+                },
+                "max_tokens": 1024,
+            }
+
+            async with httpx.AsyncClient(timeout=60) as client:
+                resp = await client.post(OPENROUTER_URL, headers=headers, json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+
+            # Parse tool call from response
+            message = data.get("choices", [{}])[0].get("message", {})
+            tool_calls = message.get("tool_calls", [])
+            for tc in tool_calls:
+                if tc.get("function", {}).get("name") == "structured_summary":
+                    args = json.loads(tc["function"]["arguments"])
+                    return StructuredSummary(
+                        context_summary=args.get("context_summary", ""),
+                        response=args.get("response", ""),
+                        expectations=args.get("expectations"),
+                    )
+
+            logger.warning("OpenRouter tool_use returned no tool call, falling back to text")
+        except Exception as e:
+            logger.warning(f"OpenRouter tool_use failed, falling back to text-only: {e}")
+
+        # Fallback: text-only via OpenRouter
+        payload = {
+            "model": OPENROUTER_HAIKU,
+            "messages": [
+                {"role": "system", "content": SUMMARIZER_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 512,
+        }
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(OPENROUTER_URL, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+        text_result = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+        if text_result:
+            return StructuredSummary(
+                context_summary="",
+                response=text_result,
+                expectations=None,
+            )
+        return None
     except Exception as e:
-        logger.warning(f"Ollama summarization failed: {e}")
+        logger.warning(f"OpenRouter summarization failed: {e}")
         return None
 
 
@@ -951,9 +1129,7 @@ def _parse_summary_and_questions(summary_text: str) -> tuple[str, str | None]:
     return summary_text, None
 
 
-def _compose_structured_summary(
-    summary_text: str, session=None, is_completion: bool = True
-) -> str:
+def _compose_structured_summary(summary_text: str, session=None, is_completion: bool = True) -> str:
     """Compose the full structured summary with emoji, stage line, bullets, questions, and links.
 
     Two modes:
@@ -981,14 +1157,10 @@ def _compose_structured_summary(
         try:
             from models.agent_session import AgentSession
 
-            fresh_sessions = list(
-                AgentSession.query.filter(session_id=session.session_id)
-            )
+            fresh_sessions = list(AgentSession.query.filter(session_id=session.session_id))
             if fresh_sessions:
                 session = fresh_sessions[0]
-                logger.debug(
-                    f"Refreshed session {session.session_id} for structured summary"
-                )
+                logger.debug(f"Refreshed session {session.session_id} for structured summary")
         except Exception as e:
             logger.debug(f"Could not refresh session for summary: {e}")
 
@@ -1010,9 +1182,7 @@ def _compose_structured_summary(
             f"{session.session_id if session else 'N/A'}: {stage_line}"
         )
     elif session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job():
-        logger.warning(
-            f"SDLC session {session.session_id} has no stage progress to render"
-        )
+        logger.warning(f"SDLC session {session.session_id} has no stage progress to render")
 
     # Summary text (bullets or prose)
     parts.append(bullets.strip())
@@ -1036,7 +1206,11 @@ async def summarize_response(
 ) -> SummarizedResponse:
     """Summarize an agent response for Telegram delivery.
 
-    - All non-empty responses: summarized via Haiku, then Ollama fallback
+    Uses structured tool_use output to extract context_summary, response,
+    and expectations fields. Fallback chain: Haiku tool_use -> Haiku text ->
+    OpenRouter tool_use -> OpenRouter text -> raw truncation.
+
+    - All non-empty responses: summarized via Haiku, then OpenRouter fallback
     - Very long responses (> FILE_ATTACH_THRESHOLD): full output
       attached as file
     - SDLC sessions: structured template with stage progress + link footer
@@ -1050,9 +1224,7 @@ async def summarize_response(
     if not raw_response or not raw_response.strip():
         # Even with empty response, render SDLC progress if available
         if session:
-            fallback = _compose_structured_summary(
-                "", session=session, is_completion=True
-            )
+            fallback = _compose_structured_summary("", session=session, is_completion=True)
             if fallback.strip():
                 return SummarizedResponse(text=fallback, was_summarized=True)
         return SummarizedResponse(text=raw_response or "", was_summarized=False)
@@ -1073,13 +1245,15 @@ async def summarize_response(
     # Build prompt once, try multiple backends
     prompt = _build_summary_prompt(cleaned_response, artifacts, session=session)
 
-    # Try Haiku first, then Ollama
-    summary_text = await _summarize_with_haiku(prompt)
-    if summary_text is None:
-        logger.info("Falling back to Ollama for summarization")
-        summary_text = await _summarize_with_ollama(prompt)
+    # Try Haiku first, then OpenRouter
+    structured = await _summarize_with_haiku(prompt)
+    if structured is None:
+        logger.info("Falling back to OpenRouter for summarization")
+        structured = await _summarize_with_openrouter(prompt)
 
-    if summary_text is not None:
+    if structured is not None:
+        summary_text = structured.response
+
         # Safety: if summary is somehow longer than original, truncate
         if len(summary_text) >= len(raw_response):
             logger.warning("Summary longer than original, using truncated original")
@@ -1098,6 +1272,8 @@ async def summarize_response(
             full_output_file=full_output_file,
             was_summarized=True,
             artifacts=artifacts,
+            context_summary=structured.context_summary or None,
+            expectations=structured.expectations,
         )
 
     # All backends failed — truncate as last resort

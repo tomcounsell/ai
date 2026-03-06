@@ -176,18 +176,14 @@ def _cleanup_session_locks() -> int:
                                 if len(parts) == 2:
                                     minutes = int(parts[0])
                                     if minutes < 1:
-                                        logger.debug(
-                                            f"Skipping young process {pid} (age: {etime})"
-                                        )
+                                        logger.debug(f"Skipping young process {pid} (age: {etime})")
                                         continue
                     except (subprocess.TimeoutExpired, ValueError):
                         # Can't determine age, skip to be safe
                         continue
 
                     # Graceful shutdown: SIGTERM first, then SIGKILL if still alive
-                    logger.warning(
-                        f"Sending SIGTERM to stale process {pid} holding {session_file}"
-                    )
+                    logger.warning(f"Sending SIGTERM to stale process {pid} holding {session_file}")
                     os.kill(pid, signal.SIGTERM)
                     # Wait up to 5 seconds for graceful exit
                     for _ in range(10):
@@ -198,9 +194,7 @@ def _cleanup_session_locks() -> int:
                             break  # Process exited
                     else:
                         # Still alive after 5s, force kill
-                        logger.warning(
-                            f"Process {pid} did not exit after SIGTERM, sending SIGKILL"
-                        )
+                        logger.warning(f"Process {pid} did not exit after SIGTERM, sending SIGKILL")
                         os.kill(pid, signal.SIGKILL)
                     killed += 1
 
@@ -239,9 +233,7 @@ SESSION_NAME = os.getenv("TELEGRAM_SESSION_NAME", "valor_bridge")
 # Active projects on this machine (comma-separated)
 # Example: ACTIVE_PROJECTS=valor,popoto,django-project-template
 ACTIVE_PROJECTS = [
-    p.strip().lower()
-    for p in os.getenv("ACTIVE_PROJECTS", "valor").split(",")
-    if p.strip()
+    p.strip().lower() for p in os.getenv("ACTIVE_PROJECTS", "valor").split(",") if p.strip()
 ]
 
 # =============================================================================
@@ -324,10 +316,7 @@ ALL_MONITORED_GROUPS = list(GROUP_TO_PROJECT.keys())
 
 # DM settings - respond to DMs if any active project allows it
 RESPOND_TO_DMS = any(
-    CONFIG.get("projects", {})
-    .get(p, {})
-    .get("telegram", {})
-    .get("respond_to_dms", True)
+    CONFIG.get("projects", {}).get(p, {}).get("telegram", {}).get("respond_to_dms", True)
     for p in ACTIVE_PROJECTS
 )
 
@@ -451,9 +440,7 @@ async def check_message_query_request(client: TelegramClient) -> None:
         formatted_messages = []
         for msg in messages:
             sender = await msg.get_sender()
-            sender_name = (
-                getattr(sender, "first_name", "Unknown") if sender else "Unknown"
-            )
+            sender_name = getattr(sender, "first_name", "Unknown") if sender else "Unknown"
 
             formatted_messages.append(
                 {
@@ -476,9 +463,7 @@ async def check_message_query_request(client: TelegramClient) -> None:
         with open(result_file, "w") as f:
             json.dump(result, f, indent=2)
 
-        logger.info(
-            f"Message query completed: fetched {len(formatted_messages)} messages"
-        )
+        logger.info(f"Message query completed: fetched {len(formatted_messages)} messages")
 
     except Exception as e:
         # Write error result
@@ -552,9 +537,7 @@ async def main():
         from bridge.dedup import is_duplicate_message
 
         if await is_duplicate_message(event.chat_id, event.message.id):
-            logger.debug(
-                f"Skipping duplicate message {event.message.id} (catch_up replay)"
-            )
+            logger.debug(f"Skipping duplicate message {event.message.id} (catch_up replay)")
             return
 
         # === BRIDGE COMMANDS (bypass agent entirely) ===
@@ -565,9 +548,7 @@ async def main():
                 sender = await event.get_sender()
                 sender_id = getattr(sender, "id", None)
                 if not RESPOND_TO_DMS and sender_id not in DM_WHITELIST:
-                    logger.debug(
-                        "Ignoring /update from DM - DMs disabled on this instance"
-                    )
+                    logger.debug("Ignoring /update from DM - DMs disabled on this instance")
                     return
             if _raw_text in ("/update --force", "/update \u2014force"):
                 await _handle_force_update_command(client, event)
@@ -599,9 +580,7 @@ async def main():
                 sender=sender_name,
                 message_id=message.id,
                 timestamp=message.date,
-                message_type=(
-                    "text" if not message.media else get_media_type(message) or "media"
-                ),
+                message_type=("text" if not message.media else get_media_type(message) or "media"),
             )
             if store_result.get("stored"):
                 logger.debug(f"Stored message {message.id} from {sender_name}")
@@ -651,9 +630,7 @@ async def main():
         )
         if not should_reply:
             if is_dm and DM_WHITELIST:
-                logger.debug(
-                    f"Ignoring DM from {sender_name} (id={sender_id}) - not in whitelist"
-                )
+                logger.debug(f"Ignoring DM from {sender_name} (id={sender_id}) - not in whitelist")
             return
 
         project_name = project.get("name", "DM") if project else "DM"
@@ -707,9 +684,36 @@ async def main():
             session_id = f"tg_{project_key}_{event.chat_id}_{message.reply_to_msg_id}"
             logger.debug(f"Session ID: {session_id} (continuation: True)")
         else:
-            # Fresh session - use this message's ID as unique identifier
-            session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
-            logger.debug(f"Session ID: {session_id} (continuation: False)")
+            # No reply-to: try semantic routing before creating a fresh session
+            session_id = None
+
+            try:
+                from bridge.session_router import (
+                    find_matching_session,
+                    is_semantic_routing_enabled,
+                )
+
+                if is_semantic_routing_enabled():
+                    matched_id, confidence = await find_matching_session(
+                        chat_id=telegram_chat_id,
+                        message_text=clean_text,
+                        project_key=project_key,
+                    )
+                    if matched_id:
+                        session_id = matched_id
+                        logger.info(
+                            f"Semantic routing: matched session {session_id} "
+                            f"(confidence: {confidence:.2f})"
+                        )
+            except Exception as e:
+                # Semantic routing failures are non-fatal — fall through
+                # to fresh session creation
+                logger.warning(f"Semantic routing failed (non-fatal): {e}")
+
+            if not session_id:
+                # Fresh session - use this message's ID as unique identifier
+                session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
+                logger.debug(f"Session ID: {session_id} (continuation: False)")
 
         # === REACTION WORKFLOW ===
         # 1. 👀 Eyes = Message received/acknowledged
@@ -791,9 +795,7 @@ async def main():
                                 message_id=message.id,
                                 additional_context=clean_text,
                             )
-                            await set_reaction(
-                                client, event.chat_id, message.id, REACTION_RECEIVED
-                            )
+                            await set_reaction(client, event.chat_id, message.id, REACTION_RECEIVED)
                             return
                 except Exception as e:
                     logger.debug(f"Revival reply check error: {e}")
@@ -819,15 +821,11 @@ async def main():
                             is_abort=is_abort,
                         )
                         ack_text = (
-                            "Stopping current task."
-                            if is_abort
-                            else "Adding to current task"
+                            "Stopping current task." if is_abort else "Adding to current task"
                         )
                         from bridge.markdown import send_markdown
 
-                        await send_markdown(
-                            client, event.chat_id, ack_text, reply_to=message.id
-                        )
+                        await send_markdown(client, event.chat_id, ack_text, reply_to=message.id)
                         logger.info(
                             f"[{project_name}] Steered message into active session "
                             f"{session_id} ({'abort' if is_abort else 'steer'})"
@@ -849,9 +847,7 @@ async def main():
 
             revival_info = check_revival(project_key, working_dir_str, telegram_chat_id)
             if revival_info:
-                revival_msg = (
-                    f"Unfinished work detected on branch `{revival_info['branch']}`"
-                )
+                revival_msg = f"Unfinished work detected on branch `{revival_info['branch']}`"
                 if revival_info.get("plan_context"):
                     revival_msg += f"\n\n> {revival_info['plan_context']}"
                 revival_msg += "\n\nReply to this message to resume."
@@ -873,9 +869,7 @@ async def main():
                         f"[{project_name}] Marked stale branch {revival_info['branch']} as dormant"
                     )
                 except Exception as e:
-                    logger.warning(
-                        f"[{project_name}] Failed to mark stale work dormant: {e}"
-                    )
+                    logger.warning(f"[{project_name}] Failed to mark stale work dormant: {e}")
 
             # Check if this is tracked work and create workflow if needed
             workflow_id = create_workflow_for_tracked_work(
@@ -884,9 +878,7 @@ async def main():
 
             # Serialize enrichment metadata for the job worker
             yt_urls_json = json.dumps(youtube_urls) if youtube_urls else None
-            non_yt_urls_json = (
-                json.dumps(non_youtube_urls) if non_youtube_urls else None
-            )
+            non_yt_urls_json = json.dumps(non_youtube_urls) if non_youtube_urls else None
 
             # Build and enqueue the job (HIGH priority — top of FILO stack)
             depth = await enqueue_job(
@@ -955,9 +947,7 @@ async def main():
                 await set_reaction(client, event.chat_id, message.id, REACTION_SUCCESS)
 
                 if sent_response:
-                    logger.info(
-                        f"[{project_name}] Replied to {sender_name} (msg {message_id})"
-                    )
+                    logger.info(f"[{project_name}] Replied to {sender_name} (msg {message_id})")
                 else:
                     logger.info(
                         f"[{project_name}] Processed message from "
@@ -990,9 +980,7 @@ async def main():
             except Exception as e:
                 # ❌ Error = Something went wrong
                 await set_reaction(client, event.chat_id, message.id, REACTION_ERROR)
-                logger.error(
-                    f"[{project_name}] Error processing message from {sender_name}: {e}"
-                )
+                logger.error(f"[{project_name}] Error processing message from {sender_name}: {e}")
                 raise
 
     # Register signal handlers for graceful shutdown
@@ -1004,9 +992,7 @@ async def main():
         logger.info(f"Received {sig_name}, shutting down gracefully...")
         SHUTTING_DOWN = True
         # Schedule client disconnect on the event loop
-        loop.call_soon_threadsafe(
-            lambda: asyncio.ensure_future(_graceful_shutdown(client))
-        )
+        loop.call_soon_threadsafe(lambda: asyncio.ensure_future(_graceful_shutdown(client)))
 
     async def _graceful_shutdown(tg_client):
         """Reset in-flight jobs and disconnect."""
@@ -1017,9 +1003,7 @@ async def main():
                 try:
                     reset = await _reset_running_jobs(_pkey)
                     if reset:
-                        logger.info(
-                            f"[{_pkey}] Reset {reset} running job(s) to pending"
-                        )
+                        logger.info(f"[{_pkey}] Reset {reset} running job(s) to pending")
                 except Exception as e:
                     logger.error(f"[{_pkey}] Failed to reset running jobs: {e}")
         logger.info("Waiting 2s for in-flight tasks to finish...")
@@ -1077,9 +1061,7 @@ async def main():
         for _pkey, _pconfig in CONFIG.get("projects", {}).items():
             # Register project config so job queue can read auto_merge etc.
             register_project_config(_pkey, _pconfig)
-            _wd = _pconfig.get(
-                "working_directory", DEFAULTS.get("working_directory", "")
-            )
+            _wd = _pconfig.get("working_directory", DEFAULTS.get("working_directory", ""))
             if not _wd:
                 continue
 

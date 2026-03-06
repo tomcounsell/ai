@@ -64,9 +64,7 @@ def sdlc_session(redis_test_db):
     s.append_history("stage", "REVIEW completed ☑")
     s.append_history("stage", "DOCS completed ☑")
     s.set_link("issue", "https://github.com/tomcounsell/ai/issues/177")
-    s.set_link(
-        "plan", "https://github.com/tomcounsell/ai/blob/main/docs/plans/summarizer.md"
-    )
+    s.set_link("plan", "https://github.com/tomcounsell/ai/blob/main/docs/plans/summarizer.md")
     s.set_link("pr", "https://github.com/tomcounsell/ai/pull/180")
     return s
 
@@ -377,8 +375,8 @@ class TestComposeStructuredSummary:
         # Stage progress line includes issue number
         assert "ISSUE 177" in result
         assert "DOCS" in result
-        # No checkbox icons
-        assert "☑" not in result
+        # Completed stages show ☑, no pending ☐ (all stages are completed)
+        assert "☑ PLAN" in result
         assert "☐" not in result
         # Bullets present
         assert "• Unified AgentSession model" in result
@@ -438,9 +436,13 @@ class TestSummarizeWithSession:
     @pytest.mark.asyncio
     async def test_short_response_still_summarized(self):
         """All non-empty responses are now summarized (no threshold)."""
-        from bridge.summarizer import summarize_response
+        from bridge.summarizer import StructuredSummary, summarize_response
 
-        mock_haiku = AsyncMock(return_value="Done ✅")
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="", response="Done ✅", expectations=None
+            )
+        )
         with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
             result = await summarize_response("Done.", session=None)
         assert result.was_summarized is True
@@ -448,10 +450,16 @@ class TestSummarizeWithSession:
 
     @pytest.mark.asyncio
     async def test_long_response_with_sdlc_session(self, sdlc_session):
-        from bridge.summarizer import summarize_response
+        from bridge.summarizer import StructuredSummary, summarize_response
 
         long_text = "Detailed implementation work. " * 200
-        mock_haiku = AsyncMock(return_value="• Built the feature\n• Tests passing")
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Building feature",
+                response="• Built the feature\n• Tests passing",
+                expectations=None,
+            )
+        )
 
         with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
             result = await summarize_response(long_text, session=sdlc_session)
@@ -461,18 +469,22 @@ class TestSummarizeWithSession:
         assert "ISSUE 177" in result.text
         assert "Issue #177" in result.text
         assert "PR #180" in result.text
-        # No checkbox icons
-        assert "☑" not in result.text
+        # Completed stages show ☑, no pending ☐ (all stages completed in sdlc_session fixture)
+        assert "☑ PLAN" in result.text
         assert "☐" not in result.text
         # The haiku output is included
         assert "Built the feature" in result.text
 
     @pytest.mark.asyncio
     async def test_long_response_with_qa_session(self, qa_session):
-        from bridge.summarizer import summarize_response
+        from bridge.summarizer import StructuredSummary, summarize_response
 
         long_text = "Here is a very long explanation. " * 200
-        mock_haiku = AsyncMock(return_value="The job queue uses FILO ordering.")
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="", response="The job queue uses FILO ordering.", expectations=None
+            )
+        )
 
         with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
             result = await summarize_response(long_text, session=qa_session)
@@ -545,9 +557,7 @@ class TestSendMarkdown:
         mock_client.send_message = AsyncMock(return_value="sent")
 
         await send_markdown(mock_client, 123, "text", reply_to=456)
-        mock_client.send_message.assert_called_once_with(
-            123, "text", reply_to=456, parse_mode="md"
-        )
+        mock_client.send_message.assert_called_once_with(123, "text", reply_to=456, parse_mode="md")
 
 
 # ── Escape Markdown ──────────────────────────────────────────────────────────
@@ -695,10 +705,10 @@ class TestSDLCLifecycle:
             is_completion=True,
         )
 
-        # Verify full structured output (new format, no checkboxes)
+        # Verify full structured output — completed stages show ☑, no pending ☐
         assert "ISSUE 177" in result
         assert "DOCS" in result
-        assert "☑" not in result
+        assert "☑ PLAN" in result
         assert "☐" not in result
         assert "• Unified AgentSession model" in result
         assert "Issue #177" in result
