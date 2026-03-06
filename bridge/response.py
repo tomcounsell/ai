@@ -411,6 +411,28 @@ async def send_response_with_files(
                 logger.info(
                     f"Summarized response: {len(response)} -> {len(text)} chars"
                 )
+
+            # Persist semantic routing fields to session for future routing
+            if session and summarized.was_summarized:
+                try:
+                    if summarized.context_summary:
+                        session.context_summary = summarized.context_summary
+                    if summarized.expectations is not None:
+                        session.expectations = summarized.expectations
+                    if summarized.context_summary or summarized.expectations is not None:
+                        session.save()
+                        logger.debug(
+                            f"Persisted routing fields to session "
+                            f"{session.session_id}: "
+                            f"context_summary={bool(summarized.context_summary)}, "
+                            f"expectations={bool(summarized.expectations)}"
+                        )
+                except Exception as persist_err:
+                    # Non-fatal: routing field persistence should never
+                    # block message delivery
+                    logger.warning(
+                        f"Failed to persist routing fields (non-fatal): {persist_err}"
+                    )
         except Exception as e:
             logger.warning(f"Summarization failed, using original: {e}")
 
