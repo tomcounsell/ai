@@ -21,7 +21,7 @@ TaskCreate({ description: "5. PATCH: Fix test failures via /do-patch", status: "
 TaskCreate({ description: "6. REVIEW: PR review via /do-pr-review", status: "pending" })
 TaskCreate({ description: "7. PATCH: Fix review blockers via /do-patch", status: "pending" })
 TaskCreate({ description: "8. DOCS: Update docs via /do-docs", status: "pending" })
-TaskCreate({ description: "9. MERGE: Ready for human merge", status: "pending" })
+TaskCreate({ description: "9. MERGE: Auto-merge or wait for human", status: "pending" })
 ```
 
 As you assess state (Step 2), mark already-completed stages as `completed` and set the current stage to `in_progress`. Use `TaskUpdate` to advance one stage at a time as each sub-skill finishes. Never skip ahead.
@@ -86,9 +86,26 @@ Based on the assessment, invoke ONE sub-skill and let it run:
 | PR exists, review has tech debt or nits | `/do-patch` to fix them, then `/do-test`, then re-review | Don't leave tech debt behind |
 | PR exists, review blockers | `/do-patch` to fix blockers, then `/do-test`, then re-review | Address feedback |
 | PR approved (clean), docs not updated | `/do-docs` | Last step before merge |
-| PR approved, docs done | **STOP. Report completion. Wait for human to say "merge".** | Human gate required |
+| PR approved, docs done, auto-merge eligible | Auto-merge: `gh pr merge --squash --delete-branch` + cleanup | Small, clean changes ship fast |
+| PR approved, docs done, NOT auto-merge eligible | **STOP. Report completion. Wait for human to say "merge".** | Human gate required |
 
-**IMPORTANT: Never auto-merge.** After all automated stages are complete (REVIEW + DOCS), STOP and report to the user. Wait for an explicit "merge" instruction. The human decides when to merge.
+### Auto-Merge Eligibility
+
+A PR may be auto-merged (no human gate) if **all four** conditions are true:
+
+1. **No open questions** — the pipeline never paused for human input
+2. **Clean review** — 0 blockers, 0 tech debt, 0 nits from `/do-pr-review`
+3. **All tests pass** — `/do-test` passed without failures
+4. **Small change** — total diff is under 150 lines (`gh pr diff --stat` additions + deletions < 150)
+
+Check line count:
+```bash
+gh pr diff {pr_number} --stat | tail -1
+# e.g. "3 files changed, 42 insertions(+), 18 deletions(-)"
+# Parse additions + deletions; if total < 150, eligible
+```
+
+If ANY condition fails, stop and wait for human "merge" instruction as before.
 
 **IMPORTANT: PR reviews must be published on GitHub.** Before advancing past the REVIEW stage, verify a review exists on the PR:
 ```bash
@@ -120,12 +137,14 @@ If the count is 0, re-invoke `/do-pr-review`. A review that only exists in agent
 6. REVIEW — /do-pr-review
 7. PATCH  — /do-patch (fix review blockers, loop back to TEST → REVIEW)
 8. DOCS   — /do-docs
-9. MERGE  — human merges the PR + post-merge cleanup
+9. MERGE  — auto-merge if eligible, otherwise wait for human + post-merge cleanup
 ```
 
-## Merge Phase: Post-Merge Cleanup
+## Merge Phase
 
-When the human says "merge", execute the merge and then clean up the local worktree and branch:
+If auto-merge eligible (see criteria above), proceed directly. Otherwise, wait for the human to say "merge".
+
+Execute the merge and clean up the local worktree and branch:
 
 ```bash
 # 1. Merge the PR (human-initiated)
