@@ -192,7 +192,9 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
         parts.append(f"{prefix}: {text}")
 
     combined = "\n".join(parts)
-    logger.info(f"[steering] Injecting {len(messages)} message(s) into session {session_id}")
+    logger.info(
+        f"[steering] Injecting {len(messages)} message(s) into session {session_id}"
+    )
 
     # Get the active SDK client and inject the steering message
     try:
@@ -212,7 +214,9 @@ async def _handle_steering(session_id: str) -> dict[str, Any] | None:
             )
             _repush_messages(session_id, messages)
     except Exception as e:
-        logger.error(f"[steering] Failed to inject message: {e} — re-pushing to preserve")
+        logger.error(
+            f"[steering] Failed to inject message: {e} — re-pushing to preserve"
+        )
         # Re-push so messages aren't lost on injection failure
         _repush_messages(session_id, messages)
 
@@ -269,7 +273,9 @@ async def watchdog_hook(
     if count % CHECK_INTERVAL != 0:
         return {"continue_": True}
 
-    logger.info(f"[health_check] Running health check at tool call #{count} (session={session_id})")
+    logger.info(
+        f"[health_check] Running health check at tool call #{count} (session={session_id})"
+    )
 
     try:
         activity = _read_recent_activity(transcript_path)

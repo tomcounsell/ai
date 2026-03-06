@@ -61,7 +61,9 @@ async def search(query: str, **kwargs) -> SearchResult | None:
                 results_list = result.get("results", [])
                 if results_list:
                     answer = "\n\n".join(
-                        r.get("content", "") for r in results_list[:3] if r.get("content")
+                        r.get("content", "")
+                        for r in results_list[:3]
+                        if r.get("content")
                     )
 
             if not answer:

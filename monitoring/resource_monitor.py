@@ -218,7 +218,9 @@ class ResourceMonitor:
         snapshot = self.get_current_snapshot()
 
         if snapshot.memory_mb > self.limits.warning_memory_mb:
-            recommendations.append(f"Memory at {snapshot.memory_mb:.1f}MB - consider cleanup")
+            recommendations.append(
+                f"Memory at {snapshot.memory_mb:.1f}MB - consider cleanup"
+            )
 
         if snapshot.cpu_percent > self.limits.warning_cpu_percent:
             recommendations.append(f"CPU at {snapshot.cpu_percent:.1f}% - reduce load")
@@ -230,7 +232,9 @@ class ResourceMonitor:
 
         health_score = self.calculate_health_score()
         if health_score < 50:
-            recommendations.append("System health critical - immediate attention needed")
+            recommendations.append(
+                "System health critical - immediate attention needed"
+            )
         elif health_score < 70:
             recommendations.append("System health degraded - monitor closely")
 

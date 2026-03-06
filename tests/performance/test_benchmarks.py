@@ -103,7 +103,9 @@ class TestMemoryPerformance:
         memory_growth = after_load.memory_mb - initial.memory_mb
 
         # Growth should be minimal for small operations
-        assert memory_growth < 50.0, f"Memory grew by {memory_growth:.1f}MB during load test"
+        assert (
+            memory_growth < 50.0
+        ), f"Memory grew by {memory_growth:.1f}MB during load test"
 
         # Cleanup
         del data
@@ -144,9 +146,9 @@ class TestCPUPerformance:
             pytest.skip("psutil not available")
 
         # At idle, CPU should be very low
-        assert snapshot.cpu_percent < baseline.cpu_baseline_percent, (
-            f"Idle CPU {snapshot.cpu_percent}% exceeds baseline {baseline.cpu_baseline_percent}%"
-        )
+        assert (
+            snapshot.cpu_percent < baseline.cpu_baseline_percent
+        ), f"Idle CPU {snapshot.cpu_percent}% exceeds baseline {baseline.cpu_baseline_percent}%"
 
     @pytest.mark.asyncio
     async def test_cpu_under_async_load(self, baseline):
@@ -165,9 +167,9 @@ class TestCPUPerformance:
             pytest.skip("psutil not available")
 
         # Should still be under control
-        assert snapshot.cpu_percent < 80.0, (
-            f"CPU under async load {snapshot.cpu_percent}% is too high"
-        )
+        assert (
+            snapshot.cpu_percent < 80.0
+        ), f"CPU under async load {snapshot.cpu_percent}% is too high"
 
 
 class TestResponseTime:
@@ -264,9 +266,9 @@ class TestConcurrency:
         results = await asyncio.gather(*tasks)
 
         assert len(results) == 50
-        assert max_active <= max_concurrent, (
-            f"Max concurrent {max_active} exceeded limit {max_concurrent}"
-        )
+        assert (
+            max_active <= max_concurrent
+        ), f"Max concurrent {max_active} exceeded limit {max_concurrent}"
 
 
 class TestHealthScoring:
@@ -327,7 +329,9 @@ class TestToolPerformance:
             try:
                 __import__(f"tools.{tool_name}", fromlist=[tool_name])
                 elapsed_ms = (time.perf_counter() - start) * 1000
-                assert elapsed_ms < 500, f"Tool {tool_name} import took {elapsed_ms:.1f}ms"
+                assert (
+                    elapsed_ms < 500
+                ), f"Tool {tool_name} import took {elapsed_ms:.1f}ms"
             except ImportError:
                 # Tool may not be fully implemented yet
                 pass
@@ -370,7 +374,9 @@ class TestEndurance:
         if initial.memory_mb > 0:
             memory_growth = final.memory_mb - initial.memory_mb
             # Should not grow significantly
-            assert memory_growth < 50, f"Memory grew by {memory_growth:.1f}MB during sustained load"
+            assert (
+                memory_growth < 50
+            ), f"Memory grew by {memory_growth:.1f}MB during sustained load"
 
     @pytest.mark.slow
     @pytest.mark.asyncio

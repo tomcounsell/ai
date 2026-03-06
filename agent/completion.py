@@ -48,7 +48,9 @@ class CompletionResult:
 
         # Status
         status_emoji = (
-            "✅" if self.status == "COMPLETE" else "⏳" if self.status == "IN_PROGRESS" else "🚫"
+            "✅"
+            if self.status == "COMPLETE"
+            else "⏳" if self.status == "IN_PROGRESS" else "🚫"
         )
         lines.append(f"**Status**: {status_emoji} {self.status}")
         lines.append("")
@@ -95,7 +97,9 @@ def load_completion_criteria() -> str:
     content = claude_md.read_text()
 
     # Extract the "Work Completion Criteria" section
-    match = re.search(r"## Work Completion Criteria\n\n(.*?)(?=\n## |\Z)", content, re.DOTALL)
+    match = re.search(
+        r"## Work Completion Criteria\n\n(.*?)(?=\n## |\Z)", content, re.DOTALL
+    )
 
     if not match:
         logger.warning("Work Completion Criteria section not found in CLAUDE.md")

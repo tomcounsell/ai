@@ -174,7 +174,9 @@ class TestCompleteTranscriptFieldPreservation:
         from bridge.session_transcript import complete_transcript
 
         # Complete with same status (running -> running)
-        complete_transcript(running_session.session_id, status="running", summary="Still going")
+        complete_transcript(
+            running_session.session_id, status="running", summary="Still going"
+        )
 
         found = list(AgentSession.query.filter(session_id=running_session.session_id))
         assert len(found) == 1
@@ -372,7 +374,9 @@ class TestSdkClientEnvVar:
             if found_condition and "VALOR_SESSION_ID" in line:
                 found_env_var = True
                 break
-        assert found_env_var, "VALOR_SESSION_ID should be set inside if session_id: block"
+        assert (
+            found_env_var
+        ), "VALOR_SESSION_ID should be set inside if session_id: block"
 
 
 # ── Fix 5: Full chain integration ────────────────────────────────────────────

@@ -77,7 +77,9 @@ async def enrich_message(
 
             # Fetch the original message object so we can process its media
             chat_id_int = int(chat_id)
-            msg_obj = await telegram_client.get_messages(chat_id_int, ids=raw_media_message_id)
+            msg_obj = await telegram_client.get_messages(
+                chat_id_int, ids=raw_media_message_id
+            )
             if msg_obj and msg_obj.media:
                 media_description, _media_files = await process_incoming_media(
                     telegram_client, msg_obj
@@ -102,7 +104,9 @@ async def enrich_message(
             if parsed_urls:
                 # process_youtube_urls_in_text works on raw text containing URLs,
                 # so we pass the enriched_text which should contain the URLs.
-                yt_enriched, youtube_results = await process_youtube_urls_in_text(enriched_text)
+                yt_enriched, youtube_results = await process_youtube_urls_in_text(
+                    enriched_text
+                )
                 successful = sum(1 for r in youtube_results if r.get("success"))
                 if successful > 0:
                     enriched_text = yt_enriched
@@ -138,10 +142,10 @@ async def enrich_message(
                 )
                 link_summary_text = format_link_summaries(link_summaries)
                 if link_summary_text:
-                    enriched_text = (
-                        f"{enriched_text}\n\n--- LINK SUMMARIES ---\n{link_summary_text}"
+                    enriched_text = f"{enriched_text}\n\n--- LINK SUMMARIES ---\n{link_summary_text}"
+                    logger.info(
+                        f"Enrichment: added {len(link_summaries)} link summaries"
                     )
-                    logger.info(f"Enrichment: added {len(link_summaries)} link summaries")
         except Exception as e:
             logger.warning(f"Enrichment: link summary processing failed: {e}")
 
@@ -160,8 +164,12 @@ async def enrich_message(
             if reply_chain:
                 reply_chain_context = format_reply_chain(reply_chain)
                 if reply_chain_context:
-                    enriched_text = f"{reply_chain_context}\n\nCURRENT MESSAGE:\n{enriched_text}"
-                    logger.info(f"Enrichment: fetched reply chain with {len(reply_chain)} messages")
+                    enriched_text = (
+                        f"{reply_chain_context}\n\nCURRENT MESSAGE:\n{enriched_text}"
+                    )
+                    logger.info(
+                        f"Enrichment: fetched reply chain with {len(reply_chain)} messages"
+                    )
         except Exception as e:
             logger.warning(f"Enrichment: reply chain fetch failed: {e}")
 

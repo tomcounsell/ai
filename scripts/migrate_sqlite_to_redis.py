@@ -82,7 +82,9 @@ def migrate_messages(conn: sqlite3.Connection, dry_run: bool) -> dict:
             # Check for existing (by chat_id + message_id to avoid duplicates)
             if row["message_id"]:
                 existing = list(TelegramMessage.query.filter(chat_id=chat_id))
-                already_exists = any(m.message_id == row["message_id"] for m in existing)
+                already_exists = any(
+                    m.message_id == row["message_id"] for m in existing
+                )
                 if already_exists:
                     skipped += 1
                     continue
@@ -190,7 +192,9 @@ def migrate_chats(conn: sqlite3.Connection, dry_run: bool) -> dict:
 
     conn.row_factory = sqlite3.Row
     try:
-        cursor = conn.execute("SELECT chat_id, chat_name, chat_type, updated_at FROM chats")
+        cursor = conn.execute(
+            "SELECT chat_id, chat_name, chat_type, updated_at FROM chats"
+        )
         rows = cursor.fetchall()
     except sqlite3.OperationalError:
         print("  Chats: table not found, skipping")
@@ -234,7 +238,9 @@ def migrate_chats(conn: sqlite3.Connection, dry_run: bool) -> dict:
         except Exception as e:
             errors += 1
             if errors <= 5:
-                print(f"    Error on chat row {row['id'] if 'id' in row.keys() else chat_id}: {e}")
+                print(
+                    f"    Error on chat row {row['id'] if 'id' in row.keys() else chat_id}: {e}"
+                )
 
     return {"total": total, "created": created, "skipped": skipped, "errors": errors}
 
@@ -285,7 +291,9 @@ def verify_migration(conn: sqlite3.Connection) -> None:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Migrate SQLite telegram history to Redis/Popoto")
+    parser = argparse.ArgumentParser(
+        description="Migrate SQLite telegram history to Redis/Popoto"
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",

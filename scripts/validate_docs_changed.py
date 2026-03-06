@@ -244,7 +244,9 @@ def validate_docs_changed(
 
     # If explicitly "no docs needed", pass validation
     if not expected_paths:
-        return True, ("Plan explicitly states no documentation changes needed. Validation passed.")
+        return True, (
+            "Plan explicitly states no documentation changes needed. Validation passed."
+        )
 
     # Dry-run: print expected paths and return early
     if dry_run:
@@ -295,7 +297,9 @@ def validate_docs_changed(
         f"Changed: {matched}",
     ]
     if missing:
-        msg_parts.append(f"Note: {len(missing)} expected doc(s) not yet changed: {missing}")
+        msg_parts.append(
+            f"Note: {len(missing)} expected doc(s) not yet changed: {missing}"
+        )
     return True, " ".join(msg_parts)
 
 

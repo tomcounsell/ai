@@ -59,7 +59,8 @@ class TestDocumentationValidation:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
+    not os.environ.get("ANTHROPIC_API_KEY")
+    and not os.environ.get("OPENROUTER_API_KEY"),
     reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestDocstringGeneration:
@@ -83,7 +84,10 @@ def calculate_total(items, tax_rate=0.08, discount=None):
 
         assert "error" not in result, f"Generation failed: {result.get('error')}"
         assert "documentation" in result
-        assert "Args:" in result["documentation"] or "Parameters:" in result["documentation"]
+        assert (
+            "Args:" in result["documentation"]
+            or "Parameters:" in result["documentation"]
+        )
 
     def test_numpy_style(self, sample_function):
         """Generate NumPy style docstring."""
@@ -100,7 +104,8 @@ def calculate_total(items, tax_rate=0.08, discount=None):
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
+    not os.environ.get("ANTHROPIC_API_KEY")
+    and not os.environ.get("OPENROUTER_API_KEY"),
     reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestReadmeGeneration:
@@ -147,7 +152,8 @@ def divide(a, b):
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
+    not os.environ.get("ANTHROPIC_API_KEY")
+    and not os.environ.get("OPENROUTER_API_KEY"),
     reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestApiDocGeneration:

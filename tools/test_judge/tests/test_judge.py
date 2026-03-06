@@ -55,7 +55,8 @@ class TestJudgeValidation:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
+    not os.environ.get("ANTHROPIC_API_KEY")
+    and not os.environ.get("OPENROUTER_API_KEY"),
     reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestJudgeCore:
@@ -106,9 +107,13 @@ class TestJudgeCore:
         """Different strictness levels affect judgment."""
         output = "The function mostly works but has some edge cases."
 
-        lenient = judge_test_result(output, ["Function works correctly"], strictness="lenient")
+        lenient = judge_test_result(
+            output, ["Function works correctly"], strictness="lenient"
+        )
 
-        strict = judge_test_result(output, ["Function works correctly"], strictness="strict")
+        strict = judge_test_result(
+            output, ["Function works correctly"], strictness="strict"
+        )
 
         # Both should complete without error
         assert "error" not in lenient
@@ -116,7 +121,8 @@ class TestJudgeCore:
 
 
 @pytest.mark.skipif(
-    not os.environ.get("ANTHROPIC_API_KEY") and not os.environ.get("OPENROUTER_API_KEY"),
+    not os.environ.get("ANTHROPIC_API_KEY")
+    and not os.environ.get("OPENROUTER_API_KEY"),
     reason="Neither ANTHROPIC_API_KEY nor OPENROUTER_API_KEY set",
 )
 class TestJudgeBatch:

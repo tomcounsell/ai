@@ -66,7 +66,9 @@ def create_env_file(force: bool = False) -> bool:
         return False
 
     if env_file.exists() and not force:
-        console.print("⚠️  .env file already exists. Use --force to overwrite.", style="yellow")
+        console.print(
+            "⚠️  .env file already exists. Use --force to overwrite.", style="yellow"
+        )
         return False
 
     try:
@@ -208,7 +210,9 @@ def show_config_summary():
         table.add_column("Status", width=50)
 
         # Environment info
-        table.add_row("Environment", f"{summary['environment']} (Debug: {summary['debug']})")
+        table.add_row(
+            "Environment", f"{summary['environment']} (Debug: {summary['debug']})"
+        )
         table.add_row("Log Level", summary["log_level"])
 
         # API Keys
@@ -257,7 +261,9 @@ def show_config_summary():
 @click.command()
 @click.option("--force", is_flag=True, help="Force overwrite existing files")
 @click.option("--interactive", is_flag=True, help="Interactive configuration setup")
-@click.option("--validate-only", is_flag=True, help="Only validate existing configuration")
+@click.option(
+    "--validate-only", is_flag=True, help="Only validate existing configuration"
+)
 def main(force: bool, interactive: bool, validate_only: bool):
     """AI Rebuild Configuration Setup Utility."""
     print_banner()
@@ -286,7 +292,9 @@ def main(force: bool, interactive: bool, validate_only: bool):
         # Create .env file from template
         create_env_file(force=force)
 
-        if interactive or Confirm.ask("Run interactive setup to configure API keys?", default=True):
+        if interactive or Confirm.ask(
+            "Run interactive setup to configure API keys?", default=True
+        ):
             interactive = True
 
     if interactive:

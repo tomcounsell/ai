@@ -125,7 +125,9 @@ class TestReflectionIgnoreModel:
         """Add an ignore entry and verify it's active."""
         from models.reflections import ReflectionIgnore
 
-        entry = ReflectionIgnore.add_ignore("null pointer", reason="known issue", days=14)
+        entry = ReflectionIgnore.add_ignore(
+            "null pointer", reason="known issue", days=14
+        )
         assert entry.pattern == "null pointer"
 
         active = ReflectionIgnore.get_active()

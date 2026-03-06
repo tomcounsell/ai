@@ -51,7 +51,9 @@ class TestBuildCoachingMessage:
             rejected=True,
             coaching_message="Show the test results.",
         )
-        msg = build_coaching_message(classification, job_message_text="/do-build foo.md")
+        msg = build_coaching_message(
+            classification, job_message_text="/do-build foo.md"
+        )
         assert "Show the test results." in msg
         assert "Implementing" not in msg
 
@@ -115,14 +117,18 @@ class TestBuildCoachingMessage:
     def test_skill_detected_from_message(self):
         """When /do-build is in message text, skill-specific coaching is used."""
         classification = _make_classification(OutputType.STATUS_UPDATE)
-        msg = build_coaching_message(classification, job_message_text="/do-build docs/plans/foo.md")
+        msg = build_coaching_message(
+            classification, job_message_text="/do-build docs/plans/foo.md"
+        )
         assert "[System Coach]" in msg
         assert "Implementing" in msg  # From SKILL_DETECTORS description
 
     def test_no_skill_no_rejection_returns_continue(self):
         """Plain status update with no context returns 'continue'."""
         classification = _make_classification(OutputType.STATUS_UPDATE)
-        msg = build_coaching_message(classification, plan_file=None, job_message_text="hello")
+        msg = build_coaching_message(
+            classification, plan_file=None, job_message_text="hello"
+        )
         assert msg == "continue"
 
     def test_nonexistent_plan_file_falls_through_to_skill(self):
@@ -151,7 +157,9 @@ class TestExtractSuccessCriteria:
 
     def test_extracts_criteria(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            f.write("# Plan\n\n## Success Criteria\n\n- [ ] Item 1\n- [ ] Item 2\n\n## Risks\n")
+            f.write(
+                "# Plan\n\n## Success Criteria\n\n- [ ] Item 1\n- [ ] Item 2\n\n## Risks\n"
+            )
             f.flush()
             result = _extract_success_criteria(f.name)
             assert "Item 1" in result

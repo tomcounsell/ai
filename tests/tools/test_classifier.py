@@ -164,9 +164,9 @@ def test_classifier_parametrized(message, expected_type):
         f"Expected {expected_type}, got {result['type']} for '{message}'. "
         f"Reason: {result['reason']}"
     )
-    assert result["confidence"] > 0.7, (
-        f"Low confidence ({result['confidence']}) for '{message}' classified as {result['type']}"
-    )
+    assert (
+        result["confidence"] > 0.7
+    ), f"Low confidence ({result['confidence']}) for '{message}' classified as {result['type']}"
 
 
 def test_classifier_error_handling():

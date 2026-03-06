@@ -66,7 +66,9 @@ class TestCodeExtraction:
 
     def test_extract_from_real_messages(self):
         """Test extraction from real-world message formats."""
-        assert extract_codes_from_text("GitHub: 647832 is your verification code") == ["647832"]
+        assert extract_codes_from_text("GitHub: 647832 is your verification code") == [
+            "647832"
+        ]
         assert extract_codes_from_text("Your Uber code is 4285") == ["4285"]
         assert extract_codes_from_text("Google verification code: 891234") == ["891234"]
 

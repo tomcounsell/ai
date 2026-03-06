@@ -138,7 +138,12 @@ class TestAnalyzeImageFromFile:
             # IHDR chunk
             ihdr_data = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
             ihdr_crc = zlib.crc32(b"IHDR" + ihdr_data) & 0xFFFFFFFF
-            ihdr = struct.pack(">I", 13) + b"IHDR" + ihdr_data + struct.pack(">I", ihdr_crc)
+            ihdr = (
+                struct.pack(">I", 13)
+                + b"IHDR"
+                + ihdr_data
+                + struct.pack(">I", ihdr_crc)
+            )
 
             # IDAT chunk (minimal image data)
             raw_data = b"\x00" * (width * 3 + 1) * height

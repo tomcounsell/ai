@@ -55,7 +55,9 @@ class TestPythonExecution:
 
     def test_with_input(self):
         """Code with input works."""
-        result = execute_code("name = input(); print(f'Hello, {name}!')", input_data="Claude")
+        result = execute_code(
+            "name = input(); print(f'Hello, {name}!')", input_data="Claude"
+        )
 
         assert "error" not in result, f"Execution failed: {result.get('error')}"
         assert result["exit_code"] == 0

@@ -90,7 +90,11 @@ def find_todays_event(service, calendar_id: str, slug: str, now: datetime):
     cached_id = cache.get(key)
     if cached_id:
         try:
-            event = service.events().get(calendarId=calendar_id, eventId=cached_id).execute()
+            event = (
+                service.events()
+                .get(calendarId=calendar_id, eventId=cached_id)
+                .execute()
+            )
             if event and event.get("status") != "cancelled":
                 return event
         except Exception:

@@ -46,9 +46,7 @@ OUR_TEMPLATE = REPO_ROOT / ".claude" / "skills" / "new-skill" / "SKILL_TEMPLATE.
 OUR_SKILL_DOCS = REPO_ROOT / ".claude" / "skills" / "new-skill" / "SKILL.md"
 
 SKILLS_DOCS_URL = "https://code.claude.com/docs/en/skills"
-SKILL_CREATOR_URL = (
-    "https://raw.githubusercontent.com/anthropics/skills/main/skills/skill-creator/SKILL.md"
-)
+SKILL_CREATOR_URL = "https://raw.githubusercontent.com/anthropics/skills/main/skills/skill-creator/SKILL.md"
 
 SYNC_TTL_DAYS = 7  # Only re-fetch if local files are older than this
 
@@ -174,7 +172,9 @@ def save_local_docs(docs_text: str | None, creator_text: str | None) -> list[str
             changed.append(DOCS_FILE.name)
 
     if creator_text is not None:
-        existing = CREATOR_FILE.read_text(encoding="utf-8") if CREATOR_FILE.exists() else ""
+        existing = (
+            CREATOR_FILE.read_text(encoding="utf-8") if CREATOR_FILE.exists() else ""
+        )
         if creator_text != existing:
             CREATOR_FILE.write_text(creator_text, encoding="utf-8")
             changed.append(CREATOR_FILE.name)
@@ -327,7 +327,9 @@ def generate_report(sources: dict[str, str], our_state: dict) -> dict:
 
     doc_limit = extract_line_limit(all_text)
     if doc_limit and doc_limit != 500:
-        report["drifts"].append(f"Anthropic recommends {doc_limit} line limit, we enforce 500")
+        report["drifts"].append(
+            f"Anthropic recommends {doc_limit} line limit, we enforce 500"
+        )
     elif doc_limit == 500:
         report["alignments"].append("Line limit 500 — aligned")
     else:
@@ -336,7 +338,10 @@ def generate_report(sources: dict[str, str], our_state: dict) -> dict:
         )
 
     for sub in ANTHROPIC_SUBSTITUTIONS:
-        if sub.replace("$", "").replace("{", "").replace("}", "").lower() in all_text.lower():
+        if (
+            sub.replace("$", "").replace("{", "").replace("}", "").lower()
+            in all_text.lower()
+        ):
             report["alignments"].append(f"Substitution variable {sub} documented")
 
     return report
@@ -392,7 +397,9 @@ def format_report_human(report: dict, sync_status: dict | None = None) -> str:
         lines.append("")
 
     if not report["new_in_anthropic"] and not report["drifts"]:
-        lines.append("✅ Fully aligned with Anthropic's latest published best practices.")
+        lines.append(
+            "✅ Fully aligned with Anthropic's latest published best practices."
+        )
         lines.append("")
 
     return "\n".join(lines)
@@ -430,7 +437,9 @@ def apply_updates(report: dict) -> list[str]:
                         last_row = rows[-1]
                         new_row = f"| `{field_name}` | No | {desc} |\n"
                         text = text[: last_row.end()] + new_row + text[last_row.end() :]
-                        changes.append(f"Added '{field_name}' to field constraints table")
+                        changes.append(
+                            f"Added '{field_name}' to field constraints table"
+                        )
 
     if changes:
         OUR_SKILL_DOCS.write_text(text, encoding="utf-8")
@@ -453,7 +462,9 @@ def scan_skills_for_updates(report: dict) -> list[dict]:
 
         desc = str(fm.get("description", ""))
         if desc and not re.search(r"(?i)(use when|triggered by|also use when)", desc):
-            skill_suggestions.append("Description should include trigger phrasing ('Use when...')")
+            skill_suggestions.append(
+                "Description should include trigger phrasing ('Use when...')"
+            )
 
         if skill_suggestions:
             suggestions.append({"skill": skill_name, "suggestions": skill_suggestions})
@@ -475,9 +486,15 @@ def main() -> int:
         action="store_true",
         help="Skip upstream check, read from local files only",
     )
-    parser.add_argument("--force-refresh", action="store_true", help="Force upstream fetch")
-    parser.add_argument("--apply", action="store_true", help="Apply updates to our template")
-    parser.add_argument("--update-skills", action="store_true", help="Suggest skill updates")
+    parser.add_argument(
+        "--force-refresh", action="store_true", help="Force upstream fetch"
+    )
+    parser.add_argument(
+        "--apply", action="store_true", help="Apply updates to our template"
+    )
+    parser.add_argument(
+        "--update-skills", action="store_true", help="Suggest skill updates"
+    )
     parser.add_argument("--json", action="store_true", help="JSON output")
     args = parser.parse_args()
 

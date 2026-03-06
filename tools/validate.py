@@ -52,7 +52,9 @@ def validate_manifest(tool_path: Path) -> list[ValidationError]:
     # Check required fields
     for field in REQUIRED_FIELDS:
         if field not in manifest:
-            errors.append(ValidationError(str(manifest_path), f"Missing required field: {field}"))
+            errors.append(
+                ValidationError(str(manifest_path), f"Missing required field: {field}")
+            )
 
     # Validate type
     if "type" in manifest and manifest["type"] not in VALID_TYPES:
@@ -74,7 +76,9 @@ def validate_manifest(tool_path: Path) -> list[ValidationError]:
 
     # Validate capabilities is a list
     if "capabilities" in manifest and not isinstance(manifest["capabilities"], list):
-        errors.append(ValidationError(str(manifest_path), "capabilities must be a list"))
+        errors.append(
+            ValidationError(str(manifest_path), "capabilities must be a list")
+        )
 
     # Validate name matches directory
     if "name" in manifest:
@@ -107,7 +111,9 @@ def validate_readme(tool_path: Path) -> list[ValidationError]:
         # Look for section as header (## Section or # Section)
         if f"# {section}" not in content and section not in content:
             errors.append(
-                ValidationError(str(readme_path), f"Missing recommended section: {section}")
+                ValidationError(
+                    str(readme_path), f"Missing recommended section: {section}"
+                )
             )
 
     return errors
@@ -125,7 +131,9 @@ def validate_tests(tool_path: Path) -> list[ValidationError]:
     # Check for test files
     test_files = list(tests_path.glob("test_*.py"))
     if not test_files:
-        errors.append(ValidationError(str(tests_path), "No test files found (test_*.py)"))
+        errors.append(
+            ValidationError(str(tests_path), "No test files found (test_*.py)")
+        )
 
     return errors
 
@@ -143,7 +151,10 @@ def validate_tool(tool_path: Path) -> list[ValidationError]:
         return errors
 
     # Skip if it's just a file (like STANDARD.md, validate.py)
-    if not (tool_path / "manifest.json").exists() and not (tool_path / "README.md").exists():
+    if (
+        not (tool_path / "manifest.json").exists()
+        and not (tool_path / "README.md").exists()
+    ):
         # Check if this looks like a tool directory at all
         if not any(tool_path.iterdir()):
             return errors

@@ -20,7 +20,6 @@ from sdlc_reminder import (  # noqa: E402, I001
     mark_reminder_sent,
 )
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -63,7 +62,9 @@ class TestReminderState:
         session_id, _ = tmp_session
         assert has_reminder_been_sent(session_id) is False
 
-    def test_state_without_reminder_sent_key_returns_false(self, patch_sessions_dir, tmp_session):
+    def test_state_without_reminder_sent_key_returns_false(
+        self, patch_sessions_dir, tmp_session
+    ):
         import json
 
         sessions_dir = patch_sessions_dir
@@ -74,7 +75,9 @@ class TestReminderState:
             json.dump({"code_modified": True, "files": ["foo.py"]}, f)
         assert has_reminder_been_sent(session_id) is False
 
-    def test_mark_reminder_sent_creates_state_with_flag(self, patch_sessions_dir, tmp_session):
+    def test_mark_reminder_sent_creates_state_with_flag(
+        self, patch_sessions_dir, tmp_session
+    ):
         import json
 
         sessions_dir = patch_sessions_dir
@@ -86,7 +89,9 @@ class TestReminderState:
             data = json.load(f)
         assert data["reminder_sent"] is True
 
-    def test_mark_reminder_sent_preserves_existing_state(self, patch_sessions_dir, tmp_session):
+    def test_mark_reminder_sent_preserves_existing_state(
+        self, patch_sessions_dir, tmp_session
+    ):
         import json
 
         sessions_dir = patch_sessions_dir
@@ -109,7 +114,9 @@ class TestReminderState:
         assert data["files"] == ["a.py"]
         assert data["quality_commands"]["pytest"] is True
 
-    def test_has_reminder_been_sent_returns_true_after_mark(self, patch_sessions_dir, tmp_session):
+    def test_has_reminder_been_sent_returns_true_after_mark(
+        self, patch_sessions_dir, tmp_session
+    ):
         session_id, _ = tmp_session
         assert has_reminder_been_sent(session_id) is False
         mark_reminder_sent(session_id)
@@ -136,7 +143,9 @@ class TestEmitReminderIfNeeded:
         out = capsys.readouterr().out
         assert SDLC_REMINDER_MESSAGE in out
 
-    def test_code_file_write_marks_reminder_sent(self, patch_sessions_dir, tmp_session, capsys):
+    def test_code_file_write_marks_reminder_sent(
+        self, patch_sessions_dir, tmp_session, capsys
+    ):
         """After reminder is emitted, reminder_sent should be True in state."""
         session_id, _ = tmp_session
         hook_input = {
@@ -162,7 +171,9 @@ class TestEmitReminderIfNeeded:
         out = capsys.readouterr().out
         assert out == ""
 
-    def test_non_code_file_write_no_output(self, patch_sessions_dir, tmp_session, capsys):
+    def test_non_code_file_write_no_output(
+        self, patch_sessions_dir, tmp_session, capsys
+    ):
         """Writing a .md file should produce no output at all."""
         session_id, _ = tmp_session
         hook_input = {
@@ -187,7 +198,9 @@ class TestEmitReminderIfNeeded:
         emit_reminder_if_needed(hook_input)
         assert has_reminder_been_sent(session_id) is False
 
-    def test_edit_tool_code_file_emits_reminder(self, patch_sessions_dir, tmp_session, capsys):
+    def test_edit_tool_code_file_emits_reminder(
+        self, patch_sessions_dir, tmp_session, capsys
+    ):
         """Edit tool on a code file should also trigger the reminder."""
         session_id, _ = tmp_session
         hook_input = {
@@ -215,7 +228,9 @@ class TestEmitReminderIfNeeded:
         assert SDLC_REMINDER_MESSAGE in out
 
     @pytest.mark.parametrize("ext", [".md", ".json", ".yaml", ".toml", ".sh", ".txt"])
-    def test_non_code_extensions_no_output(self, patch_sessions_dir, tmp_session, capsys, ext):
+    def test_non_code_extensions_no_output(
+        self, patch_sessions_dir, tmp_session, capsys, ext
+    ):
         """Non-code file extensions must not trigger the reminder."""
         session_id, _ = tmp_session
         hook_input = {
@@ -227,7 +242,9 @@ class TestEmitReminderIfNeeded:
         out = capsys.readouterr().out
         assert out == ""
 
-    def test_non_write_edit_tool_is_ignored(self, patch_sessions_dir, tmp_session, capsys):
+    def test_non_write_edit_tool_is_ignored(
+        self, patch_sessions_dir, tmp_session, capsys
+    ):
         """A Bash tool call on a .py path should not trigger the reminder."""
         session_id, _ = tmp_session
         hook_input = {

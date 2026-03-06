@@ -22,6 +22,8 @@ async def subagent_stop_hook(
     agent_type = input_data.get("agent_type", "unknown")
     agent_id = input_data.get("agent_id", "unknown")
 
-    logger.info(f"[subagent_stop] Subagent completed: agent_type={agent_type}, agent_id={agent_id}")
+    logger.info(
+        f"[subagent_stop] Subagent completed: agent_type={agent_type}, agent_id={agent_id}"
+    )
 
     return {}

@@ -132,7 +132,9 @@ class TestBridgeIntegration:
 
     def test_bridge_module_exists(self):
         """Verify bridge module can be imported."""
-        bridge_path = Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py"
+        bridge_path = (
+            Path(__file__).parent.parent.parent / "bridge" / "telegram_bridge.py"
+        )
         assert bridge_path.exists(), "Bridge module should exist"
 
     @pytest.mark.asyncio

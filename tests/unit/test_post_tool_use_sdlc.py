@@ -21,7 +21,6 @@ from post_tool_use import (  # noqa: E402, I001
     update_sdlc_state_for_file_write,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -153,7 +152,11 @@ class TestLoadSaveSdlcState:
             {
                 "code_modified": False,
                 "files": [],
-                "quality_commands": {"pytest": False, "ruff": False, "ruff-format": False},
+                "quality_commands": {
+                    "pytest": False,
+                    "ruff": False,
+                    "ruff-format": False,
+                },
             },
         )
         save_sdlc_state(
@@ -161,7 +164,11 @@ class TestLoadSaveSdlcState:
             {
                 "code_modified": True,
                 "files": ["x.py"],
-                "quality_commands": {"pytest": True, "ruff": False, "ruff-format": False},
+                "quality_commands": {
+                    "pytest": True,
+                    "ruff": False,
+                    "ruff-format": False,
+                },
             },
         )
         loaded = load_sdlc_state(session_id)
@@ -282,7 +289,9 @@ class TestUpdateSdlcStateForBash:
         state = load_sdlc_state(session_id)
         assert state["quality_commands"][expected_key] is True
 
-    def test_non_quality_bash_ignored_when_no_state(self, patch_project_dir, tmp_session):
+    def test_non_quality_bash_ignored_when_no_state(
+        self, patch_project_dir, tmp_session
+    ):
         sessions_dir = patch_project_dir
         session_id, _ = tmp_session
         hook_input = {
@@ -338,7 +347,9 @@ class TestMergeDetection:
             "gh pr merge --rebase",
         ],
     )
-    def test_gh_pr_merge_resets_code_modified(self, patch_project_dir, tmp_session, command):
+    def test_gh_pr_merge_resets_code_modified(
+        self, patch_project_dir, tmp_session, command
+    ):
         """gh pr merge commands should reset code_modified to false."""
         session_id, _ = tmp_session
         save_sdlc_state(session_id, _make_quality_state())
@@ -351,7 +362,9 @@ class TestMergeDetection:
         state = load_sdlc_state(session_id)
         assert state["code_modified"] is False
 
-    def test_non_merge_command_preserves_code_modified(self, patch_project_dir, tmp_session):
+    def test_non_merge_command_preserves_code_modified(
+        self, patch_project_dir, tmp_session
+    ):
         """Non-merge bash commands should not reset code_modified."""
         session_id, _ = tmp_session
         save_sdlc_state(session_id, _make_quality_state())
@@ -399,7 +412,9 @@ class TestBranchRecording:
         state = load_sdlc_state(session_id)
         assert state["modified_on_branch"] == "session/my-feature"
 
-    def test_branch_not_overwritten_on_subsequent_writes(self, patch_project_dir, tmp_session):
+    def test_branch_not_overwritten_on_subsequent_writes(
+        self, patch_project_dir, tmp_session
+    ):
         """modified_on_branch should only be set once (first write wins)."""
         session_id, _ = tmp_session
         # First write on session/first-branch
@@ -496,7 +511,9 @@ class TestBranchSwitchDetection:
         state = load_sdlc_state(session_id)
         assert state["modified_on_branch"] == "main"
 
-    def test_branch_switch_without_code_modified_is_noop(self, patch_project_dir, tmp_session):
+    def test_branch_switch_without_code_modified_is_noop(
+        self, patch_project_dir, tmp_session
+    ):
         """Branch switch when code_modified is False should not set modified_on_branch."""
         session_id, _ = tmp_session
         state = {
@@ -515,7 +532,9 @@ class TestBranchSwitchDetection:
         state = load_sdlc_state(session_id)
         assert "modified_on_branch" not in state
 
-    def test_branch_switch_without_existing_state_is_noop(self, patch_project_dir, tmp_session):
+    def test_branch_switch_without_existing_state_is_noop(
+        self, patch_project_dir, tmp_session
+    ):
         """Branch switch without pre-existing state file should do nothing."""
         sessions_dir = patch_project_dir
         session_id, _ = tmp_session
@@ -528,7 +547,9 @@ class TestBranchSwitchDetection:
         state_path = sessions_dir / session_id / "sdlc_state.json"
         assert not state_path.exists()
 
-    def test_chained_branch_switch_and_quality_command(self, patch_project_dir, tmp_session):
+    def test_chained_branch_switch_and_quality_command(
+        self, patch_project_dir, tmp_session
+    ):
         """A chained command like 'git checkout -b session/foo && pytest' should update both."""
         session_id, _ = tmp_session
         state = _make_quality_state()
@@ -538,7 +559,9 @@ class TestBranchSwitchDetection:
         hook_input = {
             "session_id": session_id,
             "tool_name": "Bash",
-            "tool_input": {"command": "git checkout -b session/my-fix && pytest tests/"},
+            "tool_input": {
+                "command": "git checkout -b session/my-fix && pytest tests/"
+            },
         }
         update_sdlc_state_for_bash(hook_input)
         state = load_sdlc_state(session_id)
@@ -571,7 +594,9 @@ class TestMergeCleanupModifiedOnBranch:
         assert state["code_modified"] is False
         assert "modified_on_branch" not in state
 
-    def test_merge_without_modified_on_branch_does_not_error(self, patch_project_dir, tmp_session):
+    def test_merge_without_modified_on_branch_does_not_error(
+        self, patch_project_dir, tmp_session
+    ):
         """gh pr merge on state without modified_on_branch should not crash."""
         session_id, _ = tmp_session
         save_sdlc_state(session_id, _make_quality_state())

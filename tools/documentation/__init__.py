@@ -73,7 +73,9 @@ def generate_docs(
 
     # Build prompt based on doc type
     type_prompts = {
-        "docstring": _build_docstring_prompt(source, style, detail_level, include_examples),
+        "docstring": _build_docstring_prompt(
+            source, style, detail_level, include_examples
+        ),
         "readme": _build_readme_prompt(source, detail_level, include_examples),
         "api": _build_api_prompt(source, style, detail_level),
         "changelog": _build_changelog_prompt(source),
@@ -128,7 +130,9 @@ def generate_docs(
             "documentation": text.strip(),
             "doc_type": doc_type,
             "style": style,
-            "format": ("markdown" if doc_type in ("readme", "api", "changelog") else style),
+            "format": (
+                "markdown" if doc_type in ("readme", "api", "changelog") else style
+            ),
         }
 
     except requests.exceptions.Timeout:

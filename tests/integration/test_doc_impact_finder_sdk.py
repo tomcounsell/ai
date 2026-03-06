@@ -25,7 +25,9 @@ REPO_ROOT = Path(__file__).parent.parent.parent
 PYTHON = sys.executable
 
 
-def run_tool_subprocess(code: str, env_override: dict | None = None) -> subprocess.CompletedProcess:
+def run_tool_subprocess(
+    code: str, env_override: dict | None = None
+) -> subprocess.CompletedProcess:
     """Run a python -c command the same way the agent does in /do-docs Agent C."""
     env = os.environ.copy()
     if env_override:
@@ -191,7 +193,9 @@ class TestLiveHaikuReranking:
         }
         result = _rerank_single_candidate(client, change, chunk)
         # Should return None (score < 5) for banana bread recipe
-        assert result is None, f"Haiku should not flag banana bread as relevant: {result}"
+        assert (
+            result is None
+        ), f"Haiku should not flag banana bread as relevant: {result}"
 
     def test_rerank_parallel_execution(self):
         """Verify parallel reranking works with ThreadPoolExecutor."""
@@ -235,7 +239,8 @@ class TestLiveHaikuReranking:
         results = []
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = {
-                executor.submit(_rerank_single_candidate, client, change, c): c for c in chunks
+                executor.submit(_rerank_single_candidate, client, change, c): c
+                for c in chunks
             }
             for future in as_completed(futures):
                 r = future.result()
@@ -244,9 +249,9 @@ class TestLiveHaikuReranking:
 
         # At least the bridge doc should be relevant, SOUL.md should not
         scored_paths = {r[2]["path"] for r in results}
-        assert "config/SOUL.md" not in scored_paths, (
-            "SOUL.md shouldn't be flagged for a CLI flag change"
-        )
+        assert (
+            "config/SOUL.md" not in scored_paths
+        ), "SOUL.md shouldn't be flagged for a CLI flag change"
 
     def test_json_fence_stripping(self):
         """Verify the code fence stripping fix works with real Haiku responses."""
@@ -269,9 +274,9 @@ class TestLiveHaikuReranking:
             },
         )
         # If fence stripping works, we get a parsed result (not a parse error → None)
-        assert result is not None, (
-            "JSON fence stripping should handle Haiku's markdown-wrapped responses"
-        )
+        assert (
+            result is not None
+        ), "JSON fence stripping should handle Haiku's markdown-wrapped responses"
 
 
 # ---------------------------------------------------------------------------
@@ -309,8 +314,12 @@ class TestIndexLifecycle:
         # Create docs
         docs_dir = tmp_path / "docs"
         docs_dir.mkdir()
-        (docs_dir / "stable.md").write_text("# Stable\n\n## Section\n\nUnchanged content.\n")
-        (docs_dir / "changing.md").write_text("# Changing\n\n## Section\n\nVersion 1.\n")
+        (docs_dir / "stable.md").write_text(
+            "# Stable\n\n## Section\n\nUnchanged content.\n"
+        )
+        (docs_dir / "changing.md").write_text(
+            "# Changing\n\n## Section\n\nVersion 1.\n"
+        )
 
         embed_call_count = 0
         original_texts = []
@@ -323,25 +332,31 @@ class TestIndexLifecycle:
 
         # First index: embeds all chunks
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake"}, clear=False):
-            with patch("tools.impact_finder_core._embed_openai", side_effect=counting_embed):
+            with patch(
+                "tools.impact_finder_core._embed_openai", side_effect=counting_embed
+            ):
                 index_docs(repo_root=tmp_path)
 
         first_count = embed_call_count
         assert first_count > 0, "Should have embedded some chunks"
 
         # Modify one file
-        (docs_dir / "changing.md").write_text("# Changing\n\n## Section\n\nVersion 2.\n")
+        (docs_dir / "changing.md").write_text(
+            "# Changing\n\n## Section\n\nVersion 2.\n"
+        )
 
         embed_call_count = 0
 
         # Second index: should only re-embed the changed chunk
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake"}, clear=False):
-            with patch("tools.impact_finder_core._embed_openai", side_effect=counting_embed):
+            with patch(
+                "tools.impact_finder_core._embed_openai", side_effect=counting_embed
+            ):
                 index_docs(repo_root=tmp_path)
 
-        assert embed_call_count < first_count, (
-            f"Incremental re-index should embed fewer chunks: {embed_call_count} vs {first_count}"
-        )
+        assert (
+            embed_call_count < first_count
+        ), f"Incremental re-index should embed fewer chunks: {embed_call_count} vs {first_count}"
         assert embed_call_count == 1, "Only the changed chunk should be re-embedded"
 
     def test_index_file_persistence(self, tmp_path):
@@ -358,7 +373,9 @@ class TestIndexLifecycle:
             return [[0.5, 0.5, 0.5] for _ in texts]
 
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake"}, clear=False):
-            with patch("tools.impact_finder_core._embed_openai", side_effect=fake_embed):
+            with patch(
+                "tools.impact_finder_core._embed_openai", side_effect=fake_embed
+            ):
                 index_docs(repo_root=tmp_path)
 
         # Verify file exists
@@ -427,15 +444,17 @@ class TestFullPipelineLive:
 
         # Build index
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake"}, clear=False):
-            with patch("tools.impact_finder_core._embed_openai", side_effect=smart_embed):
+            with patch(
+                "tools.impact_finder_core._embed_openai", side_effect=smart_embed
+            ):
                 index_docs(repo_root=tmp_path)
 
         # Run full pipeline with REAL Haiku reranking
         with patch.dict("os.environ", {"OPENAI_API_KEY": "fake"}, clear=False):
-            with patch("tools.impact_finder_core._embed_openai", side_effect=smart_embed):
-                change_desc = (
-                    "Refactored session isolation to use slug-based worktrees instead of thread IDs"
-                )
+            with patch(
+                "tools.impact_finder_core._embed_openai", side_effect=smart_embed
+            ):
+                change_desc = "Refactored session isolation to use slug-based worktrees instead of thread IDs"
                 results = find_affected_docs(
                     change_desc,
                     repo_root=tmp_path,
@@ -443,12 +462,12 @@ class TestFullPipelineLive:
 
         # Session doc should be found, recipes should not
         result_paths = [r.path for r in results]
-        assert any("session" in p for p in result_paths), (
-            f"Expected session.md in results, got: {result_paths}"
-        )
-        assert not any("recipes" in p for p in result_paths), (
-            f"Recipes should NOT be in results: {result_paths}"
-        )
+        assert any(
+            "session" in p for p in result_paths
+        ), f"Expected session.md in results, got: {result_paths}"
+        assert not any(
+            "recipes" in p for p in result_paths
+        ), f"Recipes should NOT be in results: {result_paths}"
 
         # Verify result quality
         for r in results:

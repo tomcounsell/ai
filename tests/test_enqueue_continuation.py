@@ -112,7 +112,9 @@ class TestEnqueueContinuationParameters:
 
         with (
             patch("bridge.coach.build_coaching_message", return_value="continue"),
-            patch("agent.job_queue.enqueue_job", new_callable=AsyncMock) as mock_enqueue,
+            patch(
+                "agent.job_queue.enqueue_job", new_callable=AsyncMock
+            ) as mock_enqueue,
         ):
             await _enqueue_continuation(
                 job=job,
@@ -133,7 +135,9 @@ class TestEnqueueContinuationParameters:
 
         with (
             patch("bridge.coach.build_coaching_message", return_value="continue"),
-            patch("agent.job_queue.enqueue_job", new_callable=AsyncMock) as mock_enqueue,
+            patch(
+                "agent.job_queue.enqueue_job", new_callable=AsyncMock
+            ) as mock_enqueue,
         ):
             await _enqueue_continuation(
                 job=job,
@@ -153,7 +157,9 @@ class TestEnqueueContinuationParameters:
 
         with (
             patch("bridge.coach.build_coaching_message", return_value="continue"),
-            patch("agent.job_queue.enqueue_job", new_callable=AsyncMock) as mock_enqueue,
+            patch(
+                "agent.job_queue.enqueue_job", new_callable=AsyncMock
+            ) as mock_enqueue,
         ):
             await _enqueue_continuation(
                 job=job,
@@ -173,7 +179,9 @@ class TestEnqueueContinuationParameters:
 
         with (
             patch("bridge.coach.build_coaching_message", return_value="continue"),
-            patch("agent.job_queue.enqueue_job", new_callable=AsyncMock) as mock_enqueue,
+            patch(
+                "agent.job_queue.enqueue_job", new_callable=AsyncMock
+            ) as mock_enqueue,
         ):
             await _enqueue_continuation(
                 job=job,
@@ -193,7 +201,9 @@ class TestEnqueueContinuationParameters:
 
         with (
             patch("bridge.coach.build_coaching_message", return_value="continue"),
-            patch("agent.job_queue.enqueue_job", new_callable=AsyncMock) as mock_enqueue,
+            patch(
+                "agent.job_queue.enqueue_job", new_callable=AsyncMock
+            ) as mock_enqueue,
         ):
             await _enqueue_continuation(
                 job=job,
@@ -213,7 +223,9 @@ class TestEnqueueContinuationParameters:
 
         with (
             patch("bridge.coach.build_coaching_message", return_value="continue"),
-            patch("agent.job_queue.enqueue_job", new_callable=AsyncMock) as mock_enqueue,
+            patch(
+                "agent.job_queue.enqueue_job", new_callable=AsyncMock
+            ) as mock_enqueue,
         ):
             await _enqueue_continuation(
                 job=job,
@@ -241,7 +253,9 @@ class TestEnqueueContinuationPlanResolution:
         mock_ws.data = mock_ws_data
 
         with (
-            patch("bridge.coach.build_coaching_message", return_value="continue") as mock_coach,
+            patch(
+                "bridge.coach.build_coaching_message", return_value="continue"
+            ) as mock_coach,
             patch("agent.job_queue.enqueue_job", new_callable=AsyncMock),
             patch("agent.workflow_state.WorkflowState.load", return_value=mock_ws),
         ):
@@ -262,7 +276,9 @@ class TestEnqueueContinuationPlanResolution:
         job = _make_mock_job(workflow_id=None)
 
         with (
-            patch("bridge.coach.build_coaching_message", return_value="continue") as mock_coach,
+            patch(
+                "bridge.coach.build_coaching_message", return_value="continue"
+            ) as mock_coach,
             patch("agent.job_queue.enqueue_job", new_callable=AsyncMock),
         ):
             await _enqueue_continuation(
@@ -282,8 +298,12 @@ class TestEnqueueContinuationPlanResolution:
         job = _make_mock_job(workflow_id="wf-broken")
 
         with (
-            patch("bridge.coach.build_coaching_message", return_value="continue") as mock_coach,
-            patch("agent.job_queue.enqueue_job", new_callable=AsyncMock) as mock_enqueue,
+            patch(
+                "bridge.coach.build_coaching_message", return_value="continue"
+            ) as mock_coach,
+            patch(
+                "agent.job_queue.enqueue_job", new_callable=AsyncMock
+            ) as mock_enqueue,
             patch(
                 "agent.workflow_state.WorkflowState.load",
                 side_effect=Exception("Redis down"),
@@ -315,7 +335,9 @@ class TestEnqueueContinuationErrorHandling:
         coaching_text = "[System Coach] Include test output next time."
         with (
             patch("bridge.coach.build_coaching_message", return_value=coaching_text),
-            patch("agent.job_queue.enqueue_job", new_callable=AsyncMock) as mock_enqueue,
+            patch(
+                "agent.job_queue.enqueue_job", new_callable=AsyncMock
+            ) as mock_enqueue,
         ):
             await _enqueue_continuation(
                 job=job,

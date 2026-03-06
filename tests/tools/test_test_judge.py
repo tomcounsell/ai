@@ -178,7 +178,9 @@ class TestJudgeOutputFormat:
 
     def test_judgment_has_required_fields(self, anthropic_api_key):
         """Test that judgment has all required fields."""
-        result = judge_test_result(test_output="Test passed", expected_criteria=["Test passes"])
+        result = judge_test_result(
+            test_output="Test passed", expected_criteria=["Test passes"]
+        )
 
         assert "error" not in result
         assert "pass_fail" in result

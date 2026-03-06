@@ -391,7 +391,9 @@ class AIJudgeTestRunner:
         """Add a judgment result."""
         self.results.append(result)
 
-    def run_test(self, test_name: str, test_output: str, criteria: list[str]) -> JudgmentResult:
+    def run_test(
+        self, test_name: str, test_output: str, criteria: list[str]
+    ) -> JudgmentResult:
         """Run a single test and record the result."""
         result = judge_test_result(
             test_output=test_output,

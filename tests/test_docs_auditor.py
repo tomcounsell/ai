@@ -47,7 +47,9 @@ def auditor(repo: Path) -> DocsAuditor:
 
 
 class TestEnumerateDocs:
-    def test_returns_md_files_under_docs(self, repo: Path, auditor: DocsAuditor) -> None:
+    def test_returns_md_files_under_docs(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
         (repo / "docs" / "foo.md").write_text("# Foo")
         (repo / "docs" / "bar.md").write_text("# Bar")
         docs = auditor.enumerate_docs()
@@ -157,7 +159,9 @@ class TestVerifyReferences:
 
 
 class TestFrequencyGate:
-    def test_no_state_file_does_not_skip(self, repo: Path, auditor: DocsAuditor) -> None:
+    def test_no_state_file_does_not_skip(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
         assert auditor._should_skip() is False
 
     def test_recent_audit_skips(self, repo: Path, auditor: DocsAuditor) -> None:
@@ -171,7 +175,9 @@ class TestFrequencyGate:
         (repo / "data" / "reflections_state.json").write_text(json.dumps(state))
         assert auditor._should_skip() is False
 
-    def test_boundary_exactly_7_days_skips(self, repo: Path, auditor: DocsAuditor) -> None:
+    def test_boundary_exactly_7_days_skips(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
         # 6.9 days ago — still within window
         recent = (datetime.now() - timedelta(days=6, hours=23)).isoformat()
         state = {"last_audit_date": recent}
@@ -220,7 +226,9 @@ class TestParseVerdict:
         assert v.low_confidence is True
 
     def test_corrections_none_not_included(self, auditor: DocsAuditor) -> None:
-        text = "VERDICT: KEEP\nCONFIDENCE: HIGH\nRATIONALE: All good\nCORRECTIONS:\n- none"
+        text = (
+            "VERDICT: KEEP\nCONFIDENCE: HIGH\nRATIONALE: All good\nCORRECTIONS:\n- none"
+        )
         v = auditor._parse_verdict(text)
         assert v.corrections == []
 
@@ -231,7 +239,9 @@ class TestParseVerdict:
 
 
 class TestExecuteVerdict:
-    def test_dry_run_delete_does_not_remove_file(self, repo: Path, auditor: DocsAuditor) -> None:
+    def test_dry_run_delete_does_not_remove_file(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
         doc = repo / "docs" / "deleteme.md"
         doc.write_text("# Delete me")
         verdict = Verdict(action="DELETE", rationale="Feature gone")
@@ -280,7 +290,9 @@ class TestSweepIndexFiles:
         assert "gone-feature.md" not in content
         assert "alive-feature.md" in content
 
-    def test_dry_run_does_not_modify_index(self, repo: Path, auditor: DocsAuditor) -> None:
+    def test_dry_run_does_not_modify_index(
+        self, repo: Path, auditor: DocsAuditor
+    ) -> None:
         index = repo / "docs" / "README.md"
         original = "| [Gone](gone.md) | desc |\n"
         index.write_text(original)
@@ -321,7 +333,9 @@ class TestRunFrequencyGate:
         auditor = DocsAuditor(repo_root=repo, dry_run=True)
         mock_verdict = Verdict(action="KEEP", rationale="All good")
 
-        with patch.object(auditor, "analyze_doc", return_value=mock_verdict) as mock_analyze:
+        with patch.object(
+            auditor, "analyze_doc", return_value=mock_verdict
+        ) as mock_analyze:
             summary = auditor.run()
 
         assert mock_analyze.call_count == 2

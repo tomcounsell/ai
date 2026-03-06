@@ -36,7 +36,9 @@ class TestSearchInstallation:
                 os.environ["PERPLEXITY_API_KEY"] = original
 
 
-@pytest.mark.skipif(not os.environ.get("PERPLEXITY_API_KEY"), reason="PERPLEXITY_API_KEY not set")
+@pytest.mark.skipif(
+    not os.environ.get("PERPLEXITY_API_KEY"), reason="PERPLEXITY_API_KEY not set"
+)
 class TestSearchCore:
     """Test core search functionality."""
 
@@ -77,7 +79,9 @@ class TestSearchValidation:
         assert "error" in result
 
 
-@pytest.mark.skipif(not os.environ.get("PERPLEXITY_API_KEY"), reason="PERPLEXITY_API_KEY not set")
+@pytest.mark.skipif(
+    not os.environ.get("PERPLEXITY_API_KEY"), reason="PERPLEXITY_API_KEY not set"
+)
 class TestSearchWithContext:
     """Test context-enhanced search."""
 

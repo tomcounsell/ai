@@ -96,7 +96,9 @@ def run_checks(prerequisites: list[dict[str, str]]) -> tuple[bool, list[str]]:
                 report.append(f"  PASS: {req}")
             else:
                 all_passed = False
-                error = result.stderr.strip() or result.stdout.strip() or "non-zero exit"
+                error = (
+                    result.stderr.strip() or result.stdout.strip() or "non-zero exit"
+                )
                 report.append(f"  FAIL: {req} -- {error}")
         except subprocess.TimeoutExpired:
             all_passed = False

@@ -170,7 +170,9 @@ def analyze_log(log_path: Path, since: str | None = None, top_n: int = 15):
             # Filter by date
             if since_dt:
                 try:
-                    line_dt = datetime.strptime(parsed["timestamp"], "%Y-%m-%d %H:%M:%S")
+                    line_dt = datetime.strptime(
+                        parsed["timestamp"], "%Y-%m-%d %H:%M:%S"
+                    )
                     if line_dt < since_dt:
                         continue
                 except ValueError:
@@ -198,7 +200,9 @@ def analyze_log(log_path: Path, since: str | None = None, top_n: int = 15):
                     root_cause_counts[cause] += 1
                     root_cause_signatures[cause][extract_error_signature(line)] += 1
                     if len(error_examples[cause]) < 3:
-                        error_examples[cause].append(parsed["timestamp"] + " " + message[:200])
+                        error_examples[cause].append(
+                            parsed["timestamp"] + " " + message[:200]
+                        )
 
                 # Track error signatures
                 sig = extract_error_signature(line)
@@ -224,7 +228,9 @@ def analyze_log(log_path: Path, since: str | None = None, top_n: int = 15):
     print(f"  Total errors:   {error_lines:,}")
     print(f"  Total warnings: {warning_lines:,}")
     if total_lines:
-        print(f"  Error rate:     {error_lines / total_lines * 100:.2f}% of all log lines")
+        print(
+            f"  Error rate:     {error_lines / total_lines * 100:.2f}% of all log lines"
+        )
 
     print("\n### Daily Error+Warning Volume (last 14 days)")
     sorted_days = sorted(daily_errors.keys())[-14:]
@@ -292,7 +298,9 @@ def analyze_log(log_path: Path, since: str | None = None, top_n: int = 15):
         print("     These are normal — Telegram periodically resets idle connections.")
         print("     FIX: Downgrade these from WARNING to DEBUG to reduce log noise.\n")
     if root_cause_counts.get("session_lock_conflict", 0) > 10:
-        print("  2. SESSION LOCK CONFLICTS indicate concurrent access to session files.")
+        print(
+            "  2. SESSION LOCK CONFLICTS indicate concurrent access to session files."
+        )
         print("     FIX: The self-healing system should be cleaning these up.\n")
     if root_cause_counts.get("python_error", 0) > 20:
         print("  3. PYTHON RUNTIME ERRORS need individual investigation.")

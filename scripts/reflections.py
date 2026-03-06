@@ -105,7 +105,9 @@ def is_ignored(pattern: str, ignore_entries: list[dict]) -> bool:
     pattern_lower = pattern.lower()
     for entry in ignore_entries:
         entry_pattern = entry.get("pattern", "").lower()
-        if entry_pattern and (entry_pattern in pattern_lower or pattern_lower in entry_pattern):
+        if entry_pattern and (
+            entry_pattern in pattern_lower or pattern_lower in entry_pattern
+        ):
             return True
     return False
 
@@ -128,7 +130,9 @@ def has_existing_github_work(pattern: str, cwd: str) -> bool:
         ["gh", "pr", "list", "--state", "open", "--search", search_term],
     ]:
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15, cwd=cwd)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=15, cwd=cwd
+            )
             if result.returncode == 0 and result.stdout.strip():
                 return True
         except Exception:
@@ -198,7 +202,9 @@ def analyze_sessions_from_redis(target_date: str) -> dict[str, Any]:
         target_sessions = []
         for session in all_sessions:
             if session.started_at:
-                session_date = datetime.fromtimestamp(session.started_at).strftime("%Y-%m-%d")
+                session_date = datetime.fromtimestamp(session.started_at).strftime(
+                    "%Y-%m-%d"
+                )
                 if session_date == target_date:
                     target_sessions.append(session)
 
@@ -261,7 +267,9 @@ def analyze_sessions_from_redis(target_date: str) -> dict[str, Any]:
             all_events = BridgeEvent.query.filter(event_type="error")
             for event in all_events:
                 if event.timestamp:
-                    event_date = datetime.fromtimestamp(event.timestamp).strftime("%Y-%m-%d")
+                    event_date = datetime.fromtimestamp(event.timestamp).strftime(
+                        "%Y-%m-%d"
+                    )
                     if event_date == target_date:
                         result["error_patterns"].append(
                             {
@@ -419,16 +427,20 @@ def extract_errors_from_redis(target_date: str) -> list[dict[str, str]]:
         all_events = BridgeEvent.query.filter(event_type="error")
         for event in all_events:
             if event.timestamp:
-                event_date = datetime.fromtimestamp(event.timestamp).strftime("%Y-%m-%d")
+                event_date = datetime.fromtimestamp(event.timestamp).strftime(
+                    "%Y-%m-%d"
+                )
                 if event_date == target_date:
                     data = event.data or {}
                     errors.append(
                         {
-                            "timestamp": datetime.fromtimestamp(event.timestamp).strftime(
-                                "%Y-%m-%d %H:%M:%S"
-                            ),
+                            "timestamp": datetime.fromtimestamp(
+                                event.timestamp
+                            ).strftime("%Y-%m-%d %H:%M:%S"),
                             "level": "ERROR",
-                            "message": data.get("error", data.get("message", str(data))),
+                            "message": data.get(
+                                "error", data.get("message", str(data))
+                            ),
                             "context": f"project={event.project_key or 'unknown'} "
                             f"chat={event.chat_id or 'unknown'}",
                         }
@@ -495,7 +507,9 @@ class ReflectionRunner:
 
         for step_num, step_name, step_func in self.steps:
             if step_num in self.state.completed_steps:
-                logger.info(f"Step {step_num} ({step_name}) already completed, skipping")
+                logger.info(
+                    f"Step {step_num} ({step_name}) already completed, skipping"
+                )
                 continue
 
             if step_num < self.state.current_step:
@@ -532,7 +546,9 @@ class ReflectionRunner:
                 text=True,
                 timeout=30,
             )
-            todo_count = len(result.stdout.strip().split("\n")) if result.stdout.strip() else 0
+            todo_count = (
+                len(result.stdout.strip().split("\n")) if result.stdout.strip() else 0
+            )
             if todo_count > 0:
                 findings.append(f"Found {todo_count} TODO comments to review")
         except Exception:
@@ -593,7 +609,9 @@ class ReflectionRunner:
             # Query Redis BridgeEvent for structured errors
             redis_errors = extract_errors_from_redis(yesterday)
             if redis_errors:
-                findings.append(f"Redis BridgeEvent: {len(redis_errors)} error events yesterday")
+                findings.append(
+                    f"Redis BridgeEvent: {len(redis_errors)} error events yesterday"
+                )
                 for error in redis_errors[-5:]:
                     msg = error["message"][:200]
                     findings.append(f"  [BridgeEvent] {error['timestamp']}: {msg}")
@@ -615,7 +633,9 @@ class ReflectionRunner:
                 try:
                     mtime = datetime.fromtimestamp(log_file.stat().st_mtime)
                     if mtime < datetime.now() - timedelta(days=7):
-                        findings.append(f"Log file {log_file.name} is older than 7 days")
+                        findings.append(
+                            f"Log file {log_file.name} is older than 7 days"
+                        )
 
                     size_mb = log_file.stat().st_size / (1024 * 1024)
                     if size_mb > 10:
@@ -632,14 +652,18 @@ class ReflectionRunner:
                         # Include up to 5 most recent errors in findings
                         for error in errors[-5:]:
                             msg = error["message"][:200]
-                            findings.append(f"  [{error['level']}] {error['timestamp']}: {msg}")
+                            findings.append(
+                                f"  [{error['level']}] {error['timestamp']}: {msg}"
+                            )
 
                     # Also count warnings
                     with open(log_file) as f:
                         lines = f.readlines()[-1000:]
                     warning_count = sum(1 for line in lines if "WARNING" in line)
                     if warning_count > 10:
-                        findings.append(f"{log_file.name}: {warning_count} warnings in recent logs")
+                        findings.append(
+                            f"{log_file.name}: {warning_count} warnings in recent logs"
+                        )
 
                 except Exception as e:
                     findings.append(f"Could not analyze {log_file.name}: {str(e)}")
@@ -721,7 +745,9 @@ class ReflectionRunner:
             total_findings += len(findings)
 
         # Also check local todo files in AI_ROOT
-        todo_files = list(PROJECT_ROOT.glob("**/TODO.md")) + list(PROJECT_ROOT.glob("**/todo.md"))
+        todo_files = list(PROJECT_ROOT.glob("**/TODO.md")) + list(
+            PROJECT_ROOT.glob("**/todo.md")
+        )
         for todo_file in todo_files:
             try:
                 content = todo_file.read_text()
@@ -747,7 +773,9 @@ class ReflectionRunner:
 
         # Record findings
         if summary.skipped:
-            self.state.add_finding("documentation", f"Docs audit skipped: {summary.skip_reason}")
+            self.state.add_finding(
+                "documentation", f"Docs audit skipped: {summary.skip_reason}"
+            )
         else:
             if len(summary.updated) > 0:
                 self.state.add_finding(
@@ -759,7 +787,11 @@ class ReflectionRunner:
                     "documentation",
                     f"Deleted {len(summary.deleted)} stale/inaccurate docs",
                 )
-            if len(summary.kept) > 0 and len(summary.updated) == 0 and len(summary.deleted) == 0:
+            if (
+                len(summary.kept) > 0
+                and len(summary.updated) == 0
+                and len(summary.deleted) == 0
+            ):
                 self.state.add_finding(
                     "documentation", f"All {len(summary.kept)} docs verified accurate"
                 )
@@ -797,7 +829,9 @@ class ReflectionRunner:
         if self.state.session_analysis:
             report_lines.append("## Session Analysis")
             sa = self.state.session_analysis
-            report_lines.append(f"- Sessions analyzed: {sa.get('sessions_analyzed', 0)}")
+            report_lines.append(
+                f"- Sessions analyzed: {sa.get('sessions_analyzed', 0)}"
+            )
             corrections = sa.get("corrections", [])
             if corrections:
                 report_lines.append(f"- User corrections detected: {len(corrections)}")
@@ -831,7 +865,9 @@ class ReflectionRunner:
         if self.state.reflections:
             report_lines.append("## LLM Reflections")
             for r in self.state.reflections:
-                report_lines.append(f"- **{r.get('category', 'unknown')}**: {r.get('summary', '')}")
+                report_lines.append(
+                    f"- **{r.get('category', 'unknown')}**: {r.get('summary', '')}"
+                )
                 report_lines.append(f"  - Pattern: {r.get('pattern', '')}")
                 report_lines.append(f"  - Prevention: {r.get('prevention', '')}")
             report_lines.append("")
@@ -839,7 +875,9 @@ class ReflectionRunner:
         # Add progress details
         report_lines.append("## Step Progress")
         for key, value in self.state.step_progress.items():
-            report_lines.append(f"- **{key.replace('_', ' ').title()}**: {json.dumps(value)}")
+            report_lines.append(
+                f"- **{key.replace('_', ' ').title()}**: {json.dumps(value)}"
+            )
 
         report_lines.append("")
         report_lines.append("---")
@@ -921,7 +959,9 @@ class ReflectionRunner:
         """Step 8: File GitHub issues for high-confidence code bugs."""
         enabled = os.environ.get("REFLECTIONS_AUTO_FIX_ENABLED", "true").lower()
         if enabled not in ("true", "1", "yes"):
-            logger.info("REFLECTIONS_AUTO_FIX_ENABLED is false, skipping bug issues step")
+            logger.info(
+                "REFLECTIONS_AUTO_FIX_ENABLED is false, skipping bug issues step"
+            )
             self.state.step_progress["auto_fix_bugs"] = {
                 "skipped": True,
                 "reason": "disabled",
@@ -949,7 +989,9 @@ class ReflectionRunner:
             if is_ignored(pattern, ignore_entries):
                 logger.info(f"Bug issues: skipping ignored pattern: {pattern[:60]}")
                 attempts.append({"pattern": pattern, "status": "ignored"})
-                self.state.add_finding("auto_fix", f"Ignored (in ignore log): {summary[:80]}")
+                self.state.add_finding(
+                    "auto_fix", f"Ignored (in ignore log): {summary[:80]}"
+                )
                 continue
 
             # Check for existing GitHub work (use first project with github config)
@@ -962,17 +1004,25 @@ class ReflectionRunner:
             if project_wd and has_existing_github_work(pattern, project_wd):
                 logger.info(f"Bug issues: duplicate found for pattern: {pattern[:60]}")
                 attempts.append({"pattern": pattern, "status": "duplicate"})
-                self.state.add_finding("auto_fix", f"Skipped (existing PR/issue): {summary[:80]}")
+                self.state.add_finding(
+                    "auto_fix", f"Skipped (existing PR/issue): {summary[:80]}"
+                )
                 continue
 
             if dry_run:
-                logger.info(f"Bug issues: [DRY RUN] would create issue for: {summary[:80]}")
+                logger.info(
+                    f"Bug issues: [DRY RUN] would create issue for: {summary[:80]}"
+                )
                 attempts.append({"pattern": pattern, "status": "dry_run"})
-                self.state.add_finding("auto_fix", f"[DRY RUN] Would file issue: {summary[:80]}")
+                self.state.add_finding(
+                    "auto_fix", f"[DRY RUN] Would file issue: {summary[:80]}"
+                )
                 continue
 
             if not project_wd:
-                logger.warning("Bug issues: no project with github config found, skipping")
+                logger.warning(
+                    "Bug issues: no project with github config found, skipping"
+                )
                 attempts.append(
                     {
                         "pattern": pattern,
@@ -1030,15 +1080,23 @@ class ReflectionRunner:
                             "output": output_snippet,
                         }
                     )
-                    logger.warning(f"Bug issues: gh issue create failed: {output_snippet}")
-                    self.state.add_finding("auto_fix", f"Issue creation failed: {summary[:80]}")
+                    logger.warning(
+                        f"Bug issues: gh issue create failed: {output_snippet}"
+                    )
+                    self.state.add_finding(
+                        "auto_fix", f"Issue creation failed: {summary[:80]}"
+                    )
             except subprocess.TimeoutExpired:
                 logger.warning(f"Bug issues: timed out for: {summary[:80]}")
                 attempts.append({"pattern": pattern, "status": "timeout"})
-                self.state.add_finding("auto_fix", f"Issue creation timed out: {summary[:80]}")
+                self.state.add_finding(
+                    "auto_fix", f"Issue creation timed out: {summary[:80]}"
+                )
             except Exception as e:
                 logger.warning(f"Bug issues: error: {e}")
-                attempts.append({"pattern": pattern, "status": "error", "error": str(e)})
+                attempts.append(
+                    {"pattern": pattern, "status": "error", "error": str(e)}
+                )
 
         self.state.auto_fix_attempts = attempts
         self.state.step_progress["auto_fix_bugs"] = {
@@ -1104,7 +1162,12 @@ class ReflectionRunner:
     async def step_skills_audit(self) -> None:
         """Step 11: Run skills audit to validate all SKILL.md files."""
         audit_script = (
-            PROJECT_ROOT / ".claude" / "skills" / "do-skills-audit" / "scripts" / "audit_skills.py"
+            PROJECT_ROOT
+            / ".claude"
+            / "skills"
+            / "do-skills-audit"
+            / "scripts"
+            / "audit_skills.py"
         )
         if not audit_script.exists():
             logger.warning("Skills audit script not found, skipping")
@@ -1187,7 +1250,9 @@ class ReflectionRunner:
                 f"events={event_deleted}, runs={run_deleted}, "
                 f"ignores={ignore_deleted})"
             )
-            self.state.daily_report.append(f"Redis cleanup: {total} expired records removed")
+            self.state.daily_report.append(
+                f"Redis cleanup: {total} expired records removed"
+            )
         except Exception as e:
             logger.warning(f"Redis TTL cleanup failed (non-fatal): {e}")
 
@@ -1231,10 +1296,14 @@ class ReflectionRunner:
             month_ago = _time.time() - (30 * 86400)
             all_chats = Chat.query.all()
             dead_chats = [
-                chat for chat in all_chats if chat.updated_at and chat.updated_at < month_ago
+                chat
+                for chat in all_chats
+                if chat.updated_at and chat.updated_at < month_ago
             ]
             if dead_chats:
-                findings.append(f"{len(dead_chats)} chat(s) with no activity in 30+ days")
+                findings.append(
+                    f"{len(dead_chats)} chat(s) with no activity in 30+ days"
+                )
                 for chat in dead_chats[:5]:
                     days_inactive = int((_time.time() - chat.updated_at) / 86400)
                     findings.append(
@@ -1271,12 +1340,16 @@ class ReflectionRunner:
                     ]:
                         count = content.count(keyword)
                         if count > 0:
-                            error_keywords[keyword] = error_keywords.get(keyword, 0) + count
+                            error_keywords[keyword] = (
+                                error_keywords.get(keyword, 0) + count
+                            )
                 except OSError:
                     continue
 
             if error_keywords:
-                sorted_errors = sorted(error_keywords.items(), key=lambda x: x[1], reverse=True)
+                sorted_errors = sorted(
+                    error_keywords.items(), key=lambda x: x[1], reverse=True
+                )
                 findings.append(
                     f"Error patterns across {len(recent_sessions)} recent session transcripts:"
                 )
@@ -1289,14 +1362,18 @@ class ReflectionRunner:
             # on TelegramMessage, so we fetch and filter in Python (same pattern
             # as cleanup_expired in models/telegram.py -- bounded dataset).
             all_messages = TelegramMessage.query.all()[:10000]
-            recent_messages = [m for m in all_messages if m.timestamp and m.timestamp > week_ago]
+            recent_messages = [
+                m for m in all_messages if m.timestamp and m.timestamp > week_ago
+            ]
             chat_volumes: dict[str, int] = {}
             for msg in recent_messages:
                 chat_id = msg.chat_id or "unknown"
                 chat_volumes[chat_id] = chat_volumes.get(chat_id, 0) + 1
 
             if chat_volumes:
-                sorted_chats = sorted(chat_volumes.items(), key=lambda x: x[1], reverse=True)
+                sorted_chats = sorted(
+                    chat_volumes.items(), key=lambda x: x[1], reverse=True
+                )
                 findings.append(
                     f"Message volume (last 7 days): "
                     f"{len(recent_messages)} messages across "
@@ -1353,7 +1430,9 @@ class ReflectionRunner:
                         )
                         if del_result.returncode == 0:
                             findings.append(f"Deleted merged branch: {branch}")
-                            logger.info(f"Branch cleanup: deleted merged branch {branch}")
+                            logger.info(
+                                f"Branch cleanup: deleted merged branch {branch}"
+                            )
                         else:
                             logger.warning(
                                 f"Branch cleanup: failed to delete {branch}: "
@@ -1398,7 +1477,15 @@ class ReflectionRunner:
                 if project_wd:
                     try:
                         result = subprocess.run(
-                            ["gh", "issue", "list", "--state", "open", "--search", plan_name],
+                            [
+                                "gh",
+                                "issue",
+                                "list",
+                                "--state",
+                                "open",
+                                "--search",
+                                plan_name,
+                            ],
                             capture_output=True,
                             text=True,
                             timeout=15,
@@ -1412,7 +1499,9 @@ class ReflectionRunner:
                                 f"Orphaned plan (no open issue): {plan_file.name}",
                             )
                     except Exception as e:
-                        logger.warning(f"Could not check issue for plan {plan_name}: {e}")
+                        logger.warning(
+                            f"Could not check issue for plan {plan_name}: {e}"
+                        )
 
         for finding in findings:
             logger.info(f"Branch/plan cleanup: {finding}")
@@ -1430,7 +1519,9 @@ class ReflectionRunner:
         """
         groups = project.get("telegram", {}).get("groups", [])
         if not groups:
-            logger.info(f"No telegram groups configured for {project['slug']}, skipping")
+            logger.info(
+                f"No telegram groups configured for {project['slug']}, skipping"
+            )
             return
 
         session_file = AI_ROOT / "data" / "valor.session"
@@ -1451,7 +1542,9 @@ class ReflectionRunner:
             # Build summary message
             slug = project["slug"]
             findings_count = sum(
-                len(v) for k, v in self.state.findings.items() if k.startswith(f"{slug}:")
+                len(v)
+                for k, v in self.state.findings.items()
+                if k.startswith(f"{slug}:")
             )
             msg_lines = [f"Reflections Report — {self.state.date}"]
             msg_lines.append(f"Project: {project.get('name', slug)}")
@@ -1555,7 +1648,9 @@ async def main() -> None:
     if args.ignore:
         from models.reflections import ReflectionIgnore
 
-        entry = ReflectionIgnore.add_ignore(pattern=args.ignore, reason=args.reason, days=14)
+        entry = ReflectionIgnore.add_ignore(
+            pattern=args.ignore, reason=args.reason, days=14
+        )
         ignored_until = datetime.fromtimestamp(entry.expires_at).date().isoformat()
         print(f"Added ignore entry: {args.ignore!r} (until {ignored_until})")
         return

@@ -140,7 +140,9 @@ def get_user_permissions(sender_id: int | None) -> str:
 # =============================================================================
 
 
-def build_context_prefix(project: dict | None, is_dm: bool, sender_id: int | None = None) -> str:
+def build_context_prefix(
+    project: dict | None, is_dm: bool, sender_id: int | None = None
+) -> str:
     """Build project context to inject into agent prompt."""
     context_parts = []
 
@@ -156,10 +158,14 @@ def build_context_prefix(project: dict | None, is_dm: bool, sender_id: int | Non
 
     if not project:
         if is_dm:
-            context_parts.append("CONTEXT: Direct message to Valor (no specific project context)")
+            context_parts.append(
+                "CONTEXT: Direct message to Valor (no specific project context)"
+            )
         return "\n".join(context_parts) if context_parts else ""
 
-    context_parts.append(f"PROJECT: {project.get('name', project.get('_key', 'Unknown'))}")
+    context_parts.append(
+        f"PROJECT: {project.get('name', project.get('_key', 'Unknown'))}"
+    )
 
     project_context = project.get("context", {})
     if project_context.get("description"):

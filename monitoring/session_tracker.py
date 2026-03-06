@@ -180,7 +180,9 @@ class SessionTracker:
         """
         cutoff = datetime.now() - timedelta(hours=max_age_hours)
         stale_ids = [
-            sid for sid, session in self._sessions.items() if session.last_activity < cutoff
+            sid
+            for sid, session in self._sessions.items()
+            if session.last_activity < cutoff
         ]
 
         for sid in stale_ids:

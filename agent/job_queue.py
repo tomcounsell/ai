@@ -90,8 +90,12 @@ def _is_planning_language(msg: str) -> bool:
 # Job health check constants
 JOB_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
 JOB_TIMEOUT_DEFAULT = 2700  # 45 minutes for standard jobs
-JOB_TIMEOUT_BUILD = 9000  # 2.5 hours for build jobs (detected by /do-build in message_text)
-JOB_HEALTH_MIN_RUNNING = 300  # Don't recover jobs running less than 5 min (race condition guard)
+JOB_TIMEOUT_BUILD = (
+    9000  # 2.5 hours for build jobs (detected by /do-build in message_text)
+)
+JOB_HEALTH_MIN_RUNNING = (
+    300  # Don't recover jobs running less than 5 min (race condition guard)
+)
 
 
 class Job:
@@ -310,13 +314,17 @@ async def _push_job(
 
     # Log lifecycle transition for newly created pending job
     try:
-        sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
+        sessions = list(
+            AgentSession.query.filter(session_id=session_id, status="pending")
+        )
         if sessions:
             sessions[0].log_lifecycle_transition("pending", "job enqueued")
     except Exception:
         pass  # Non-fatal: don't break enqueue on logging errors
 
-    return await AgentSession.query.async_count(project_key=project_key, status="pending")
+    return await AgentSession.query.async_count(
+        project_key=project_key, status="pending"
+    )
 
 
 async def _pop_job(project_key: str) -> Job | None:
@@ -330,7 +338,9 @@ async def _pop_job(project_key: str) -> Job | None:
     status index set but never REMOVEs from the old one, so mutating
     status and calling save() leaves a stale entry in the pending index.
     """
-    pending = await AgentSession.query.async_filter(project_key=project_key, status="pending")
+    pending = await AgentSession.query.async_filter(
+        project_key=project_key, status="pending"
+    )
     if not pending:
         return None
 
@@ -360,12 +370,16 @@ async def _pop_job(project_key: str) -> Job | None:
 
 async def _pending_depth(project_key: str) -> int:
     """Count of pending jobs for a project."""
-    return await AgentSession.query.async_count(project_key=project_key, status="pending")
+    return await AgentSession.query.async_count(
+        project_key=project_key, status="pending"
+    )
 
 
 async def _remove_by_session(project_key: str, session_id: str) -> bool:
     """Remove all pending jobs for a session. Returns True if any removed."""
-    jobs = await AgentSession.query.async_filter(project_key=project_key, status="pending")
+    jobs = await AgentSession.query.async_filter(
+        project_key=project_key, status="pending"
+    )
     removed = False
     for j in jobs:
         if j.session_id == session_id:
@@ -392,7 +406,9 @@ def _recover_interrupted_jobs(project_key: str) -> int:
     Uses delete-and-recreate to avoid KeyField index corruption.
     Returns the number of recovered jobs.
     """
-    running_jobs = list(AgentSession.query.filter(project_key=project_key, status="running"))
+    running_jobs = list(
+        AgentSession.query.filter(project_key=project_key, status="running")
+    )
     if not running_jobs:
         return 0
 
@@ -420,13 +436,17 @@ async def _reset_running_jobs(project_key: str) -> int:
     Uses delete-and-recreate to avoid KeyField index corruption.
     Returns the number of reset jobs.
     """
-    running_jobs = await AgentSession.query.async_filter(project_key=project_key, status="running")
+    running_jobs = await AgentSession.query.async_filter(
+        project_key=project_key, status="running"
+    )
     if not running_jobs:
         return 0
 
     for job in running_jobs:
         old_id = job.job_id
-        logger.info(f"[{project_key}] Resetting in-flight job {old_id} to pending for next startup")
+        logger.info(
+            f"[{project_key}] Resetting in-flight job {old_id} to pending for next startup"
+        )
         fields = _extract_job_fields(job)
         await job.async_delete()
         fields["status"] = "pending"
@@ -493,7 +513,11 @@ def _recover_orphaned_jobs(project_key: str) -> int:
             # Check if this belongs to our project. Use errors='replace' to
             # handle corrupted field values without crashing.
             pk_bytes = data.get(b"project_key", b"")
-            pk = pk_bytes.decode(errors="replace") if isinstance(pk_bytes, bytes) else pk_bytes
+            pk = (
+                pk_bytes.decode(errors="replace")
+                if isinstance(pk_bytes, bytes)
+                else pk_bytes
+            )
             if pk != project_key:
                 continue
 
@@ -594,7 +618,9 @@ async def _job_health_check() -> None:
                 # Legacy job without started_at and no worker -- recover
                 should_recover = True
                 reason = "worker dead/missing, no started_at (legacy job)"
-            elif running_seconds is not None and running_seconds > JOB_HEALTH_MIN_RUNNING:
+            elif (
+                running_seconds is not None and running_seconds > JOB_HEALTH_MIN_RUNNING
+            ):
                 should_recover = True
                 reason = (
                     f"worker dead/missing, running for "
@@ -685,7 +711,9 @@ _active_workers: dict[str, asyncio.Task] = {}
 _project_configs: dict[str, dict] = {}
 
 # Callbacks registered by the bridge for sending messages and reactions
-SendCallback = Callable[[str, str, int, Any], Awaitable[None]]  # (chat_id, text, reply_to, session)
+SendCallback = Callable[
+    [str, str, int, Any], Awaitable[None]
+]  # (chat_id, text, reply_to, session)
 ReactionCallback = Callable[[str, int, str | None], Awaitable[None]]
 ResponseCallback = Callable[[object, str, str, int], Awaitable[None]]
 
@@ -755,7 +783,9 @@ def _check_restart_flag() -> bool:
             return False
 
     flag_content = _RESTART_FLAG.read_text().strip()
-    logger.info(f"Restart flag found ({flag_content}), no running jobs — restarting bridge")
+    logger.info(
+        f"Restart flag found ({flag_content}), no running jobs — restarting bridge"
+    )
     return True
 
 
@@ -872,7 +902,9 @@ async def _worker_loop(project_key: str) -> None:
                     if _check_restart_flag():
                         _trigger_restart()
                     break
-                logger.info(f"[{project_key}] Drain guard caught job that would have been lost")
+                logger.info(
+                    f"[{project_key}] Drain guard caught job that would have been lost"
+                )
 
             try:
                 await _execute_job(job)
@@ -1057,7 +1089,9 @@ async def _execute_job(job: Job) -> None:
     # Update the AgentSession (already created at enqueue time) with session-phase fields
     agent_session = None
     try:
-        sessions = list(AgentSession.query.filter(project_key=job.project_key, status="running"))
+        sessions = list(
+            AgentSession.query.filter(project_key=job.project_key, status="running")
+        )
         for s in sessions:
             if s.session_id == job.session_id:
                 agent_session = s
@@ -1156,7 +1190,11 @@ async def _execute_job(job: Job) -> None:
             chat_state.completion_sent = True
             return
 
-        if _is_sdlc and _sdlc_has_remaining and chat_state.auto_continue_count < effective_max:
+        if (
+            _is_sdlc
+            and _sdlc_has_remaining
+            and chat_state.auto_continue_count < effective_max
+        ):
             # Stage-aware error guard: before auto-continuing, check if the
             # output looks like an error. Error prose should reach the user
             # even when stage history says "still in progress".
@@ -1228,7 +1266,9 @@ async def _execute_job(job: Job) -> None:
             # Without this, SDK crashes would be misclassified as status updates
             # and re-enqueued indefinitely, creating an infinite crash loop.
             # See docs/features/coaching-loop.md "Error-Classified Output Bypass".
-            logger.info(f"[{job.project_key}] Error classified — skipping auto-continue")
+            logger.info(
+                f"[{job.project_key}] Error classified — skipping auto-continue"
+            )
             # Fall through to send error to chat
 
         elif (
@@ -1253,7 +1293,9 @@ async def _execute_job(job: Job) -> None:
                 event="auto_continue",
                 project_key=job.project_key,
                 branch_name=branch_name,
-                task_summary=(f"Auto-continued ({chat_state.auto_continue_count}/{effective_max})"),
+                task_summary=(
+                    f"Auto-continued ({chat_state.auto_continue_count}/{effective_max})"
+                ),
                 extra_context={
                     "routing": "classifier",
                     "classification": classification.output_type.value,
@@ -1329,7 +1371,9 @@ async def _execute_job(job: Job) -> None:
                 chat_state.defer_reaction = True
 
             chat_state.completion_sent = True
-            logger.info(f"[{job.project_key}] Completion sent — suppressing further outputs")
+            logger.info(
+                f"[{job.project_key}] Completion sent — suppressing further outputs"
+            )
 
     messenger = BossMessenger(
         _send_callback=send_to_chat,
@@ -1358,7 +1402,9 @@ async def _execute_job(job: Job) -> None:
                 message_id=job.message_id,
             )
         except Exception as e:
-            logger.warning(f"[{job.project_key}] Enrichment failed, using raw text: {e}")
+            logger.warning(
+                f"[{job.project_key}] Enrichment failed, using raw text: {e}"
+            )
 
     # Run agent work directly in the project working directory
     project_config = {
@@ -1388,7 +1434,9 @@ async def _execute_job(job: Job) -> None:
     while task.is_running:
         await asyncio.sleep(2)
         if time.time() - last_heartbeat >= CALENDAR_HEARTBEAT_INTERVAL:
-            asyncio.create_task(_calendar_heartbeat(job.project_key, project=job.project_key))
+            asyncio.create_task(
+                _calendar_heartbeat(job.project_key, project=job.project_key)
+            )
             last_heartbeat = time.time()
 
     # Update session status in Redis via AgentSession
@@ -1432,7 +1480,10 @@ async def _execute_job(job: Job) -> None:
 
         leftover = pop_all_steering_messages(job.session_id)
         if leftover:
-            texts = [f"  [{m.get('sender', '?')}]: {m.get('text', '')[:120]}" for m in leftover]
+            texts = [
+                f"  [{m.get('sender', '?')}]: {m.get('text', '')[:120]}"
+                for m in leftover
+            ]
             logger.warning(
                 f"[{job.project_key}] {len(leftover)} unconsumed steering "
                 f"message(s) dropped for session {job.session_id}:\n" + "\n".join(texts)
@@ -1614,9 +1665,7 @@ async def queue_revival_job(
     """
     revival_text = f"Continue the unfinished work on branch `{revival_info['branch']}`."
     if additional_context:
-        revival_text += (
-            f"\n\nAsked user whether to resume and user responded with: {additional_context}"
-        )
+        revival_text += f"\n\nAsked user whether to resume and user responded with: {additional_context}"
 
     return await enqueue_job(
         project_key=revival_info["project_key"],
@@ -1631,7 +1680,9 @@ async def queue_revival_job(
     )
 
 
-async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) -> list[str]:
+async def cleanup_stale_branches(
+    working_dir: str, max_age_hours: float = 72
+) -> list[str]:
     """
     Clean up session branches older than max_age_hours.
     Returns list of cleaned branch names.
@@ -1650,7 +1701,11 @@ async def cleanup_stale_branches(working_dir: str, max_age_hours: float = 72) ->
             text=True,
             timeout=10,
         )
-        branches = [b.strip().lstrip("* ") for b in result.stdout.strip().split("\n") if b.strip()]
+        branches = [
+            b.strip().lstrip("* ")
+            for b in result.stdout.strip().split("\n")
+            if b.strip()
+        ]
 
         for branch in branches:
             age_result = subprocess.run(
@@ -1802,8 +1857,12 @@ def _cli_main() -> None:
     parser = argparse.ArgumentParser(description="Job queue management CLI")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--status", action="store_true", help="Show current queue state")
-    group.add_argument("--flush-stuck", action="store_true", help="Recover all stuck running jobs")
-    group.add_argument("--flush-job", metavar="JOB_ID", help="Recover a specific job by ID")
+    group.add_argument(
+        "--flush-stuck", action="store_true", help="Recover all stuck running jobs"
+    )
+    group.add_argument(
+        "--flush-job", metavar="JOB_ID", help="Recover a specific job by ID"
+    )
 
     args = parser.parse_args()
 

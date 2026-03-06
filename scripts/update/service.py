@@ -139,7 +139,9 @@ def install_reflections(project_dir: Path) -> bool:
     plist_dst = Path.home() / "Library" / "LaunchAgents" / "com.valor.reflections.plist"
     label = "com.valor.reflections"
     old_label = "com.valor.daydream"
-    old_plist_dst = Path.home() / "Library" / "LaunchAgents" / "com.valor.daydream.plist"
+    old_plist_dst = (
+        Path.home() / "Library" / "LaunchAgents" / "com.valor.daydream.plist"
+    )
 
     if not plist_src.exists():
         return False

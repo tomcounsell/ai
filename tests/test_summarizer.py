@@ -39,7 +39,9 @@ class TestExtractArtifacts:
         assert "https://sentry.io/issues/123" in artifacts["urls"]
 
     def test_extracts_files_changed(self):
-        text = "modified: src/main.py\ncreated: tests/test_new.py\ndeleted: old_file.txt"
+        text = (
+            "modified: src/main.py\ncreated: tests/test_new.py\ndeleted: old_file.txt"
+        )
         artifacts = extract_artifacts(text)
         assert "files_changed" in artifacts
         assert "src/main.py" in artifacts["files_changed"]
@@ -282,7 +284,10 @@ class TestClassificationResult:
             reason="Test",
             coaching_message="You said 'should work' but didn't show test output.",
         )
-        assert result.coaching_message == "You said 'should work' but didn't show test output."
+        assert (
+            result.coaching_message
+            == "You said 'should work' but didn't show test output."
+        )
 
     def test_confidence_range(self):
         """Confidence is a float between 0.0 and 1.0."""
@@ -328,14 +333,18 @@ class TestParseClassificationResponse:
 
     def test_markdown_code_fences(self):
         """Handles JSON wrapped in markdown code fences."""
-        raw = '```json\n{"type": "completion", "confidence": 0.88, "reason": "done"}\n```'
+        raw = (
+            '```json\n{"type": "completion", "confidence": 0.88, "reason": "done"}\n```'
+        )
         result = _parse_classification_response(raw)
         assert result is not None
         assert result.output_type == OutputType.COMPLETION
 
     def test_code_fences_no_language(self):
         """Handles code fences without language tag."""
-        raw = '```\n{"type": "status", "confidence": 0.75, "reason": "in progress"}\n```'
+        raw = (
+            '```\n{"type": "status", "confidence": 0.75, "reason": "in progress"}\n```'
+        )
         result = _parse_classification_response(raw)
         assert result is not None
         assert result.output_type == OutputType.STATUS_UPDATE
@@ -378,7 +387,10 @@ class TestParseClassificationResponse:
         )
         result = _parse_classification_response(raw)
         assert result is not None
-        assert result.coaching_message == "You said 'should work' — run the tests and share output."
+        assert (
+            result.coaching_message
+            == "You said 'should work' — run the tests and share output."
+        )
 
     def test_coaching_message_absent_defaults_none(self):
         """When coaching_message is missing from JSON, it defaults to None."""
@@ -424,12 +436,12 @@ class TestParseClassificationResponse:
             )
             result = _parse_classification_response(raw)
             assert result is not None
-            assert result.coaching_message is None, (
-                f"coaching_message should be None for {type_str}"
-            )
-            assert result.was_rejected_completion is False, (
-                f"was_rejected_completion should be False for {type_str}"
-            )
+            assert (
+                result.coaching_message is None
+            ), f"coaching_message should be None for {type_str}"
+            assert (
+                result.was_rejected_completion is False
+            ), f"was_rejected_completion should be False for {type_str}"
 
     def test_coaching_message_on_non_status_ignored_for_rejection(self):
         """Even if LLM mistakenly sets coaching_message on completion, was_rejected stays False."""
@@ -477,7 +489,9 @@ class TestClassifyWithHeuristics:
         assert result.output_type == OutputType.QUESTION
 
     def test_error_pattern(self):
-        result = _classify_with_heuristics("Error: ModuleNotFoundError: No module named 'foo'")
+        result = _classify_with_heuristics(
+            "Error: ModuleNotFoundError: No module named 'foo'"
+        )
         assert result.output_type == OutputType.ERROR
         assert result.confidence >= 0.80
 
@@ -495,11 +509,15 @@ class TestClassifyWithHeuristics:
         assert result.confidence >= 0.80
 
     def test_blocker_permission(self):
-        result = _classify_with_heuristics("Permission denied when accessing the deployment config")
+        result = _classify_with_heuristics(
+            "Permission denied when accessing the deployment config"
+        )
         assert result.output_type == OutputType.BLOCKER
 
     def test_blocker_cannot_proceed(self):
-        result = _classify_with_heuristics("Cannot proceed without database credentials")
+        result = _classify_with_heuristics(
+            "Cannot proceed without database credentials"
+        )
         assert result.output_type == OutputType.BLOCKER
 
     def test_completion_done(self):
@@ -508,7 +526,9 @@ class TestClassifyWithHeuristics:
         assert result.confidence >= 0.80
 
     def test_completion_pr_url(self):
-        result = _classify_with_heuristics("PR created: https://github.com/org/repo/pull/42")
+        result = _classify_with_heuristics(
+            "PR created: https://github.com/org/repo/pull/42"
+        )
         assert result.output_type == OutputType.COMPLETION
 
     def test_completion_pushed(self):
@@ -528,7 +548,9 @@ class TestClassifyWithHeuristics:
         """
         result = _classify_with_heuristics("Analyzing the codebase structure now")
         assert result.output_type == OutputType.QUESTION
-        assert result.confidence == 0.80  # At threshold to avoid redundant gate re-conversion
+        assert (
+            result.confidence == 0.80
+        )  # At threshold to avoid redundant gate re-conversion
 
     def test_default_running_tests(self):
         """No explicit status pattern — falls to conservative QUESTION default."""
@@ -576,17 +598,23 @@ class TestClassifyWithHeuristics:
 
     def test_approval_gate_shall_i_proceed(self):
         """'shall I proceed' triggers QUESTION."""
-        result = _classify_with_heuristics("Plan is ready. Shall I proceed with the build?")
+        result = _classify_with_heuristics(
+            "Plan is ready. Shall I proceed with the build?"
+        )
         assert result.output_type == OutputType.QUESTION
 
     def test_approval_gate_awaiting_approval(self):
         """'awaiting approval' triggers QUESTION."""
-        result = _classify_with_heuristics("PR is up, awaiting your approval before merging")
+        result = _classify_with_heuristics(
+            "PR is up, awaiting your approval before merging"
+        )
         assert result.output_type == OutputType.QUESTION
 
     def test_approval_gate_let_me_know_when(self):
         """'let me know when' triggers QUESTION."""
-        result = _classify_with_heuristics("Let me know when you want me to start the migration")
+        result = _classify_with_heuristics(
+            "Let me know when you want me to start the migration"
+        )
         assert result.output_type == OutputType.QUESTION
 
 
@@ -740,7 +768,9 @@ class TestClassifyOutput:
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
         ):
             result = await classify_output("Should I use approach A or B?")
 
@@ -759,7 +789,9 @@ class TestClassifyOutput:
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
         ):
             result = await classify_output("Some ambiguous output")
 
@@ -786,7 +818,9 @@ class TestClassifyOutput:
     async def test_no_api_key_falls_back_to_heuristics(self):
         """When no API key, heuristics are used."""
         with patch("utils.api_keys.get_anthropic_api_key", return_value=""):
-            result = await classify_output("Error: ModuleNotFoundError: No module named 'foo'")
+            result = await classify_output(
+                "Error: ModuleNotFoundError: No module named 'foo'"
+            )
 
         assert result.output_type == OutputType.ERROR
 
@@ -800,7 +834,9 @@ class TestClassifyOutput:
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
         ):
             result = await classify_output("Done. Committed abc1234.")
 
@@ -813,14 +849,18 @@ class TestClassifyOutput:
         long_text = "x" * 5000
         mock_response = AsyncMock()
         mock_response.content = [
-            AsyncMock(text='{"type": "status", "confidence": 0.90, "reason": "progress report"}')
+            AsyncMock(
+                text='{"type": "status", "confidence": 0.90, "reason": "progress report"}'
+            )
         ]
         mock_client = AsyncMock()
         mock_client.messages.create = AsyncMock(return_value=mock_response)
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
         ):
             result = await classify_output(long_text)
 
@@ -847,7 +887,9 @@ class TestClassifyOutput:
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
         ):
             result = await classify_output("I think the bug is fixed now. Should work.")
 
@@ -871,12 +913,16 @@ class TestClassifyOutput:
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
         ):
             result = await classify_output("All tests pass. Task complete.")
 
         assert result.output_type == OutputType.STATUS_UPDATE
-        assert result.coaching_message == "Paste the pytest output with pass/fail counts."
+        assert (
+            result.coaching_message == "Paste the pytest output with pass/fail counts."
+        )
         assert result.was_rejected_completion is True
 
     @pytest.mark.asyncio
@@ -895,7 +941,9 @@ class TestClassifyOutput:
 
         with (
             patch("utils.api_keys.get_anthropic_api_key", return_value="sk-test"),
-            patch("bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client),
+            patch(
+                "bridge.summarizer.anthropic.AsyncAnthropic", return_value=mock_client
+            ),
         ):
             result = await classify_output(
                 "All 42 tests passed. Committed abc1234. PR: https://github.com/org/repo/pull/99"
@@ -964,12 +1012,16 @@ class TestComposeStructuredSummary:
         assert "• Shipped it" in result
 
     def test_questions_appended(self):
-        result = _compose_structured_summary("• Done\n---\n? Should I merge?", session=None)
+        result = _compose_structured_summary(
+            "• Done\n---\n? Should I merge?", session=None
+        )
         assert "? Should I merge?" in result
         assert "• Done" in result
 
     def test_not_completion_uses_pending_emoji(self):
-        result = _compose_structured_summary("• Working on it", session=None, is_completion=False)
+        result = _compose_structured_summary(
+            "• Working on it", session=None, is_completion=False
+        )
         assert "⏳" in result
 
 
@@ -1010,7 +1062,9 @@ class TestNoMessageEcho:
         session.message_text = "What time is it?"
         session.status = "completed"
 
-        result = _compose_structured_summary("It's 3pm UTC+7", session=session, is_completion=True)
+        result = _compose_structured_summary(
+            "It's 3pm UTC+7", session=session, is_completion=True
+        )
         first_line = result.split("\n")[0]
         assert first_line.strip() in ("✅", "⏳", "❌")
         assert "What time is it?" not in first_line
@@ -1146,7 +1200,9 @@ class TestRenderStageProgress:
             "REVIEW": "pending",
             "DOCS": "pending",
         }
-        session.get_links.return_value = {"issue": "https://github.com/org/repo/issues/243"}
+        session.get_links.return_value = {
+            "issue": "https://github.com/org/repo/issues/243"
+        }
         result = _render_stage_progress(session)
         assert "ISSUE 243" in result
         assert "☑ PLAN" in result
@@ -1190,7 +1246,9 @@ class TestRenderLinkFooter:
         from unittest.mock import MagicMock
 
         session = MagicMock()
-        session.get_links.return_value = {"issue": "https://github.com/org/repo/issues/190"}
+        session.get_links.return_value = {
+            "issue": "https://github.com/org/repo/issues/190"
+        }
         result = _render_link_footer(session)
         assert "Issue #190" in result
         assert "https://github.com/org/repo/issues/190" in result
@@ -1310,7 +1368,9 @@ class TestComposeStructuredSummaryWithSession:
         }
         session.get_links.return_value = {}
 
-        result = _compose_structured_summary("It's 3pm UTC+7", session=session, is_completion=True)
+        result = _compose_structured_summary(
+            "It's 3pm UTC+7", session=session, is_completion=True
+        )
 
         # No stage-related content for non-SDLC
         assert "ISSUE" not in result

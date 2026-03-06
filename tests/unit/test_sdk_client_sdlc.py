@@ -110,9 +110,9 @@ class TestLoadSystemPromptInjection:
         # Completion criteria section starts with 'Work is DONE'
         criteria_pos = prompt.find("Work is DONE")
         if criteria_pos > 0:
-            assert sdlc_pos < criteria_pos, (
-                "SDLC_WORKFLOW must appear before Work Completion Criteria"
-            )
+            assert (
+                sdlc_pos < criteria_pos
+            ), "SDLC_WORKFLOW must appear before Work Completion Criteria"
 
     def test_prompt_contains_separator_before_sdlc(self):
         """load_system_prompt() must use --- separator before SDLC section."""
@@ -371,7 +371,9 @@ class TestCheckNoDirectMainPush:
         )
         # Ensure SKIP_SDLC is not set in env (default)
         with patch.dict(os.environ, {"SKIP_SDLC": "true"}, clear=False):
-            result = _check_no_direct_main_push("wrong-skip-session", repo_root=tmp_path)
+            result = _check_no_direct_main_push(
+                "wrong-skip-session", repo_root=tmp_path
+            )
         # "true" is not "1", so it should still check and find violation
         # (depends on whether state file exists and has uncommitted changes)
         # This test just ensures "true" != "1" bypass

@@ -53,7 +53,9 @@ def generate_image(
             },
             json={
                 "model": model,
-                "messages": [{"role": "user", "content": f"Generate an image: {prompt}"}],
+                "messages": [
+                    {"role": "user", "content": f"Generate an image: {prompt}"}
+                ],
             },
             timeout=120,
         )

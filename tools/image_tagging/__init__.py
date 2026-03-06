@@ -189,7 +189,9 @@ def tag_image(
                                 {"type": "text", "text": prompt},
                                 {
                                     "type": "image_url",
-                                    "image_url": {"url": f"data:{media_type};base64,{image_data}"},
+                                    "image_url": {
+                                        "url": f"data:{media_type};base64,{image_data}"
+                                    },
                                 },
                             ],
                         }
@@ -226,7 +228,9 @@ def tag_image(
 
             # Filter by confidence threshold
             tags = [
-                t for t in parsed.get("tags", []) if t.get("confidence", 0) >= confidence_threshold
+                t
+                for t in parsed.get("tags", [])
+                if t.get("confidence", 0) >= confidence_threshold
             ]
 
             # Group by category

@@ -37,9 +37,9 @@ class TestClassifierQACompletion:
         # Heuristics may return None (meaning "pass to LLM") or a type.
         # The key assertion: it should NOT be classified as STATUS_UPDATE
         if result.output_type is not None:
-            assert result.output_type != OutputType.STATUS_UPDATE, (
-                f"Q&A answer was classified as STATUS_UPDATE by heuristics: {result}"
-            )
+            assert (
+                result.output_type != OutputType.STATUS_UPDATE
+            ), f"Q&A answer was classified as STATUS_UPDATE by heuristics: {result}"
 
     def test_architecture_explanation_heuristic_not_status(self):
         """Architecture explanations should not be status updates."""
@@ -112,9 +112,9 @@ class TestSessionIsolation:
         agent = ValorAgent()
         # Use a session_id that has no prior AgentSession in Redis
         options = agent._create_options(session_id="fresh_session_no_prior_232")
-        assert options.continue_conversation is False, (
-            "Fresh session should not continue conversation"
-        )
+        assert (
+            options.continue_conversation is False
+        ), "Fresh session should not continue conversation"
         assert options.resume is None, "Fresh session should not resume"
 
     def test_create_options_no_session_id(self):

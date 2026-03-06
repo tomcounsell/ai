@@ -102,14 +102,18 @@ class TestMessengerCommunicationTracking:
     @pytest.mark.asyncio
     async def test_has_communicated_false_initially(self):
         """Fresh messenger should report no communication."""
-        messenger = BossMessenger(_send_callback=AsyncMock(), chat_id="test", session_id="test")
+        messenger = BossMessenger(
+            _send_callback=AsyncMock(), chat_id="test", session_id="test"
+        )
         assert messenger.has_communicated() is False
 
     @pytest.mark.asyncio
     async def test_has_communicated_true_after_send(self):
         """After sending a message, has_communicated should be True."""
         send_cb = AsyncMock()
-        messenger = BossMessenger(_send_callback=send_cb, chat_id="test", session_id="test")
+        messenger = BossMessenger(
+            _send_callback=send_cb, chat_id="test", session_id="test"
+        )
         await messenger.send("Hello")
         assert messenger.has_communicated() is True
 
@@ -117,7 +121,9 @@ class TestMessengerCommunicationTracking:
     async def test_has_communicated_false_after_failed_send(self):
         """If send fails (callback raises), has_communicated should be False."""
         send_cb = AsyncMock(side_effect=Exception("connection lost"))
-        messenger = BossMessenger(_send_callback=send_cb, chat_id="test", session_id="test")
+        messenger = BossMessenger(
+            _send_callback=send_cb, chat_id="test", session_id="test"
+        )
         result = await messenger.send("Hello")
         assert result is False
         assert messenger.has_communicated() is False
@@ -204,7 +210,9 @@ class TestFilterToolLogsFallback:
         """In mixed content, tool lines stripped but real text preserved."""
         from bridge.response import filter_tool_logs
 
-        result = filter_tool_logs("🛠️ exec: ls -la\nHere are the results.\n📖 read: file.py")
+        result = filter_tool_logs(
+            "🛠️ exec: ls -la\nHere are the results.\n📖 read: file.py"
+        )
         assert "Here are the results." in result
 
     def test_filter_handles_empty_string(self):

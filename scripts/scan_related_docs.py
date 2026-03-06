@@ -56,10 +56,14 @@ def extract_code_identifiers(file_path: str) -> dict[str, list[str]]:
         return {"functions": [], "classes": []}
 
     # Extract function definitions (def function_name)
-    functions = re.findall(r"^\s*def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", content, re.MULTILINE)
+    functions = re.findall(
+        r"^\s*def\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", content, re.MULTILINE
+    )
 
     # Extract class definitions (class ClassName)
-    classes = re.findall(r"^\s*class\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[\(:]", content, re.MULTILINE)
+    classes = re.findall(
+        r"^\s*class\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*[\(:]", content, re.MULTILINE
+    )
 
     return {
         "functions": list(set(functions)),
@@ -179,7 +183,9 @@ def scan_doc_for_references(
             re.IGNORECASE,
         ):
             # Don't count if already matched at higher confidence
-            already_matched = any(matches["HIGH"] or matches["MED-HIGH"] or matches["MED"])
+            already_matched = any(
+                matches["HIGH"] or matches["MED-HIGH"] or matches["MED"]
+            )
             if not already_matched:
                 matches["LOW"].append(f"Keyword: {filename_no_ext}")
 

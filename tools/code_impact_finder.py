@@ -135,7 +135,9 @@ def _chunk_python(content: str, file_path: str) -> list[dict]:
     for node in ast.iter_child_nodes(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             # Include decorators
-            start = node.decorator_list[0].lineno if node.decorator_list else node.lineno
+            start = (
+                node.decorator_list[0].lineno if node.decorator_list else node.lineno
+            )
             end = node.end_lineno or node.lineno
             top_level_ranges.append((start, end, node))
 
@@ -168,7 +170,9 @@ def _chunk_python(content: str, file_path: str) -> list[dict]:
             for item in ast.iter_child_nodes(node):
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     method_start = (
-                        item.decorator_list[0].lineno if item.decorator_list else item.lineno
+                        item.decorator_list[0].lineno
+                        if item.decorator_list
+                        else item.lineno
                     )
                     method_end = item.end_lineno or item.lineno
                     method_text = "\n".join(lines[method_start - 1 : method_end])
@@ -235,7 +239,8 @@ def _chunk_config(content: str, file_path: str) -> list[dict]:
 
         if len(sections) > 1:
             return [
-                _make_chunk("\n".join(lines), file_path, section) for section, lines in sections
+                _make_chunk("\n".join(lines), file_path, section)
+                for section, lines in sections
             ]
 
     return [_make_chunk(content, file_path, "")]
@@ -366,7 +371,9 @@ def _build_affected_code(
     for score, reason, chunk in results:
         haiku_type = chunk.get("haiku_impact_type", "")
         impact_type = (
-            haiku_type if haiku_type in VALID_IMPACT_TYPES else _classify_impact_type(chunk["path"])
+            haiku_type
+            if haiku_type in VALID_IMPACT_TYPES
+            else _classify_impact_type(chunk["path"])
         )
         affected.append(
             AffectedCode(
@@ -470,7 +477,9 @@ def _cli():
     """CLI entry point for code impact finder."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Find code affected by a proposed change.")
+    parser = argparse.ArgumentParser(
+        description="Find code affected by a proposed change."
+    )
     parser.add_argument(
         "change_summary",
         nargs="?",
@@ -511,7 +520,9 @@ def _cli():
         return
 
     if not args.change_summary:
-        parser.error("change_summary is required unless --status or --index-only is used")
+        parser.error(
+            "change_summary is required unless --status or --index-only is used"
+        )
 
     # Index if needed
     status = _core_get_index_status(INDEX_NAME)

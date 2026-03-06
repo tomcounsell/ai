@@ -9,7 +9,13 @@ import pytest
 
 sys.path.insert(
     0,
-    str(Path(__file__).resolve().parents[2] / ".claude" / "skills" / "do-skills-audit" / "scripts"),
+    str(
+        Path(__file__).resolve().parents[2]
+        / ".claude"
+        / "skills"
+        / "do-skills-audit"
+        / "scripts"
+    ),
 )
 
 from audit_skills import (  # noqa: E402
@@ -49,8 +55,7 @@ def tmp_skill(tmp_path):
     skill_dir = tmp_path / "test-skill"
     skill_dir.mkdir()
     skill_md = skill_dir / "SKILL.md"
-    skill_md.write_text(
-        """---
+    skill_md.write_text("""---
 name: test-skill
 description: "Use when testing the audit system. Handles test validation."
 ---
@@ -58,8 +63,7 @@ description: "Use when testing the audit system. Handles test validation."
 # Test Skill
 
 This is a test skill for validation purposes.
-"""
-    )
+""")
     return skill_dir
 
 
@@ -72,8 +76,7 @@ def tmp_skill_with_subfiles(tmp_path):
     (skill_dir / "REFERENCE.md").write_text("# Reference\nDetails here.")
     (skill_dir / "EXAMPLES.md").write_text("# Examples\nExamples here.")
     skill_md = skill_dir / "SKILL.md"
-    skill_md.write_text(
-        """---
+    skill_md.write_text("""---
 name: multi-skill
 description: "Use when testing sub-file links."
 ---
@@ -82,8 +85,7 @@ description: "Use when testing sub-file links."
 
 See [reference](REFERENCE.md) and [examples](EXAMPLES.md) for details.
 Also see [broken](NONEXISTENT.md) for more.
-"""
-    )
+""")
     return skill_dir
 
 
@@ -190,15 +192,21 @@ class TestRule03NameField:
 
 class TestRule04DescriptionTrigger:
     def test_with_use_when(self):
-        f = rule_04_description_trigger("test", {"description": "Use when testing things."})
+        f = rule_04_description_trigger(
+            "test", {"description": "Use when testing things."}
+        )
         assert f.severity == "PASS"
 
     def test_with_triggered_by(self):
-        f = rule_04_description_trigger("test", {"description": "Triggered by test requests."})
+        f = rule_04_description_trigger(
+            "test", {"description": "Triggered by test requests."}
+        )
         assert f.severity == "PASS"
 
     def test_missing_trigger(self):
-        f = rule_04_description_trigger("test", {"description": "A skill for doing things."})
+        f = rule_04_description_trigger(
+            "test", {"description": "A skill for doing things."}
+        )
         assert f.severity == "WARN"
 
     def test_missing_description(self):
@@ -393,7 +401,9 @@ class TestApplyFixes:
         skill_dir = tmp_path / "test-skill"
         skill_dir.mkdir()
         skill_md = skill_dir / "SKILL.md"
-        skill_md.write_text("---\nname: test-skill\ndescription: 'has trailing  '\n---\n\nBody.")
+        skill_md.write_text(
+            "---\nname: test-skill\ndescription: 'has trailing  '\n---\n\nBody."
+        )
 
         fm = {"name": "test-skill", "description": "has trailing  "}
         text = skill_md.read_text()

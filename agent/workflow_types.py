@@ -38,12 +38,18 @@ class WorkflowStateData(BaseModel):
 
     workflow_id: str = Field(..., description="Unique 8-character workflow identifier")
     plan_file: str = Field(..., description="Path to docs/plans/*.md plan document")
-    tracking_url: str = Field(..., description="GitHub issue or Notion task URL for tracking")
-    issue_number: int | None = Field(None, description="GitHub issue number if GitHub tracking")
+    tracking_url: str = Field(
+        ..., description="GitHub issue or Notion task URL for tracking"
+    )
+    issue_number: int | None = Field(
+        None, description="GitHub issue number if GitHub tracking"
+    )
     branch_name: str | None = Field(None, description="Git branch name")
     phase: WorkflowPhase | None = Field(None, description="Current workflow phase")
     status: WorkflowStatus | None = Field(None, description="Current workflow status")
-    telegram_chat_id: int | None = Field(None, description="Telegram chat ID for notifications")
+    telegram_chat_id: int | None = Field(
+        None, description="Telegram chat ID for notifications"
+    )
     created_at: datetime = Field(
         default_factory=datetime.utcnow, description="Workflow creation timestamp"
     )

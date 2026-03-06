@@ -79,7 +79,9 @@ def main():
     updated = []
 
     if args.stage:
-        status_icon = {"completed": "☑", "in_progress": "▶", "failed": "✗"}.get(args.status, "?")
+        status_icon = {"completed": "☑", "in_progress": "▶", "failed": "✗"}.get(
+            args.status, "?"
+        )
         session.append_history("stage", f"{args.stage} {status_icon}")
         updated.append(f"stage {args.stage}={args.status}")
 

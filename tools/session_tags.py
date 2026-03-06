@@ -125,7 +125,9 @@ def sessions_by_tag(tag: str, project_key: str | None = None) -> list:
     return [s for s in all_sessions if s.tags and tag in s.tags]
 
 
-def _read_transcript_tail(session_id: str, num_lines: int = TRANSCRIPT_TAIL_LINES) -> str:
+def _read_transcript_tail(
+    session_id: str, num_lines: int = TRANSCRIPT_TAIL_LINES
+) -> str:
     """Read the last N lines of a session's transcript file.
 
     Args:

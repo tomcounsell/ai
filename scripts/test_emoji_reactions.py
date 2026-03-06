@@ -316,7 +316,9 @@ async def test_reactions_for_real(emojis_to_test: list[str], delay: float = 0.5)
     # Clear reaction and delete test message
     print("\nCleaning up...")
     try:
-        await client(SendReactionRequest(peer=TEST_CHAT_ID, msg_id=test_msg.id, reaction=[]))
+        await client(
+            SendReactionRequest(peer=TEST_CHAT_ID, msg_id=test_msg.id, reaction=[])
+        )
         await asyncio.sleep(1)
         await test_msg.delete()
         print("Test message deleted.")
@@ -341,16 +343,14 @@ async def test_reactions_for_real(emojis_to_test: list[str], delay: float = 0.5)
     print("\n" + "=" * 60)
     print("COPY-PASTE FOR bridge/telegram_bridge.py:")
     print("=" * 60)
-    print(
-        f"""
+    print(f"""
 # Validated {len(valid)} emojis on {date.today()} via scripts/test_emoji_reactions.py
 # IMPORTANT: Do NOT trust GetAvailableReactionsRequest - it lies!
 # These were tested by actually setting each as a reaction.
 # fmt: off
 VALIDATED_REACTIONS = {valid!r}
 # fmt: on
-"""
-    )
+""")
 
     await client.disconnect()
     return valid, invalid

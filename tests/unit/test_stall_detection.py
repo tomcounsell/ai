@@ -217,7 +217,9 @@ class TestCheckStalledSessions:
             created_at=now - (STALL_THRESHOLD_PENDING + 120),
             started_at=None,
         )
-        mock_query = _mock_query_for_sessions({"pending": [stalled], "active": [healthy]})
+        mock_query = _mock_query_for_sessions(
+            {"pending": [stalled], "active": [healthy]}
+        )
         with patch("monitoring.session_watchdog.AgentSession.query", mock_query):
             result = check_stalled_sessions()
             ids = _stalled_session_ids(result)
@@ -311,7 +313,9 @@ class TestCheckStalledSessions:
             with caplog.at_level(logging.WARNING, logger="monitoring.session_watchdog"):
                 check_stalled_sessions()
 
-        lifecycle_stall_logs = [r for r in caplog.records if "LIFECYCLE_STALL" in r.message]
+        lifecycle_stall_logs = [
+            r for r in caplog.records if "LIFECYCLE_STALL" in r.message
+        ]
         assert len(lifecycle_stall_logs) >= 1
         msg = lifecycle_stall_logs[0].message
         assert "session=log-check" in msg

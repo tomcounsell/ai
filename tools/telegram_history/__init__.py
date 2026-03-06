@@ -487,7 +487,11 @@ def search_links(
     # Apply case-insensitive sender filter if not already filtered via KeyField
     if sender and not filter_kwargs.get("sender"):
         sender_lower = sender.lower()
-        all_links = [lnk for lnk in all_links if lnk.sender and sender_lower in lnk.sender.lower()]
+        all_links = [
+            lnk
+            for lnk in all_links
+            if lnk.sender and sender_lower in lnk.sender.lower()
+        ]
 
     # Sort by timestamp descending
     all_links.sort(key=lambda x: x.timestamp or 0.0, reverse=True)
@@ -680,7 +684,9 @@ def update_link(
     try:
         # Find link by link_id
         all_links = list(Link.query.all())
-        target = next((lnk for lnk in all_links if str(lnk.link_id) == str(link_id)), None)
+        target = next(
+            (lnk for lnk in all_links if str(lnk.link_id) == str(link_id)), None
+        )
 
         if target is None:
             return {"error": f"Link {link_id} not found"}
@@ -701,7 +707,9 @@ def update_link(
                 "description": target.description,
                 "tags": target.tags,
                 "notes": notes if notes is not None else target.notes,
-                "ai_summary": (ai_summary if ai_summary is not None else target.ai_summary),
+                "ai_summary": (
+                    ai_summary if ai_summary is not None else target.ai_summary
+                ),
             }
             target.delete()
             Link.create(status=status, **old_data)
@@ -827,7 +835,9 @@ def register_chat(
         if existing:
             chat = existing[0]
             # chat_name is a KeyField — delete-and-recreate if changed
-            if chat.chat_name != chat_name or (chat_type and chat.chat_type != chat_type):
+            if chat.chat_name != chat_name or (
+                chat_type and chat.chat_type != chat_type
+            ):
                 old_type = chat_type or chat.chat_type
                 chat.delete()
                 Chat.create(
