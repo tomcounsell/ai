@@ -2,7 +2,7 @@
 
 Covers:
 - SDLC_WORKFLOW constant exists and contains mandatory pipeline text
-- load_system_prompt() injects SDLC_WORKFLOW between SOUL.md and completion criteria
+- load_system_prompt() injects SDLC_WORKFLOW before SOUL.md and completion criteria
 - _check_no_direct_main_push(): code on main -> hard-blocked
 - _check_no_direct_main_push(): docs-only on main -> allowed
 - _check_no_direct_main_push(): code on feature branch -> allowed
@@ -97,15 +97,15 @@ class TestLoadSystemPromptInjection:
         assert "MANDATORY Development Pipeline" in prompt
 
     def test_sdlc_workflow_is_between_soul_and_criteria(self):
-        """SDLC_WORKFLOW must appear after SOUL.md and before completion criteria."""
+        """SDLC_WORKFLOW must appear before SOUL.md and before completion criteria."""
         prompt = load_system_prompt()
         sdlc_pos = prompt.find("MANDATORY Development Pipeline")
         assert sdlc_pos > 0, "SDLC_WORKFLOW not found in prompt"
 
-        # SOUL.md starts with '# Valor' — check it precedes SDLC
+        # SOUL.md starts with '# Valor' — check SDLC precedes it
         soul_pos = prompt.find("# Valor")
         assert soul_pos >= 0, "SOUL.md content '# Valor' not found in prompt"
-        assert soul_pos < sdlc_pos, "SOUL.md content must come before SDLC_WORKFLOW"
+        assert sdlc_pos < soul_pos, "SDLC_WORKFLOW must come before SOUL.md content"
 
         # Completion criteria section starts with 'Work is DONE'
         criteria_pos = prompt.find("Work is DONE")
@@ -114,14 +114,16 @@ class TestLoadSystemPromptInjection:
                 sdlc_pos < criteria_pos
             ), "SDLC_WORKFLOW must appear before Work Completion Criteria"
 
-    def test_prompt_contains_separator_before_sdlc(self):
-        """load_system_prompt() must use --- separator before SDLC section."""
+    def test_prompt_contains_separator_between_sdlc_and_soul(self):
+        """load_system_prompt() must use --- separator between SDLC and SOUL sections."""
         prompt = load_system_prompt()
-        # Find position of SDLC content and verify --- appears just before it
+        # Find positions of SDLC and SOUL content
         sdlc_pos = prompt.find("MANDATORY Development Pipeline")
-        assert sdlc_pos > 0
-        preceding = prompt[max(0, sdlc_pos - 50) : sdlc_pos]
-        assert "---" in preceding, "Separator '---' must precede SDLC_WORKFLOW block"
+        assert sdlc_pos > 0, "SDLC_WORKFLOW not found in prompt"
+        soul_pos = prompt.find("# Valor")
+        assert soul_pos > sdlc_pos, "SOUL.md must come after SDLC_WORKFLOW"
+        between = prompt[sdlc_pos:soul_pos]
+        assert "---" in between, "Separator '---' must appear between SDLC_WORKFLOW and SOUL.md"
 
 
 # ---------------------------------------------------------------------------
