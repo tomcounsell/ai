@@ -7,9 +7,7 @@ hooks:
     - matcher: "Write|Edit"
       hooks:
         - type: command
-          command: "python -m ruff check --fix $CLAUDE_PROJECT_DIR || true"
-        - type: command
-          command: "black $CLAUDE_PROJECT_DIR || true"
+          command: "python $CLAUDE_PROJECT_DIR/.claude/hooks/format_file.py || true"
 ---
 <!-- NOTE: For SDK sessions, the programmatic definition in agent/agent_definitions.py takes precedence. -->
 
