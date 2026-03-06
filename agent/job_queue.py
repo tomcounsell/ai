@@ -240,6 +240,9 @@ _JOB_FIELDS = [
     "issue_url",
     "plan_url",
     "pr_url",
+    # Semantic routing fields — must be preserved across delete-and-recreate
+    "context_summary",
+    "expectations",
 ]
 
 # Backward compat alias
@@ -945,11 +948,16 @@ async def _enqueue_continuation(
     output_msg: str,
     coaching_source: str = "stage_aware",
 ) -> None:
-    """Enqueue a continuation job for stage-aware auto-continue.
+    """Enqueue a continuation job by reusing the existing AgentSession.
 
-    Builds a coaching message and re-enqueues the job with the same
-    session_id so the SDK resumes the conversation. Used by both the
-    stage-aware path and the classifier path.
+    Instead of creating a new AgentSession (which orphans the old one and
+    loses metadata like classification_type, history, and links), this
+    function looks up the existing session by session_id, preserves all
+    fields via delete-and-recreate, and updates only status, message_text,
+    auto_continue_count, and priority.
+
+    This makes AgentSession the single source of truth -- no metadata
+    needs to be manually propagated as function parameters.
 
     Args:
         job: The current Job being executed.
@@ -993,23 +1001,59 @@ async def _enqueue_continuation(
         f"({len(coaching_message)} chars): {coaching_message[:120]!r}"
     )
 
-    # Propagate classification_type so continuation jobs retain the original
-    # session's classification (e.g. "sdlc"). Without this, the continuation
-    # job gets classification_type=None and is_sdlc_job() fails on the new
-    # AgentSession record, losing stage progress and structured template rendering.
-    await enqueue_job(
-        project_key=job.project_key,
-        session_id=job.session_id,
-        working_dir=job.working_dir,
-        message_text=coaching_message,
-        sender_name="System (auto-continue)",
-        chat_id=job.chat_id,
-        message_id=job.message_id,
-        priority="high",
-        work_item_slug=job.work_item_slug,
-        task_list_id=task_list_id,
-        auto_continue_count=auto_continue_count,
-        classification_type=job.classification_type,
+    # Reuse existing AgentSession instead of creating a new one.
+    # This preserves classification_type, history, links, context_summary,
+    # expectations, and all other metadata that would be lost if we called
+    # enqueue_job() (which creates a brand new AgentSession record).
+    #
+    # Uses the same delete-and-recreate pattern as _pop_job() to work
+    # around Popoto's KeyField index corruption bug (on_save() adds to
+    # new index set but never removes from old one).
+    sessions = list(AgentSession.query.filter(session_id=job.session_id))
+    if not sessions:
+        logger.error(
+            f"[{job.project_key}] No session found for {job.session_id} "
+            f"— falling back to enqueue_job"
+        )
+        # Fallback: create a new session if the original is somehow gone
+        await enqueue_job(
+            project_key=job.project_key,
+            session_id=job.session_id,
+            working_dir=job.working_dir,
+            message_text=coaching_message,
+            sender_name="System (auto-continue)",
+            chat_id=job.chat_id,
+            message_id=job.message_id,
+            priority="high",
+            work_item_slug=job.work_item_slug,
+            task_list_id=task_list_id,
+            auto_continue_count=auto_continue_count,
+            classification_type=job.classification_type,
+        )
+        return
+
+    session = sessions[0]
+
+    # Extract all fields from the existing session, preserving everything
+    fields = _extract_job_fields(session)
+
+    # Delete the old record (first half of delete-and-recreate)
+    await session.async_delete()
+
+    # Update only the fields that change for continuation
+    fields["status"] = "pending"
+    fields["message_text"] = coaching_message
+    fields["auto_continue_count"] = auto_continue_count
+    fields["priority"] = "high"
+    fields["task_list_id"] = task_list_id
+
+    # Recreate with all original metadata intact
+    await AgentSession.async_create(**fields)
+
+    _ensure_worker(job.project_key)
+    logger.info(
+        f"[{job.project_key}] Reused session {job.session_id} for continuation "
+        f"(auto_continue_count={auto_continue_count})"
     )
 
 
@@ -1101,6 +1145,8 @@ async def _execute_job(job: Job) -> None:
     )
 
     async def send_to_chat(msg: str) -> None:
+        nonlocal agent_session  # Re-read from Redis for fresh stage data
+
         if not send_cb:
             return
 
@@ -1140,6 +1186,19 @@ async def _execute_job(job: Job) -> None:
         # For SDLC jobs, stage progress is the primary termination signal.
         # The classifier is only consulted when all stages are done or for
         # non-SDLC jobs.
+
+        # Re-read session from Redis for fresh stage data.
+        # The agent_session captured by the closure at job start goes stale
+        # as session_progress.py writes [stage] entries from the agent subprocess.
+        # Without this re-read, is_sdlc_job() and has_remaining_stages() would
+        # evaluate stale in-memory data and make wrong routing decisions.
+        if agent_session and agent_session.session_id:
+            try:
+                fresh = list(AgentSession.query.filter(session_id=agent_session.session_id))
+                if fresh:
+                    agent_session = fresh[0]
+            except Exception:
+                pass  # Fall back to stale in-memory session
 
         _is_sdlc = False
         _sdlc_has_remaining = False
