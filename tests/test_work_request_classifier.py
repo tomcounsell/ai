@@ -107,9 +107,7 @@ class TestLlmClassification:
     )
     def test_questions_classified_as_question(self, message):
         result = classify_work_request(message)
-        assert (
-            result == "question"
-        ), f"Expected 'question' for: {message}, got: {result}"
+        assert result == "question", f"Expected 'question' for: {message}, got: {result}"
 
 
 class TestClassifierSdlcType:
@@ -127,8 +125,7 @@ class TestClassifierSdlcType:
         mock_response = MagicMock()
         mock_response.content = [
             MagicMock(
-                text='{"type": "sdlc", "confidence": 0.95,'
-                ' "reason": "SDLC pipeline reference"}'
+                text='{"type": "sdlc", "confidence": 0.95, "reason": "SDLC pipeline reference"}'
             )
         ]
         mock_client = MagicMock()
