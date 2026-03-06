@@ -176,8 +176,7 @@ class AgentSession(Model):
         logger.info(
             f"LIFECYCLE session={self.session_id} transition={old_status}\u2192{new_status} "
             f"job_id={self.job_id} project={self.project_key} "
-            f"duration_in_prev_state={duration:.1f}s"
-            + (f' context="{context}"' if context else "")
+            f"duration_in_prev_state={duration:.1f}s" + (f' context="{context}"' if context else "")
         )
 
         # Update fields

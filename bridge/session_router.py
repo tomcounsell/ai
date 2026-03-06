@@ -75,8 +75,7 @@ async def find_matching_session(
         # Zero candidates = zero cost (no LLM call)
         if not candidates:
             logger.debug(
-                f"Semantic routing: no candidate sessions with expectations "
-                f"in chat {chat_id}"
+                f"Semantic routing: no candidate sessions with expectations in chat {chat_id}"
             )
             return (None, 0.0)
 
@@ -157,9 +156,7 @@ Rules:
 
             data = json.loads(cleaned)
         except json.JSONDecodeError:
-            logger.warning(
-                f"Semantic routing: could not parse classifier response: {raw[:200]}"
-            )
+            logger.warning(f"Semantic routing: could not parse classifier response: {raw[:200]}")
             return (None, 0.0)
 
         matched_id = data.get("match")

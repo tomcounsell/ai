@@ -104,15 +104,9 @@ class ClassificationResult:
     output_type: OutputType
     confidence: float  # 0.0-1.0
     reason: str  # Brief explanation
-    was_rejected_completion: bool = (
-        False  # True when COMPLETION → STATUS_UPDATE downgrade
-    )
-    coaching_message: str | None = (
-        None  # LLM-generated coaching for rejected completions
-    )
-    has_workarounds: bool = (
-        False  # True when agent encountered problems it worked around
-    )
+    was_rejected_completion: bool = False  # True when COMPLETION → STATUS_UPDATE downgrade
+    coaching_message: str | None = None  # LLM-generated coaching for rejected completions
+    has_workarounds: bool = False  # True when agent encountered problems it worked around
 
 
 @dataclass
@@ -146,9 +140,7 @@ STRUCTURED_SUMMARY_TOOL = {
             },
             "response": {
                 "type": "string",
-                "description": (
-                    "The Telegram message. Follow format rules from system prompt."
-                ),
+                "description": ("The Telegram message. Follow format rules from system prompt."),
             },
             "expectations": {
                 "type": ["string", "null"],
@@ -203,9 +195,7 @@ def extract_artifacts(text: str) -> dict[str, list[str]]:
     files_changed = re.findall(file_pat, text, re.IGNORECASE)
     files_changed += re.findall(r"^\s*[MADR]\s+(\S+)", text, re.MULTILINE)
     if files_changed:
-        artifacts["files_changed"] = list(
-            dict.fromkeys(f.strip() for f in files_changed)
-        )
+        artifacts["files_changed"] = list(dict.fromkeys(f.strip() for f in files_changed))
 
     # Test results
     test_pat = r"(\d+\s+passed" r"(?:,\s*\d+\s+(?:failed|error|warning|skipped))*)"
@@ -533,9 +523,7 @@ _AUDIT_LOG_PATH = Path(__file__).parent.parent / "logs" / "classification_audit.
 _AUDIT_LOG_MAX_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
-def _write_classification_audit(
-    text: str, result: ClassificationResult, source: str
-) -> None:
+def _write_classification_audit(text: str, result: ClassificationResult, source: str) -> None:
     """Append a JSONL entry to the classification audit log.
 
     Provides structured observability for every classify_output() call.
@@ -548,10 +536,7 @@ def _write_classification_audit(
         _AUDIT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
         # Size-based rotation
-        if (
-            _AUDIT_LOG_PATH.exists()
-            and _AUDIT_LOG_PATH.stat().st_size > _AUDIT_LOG_MAX_SIZE
-        ):
+        if _AUDIT_LOG_PATH.exists() and _AUDIT_LOG_PATH.stat().st_size > _AUDIT_LOG_MAX_SIZE:
             rotated = _AUDIT_LOG_PATH.with_suffix(".jsonl.1")
             _AUDIT_LOG_PATH.rename(rotated)
 
@@ -847,17 +832,13 @@ def _build_summary_prompt(
         parts = []
         for key, values in artifacts.items():
             parts.append(f"- {key}: {', '.join(values[:10])}")
-        artifact_section = (
-            "\n\nPreserve these artifacts verbatim:\n" + "\n".join(parts) + "\n"
-        )
+        artifact_section = "\n\nPreserve these artifacts verbatim:\n" + "\n".join(parts) + "\n"
 
     context_section = ""
     if session:
         context_parts = []
         if session.message_text:
-            context_parts.append(
-                f"Original request: {(session.message_text or '')[:200]}"
-            )
+            context_parts.append(f"Original request: {(session.message_text or '')[:200]}")
         if session.classification_type:
             context_parts.append(f"Work type: {session.classification_type}")
         if session.branch_name:
@@ -878,9 +859,7 @@ def _build_summary_prompt(
             history = session._get_history_list()
             if history:
                 recent = history[-5:]  # Last 5 entries
-                context_parts.append(
-                    "Recent history: " + " | ".join(str(e) for e in recent)
-                )
+                context_parts.append("Recent history: " + " | ".join(str(e) for e in recent))
         if context_parts:
             context_section = "\n\nSession context:\n" + "\n".join(context_parts) + "\n"
 
@@ -1150,9 +1129,7 @@ def _parse_summary_and_questions(summary_text: str) -> tuple[str, str | None]:
     return summary_text, None
 
 
-def _compose_structured_summary(
-    summary_text: str, session=None, is_completion: bool = True
-) -> str:
+def _compose_structured_summary(summary_text: str, session=None, is_completion: bool = True) -> str:
     """Compose the full structured summary with emoji, stage line, bullets, questions, and links.
 
     Two modes:
@@ -1180,14 +1157,10 @@ def _compose_structured_summary(
         try:
             from models.agent_session import AgentSession
 
-            fresh_sessions = list(
-                AgentSession.query.filter(session_id=session.session_id)
-            )
+            fresh_sessions = list(AgentSession.query.filter(session_id=session.session_id))
             if fresh_sessions:
                 session = fresh_sessions[0]
-                logger.debug(
-                    f"Refreshed session {session.session_id} for structured summary"
-                )
+                logger.debug(f"Refreshed session {session.session_id} for structured summary")
         except Exception as e:
             logger.debug(f"Could not refresh session for summary: {e}")
 
@@ -1209,9 +1182,7 @@ def _compose_structured_summary(
             f"{session.session_id if session else 'N/A'}: {stage_line}"
         )
     elif session and hasattr(session, "is_sdlc_job") and session.is_sdlc_job():
-        logger.warning(
-            f"SDLC session {session.session_id} has no stage progress to render"
-        )
+        logger.warning(f"SDLC session {session.session_id} has no stage progress to render")
 
     # Summary text (bullets or prose)
     parts.append(bullets.strip())
@@ -1253,9 +1224,7 @@ async def summarize_response(
     if not raw_response or not raw_response.strip():
         # Even with empty response, render SDLC progress if available
         if session:
-            fallback = _compose_structured_summary(
-                "", session=session, is_completion=True
-            )
+            fallback = _compose_structured_summary("", session=session, is_completion=True)
             if fallback.strip():
                 return SummarizedResponse(text=fallback, was_summarized=True)
         return SummarizedResponse(text=raw_response or "", was_summarized=False)
