@@ -1025,6 +1025,10 @@ async def _enqueue_continuation(
         f"({len(coaching_message)} chars): {coaching_message[:120]!r}"
     )
 
+    # Propagate classification_type so continuation jobs retain the original
+    # session's classification (e.g. "sdlc"). Without this, the continuation
+    # job gets classification_type=None and is_sdlc_job() fails on the new
+    # AgentSession record, losing stage progress and structured template rendering.
     await enqueue_job(
         project_key=job.project_key,
         session_id=job.session_id,
@@ -1037,6 +1041,7 @@ async def _enqueue_continuation(
         work_item_slug=job.work_item_slug,
         task_list_id=task_list_id,
         auto_continue_count=auto_continue_count,
+        classification_type=job.classification_type,
     )
 
 
