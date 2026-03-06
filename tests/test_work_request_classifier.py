@@ -126,7 +126,10 @@ class TestClassifierSdlcType:
         # Mock the Anthropic API to return an sdlc classification
         mock_response = MagicMock()
         mock_response.content = [
-            MagicMock(text='{"type": "sdlc", "confidence": 0.95, "reason": "SDLC pipeline reference"}')
+            MagicMock(
+                text='{"type": "sdlc", "confidence": 0.95,'
+                ' "reason": "SDLC pipeline reference"}'
+            )
         ]
         mock_client = MagicMock()
         mock_client.messages.create.return_value = mock_response
