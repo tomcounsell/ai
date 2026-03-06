@@ -707,9 +707,36 @@ async def main():
             session_id = f"tg_{project_key}_{event.chat_id}_{message.reply_to_msg_id}"
             logger.debug(f"Session ID: {session_id} (continuation: True)")
         else:
-            # Fresh session - use this message's ID as unique identifier
-            session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
-            logger.debug(f"Session ID: {session_id} (continuation: False)")
+            # No reply-to: try semantic routing before creating a fresh session
+            session_id = None
+
+            try:
+                from bridge.session_router import (
+                    find_matching_session,
+                    is_semantic_routing_enabled,
+                )
+
+                if is_semantic_routing_enabled():
+                    matched_id, confidence = await find_matching_session(
+                        chat_id=telegram_chat_id,
+                        message_text=clean_text,
+                        project_key=project_key,
+                    )
+                    if matched_id:
+                        session_id = matched_id
+                        logger.info(
+                            f"Semantic routing: matched session {session_id} "
+                            f"(confidence: {confidence:.2f})"
+                        )
+            except Exception as e:
+                # Semantic routing failures are non-fatal — fall through
+                # to fresh session creation
+                logger.warning(f"Semantic routing failed (non-fatal): {e}")
+
+            if not session_id:
+                # Fresh session - use this message's ID as unique identifier
+                session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
+                logger.debug(f"Session ID: {session_id} (continuation: False)")
 
         # === REACTION WORKFLOW ===
         # 1. 👀 Eyes = Message received/acknowledged
