@@ -25,7 +25,9 @@ def validate_plan_label(plan_path: str) -> bool:
     frontmatter = frontmatter_match.group(1)
 
     # Must have type: bug|feature|chore
-    return bool(re.search(r"^type:\s*(bug|feature|chore)\s*$", frontmatter, re.MULTILINE))
+    return bool(
+        re.search(r"^type:\s*(bug|feature|chore)\s*$", frontmatter, re.MULTILINE)
+    )
 
 
 if __name__ == "__main__":

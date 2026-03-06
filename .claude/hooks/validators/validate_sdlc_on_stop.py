@@ -107,7 +107,9 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
                     code_files.extend(
                         f
                         for f in staged_diff.split("\n")
-                        if f and any(f.endswith(ext) for ext in code_exts) and f not in code_files
+                        if f
+                        and any(f.endswith(ext) for ext in code_exts)
+                        and f not in code_files
                     )
 
                 if code_files:
@@ -159,7 +161,9 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
         return None
 
     # Build human-readable error listing missing checks with run hints
-    missing_lines = "\n".join(f"  - {cmd} (run: {_QUALITY_RUN_HINTS[cmd]})" for cmd in missing)
+    missing_lines = "\n".join(
+        f"  - {cmd} (run: {_QUALITY_RUN_HINTS[cmd]})" for cmd in missing
+    )
     return _ERROR_TEMPLATE.format(missing_lines=missing_lines)
 
 

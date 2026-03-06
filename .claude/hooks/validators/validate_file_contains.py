@@ -99,7 +99,9 @@ def get_recent_files(directory: str, extension: str, max_age_minutes: int) -> li
     return recent
 
 
-def get_git_committed_files(directory: str, extension: str, max_age_minutes: int) -> list[str]:
+def get_git_committed_files(
+    directory: str, extension: str, max_age_minutes: int
+) -> list[str]:
     """Check git log for recently committed files (even if later deleted/migrated)."""
     try:
         result = subprocess.run(
@@ -151,7 +153,9 @@ def get_committed_file_content(filepath: str) -> str | None:
         return None
 
 
-def find_newest_file(directory: str, extension: str, max_age_minutes: int) -> str | None:
+def find_newest_file(
+    directory: str, extension: str, max_age_minutes: int
+) -> str | None:
     """Find the most recently modified file."""
     all_files = list(
         set(
@@ -178,7 +182,9 @@ def find_newest_file(directory: str, extension: str, max_age_minutes: int) -> st
     return newest
 
 
-def check_contains(filepath: str, required: list[str]) -> tuple[bool, list[str], list[str]]:
+def check_contains(
+    filepath: str, required: list[str]
+) -> tuple[bool, list[str], list[str]]:
     """Check if file contains all required strings (case-insensitive)."""
     try:
         content = Path(filepath).read_text(encoding="utf-8").lower()
@@ -214,7 +220,9 @@ def validate(
                 content = get_committed_file_content(cfile)
                 if content and required_strings:
                     content_lower = content.lower()
-                    missing = [r for r in required_strings if r.lower() not in content_lower]
+                    missing = [
+                        r for r in required_strings if r.lower() not in content_lower
+                    ]
                     if not missing:
                         return (
                             True,
@@ -245,7 +253,9 @@ def validate(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Validate file contains required content")
+    parser = argparse.ArgumentParser(
+        description="Validate file contains required content"
+    )
     parser.add_argument("-d", "--directory", default=DEFAULT_DIRECTORY)
     parser.add_argument("-e", "--extension", default=DEFAULT_EXTENSION)
     parser.add_argument("--max-age", type=int, default=DEFAULT_MAX_AGE_MINUTES)
@@ -265,7 +275,9 @@ def main():
     except (json.JSONDecodeError, EOFError):
         pass
 
-    success, message = validate(args.directory, args.extension, args.max_age, args.required_strings)
+    success, message = validate(
+        args.directory, args.extension, args.max_age, args.required_strings
+    )
 
     if success:
         print(json.dumps({"result": "continue", "message": message}))
