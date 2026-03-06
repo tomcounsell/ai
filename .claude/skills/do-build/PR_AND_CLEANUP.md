@@ -113,7 +113,7 @@ Note: `delete_branch=False` because the PR still references `session/{slug}`. Th
 
 ### Post-Merge Cleanup (after PR is merged)
 
-After the human merges the PR with `gh pr merge --squash --delete-branch`, run the post-merge cleanup to remove the local branch and any lingering worktree references:
+After the PR is merged (auto-merge for eligible PRs, or human-initiated via `gh pr merge --squash --delete-branch`), run the post-merge cleanup to remove the local branch and any lingering worktree references:
 
 ```bash
 python scripts/post_merge_cleanup.py {slug}

@@ -61,7 +61,7 @@ For casual Q&A, one-off tasks, and non-pipeline messages, the existing classifie
 | Pipeline state | Output classification | Action |
 |---|---|---|
 | Stages remaining | (skipped) | Auto-continue |
-| All stages done | Completion | Deliver to user (human merge gate — never auto-merge) |
+| All stages done | Completion | Auto-merge if eligible, otherwise deliver to user (human merge gate) |
 | All stages done | Status (no evidence) | Coach + continue |
 | Any stage failed | Error/blocker | Deliver to user |
 | No stages (non-SDLC) | Question | Deliver to user |
@@ -74,7 +74,7 @@ For casual Q&A, one-off tasks, and non-pipeline messages, the existing classifie
 - **MAX_AUTO_CONTINUES_SDLC = 10** -- Higher safety cap for SDLC jobs where stage progress is the primary termination signal.
 - **Counter resets on human reply** -- When the human sends a new message to the session, the auto-continue counter resets to zero.
 - **Steering queue integration** -- Auto-continue uses the same steering queue mechanism as manual human input, so the agent sees it as a normal continuation signal.
-- **Human merge gate** -- The SDLC pipeline never auto-merges PRs. After REVIEW + DOCS stages complete, the agent stops and reports to the user. Merging requires an explicit human instruction. Tech debt and nits from reviews are patched before docs (not skipped).
+- **Merge gate** -- After REVIEW + DOCS stages complete, the SDLC pipeline checks auto-merge eligibility (no open questions, clean review with 0 issues, all tests pass, diff < 150 lines). Eligible PRs are auto-merged; all others stop and wait for explicit human instruction. Tech debt and nits from reviews are patched before docs (not skipped).
 
 ## Session Log Snapshots
 
