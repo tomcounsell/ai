@@ -155,7 +155,10 @@ def update_sdlc_state_for_file_write(hook_input: dict) -> None:
     try:
         save_sdlc_state(session_id, state)
     except Exception as e:
-        print(f"HOOK WARNING: Failed to save SDLC state for {session_id}: {e}", file=sys.stderr)
+        print(
+            f"HOOK WARNING: Failed to save SDLC state for {session_id}: {e}",
+            file=sys.stderr,
+        )
 
 
 def update_sdlc_state_for_bash(hook_input: dict) -> None:
@@ -185,7 +188,9 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
     command = tool_input.get("command", "")
 
     # Detect branch switch to a session/* branch (fixes stale modified_on_branch)
-    branch_match = re.search(r"\bgit\s+(?:checkout\s+-b|switch\s+-c)\s+(session/\S+)", command)
+    branch_match = re.search(
+        r"\bgit\s+(?:checkout\s+-b|switch\s+-c)\s+(session/\S+)", command
+    )
     if branch_match:
         session_id = hook_input.get("session_id", "unknown")
         state_path = get_sdlc_state_path(session_id)
@@ -244,7 +249,10 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
     try:
         save_sdlc_state(session_id, state)
     except Exception as e:
-        print(f"HOOK WARNING: Failed to save SDLC state for {session_id}: {e}", file=sys.stderr)
+        print(
+            f"HOOK WARNING: Failed to save SDLC state for {session_id}: {e}",
+            file=sys.stderr,
+        )
 
 
 def update_stage_progress_for_skill(hook_input: dict) -> None:
@@ -289,7 +297,8 @@ def update_stage_progress_for_skill(hook_input: dict) -> None:
     # Determine status - check if output suggests failure
     output_lower = tool_output.lower()
     if any(
-        kw in output_lower for kw in ["failed", "stuck", "error", "blocker", "changes requested"]
+        kw in output_lower
+        for kw in ["failed", "stuck", "error", "blocker", "changes requested"]
     ):
         status = "failed" if stage in ("TEST",) else "in_progress"
     else:

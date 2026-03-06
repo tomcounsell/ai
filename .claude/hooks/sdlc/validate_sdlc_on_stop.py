@@ -149,7 +149,9 @@ def main():
             sys.exit(0)
 
         # Build error message
-        missing_lines = "\n".join(f"  - {cmd} (run: {QUALITY_RUN_HINTS[cmd]})" for cmd in missing)
+        missing_lines = "\n".join(
+            f"  - {cmd} (run: {QUALITY_RUN_HINTS[cmd]})" for cmd in missing
+        )
         print(ERROR_TEMPLATE.format(missing_lines=missing_lines), file=sys.stderr)
         sys.exit(2)
 

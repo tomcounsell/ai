@@ -72,7 +72,9 @@ def main():
             code_extensions = {".py", ".js", ".ts"}
             staged_files = [f for f in result.stdout.strip().split("\n") if f]
             staged_code = [
-                f for f in staged_files if any(f.endswith(ext) for ext in code_extensions)
+                f
+                for f in staged_files
+                if any(f.endswith(ext) for ext in code_extensions)
             ]
             if staged_code:
                 block(
