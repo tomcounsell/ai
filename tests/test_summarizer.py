@@ -1484,3 +1484,285 @@ class TestSummarizationBypass:
         should_summarize = text and (is_sdlc or len(text) >= 500)
 
         assert not should_summarize
+
+
+class TestQuestionFabricationPrevention:
+    """Tests for anti-fabrication rules in the summarizer (issue #280).
+
+    The summarizer must NEVER fabricate questions from declarative statements.
+    Only explicit questions (sentences ending in "?" directed at the human)
+    may appear in the "?" section or set the expectations field.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_questions_fabricated_from_declarative_statements(self):
+        """Declarative planned work must produce expectations=None, no '?' lines."""
+        agent_output = (
+            "I will add sdlc to classifier categories. "
+            "I will fix auto-continue to carry forward session state."
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Planning classifier and auto-continue fixes",
+                response=(
+                    "• Adding sdlc to classifier categories\n"
+                    "• Fixing auto-continue session state propagation"
+                ),
+                expectations=None,
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is None
+        # Verify no --- separator (which precedes questions)
+        assert "\n---\n" not in result.text
+
+    @pytest.mark.asyncio
+    async def test_explicit_questions_preserved_verbatim(self):
+        """Real questions in agent output must be preserved in expectations."""
+        agent_output = (
+            "Built the auth module. 12 tests passing.\n\n"
+            "Should we use exponential backoff or fixed intervals?"
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Auth module with backoff decision",
+                response=(
+                    "• Built auth module\n• 12 tests passing\n---\n"
+                    "? Should we use exponential backoff or fixed intervals?"
+                ),
+                expectations="Should we use exponential backoff or fixed intervals?",
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is not None
+        assert "exponential backoff" in result.expectations
+        assert "? Should we use exponential backoff or fixed intervals?" in result.text
+
+    @pytest.mark.asyncio
+    async def test_mixed_declarative_and_questions(self):
+        """Only explicit questions surfaced; declarative statements stay as bullets."""
+        agent_output = (
+            "Implemented retry logic with 3 attempts. "
+            "Refactored the error handler to use structured exceptions.\n\n"
+            "The API rate limit is 100/min — should we add client-side throttling?"
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Retry logic with rate limit question",
+                response=(
+                    "• Implemented retry logic with 3 attempts\n"
+                    "• Refactored error handler to structured exceptions\n---\n"
+                    "? Should we add client-side throttling?"
+                ),
+                expectations="Should we add client-side throttling?",
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is not None
+        assert "throttling" in result.expectations
+        # The retry logic should be a bullet, not a question
+        assert "retry" in result.text.lower()
+        # Only one question line
+        lines = result.text.split("\n")
+        question_lines = [l for l in lines if l.strip().startswith("?")]
+        assert len(question_lines) == 1
+        assert "throttling" in question_lines[0]
+
+    @pytest.mark.asyncio
+    async def test_future_tense_plans_not_turned_into_questions(self):
+        """'Will do X' statements must not become questions."""
+        agent_output = (
+            "Next steps: will update the migration script, "
+            "will add index to users table, will run load test."
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Planning migration and performance work",
+                response=(
+                    "• Will update migration script\n"
+                    "• Will add index to users table\n"
+                    "• Will run load test"
+                ),
+                expectations=None,
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is None
+        assert "\n---\n" not in result.text
+
+    @pytest.mark.asyncio
+    async def test_rhetorical_questions_not_surfaced(self):
+        """Rhetorical questions in agent reasoning must not set expectations."""
+        agent_output = (
+            "Why was this never caught? Because the test suite didn't cover "
+            "this path. Fixed by adding integration test."
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Fixed missing test coverage",
+                response="• Fixed missing test coverage by adding integration test",
+                expectations=None,
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is None
+
+    @pytest.mark.asyncio
+    async def test_code_snippet_with_question_marks_not_treated_as_questions(self):
+        """Question marks inside code snippets must not be extracted as questions."""
+        agent_output = (
+            "Fixed the regex: `if line.endswith('?'):` now handles edge cases. "
+            "All 8 tests passing."
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Fixed regex edge case handling",
+                response="• Fixed regex `endswith('?')` edge case\n• 8 tests passing",
+                expectations=None,
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is None
+        assert "\n---\n" not in result.text
+
+    @pytest.mark.asyncio
+    async def test_conditional_statements_not_treated_as_questions(self):
+        """'If X' and 'whether Y' statements must not become questions."""
+        agent_output = (
+            "If the CI pipeline fails, the deploy will be blocked. "
+            "Whether to retry depends on the error type."
+        )
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="CI pipeline deployment notes",
+                response="• CI failure blocks deploy; retry depends on error type",
+                expectations=None,
+            )
+        )
+        with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
+            result = await summarize_response(agent_output)
+
+        assert result.expectations is None
+
+    def test_prompt_contains_anti_fabrication_instruction(self):
+        """Verify SUMMARIZER_SYSTEM_PROMPT includes anti-fabrication rules."""
+        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+
+        assert "NEVER fabricate questions" in SUMMARIZER_SYSTEM_PROMPT
+        assert (
+            "NEVER reframe declarative statements as questions"
+            in SUMMARIZER_SYSTEM_PROMPT
+        )
+        assert "VERBATIM" in SUMMARIZER_SYSTEM_PROMPT
+
+    def test_prompt_contains_negative_examples(self):
+        """Verify SUMMARIZER_SYSTEM_PROMPT includes negative examples."""
+        from bridge.summarizer import SUMMARIZER_SYSTEM_PROMPT
+
+        assert "WRONG" in SUMMARIZER_SYSTEM_PROMPT
+        assert "FABRICATED" in SUMMARIZER_SYSTEM_PROMPT
+        assert "I will add sdlc to classifier categories" in SUMMARIZER_SYSTEM_PROMPT
+
+    def test_expectations_tool_schema_updated(self):
+        """Verify the tool schema description for expectations reflects anti-fabrication."""
+        from bridge.summarizer import STRUCTURED_SUMMARY_TOOL
+
+        schema = STRUCTURED_SUMMARY_TOOL["input_schema"]
+        expectations_desc = schema["properties"]["expectations"]["description"]
+        assert "explicit question" in expectations_desc.lower()
+
+
+class TestQuestionFabricationIntegration:
+    """Integration tests using real Haiku API to validate anti-fabrication behavior."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        not __import__("os").environ.get("ANTHROPIC_API_KEY"),
+        reason="ANTHROPIC_API_KEY not set",
+    )
+    async def test_real_haiku_no_fabricated_questions(self):
+        """Real Haiku should not fabricate questions from declarative statements."""
+        # This is the actual raw output pattern that triggered the bug
+        agent_output = (
+            "I identified two root causes for the session tracking bugs:\n\n"
+            "1. The classifier doesn't have an 'sdlc' category. I will add sdlc "
+            "to the classifier categories so it can properly identify SDLC work.\n\n"
+            "2. Auto-continue doesn't carry forward session state. I will fix "
+            "auto-continue to propagate the classification_type and branch_name "
+            "from the parent session to the continued session.\n\n"
+            "Both fixes are straightforward — modifying the classifier prompt and "
+            "the auto-continue handler in the bridge."
+        )
+        result = await summarize_response(agent_output)
+
+        assert result.was_summarized is True
+        assert result.expectations is None, (
+            f"Haiku fabricated expectations from declarative output: "
+            f"{result.expectations}"
+        )
+        # No ? prefix lines should appear
+        lines = result.text.split("\n")
+        question_lines = [l for l in lines if l.strip().startswith("?")]
+        assert len(question_lines) == 0, (
+            f"Haiku fabricated question lines: {question_lines}"
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        not __import__("os").environ.get("ANTHROPIC_API_KEY"),
+        reason="ANTHROPIC_API_KEY not set",
+    )
+    async def test_real_haiku_preserves_real_questions(self):
+        """Real Haiku should preserve genuine questions in expectations."""
+        agent_output = (
+            "Completed the database schema refactor. All 15 tests passing.\n"
+            "Committed abc1234 and pushed to session/db-refactor.\n\n"
+            "Should I merge to main or wait for the design review?"
+        )
+        result = await summarize_response(agent_output)
+
+        assert result.was_summarized is True
+        assert result.expectations is not None, (
+            "Haiku failed to surface the genuine question about merging"
+        )
+        assert (
+            "merge" in result.expectations.lower()
+            or "review" in result.expectations.lower()
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.skipif(
+        not __import__("os").environ.get("ANTHROPIC_API_KEY"),
+        reason="ANTHROPIC_API_KEY not set",
+    )
+    async def test_real_haiku_sdlc_work_summary_no_questions(self):
+        """SDLC completion output without questions should have expectations=None."""
+        agent_output = (
+            "Plan execution complete for fix-session-tracking.\n\n"
+            "Changes made:\n"
+            "- Modified bridge/summarizer.py: updated classifier categories\n"
+            "- Modified bridge/telegram_bridge.py: fixed auto-continue propagation\n"
+            "- Created tests/test_session_tracking.py: 8 new tests\n\n"
+            "Test results: 135 passed, 0 failed\n"
+            "Committed def5678 and pushed to session/fix-session-tracking.\n"
+            "PR created: https://github.com/org/repo/pull/277"
+        )
+        result = await summarize_response(agent_output)
+
+        assert result.was_summarized is True
+        assert result.expectations is None, (
+            f"Haiku fabricated expectations from SDLC completion: "
+            f"{result.expectations}"
+        )
