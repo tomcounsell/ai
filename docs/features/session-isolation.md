@@ -129,8 +129,15 @@ This ensures auto-continued work remains within the correct isolation scope. The
 
 See [Reaction Semantics](reaction-semantics.md) for details on the re-enqueue design and the race condition it fixes.
 
+## Semantic Session Routing
+
+In addition to mechanical routing (reply-to message ID), sessions can be matched semantically. When the summarizer produces structured output, it extracts `context_summary` and `expectations` fields that describe what a session is working on and what it needs from the human. Unthreaded messages are then evaluated against active sessions with expectations, and high-confidence matches are auto-routed.
+
+This complements the isolation model: sessions remain isolated, but messages can find their way to the correct session even without explicit reply-to threading. See [Semantic Session Routing](semantic-session-routing.md) for full details.
+
 ## See Also
 
+- [Semantic Session Routing](semantic-session-routing.md) -- Semantic matching of unthreaded messages to sessions with expectations
 - [Scale Job Queue (Popoto + Worktrees)](scale-job-queue-with-popoto-and-worktrees.md) -- The parallel execution foundation that this feature enables
 - [Session Watchdog](session-watchdog.md) -- Active session monitoring that works alongside isolation
 - [Bridge Workflow Gaps](bridge-workflow-gaps.md) -- Auto-continue, output classification, session logs
