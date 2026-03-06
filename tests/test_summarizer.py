@@ -8,6 +8,7 @@ from bridge.summarizer import (
     CLASSIFICATION_CONFIDENCE_THRESHOLD,
     ClassificationResult,
     OutputType,
+    StructuredSummary,
     _classify_with_heuristics,
     _compose_structured_summary,
     _get_status_emoji,
@@ -85,7 +86,13 @@ class TestSummarizeResponse:
     async def test_short_response_still_summarized(self):
         """All non-empty responses are summarized (no threshold)."""
         short_text = "Done. Committed abc1234."
-        mock_haiku = AsyncMock(return_value="Done ✅ `abc1234`")
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Committed changes",
+                response="Done ✅ `abc1234`",
+                expectations=None,
+            )
+        )
         with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
             result = await summarize_response(short_text)
         assert result.was_summarized is True
@@ -107,7 +114,13 @@ class TestSummarizeResponse:
         """Responses over threshold trigger Haiku summarization."""
         long_text = "Detailed work output. " * 200
 
-        mock_haiku = AsyncMock(return_value="Summary: did the work. `abc1234`")
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Working on output",
+                response="Summary: did the work. `abc1234`",
+                expectations=None,
+            )
+        )
         with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
             result = await summarize_response(long_text)
 
@@ -117,22 +130,28 @@ class TestSummarizeResponse:
         mock_haiku.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_haiku_fails_falls_back_to_ollama(self):
-        """If Haiku fails, Ollama is tried next."""
+    async def test_haiku_fails_falls_back_to_openrouter(self):
+        """If Haiku fails, OpenRouter is tried next."""
         long_text = "Detailed work output. " * 200
 
         mock_haiku = AsyncMock(return_value=None)
-        mock_ollama = AsyncMock(return_value="Ollama summary of work.")
+        mock_openrouter = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Working on output",
+                response="OpenRouter summary of work.",
+                expectations=None,
+            )
+        )
         with (
             patch("bridge.summarizer._summarize_with_haiku", mock_haiku),
-            patch("bridge.summarizer._summarize_with_ollama", mock_ollama),
+            patch("bridge.summarizer._summarize_with_openrouter", mock_openrouter),
         ):
             result = await summarize_response(long_text)
 
         assert result.was_summarized is True
-        assert "Ollama summary of work." in result.text
+        assert "OpenRouter summary of work." in result.text
         mock_haiku.assert_called_once()
-        mock_ollama.assert_called_once()
+        mock_openrouter.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_all_backends_fail_truncates(self):
@@ -140,10 +159,10 @@ class TestSummarizeResponse:
         long_text = "x" * 5000
 
         mock_haiku = AsyncMock(return_value=None)
-        mock_ollama = AsyncMock(return_value=None)
+        mock_openrouter = AsyncMock(return_value=None)
         with (
             patch("bridge.summarizer._summarize_with_haiku", mock_haiku),
-            patch("bridge.summarizer._summarize_with_ollama", mock_ollama),
+            patch("bridge.summarizer._summarize_with_openrouter", mock_openrouter),
         ):
             result = await summarize_response(long_text)
 
@@ -156,7 +175,13 @@ class TestSummarizeResponse:
         """Responses over FILE_ATTACH_THRESHOLD get a full output file."""
         long_text = "Output line.\n" * 500
 
-        mock_haiku = AsyncMock(return_value="Summary of work.")
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Work output",
+                response="Summary of work.",
+                expectations=None,
+            )
+        )
         with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
             result = await summarize_response(long_text)
 
@@ -173,7 +198,13 @@ class TestSummarizeResponse:
         """Responses between summarize and file thresholds: no file."""
         text = "x" * 2000  # Over 1500, under 3000
 
-        mock_haiku = AsyncMock(return_value="Short summary.")
+        mock_haiku = AsyncMock(
+            return_value=StructuredSummary(
+                context_summary="Mid-length content",
+                response="Short summary.",
+                expectations=None,
+            )
+        )
         with patch("bridge.summarizer._summarize_with_haiku", mock_haiku):
             result = await summarize_response(text)
 
