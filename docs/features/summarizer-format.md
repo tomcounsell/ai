@@ -6,7 +6,7 @@ Structured output format for Telegram delivery of agent work summaries. Every re
 
 1. **SDLC: always summarize (even empty responses). Non-SDLC: summarize if >= 200 chars.** SDLC sessions always go through Haiku (stage lines + link footers needed). Even empty SDK responses render SDLC stage progress if session data is available. Non-SDLC short responses (< 200 chars) pass through raw -- this preserves programmatic skill output like `/update` that's already formatted.
 2. **SDLC template rendering**: Stage progress lines and link footers are rendered in Python code, not by the LLM. The LLM only generates bullet summaries and questions.
-3. **Question extraction**: The LLM can surface questions, decisions, and items needing human input using a `---` separator and `? ` prefix. These are parsed and rendered after the summary bullets.
+3. **Question extraction (anti-fabrication)**: The LLM can surface questions using a `---` separator and `? ` prefix, but ONLY questions that are **verbatim present** in the raw agent output. Declarative statements and plans must never be reframed as questions. The `expectations` field is set only when explicit questions exist.
 
 ## Output Format
 
@@ -114,6 +114,24 @@ Before summarization, `_strip_process_narration()` removes meta-action lines tha
 **Preserved**: Lines containing substantive content (e.g., "I'll document the API changes" or "Let me explain the architecture") are NOT stripped — only meta-actions that describe tool invocations.
 
 The stripping runs inside `summarize_response()` before the text is passed to `_build_summary_prompt()`, reducing token usage and improving summary quality.
+
+## Anti-Fabrication Rules (Issue #280)
+
+The summarizer must NEVER fabricate questions that are not verbatim in the raw agent output. This was added after Haiku reframed declarative statements ("I will add sdlc to classifier categories") as questions ("? Should classifier be updated to output 'sdlc'?"), causing false-dormant sessions.
+
+**Rules enforced in `SUMMARIZER_SYSTEM_PROMPT`:**
+
+1. Only surface questions that are **explicit** in the raw output (sentences ending in `?` directed at the human)
+2. Declarative statements ("I will do X") are plans, not questions
+3. Future-tense work descriptions are NOT questions
+4. The `expectations` field is null unless an explicit question exists
+5. Negative examples in the prompt show Haiku what NOT to do
+
+**Rules enforced in `STRUCTURED_SUMMARY_TOOL` schema:**
+
+The `expectations` field description explicitly states it should only be set when the raw output contains an explicit question directed at the human.
+
+**Test coverage:** `TestQuestionFabricationPrevention` in `tests/test_summarizer.py` covers 10 scenarios including declarative statements, real questions, mixed content, future-tense plans, rhetorical questions, code snippets with `?`, and conditional statements. Integration tests with real Haiku API validate end-to-end behavior.
 
 ## Adaptive Format Rules
 
