@@ -249,11 +249,11 @@ class TestRenderStageProgress:
         line = _render_stage_progress(sdlc_session)
         assert line is not None
         assert "ISSUE 177" in line
-        assert "DOCS" in line
+        assert "☑ DOCS" in line
         assert "→" in line
-        # No checkbox icons in new format
-        assert "☑" not in line
-        assert "☐" not in line
+        # ISSUE has no checkbox
+        assert "☑ ISSUE" not in line
+        assert "☐ ISSUE" not in line
 
     def test_partial_progress(self, session):
         from bridge.summarizer import _render_stage_progress
@@ -265,12 +265,9 @@ class TestRenderStageProgress:
         session.set_link("issue", "https://github.com/tomcounsell/ai/issues/177")
         line = _render_stage_progress(session)
         assert "ISSUE 177" in line
-        assert "PLAN" in line
+        assert "☑ PLAN" in line
         assert "▶ BUILD" in line
-        assert "TEST" in line
-        # No checkbox icons in new format
-        assert "☑" not in line
-        assert "☐" not in line
+        assert "☐ TEST" in line
 
 
 class TestRenderLinkFooter:

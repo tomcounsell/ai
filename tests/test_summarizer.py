@@ -1087,7 +1087,7 @@ class TestRenderStageProgress:
         assert _render_stage_progress(session) is None
 
     def test_mixed_progress_renders_correctly(self):
-        """Completed, in-progress, and pending stages render without checkbox icons."""
+        """Completed, in-progress, and pending stages render with checkboxes."""
         from unittest.mock import MagicMock
 
         session = MagicMock()
@@ -1101,13 +1101,15 @@ class TestRenderStageProgress:
         }
         session.get_links.return_value = {}
         result = _render_stage_progress(session)
-        # No checkbox icons in new format
-        assert "☑" not in result
-        assert "☐" not in result
-        # Completed stages show plain name
-        assert "PLAN" in result
+        # ISSUE has no checkbox
+        assert "☑ ISSUE" not in result
+        assert "☐ ISSUE" not in result
+        # Completed stages show ☑
+        assert "☑ PLAN" in result
         # In-progress shows ▶ prefix
         assert "▶ BUILD" in result
+        # Pending stages show ☐
+        assert "☐ TEST" in result
         # Stages joined with arrows
         assert "→" in result
 
@@ -1126,9 +1128,10 @@ class TestRenderStageProgress:
         session.get_links.return_value = {}
         result = _render_stage_progress(session)
         assert result is not None
-        assert "☐" not in result
-        assert "☑" not in result
-        assert "▶" not in result
+        assert "☐" not in result  # No pending stages
+        assert "▶" not in result  # No in-progress stages
+        assert "☑ PLAN" in result
+        assert "☑ DOCS" in result
 
     def test_issue_number_embedded_in_label(self):
         """ISSUE stage shows the issue number when available in session links."""
@@ -1146,7 +1149,9 @@ class TestRenderStageProgress:
         session.get_links.return_value = {"issue": "https://github.com/org/repo/issues/243"}
         result = _render_stage_progress(session)
         assert "ISSUE 243" in result
+        assert "☑ PLAN" in result
         assert "▶ BUILD" in result
+        assert "☐ TEST" in result
 
     def test_no_issue_number_without_links(self):
         """ISSUE stage shows plain 'ISSUE' when no issue link exists."""
@@ -1164,7 +1169,8 @@ class TestRenderStageProgress:
         session.get_links.return_value = {}
         result = _render_stage_progress(session)
         # Should start with plain "ISSUE" not "ISSUE None" or similar
-        assert result.startswith("ISSUE →") or result.startswith("ISSUE →")
+        assert result.startswith("ISSUE →")
+        assert "▶ PLAN" in result
 
 
 class TestRenderLinkFooter:
@@ -1274,11 +1280,11 @@ class TestComposeStructuredSummaryWithSession:
         first_line = result.split("\n")[0]
         assert first_line.strip() in ("✅", "⏳", "❌")
         assert "continue" not in first_line
-        # Stage progress line present — new format without checkboxes
-        assert "☑" not in result
-        assert "☐" not in result
+        # Stage progress line with checkboxes (ISSUE has none)
         assert "ISSUE 190" in result
+        assert "☑ PLAN" in result
         assert "▶ BUILD" in result
+        assert "☐ TEST" in result
         # Bullets present
         assert "• Implemented the bypass" in result
         # Link footer present (no plan link)

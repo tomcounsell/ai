@@ -667,10 +667,9 @@ def _parse_classification_response(raw: str) -> ClassificationResult | None:
 def _render_stage_progress(session) -> str | None:
     """Render SDLC stage progress line from session history.
 
-    Returns a line like: ISSUE 243 → PLAN → ▶ BUILD → TEST → REVIEW → DOCS
-    No checkbox icons — completed stages show plain name, in-progress shows ▶ prefix,
-    pending stages show plain name. The ISSUE stage includes the issue number when available.
-    Returns None if no stage data is available.
+    Returns a line like: ISSUE 243 → ☑ PLAN → ▶ BUILD → ☐ TEST → ☐ REVIEW → ☐ DOCS
+    ISSUE has no checkbox (just label + number). Other stages show ☑ when completed,
+    ▶ when in-progress, ☐ when pending. Returns None if no stage data is available.
     """
     if not session:
         return None
@@ -700,12 +699,18 @@ def _render_stage_progress(session) -> str | None:
         else:
             label = stage
 
-        if status == "in_progress":
+        if stage == "ISSUE":
+            # ISSUE has no checkbox — just label (with optional number)
+            if status == "in_progress":
+                parts.append(f"▶ {label}")
+            else:
+                parts.append(label)
+        elif status == "completed":
+            parts.append(f"☑ {label}")
+        elif status == "in_progress":
             parts.append(f"▶ {label}")
         else:
-            # Both completed and pending show plain label
-            # Position in the sequence (before/after ▶) implies completion state
-            parts.append(label)
+            parts.append(f"☐ {label}")
 
     return " → ".join(parts)
 

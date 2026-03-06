@@ -417,8 +417,9 @@ class TestFullChainIntegration:
 
         # 3. Verify all components rendered
         assert "209" in result
-        assert "\u2611 ISSUE" in result
-        assert "\u2611 DOCS" in result
+        assert "ISSUE" in result
+        assert "☑ DOCS" in result
+        assert "☑ PLAN" in result
         assert "Issue #209" in result
         assert "PR #210" in result
         assert "Fixed connectivity gaps" in result
