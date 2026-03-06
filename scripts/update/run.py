@@ -339,6 +339,9 @@ def run_update(project_dir: Path, config: UpdateConfig) -> UpdateResult:
         for tool in result.verification.system_tools:
             status = "OK" if tool.available else "MISSING"
             log(f"  {tool.name}: {status}", v)
+            if not tool.available and tool.error:
+                log(f"    {tool.error}", v, always=True)
+                result.warnings.append(f"{tool.name}: {tool.error}")
 
         # Sync Claude OAuth credentials
         log("Syncing Claude OAuth credentials...", v)

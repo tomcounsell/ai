@@ -113,6 +113,46 @@ def check_venv_tool(project_dir: Path, tool: str) -> ToolCheck:
         return ToolCheck(name=tool, available=True, error=str(e))
 
 
+def check_python_alias() -> ToolCheck:
+    """Check that 'python' resolves to python3.
+
+    Many hooks and scripts use bare 'python'. On macOS, this may not exist
+    or may point to an old Python 2. If python3 exists but python doesn't,
+    report with a fix command.
+    """
+    python_path = shutil.which("python")
+    python3_path = shutil.which("python3")
+
+    if not python3_path:
+        return ToolCheck(name="python", available=False, error="python3 not found")
+
+    if python_path:
+        # Check it's actually python 3.12+
+        try:
+            result = run_cmd([python_path, "--version"], timeout=5)
+            version = result.stdout.strip()
+            if "3.12" in version or "3.13" in version:
+                return ToolCheck(name="python", available=True, version=version)
+            else:
+                return ToolCheck(
+                    name="python",
+                    available=False,
+                    version=version,
+                    error=f"python is {version}, expected 3.12+. "
+                    f"Fix: brew install python@3.12 && brew link python@3.12",
+                )
+        except Exception:
+            pass
+
+    # python not found but python3 exists
+    return ToolCheck(
+        name="python",
+        available=False,
+        error="'python' not found but python3 exists. "
+        "Fix: brew install python@3.12 && brew link python@3.12",
+    )
+
+
 def check_system_tools() -> list[ToolCheck]:
     """Check system-level tools."""
     tools = [
@@ -121,7 +161,9 @@ def check_system_tools() -> list[ToolCheck]:
         ("git", "--version"),
         ("uv", "--version"),
     ]
-    return [check_command(name, flag) for name, flag in tools]
+    results = [check_command(name, flag) for name, flag in tools]
+    results.append(check_python_alias())
+    return results
 
 
 def check_python_deps(project_dir: Path) -> list[ToolCheck]:
