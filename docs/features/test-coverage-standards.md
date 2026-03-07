@@ -31,9 +31,11 @@ Replaced 7 `except Exception: pass` blocks in critical job queue functions with 
 
 ### Gap 2: Empty Output Anomaly Detection (agent/job_queue.py)
 
-Added a guard in `_execute_job` that detects empty/whitespace-only output during SDLC sessions with remaining stages. Instead of classifying and auto-continuing (which creates a silent loop), the empty output is delivered directly to the user with a "(empty output)" placeholder.
+Extracted the empty output guard into a pure function `should_guard_empty_output(msg, is_sdlc, has_remaining_stages) -> bool` in `agent/job_queue.py`. The function returns True when output is empty/whitespace AND the job is SDLC with remaining stages. The production `send_to_chat` closure calls this function, and tests call it directly — following the same extraction pattern used for Gap 3.
 
-**Tests:** `TestEmptyOutputAnomalyDetection` in `tests/test_auto_continue.py` and `TestEmptyOutputLoopTermination` in `tests/test_enqueue_continuation.py`.
+When the guard triggers, the empty output is delivered to the user with a "(empty output)" placeholder instead of being classified as STATUS_UPDATE and auto-continued.
+
+**Tests:** `TestEmptyOutputAnomalyDetection` in `tests/test_auto_continue.py` (5 unit tests calling `should_guard_empty_output` directly + 1 async test for `classify_output` behavior) and `TestEmptyOutputLoopTermination` in `tests/test_enqueue_continuation.py`.
 
 ### Gap 3: Routing Decision Extraction (agent/job_queue.py)
 
@@ -97,9 +99,9 @@ grep -rn "except.*Exception.*:" --include="*.py" agent/ bridge/ | grep -v "logge
 
 | File | Change |
 |------|--------|
-| `agent/job_queue.py` | Replace 7 silent exception handlers with logger.warning; add empty output guard; extract `classify_routing_decision()` |
+| `agent/job_queue.py` | Replace 7 silent exception handlers with logger.warning; extract `should_guard_empty_output()` and `classify_routing_decision()` |
 | `tests/test_silent_failures.py` | New: 8 test classes for Gap 1 exception logging |
-| `tests/test_auto_continue.py` | Add `TestClassifyRoutingDecision` (10 tests) and `TestEmptyOutputAnomalyDetection` (6 tests) |
+| `tests/test_auto_continue.py` | Add `TestClassifyRoutingDecision` (10 tests) and `TestEmptyOutputAnomalyDetection` (6 tests calling production `should_guard_empty_output`) |
 | `tests/test_enqueue_continuation.py` | Add `TestEmptyOutputLoopTermination` (3 tests) |
 | `tests/test_summarizer.py` | Add `TestErrorStateRendering` (7 tests) |
 | `tests/test_build_validation.py` | New: 6 tests for build output verification |
