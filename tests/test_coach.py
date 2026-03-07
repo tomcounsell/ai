@@ -5,7 +5,9 @@ from pathlib import Path
 
 from bridge.coach import (
     SKILL_DETECTORS,
+    STAGE_TO_SKILL,
     _build_heuristic_rejection_coaching,
+    _build_sdlc_stage_coaching,
     _detect_active_skill,
     _extract_success_criteria,
     build_coaching_message,
@@ -51,9 +53,7 @@ class TestBuildCoachingMessage:
             rejected=True,
             coaching_message="Show the test results.",
         )
-        msg = build_coaching_message(
-            classification, job_message_text="/do-build foo.md"
-        )
+        msg = build_coaching_message(classification, job_message_text="/do-build foo.md")
         assert "Show the test results." in msg
         assert "Implementing" not in msg
 
@@ -117,18 +117,14 @@ class TestBuildCoachingMessage:
     def test_skill_detected_from_message(self):
         """When /do-build is in message text, skill-specific coaching is used."""
         classification = _make_classification(OutputType.STATUS_UPDATE)
-        msg = build_coaching_message(
-            classification, job_message_text="/do-build docs/plans/foo.md"
-        )
+        msg = build_coaching_message(classification, job_message_text="/do-build docs/plans/foo.md")
         assert "[System Coach]" in msg
         assert "Implementing" in msg  # From SKILL_DETECTORS description
 
     def test_no_skill_no_rejection_returns_continue(self):
         """Plain status update with no context returns 'continue'."""
         classification = _make_classification(OutputType.STATUS_UPDATE)
-        msg = build_coaching_message(
-            classification, plan_file=None, job_message_text="hello"
-        )
+        msg = build_coaching_message(classification, plan_file=None, job_message_text="hello")
         assert msg == "continue"
 
     def test_nonexistent_plan_file_falls_through_to_skill(self):
@@ -157,9 +153,7 @@ class TestExtractSuccessCriteria:
 
     def test_extracts_criteria(self):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
-            f.write(
-                "# Plan\n\n## Success Criteria\n\n- [ ] Item 1\n- [ ] Item 2\n\n## Risks\n"
-            )
+            f.write("# Plan\n\n## Success Criteria\n\n- [ ] Item 1\n- [ ] Item 2\n\n## Risks\n")
             f.flush()
             result = _extract_success_criteria(f.name)
             assert "Item 1" in result
@@ -288,3 +282,254 @@ class TestHeuristicRejectionCoaching:
     def test_contains_guidance(self):
         msg = _build_heuristic_rejection_coaching()
         assert "concrete proof" in msg
+
+
+class TestSdlcStageCoaching:
+    """Tests for SDLC stage progress coaching (Tier 1c)."""
+
+    def test_plan_completed_build_pending_mentions_do_build(self):
+        """After PLAN completes, coaching should mention /do-build."""
+        progress = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        msg = _build_sdlc_stage_coaching(progress)
+        assert msg is not None
+        assert "[System Coach]" in msg
+        assert "/do-build" in msg
+        assert "PLAN" in msg  # mentions completed stage
+        assert "BUILD" in msg  # mentions next stage
+
+    def test_build_completed_test_pending_mentions_do_test(self):
+        """After BUILD completes, coaching should mention /do-test."""
+        progress = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        msg = _build_sdlc_stage_coaching(progress)
+        assert msg is not None
+        assert "/do-test" in msg
+
+    def test_test_completed_review_pending_mentions_do_pr_review(self):
+        """After TEST completes, coaching should mention /do-pr-review."""
+        progress = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        msg = _build_sdlc_stage_coaching(progress)
+        assert msg is not None
+        assert "/do-pr-review" in msg
+
+    def test_review_completed_docs_pending_mentions_do_docs(self):
+        """After REVIEW completes, coaching should mention /do-docs."""
+        progress = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "completed",
+            "DOCS": "pending",
+        }
+        msg = _build_sdlc_stage_coaching(progress)
+        assert msg is not None
+        assert "/do-docs" in msg
+
+    def test_all_completed_returns_none(self):
+        """When all stages are completed, returns None to fall through."""
+        progress = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "completed",
+            "DOCS": "completed",
+        }
+        msg = _build_sdlc_stage_coaching(progress)
+        assert msg is None
+
+    def test_empty_dict_returns_none(self):
+        """Empty progress dict returns None to fall through."""
+        msg = _build_sdlc_stage_coaching({})
+        assert msg is None
+
+    def test_none_returns_none(self):
+        """None input returns None."""
+        msg = _build_sdlc_stage_coaching(None)
+        assert msg is None
+
+    def test_all_pending_returns_none(self):
+        """All stages pending (no progress) returns None."""
+        progress = {
+            "ISSUE": "pending",
+            "PLAN": "pending",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        msg = _build_sdlc_stage_coaching(progress)
+        assert msg is None
+
+    def test_in_progress_stage_is_reported(self):
+        """In-progress stages are mentioned in the coaching message."""
+        progress = {
+            "ISSUE": "completed",
+            "PLAN": "in_progress",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        msg = _build_sdlc_stage_coaching(progress)
+        assert msg is not None
+        assert "In progress: PLAN" in msg
+
+    def test_contains_do_not_investigate_directive(self):
+        """Coaching should include explicit 'do NOT investigate' directive."""
+        progress = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        msg = _build_sdlc_stage_coaching(progress)
+        assert msg is not None
+        assert "Do NOT investigate" in msg
+
+    def test_issue_pending_skips_to_plan(self):
+        """ISSUE has no skill mapping, so coaching skips to PLAN."""
+        progress = {
+            "ISSUE": "pending",
+            "PLAN": "pending",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        # All pending with nothing completed -> returns None
+        msg = _build_sdlc_stage_coaching(progress)
+        assert msg is None
+
+
+class TestSdlcCoachingIntegration:
+    """Tests that SDLC coaching integrates correctly with build_coaching_message."""
+
+    def test_sdlc_progress_produces_coaching(self):
+        """build_coaching_message with sdlc_stage_progress produces SDLC coaching."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        progress = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        msg = build_coaching_message(classification, sdlc_stage_progress=progress)
+        assert "[System Coach]" in msg
+        assert "/do-build" in msg
+
+    def test_sdlc_progress_none_falls_through(self):
+        """Without sdlc_stage_progress, existing coaching tiers are unchanged."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        msg = build_coaching_message(classification, sdlc_stage_progress=None)
+        assert msg == "continue"
+
+    def test_sdlc_all_completed_falls_through_to_skill(self):
+        """All-completed progress falls through to skill-aware coaching."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        all_done = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "completed",
+            "TEST": "completed",
+            "REVIEW": "completed",
+            "DOCS": "completed",
+        }
+        msg = build_coaching_message(
+            classification,
+            sdlc_stage_progress=all_done,
+            job_message_text="/do-build foo.md",
+        )
+        # Should fall through to skill-aware coaching since SDLC coaching returns None
+        assert "[System Coach]" in msg
+        assert "Implementing" in msg  # skill-aware for /do-build
+
+    def test_llm_coaching_takes_priority_over_sdlc(self):
+        """LLM coaching (Tier 1) takes priority over SDLC coaching (Tier 1c)."""
+        classification = _make_classification(
+            OutputType.STATUS_UPDATE,
+            coaching_message="Do something specific.",
+        )
+        progress = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        msg = build_coaching_message(classification, sdlc_stage_progress=progress)
+        assert "Do something specific." in msg
+        assert "/do-build" not in msg  # SDLC coaching was not used
+
+    def test_heuristic_rejection_takes_priority_over_sdlc(self):
+        """Heuristic rejection coaching (Tier 1b) takes priority over SDLC (Tier 1c)."""
+        classification = _make_classification(
+            OutputType.STATUS_UPDATE, rejected=True, coaching_message=None
+        )
+        progress = {
+            "ISSUE": "completed",
+            "PLAN": "completed",
+            "BUILD": "pending",
+            "TEST": "pending",
+            "REVIEW": "pending",
+            "DOCS": "pending",
+        }
+        msg = build_coaching_message(classification, sdlc_stage_progress=progress)
+        assert "concrete proof" in msg  # Heuristic rejection coaching
+        assert "/do-build" not in msg
+
+    def test_existing_coaching_without_sdlc_unchanged(self):
+        """Existing coaching behavior is not affected when sdlc_stage_progress is absent."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        msg = build_coaching_message(classification, plan_file=None, job_message_text="hello")
+        assert msg == "continue"
+
+
+class TestStageToSkillMapping:
+    """Tests for the STAGE_TO_SKILL configuration."""
+
+    def test_all_actionable_stages_have_skills(self):
+        """All stages that need skill invocation are mapped."""
+        assert "PLAN" in STAGE_TO_SKILL
+        assert "BUILD" in STAGE_TO_SKILL
+        assert "TEST" in STAGE_TO_SKILL
+        assert "REVIEW" in STAGE_TO_SKILL
+        assert "DOCS" in STAGE_TO_SKILL
+
+    def test_issue_stage_not_mapped(self):
+        """ISSUE stage has no corresponding skill (it's a manual step)."""
+        assert "ISSUE" not in STAGE_TO_SKILL
+
+    def test_skill_names_are_correct(self):
+        """Skill names match the actual /do-* commands."""
+        assert STAGE_TO_SKILL["PLAN"] == "/do-plan"
+        assert STAGE_TO_SKILL["BUILD"] == "/do-build"
+        assert STAGE_TO_SKILL["TEST"] == "/do-test"
+        assert STAGE_TO_SKILL["REVIEW"] == "/do-pr-review"
+        assert STAGE_TO_SKILL["DOCS"] == "/do-docs"

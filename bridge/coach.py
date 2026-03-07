@@ -11,6 +11,7 @@ than to accidentally coach in the wrong direction.
 Coaching tiers (in priority order):
 1. LLM coaching - classifier provided a coaching_message (preferred)
 1b. Heuristic rejection coaching - static fallback when no LLM coaching available
+1c. SDLC stage progress coaching - explicit next-stage instruction for SDLC pipelines
 2. Skill-aware coaching - a /do-* skill is active with plan success criteria
 3. Plain continue - fallback for genuine status updates
 
@@ -40,6 +41,22 @@ logger = logging.getLogger(__name__)
 #   2. Optionally add a skill-specific coaching template
 #   3. The coach will automatically pick it up — no other wiring needed
 # ---------------------------------------------------------------------------
+# Maps SDLC stage names (from AgentSession.get_stage_progress()) to the
+# corresponding /do-* skill that should be invoked next. Used by the
+# SDLC stage progress coaching tier (1c) to build explicit next-step
+# instructions that prevent the agent from drifting to unrelated work.
+STAGE_TO_SKILL: dict[str, str] = {
+    "PLAN": "/do-plan",
+    "BUILD": "/do-build",
+    "TEST": "/do-test",
+    "REVIEW": "/do-pr-review",
+    "DOCS": "/do-docs",
+}
+
+# Ordered list of SDLC stages for determining "next stage" from progress.
+# Must match the order in models.agent_session.SDLC_STAGES.
+_STAGE_ORDER = ["ISSUE", "PLAN", "BUILD", "TEST", "REVIEW", "DOCS"]
+
 SKILL_DETECTORS: dict[str, dict] = {
     "/do-plan": {
         "phase": "plan",
@@ -68,6 +85,7 @@ def build_coaching_message(
     classification,
     plan_file: str | None = None,
     job_message_text: str | None = None,
+    sdlc_stage_progress: dict | None = None,
 ) -> str:
     """Build a context-aware coaching message for auto-continue.
 
@@ -80,6 +98,9 @@ def build_coaching_message(
         classification: ClassificationResult from the summarizer.
         plan_file: Path to the active plan document, if any.
         job_message_text: Original message text that triggered the job.
+        sdlc_stage_progress: Dict mapping stage names to statuses from
+            AgentSession.get_stage_progress(). When provided with remaining
+            stages, triggers Tier 1c SDLC pipeline coaching.
 
     Returns:
         Coaching message string to send as the continuation prompt.
@@ -93,6 +114,11 @@ def build_coaching_message(
         >>> build_coaching_message(status, plan_file='docs/plans/foo.md')
         '[System Coach] You are working through a plan. ...'
 
+        >>> # SDLC progress with remaining stages -> explicit next-step
+        >>> progress = {"PLAN": "completed", "BUILD": "pending"}
+        >>> build_coaching_message(status, sdlc_stage_progress=progress)
+        '[System Coach] The SDLC pipeline has completed: PLAN. ...'
+
         >>> # No context → plain continue
         >>> build_coaching_message(status)
         'continue'
@@ -105,6 +131,12 @@ def build_coaching_message(
     # Tier 1b: Heuristic rejection coaching — fallback when LLM coaching absent
     if getattr(classification, "was_rejected_completion", False):
         return _build_heuristic_rejection_coaching()
+
+    # Tier 1c: SDLC stage progress coaching — explicit next-stage instruction
+    if sdlc_stage_progress:
+        sdlc_msg = _build_sdlc_stage_coaching(sdlc_stage_progress)
+        if sdlc_msg:
+            return sdlc_msg
 
     # Tier 2: Skill-aware coaching (plan file with extractable criteria)
     if plan_file and Path(plan_file).exists():
@@ -122,6 +154,73 @@ def build_coaching_message(
 
     # Tier 3: Plain continue — no context to coach on
     return "continue"
+
+
+def _build_sdlc_stage_coaching(stage_progress: dict) -> str | None:
+    """Build SDLC pipeline coaching with explicit next-stage instruction.
+
+    Parses the stage progress dict to determine which stages are done and
+    which stage should be invoked next. Returns None if there are no
+    remaining stages (all completed or all pending with no progress),
+    allowing the caller to fall through to lower-priority coaching tiers.
+
+    Args:
+        stage_progress: Dict mapping stage names (e.g. "PLAN", "BUILD")
+            to statuses ("completed", "in_progress", "pending", "failed").
+
+    Returns:
+        Coaching message string with explicit next-step instruction,
+        or None if no actionable SDLC coaching can be produced.
+    """
+    if not stage_progress:
+        return None
+
+    completed = [s for s in _STAGE_ORDER if stage_progress.get(s) == "completed"]
+    in_progress = [s for s in _STAGE_ORDER if stage_progress.get(s) == "in_progress"]
+
+    # If nothing is completed and nothing is in progress, no useful coaching
+    if not completed and not in_progress:
+        return None
+
+    # Find the next stage to invoke: first pending stage in pipeline order
+    next_stage = None
+    for stage in _STAGE_ORDER:
+        if stage_progress.get(stage) == "pending":
+            next_stage = stage
+            break
+
+    # If no pending stages remain, all stages are done or in progress
+    if next_stage is None:
+        return None
+
+    # Build the coaching message
+    skill_name = STAGE_TO_SKILL.get(next_stage)
+    if not skill_name:
+        # ISSUE stage has no corresponding skill — skip to the next pending
+        for stage in _STAGE_ORDER:
+            if stage_progress.get(stage) == "pending" and stage in STAGE_TO_SKILL:
+                next_stage = stage
+                skill_name = STAGE_TO_SKILL[next_stage]
+                break
+        if not skill_name:
+            return None
+
+    completed_str = ", ".join(completed) if completed else "none yet"
+    in_progress_str = ", ".join(in_progress) if in_progress else ""
+
+    parts = [
+        f"[System Coach] The SDLC pipeline has completed: {completed_str}.",
+    ]
+    if in_progress_str:
+        parts.append(f" In progress: {in_progress_str}.")
+    parts.append(
+        f" The next stage is {next_stage}. "
+        f"Return to the SDLC pipeline and invoke `{skill_name}` to continue. "
+        f"Do NOT investigate logs, check system status, or start other work — "
+        f"proceed directly to `{skill_name}`."
+    )
+
+    return "".join(parts)
 
 
 def _build_heuristic_rejection_coaching() -> str:
