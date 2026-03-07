@@ -73,13 +73,14 @@ def _compute_button_state(episode: Episode, step: int) -> dict:
         wf = episode.workflow
     except EpisodeWorkflow.DoesNotExist:
         if step == 1:
+            disabled = not episode.description.strip()
             return {
                 "show": True,
                 "label": "Start Pipeline",
-                "color": "green",
+                "color": "green" if not disabled else "gray",
                 "icon": "check",
-                "disabled": False,
-                "blocked_reason": "",
+                "disabled": disabled,
+                "blocked_reason": "Episode description is required" if disabled else "",
                 "error": "",
             }
         return {"show": False}
@@ -157,13 +158,14 @@ def _compute_button_state(episode: Episode, step: int) -> dict:
         }
 
     if wf.status == "pending" and step == 1:
+        disabled = not episode.description.strip()
         return {
             "show": True,
             "label": "Start Pipeline",
-            "color": "green",
+            "color": "green" if not disabled else "gray",
             "icon": "check",
-            "disabled": False,
-            "blocked_reason": "",
+            "disabled": disabled,
+            "blocked_reason": "Episode description is required" if disabled else "",
             "error": "",
         }
 
@@ -291,6 +293,47 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
             )
 
         return self._redirect(slug, episode_slug, step)
+
+    def patch(
+        self, request, slug: str, episode_slug: str, step: int, *args, **kwargs
+    ) -> HttpResponse:
+        """Handle HTMX field updates for episode title/description on step 1."""
+        from django.http import QueryDict
+
+        podcast, episode = self._load_context(request, slug, episode_slug, step)
+
+        if step != 1:
+            return HttpResponse("Field editing only available on step 1", status=400)
+
+        # Parse PATCH data from request body (Django doesn't parse PATCH into request.POST)
+        data = QueryDict(request.body)
+
+        field = data.get("field")
+        if field not in ["title", "description"]:
+            return HttpResponse("Invalid field", status=400)
+
+        value = data.get(field, "").strip()
+
+        # Validation
+        if field == "title" and not value:
+            return HttpResponse(
+                '<span class="text-red-600">Title cannot be empty</span>', status=400
+            )
+
+        if field == "description" and not value:
+            return HttpResponse(
+                '<span class="text-red-600">Description cannot be empty</span>',
+                status=400,
+            )
+
+        # Save
+        setattr(episode, field, value)
+        episode.save(update_fields=[field])
+
+        # Return success message
+        return HttpResponse(
+            '<span class="text-green-600"><i class="fas fa-check-circle"></i> Saved</span>'
+        )
 
     def _redirect(self, slug: str, episode_slug: str, step: int) -> HttpResponse:
         """Return HX-Redirect for HTMX or standard redirect."""

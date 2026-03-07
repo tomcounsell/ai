@@ -26,6 +26,11 @@ urlpatterns = [
         name="episode_workflow",
     ),
     path(
+        "<slug:slug>/<slug:episode_slug>/edit/<int:step>/update/",
+        EpisodeWorkflowView.as_view(),
+        name="episode_update_field",
+    ),
+    path(
         "<slug:slug>/<slug:episode_slug>/",
         EpisodeDetailView.as_view(),
         name="episode_detail",

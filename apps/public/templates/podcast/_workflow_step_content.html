@@ -17,6 +17,52 @@
   </div>
 </div>
 
+<!-- Episode Brief Editor (Step 1 only) -->
+{% if current_step == 1 %}
+<div class="mb-6 px-4 py-4 border border-gray-200 bg-white">
+  <h3 class="text-sm font-semibold text-gray-700 mb-3">Episode Details</h3>
+
+  <!-- Title Field -->
+  <div class="mb-4">
+    <label for="episode-title" class="block text-xs font-medium text-gray-600 mb-1">Title</label>
+    <input type="text"
+           id="episode-title"
+           name="title"
+           value="{{ episode.title }}"
+           class="input-brand w-full"
+           hx-patch="{% url 'podcast:episode_update_field' slug=podcast.slug episode_slug=episode.slug step=1 %}"
+           hx-trigger="blur changed delay:500ms"
+           hx-vals='{"field": "title"}'
+           hx-include="[name='title']"
+           hx-target="#save-status"
+           hx-swap="innerHTML">
+  </div>
+
+  <!-- Description Field -->
+  <div class="mb-4">
+    <label for="episode-description" class="block text-xs font-medium text-gray-600 mb-1">
+      Description / Research Prompt
+      <span class="text-red-500">*</span>
+    </label>
+    <textarea id="episode-description"
+              name="description"
+              rows="6"
+              class="input-brand w-full"
+              placeholder="Describe what this episode should cover. This becomes the research prompt for the AI pipeline."
+              hx-patch="{% url 'podcast:episode_update_field' slug=podcast.slug episode_slug=episode.slug step=1 %}"
+              hx-trigger="blur changed delay:500ms"
+              hx-vals='{"field": "description"}'
+              hx-include="[name='description']"
+              hx-target="#save-status"
+              hx-swap="innerHTML">{{ episode.description }}</textarea>
+    <p class="text-xs text-gray-500 mt-1">This prompt seeds all research phases. Be specific about topics, themes, or questions to explore.</p>
+  </div>
+
+  <!-- Save Status -->
+  <div id="save-status" class="text-sm"></div>
+</div>
+{% endif %}
+
 <!-- Pipeline action button -->
 {% if button_state.show %}
 <div class="mb-6 px-3 py-3 border border-gray-200 bg-gray-50">

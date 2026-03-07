@@ -168,3 +168,111 @@ class EpisodeWorkflowViewTestCase(TestCase):
             )
         )
         self.assertEqual(response.status_code, 200)
+
+    # PATCH field update tests
+    def _update_field_url(
+        self,
+        step: int = 1,
+        slug: str = "test-podcast",
+        episode_slug: str = "test-episode",
+    ) -> str:
+        return f"/podcast/{slug}/{episode_slug}/edit/{step}/update/"
+
+    # 16. PATCH updates title successfully
+    def test_patch_updates_title(self):
+        self.client.login(username="staff", password="pass")
+        response = self.client.patch(
+            self._update_field_url(step=1),
+            data="field=title&title=New Title",
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Saved", response.content.decode("utf-8"))
+        self.episode.refresh_from_db()
+        self.assertEqual(self.episode.title, "New Title")
+
+    # 17. PATCH updates description successfully
+    def test_patch_updates_description(self):
+        self.client.login(username="staff", password="pass")
+        response = self.client.patch(
+            self._update_field_url(step=1),
+            data="field=description&description=New description for research",
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Saved", response.content.decode("utf-8"))
+        self.episode.refresh_from_db()
+        self.assertEqual(self.episode.description, "New description for research")
+
+    # 18. PATCH rejects empty title
+    def test_patch_rejects_empty_title(self):
+        self.client.login(username="staff", password="pass")
+        response = self.client.patch(
+            self._update_field_url(step=1),
+            data="field=title&title=",
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Title cannot be empty", response.content.decode("utf-8"))
+
+    # 19. PATCH rejects empty description
+    def test_patch_rejects_empty_description(self):
+        self.client.login(username="staff", password="pass")
+        response = self.client.patch(
+            self._update_field_url(step=1),
+            data="field=description&description=",
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Description cannot be empty", response.content.decode("utf-8"))
+
+    # 20. PATCH only works on step 1
+    def test_patch_only_works_on_step_1(self):
+        self.client.login(username="staff", password="pass")
+        response = self.client.patch(
+            self._update_field_url(step=2),
+            data="field=title&title=New Title",
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("only available on step 1", response.content.decode("utf-8"))
+
+    # 21. PATCH rejects invalid field name
+    def test_patch_rejects_invalid_field(self):
+        self.client.login(username="staff", password="pass")
+        response = self.client.patch(
+            self._update_field_url(step=1),
+            data="field=tags&tags=test,tags",
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Invalid field", response.content.decode("utf-8"))
+
+    # 22. Button disabled when description is empty
+    def test_button_disabled_when_description_empty(self):
+        Episode.objects.create(
+            podcast=self.podcast,
+            title="No Description Episode",
+            slug="no-desc-episode",
+            episode_number=2,
+            status="draft",
+            description="",
+        )
+        self.client.login(username="staff", password="pass")
+        response = self.client.get(
+            self._workflow_url(step=1, episode_slug="no-desc-episode")
+        )
+        self.assertEqual(response.status_code, 200)
+        button_state = response.context["button_state"]
+        self.assertTrue(button_state["show"])
+        self.assertTrue(button_state["disabled"])
+        self.assertIn("description is required", button_state["blocked_reason"])
+
+    # 23. Button enabled when description exists
+    def test_button_enabled_when_description_exists(self):
+        self.client.login(username="staff", password="pass")
+        response = self.client.get(self._workflow_url(step=1))
+        self.assertEqual(response.status_code, 200)
+        button_state = response.context["button_state"]
+        self.assertTrue(button_state["show"])
+        self.assertFalse(button_state["disabled"])
