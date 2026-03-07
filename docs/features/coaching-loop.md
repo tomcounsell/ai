@@ -35,6 +35,7 @@ The `build_coaching_message()` function in `bridge/coach.py` resolves coaching t
 |------|--------|-------------|
 | **Tier 1** | LLM coaching | Uses `classification.coaching_message` from the merged classifier pass. Prefixed with `[System Coach]`. |
 | **Tier 1b** | Heuristic rejection coaching | Static templates from `_build_heuristic_rejection_coaching()` when no LLM coaching is available but `was_rejected_completion=True`. |
+| **Tier 1c** | SDLC stage progress coaching | Explicit next-stage instructions for SDLC pipelines via `_build_sdlc_stage_coaching()`. Fires when `sdlc_stage_progress` is provided and has remaining stages. |
 | **Tier 2** | Skill-aware coaching | Matches the agent output against known skills/commands and suggests relevant evidence. |
 | **Tier 3** | Plain continue | Falls back to a simple "continue" message when no richer coaching is available. |
 
@@ -88,6 +89,7 @@ Is SDLC job? (classification_type == "sdlc" OR [stage] entries in history)
     build_coaching_message()
           |-- Tier 1:  coaching_message from classifier (if present)
           |-- Tier 1b: heuristic rejection templates (if was_rejected but no LLM coaching)
+          |-- Tier 1c: SDLC stage progress coaching (if sdlc_stage_progress has remaining stages)
           |-- Tier 2:  skill-aware coaching (plan criteria or skill evidence hints)
           +-- Tier 3:  plain "continue"
           |
@@ -244,6 +246,39 @@ Every `classify_output()` call appends a JSONL entry to `logs/classification_aud
 **Rotation**: When the file exceeds 10MB, it's renamed to `.jsonl.1` (simple single-rotation). Single writer, no locking needed.
 
 **Non-fatal**: Write failures are logged at DEBUG level and do not affect classification behavior.
+
+### SDLC Stage Progress Coaching (Tier 1c)
+
+When the auto-continue system fires for an SDLC job with remaining pipeline stages, `_enqueue_continuation()` in `agent/job_queue.py` reads the session's stage progress via `AgentSession.get_stage_progress()` and passes it to `build_coaching_message()` as the `sdlc_stage_progress` parameter.
+
+The `_build_sdlc_stage_coaching()` function in `bridge/coach.py` then:
+
+1. Identifies which stages are completed, in progress, and pending
+2. Finds the first pending stage in pipeline order
+3. Maps the stage name to a `/do-*` skill via `STAGE_TO_SKILL`
+4. Builds a directive coaching message that explicitly tells the agent to invoke the next skill
+
+Example output:
+```
+[System Coach] The SDLC pipeline has completed: ISSUE, PLAN.
+The next stage is BUILD. Return to the SDLC pipeline and invoke
+`/do-build` to continue. Do NOT investigate logs, check system
+status, or start other work -- proceed directly to `/do-build`.
+```
+
+The `STAGE_TO_SKILL` mapping covers all actionable stages:
+
+| Stage | Skill |
+|-------|-------|
+| PLAN | `/do-plan` |
+| BUILD | `/do-build` |
+| TEST | `/do-test` |
+| REVIEW | `/do-pr-review` |
+| DOCS | `/do-docs` |
+
+The ISSUE stage has no skill mapping since it is a manual step.
+
+**Fall-through behavior**: When `sdlc_stage_progress` is `None`, empty, or has no remaining stages (all completed), the function returns `None` and the coach falls through to Tier 2 (skill-aware coaching) or Tier 3 (plain continue).
 
 ### Skill-Specific Coaching
 
