@@ -66,6 +66,23 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 - [Key decision 2]
 - [Integration points]
 
+## Failure Path Test Strategy
+
+[Every plan must address how failure paths will be tested. Silent failures are a class of bug where exceptions are caught and swallowed without logging, empty outputs loop indefinitely, or error states render incorrectly. Address each category below.]
+
+### Exception Handling Coverage
+- [ ] Identify `except Exception: pass` blocks in touched files — each must have a corresponding test asserting observable behavior (logger.warning, metric, or state change)
+- [ ] If no exception handlers exist in the scope of this work, state "No exception handlers in scope"
+
+### Empty/Invalid Input Handling
+- [ ] Document what happens when functions receive empty strings, None, or whitespace-only inputs
+- [ ] Add tests for empty input edge cases in any new or modified functions
+- [ ] If the feature involves agent output processing, verify empty output does not trigger silent loops
+
+### Error State Rendering
+- [ ] If the feature has user-visible output, test the error/failure rendering path (not just success)
+- [ ] Verify error messages propagate to the user rather than being swallowed silently
+
 ## Rabbit Holes
 
 [Areas that look tempting but will swallow disproportionate time. Call these out so the team deliberately avoids them.]
