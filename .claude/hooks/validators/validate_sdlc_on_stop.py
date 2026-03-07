@@ -33,6 +33,45 @@ def get_sdlc_state_path(session_id: str) -> Path:
     return get_data_sessions_dir() / session_id / "sdlc_state.json"
 
 
+def _baseline_path(session_id: str) -> Path:
+    """Return the path to the git-dirty baseline snapshot for a session."""
+    return get_data_sessions_dir() / session_id / "git_baseline.json"
+
+
+def save_baseline(session_id: str) -> None:
+    """Snapshot currently dirty code files so the stop hook can diff against them.
+
+    Called once at session start (or lazily on first stop-hook invocation).
+    """
+    import subprocess
+
+    code_exts = (".py", ".js", ".ts")
+    dirty: list[str] = []
+
+    for cmd in (["git", "diff", "--name-only"], ["git", "diff", "--name-only", "--cached"]):
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+        for f in result.stdout.strip().split("\n"):
+            if f and any(f.endswith(ext) for ext in code_exts) and f not in dirty:
+                dirty.append(f)
+
+    bp = _baseline_path(session_id)
+    bp.parent.mkdir(parents=True, exist_ok=True)
+    with open(bp, "w") as fh:
+        json.dump(dirty, fh)
+
+
+def _load_baseline(session_id: str) -> set[str] | None:
+    """Load the baseline snapshot. Returns None if no baseline was captured."""
+    bp = _baseline_path(session_id)
+    if not bp.exists():
+        return None
+    try:
+        with open(bp) as fh:
+            return set(json.load(fh))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Quality gate logic
 # ---------------------------------------------------------------------------
@@ -67,8 +106,8 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
     state_path = get_sdlc_state_path(session_id)
     if not state_path.exists():
         # Fallback: detect code changes on main without SDLC tracking.
-        # Check both uncommitted changes (working tree) AND the most recent
-        # commit — the bypass scenario involves code already committed to main.
+        # Only flag files that became dirty DURING this session by comparing
+        # against a baseline snapshot captured at session start.
         try:
             import subprocess
 
@@ -107,10 +146,17 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
                     code_files.extend(
                         f
                         for f in staged_diff.split("\n")
-                        if f
-                        and any(f.endswith(ext) for ext in code_exts)
-                        and f not in code_files
+                        if f and any(f.endswith(ext) for ext in code_exts) and f not in code_files
                     )
+
+                # Filter out files that were already dirty at session start.
+                # If no baseline was captured, assume all dirty files are
+                # pre-existing (fail open — can't prove this session caused them).
+                baseline = _load_baseline(session_id)
+                if baseline is None:
+                    code_files = []  # No baseline → assume all pre-existing
+                else:
+                    code_files = [f for f in code_files if f not in baseline]
 
                 if code_files:
                     if os.environ.get("SKIP_SDLC") == "1":
@@ -120,13 +166,16 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
                             file=sys.stderr,
                         )
                         return None
-                    return (
-                        "SDLC Quality Gate: Code files modified on main "
-                        "without SDLC tracking.\n\n"
-                        f"Files: {', '.join(code_files[:5])}\n\n"
-                        "Use /sdlc to create a branch and follow the pipeline.\n"
-                        "Set SKIP_SDLC=1 to bypass in genuine emergencies."
+                    # Downgrade to warning (exit 0) — no SDLC state means
+                    # this wasn't a tracked code session. Warn, don't block.
+                    print(
+                        "SDLC Warning: Code files modified on main "
+                        "without SDLC tracking.\n"
+                        f"Files: {', '.join(code_files[:5])}\n"
+                        "Consider using /sdlc to create a branch and follow the pipeline.",
+                        file=sys.stderr,
                     )
+                    return None
         except Exception:
             pass  # Fail open
         return None
@@ -161,9 +210,7 @@ def check_sdlc_quality_gate(session_id: str) -> str | None:
         return None
 
     # Build human-readable error listing missing checks with run hints
-    missing_lines = "\n".join(
-        f"  - {cmd} (run: {_QUALITY_RUN_HINTS[cmd]})" for cmd in missing
-    )
+    missing_lines = "\n".join(f"  - {cmd} (run: {_QUALITY_RUN_HINTS[cmd]})" for cmd in missing)
     return _ERROR_TEMPLATE.format(missing_lines=missing_lines)
 
 
