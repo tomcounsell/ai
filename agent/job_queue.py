@@ -1065,10 +1065,33 @@ async def _enqueue_continuation(
         except Exception as e:
             logger.warning(f"Failed to resolve plan_file for workflow {job.workflow_id}: {e}")
 
+    # For stage-aware continuations, look up the session's SDLC stage progress
+    # so the coach can build explicit next-step instructions. The session is
+    # re-read from Redis to get fresh stage data written by session_progress.py.
+    _sdlc_stage_progress = None
+    if coaching_source == "stage_aware":
+        try:
+            sessions_for_progress = list(
+                AgentSession.query.filter(session_id=job.session_id)
+            )
+            if sessions_for_progress:
+                agent_session = sessions_for_progress[0]
+                if agent_session.is_sdlc_job():
+                    _sdlc_stage_progress = agent_session.get_stage_progress()
+                    logger.info(
+                        f"[{job.project_key}] SDLC stage progress for coaching: "
+                        f"{_sdlc_stage_progress}"
+                    )
+        except Exception as e:
+            logger.warning(
+                f"[{job.project_key}] Failed to get stage progress for coaching: {e}"
+            )
+
     coaching_message = build_coaching_message(
         classification=classification,
         plan_file=_plan_file,
         job_message_text=job.message_text,
+        sdlc_stage_progress=_sdlc_stage_progress,
     )
 
     logger.info(
