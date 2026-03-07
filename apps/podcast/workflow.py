@@ -211,6 +211,10 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
         phases = compute_workflow_progress(episode, artifact_titles)
         current_phase = phases[step - 1]
 
+        # Get artifact for current phase
+        phase_artifact = self._get_phase_artifact(episode, step)
+        auto_expand = step in [6, 8]  # Quality gates
+
         self.context["podcast"] = podcast
         self.context["episode"] = episode
         self.context["phases"] = phases
@@ -218,8 +222,27 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
         self.context["current_step"] = step
         self.context["total_steps"] = 12
         self.context["button_state"] = _compute_button_state(episode, step)
+        self.context["phase_artifact"] = phase_artifact
+        self.context["auto_expand_artifact"] = auto_expand
 
         return podcast, episode
+
+    def _get_phase_artifact(self, episode: Episode, step: int):
+        """Get the artifact for the given workflow phase, if it exists."""
+        artifact_map = {
+            1: "p1-brief",
+            2: "p2-research",
+            3: "p3-questions",
+            4: "p4-digest",
+            5: "p5-validation",
+            6: "p6-briefing",
+            7: "p7-report",
+            8: "p8-plan",
+        }
+        title = artifact_map.get(step)
+        if not title:
+            return None
+        return episode.artifacts.filter(title=title).first()
 
     def get(self, request, slug: str, episode_slug: str, step: int, *args, **kwargs):
         self._load_context(request, slug, episode_slug, step)

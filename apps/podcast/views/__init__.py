@@ -3,6 +3,7 @@ from apps.podcast.workflow import EpisodeWorkflowView
 from .episode_update import EpisodeUpdateFieldView
 from .feed_views import PodcastFeedView
 from .podcast_views import (
+    ArtifactContentView,
     EpisodeCreateView,
     EpisodeDetailView,
     EpisodeReportView,
@@ -13,6 +14,7 @@ from .podcast_views import (
 )
 
 __all__ = [
+    "ArtifactContentView",
     "EpisodeCreateView",
     "EpisodeDetailView",
     "EpisodeReportView",

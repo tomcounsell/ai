@@ -138,6 +138,24 @@
 </div>
 {% endif %}
 
+<!-- Artifact viewer (if artifact exists for this phase) -->
+{% if phase_artifact %}
+<div class="mb-6">
+  <details {% if auto_expand_artifact %}open{% endif %} class="border border-gray-200 rounded">
+    <summary class="px-4 py-3 bg-gray-50 hover:bg-gray-100 cursor-pointer font-mono text-sm flex items-center">
+      <span class="mr-2">📄 {{ phase_artifact.title }}</span>
+      <span class="text-xs text-gray-500">({{ phase_artifact.word_count }} words)</span>
+    </summary>
+    <div class="px-4 py-4 bg-white border-t border-gray-200"
+         hx-get="{% url 'podcast:artifact_content' slug=podcast.slug episode_slug=episode.slug artifact_id=phase_artifact.id %}"
+         hx-trigger="load"
+         hx-swap="innerHTML">
+      <div class="text-sm text-gray-400">Loading artifact content...</div>
+    </div>
+  </details>
+</div>
+{% endif %}
+
 <!-- Pipeline action button -->
 {% if button_state.show %}
 <div class="mb-6 px-3 py-3 border border-gray-200 bg-gray-50">

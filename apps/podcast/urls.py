@@ -1,6 +1,7 @@
 from django.urls import path
 
 from apps.podcast.views import (
+    ArtifactContentView,
     EpisodeCreateView,
     EpisodeDetailView,
     EpisodeReportView,
@@ -30,6 +31,11 @@ urlpatterns = [
         "<slug:slug>/<slug:episode_slug>/edit/<int:step>/update/",
         EpisodeWorkflowView.as_view(),
         name="episode_update_field",
+    ),
+    path(
+        "<slug:slug>/<slug:episode_slug>/artifacts/<int:artifact_id>/",
+        ArtifactContentView.as_view(),
+        name="artifact_content",
     ),
     path(
         "<slug:slug>/<slug:episode_slug>/",

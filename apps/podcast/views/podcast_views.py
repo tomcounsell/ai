@@ -4,14 +4,15 @@ from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.db.models import Count, F, Max, Q
 from django.db.models.functions import Now
-from django.http import Http404
+from django.http import Http404, HttpResponse, HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
+from django.views import View
 from django.views.generic.edit import CreateView, UpdateView
 
 from apps.common.services.storage import store_file
 from apps.podcast.forms import EpisodeForm
-from apps.podcast.models import Episode, Podcast
+from apps.podcast.models import Episode, EpisodeArtifact, Podcast
 from apps.public.views.helpers.main_content_view import MainContentView
 
 
@@ -296,4 +297,28 @@ class EpisodeCreateView(
                 "episode_slug": self.object.slug,
                 "step": 1,
             },
+        )
+
+
+class ArtifactContentView(LoginRequiredMixin, UserPassesTestMixin, View):
+    """Return rendered artifact content as HTML fragment for HTMX."""
+
+    def test_func(self) -> bool:
+        return self.request.user.is_staff
+
+    def get(self, request, slug: str, episode_slug: str, artifact_id: int):
+        podcast = get_object_or_404(Podcast, slug=slug)
+        episode = get_object_or_404(Episode, podcast=podcast, slug=episode_slug)
+        artifact = get_object_or_404(EpisodeArtifact, id=artifact_id, episode=episode)
+
+        # Convert markdown to HTML
+        import markdown
+
+        html_content = markdown.markdown(
+            artifact.content, extensions=["fenced_code", "tables", "nl2br"]
+        )
+
+        # Return as HTML fragment
+        return HttpResponse(
+            f'<div class="prose prose-sm max-w-none">{html_content}</div>'
         )

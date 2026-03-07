@@ -43,3 +43,10 @@ class EpisodeArtifact(Timestampable):
 
     def __str__(self) -> str:
         return f"{self.episode} / {self.title}"
+
+    @property
+    def word_count(self) -> int:
+        """Count words in artifact content."""
+        if not self.content:
+            return 0
+        return len(self.content.split())
