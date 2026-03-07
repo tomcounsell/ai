@@ -114,8 +114,9 @@ def build_coaching_message(
         >>> build_coaching_message(status, plan_file='docs/plans/foo.md')
         '[System Coach] You are working through a plan. ...'
 
-        >>> # SDLC progress with remaining stages → explicit next-step
-        >>> build_coaching_message(status, sdlc_stage_progress={"PLAN": "completed", "BUILD": "pending"})
+        >>> # SDLC progress with remaining stages -> explicit next-step
+        >>> progress = {"PLAN": "completed", "BUILD": "pending"}
+        >>> build_coaching_message(status, sdlc_stage_progress=progress)
         '[System Coach] The SDLC pipeline has completed: PLAN. ...'
 
         >>> # No context → plain continue
@@ -176,7 +177,6 @@ def _build_sdlc_stage_coaching(stage_progress: dict) -> str | None:
 
     completed = [s for s in _STAGE_ORDER if stage_progress.get(s) == "completed"]
     in_progress = [s for s in _STAGE_ORDER if stage_progress.get(s) == "in_progress"]
-    pending = [s for s in _STAGE_ORDER if stage_progress.get(s) == "pending"]
 
     # If nothing is completed and nothing is in progress, no useful coaching
     if not completed and not in_progress:
