@@ -1298,11 +1298,22 @@ async def _execute_job(job: Job) -> None:
         if _is_sdlc and _sdlc_has_remaining and chat_state.auto_continue_count < effective_max:
             # Open question gate: before auto-continuing, check if the output
             # contains an ## Open Questions section with substantive questions.
-            # If so, deliver to the user instead of auto-continuing, so the
-            # human can answer design decisions before BUILD proceeds.
+            # Only applies during the PLAN stage — that's where open questions
+            # are produced. Checking other stages would cause false positives
+            # from quoted plan content in status reports.
             from bridge.summarizer import _extract_open_questions
 
-            open_questions = _extract_open_questions(msg)
+            _current_stage = None
+            if agent_session:
+                stage_progress = agent_session.get_stage_progress()
+                for stage_name in ("PLAN", "BUILD", "TEST", "REVIEW", "DOCS"):
+                    if stage_progress.get(stage_name) == "in_progress":
+                        _current_stage = stage_name
+                        break
+
+            open_questions = (
+                _extract_open_questions(msg) if _current_stage == "PLAN" else []
+            )
             if open_questions:
                 logger.info(
                     f"[{job.project_key}] Open questions detected in output "

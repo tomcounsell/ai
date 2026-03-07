@@ -81,10 +81,10 @@ def _extract_open_questions(text: str) -> list[str]:
     if not text:
         return []
 
-    # Find the ## Open Questions section
-    # Match "## Open Questions" with optional trailing text (e.g., "(Resolved)")
-    pattern = r"^## Open Questions.*$"
-    match = re.search(pattern, text, re.MULTILINE)
+    # Find the ## Open Questions section, but skip resolved/answered sections.
+    # Match "## Open Questions" but NOT "## Open Questions (Resolved)" or similar.
+    pattern = r"^## Open Questions(?!\s*\((?:Resolved|Answered|Closed|Done)\)).*$"
+    match = re.search(pattern, text, re.MULTILINE | re.IGNORECASE)
     if not match:
         return []
 
