@@ -107,6 +107,91 @@
   {% endfor %}
 </div>
 
+<!-- Metadata Review (Step 11 only) -->
+{% if current_step == 11 %}
+<div class="mt-6 px-4 py-4 border border-gray-200 bg-white">
+  <h3 class="text-sm font-semibold text-gray-700 mb-4">Episode Metadata Review</h3>
+
+  <!-- Title Field -->
+  <div class="mb-4">
+    <label for="episode-title" class="block text-xs font-medium text-gray-600 mb-1">Title</label>
+    <input type="text"
+           id="episode-title"
+           name="title"
+           value="{{ episode.title }}"
+           class="w-full px-3 py-2 border border-gray-300 text-sm font-mono"
+           hx-patch="{% url 'podcast:episode_update_field' slug=podcast.slug episode_slug=episode.slug %}"
+           hx-trigger="blur changed delay:500ms"
+           hx-vals='{"field": "title"}'
+           hx-include="[name='title']"
+           hx-target="#save-status-metadata"
+           hx-swap="innerHTML">
+  </div>
+
+  <!-- Description Field -->
+  <div class="mb-4">
+    <label for="episode-description" class="block text-xs font-medium text-gray-600 mb-1">Description</label>
+    <textarea id="episode-description"
+              name="description"
+              rows="4"
+              class="w-full px-3 py-2 border border-gray-300 text-sm font-mono"
+              hx-patch="{% url 'podcast:episode_update_field' slug=podcast.slug episode_slug=episode.slug %}"
+              hx-trigger="blur changed delay:500ms"
+              hx-vals='{"field": "description"}'
+              hx-include="[name='description']"
+              hx-target="#save-status-metadata"
+              hx-swap="innerHTML">{{ episode.description }}</textarea>
+  </div>
+
+  <!-- Show Notes Field -->
+  <div class="mb-4">
+    <label for="episode-show-notes" class="block text-xs font-medium text-gray-600 mb-1">Show Notes</label>
+    <textarea id="episode-show-notes"
+              name="show_notes"
+              rows="8"
+              class="w-full px-3 py-2 border border-gray-300 text-sm font-mono"
+              hx-patch="{% url 'podcast:episode_update_field' slug=podcast.slug episode_slug=episode.slug %}"
+              hx-trigger="blur changed delay:500ms"
+              hx-vals='{"field": "show_notes"}'
+              hx-include="[name='show_notes']"
+              hx-target="#save-status-metadata"
+              hx-swap="innerHTML">{{ episode.show_notes }}</textarea>
+  </div>
+
+  <!-- Tags Field -->
+  <div class="mb-4">
+    <label for="episode-tags" class="block text-xs font-medium text-gray-600 mb-1">
+      Tags <span class="text-gray-400">(comma-separated)</span>
+    </label>
+    <input type="text"
+           id="episode-tags"
+           name="tags"
+           value="{{ episode.tags }}"
+           class="w-full px-3 py-2 border border-gray-300 text-sm font-mono"
+           placeholder="ai, technology, research"
+           hx-patch="{% url 'podcast:episode_update_field' slug=podcast.slug episode_slug=episode.slug %}"
+           hx-trigger="blur changed delay:500ms"
+           hx-vals='{"field": "tags"}'
+           hx-include="[name='tags']"
+           hx-target="#save-status-metadata"
+           hx-swap="innerHTML">
+  </div>
+
+  <!-- Cover Art Preview -->
+  {% if episode.cover_image_url %}
+  <div class="mb-4">
+    <label class="block text-xs font-medium text-gray-600 mb-1">Cover Art</label>
+    <img src="{{ episode.cover_image_url }}"
+         alt="Episode cover art"
+         class="w-48 h-48 object-cover border border-gray-300">
+  </div>
+  {% endif %}
+
+  <!-- Save Status -->
+  <div id="save-status-metadata" class="text-xs text-gray-500"></div>
+</div>
+{% endif %}
+
 <!-- Navigation: Prev / Next -->
 <div class="flex justify-between mt-8 pt-4 border-t border-gray-200">
   {% if current_step > 1 %}
