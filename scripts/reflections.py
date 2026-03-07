@@ -16,7 +16,8 @@ A long-running process that performs daily self-directed maintenance tasks:
 11. Skills audit (validate all SKILL.md files against template standards)
 12. Redis TTL cleanup (all models including reflections models)
 13. Redis data quality checks (unsummarized links, dead channels)
-14. Branch and plan cleanup (stale branches, orphaned plans)
+14. Branch and plan cleanup (stale branches, orphaned/completed/duplicate plans)
+15. Feature docs audit (stale refs, README.md accuracy, plan-masquerading-as-feature)
 
 All persistence is Redis-backed via Popoto models (see models/ directory).
 State: ReflectionRun | Ignore patterns: ReflectionIgnore
@@ -465,6 +466,7 @@ class ReflectionRunner:
             (12, "Redis TTL Cleanup", self.step_redis_cleanup),
             (13, "Redis Data Quality", self.step_redis_data_quality),
             (14, "Branch and Plan Cleanup", self.step_branch_plan_cleanup),
+            (15, "Feature Docs Audit", self.step_feature_docs_audit),
         ]
 
     def _load_state(self) -> ReflectionsState:
@@ -1323,17 +1325,24 @@ class ReflectionRunner:
         }
 
     async def step_branch_plan_cleanup(self) -> None:
-        """Step 14: Clean up stale branches and orphaned plan files.
+        """Step 14: Clean up stale branches and audit plan files.
 
+        Branches:
         - Deletes local branches already merged into main
-        - Ensures every plan in docs/plans/ has a matching open GitHub issue
-        - For completed plans, logs a finding to run /do-docs and delete the plan
+
+        Plans (docs/plans/):
+        - COMPLETE: all checkboxes checked -> needs docs migration & deletion
+        - ORPHANED: no matching open issue AND referenced issue is closed
+        - CLOSED-ISSUE: plan references a closed issue -> should be cleaned up
+        - DUPLICATE: multiple plan files for the same feature (underscore/hyphen)
+        - ACTIVE: incomplete plan with matching open issue (healthy)
+
+        Uses async subprocess calls for parallel GitHub issue state checks.
         """
         findings: list[str] = []
 
         # --- Stale branch cleanup ---
         try:
-            # Delete local branches that are fully merged into main
             result = subprocess.run(
                 ["git", "branch", "--merged", "main"],
                 capture_output=True,
@@ -1365,68 +1374,304 @@ class ReflectionRunner:
 
         # --- Plan file cleanup ---
         plans_dir = PROJECT_ROOT / "docs" / "plans"
-        if plans_dir.exists():
-            plan_files = sorted(plans_dir.glob("*.md"))
+        if not plans_dir.exists():
+            self.state.step_progress["branch_plan_cleanup"] = {
+                "findings": len(findings),
+            }
+            return
 
-            # Find first project with github config for issue checks
-            project_wd = None
-            for project in self.projects:
-                if project.get("github"):
-                    project_wd = project["working_directory"]
-                    break
+        plan_files = sorted(plans_dir.glob("*.md"))
 
-            for plan_file in plan_files:
-                plan_name = plan_file.stem
-                plan_text = plan_file.read_text(errors="replace")
+        # Find project working directory for gh CLI
+        project_wd = None
+        for project in self.projects:
+            if project.get("github"):
+                project_wd = project["working_directory"]
+                break
 
-                # Check if plan is complete (all checkboxes checked)
-                checkboxes = re.findall(r"- \[([ xX])\]", plan_text)
-                checked = sum(1 for c in checkboxes if c.lower() == "x")
-                is_complete = checkboxes and checked == len(checkboxes)
+        # --- Detect duplicate plan files (underscore vs hyphen variants) ---
+        normalized: dict[str, list[Path]] = {}
+        for pf in plan_files:
+            key = pf.stem.replace("-", "_").lower()
+            normalized.setdefault(key, []).append(pf)
+        for _key, dupes in normalized.items():
+            if len(dupes) > 1:
+                names = ", ".join(d.name for d in dupes)
+                findings.append(f"Duplicate plans: {names}")
+                self.state.add_finding(
+                    "branch_plan_cleanup",
+                    f"Duplicate plan files (consolidate): {names}",
+                )
 
-                if is_complete:
-                    findings.append(
-                        f"Plan complete: {plan_name} — "
-                        f"run /do-docs then delete docs/plans/{plan_file.name}"
-                    )
+        # --- Extract issue references from each plan ---
+        plan_issue_refs: dict[Path, list[int]] = {}
+        for plan_file in plan_files:
+            plan_text = plan_file.read_text(errors="replace")
+            refs: set[int] = set()
+            for m in re.finditer(r"#(\d+)", plan_text):
+                refs.add(int(m.group(1)))
+            for m in re.finditer(r"github\.com/[^/]+/[^/]+/issues/(\d+)", plan_text):
+                refs.add(int(m.group(1)))
+            plan_issue_refs[plan_file] = sorted(refs)
+
+        # --- Check issue states in parallel via async subprocess ---
+        async def check_issue_state(issue_num: int) -> tuple[int, str]:
+            """Return (issue_number, 'open'|'closed'|'unknown')."""
+            if not project_wd:
+                return issue_num, "unknown"
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "gh",
+                    "issue",
+                    "view",
+                    str(issue_num),
+                    "--json",
+                    "state",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=project_wd,
+                )
+                stdout, _ = await proc.communicate()
+                if proc.returncode == 0:
+                    data = json.loads(stdout.decode())
+                    return issue_num, data.get("state", "unknown").lower()
+            except Exception as e:
+                logger.warning(f"Could not check issue #{issue_num}: {e}")
+            return issue_num, "unknown"
+
+        # Collect unique issue numbers, check in parallel batches
+        all_issue_nums: set[int] = set()
+        for refs in plan_issue_refs.values():
+            all_issue_nums.update(refs)
+
+        issue_states: dict[int, str] = {}
+        if all_issue_nums:
+            batch_size = 10
+            issue_list = sorted(all_issue_nums)
+            for i in range(0, len(issue_list), batch_size):
+                batch = issue_list[i : i + batch_size]
+                results = await asyncio.gather(
+                    *[check_issue_state(n) for n in batch],
+                    return_exceptions=True,
+                )
+                for r in results:
+                    if isinstance(r, tuple):
+                        issue_states[r[0]] = r[1]
+
+        # --- Evaluate each plan file ---
+        stats = {"complete": 0, "orphaned": 0, "closed_issue": 0, "active": 0}
+
+        for plan_file in plan_files:
+            plan_name = plan_file.stem
+            plan_text = plan_file.read_text(errors="replace")
+            refs = plan_issue_refs.get(plan_file, [])
+
+            # Check checkbox completion
+            checkboxes = re.findall(r"- \[([ xX])\]", plan_text)
+            checked = sum(1 for c in checkboxes if c.lower() == "x")
+            is_complete = checkboxes and checked == len(checkboxes)
+
+            if is_complete:
+                stats["complete"] += 1
+                findings.append(
+                    f"Plan complete: {plan_name} -- "
+                    f"run /do-docs then delete docs/plans/{plan_file.name}"
+                )
+                self.state.add_finding(
+                    "branch_plan_cleanup",
+                    f"Completed plan needs docs migration: {plan_file.name}",
+                )
+                continue
+
+            # Check if all referenced issues are closed
+            if refs:
+                ref_states = [issue_states.get(r, "unknown") for r in refs]
+                all_closed = all(s == "closed" for s in ref_states if s != "unknown")
+                any_open = any(s == "open" for s in ref_states)
+
+                if all_closed and not any_open:
+                    stats["closed_issue"] += 1
+                    closed_refs = ", ".join(f"#{r}" for r in refs)
+                    findings.append(f"Plan with closed issue(s): {plan_file.name} ({closed_refs})")
                     self.state.add_finding(
                         "branch_plan_cleanup",
-                        f"Completed plan needs docs migration: {plan_file.name}",
+                        f"Stale plan (all issues closed): {plan_file.name} ({closed_refs})",
                     )
                     continue
 
-                # For incomplete plans, ensure a matching open issue exists
-                if project_wd:
-                    try:
-                        result = subprocess.run(
-                            [
-                                "gh",
-                                "issue",
-                                "list",
-                                "--state",
-                                "open",
-                                "--search",
-                                plan_name,
-                            ],
-                            capture_output=True,
-                            text=True,
-                            timeout=15,
-                            cwd=project_wd,
-                        )
-                        has_issue = result.returncode == 0 and result.stdout.strip()
-                        if not has_issue:
-                            findings.append(f"Plan without issue: {plan_file.name}")
-                            self.state.add_finding(
-                                "branch_plan_cleanup",
-                                f"Orphaned plan (no open issue): {plan_file.name}",
-                            )
-                    except Exception as e:
-                        logger.warning(f"Could not check issue for plan {plan_name}: {e}")
+                if any_open:
+                    stats["active"] += 1
+                    continue
+
+            # No refs or unknown state -- fall back to name search
+            if project_wd:
+                try:
+                    result = subprocess.run(
+                        [
+                            "gh",
+                            "issue",
+                            "list",
+                            "--state",
+                            "open",
+                            "--search",
+                            plan_name,
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=15,
+                        cwd=project_wd,
+                    )
+                    if result.returncode == 0 and result.stdout.strip():
+                        stats["active"] += 1
+                        continue
+                except Exception as e:
+                    logger.warning(f"Could not search issues for plan {plan_name}: {e}")
+
+            stats["orphaned"] += 1
+            findings.append(f"Orphaned plan (no open issue): {plan_file.name}")
+            self.state.add_finding(
+                "branch_plan_cleanup",
+                f"Orphaned plan (no open issue): {plan_file.name}",
+            )
 
         for finding in findings:
             logger.info(f"Branch/plan cleanup: {finding}")
 
         self.state.step_progress["branch_plan_cleanup"] = {
+            "total_plans": len(plan_files),
+            **stats,
+            "findings": len(findings),
+        }
+
+    async def step_feature_docs_audit(self) -> None:
+        """Step 15: Audit feature documentation for staleness and accuracy.
+
+        Checks:
+        - Stale references (SessionLog, RedisJob, old module paths)
+        - README.md index vs actual files (missing entries, phantom entries)
+        - Plan docs masquerading as feature docs (majority unchecked checkboxes)
+        - Stub/empty docs (<5 content lines)
+        - Docs referencing code files that no longer exist
+        """
+        findings: list[str] = []
+        features_dir = PROJECT_ROOT / "docs" / "features"
+
+        if not features_dir.exists():
+            self.state.step_progress["feature_docs_audit"] = {"findings": 0}
+            return
+
+        feature_files = sorted(features_dir.glob("*.md"))
+        readme_path = features_dir / "README.md"
+
+        # Known stale terms to flag
+        stale_terms = {
+            "SessionLog": "AgentSession",
+            "RedisJob": "AgentSession",
+            "session_log": "agent_session",
+            "redis_job": "agent_session",
+        }
+
+        stats = {
+            "total_docs": len(feature_files),
+            "current": 0,
+            "stale_refs": 0,
+            "stubs": 0,
+            "plan_masquerade": 0,
+            "dead_code_refs": 0,
+        }
+
+        for doc_file in feature_files:
+            if doc_file.name == "README.md":
+                continue
+
+            text = doc_file.read_text(errors="replace")
+            doc_findings: list[str] = []
+
+            # Check for stale term references
+            for old_term, new_term in stale_terms.items():
+                if old_term in text:
+                    # Don't flag if it's documenting the migration itself
+                    migration_context = (
+                        f"renamed to {new_term}" in text
+                        or f"replaced by {new_term}" in text
+                        or f"now {new_term}" in text
+                        or f"formerly {old_term}" in text
+                        or f"Replaces {old_term}" in text
+                        or f"replaces {old_term}" in text
+                    )
+                    if not migration_context:
+                        doc_findings.append(f"stale term '{old_term}' (now '{new_term}')")
+
+            # Check for stub docs (very short, no real content)
+            content_lines = [
+                ln for ln in text.splitlines() if ln.strip() and not ln.startswith("#")
+            ]
+            if len(content_lines) < 5:
+                stats["stubs"] += 1
+                doc_findings.append("stub doc (<5 content lines)")
+
+            # Check for plan-masquerading-as-feature (majority unchecked)
+            unchecked = re.findall(r"- \[ \]", text)
+            checked_boxes = re.findall(r"- \[[xX]\]", text)
+            if unchecked and len(unchecked) > len(checked_boxes):
+                stats["plan_masquerade"] += 1
+                doc_findings.append(
+                    f"looks like a plan ({len(unchecked)} unchecked, "
+                    f"{len(checked_boxes)} checked checkboxes)"
+                )
+
+            # Check for references to code files that don't exist
+            code_refs = re.findall(
+                r"(?:`|\b)"
+                r"((?:agent|bridge|models|tools|scripts|config)/\S+\.py)",
+                text,
+            )
+            for ref in code_refs:
+                ref_path = PROJECT_ROOT / ref
+                if not ref_path.exists():
+                    stats["dead_code_refs"] += 1
+                    doc_findings.append(f"references non-existent file: {ref}")
+
+            if doc_findings:
+                stats["stale_refs"] += len([f for f in doc_findings if f.startswith("stale term")])
+                for df in doc_findings:
+                    finding = f"{doc_file.name}: {df}"
+                    findings.append(finding)
+                    self.state.add_finding("feature_docs_audit", finding)
+            else:
+                stats["current"] += 1
+
+        # --- README.md index validation ---
+        if readme_path.exists():
+            readme_text = readme_path.read_text(errors="replace")
+            actual_files = {f.name for f in feature_files if f.name != "README.md"}
+
+            # Extract doc references from README table rows
+            readme_refs = set(re.findall(r"\[.*?\]\(([^)]+\.md)\)", readme_text))
+            readme_refs = {r.lstrip("./") for r in readme_refs}
+
+            # Files in directory but not in README
+            unlisted = actual_files - readme_refs
+            for f in sorted(unlisted):
+                finding = f"README.md missing entry for: {f}"
+                findings.append(finding)
+                self.state.add_finding("feature_docs_audit", finding)
+
+            # Files in README but not in directory
+            phantom = readme_refs - actual_files
+            for f in sorted(phantom):
+                finding = f"README.md references non-existent doc: {f}"
+                findings.append(finding)
+                self.state.add_finding("feature_docs_audit", finding)
+
+            if unlisted or phantom:
+                stats["readme_mismatches"] = len(unlisted) + len(phantom)
+
+        for finding in findings:
+            logger.info(f"Feature docs audit: {finding}")
+
+        self.state.step_progress["feature_docs_audit"] = {
+            **stats,
             "findings": len(findings),
         }
 
