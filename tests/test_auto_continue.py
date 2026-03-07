@@ -18,7 +18,7 @@ if "claude_agent_sdk" not in sys.modules:
     _mock_sdk = MagicMock()
     sys.modules["claude_agent_sdk"] = _mock_sdk
 
-from agent.job_queue import MAX_AUTO_CONTINUES
+from agent.job_queue import MAX_AUTO_CONTINUES, RoutingDecision, classify_routing_decision
 from bridge.summarizer import ClassificationResult, OutputType
 
 
@@ -603,6 +603,136 @@ class TestAutoContineCompletionSentSuppression:
 
         assert not classify_called
         send_cb.assert_not_called()
+
+
+class TestClassifyRoutingDecision:
+    """Tests for the extracted classify_routing_decision function (Gap 3).
+
+    These tests call the actual production function instead of replicating
+    the routing logic inline. This ensures test and production code stay
+    in sync — if the routing logic changes, tests exercise the real code.
+    """
+
+    def test_error_triggers_bypass(self):
+        """ERROR classification should return ERROR_BYPASS."""
+        classification = _make_classification(OutputType.ERROR)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=True,
+            msg="Error: ModuleNotFoundError",
+        )
+        assert decision.action == RoutingDecision.ERROR_BYPASS
+
+    def test_status_update_sdlc_triggers_auto_continue(self):
+        """STATUS_UPDATE for SDLC job should auto-continue."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=10,
+            is_sdlc=True,
+            msg="Running tests...",
+        )
+        assert decision.action == RoutingDecision.AUTO_CONTINUE
+
+    def test_status_update_non_sdlc_with_planning_language_auto_continues(self):
+        """Non-SDLC status update with planning language should auto-continue."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=False,
+            msg="I'll start by reading the configuration file...",
+        )
+        assert decision.action == RoutingDecision.AUTO_CONTINUE
+
+    def test_status_update_non_sdlc_without_planning_language_delivers(self):
+        """Non-SDLC status update without planning language should deliver."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=False,
+            msg="Here is the information you requested about the system.",
+        )
+        assert decision.action == RoutingDecision.DELIVER
+
+    def test_question_delivers_to_user(self):
+        """QUESTION should deliver to user."""
+        classification = _make_classification(OutputType.QUESTION)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=True,
+            msg="Should I proceed?",
+        )
+        assert decision.action == RoutingDecision.DELIVER
+
+    def test_completion_delivers_to_user(self):
+        """COMPLETION should deliver to user."""
+        classification = _make_classification(OutputType.COMPLETION)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=True,
+            msg="Done. All 42 tests pass.",
+        )
+        assert decision.action == RoutingDecision.DELIVER
+
+    def test_blocker_delivers_to_user(self):
+        """BLOCKER should deliver to user."""
+        classification = _make_classification(OutputType.BLOCKER)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=True,
+            msg="Blocked on missing credentials.",
+        )
+        assert decision.action == RoutingDecision.DELIVER
+
+    def test_max_auto_continues_reached_delivers(self):
+        """When max auto-continues reached, status updates deliver to user."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=MAX_AUTO_CONTINUES,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=True,
+            msg="Still running...",
+        )
+        assert decision.action == RoutingDecision.DELIVER
+
+    def test_sdlc_higher_cap_allows_more_continues(self):
+        """SDLC jobs with count < 10 should still auto-continue."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=5,
+            effective_max=10,
+            is_sdlc=True,
+            msg="Building stage 5...",
+        )
+        assert decision.action == RoutingDecision.AUTO_CONTINUE
+
+    def test_decision_includes_reason(self):
+        """RoutingDecision should include a human-readable reason."""
+        classification = _make_classification(OutputType.ERROR)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=3,
+            is_sdlc=False,
+            msg="Error",
+        )
+        assert isinstance(decision.reason, str)
+        assert len(decision.reason) > 0
 
 
 class TestEmptyOutputAnomalyDetection:

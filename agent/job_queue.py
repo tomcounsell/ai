@@ -87,6 +87,72 @@ def _is_planning_language(msg: str) -> bool:
     return any(prefix.startswith(p) for p in _PLANNING_PREFIXES)
 
 
+class RoutingDecision:
+    """Result of the classifier-based routing decision.
+
+    Encapsulates the decision of whether to auto-continue, deliver to user,
+    or bypass (error guard). Used by both production code and tests to ensure
+    they exercise the same logic.
+    """
+
+    AUTO_CONTINUE = "auto_continue"
+    DELIVER = "deliver"
+    ERROR_BYPASS = "error_bypass"
+
+    def __init__(self, action: str, reason: str):
+        self.action = action
+        self.reason = reason
+
+
+def classify_routing_decision(
+    classification,
+    auto_continue_count: int,
+    effective_max: int,
+    is_sdlc: bool,
+    msg: str,
+) -> RoutingDecision:
+    """Determine routing action based on classification result and context.
+
+    This is the core routing decision extracted from the send_to_chat closure
+    in _execute_job. Tests call this function directly instead of replicating
+    the logic inline, ensuring test and production code stay in sync.
+
+    Args:
+        classification: ClassificationResult from classify_output()
+        auto_continue_count: Current count of auto-continues in this session
+        effective_max: Maximum allowed auto-continues (3 for non-SDLC, 10 for SDLC)
+        is_sdlc: Whether this is an SDLC job
+        msg: The agent output message (used for planning language detection)
+
+    Returns:
+        RoutingDecision with action (AUTO_CONTINUE, DELIVER, or ERROR_BYPASS)
+        and reason string.
+    """
+    from bridge.summarizer import OutputType
+
+    if classification.output_type == OutputType.ERROR:
+        return RoutingDecision(
+            RoutingDecision.ERROR_BYPASS,
+            "Error-classified output bypasses auto-continue",
+        )
+
+    if (
+        classification.output_type == OutputType.STATUS_UPDATE
+        and auto_continue_count < effective_max
+        and (is_sdlc or _is_planning_language(msg))
+    ):
+        return RoutingDecision(
+            RoutingDecision.AUTO_CONTINUE,
+            f"Status update, count {auto_continue_count} < {effective_max}",
+        )
+
+    return RoutingDecision(
+        RoutingDecision.DELIVER,
+        f"Delivering to user: type={classification.output_type.value}, "
+        f"count={auto_continue_count}/{effective_max}",
+    )
+
+
 # Job health check constants
 JOB_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
 JOB_TIMEOUT_DEFAULT = 2700  # 45 minutes for standard jobs
@@ -1299,7 +1365,16 @@ async def _execute_job(job: Job) -> None:
             f"(confidence={classification.confidence:.2f}): {classification.reason}"
         )
 
-        if classification.output_type == OutputType.ERROR:
+        # Use extracted routing decision function — same logic used by tests
+        routing = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=chat_state.auto_continue_count,
+            effective_max=effective_max,
+            is_sdlc=_is_sdlc,
+            msg=msg,
+        )
+
+        if routing.action == RoutingDecision.ERROR_BYPASS:
             # CRASH GUARD: Error-classified outputs bypass auto-continue entirely.
             # Without this, SDK crashes would be misclassified as status updates
             # and re-enqueued indefinitely, creating an infinite crash loop.
@@ -1307,11 +1382,7 @@ async def _execute_job(job: Job) -> None:
             logger.info(f"[{job.project_key}] Error classified — skipping auto-continue")
             # Fall through to send error to chat
 
-        elif (
-            classification.output_type == OutputType.STATUS_UPDATE
-            and chat_state.auto_continue_count < effective_max
-            and (_is_sdlc or _is_planning_language(msg))
-        ):
+        elif routing.action == RoutingDecision.AUTO_CONTINUE:
             # Status update -- don't send to chat, re-enqueue job to continue session
             # For non-SDLC jobs, only auto-continue if the output contains planning
             # language (agent sharing its approach before executing). Substantive
