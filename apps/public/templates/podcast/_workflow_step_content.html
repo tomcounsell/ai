@@ -1,3 +1,78 @@
+{% if episode.status == 'complete' and current_step == 12 %}
+<!-- Success state: Episode published -->
+<div class="mb-6">
+  <div class="flex items-center gap-3 mb-4">
+    <span class="text-4xl"><i class="fas fa-check-circle text-green-500"></i></span>
+    <div>
+      <h2 class="text-2xl font-bold text-gray-900">Episode published!</h2>
+      <p class="text-sm text-gray-600 mt-1">Your episode is now live and available in all feeds.</p>
+    </div>
+  </div>
+
+  <!-- Success action links -->
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-6">
+    <!-- View Episode -->
+    <a href="{% url 'podcast:episode_detail' slug=podcast.slug episode_slug=episode.slug %}"
+       class="flex items-center gap-3 p-4 border border-gray-200 rounded hover:bg-blue-50 hover:border-blue-300 transition">
+      <span class="text-blue-600"><i class="fas fa-eye text-xl"></i></span>
+      <div>
+        <span class="block text-sm font-mono font-semibold text-gray-900">View Episode</span>
+        <span class="block text-xs text-gray-500">See episode details and listener feedback</span>
+      </div>
+    </a>
+
+    <!-- RSS Feed -->
+    <a href="{% url 'podcast:feed' slug=podcast.slug %}"
+       class="flex items-center gap-3 p-4 border border-gray-200 rounded hover:bg-orange-50 hover:border-orange-300 transition">
+      <span class="text-orange-600"><i class="fas fa-rss text-xl"></i></span>
+      <div>
+        <span class="block text-sm font-mono font-semibold text-gray-900">RSS Feed</span>
+        <span class="block text-xs text-gray-500">Share feed with listeners</span>
+      </div>
+    </a>
+
+    {% if podcast.spotify_url %}
+    <!-- Spotify -->
+    <a href="{{ podcast.spotify_url }}"
+       target="_blank"
+       rel="noopener noreferrer"
+       class="flex items-center gap-3 p-4 border border-gray-200 rounded hover:bg-green-50 hover:border-green-300 transition">
+      <span class="text-green-600"><i class="fab fa-spotify text-xl"></i></span>
+      <div>
+        <span class="block text-sm font-mono font-semibold text-gray-900">Listen on Spotify</span>
+        <span class="block text-xs text-gray-500">Open in Spotify</span>
+      </div>
+    </a>
+    {% endif %}
+
+    {% if podcast.apple_podcasts_url %}
+    <!-- Apple Podcasts -->
+    <a href="{{ podcast.apple_podcasts_url }}"
+       target="_blank"
+       rel="noopener noreferrer"
+       class="flex items-center gap-3 p-4 border border-gray-200 rounded hover:bg-gray-50 hover:border-gray-300 transition">
+      <span class="text-gray-700"><i class="fab fa-apple text-xl"></i></span>
+      <div>
+        <span class="block text-sm font-mono font-semibold text-gray-900">Listen on Apple Podcasts</span>
+        <span class="block text-xs text-gray-500">Open in Apple Podcasts</span>
+      </div>
+    </a>
+    {% endif %}
+
+    <!-- Create Another Episode -->
+    <a href="{% url 'podcast:detail' slug=podcast.slug %}"
+       class="flex items-center gap-3 p-4 border border-gray-200 rounded hover:bg-purple-50 hover:border-purple-300 transition">
+      <span class="text-purple-600"><i class="fas fa-plus-circle text-xl"></i></span>
+      <div>
+        <span class="block text-sm font-mono font-semibold text-gray-900">Create Another Episode</span>
+        <span class="block text-xs text-gray-500">Go to podcast to start next episode</span>
+      </div>
+    </a>
+  </div>
+</div>
+
+{% else %}
+<!-- Normal phase content -->
 <!-- Phase header -->
 <div class="mb-6">
   <div class="flex items-center gap-3 mb-2">
@@ -106,6 +181,7 @@
   </div>
   {% endfor %}
 </div>
+{% endif %}
 
 <!-- Metadata Review (Step 11 only) -->
 {% if current_step == 11 %}

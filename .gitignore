@@ -166,3 +166,4 @@ apps/podcast/pending-episodes/
 
 # Downloaded fonts (installed by build scripts)
 fonts/
+.worktrees/
