@@ -261,7 +261,11 @@ class EpisodeCreateView(
     template_name = "podcast/episode_create.html"
 
     def test_func(self) -> bool:
-        return self.request.user.is_staff
+        slug = self.kwargs.get("slug")
+        if not slug:
+            return False
+        podcast = get_object_or_404(Podcast, slug=slug)
+        return self.request.user.is_staff or podcast.owner == self.request.user
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)

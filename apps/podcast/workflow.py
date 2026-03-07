@@ -189,7 +189,11 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
     template_name = "podcast/episode_workflow.html"
 
     def test_func(self) -> bool:
-        return self.request.user.is_staff
+        slug = self.kwargs.get("slug")
+        if not slug:
+            return False
+        podcast = get_object_or_404(Podcast, slug=slug)
+        return self.request.user.is_staff or podcast.owner == self.request.user
 
     def _load_context(
         self, request, slug: str, episode_slug: str, step: int
