@@ -22,7 +22,12 @@ if "claude_agent_sdk" not in sys.modules:
     _mock_sdk = MagicMock()
     sys.modules["claude_agent_sdk"] = _mock_sdk
 
-from agent.job_queue import _JOB_FIELDS, SendToChatResult, _enqueue_continuation
+from agent.job_queue import (
+    _JOB_FIELDS,
+    SendToChatResult,
+    _enqueue_continuation,
+    should_guard_empty_output,
+)
 from models.agent_session import AgentSession
 
 
@@ -668,8 +673,8 @@ class TestEmptyOutputLoopTermination:
         _is_sdlc = True
         _sdlc_has_remaining = True
 
-        # Simulate the guard from _execute_job
-        if not msg.strip() and _is_sdlc and _sdlc_has_remaining:
+        # Use the production guard function (not inline replication)
+        if should_guard_empty_output(msg, _is_sdlc, _sdlc_has_remaining):
             chat_state.completion_sent = True
 
         assert chat_state.completion_sent is True

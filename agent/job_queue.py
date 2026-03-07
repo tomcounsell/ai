@@ -153,6 +153,15 @@ def classify_routing_decision(
     )
 
 
+def should_guard_empty_output(msg: str, is_sdlc: bool, has_remaining_stages: bool) -> bool:
+    """Check if empty/whitespace output should be guarded (delivered to user, not auto-continued).
+
+    Returns True if the output is empty/whitespace AND this is an SDLC job with remaining stages.
+    This prevents silent auto-continue loops when an agent produces nothing.
+    """
+    return not msg.strip() and is_sdlc and has_remaining_stages
+
+
 # Job health check constants
 JOB_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
 JOB_TIMEOUT_DEFAULT = 2700  # 45 minutes for standard jobs
@@ -1350,7 +1359,7 @@ async def _execute_job(job: Job) -> None:
         # Empty output anomaly detection: if output is empty/whitespace-only
         # AND this is an SDLC job with remaining stages, log a warning and
         # deliver to user instead of auto-continuing. Prevents silent loops.
-        if not msg.strip() and _is_sdlc and _sdlc_has_remaining:
+        if should_guard_empty_output(msg, _is_sdlc, _sdlc_has_remaining):
             logger.warning(
                 f"[{job.project_key}] Empty output with remaining SDLC stages — "
                 f"delivering to user to prevent silent loop"

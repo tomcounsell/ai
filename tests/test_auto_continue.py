@@ -18,7 +18,12 @@ if "claude_agent_sdk" not in sys.modules:
     _mock_sdk = MagicMock()
     sys.modules["claude_agent_sdk"] = _mock_sdk
 
-from agent.job_queue import MAX_AUTO_CONTINUES, RoutingDecision, classify_routing_decision
+from agent.job_queue import (
+    MAX_AUTO_CONTINUES,
+    RoutingDecision,
+    classify_routing_decision,
+    should_guard_empty_output,
+)
 from bridge.summarizer import ClassificationResult, OutputType
 
 
@@ -742,116 +747,44 @@ class TestEmptyOutputAnomalyDetection:
     job produces empty/whitespace output with remaining stages, the system
     should surface this to the user as an anomaly rather than classifying it
     as STATUS_UPDATE and looping silently.
+
+    These tests call the production should_guard_empty_output function
+    directly instead of replicating the if-statement inline. This ensures
+    test and production code stay in sync.
     """
 
-    @pytest.mark.asyncio
-    async def test_empty_output_sdlc_delivers_to_user(self):
-        """Empty SDLC output with remaining stages should deliver to user, not auto-continue."""
-        from agent.steering import pop_steering_message
+    def test_empty_output_sdlc_triggers_guard(self):
+        """Empty SDLC output with remaining stages should trigger guard."""
+        assert should_guard_empty_output("", is_sdlc=True, has_remaining_stages=True) is True
 
-        send_cb = AsyncMock()
-        session_id = "test_empty_output_sdlc"
+    def test_whitespace_output_sdlc_triggers_guard(self):
+        """Whitespace-only SDLC output should also trigger guard."""
+        result = should_guard_empty_output("   \n\t  ", is_sdlc=True, has_remaining_stages=True)
+        assert result is True
 
-        # Simulate the empty output guard from job_queue.py
-        msg = ""
-        _is_sdlc = True
-        _sdlc_has_remaining = True
+    def test_empty_output_non_sdlc_does_not_trigger(self):
+        """Empty output for non-SDLC jobs should NOT trigger guard."""
+        assert should_guard_empty_output("", is_sdlc=False, has_remaining_stages=False) is False
 
-        # The guard should trigger before classification
-        if not msg.strip() and _is_sdlc and _sdlc_has_remaining:
-            # Deliver anomaly to user
-            await send_cb("chat_123", "(empty output)", 456)
-            delivered_to_user = True
-        else:
-            delivered_to_user = False
-
-        assert delivered_to_user is True
-        send_cb.assert_called_once_with("chat_123", "(empty output)", 456)
-        # No steering message should be pushed (no auto-continue)
-        assert pop_steering_message(session_id) is None
-
-    @pytest.mark.asyncio
-    async def test_whitespace_output_sdlc_delivers_to_user(self):
-        """Whitespace-only SDLC output should also trigger the anomaly guard."""
-        send_cb = AsyncMock()
-
-        msg = "   \n\t  "
-        _is_sdlc = True
-        _sdlc_has_remaining = True
-
-        if not msg.strip() and _is_sdlc and _sdlc_has_remaining:
-            await send_cb("chat_123", "(empty output)", 456)
-            delivered_to_user = True
-        else:
-            delivered_to_user = False
-
-        assert delivered_to_user is True
-        send_cb.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_empty_output_non_sdlc_falls_through(self):
-        """Empty output for non-SDLC jobs should NOT trigger the anomaly guard."""
-        send_cb = AsyncMock()
-
-        msg = ""
-        _is_sdlc = False
-        _sdlc_has_remaining = False
-
-        guard_triggered = False
-        if not msg.strip() and _is_sdlc and _sdlc_has_remaining:
-            await send_cb("chat_123", "(empty output)", 456)
-            guard_triggered = True
-
-        assert guard_triggered is False
-        send_cb.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_empty_output_sdlc_no_remaining_stages_falls_through(self):
+    def test_empty_output_sdlc_no_remaining_does_not_trigger(self):
         """Empty output for SDLC with all stages done should NOT trigger guard."""
-        send_cb = AsyncMock()
+        assert should_guard_empty_output("", is_sdlc=True, has_remaining_stages=False) is False
 
-        msg = ""
-        _is_sdlc = True
-        _sdlc_has_remaining = False  # All stages completed
-
-        guard_triggered = False
-        if not msg.strip() and _is_sdlc and _sdlc_has_remaining:
-            await send_cb("chat_123", "(empty output)", 456)
-            guard_triggered = True
-
-        assert guard_triggered is False
-        send_cb.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_non_empty_output_not_affected(self):
-        """Non-empty output should NOT trigger the anomaly guard."""
-        send_cb = AsyncMock()
-
-        msg = "Building the feature..."
-        _is_sdlc = True
-        _sdlc_has_remaining = True
-
-        guard_triggered = False
-        if not msg.strip() and _is_sdlc and _sdlc_has_remaining:
-            await send_cb("chat_123", "(empty output)", 456)
-            guard_triggered = True
-
-        assert guard_triggered is False
-        send_cb.assert_not_called()
+    def test_non_empty_output_does_not_trigger(self):
+        """Non-empty output should NOT trigger guard."""
+        result = should_guard_empty_output(
+            "Building the feature...", is_sdlc=True, has_remaining_stages=True
+        )
+        assert result is False
 
     @pytest.mark.asyncio
     async def test_classify_output_empty_returns_status_update(self):
         """classify_output returns STATUS_UPDATE for empty text.
 
-        This demonstrates the bug this guard prevents: empty output gets
-        classified as STATUS_UPDATE with confidence 1.0, which would trigger
-        auto-continue in the old code path.
+        Demonstrates the bug this guard prevents.
         """
         from bridge.summarizer import OutputType, classify_output
 
         result = await classify_output("")
         assert result.output_type == OutputType.STATUS_UPDATE
         assert result.confidence == 1.0
-        # The empty output guard in job_queue.py prevents this from being
-        # used to auto-continue — it short-circuits before classify_output
-        # is even called for SDLC jobs with remaining stages.
