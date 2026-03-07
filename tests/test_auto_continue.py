@@ -18,7 +18,12 @@ if "claude_agent_sdk" not in sys.modules:
     _mock_sdk = MagicMock()
     sys.modules["claude_agent_sdk"] = _mock_sdk
 
-from agent.job_queue import MAX_AUTO_CONTINUES
+from agent.job_queue import (
+    MAX_AUTO_CONTINUES,
+    RoutingDecision,
+    classify_routing_decision,
+    should_guard_empty_output,
+)
 from bridge.summarizer import ClassificationResult, OutputType
 
 
@@ -603,3 +608,183 @@ class TestAutoContineCompletionSentSuppression:
 
         assert not classify_called
         send_cb.assert_not_called()
+
+
+class TestClassifyRoutingDecision:
+    """Tests for the extracted classify_routing_decision function (Gap 3).
+
+    These tests call the actual production function instead of replicating
+    the routing logic inline. This ensures test and production code stay
+    in sync — if the routing logic changes, tests exercise the real code.
+    """
+
+    def test_error_triggers_bypass(self):
+        """ERROR classification should return ERROR_BYPASS."""
+        classification = _make_classification(OutputType.ERROR)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=True,
+            msg="Error: ModuleNotFoundError",
+        )
+        assert decision.action == RoutingDecision.ERROR_BYPASS
+
+    def test_status_update_sdlc_triggers_auto_continue(self):
+        """STATUS_UPDATE for SDLC job should auto-continue."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=10,
+            is_sdlc=True,
+            msg="Running tests...",
+        )
+        assert decision.action == RoutingDecision.AUTO_CONTINUE
+
+    def test_status_update_non_sdlc_with_planning_language_auto_continues(self):
+        """Non-SDLC status update with planning language should auto-continue."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=False,
+            msg="I'll start by reading the configuration file...",
+        )
+        assert decision.action == RoutingDecision.AUTO_CONTINUE
+
+    def test_status_update_non_sdlc_without_planning_language_delivers(self):
+        """Non-SDLC status update without planning language should deliver."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=False,
+            msg="Here is the information you requested about the system.",
+        )
+        assert decision.action == RoutingDecision.DELIVER
+
+    def test_question_delivers_to_user(self):
+        """QUESTION should deliver to user."""
+        classification = _make_classification(OutputType.QUESTION)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=True,
+            msg="Should I proceed?",
+        )
+        assert decision.action == RoutingDecision.DELIVER
+
+    def test_completion_delivers_to_user(self):
+        """COMPLETION should deliver to user."""
+        classification = _make_classification(OutputType.COMPLETION)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=True,
+            msg="Done. All 42 tests pass.",
+        )
+        assert decision.action == RoutingDecision.DELIVER
+
+    def test_blocker_delivers_to_user(self):
+        """BLOCKER should deliver to user."""
+        classification = _make_classification(OutputType.BLOCKER)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=True,
+            msg="Blocked on missing credentials.",
+        )
+        assert decision.action == RoutingDecision.DELIVER
+
+    def test_max_auto_continues_reached_delivers(self):
+        """When max auto-continues reached, status updates deliver to user."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=MAX_AUTO_CONTINUES,
+            effective_max=MAX_AUTO_CONTINUES,
+            is_sdlc=True,
+            msg="Still running...",
+        )
+        assert decision.action == RoutingDecision.DELIVER
+
+    def test_sdlc_higher_cap_allows_more_continues(self):
+        """SDLC jobs with count < 10 should still auto-continue."""
+        classification = _make_classification(OutputType.STATUS_UPDATE)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=5,
+            effective_max=10,
+            is_sdlc=True,
+            msg="Building stage 5...",
+        )
+        assert decision.action == RoutingDecision.AUTO_CONTINUE
+
+    def test_decision_includes_reason(self):
+        """RoutingDecision should include a human-readable reason."""
+        classification = _make_classification(OutputType.ERROR)
+        decision = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=0,
+            effective_max=3,
+            is_sdlc=False,
+            msg="Error",
+        )
+        assert isinstance(decision.reason, str)
+        assert len(decision.reason) > 0
+
+
+class TestEmptyOutputAnomalyDetection:
+    """Tests for empty output anomaly detection (Gap 2).
+
+    Empty agent output should NOT be silently auto-continued. When an SDLC
+    job produces empty/whitespace output with remaining stages, the system
+    should surface this to the user as an anomaly rather than classifying it
+    as STATUS_UPDATE and looping silently.
+
+    These tests call the production should_guard_empty_output function
+    directly instead of replicating the if-statement inline. This ensures
+    test and production code stay in sync.
+    """
+
+    def test_empty_output_sdlc_triggers_guard(self):
+        """Empty SDLC output with remaining stages should trigger guard."""
+        assert should_guard_empty_output("", is_sdlc=True, has_remaining_stages=True) is True
+
+    def test_whitespace_output_sdlc_triggers_guard(self):
+        """Whitespace-only SDLC output should also trigger guard."""
+        result = should_guard_empty_output("   \n\t  ", is_sdlc=True, has_remaining_stages=True)
+        assert result is True
+
+    def test_empty_output_non_sdlc_does_not_trigger(self):
+        """Empty output for non-SDLC jobs should NOT trigger guard."""
+        assert should_guard_empty_output("", is_sdlc=False, has_remaining_stages=False) is False
+
+    def test_empty_output_sdlc_no_remaining_does_not_trigger(self):
+        """Empty output for SDLC with all stages done should NOT trigger guard."""
+        assert should_guard_empty_output("", is_sdlc=True, has_remaining_stages=False) is False
+
+    def test_non_empty_output_does_not_trigger(self):
+        """Non-empty output should NOT trigger guard."""
+        result = should_guard_empty_output(
+            "Building the feature...", is_sdlc=True, has_remaining_stages=True
+        )
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_classify_output_empty_returns_status_update(self):
+        """classify_output returns STATUS_UPDATE for empty text.
+
+        Demonstrates the bug this guard prevents.
+        """
+        from bridge.summarizer import OutputType, classify_output
+
+        result = await classify_output("")
+        assert result.output_type == OutputType.STATUS_UPDATE
+        assert result.confidence == 1.0

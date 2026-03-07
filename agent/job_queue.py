@@ -87,6 +87,81 @@ def _is_planning_language(msg: str) -> bool:
     return any(prefix.startswith(p) for p in _PLANNING_PREFIXES)
 
 
+class RoutingDecision:
+    """Result of the classifier-based routing decision.
+
+    Encapsulates the decision of whether to auto-continue, deliver to user,
+    or bypass (error guard). Used by both production code and tests to ensure
+    they exercise the same logic.
+    """
+
+    AUTO_CONTINUE = "auto_continue"
+    DELIVER = "deliver"
+    ERROR_BYPASS = "error_bypass"
+
+    def __init__(self, action: str, reason: str):
+        self.action = action
+        self.reason = reason
+
+
+def classify_routing_decision(
+    classification,
+    auto_continue_count: int,
+    effective_max: int,
+    is_sdlc: bool,
+    msg: str,
+) -> RoutingDecision:
+    """Determine routing action based on classification result and context.
+
+    This is the core routing decision extracted from the send_to_chat closure
+    in _execute_job. Tests call this function directly instead of replicating
+    the logic inline, ensuring test and production code stay in sync.
+
+    Args:
+        classification: ClassificationResult from classify_output()
+        auto_continue_count: Current count of auto-continues in this session
+        effective_max: Maximum allowed auto-continues (3 for non-SDLC, 10 for SDLC)
+        is_sdlc: Whether this is an SDLC job
+        msg: The agent output message (used for planning language detection)
+
+    Returns:
+        RoutingDecision with action (AUTO_CONTINUE, DELIVER, or ERROR_BYPASS)
+        and reason string.
+    """
+    from bridge.summarizer import OutputType
+
+    if classification.output_type == OutputType.ERROR:
+        return RoutingDecision(
+            RoutingDecision.ERROR_BYPASS,
+            "Error-classified output bypasses auto-continue",
+        )
+
+    if (
+        classification.output_type == OutputType.STATUS_UPDATE
+        and auto_continue_count < effective_max
+        and (is_sdlc or _is_planning_language(msg))
+    ):
+        return RoutingDecision(
+            RoutingDecision.AUTO_CONTINUE,
+            f"Status update, count {auto_continue_count} < {effective_max}",
+        )
+
+    return RoutingDecision(
+        RoutingDecision.DELIVER,
+        f"Delivering to user: type={classification.output_type.value}, "
+        f"count={auto_continue_count}/{effective_max}",
+    )
+
+
+def should_guard_empty_output(msg: str, is_sdlc: bool, has_remaining_stages: bool) -> bool:
+    """Check if empty/whitespace output should be guarded (delivered to user, not auto-continued).
+
+    Returns True if the output is empty/whitespace AND this is an SDLC job with remaining stages.
+    This prevents silent auto-continue loops when an agent produces nothing.
+    """
+    return not msg.strip() and is_sdlc and has_remaining_stages
+
+
 # Job health check constants
 JOB_HEALTH_CHECK_INTERVAL = 300  # 5 minutes
 JOB_TIMEOUT_DEFAULT = 2700  # 45 minutes for standard jobs
@@ -316,8 +391,8 @@ async def _push_job(
         sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
         if sessions:
             sessions[0].log_lifecycle_transition("pending", "job enqueued")
-    except Exception:
-        pass  # Non-fatal: don't break enqueue on logging errors
+    except Exception as e:
+        logger.warning(f"Failed to log lifecycle transition for session {session_id}: {e}")
 
     return await AgentSession.query.async_count(project_key=project_key, status="pending")
 
@@ -355,8 +430,8 @@ async def _pop_job(project_key: str) -> Job | None:
     # Log lifecycle transition for job starting execution
     try:
         new_job.log_lifecycle_transition("running", "worker picked up job")
-    except Exception:
-        pass  # Non-fatal: don't break pop on logging errors
+    except Exception as e:
+        logger.warning(f"Failed to log lifecycle transition for job {new_job.job_id}: {e}")
 
     return Job(new_job)
 
@@ -987,8 +1062,8 @@ async def _enqueue_continuation(
             ws = WorkflowState.load(job.workflow_id)
             if ws.data and ws.data.plan_file:
                 _plan_file = ws.data.plan_file
-        except Exception:
-            pass  # Degrade gracefully
+        except Exception as e:
+            logger.warning(f"Failed to resolve plan_file for workflow {job.workflow_id}: {e}")
 
     coaching_message = build_coaching_message(
         classification=classification,
@@ -1197,8 +1272,8 @@ async def _execute_job(job: Job) -> None:
                 fresh = list(AgentSession.query.filter(session_id=agent_session.session_id))
                 if fresh:
                     agent_session = fresh[0]
-            except Exception:
-                pass  # Fall back to stale in-memory session
+            except Exception as e:
+                logger.warning(f"Failed to re-read session {agent_session.session_id}: {e}")
 
         _is_sdlc = False
         _sdlc_has_remaining = False
@@ -1281,13 +1356,34 @@ async def _execute_job(job: Job) -> None:
         # stage-aware error guard detected error prose.
         from bridge.summarizer import OutputType, classify_output
 
+        # Empty output anomaly detection: if output is empty/whitespace-only
+        # AND this is an SDLC job with remaining stages, log a warning and
+        # deliver to user instead of auto-continuing. Prevents silent loops.
+        if should_guard_empty_output(msg, _is_sdlc, _sdlc_has_remaining):
+            logger.warning(
+                f"[{job.project_key}] Empty output with remaining SDLC stages — "
+                f"delivering to user to prevent silent loop"
+            )
+            await send_cb(job.chat_id, "(empty output)", job.message_id, agent_session)
+            chat_state.completion_sent = True
+            return
+
         classification = await classify_output(msg)
         logger.info(
             f"[{job.project_key}] Output classified as {classification.output_type.value} "
             f"(confidence={classification.confidence:.2f}): {classification.reason}"
         )
 
-        if classification.output_type == OutputType.ERROR:
+        # Use extracted routing decision function — same logic used by tests
+        routing = classify_routing_decision(
+            classification=classification,
+            auto_continue_count=chat_state.auto_continue_count,
+            effective_max=effective_max,
+            is_sdlc=_is_sdlc,
+            msg=msg,
+        )
+
+        if routing.action == RoutingDecision.ERROR_BYPASS:
             # CRASH GUARD: Error-classified outputs bypass auto-continue entirely.
             # Without this, SDK crashes would be misclassified as status updates
             # and re-enqueued indefinitely, creating an infinite crash loop.
@@ -1295,11 +1391,7 @@ async def _execute_job(job: Job) -> None:
             logger.info(f"[{job.project_key}] Error classified — skipping auto-continue")
             # Fall through to send error to chat
 
-        elif (
-            classification.output_type == OutputType.STATUS_UPDATE
-            and chat_state.auto_continue_count < effective_max
-            and (_is_sdlc or _is_planning_language(msg))
-        ):
+        elif routing.action == RoutingDecision.AUTO_CONTINUE:
             # Status update -- don't send to chat, re-enqueue job to continue session
             # For non-SDLC jobs, only auto-continue if the output contains planning
             # language (agent sharing its approach before executing). Substantive
@@ -1577,8 +1669,8 @@ def _load_cooldowns() -> dict[str, float]:
             import json
 
             return json.loads(_COOLDOWN_FILE.read_text())
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to load revival cooldowns from {_COOLDOWN_FILE}: {e}")
     return {}
 
 
@@ -1589,8 +1681,8 @@ def _save_cooldowns(cooldowns: dict[str, float]) -> None:
 
         _COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
         _COOLDOWN_FILE.write_text(json.dumps(cooldowns))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to save revival cooldowns to {_COOLDOWN_FILE}: {e}")
 
 
 def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | None:
@@ -1638,8 +1730,8 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
                 )
                 if result.stdout.strip():
                     existing.append(branch)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to check if branch {branch} exists: {e}")
         branches = existing
 
     if not branches:

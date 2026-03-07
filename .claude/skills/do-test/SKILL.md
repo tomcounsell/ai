@@ -331,6 +331,42 @@ Simply use the CWD as-is. Run `pwd` once at the start to confirm and log it.
 - If git commands fail for `--changed`, fall back to running all tests
 - Parse pytest exit codes: 0 = all passed, 1 = some failed, 2 = error, 5 = no tests collected
 
+## Quality Checks (Post-Test)
+
+After tests pass, run these additional quality scans and include results in the report:
+
+### Exception Swallow Scan
+
+Scan for `except Exception: pass` patterns that lack test coverage:
+
+```bash
+grep -rn "except.*Exception.*:" --include="*.py" agent/ bridge/ | grep -v "logger\|log\.\|warning\|error\|raise\|# .*tested" | head -20
+```
+
+Report any bare exception handlers found. Each should either:
+1. Have a corresponding test asserting observable behavior (logger.warning, state change)
+2. Be documented with a comment explaining why bare `pass` is acceptable (e.g., cleanup during shutdown)
+
+### Empty Input Check
+
+If the test suite covers agent output processing code, verify that empty/None/whitespace inputs are tested:
+
+```bash
+grep -rn "def test.*empty\|def test.*none\|def test.*whitespace" tests/ --include="*.py" | wc -l
+```
+
+Flag if the changed files include output processing code but the test suite has zero empty input tests.
+
+### Closure Coverage Flag
+
+If any changed files contain inner functions or closures (functions defined inside other functions), flag whether those closures have dedicated test coverage:
+
+```bash
+grep -rn "def .*(" --include="*.py" agent/ bridge/ | grep "^.*:.*def .*:$" | head -10
+```
+
+Closures that replicate logic already tested elsewhere (e.g., inline routing logic that should call a shared function) are a test smell. Note them in the report.
+
 ## Notes
 
 - No temporary files in the repo -- use `/tmp` for any scratch work
