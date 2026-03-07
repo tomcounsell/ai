@@ -36,6 +36,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Message Pipeline](message-pipeline.md) | Deferred enrichment pipeline for fast message acknowledgment and zero-loss restarts | Shipped |
 | [Plan Prerequisites Validation](plan-prerequisites.md) | Declare and validate environment requirements before plan execution | Shipped |
 | [Popoto Redis Expansion](popoto-redis-expansion.md) | Migration from JSONL/JSON file state to Redis for atomicity and queries | Shipped |
+| [Race Condition Analysis](race-condition-analysis.md) | Structured concurrency analysis section in plan template with soft validator for async code | Shipped |
 | [Reaction Semantics](reaction-semantics.md) | Emoji reaction protocol for message delivery feedback and silent loss prevention | Shipped |
 | [Remote Update](remote-update.md) | Telegram command and cron for remote system updates across machines | Shipped |
 | [Review Workflow Screenshots](review-workflow-screenshots.md) | Screenshot capture during review for visual validation | Shipped |
