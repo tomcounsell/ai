@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: chore
 appetite: Medium
 owner: Valor
@@ -234,10 +234,10 @@ No agent integration required -- this is a test coverage and skill documentation
 
 ---
 
-## Open Questions
+## Open Questions (Resolved)
 
-1. **Gap 3 extraction scope**: Should the routing logic extraction from `_execute_job` be a minimal extraction (just the if/elif/else block) or should it also extract the auto-continue counter logic? Minimal extraction is safer but the counter logic is tightly coupled.
+1. **Gap 3 extraction scope**: Extract whatever is tightly coupled together — if the counter logic is coupled to the routing logic, include it. The goal is: tests call the same function production calls. Do the simplest extraction that achieves that. Don't over-separate things that belong together.
 
-2. **Empty output threshold**: For Gap 2, should empty output immediately terminate the auto-continue loop, or should it allow 1-2 retries before terminating? Immediate termination is simpler but a transient empty response from the agent API could be a fluke.
+2. **Empty output threshold**: Immediate termination. An agent that produced nothing won't produce something on retry. Empty output means something went wrong — surface it to the user right away. No retries.
 
-3. **Gap 5 enforcement level**: The issue describes `/do-build` validating commits exist. Should this be a hard error that blocks the build, or a warning that the human sees? A hard error could cause false positives if a builder legitimately makes no file changes (e.g., a config-only change via API).
+3. **Gap 5 enforcement level**: Warning, not hard error. The user should see "builder produced no commits" but the pipeline shouldn't block. Config-only or API-only changes are legitimate. The goal is visibility — silent success with no output is the bug, not the absence of commits per se.
