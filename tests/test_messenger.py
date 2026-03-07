@@ -63,52 +63,6 @@ class TestBossMessenger:
         assert len(sent_messages) == 0
 
     @pytest.mark.asyncio
-    async def test_acknowledgment_sent_once(self):
-        """Test that acknowledgment is only sent once."""
-        sent_messages = []
-
-        async def mock_send(msg: str):
-            sent_messages.append(msg)
-
-        messenger = BossMessenger(
-            _send_callback=mock_send,
-            chat_id="test_chat",
-            session_id="test_session",
-        )
-
-        # First acknowledgment should send
-        result1 = await messenger.send_acknowledgment("Working on it...")
-        assert result1 is True
-        assert len(sent_messages) == 1
-
-        # Second acknowledgment should be skipped
-        result2 = await messenger.send_acknowledgment("Still working...")
-        assert result2 is False
-        assert len(sent_messages) == 1  # Still just 1
-
-    @pytest.mark.asyncio
-    async def test_acknowledgment_skipped_if_already_communicated(self):
-        """Test that acknowledgment is skipped if we already sent a message."""
-        sent_messages = []
-
-        async def mock_send(msg: str):
-            sent_messages.append(msg)
-
-        messenger = BossMessenger(
-            _send_callback=mock_send,
-            chat_id="test_chat",
-            session_id="test_session",
-        )
-
-        # Send a regular message first
-        await messenger.send("Here's the result!")
-
-        # Now acknowledgment should be skipped
-        result = await messenger.send_acknowledgment()
-        assert result is False
-        assert len(sent_messages) == 1  # Only the first message
-
-    @pytest.mark.asyncio
     async def test_has_communicated(self):
         """Test the has_communicated check."""
 
@@ -182,8 +136,8 @@ class TestBackgroundTask:
         assert sent_messages[0] == "Done quickly!"
 
     @pytest.mark.asyncio
-    async def test_slow_task_sends_acknowledgment(self):
-        """Test that slow tasks trigger acknowledgment after timeout."""
+    async def test_slow_task_no_acknowledgment(self):
+        """Test that slow tasks do NOT send acknowledgment (watchdog logs only)."""
         sent_messages = []
 
         async def mock_send(msg: str):
@@ -198,7 +152,6 @@ class TestBackgroundTask:
         task = BackgroundTask(
             messenger=messenger,
             acknowledgment_timeout=0.2,  # 200ms for testing
-            acknowledgment_message="I'm on it!",
         )
 
         async def slow_work():
@@ -207,19 +160,19 @@ class TestBackgroundTask:
 
         await task.run(slow_work(), send_result=True)
 
-        # Wait for acknowledgment timeout
+        # Wait past acknowledgment timeout
         await asyncio.sleep(0.3)
 
-        # Should have acknowledgment by now
-        assert len(sent_messages) >= 1
-        assert sent_messages[0] == "I'm on it!"
+        # Should NOT have any messages yet (watchdog only logs internally)
+        assert len(sent_messages) == 0
 
         # Wait for completion
         await asyncio.sleep(0.5)
 
         assert task.is_complete
-        assert len(sent_messages) == 2
-        assert sent_messages[1] == "Finally done!"
+        # Only the result message should be sent
+        assert len(sent_messages) == 1
+        assert sent_messages[0] == "Finally done!"
 
     @pytest.mark.asyncio
     async def test_task_error_sends_error_message(self):
@@ -345,10 +298,6 @@ class TestIntegration:
         assert len(sent_messages) == 2
         assert messenger.has_communicated() is True
 
-        # Acknowledgment should be skipped since we already communicated
-        result = await messenger.send_acknowledgment()
-        assert result is False
-
     @pytest.mark.asyncio
     async def test_concurrent_tasks(self):
         """Test that multiple background tasks can run concurrently."""
@@ -392,8 +341,8 @@ class TestIntegration:
         # Fast task should have just result
         assert len(results["fast"]) == 1
 
-        # Slow task should have acknowledgment + result
-        assert len(results["slow"]) == 2
+        # Slow task should also have just result (no acknowledgment)
+        assert len(results["slow"]) == 1
 
 
 if __name__ == "__main__":

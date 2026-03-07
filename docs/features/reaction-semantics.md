@@ -24,7 +24,7 @@ All constants are defined in `bridge/response.py`.
 
 The distinction between `REACTION_SUCCESS` and `REACTION_COMPLETE` is critical:
 
-- **REACTION_SUCCESS** means "the agent processed your message and has nothing to say back." This covers status updates suppressed by auto-continue, simple acknowledgments, and cases where the agent's work product is an action rather than text.
+- **REACTION_SUCCESS** means "the agent processed your message and has nothing to say back." This covers status updates suppressed by auto-continue and cases where the agent's work product is an action rather than text.
 - **REACTION_COMPLETE** means "the agent finished AND a text reply was delivered to you." This uses `messenger.has_communicated()` to verify that at least one message was actually sent before claiming completion.
 
 Without this distinction, a failure to deliver a reply could be masked by a thumbs-up reaction, making the user believe everything succeeded.
@@ -98,7 +98,7 @@ Three paths to silent text loss have been identified and guarded:
 |------|------|
 | `bridge/response.py` | Reaction constants, OutputType enum, MAX_AUTO_CONTINUES, filter_tool_logs |
 | `agent/job_queue.py` | Reaction selection logic, auto-continue re-enqueue, has_communicated() check |
-| `agent/messenger.py` | BossMessenger with `has_communicated()` tracking |
+| `agent/messenger.py` | BossMessenger with `has_communicated()` tracking, BackgroundTask with internal health watchdog |
 | `bridge/summarizer.py` | Output classification (classify_output) |
 | `tests/test_reply_delivery.py` | Tests for steering drain, reaction selection, filter fallback |
 

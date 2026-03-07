@@ -105,9 +105,7 @@ async def _handle_update_command(tg_client, event):
             + "\n".join(running_descriptions)
             + "\n\nRestart will be queued until all sessions complete."
         )
-        logger.info(
-            f"[bridge] /update: {running_count} session(s) running, restart will be queued"
-        )
+        logger.info(f"[bridge] /update: {running_count} session(s) running, restart will be queued")
 
     script_path = _BRIDGE_PROJECT_DIR / "scripts" / "remote-update.sh"
     if not script_path.exists():
@@ -215,9 +213,7 @@ async def _handle_force_update_command(tg_client, event):
         # Extract key info from output
         output_lines = (result.stdout or "").strip().split("\n")
         for line in output_lines:
-            if any(
-                k in line for k in ["commit", "Already up to date", "FAIL", "ERROR"]
-            ):
+            if any(k in line for k in ["commit", "Already up to date", "FAIL", "ERROR"]):
                 steps.append(line.strip().removeprefix("[update] "))
     except subprocess.TimeoutExpired:
         steps.append("Update timed out after 120s")
@@ -228,9 +224,7 @@ async def _handle_force_update_command(tg_client, event):
     # Just report what happened
     steps.append("Bridge restarted")
 
-    summary = f"{machine} - force update complete:\n" + "\n".join(
-        f"  • {s}" for s in steps
-    )
+    summary = f"{machine} - force update complete:\n" + "\n".join(f"  • {s}" for s in steps)
     await send_response_with_files(
         tg_client,
         event=None,
@@ -265,13 +259,6 @@ async def get_agent_response(
 # Retry with Self-Healing
 # =============================================================================
 
-# How long to wait before sending "I'm working on this" acknowledgment
-# Only sends if no message has been sent to the chat yet
-ACKNOWLEDGMENT_TIMEOUT_SECONDS = 180  # 3 minutes
-
-# Message to send when work is taking a while
-ACKNOWLEDGMENT_MESSAGE = "I'm working on this."
-
 # Retry configuration
 MAX_RETRIES = 3
 RETRY_DELAYS = [5, 15, 30]  # Seconds between retries
@@ -300,10 +287,7 @@ async def create_failure_plan(message: str, error: str, session_id: str) -> None
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     plan_path = (
-        Path(__file__).parent.parent
-        / "docs"
-        / "plans"
-        / f"fix-bridge-failure-{timestamp}.md"
+        Path(__file__).parent.parent / "docs" / "plans" / f"fix-bridge-failure-{timestamp}.md"
     )
 
     # Ensure plans directory exists
@@ -385,9 +369,7 @@ async def get_agent_response_with_retry(
             )
 
             # Check if response looks like an error
-            if response.startswith("Error:") or response.startswith(
-                "Request timed out"
-            ):
+            if response.startswith("Error:") or response.startswith("Request timed out"):
                 last_error = response
                 if attempt < MAX_RETRIES - 1:
                     await attempt_self_healing(response, session_id)
@@ -526,9 +508,7 @@ def _detect_issue_number(message_text: str, working_dir: str) -> str | None:
     return None
 
 
-def detect_tracked_work(
-    message_text: str, working_dir: str
-) -> tuple[str | None, str | None]:
+def detect_tracked_work(message_text: str, working_dir: str) -> tuple[str | None, str | None]:
     """
     Detect if message references tracked work (plan file + tracking URL).
 

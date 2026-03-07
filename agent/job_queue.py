@@ -1444,7 +1444,7 @@ async def _execute_job(job: Job) -> None:
             task_list_id,
         )
 
-    task = BackgroundTask(messenger=messenger, acknowledgment_timeout=180.0)
+    task = BackgroundTask(messenger=messenger)
     await task.run(do_work(), send_result=True)
 
     # Wait for the background task to complete, with periodic calendar heartbeats
