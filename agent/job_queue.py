@@ -316,8 +316,8 @@ async def _push_job(
         sessions = list(AgentSession.query.filter(session_id=session_id, status="pending"))
         if sessions:
             sessions[0].log_lifecycle_transition("pending", "job enqueued")
-    except Exception:
-        pass  # Non-fatal: don't break enqueue on logging errors
+    except Exception as e:
+        logger.warning(f"Failed to log lifecycle transition for session {session_id}: {e}")
 
     return await AgentSession.query.async_count(project_key=project_key, status="pending")
 
@@ -355,8 +355,8 @@ async def _pop_job(project_key: str) -> Job | None:
     # Log lifecycle transition for job starting execution
     try:
         new_job.log_lifecycle_transition("running", "worker picked up job")
-    except Exception:
-        pass  # Non-fatal: don't break pop on logging errors
+    except Exception as e:
+        logger.warning(f"Failed to log lifecycle transition for job {new_job.job_id}: {e}")
 
     return Job(new_job)
 
@@ -987,8 +987,8 @@ async def _enqueue_continuation(
             ws = WorkflowState.load(job.workflow_id)
             if ws.data and ws.data.plan_file:
                 _plan_file = ws.data.plan_file
-        except Exception:
-            pass  # Degrade gracefully
+        except Exception as e:
+            logger.warning(f"Failed to resolve plan_file for workflow {job.workflow_id}: {e}")
 
     coaching_message = build_coaching_message(
         classification=classification,
@@ -1197,8 +1197,8 @@ async def _execute_job(job: Job) -> None:
                 fresh = list(AgentSession.query.filter(session_id=agent_session.session_id))
                 if fresh:
                     agent_session = fresh[0]
-            except Exception:
-                pass  # Fall back to stale in-memory session
+            except Exception as e:
+                logger.warning(f"Failed to re-read session {agent_session.session_id}: {e}")
 
         _is_sdlc = False
         _sdlc_has_remaining = False
@@ -1280,6 +1280,18 @@ async def _execute_job(job: Job) -> None:
         # SDLC jobs that hit the safety cap, and SDLC jobs where the
         # stage-aware error guard detected error prose.
         from bridge.summarizer import OutputType, classify_output
+
+        # Empty output anomaly detection: if output is empty/whitespace-only
+        # AND this is an SDLC job with remaining stages, log a warning and
+        # deliver to user instead of auto-continuing. Prevents silent loops.
+        if not msg.strip() and _is_sdlc and _sdlc_has_remaining:
+            logger.warning(
+                f"[{job.project_key}] Empty output with remaining SDLC stages — "
+                f"delivering to user to prevent silent loop"
+            )
+            await send_cb(job.chat_id, "(empty output)", job.message_id, agent_session)
+            chat_state.completion_sent = True
+            return
 
         classification = await classify_output(msg)
         logger.info(
@@ -1577,8 +1589,8 @@ def _load_cooldowns() -> dict[str, float]:
             import json
 
             return json.loads(_COOLDOWN_FILE.read_text())
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to load revival cooldowns from {_COOLDOWN_FILE}: {e}")
     return {}
 
 
@@ -1589,8 +1601,8 @@ def _save_cooldowns(cooldowns: dict[str, float]) -> None:
 
         _COOLDOWN_FILE.parent.mkdir(parents=True, exist_ok=True)
         _COOLDOWN_FILE.write_text(json.dumps(cooldowns))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"Failed to save revival cooldowns to {_COOLDOWN_FILE}: {e}")
 
 
 def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | None:
@@ -1638,8 +1650,8 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
                 )
                 if result.stdout.strip():
                     existing.append(branch)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to check if branch {branch} exists: {e}")
         branches = existing
 
     if not branches:
