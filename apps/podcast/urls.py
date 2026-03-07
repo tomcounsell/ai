@@ -12,6 +12,8 @@ from apps.podcast.views import (
     PodcastEditView,
     PodcastFeedView,
     PodcastListView,
+    RegenerateCoverArtView,
+    UploadCoverArtView,
 )
 
 app_name = "podcast"
@@ -56,5 +58,15 @@ urlpatterns = [
         "<slug:slug>/<slug:episode_slug>/update-field/",
         EpisodeUpdateFieldView.as_view(),
         name="episode_update_field",
+    ),
+    path(
+        "<slug:slug>/<slug:episode_slug>/regenerate-cover/",
+        RegenerateCoverArtView.as_view(),
+        name="regenerate_cover_art",
+    ),
+    path(
+        "<slug:slug>/<slug:episode_slug>/upload-cover/",
+        UploadCoverArtView.as_view(),
+        name="upload_cover_art",
     ),
 ]

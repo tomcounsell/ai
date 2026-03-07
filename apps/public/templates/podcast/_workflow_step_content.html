@@ -325,6 +325,61 @@
 </div>
 {% endif %}
 
+<!-- Cover Art Preview (Step 11 only) -->
+{% if current_step == 11 %}
+<div class="mt-6 px-4 py-4 border border-gray-200 bg-white">
+  <h3 class="text-sm font-semibold text-gray-700 mb-3 font-mono uppercase tracking-wider">Cover Art</h3>
+
+  {% if episode.cover_image_url %}
+  <div class="mb-4">
+    <img src="{{ episode.cover_image_url }}" alt="Episode cover art"
+         class="w-48 h-48 object-cover border border-gray-200"
+         onerror="this.style.display='none'">
+  </div>
+  <div class="flex gap-3">
+    <form method="post"
+          action="{% url 'podcast:regenerate_cover_art' slug=podcast.slug episode_slug=episode.slug %}">
+      {% csrf_token %}
+      <button type="submit"
+              class="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-mono text-gray-600 border border-gray-300 hover:bg-gray-50 transition-colors">
+        <i class="fas fa-sync-alt"></i> Regenerate
+      </button>
+    </form>
+    <form method="post" enctype="multipart/form-data"
+          action="{% url 'podcast:upload_cover_art' slug=podcast.slug episode_slug=episode.slug %}">
+      {% csrf_token %}
+      <label class="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-mono text-gray-600 border border-gray-300 hover:bg-gray-50 transition-colors cursor-pointer">
+        <i class="fas fa-upload"></i> Upload Custom
+        <input type="file" name="cover_art" accept="image/*" class="hidden"
+               onchange="this.closest('form').submit()">
+      </label>
+    </form>
+  </div>
+  {% else %}
+  <p class="text-sm text-gray-500 mb-3">No cover art generated yet.</p>
+  <div class="flex gap-3">
+    <form method="post"
+          action="{% url 'podcast:regenerate_cover_art' slug=podcast.slug episode_slug=episode.slug %}">
+      {% csrf_token %}
+      <button type="submit"
+              class="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-mono text-white bg-gray-900 hover:bg-gray-800 transition-colors">
+        <i class="fas fa-image"></i> Generate Cover Art
+      </button>
+    </form>
+    <form method="post" enctype="multipart/form-data"
+          action="{% url 'podcast:upload_cover_art' slug=podcast.slug episode_slug=episode.slug %}">
+      {% csrf_token %}
+      <label class="inline-flex items-center gap-2 px-3 py-1.5 text-xs font-mono text-gray-600 border border-gray-300 hover:bg-gray-50 transition-colors cursor-pointer">
+        <i class="fas fa-upload"></i> Upload Custom
+        <input type="file" name="cover_art" accept="image/*" class="hidden"
+               onchange="this.closest('form').submit()">
+      </label>
+    </form>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 <!-- Navigation: Prev / Next -->
 <div class="flex justify-between mt-8 pt-4 border-t border-gray-200">
   {% if current_step > 1 %}

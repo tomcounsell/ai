@@ -1,4 +1,8 @@
-from apps.podcast.workflow import EpisodeWorkflowView
+from apps.podcast.workflow import (
+    EpisodeWorkflowView,
+    RegenerateCoverArtView,
+    UploadCoverArtView,
+)
 
 from .episode_update import EpisodeUpdateFieldView
 from .feed_views import PodcastFeedView
@@ -25,4 +29,6 @@ __all__ = [
     "PodcastEditView",
     "PodcastFeedView",
     "PodcastListView",
+    "RegenerateCoverArtView",
+    "UploadCoverArtView",
 ]

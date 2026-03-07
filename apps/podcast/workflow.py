@@ -6,6 +6,7 @@ from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.http import Http404, HttpResponse, HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
+from django.views import View
 
 from apps.podcast.models import Episode, EpisodeWorkflow, Podcast
 from apps.podcast.services.workflow import WORKFLOW_STEPS
@@ -433,3 +434,74 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
             response["HX-Redirect"] = url
             return response
         return HttpResponseRedirect(url)
+
+
+class RegenerateCoverArtView(LoginRequiredMixin, UserPassesTestMixin, View):
+    """Trigger cover art regeneration for an episode."""
+
+    def test_func(self) -> bool:
+        return self.request.user.is_staff
+
+    def post(self, request, slug: str, episode_slug: str):
+        from apps.podcast.services.publishing import generate_cover_art
+
+        podcast = get_object_or_404(Podcast, slug=slug)
+        episode = get_object_or_404(Episode, podcast=podcast, slug=episode_slug)
+
+        try:
+            generate_cover_art(episode.id)
+            logger.info("Cover art regenerated for episode %d", episode.pk)
+        except Exception:
+            logger.exception(
+                "Failed to regenerate cover art for episode %d", episode.pk
+            )
+
+        return HttpResponseRedirect(
+            reverse(
+                "podcast:episode_workflow",
+                kwargs={"slug": slug, "episode_slug": episode_slug, "step": 11},
+            )
+        )
+
+
+class UploadCoverArtView(LoginRequiredMixin, UserPassesTestMixin, View):
+    """Upload custom cover art for an episode."""
+
+    def test_func(self) -> bool:
+        return self.request.user.is_staff
+
+    def post(self, request, slug: str, episode_slug: str):
+        from apps.common.services.storage import store_file
+
+        podcast = get_object_or_404(Podcast, slug=slug)
+        episode = get_object_or_404(Episode, podcast=podcast, slug=episode_slug)
+
+        cover_file = request.FILES.get("cover_art")
+        if not cover_file:
+            return HttpResponseRedirect(
+                reverse(
+                    "podcast:episode_workflow",
+                    kwargs={"slug": slug, "episode_slug": episode_slug, "step": 11},
+                )
+            )
+
+        try:
+            file_content = cover_file.read()
+            content_type = cover_file.content_type or "image/png"
+            storage_key = f"podcast/{slug}/{episode_slug}/cover.png"
+            cover_url = store_file(storage_key, file_content, content_type, public=True)
+
+            episode.cover_image_url = cover_url
+            episode.save(update_fields=["cover_image_url"])
+            logger.info(
+                "Custom cover art uploaded for episode %d: %s", episode.pk, cover_url
+            )
+        except Exception:
+            logger.exception("Failed to upload cover art for episode %d", episode.pk)
+
+        return HttpResponseRedirect(
+            reverse(
+                "podcast:episode_workflow",
+                kwargs={"slug": slug, "episode_slug": episode_slug, "step": 11},
+            )
+        )
