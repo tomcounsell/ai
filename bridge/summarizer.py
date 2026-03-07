@@ -60,6 +60,67 @@ _PROCESS_NARRATION_PATTERNS = [
 ]
 
 
+def _extract_open_questions(text: str) -> list[str]:
+    """Extract questions from '## Open Questions' sections in agent output.
+
+    Scans the text for a markdown '## Open Questions' heading and extracts
+    substantive question items from the content below it. Returns an empty
+    list if no section is found, the section is empty, or it contains only
+    placeholder text.
+
+    Only numbered/bulleted list items with substantive text are treated as
+    questions. The heading itself is the signal -- items under it are questions
+    regardless of punctuation (per plan design decision).
+
+    Args:
+        text: Raw agent output text to scan.
+
+    Returns:
+        List of verbatim question strings, or empty list if none found.
+    """
+    if not text:
+        return []
+
+    # Find the ## Open Questions section, but skip resolved/answered sections.
+    # Match "## Open Questions" but NOT "## Open Questions (Resolved)" or similar.
+    pattern = r"^## Open Questions(?!\s*\((?:Resolved|Answered|Closed|Done)\)).*$"
+    match = re.search(pattern, text, re.MULTILINE | re.IGNORECASE)
+    if not match:
+        return []
+
+    # Extract content after the heading until the next ## heading or end of text
+    section_start = match.end()
+    next_heading = re.search(r"^## ", text[section_start:], re.MULTILINE)
+    if next_heading:
+        section_content = text[section_start : section_start + next_heading.start()]
+    else:
+        section_content = text[section_start:]
+
+    # Extract list items (numbered or bulleted)
+    questions = []
+    # Match lines starting with number+period, dash, asterisk, or bullet
+    list_item_pattern = re.compile(r"^\s*(?:\d+[\.\)]\s*|[-*+]\s*|\u2022\s*)(.*)", re.MULTILINE)
+    for item_match in list_item_pattern.finditer(section_content):
+        item_text = item_match.group(1).strip()
+        # Skip empty, whitespace-only, or placeholder items
+        if not item_text:
+            continue
+        # Skip obvious placeholders
+        placeholder_patterns = [
+            r"^TBD\.?$",
+            r"^TODO\.?$",
+            r"^N/?A\.?$",
+            r"^None\.?$",
+            r"^\?+$",
+            r"^\.+$",
+        ]
+        if any(re.match(p, item_text, re.IGNORECASE) for p in placeholder_patterns):
+            continue
+        questions.append(item_text)
+
+    return questions
+
+
 def _strip_process_narration(text: str) -> str:
     """Strip process narration lines from agent output before summarization.
 
@@ -1285,6 +1346,21 @@ async def summarize_response(
             else:
                 summary_text = raw_response
 
+        # Open question extraction: if the raw output contains an
+        # ## Open Questions section with substantive questions, populate
+        # expectations with the extracted questions. This bypasses the
+        # anti-fabrication filter because questions are extracted verbatim
+        # from structured document sections, not fabricated by the LLM.
+        # LLM-detected expectations take priority (if already set).
+        expectations = structured.expectations
+        if not expectations:
+            open_questions = _extract_open_questions(raw_response)
+            if open_questions:
+                expectations = "\n".join(f"? {q}" for q in open_questions)
+                logger.info(
+                    f"Extracted {len(open_questions)} open questions from ## Open Questions section"
+                )
+
         # Compose structured output with stage progress and links
         summary_text = _compose_structured_summary(
             summary_text, session=session, is_completion=True
@@ -1296,7 +1372,7 @@ async def summarize_response(
             was_summarized=True,
             artifacts=artifacts,
             context_summary=structured.context_summary or None,
-            expectations=structured.expectations,
+            expectations=expectations,
         )
 
     # All backends failed — truncate as last resort
