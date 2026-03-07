@@ -104,6 +104,7 @@ class TestCraftTargetedPrompts:
             gpt_prompt="GPT: investigate industry adoption...",
             gemini_prompt="Gemini: analyze policy frameworks...",
             together_prompt="Together: explore adjacent topics...",
+            claude_prompt="Claude: deep dive into technical foundations...",
         )
         mock_result = self._make_mock_result(expected)
 
@@ -128,6 +129,7 @@ class TestCraftTargetedPrompts:
             gpt_prompt="gpt prompt",
             gemini_prompt="gemini prompt",
             together_prompt="together prompt",
+            claude_prompt="claude prompt",
         )
         mock_result = self._make_mock_result(expected)
 
@@ -153,6 +155,7 @@ class TestCraftTargetedPrompts:
             gpt_prompt="gpt",
             gemini_prompt="gemini",
             together_prompt="together",
+            claude_prompt="claude",
         )
         mock_result = self._make_mock_result(expected)
 

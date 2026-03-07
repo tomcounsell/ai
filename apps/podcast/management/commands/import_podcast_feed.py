@@ -220,6 +220,16 @@ class Command(BaseCommand):
                 "language": language,
                 "categories": categories,
                 "website_url": website_url,
+            },
+            create_defaults={
+                "title": title,
+                "description": description,
+                "author_name": author_name,
+                "author_email": author_email,
+                "cover_image_url": cover_image_url,
+                "language": language,
+                "categories": categories,
+                "website_url": website_url,
                 "privacy": "public",
             },
         )

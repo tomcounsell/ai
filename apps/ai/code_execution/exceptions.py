@@ -10,6 +10,8 @@ The exception hierarchy enables:
     - Detailed logging and monitoring of security events
 """
 
+from typing import Any
+
 
 class CodeExecutionError(Exception):
     """
@@ -127,7 +129,7 @@ class ResourceLimitError(CodeExecutionError):
         self,
         message: str,
         limit_type: str | None = None,
-        limit_value: any | None = None,
+        limit_value: Any | None = None,
     ):
         details = {}
         if limit_type:
