@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: bug
 appetite: Medium
 owner: Valor Engels
@@ -215,10 +215,10 @@ Using standard Tier 1 agents: builder and validator.
 
 ---
 
-## Open Questions
+## Open Questions (Resolved)
 
-1. Should the open question gate apply only to PLAN stage outputs, or to all SDLC stage outputs? The issue specifically mentions plan open questions, but other stages could theoretically produce questions too. Restricting to PLAN is simpler and avoids false positives.
+1. **Scope**: PLAN stage only. That's where the problem occurs. Simpler, no false positives from other stages.
 
-2. When open questions are surfaced and the human answers them, how should the answers flow back into the plan document? Currently the SDLC dispatcher would just re-invoke the next stage. Should the plan be updated with answers before proceeding, or is that the human's responsibility?
+2. **Answer flow**: Human's responsibility. The agent resumes with the human's reply as context. Don't auto-edit the plan doc — that's overengineering.
 
-3. The `_extract_open_questions()` function needs to decide what counts as a "substantive question." Should it require lines ending in `?`, or should numbered list items under `## Open Questions` be treated as questions regardless of punctuation? Plan open questions are often phrased as statements with context (e.g., "Whether the extraction scope should include counter logic").
+3. **What counts as a question**: Any numbered/bulleted list item under `## Open Questions` is a question, regardless of punctuation. The heading is the signal. If someone puts items under that heading, they're questions.
