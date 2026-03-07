@@ -1358,8 +1358,7 @@ async def summarize_response(
             if open_questions:
                 expectations = "\n".join(f"? {q}" for q in open_questions)
                 logger.info(
-                    f"Extracted {len(open_questions)} open questions from "
-                    f"## Open Questions section"
+                    f"Extracted {len(open_questions)} open questions from ## Open Questions section"
                 )
 
         # Compose structured output with stage progress and links
