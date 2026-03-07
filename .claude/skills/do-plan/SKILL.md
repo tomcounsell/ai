@@ -75,6 +75,10 @@ Where:
    Skip if the change is purely documentation or process-related.
 4. **Set appetite** - Small / Medium / Large (see `SCOPING.md` for sizing guidance)
 5. **Rough out solution** - Key components and flow, stay abstract
+6. **Race condition analysis** - If the solution involves async operations, shared mutable state,
+   or cross-process data flows, identify timing hazards. For each: specify what data/state must
+   be established before dependent operations read it, and how the implementation prevents races.
+   Skip if the change is purely synchronous and single-threaded.
 
 ### Phase 2: Write Initial Plan
 

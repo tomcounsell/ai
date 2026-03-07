@@ -84,6 +84,20 @@ Settings page → Click "Enable 2FA" → Setup screen → Enter code → Confirm
 **Impact:** [What breaks if this goes wrong]
 **Mitigation:** [How we'll handle it]
 
+## Race Conditions
+
+[Enumerate timing-dependent bugs, concurrent access patterns, and data/state prerequisites.
+For each hazard identified, fill out the template below. If no concurrency concerns exist,
+state "No race conditions identified" with justification (e.g., "all operations are synchronous
+and single-threaded").]
+
+### Race N: [Description]
+**Location:** [File and line range]
+**Trigger:** [What sequence of events causes the race]
+**Data prerequisite:** [What data must exist/be populated before the dependent operation]
+**State prerequisite:** [What system state must hold for correctness]
+**Mitigation:** [How the implementation prevents this -- await, lock, re-read, idempotency, etc.]
+
 ## No-Gos (Out of Scope)
 
 [Explicitly state what we're NOT doing. This is critical for scope control.]
