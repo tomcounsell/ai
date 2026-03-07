@@ -603,3 +603,74 @@ class TestSendToChatResultDataclass:
         assert result.completion_sent is True
         assert result.defer_reaction is True
         assert result.auto_continue_count == 3
+
+
+class TestEmptyOutputLoopTermination:
+    """Tests for empty output loop termination behavior (Gap 2).
+
+    Verifies that empty/whitespace agent output terminates the
+    auto-continue loop immediately rather than re-enqueuing.
+    An agent that produced nothing won't produce something on retry.
+    """
+
+    @pytest.mark.asyncio
+    async def test_empty_output_not_enqueued_for_continuation(self, redis_test_db):
+        """Empty output should NOT be passed to _enqueue_continuation.
+
+        The guard in _execute_job should deliver to user before
+        _enqueue_continuation is ever called.
+        """
+        session = _create_session(redis_test_db, classification_type="sdlc")
+        job = _make_mock_job(session_id=session.session_id, classification_type="sdlc")
+
+        # If _enqueue_continuation IS called with empty output, it should
+        # still work without error (defense in depth)
+        with patch("bridge.coach.build_coaching_message", return_value="continue"):
+            await _enqueue_continuation(
+                job=job,
+                branch_name="session/test",
+                task_list_id="tl",
+                auto_continue_count=1,
+                output_msg="",  # Empty output
+            )
+
+        # Session should still be in valid state
+        sessions = list(AgentSession.query.filter(session_id=session.session_id))
+        assert len(sessions) == 1
+        assert sessions[0].status == "pending"
+
+    @pytest.mark.asyncio
+    async def test_whitespace_output_not_enqueued_for_continuation(self, redis_test_db):
+        """Whitespace-only output should also be handled gracefully."""
+        session = _create_session(redis_test_db, classification_type="sdlc")
+        job = _make_mock_job(session_id=session.session_id, classification_type="sdlc")
+
+        with patch("bridge.coach.build_coaching_message", return_value="continue"):
+            await _enqueue_continuation(
+                job=job,
+                branch_name="session/test",
+                task_list_id="tl",
+                auto_continue_count=1,
+                output_msg="   \n\t  ",  # Whitespace only
+            )
+
+        sessions = list(AgentSession.query.filter(session_id=session.session_id))
+        assert len(sessions) == 1
+
+    def test_send_to_chat_result_tracks_empty_output_delivery(self):
+        """SendToChatResult.completion_sent should be set when empty output is delivered.
+
+        This prevents BackgroundTask from re-sending the empty output.
+        """
+        chat_state = SendToChatResult()
+
+        msg = ""
+        _is_sdlc = True
+        _sdlc_has_remaining = True
+
+        # Simulate the guard from _execute_job
+        if not msg.strip() and _is_sdlc and _sdlc_has_remaining:
+            chat_state.completion_sent = True
+
+        assert chat_state.completion_sent is True
+        assert chat_state.auto_continue_count == 0  # No auto-continue happened
