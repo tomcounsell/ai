@@ -1296,59 +1296,73 @@ async def _execute_job(job: Job) -> None:
             return
 
         if _is_sdlc and _sdlc_has_remaining and chat_state.auto_continue_count < effective_max:
-            # Stage-aware error guard: before auto-continuing, check if the
-            # output looks like an error. Error prose should reach the user
-            # even when stage history says "still in progress".
-            from bridge.summarizer import OutputType, _classify_with_heuristics
+            # Open question gate: before auto-continuing, check if the output
+            # contains an ## Open Questions section with substantive questions.
+            # If so, deliver to the user instead of auto-continuing, so the
+            # human can answer design decisions before BUILD proceeds.
+            from bridge.summarizer import _extract_open_questions
 
-            quick_check = _classify_with_heuristics(msg[:500])
-            if quick_check.output_type in (OutputType.ERROR, OutputType.BLOCKER):
-                logger.warning(
-                    f"[{job.project_key}] Stage-aware path detected "
-                    f"{quick_check.output_type.value} in prose, "
-                    f"routing to classifier instead of auto-continuing"
-                )
-                # Fall through to classifier-based routing below
-            else:
-                # SDLC job with stages remaining — auto-continue without classifier.
-                # Stage progress is a stronger signal than prose classification.
-                chat_state.auto_continue_count += 1
-                progress = agent_session.get_stage_progress()
+            open_questions = _extract_open_questions(msg)
+            if open_questions:
                 logger.info(
-                    f"[{job.project_key}] Stage-aware auto-continue "
-                    f"({chat_state.auto_continue_count}/{effective_max}), "
-                    f"progress: {progress}"
+                    f"[{job.project_key}] Open questions detected in output "
+                    f"({len(open_questions)} questions), pausing for human input"
                 )
+                # Fall through to classifier/deliver path below
+            else:
+                # Stage-aware error guard: before auto-continuing, check if the
+                # output looks like an error. Error prose should reach the user
+                # even when stage history says "still in progress".
+                from bridge.summarizer import OutputType, _classify_with_heuristics
 
-                save_session_snapshot(
-                    session_id=job.session_id,
-                    event="auto_continue",
-                    project_key=job.project_key,
-                    branch_name=branch_name,
-                    task_summary=(
-                        f"Stage-aware auto-continue "
-                        f"({chat_state.auto_continue_count}/{effective_max})"
-                    ),
-                    extra_context={
-                        "routing": "stage_aware",
-                        "stage_progress": str(progress),
-                        "message_preview": msg[:200],
-                    },
-                    working_dir=str(working_dir),
-                )
+                quick_check = _classify_with_heuristics(msg[:500])
+                if quick_check.output_type in (OutputType.ERROR, OutputType.BLOCKER):
+                    logger.warning(
+                        f"[{job.project_key}] Stage-aware path detected "
+                        f"{quick_check.output_type.value} in prose, "
+                        f"routing to classifier instead of auto-continuing"
+                    )
+                    # Fall through to classifier-based routing below
+                else:
+                    # SDLC job with stages remaining — auto-continue without classifier.
+                    # Stage progress is a stronger signal than prose classification.
+                    chat_state.auto_continue_count += 1
+                    progress = agent_session.get_stage_progress()
+                    logger.info(
+                        f"[{job.project_key}] Stage-aware auto-continue "
+                        f"({chat_state.auto_continue_count}/{effective_max}), "
+                        f"progress: {progress}"
+                    )
 
-                await _enqueue_continuation(
-                    job,
-                    branch_name,
-                    task_list_id,
-                    chat_state.auto_continue_count,
-                    msg,
-                    coaching_source="stage_aware",
-                )
+                    save_session_snapshot(
+                        session_id=job.session_id,
+                        event="auto_continue",
+                        project_key=job.project_key,
+                        branch_name=branch_name,
+                        task_summary=(
+                            f"Stage-aware auto-continue "
+                            f"({chat_state.auto_continue_count}/{effective_max})"
+                        ),
+                        extra_context={
+                            "routing": "stage_aware",
+                            "stage_progress": str(progress),
+                            "message_preview": msg[:200],
+                        },
+                        working_dir=str(working_dir),
+                    )
 
-                chat_state.completion_sent = True
-                chat_state.defer_reaction = True
-                return
+                    await _enqueue_continuation(
+                        job,
+                        branch_name,
+                        task_list_id,
+                        chat_state.auto_continue_count,
+                        msg,
+                        coaching_source="stage_aware",
+                    )
+
+                    chat_state.completion_sent = True
+                    chat_state.defer_reaction = True
+                    return
 
         # === Classifier-based routing ===
         # Used for: non-SDLC jobs, SDLC jobs with all stages done,
