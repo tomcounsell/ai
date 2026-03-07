@@ -4,13 +4,13 @@ from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.db.models import Count, F, Max, Q
 from django.db.models.functions import Now
-from django.http import Http404, HttpResponseRedirect
+from django.http import Http404
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
-from django.views import View
-from django.views.generic.edit import UpdateView
+from django.views.generic.edit import CreateView, UpdateView
 
 from apps.common.services.storage import store_file
+from apps.podcast.forms import EpisodeForm
 from apps.podcast.models import Episode, Podcast
 from apps.public.views.helpers.main_content_view import MainContentView
 
@@ -251,26 +251,45 @@ class PodcastEditView(LoginRequiredMixin, UpdateView, MainContentView):
         return reverse("podcast:detail", kwargs={"slug": self.object.slug})
 
 
-class EpisodeCreateView(LoginRequiredMixin, UserPassesTestMixin, View):
-    """Create a bare draft Episode with UUID slug and redirect to workflow step 1."""
+class EpisodeCreateView(
+    LoginRequiredMixin, UserPassesTestMixin, CreateView, MainContentView
+):
+    """Create a draft Episode with title, description, and tags before starting workflow."""
+
+    model = Episode
+    form_class = EpisodeForm
+    template_name = "podcast/episode_create.html"
 
     def test_func(self) -> bool:
         return self.request.user.is_staff
 
-    def get(self, request, slug: str, *args, **kwargs) -> HttpResponseRedirect:
-        return HttpResponseRedirect(reverse("podcast:detail", kwargs={"slug": slug}))
+    def get_context_data(self, **kwargs):
+        context = super().get_context_data(**kwargs)
+        podcast = get_object_or_404(Podcast, slug=self.kwargs["slug"])
+        context["podcast"] = podcast
+        context["title"] = f"New Episode: {podcast.title}"
+        # MainContentView expects base_template to be set
+        context.setdefault("base_template", self.base_template)
+        return context
 
-    def post(self, request, slug: str, *args, **kwargs) -> HttpResponseRedirect:
-        podcast = get_object_or_404(Podcast, slug=slug)
-        episode = Episode.objects.create(
-            podcast=podcast,
-            title="Untitled Episode",
-            slug=uuid4().hex[:12],
-            status="draft",
+    def form_valid(self, form):
+        podcast = get_object_or_404(Podcast, slug=self.kwargs["slug"])
+        form.instance.podcast = podcast
+        form.instance.slug = uuid4().hex[:12]
+        form.instance.status = "draft"
+        response = super().form_valid(form)
+        messages.success(
+            self.request,
+            f'Episode "{form.instance.title}" created. Configure and start the pipeline below.',
         )
-        return HttpResponseRedirect(
-            reverse(
-                "podcast:episode_workflow",
-                kwargs={"slug": slug, "episode_slug": episode.slug, "step": 1},
-            )
+        return response
+
+    def get_success_url(self):
+        return reverse(
+            "podcast:episode_workflow",
+            kwargs={
+                "slug": self.object.podcast.slug,
+                "episode_slug": self.object.slug,
+                "step": 1,
+            },
         )

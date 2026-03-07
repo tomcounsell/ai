@@ -1,0 +1,94 @@
+{% extends base_template %}
+
+{% block title %}New Episode: {{ podcast.title }}{% endblock %}
+
+{% block content_width %}8{% endblock %}
+
+{% block main_header %}
+<div>
+  <nav class="text-sm text-gray-500 mb-2 font-mono">
+    <a href="{% url 'podcast:list' %}" class="hover:text-gray-700">Podcasts</a>
+    <span class="mx-1">/</span>
+    <a href="{% url 'podcast:detail' slug=podcast.slug %}" class="hover:text-gray-700">{{ podcast.title }}</a>
+    <span class="mx-1">/</span>
+    <span class="text-gray-900">New Episode</span>
+  </nav>
+  <h1 class="text-3xl font-bold tracking-tight text-gray-900">Create Episode</h1>
+  <p class="text-sm text-gray-600 mt-2">Set the title and topic before starting the research pipeline.</p>
+</div>
+{% endblock %}
+
+{% block content %}
+<form method="post" class="max-w-2xl">
+  {% csrf_token %}
+
+  {% if form.non_field_errors %}
+  <div class="bg-red-50 border border-red-300 p-4 mb-6">
+    <p class="text-sm text-red-800 font-medium">Please correct the errors below:</p>
+    <ul class="mt-1 text-sm text-red-700 list-disc list-inside">
+      {% for error in form.non_field_errors %}
+      <li>{{ error }}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  <!-- Episode Details -->
+  <div class="space-y-6 mb-8">
+    <h2 class="font-mono text-sm font-semibold text-gray-500 uppercase tracking-wider">Episode Details</h2>
+
+    <div>
+      <label for="{{ form.title.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">
+        {{ form.title.label }} <span class="text-red-600">*</span>
+      </label>
+      <input type="text" name="title" id="{{ form.title.id_for_label }}"
+             value="{{ form.title.value|default:'' }}"
+             class="input-brand w-full"
+             required
+             maxlength="200"
+             placeholder="e.g. The Future of AI Alignment">
+      {% if form.title.errors %}
+      <p class="text-red-600 text-sm mt-1">{{ form.title.errors.0 }}</p>
+      {% endif %}
+    </div>
+
+    <div>
+      <label for="{{ form.description.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">
+        {{ form.description.label }} <span class="text-red-600">*</span>
+      </label>
+      <textarea name="description" id="{{ form.description.id_for_label }}"
+                rows="6"
+                class="input-brand w-full"
+                required
+                placeholder="Describe what this episode should cover. This becomes the research prompt for the AI pipeline.">{{ form.description.value|default:'' }}</textarea>
+      {% if form.description.help_text %}
+      <p class="text-xs text-gray-500 font-mono mt-1">{{ form.description.help_text }}</p>
+      {% endif %}
+      {% if form.description.errors %}
+      <p class="text-red-600 text-sm mt-1">{{ form.description.errors.0 }}</p>
+      {% endif %}
+    </div>
+
+    <div>
+      <label for="{{ form.tags.id_for_label }}" class="block text-sm font-medium text-gray-700 mb-1">
+        {{ form.tags.label }}
+      </label>
+      <input type="text" name="tags" id="{{ form.tags.id_for_label }}"
+             value="{{ form.tags.value|default:'' }}"
+             class="input-brand w-full"
+             placeholder="e.g. AI, productivity, deep-dive">
+      <p class="text-xs text-gray-500 font-mono mt-1">Optional. Comma-separated tags for categorization.</p>
+      {% if form.tags.errors %}
+      <p class="text-red-600 text-sm mt-1">{{ form.tags.errors.0 }}</p>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Actions -->
+  <div class="flex items-center justify-between border-t border-gray-200 pt-6">
+    <a href="{% url 'podcast:detail' slug=podcast.slug %}"
+       class="text-sm font-mono text-gray-600 hover:text-gray-800">Cancel</a>
+    <button type="submit" class="btn-brand">Create Episode</button>
+  </div>
+</form>
+{% endblock %}
