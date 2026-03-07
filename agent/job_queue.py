@@ -1220,6 +1220,20 @@ async def _execute_job(job: Job) -> None:
     )
 
     async def send_to_chat(msg: str) -> None:
+        """Route agent output to the user or auto-continue the pipeline.
+
+        Decision tree for SDLC jobs:
+        1. Failed stage -> deliver immediately
+        2. Stages remaining + PLAN stage + open questions -> deliver (pause for input)
+        3. Stages remaining + error prose -> fall through to classifier
+        4. Stages remaining + no issues -> auto-continue
+        5. All stages done -> classifier-based routing
+
+        The open question gate (step 2) extracts questions from '## Open Questions'
+        sections and pauses the pipeline so the human can answer design decisions
+        before BUILD proceeds. Only active during the PLAN stage to avoid false
+        positives from quoted plan content in later stages.
+        """
         nonlocal agent_session  # Re-read from Redis for fresh stage data
 
         if not send_cb:

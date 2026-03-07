@@ -115,13 +115,15 @@ Is SDLC job? (classification_type == "sdlc" OR [stage] entries in history)
 
 ### Open Question Gate
 
-Before auto-continuing on the stage-aware path, the system checks for `## Open Questions` sections in the agent output using `_extract_open_questions()` from `bridge/summarizer.py`. If substantive questions are found, the output falls through to the classifier/deliver path instead of auto-continuing. This ensures the human can answer design decisions before BUILD proceeds.
+Before auto-continuing on the stage-aware path during the **PLAN stage**, the system checks for `## Open Questions` sections in the agent output using `_extract_open_questions()` from `bridge/summarizer.py`. If substantive questions are found, the output falls through to the classifier/deliver path instead of auto-continuing. This ensures the human can answer design decisions before BUILD proceeds.
+
+The gate is scoped to the PLAN stage only (determined via `agent_session.get_stage_progress()`). During BUILD, TEST, REVIEW, and DOCS stages, the gate is bypassed to avoid false positives from quoted plan content in status reports.
 
 The gate works at two levels (defense in depth):
-1. **`agent/job_queue.py`**: Before auto-continuing, extracts open questions from the output. If found, falls through to deliver path.
+1. **`agent/job_queue.py`**: During PLAN stage, extracts open questions from the output. If found, falls through to deliver path. During other stages, skips extraction entirely.
 2. **`bridge/summarizer.py`**: When summarizing, `summarize_response()` detects `## Open Questions` sections and populates the `expectations` field with extracted questions. LLM-detected expectations take priority.
 
-The `_extract_open_questions()` function extracts list items (numbered or bulleted) from `## Open Questions` sections. It handles edge cases: empty sections, placeholder text (TBD, TODO, N/A), whitespace-only sections, and malformed markdown. Only substantive items are treated as questions.
+The `_extract_open_questions()` function extracts list items (numbered or bulleted) from `## Open Questions` sections. It skips resolved/answered sections (headings like `## Open Questions (Resolved)`). It handles edge cases: empty sections, placeholder text (TBD, TODO, N/A), whitespace-only sections, and malformed markdown. Only substantive items are treated as questions.
 
 ### Stage-Aware Error Guard
 
