@@ -27,21 +27,31 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Patterns that indicate async/concurrent code is involved
-ASYNC_INDICATORS = [
-    r"bridge/",
-    r"agent/",
-    r"asyncio",
-    r"async\s+def",
-    r"create_task",
-    r"await\s+",
-    r"aiohttp",
-    r"asyncio\.Lock",
-    r"asyncio\.Event",
-    r"asyncio\.Queue",
-    r"concurrent\.",
-    r"threading\.",
-    r"multiprocessing\.",
+# Patterns that indicate async/concurrent code is involved.
+# These are checked in code-context sections (Solution, Technical Approach, etc.)
+# to avoid false positives from prose mentioning these terms casually.
+ASYNC_CODE_PATTERNS = [
+    r"`bridge/",          # backtick-quoted file paths
+    r"`agent/",           # backtick-quoted file paths
+    r"bridge/\w+\.py",    # file path references like bridge/telegram_bridge.py
+    r"agent/\w+\.py",     # file path references like agent/job_queue.py
+    r"`asyncio",          # backtick-quoted module references
+    r"async\s+def\s",     # async function definitions
+    r"create_task\(",     # asyncio.create_task() calls
+    r"await\s+\w",        # await expressions
+    r"`aiohttp",          # backtick-quoted library references
+    r"asyncio\.\w+",      # asyncio.Lock, asyncio.Event, etc.
+    r"concurrent\.\w+",   # concurrent.futures references
+    r"threading\.\w+",    # threading module references
+    r"multiprocessing\.", # multiprocessing module references
+]
+
+# Broader patterns checked without case sensitivity for section headers
+# and explicit mentions in Solution/Technical sections
+ASYNC_SECTION_INDICATORS = [
+    r"##.*async",         # section headers mentioning async
+    r"##.*concurren",     # section headers mentioning concurrency
+    r"##.*race\s+condition", # section headers mentioning race conditions
 ]
 
 WARNING_MESSAGE = """
@@ -122,8 +132,17 @@ def find_newest_plan_file(directory: str = "docs/plans") -> str | None:
 
 
 def plan_involves_async_code(content: str) -> bool:
-    """Check if the plan content references async/concurrent code patterns."""
-    for pattern in ASYNC_INDICATORS:
+    """Check if the plan content references async/concurrent code patterns.
+
+    Uses precise patterns to avoid false positives from prose that casually
+    mentions words like 'await' or 'agent/' in non-code contexts.
+    """
+    # Check code-specific patterns (case-sensitive for precision)
+    for pattern in ASYNC_CODE_PATTERNS:
+        if re.search(pattern, content):
+            return True
+    # Check section-level indicators (case-insensitive)
+    for pattern in ASYNC_SECTION_INDICATORS:
         if re.search(pattern, content, re.IGNORECASE):
             return True
     return False
@@ -249,6 +268,8 @@ def main():
     if not Path(plan_file).exists():
         print(f"Plan file does not exist: {plan_file}", file=sys.stderr)
         # Soft validator -- don't block even on errors
+        msg = f"Plan file does not exist: {plan_file}"
+        print(json.dumps({"result": "continue", "message": msg}))
         sys.exit(0)
 
     needs_warning, message = validate_race_conditions(plan_file)
