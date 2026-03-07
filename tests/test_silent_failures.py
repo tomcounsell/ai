@@ -36,12 +36,12 @@ class TestPushJobLogging:
     @pytest.mark.asyncio
     async def test_lifecycle_transition_failure_logs_warning(self, caplog, redis_test_db):
         """When log_lifecycle_transition raises, a warning is emitted."""
+        import time
+
         from models.agent_session import AgentSession
 
         # Create a session that will trigger the lifecycle logging path
-        import time
-
-        session = AgentSession.create(
+        AgentSession.create(
             session_id="test-push-lifecycle",
             project_key="test-project",
             status="pending",
@@ -88,12 +88,12 @@ class TestPopJobLogging:
     @pytest.mark.asyncio
     async def test_lifecycle_transition_failure_logs_warning(self, caplog, redis_test_db):
         """When log_lifecycle_transition raises during pop, a warning is emitted."""
-        from models.agent_session import AgentSession
-
         import time
 
+        from models.agent_session import AgentSession
+
         # Create a pending session for the worker to pop
-        session = AgentSession.create(
+        AgentSession.create(
             session_id="test-pop-lifecycle",
             project_key="test-pop-project",
             status="pending",
@@ -107,8 +107,6 @@ class TestPopJobLogging:
         )
 
         # Patch lifecycle method to raise after pop
-        original_log = AgentSession.log_lifecycle_transition
-
         def failing_log(self, *args, **kwargs):
             raise Exception("Redis timeout on lifecycle log")
 
@@ -124,8 +122,11 @@ class TestPopJobLogging:
         assert job is not None
         # Verify warning was logged
         warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
-        assert any("lifecycle" in r.message.lower() or "test-pop" in r.message for r in warning_records), (
-            f"Expected warning about lifecycle transition, got: {[r.message for r in warning_records]}"
+        assert any(
+            "lifecycle" in r.message.lower() or "test-pop" in r.message for r in warning_records
+        ), (
+            f"Expected warning about lifecycle transition, got: "
+            f"{[r.message for r in warning_records]}"
         )
 
 
@@ -135,11 +136,11 @@ class TestEnqueueContinuationPlanResolutionLogging:
     @pytest.mark.asyncio
     async def test_workflow_state_failure_logs_warning(self, caplog, redis_test_db):
         """When WorkflowState.load raises, a warning is emitted with workflow_id."""
-        from models.agent_session import AgentSession
-
         import time
 
-        session = AgentSession.create(
+        from models.agent_session import AgentSession
+
+        AgentSession.create(
             session_id="test-plan-resolve",
             project_key="test-project",
             status="running",
@@ -195,8 +196,8 @@ class TestLoadCooldownsLogging:
 
     def test_file_read_failure_logs_warning(self, caplog, tmp_path):
         """When cooldown file read fails, a warning is emitted."""
-        from agent.job_queue import _load_cooldowns
         import agent.job_queue as jq
+        from agent.job_queue import _load_cooldowns
 
         # Save and replace the cooldown file path
         original = jq._COOLDOWN_FILE
@@ -225,8 +226,8 @@ class TestSaveCooldownsLogging:
 
     def test_file_write_failure_logs_warning(self, caplog):
         """When cooldown file write fails, a warning is emitted."""
-        from agent.job_queue import _save_cooldowns
         import agent.job_queue as jq
+        from agent.job_queue import _save_cooldowns
 
         original = jq._COOLDOWN_FILE
         # Point to a path that can't be written (permission denied simulation)
@@ -248,27 +249,42 @@ class TestSaveCooldownsLogging:
 class TestCheckRevivalBranchLogging:
     """Tests that check_revival logs warnings on branch existence check failures."""
 
-    def test_branch_check_failure_logs_warning(self, caplog):
+    def test_branch_check_failure_logs_warning(self, caplog, redis_test_db):
         """When subprocess fails checking branch existence, a warning is emitted."""
+        import time as _time
+
         from agent.job_queue import check_revival
+        from models.agent_session import AgentSession
+
+        # Create a session in Redis that belongs to this chat so the branch
+        # list is populated (check_revival queries Redis first, then verifies
+        # branches with git subprocess)
+        AgentSession.create(
+            session_id="revival-test-session",
+            project_key="test-revival-project",
+            status="running",
+            chat_id="chat_revival",
+            sender_name="Test",
+            created_at=_time.time(),
+            message_text="test",
+            working_dir="/tmp/nonexistent",
+            message_id=99,
+            priority="normal",
+        )
 
         with (
-            patch("agent.job_queue.get_branch_state") as mock_branch_state,
+            patch("agent.job_queue._load_cooldowns", return_value={}),
             patch("subprocess.run", side_effect=Exception("git not found")),
             caplog.at_level(logging.WARNING, logger="agent.job_queue"),
         ):
-            mock_branch_state.return_value = {
-                "branches": ["session/test-branch"],
-                "last_modified": "2026-03-07T00:00:00",
-            }
-
             result = check_revival(
-                project_key="test-project",
+                project_key="test-revival-project",
                 working_dir="/tmp/nonexistent",
-                chat_id="chat_test",
+                chat_id="chat_revival",
             )
 
-        # check_revival should still return a result (may be None if no valid branches)
+        # check_revival should return None (branch check failed, no valid branches)
+        assert result is None
         # The key assertion is that the warning was logged
         warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert any("branch" in r.message.lower() for r in warning_records), (
@@ -282,12 +298,13 @@ class TestNoSilentPassRemaining:
     def test_no_bare_pass_in_critical_functions(self):
         """Critical functions should not have bare 'except Exception: pass'."""
         import inspect
+
         from agent.job_queue import (
-            _push_job,
-            _pop_job,
             _enqueue_continuation,
             _execute_job,
             _load_cooldowns,
+            _pop_job,
+            _push_job,
             _save_cooldowns,
             check_revival,
         )

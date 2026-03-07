@@ -18,8 +18,6 @@ import subprocess
 import sys
 from unittest.mock import MagicMock
 
-import pytest
-
 # Mock the claude_agent_sdk before agent package tries to import it
 if "claude_agent_sdk" not in sys.modules:
     _mock_sdk = MagicMock()
@@ -46,9 +44,14 @@ class TestBuildOutputVerification:
             ["git", "commit", "--allow-empty", "-m", "initial"],
             cwd=tmp_path,
             capture_output=True,
-            env={"GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@test.com",
-                 "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@test.com",
-                 "HOME": str(tmp_path), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+            env={
+                "GIT_AUTHOR_NAME": "test",
+                "GIT_AUTHOR_EMAIL": "test@test.com",
+                "GIT_COMMITTER_NAME": "test",
+                "GIT_COMMITTER_EMAIL": "test@test.com",
+                "HOME": str(tmp_path),
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            },
         )
 
         # Check commit count on current branch vs HEAD (no divergence)
@@ -77,19 +80,25 @@ class TestBuildOutputVerification:
         subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True, env=env)
         subprocess.run(
             ["git", "commit", "--allow-empty", "-m", "initial"],
-            cwd=tmp_path, capture_output=True, env=env,
+            cwd=tmp_path,
+            capture_output=True,
+            env=env,
         )
 
         # Create session branch with a commit
         subprocess.run(
             ["git", "checkout", "-b", "session/test-build"],
-            cwd=tmp_path, capture_output=True, env=env,
+            cwd=tmp_path,
+            capture_output=True,
+            env=env,
         )
         (tmp_path / "new_file.py").write_text("# test")
         subprocess.run(["git", "add", "."], cwd=tmp_path, capture_output=True, env=env)
         subprocess.run(
             ["git", "commit", "-m", "add test file"],
-            cwd=tmp_path, capture_output=True, env=env,
+            cwd=tmp_path,
+            capture_output=True,
+            env=env,
         )
 
         # Count commits on session branch vs main
@@ -111,8 +120,7 @@ class TestBuildOutputVerification:
         with caplog.at_level(logging.WARNING):
             # Simulate the warning that /do-build should emit
             logging.getLogger("agent.job_queue").warning(
-                f"BUILD WARNING: No commits on {branch}. "
-                f"Builder agents produced no code changes."
+                f"BUILD WARNING: No commits on {branch}. Builder agents produced no code changes."
             )
 
         assert any("BUILD WARNING" in r.message for r in caplog.records)
