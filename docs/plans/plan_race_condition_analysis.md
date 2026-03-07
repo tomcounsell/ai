@@ -4,7 +4,7 @@ type: chore
 appetite: Small
 owner: Valor
 created: 2026-03-07
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/282
 ---
 
 # Require Race Condition Analysis in Plans
