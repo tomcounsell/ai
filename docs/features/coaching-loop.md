@@ -76,7 +76,10 @@ Is SDLC job? (classification_type == "sdlc" OR [stage] entries in history)
     +-- YES: Stage-Aware Path
     |     |
     |     +-- Has failed stage? --> Deliver to user immediately
-    |     +-- Stages remaining? --> Auto-continue (skip classifier)
+    |     +-- Stages remaining?
+    |     |     +-- Open questions detected? --> Deliver to user (pause for input)
+    |     |     +-- Error prose detected?    --> Fall through to Classifier Path
+    |     |     +-- Otherwise                --> Auto-continue (skip classifier)
     |     +-- All stages done?  --> Fall through to Classifier Path
     |
     +-- NO: Classifier Path
@@ -99,7 +102,8 @@ Is SDLC job? (classification_type == "sdlc" OR [stage] entries in history)
 
 | Pipeline state | Output classification | Action |
 |---|---|---|
-| Stages remaining, no error prose | (skipped) | Auto-continue |
+| Stages remaining, open questions detected | (skipped) | Deliver to user (pause for human input) |
+| Stages remaining, no error prose, no open questions | (skipped) | Auto-continue |
 | Stages remaining, error prose detected | ERROR/BLOCKER (heuristic) | Fall through to classifier |
 | All stages done | Completion | Deliver to user |
 | All stages done | Status (no evidence) | Coach + continue |
@@ -108,6 +112,16 @@ Is SDLC job? (classification_type == "sdlc" OR [stage] entries in history)
 | No stages (non-SDLC) | Completion (Q&A answer) | Deliver to user |
 | No stages (non-SDLC) | Status + planning language | Auto-continue |
 | No stages (non-SDLC) | Status + substantive content | Deliver to user |
+
+### Open Question Gate
+
+Before auto-continuing on the stage-aware path, the system checks for `## Open Questions` sections in the agent output using `_extract_open_questions()` from `bridge/summarizer.py`. If substantive questions are found, the output falls through to the classifier/deliver path instead of auto-continuing. This ensures the human can answer design decisions before BUILD proceeds.
+
+The gate works at two levels (defense in depth):
+1. **`agent/job_queue.py`**: Before auto-continuing, extracts open questions from the output. If found, falls through to deliver path.
+2. **`bridge/summarizer.py`**: When summarizing, `summarize_response()` detects `## Open Questions` sections and populates the `expectations` field with extracted questions. LLM-detected expectations take priority.
+
+The `_extract_open_questions()` function extracts list items (numbered or bulleted) from `## Open Questions` sections. It handles edge cases: empty sections, placeholder text (TBD, TODO, N/A), whitespace-only sections, and malformed markdown. Only substantive items are treated as questions.
 
 ### Stage-Aware Error Guard
 
@@ -190,9 +204,9 @@ This replaces the previous `nonlocal` closure variables (`_defer_reaction`, `_co
 
 | File | Purpose |
 |------|---------|
-| `bridge/summarizer.py` | LLM classifier, heuristic fallback, confidence gate, approval gate patterns, audit log |
+| `bridge/summarizer.py` | LLM classifier, heuristic fallback, confidence gate, approval gate patterns, open question extraction, audit log |
 | `bridge/coach.py` | Tiered coaching resolution via `build_coaching_message()` |
-| `agent/job_queue.py` | Auto-continue wiring, `SendToChatResult` state, stage-aware routing + error guard, WorkflowState resolution |
+| `agent/job_queue.py` | Auto-continue wiring, `SendToChatResult` state, stage-aware routing + open question gate + error guard, WorkflowState resolution |
 | `models/agent_session.py` | `AgentSession` with `is_sdlc_job()`, `has_remaining_stages()`, `has_failed_stage()` helpers |
 | `agent/sdk_client.py` | Session cleanup on SDK errors (marks sessions as `failed`) |
 | `monitoring/session_watchdog.py` | Stale session detection with unique constraint handling |
@@ -203,6 +217,7 @@ This replaces the previous `nonlocal` closure variables (`_defer_reaction`, `_co
 | `tests/test_stage_aware_auto_continue.py` | Stage-aware decision matrix tests (32 tests) |
 | `tests/test_enqueue_continuation.py` | `_enqueue_continuation` tests (coaching source, parameters, plan resolution) |
 | `tests/test_cross_wire_fixes.py` | Cross-wire bug fix tests: classifier Q&A, session isolation, planning language guard |
+| `tests/test_open_question_gate.py` | Open question extraction and stage-aware gate behavior tests (28 tests) |
 
 ## Tuning Guide
 
