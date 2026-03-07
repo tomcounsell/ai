@@ -255,13 +255,20 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
         return self.render(request)
 
     def post(self, request, slug: str, episode_slug: str, step: int, *args, **kwargs):
-        """Handle pipeline actions: start, resume, or retry.
+        """Handle pipeline actions: start, resume, retry, or audio upload.
+
+        Also handles audio file uploads for step 9 when action=upload_audio.
 
         Determines the correct action from the workflow state and enqueues
         the appropriate task(s). Returns HX-Redirect for HTMX clients or
         a standard redirect for regular form submissions.
         """
         podcast, episode = self._load_context(request, slug, episode_slug, step)
+
+        # Handle audio upload for step 9
+        if request.POST.get("action") == "upload_audio" and step == 9:
+            return self._handle_audio_upload(request, episode, slug, episode_slug, step)
+
         button_state = self.context["button_state"]
 
         if not button_state.get("show") or button_state.get("disabled"):
@@ -361,6 +368,55 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
         return HttpResponse(
             '<span class="text-green-600"><i class="fas fa-check-circle"></i> Saved</span>'
         )
+
+    def _handle_audio_upload(
+        self, request, episode: Episode, slug: str, episode_slug: str, step: int
+    ) -> HttpResponse:
+        """Handle audio file upload for step 9.
+
+        Saves the uploaded file to Supabase storage and sets Episode.audio_url.
+        """
+        from apps.common.services.storage import store_file
+
+        audio_file = request.FILES.get("audio_file")
+        if not audio_file:
+            logger.warning(
+                "Audio upload requested but no file provided for episode %d", episode.pk
+            )
+            return self._redirect(slug, episode_slug, step)
+
+        try:
+            # Detect content type from file extension
+            file_name = audio_file.name.lower()
+            if file_name.endswith(".mp3"):
+                content_type = "audio/mpeg"
+            elif file_name.endswith(".wav"):
+                content_type = "audio/wav"
+            elif file_name.endswith(".m4a"):
+                content_type = "audio/mp4"
+            else:
+                content_type = "audio/mpeg"  # Default
+
+            # Read file content
+            file_content = audio_file.read()
+
+            # Store in Supabase: podcast/{slug}/{episode_slug}/audio.mp3
+            storage_key = f"podcast/{slug}/{episode_slug}/audio.mp3"
+            audio_url = store_file(storage_key, file_content, content_type, public=True)
+
+            # Update episode
+            episode.audio_url = audio_url
+            episode.save(update_fields=["audio_url"])
+
+            logger.info(
+                "Audio uploaded for episode %d: %s (%.2f MB)",
+                episode.pk,
+                audio_url,
+                len(file_content) / (1024 * 1024),
+            )
+
+        except Exception:
+            logger.exception("Failed to upload audio for episode %d", episode.pk)
 
     def _redirect(self, slug: str, episode_slug: str, step: int) -> HttpResponse:
         """Return HX-Redirect for HTMX or standard redirect."""

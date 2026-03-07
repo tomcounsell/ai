@@ -156,6 +156,45 @@
 </div>
 {% endif %}
 
+<!-- Audio upload form (step 9 only, when paused and no audio) -->
+{% if current_step == 9 and button_state.label == "Resume Pipeline" and not episode.audio_url %}
+<div class="mb-6 px-4 py-4 border border-blue-200 bg-blue-50">
+  <p class="text-sm text-gray-700 mb-3 font-mono">
+    <i class="fas fa-info-circle text-blue-500 mr-1"></i>
+    Waiting for audio generation. You can manually upload an audio file to continue.
+  </p>
+  <form method="post"
+        enctype="multipart/form-data"
+        action="{% url 'podcast:episode_workflow' slug=podcast.slug episode_slug=episode.slug step=current_step %}"
+        class="space-y-3">
+    {% csrf_token %}
+    <input type="hidden" name="action" value="upload_audio">
+    <div>
+      <label class="block text-sm font-medium text-gray-700 mb-1">Audio File</label>
+      <input type="file" name="audio_file" accept=".mp3,.wav,.m4a" required
+             class="block w-full text-sm text-gray-900 border border-gray-300 cursor-pointer bg-white focus:outline-none">
+    </div>
+    <button type="submit" class="px-4 py-2 bg-blue-600 text-white text-sm font-medium hover:bg-blue-700">
+      <i class="fas fa-upload mr-1"></i> Upload Audio
+    </button>
+  </form>
+</div>
+{% endif %}
+
+<!-- Audio preview (when audio exists) -->
+{% if current_step == 9 and episode.audio_url %}
+<div class="mb-6 px-4 py-4 border border-green-200 bg-green-50">
+  <p class="text-sm text-green-800 mb-2 font-mono">
+    <i class="fas fa-check-circle text-green-600 mr-1"></i>
+    Audio file ready
+  </p>
+  <audio controls class="w-full">
+    <source src="{{ episode.audio_url }}" type="audio/mpeg">
+    Your browser does not support the audio element.
+  </audio>
+</div>
+{% endif %}
+
 <!-- Pipeline action button -->
 {% if button_state.show %}
 <div class="mb-6 px-3 py-3 border border-gray-200 bg-gray-50">
