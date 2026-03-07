@@ -265,13 +265,6 @@ async def get_agent_response(
 # Retry with Self-Healing
 # =============================================================================
 
-# How long to wait before sending "I'm working on this" acknowledgment
-# Only sends if no message has been sent to the chat yet
-ACKNOWLEDGMENT_TIMEOUT_SECONDS = 180  # 3 minutes
-
-# Message to send when work is taking a while
-ACKNOWLEDGMENT_MESSAGE = "I'm working on this."
-
 # Retry configuration
 MAX_RETRIES = 3
 RETRY_DELAYS = [5, 15, 30]  # Seconds between retries

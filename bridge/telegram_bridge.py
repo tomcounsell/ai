@@ -383,8 +383,6 @@ _agents_module.DEFAULTS = DEFAULTS
 _agents_module._BRIDGE_PROJECT_DIR = _BRIDGE_PROJECT_DIR
 
 from bridge.agents import (  # noqa: E402
-    ACKNOWLEDGMENT_MESSAGE,  # noqa: F401
-    ACKNOWLEDGMENT_TIMEOUT_SECONDS,  # noqa: F401
     MAX_RETRIES,  # noqa: F401
     RETRY_DELAYS,  # noqa: F401
     _detect_issue_number,  # noqa: F401

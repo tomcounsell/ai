@@ -25,7 +25,7 @@ class MessageRecord:
 
     content: str
     timestamp: datetime
-    message_type: str = "result"  # "result", "acknowledgment", "error"
+    message_type: str = "result"  # "result", "error"
 
 
 @dataclass
@@ -47,16 +47,13 @@ class BossMessenger:
     # Track sent messages
     messages_sent: list[MessageRecord] = field(default_factory=list)
 
-    # Flag to track if we've sent an acknowledgment
-    acknowledgment_sent: bool = False
-
     async def send(self, message: str, message_type: str = "result") -> bool:
         """
         Send a message to the supervisor.
 
         Args:
             message: The message content to send
-            message_type: Type of message ("result", "acknowledgment", "error")
+            message_type: Type of message ("result", "error")
 
         Returns:
             True if sent successfully, False otherwise
@@ -85,24 +82,6 @@ class BossMessenger:
             logger.error(f"[{self.session_id}] Failed to send message: {e}")
             return False
 
-    async def send_acknowledgment(self, message: str = "I'm working on this.") -> bool:
-        """
-        Send a one-time acknowledgment that work is in progress.
-
-        Only sends if no messages have been sent yet.
-
-        Returns:
-            True if sent, False if already acknowledged or error
-        """
-        if self.acknowledgment_sent or self.messages_sent:
-            logger.debug(
-                f"[{self.session_id}] Skipping acknowledgment - already communicated"
-            )
-            return False
-
-        self.acknowledgment_sent = True
-        return await self.send(message, message_type="acknowledgment")
-
     def has_communicated(self) -> bool:
         """Check if any message has been sent to the supervisor."""
         return len(self.messages_sent) > 0
@@ -120,7 +99,7 @@ class BackgroundTask:
 
     Handles:
     - Launching agent work without blocking
-    - Sending acknowledgment if work takes > timeout
+    - Internal health logging if work takes > timeout
     - Sending final result when complete
     """
 
@@ -128,11 +107,9 @@ class BackgroundTask:
         self,
         messenger: BossMessenger,
         acknowledgment_timeout: float = 180.0,  # 3 minutes
-        acknowledgment_message: str = "I'm working on this.",
     ):
         self.messenger = messenger
         self.acknowledgment_timeout = acknowledgment_timeout
-        self.acknowledgment_message = acknowledgment_message
 
         self._task: asyncio.Task | None = None
         self._watchdog_task: asyncio.Task | None = None
@@ -188,21 +165,25 @@ class BackgroundTask:
 
     async def _watchdog(self) -> None:
         """
-        Watch for timeout and send acknowledgment if needed.
+        Internal health check watchdog.
 
-        Waits for acknowledgment_timeout seconds, then checks if any
-        message has been sent. If not, sends acknowledgment.
+        Waits for acknowledgment_timeout seconds, then logs if the task
+        is still running without having communicated. Does not send any
+        message to chat -- the hourglass reaction already signals progress.
         """
         try:
             await asyncio.sleep(self.acknowledgment_timeout)
 
-            # Check if we're still running and haven't communicated
+            # Log health check if still running and silent
             if (
                 self._task
                 and not self._task.done()
                 and not self.messenger.has_communicated()
             ):
-                await self.messenger.send_acknowledgment(self.acknowledgment_message)
+                logger.info(
+                    f"[{self.messenger.session_id}] Task running "
+                    f"{self.acknowledgment_timeout}s without output (health check)"
+                )
 
         except asyncio.CancelledError:
             # Normal cancellation when task completes
