@@ -175,11 +175,7 @@ class BackgroundTask:
             await asyncio.sleep(self.acknowledgment_timeout)
 
             # Log health check if still running and silent
-            if (
-                self._task
-                and not self._task.done()
-                and not self.messenger.has_communicated()
-            ):
+            if self._task and not self._task.done() and not self.messenger.has_communicated():
                 logger.info(
                     f"[{self.messenger.session_id}] Task running "
                     f"{self.acknowledgment_timeout}s without output (health check)"
