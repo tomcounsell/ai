@@ -128,8 +128,8 @@ No agent integration required -- this modifies the `/do-plan` skill template and
 ## Documentation
 
 ### Feature Documentation
-- [ ] Update `docs/features/README.md` index table with entry for upgraded plan skill
-- [ ] No standalone feature doc needed -- the plan template and SKILL.md are themselves the documentation
+- [ ] Create `docs/features/deep-plan-analysis.md` describing the new analytical sections
+- [ ] Update `docs/features/README.md` index table with entry for deep plan analysis
 
 ### Inline Documentation
 - [ ] Comments in PLAN_TEMPLATE.md explaining when each new section should be skipped
