@@ -60,6 +60,11 @@
           },
           {
             "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_features_readme_sort.py",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sdlc_reminder.py",
             "timeout": 10
           }
@@ -68,6 +73,11 @@
       {
         "matcher": "Edit",
         "hooks": [
+          {
+            "type": "command",
+            "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/validators/validate_features_readme_sort.py",
+            "timeout": 10
+          },
           {
             "type": "command",
             "command": "python \"$CLAUDE_PROJECT_DIR\"/.claude/hooks/sdlc_reminder.py",
