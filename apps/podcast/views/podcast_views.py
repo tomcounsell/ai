@@ -278,10 +278,19 @@ class EpisodeCreateView(
         context.setdefault("base_template", self.base_template)
         return context
 
+    def _generate_unique_slug(self, podcast) -> str:
+        """Generate a unique episode slug with retry on collision."""
+        for _ in range(5):
+            slug = uuid4().hex[:12]
+            if not Episode.objects.filter(podcast=podcast, slug=slug).exists():
+                return slug
+        # Fallback: use full uuid hex (32 chars) to virtually eliminate collision
+        return uuid4().hex
+
     def form_valid(self, form):
         podcast = get_object_or_404(Podcast, slug=self.kwargs["slug"])
         form.instance.podcast = podcast
-        form.instance.slug = uuid4().hex[:12]
+        form.instance.slug = self._generate_unique_slug(podcast)
         form.instance.status = "draft"
         response = super().form_valid(form)
         messages.success(

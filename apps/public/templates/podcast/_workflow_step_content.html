@@ -1,4 +1,4 @@
-{% if episode.status == 'complete' and current_step == 12 %}
+{% if episode.status == 'complete' and current_step == 12 and episode.published_at %}
 <!-- Success state: Episode published -->
 <div class="mb-6">
   <div class="flex items-center gap-3 mb-4">
