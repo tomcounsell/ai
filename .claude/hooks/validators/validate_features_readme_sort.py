@@ -243,19 +243,25 @@ def main():
     args = parser.parse_args()
 
     # Consume stdin if provided (Claude Code hooks pass context via stdin)
-    try:
-        stdin_data = json.load(sys.stdin)
-        # If invoked as a hook, check if the tool output path matches
-        tool_input = stdin_data.get("tool_input", {})
-        file_path = tool_input.get("file_path", "")
-        if file_path and "docs/features/README.md" not in file_path:
-            # Not our file, pass through
-            sys.exit(0)
-        # Use the file_path from hook context if available
-        if file_path and "docs/features/README.md" in file_path:
-            args.filepath = file_path
-    except (json.JSONDecodeError, EOFError, ValueError):
-        pass
+    # Use select to avoid blocking when no stdin is available
+    import select
+
+    if select.select([sys.stdin], [], [], 0.1)[0]:
+        try:
+            raw = sys.stdin.read()
+            if raw.strip():
+                stdin_data = json.loads(raw)
+                # If invoked as a hook, check if the tool output path matches
+                tool_input = stdin_data.get("tool_input", {})
+                file_path = tool_input.get("file_path", "")
+                if file_path and "docs/features/README.md" not in file_path:
+                    # Not our file, pass through
+                    sys.exit(0)
+                # Use the file_path from hook context if available
+                if file_path and "docs/features/README.md" in file_path:
+                    args.filepath = file_path
+        except (json.JSONDecodeError, EOFError, ValueError):
+            pass
 
     if args.fix:
         sys.exit(fix_mode(args.filepath))
