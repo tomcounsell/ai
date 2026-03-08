@@ -19,8 +19,22 @@ mkdir -p "$PROJECT_DIR/data"
 # ── Lockfile (mkdir is atomic on POSIX) ──────────────────────────────
 cleanup_lock() { rmdir "$LOCK_DIR" 2>/dev/null || true; }
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    echo "Another update is already running. Skipping."
-    exit 0
+    # Stale lock detection: if lock is older than 10 minutes, force-remove it.
+    # This prevents permanent lockout after crashes, OOM kills, or power loss.
+    if [ -d "$LOCK_DIR" ]; then
+        LOCK_AGE=$(( $(date +%s) - $(stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0) ))
+        if [ "$LOCK_AGE" -gt 600 ]; then
+            echo "Stale lock detected (${LOCK_AGE}s old). Removing."
+            rmdir "$LOCK_DIR" 2>/dev/null || rm -rf "$LOCK_DIR"
+            mkdir "$LOCK_DIR" 2>/dev/null || true
+        else
+            echo "Another update is already running. Skipping."
+            exit 0
+        fi
+    else
+        echo "Another update is already running. Skipping."
+        exit 0
+    fi
 fi
 trap cleanup_lock EXIT
 
