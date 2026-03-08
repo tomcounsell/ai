@@ -97,8 +97,8 @@ class AgentSession(Model):
     pr_url = Field(null=True)
 
     # === Stall retry fields ===
-    retry_count = Field(type=int, default=0)  # How many times this session has been retried after stall
-    last_stall_reason = Field(null=True)  # Diagnostic context from last stall detection
+    retry_count = Field(type=int, default=0)  # Stall retry attempt count
+    last_stall_reason = Field(null=True)  # Diagnostic context from last stall
 
     # === Semantic routing fields ===
     context_summary = Field(null=True, max_length=200)  # What this session is about
