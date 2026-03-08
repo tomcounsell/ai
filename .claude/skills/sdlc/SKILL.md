@@ -107,11 +107,20 @@ gh pr diff {pr_number} --stat | tail -1
 
 If ANY condition fails, stop and wait for human "merge" instruction as before.
 
-**IMPORTANT: PR reviews must be published on GitHub.** Before advancing past the REVIEW stage, verify a review exists on the PR:
+**IMPORTANT: PR reviews must be published on GitHub.** Before advancing past the REVIEW stage, verify a review or review comment exists on the PR:
 ```bash
-gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews --jq length
+# Check for formal reviews
+REVIEW_COUNT=$(gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews --jq length)
+
+# Check for review comments (used for self-authored PRs where gh pr review fails)
+COMMENT_COUNT=$(gh api repos/{owner}/{repo}/issues/{pr_number}/comments --jq '[.[] | select(.body | startswith("## Review:"))] | length')
+
+# At least one must exist
+if [ "$REVIEW_COUNT" -eq 0 ] && [ "$COMMENT_COUNT" -eq 0 ]; then
+  echo "No review found — re-invoking /do-pr-review"
+fi
 ```
-If the count is 0, re-invoke `/do-pr-review`. A review that only exists in agent output is NOT a review.
+If both counts are 0, re-invoke `/do-pr-review`. A review that only exists in agent output is NOT a review. For self-authored PRs, a comment starting with "## Review:" counts as a valid review.
 
 **IMPORTANT: Tech debt and nits get patched.** After REVIEW, if the review found ANY tech debt or nits, invoke `/do-patch` to fix them before proceeding to DOCS. Only skip the patch step if the review found zero issues (clean approval).
 
