@@ -8,6 +8,20 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
+# Ensure PATH includes common tool locations (launchd has minimal PATH)
+_EXTRA_PATHS = [
+    str(Path.home() / ".pyenv" / "shims"),
+    str(Path.home() / ".local" / "bin"),
+    str(Path.home() / "Library" / "Python" / "3.12" / "bin"),
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+]
+_current_path = os.environ.get("PATH", "")
+_missing = [p for p in _EXTRA_PATHS if p not in _current_path.split(":")]
+if _missing:
+    os.environ["PATH"] = ":".join(_missing) + ":" + _current_path
+
 
 @dataclass
 class ToolCheck:
