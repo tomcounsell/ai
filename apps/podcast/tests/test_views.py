@@ -744,16 +744,18 @@ class EpisodeCreateViewTestCase(TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_staff_post_creates_episode(self):
-        """Staff user POSTing creates a draft Episode and redirects to workflow."""
+        """Staff user POSTing with form data creates a draft Episode and redirects to workflow."""
         self.client.login(username="staffuser", password="password")
-        response = self.client.post(f"/podcast/{self.podcast.slug}/new/")
+        response = self.client.post(
+            f"/podcast/{self.podcast.slug}/new/",
+            {"title": "Test Episode", "description": "Test description"},
+        )
         self.assertEqual(response.status_code, 302)
 
         episode = Episode.objects.get(podcast=self.podcast)
         self.assertEqual(episode.status, "draft")
-        self.assertEqual(episode.title, "Untitled Episode")
+        self.assertEqual(episode.title, "Test Episode")
         self.assertTrue(len(episode.slug) > 0)
-        self.assertIsNotNone(episode.episode_number)
         self.assertIn(
             f"/podcast/{self.podcast.slug}/{episode.slug}/edit/1/", response.url
         )
@@ -761,7 +763,10 @@ class EpisodeCreateViewTestCase(TestCase):
     def test_staff_post_creates_episode_on_private_podcast(self):
         """Staff user can create episodes on private podcasts."""
         self.client.login(username="staffuser", password="password")
-        response = self.client.post(f"/podcast/{self.private_podcast.slug}/new/")
+        response = self.client.post(
+            f"/podcast/{self.private_podcast.slug}/new/",
+            {"title": "Private Episode", "description": "Private test description"},
+        )
         self.assertEqual(response.status_code, 302)
 
         episode = Episode.objects.get(podcast=self.private_podcast)

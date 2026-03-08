@@ -4,7 +4,7 @@ from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
 from django.db.models import Count, F, Max, Q
 from django.db.models.functions import Now
-from django.http import Http404, HttpResponse, HttpResponseRedirect
+from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.views import View
@@ -109,6 +109,7 @@ class PodcastDetailView(MainContentView):
             )
 
         self.context["is_owner"] = is_owner
+        self.context["is_staff"] = is_staff
         self.context["podcast"] = podcast
         self.context["episodes"] = published
         self.context["drafts"] = drafts
