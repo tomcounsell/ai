@@ -73,9 +73,45 @@ Where:
    - `impact_type="docs"` -> **Documentation** section
    - Tangentially coupled files (< 0.5 relevance) -> **Rabbit Holes** section
    Skip if the change is purely documentation or process-related.
-4. **Set appetite** - Small / Medium / Large (see `SCOPING.md` for sizing guidance)
-5. **Rough out solution** - Key components and flow, stay abstract
-6. **Race condition analysis** - If the solution involves async operations, shared mutable state,
+
+4. **Prior art search** - Search closed issues and merged PRs for related work. This prevents
+   proposing solutions that have already been tried (and failed) or re-solving problems that
+   already have working implementations.
+   ```bash
+   # Search closed issues for related keywords
+   gh issue list --state closed --search "KEYWORDS_HERE" --limit 10 --json number,title,closedAt,url
+   # Search merged PRs for related work
+   gh pr list --state merged --search "KEYWORDS_HERE" --limit 10 --json number,title,mergedAt,url
+   ```
+   Use results to fill the **Prior Art** section in the plan. If multiple prior attempts
+   addressed the same problem, also fill the **Why Previous Fixes Failed** section.
+   **Skip if:** Small appetite AND greenfield work (no existing code being modified).
+
+5. **Data flow trace** - For changes involving multi-component interactions, trace the data
+   flow end-to-end through the system. Start from the entry point (user action, API call,
+   event trigger) and follow through each component, transformation, and storage layer.
+   ```bash
+   # Read the entry point file
+   # Follow imports and function calls through the chain
+   # Document each transformation and handoff between components
+   ```
+   Use results to fill the **Data Flow** section in the plan. This is critical for changes
+   that span multiple modules -- it prevents fixes applied at the wrong layer.
+   **Skip if:** Change is isolated to a single file/function, or is purely documentation/config.
+
+6. **Failure analysis** - If the prior art search (step 4) found previous attempts to fix the
+   same problem, analyze why each attempt failed or was incomplete. Look for patterns:
+   - Was the root cause correctly identified?
+   - Was the fix applied at the right architectural layer?
+   - Did it address a symptom instead of the underlying cause?
+   - Did it introduce new problems while fixing the original?
+   Use results to fill the **Why Previous Fixes Failed** section (conditional -- only include
+   in the plan if prior failed fixes exist).
+   **Skip if:** No prior fixes found, or this is greenfield work.
+
+7. **Set appetite** - Small / Medium / Large (see `SCOPING.md` for sizing guidance)
+8. **Rough out solution** - Key components and flow, stay abstract
+9. **Race condition analysis** - If the solution involves async operations, shared mutable state,
    or cross-process data flows, identify timing hazards. For each: specify what data/state must
    be established before dependent operations read it, and how the implementation prevents races.
    Skip if the change is purely synchronous and single-threaded.

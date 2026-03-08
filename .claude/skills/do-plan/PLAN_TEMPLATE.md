@@ -19,6 +19,67 @@ tracking: [GitHub Issue URL or Notion page URL - added automatically]
 **Desired outcome:**
 [What success looks like]
 
+## Prior Art
+
+<!-- Search closed issues and merged PRs for related work before proposing solutions.
+     Skip for trivial changes (Small appetite, no-code, or clearly greenfield work). -->
+
+[Search results from `gh issue list --state closed` and `gh pr list --state merged` for related work.
+Include issue/PR numbers, what they attempted, and whether they succeeded or failed.
+If nothing found, state "No prior issues found related to this work."]
+
+- **[Issue/PR #N]**: [Title] -- [What it did, outcome, relevance to current work]
+- **[Issue/PR #N]**: [Title] -- [What it did, outcome, relevance to current work]
+
+## Data Flow
+
+<!-- Trace the end-to-end data flow through the components this change touches.
+     Skip for trivial changes or purely documentation/process work.
+     For multi-component features, trace from input to output across all boundaries. -->
+
+[Trace how data moves through the system for the feature/fix being planned.
+Start from the entry point (user action, API call, event) and follow through
+each component, transformation, and storage layer to the final output.]
+
+1. **Entry point**: [Where the data/action originates]
+2. **[Component]**: [What happens to the data here]
+3. **[Component]**: [What happens to the data here]
+4. **Output**: [Where and how the result is delivered]
+
+## Why Previous Fixes Failed
+
+<!-- CONDITIONAL: Only include this section if Prior Art search found previous attempts
+     to fix the same or similar problem. If this is greenfield work or no prior fixes
+     exist, delete this entire section.
+     This section prevents the pattern of repeated fixes that each address a symptom
+     without resolving the root cause. -->
+
+[For each prior attempt that failed or was incomplete, analyze WHY it failed.
+Look for patterns: Was the root cause misidentified? Was the fix applied at the
+wrong layer? Did it address a symptom instead of the cause?]
+
+| Prior Fix | What It Did | Why It Failed / Was Incomplete |
+|-----------|-------------|-------------------------------|
+| PR #N | [Description] | [Root cause analysis] |
+| PR #N | [Description] | [Root cause analysis] |
+
+**Root cause pattern:** [What underlying issue connects the repeated failures]
+
+## Architectural Impact
+
+<!-- Assess how this change affects the broader system architecture.
+     Skip for isolated changes with no cross-component effects.
+     Focus on: coupling changes, new dependencies, interface modifications,
+     and changes to data ownership or flow direction. -->
+
+[How does this change affect system architecture? Consider:]
+
+- **New dependencies**: [Any new imports, services, or libraries required]
+- **Interface changes**: [APIs, function signatures, or contracts that change]
+- **Coupling**: [Does this increase or decrease coupling between components?]
+- **Data ownership**: [Does this change which component owns or manages data?]
+- **Reversibility**: [How hard would it be to undo this change?]
+
 ## Appetite
 
 **Size:** [Small | Medium | Large]
