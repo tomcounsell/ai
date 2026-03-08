@@ -192,9 +192,18 @@ This step exists because of issue #181: a prior review hallucinated two "blocker
 
 ### 6. Post Review
 
+**First, detect if this is a self-authored PR:**
+```bash
+PR_AUTHOR=$(gh pr view {pr_number} --json author --jq .author.login)
+CURRENT_USER=$(gh api user --jq .login)
+SELF_AUTHORED=$( [ "$PR_AUTHOR" = "$CURRENT_USER" ] && echo "true" || echo "false" )
+```
+
+Self-authored PRs cannot use `gh pr review --approve` or `--request-changes` (GitHub rejects these). Use `gh pr comment` as fallback.
+
 **If blockers found:**
 ```bash
-gh pr review {pr_number} --request-changes --body "$(cat <<'EOF'
+REVIEW_BODY="$(cat <<'EOF'
 ## Review: Changes Requested
 
 [summary of blockers]
@@ -210,11 +219,17 @@ gh pr review {pr_number} --request-changes --body "$(cat <<'EOF'
 [screenshot references if captured]
 EOF
 )"
+
+if [ "$SELF_AUTHORED" = "true" ]; then
+  gh pr comment {pr_number} --body "$REVIEW_BODY"
+else
+  gh pr review {pr_number} --request-changes --body "$REVIEW_BODY"
+fi
 ```
 
 **If no blockers:**
 ```bash
-gh pr review {pr_number} --approve --body "$(cat <<'EOF'
+REVIEW_BODY="$(cat <<'EOF'
 ## Review: Approved
 
 [summary of review]
@@ -232,11 +247,39 @@ gh pr review {pr_number} --approve --body "$(cat <<'EOF'
 [screenshot references if captured]
 EOF
 )"
+
+if [ "$SELF_AUTHORED" = "true" ]; then
+  gh pr comment {pr_number} --body "$REVIEW_BODY"
+else
+  gh pr review {pr_number} --approve --body "$REVIEW_BODY"
+fi
 ```
 
-**After posting the review, fetch the review comment URL:**
+### 6.5. Verify Review Was Posted
+
+**Always verify the review or comment exists after posting:**
 ```bash
-gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews --jq '.[-1].html_url'
+# Check for formal reviews
+REVIEW_COUNT=$(gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews --jq length)
+
+# Check for comments (used for self-authored PRs)
+COMMENT_COUNT=$(gh api repos/{owner}/{repo}/issues/{pr_number}/comments --jq '[.[] | select(.body | startswith("## Review:"))] | length')
+
+if [ "$REVIEW_COUNT" -eq 0 ] && [ "$COMMENT_COUNT" -eq 0 ]; then
+  echo "WARNING: Review was not posted. Retrying as comment..."
+  gh pr comment {pr_number} --body "$REVIEW_BODY"
+fi
+```
+
+**After verification, fetch the review URL:**
+```bash
+# Try formal review URL first
+REVIEW_URL=$(gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews --jq '.[-1].html_url // empty')
+
+# Fall back to comment URL
+if [ -z "$REVIEW_URL" ]; then
+  REVIEW_URL=$(gh api repos/{owner}/{repo}/issues/{pr_number}/comments --jq '.[-1].html_url // empty')
+fi
 ```
 Save this URL as `{review_url}` for the output summary.
 
@@ -273,7 +316,7 @@ Save this URL as `{review_url}` for the output summary.
 
 ## Hard Rules
 
-1. **Reviews MUST be posted on GitHub.** A review that only exists in agent output is NOT a review. Always use `gh pr review` to post. The SDLC dispatcher verifies this before advancing.
+1. **Reviews MUST be posted on GitHub.** A review that only exists in agent output is NOT a review. Use `gh pr review` to post, or `gh pr comment` for self-authored PRs. Step 6.5 verifies posting succeeded. The SDLC dispatcher checks for both reviews and comments before advancing.
 2. **Tech debt and nits get patched.** After review, `/do-patch` fixes all tech debt and non-subjective nits before proceeding to docs/merge. Only purely subjective nits may be skipped — and that requires human approval.
 3. **Never approve and skip issues.** If you found tech debt or nits, they appear in the review body. The pipeline will patch them. Don't omit findings to make the review look clean.
 
