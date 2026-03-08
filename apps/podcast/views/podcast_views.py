@@ -305,21 +305,29 @@ class ArtifactContentView(LoginRequiredMixin, UserPassesTestMixin, View):
     """Return rendered artifact content as HTML fragment for HTMX."""
 
     def test_func(self) -> bool:
-        return self.request.user.is_staff
+        slug = self.kwargs.get("slug")
+        if not slug:
+            return False
+        podcast = get_object_or_404(Podcast, slug=slug)
+        return self.request.user.is_staff or podcast.owner == self.request.user
 
     def get(self, request, slug: str, episode_slug: str, artifact_id: int):
         podcast = get_object_or_404(Podcast, slug=slug)
         episode = get_object_or_404(Episode, podcast=podcast, slug=episode_slug)
         artifact = get_object_or_404(EpisodeArtifact, id=artifact_id, episode=episode)
 
-        # Convert markdown to HTML
+        # Convert markdown to HTML with sanitization
+        import re
+
         import markdown
 
+        # Strip any raw HTML tags from source to prevent XSS before markdown processing
+        clean_content = re.sub(r"<[^>]+>", "", artifact.content)
         html_content = markdown.markdown(
-            artifact.content, extensions=["fenced_code", "tables", "nl2br"]
+            clean_content, extensions=["fenced_code", "tables", "nl2br"]
         )
 
-        # Return as HTML fragment
+        # Return as HTML fragment (safe because raw HTML was stripped before conversion)
         return HttpResponse(
             f'<div class="prose prose-sm max-w-none">{html_content}</div>'
         )

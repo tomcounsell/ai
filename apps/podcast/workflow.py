@@ -370,6 +370,17 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
             '<span class="text-green-600"><i class="fas fa-check-circle"></i> Saved</span>'
         )
 
+    # File upload limits
+    MAX_AUDIO_SIZE = 500 * 1024 * 1024  # 500MB
+    ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".flac"}
+    AUDIO_CONTENT_TYPES = {
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+        ".ogg": "audio/ogg",
+        ".flac": "audio/flac",
+    }
+
     def _handle_audio_upload(
         self, request, episode: Episode, slug: str, episode_slug: str, step: int
     ) -> HttpResponse:
@@ -377,6 +388,8 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
 
         Saves the uploaded file to Supabase storage and sets Episode.audio_url.
         """
+        import os
+
         from apps.common.services.storage import store_file
 
         audio_file = request.FILES.get("audio_file")
@@ -386,17 +399,27 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
             )
             return self._redirect(slug, episode_slug, step)
 
+        # Validate file extension
+        _, ext = os.path.splitext(audio_file.name.lower())
+        if ext not in self.ALLOWED_AUDIO_EXTENSIONS:
+            logger.warning(
+                "Rejected audio upload with extension '%s' for episode %d",
+                ext,
+                episode.pk,
+            )
+            return self._redirect(slug, episode_slug, step)
+
+        # Validate file size
+        if audio_file.size > self.MAX_AUDIO_SIZE:
+            logger.warning(
+                "Rejected audio upload (%.1f MB) exceeding limit for episode %d",
+                audio_file.size / (1024 * 1024),
+                episode.pk,
+            )
+            return self._redirect(slug, episode_slug, step)
+
         try:
-            # Detect content type from file extension
-            file_name = audio_file.name.lower()
-            if file_name.endswith(".mp3"):
-                content_type = "audio/mpeg"
-            elif file_name.endswith(".wav"):
-                content_type = "audio/wav"
-            elif file_name.endswith(".m4a"):
-                content_type = "audio/mp4"
-            else:
-                content_type = "audio/mpeg"  # Default
+            content_type = self.AUDIO_CONTENT_TYPES.get(ext, "audio/mpeg")
 
             # Read file content
             file_content = audio_file.read()
@@ -419,6 +442,8 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
         except Exception:
             logger.exception("Failed to upload audio for episode %d", episode.pk)
 
+        return self._redirect(slug, episode_slug, step)
+
     def _redirect(self, slug: str, episode_slug: str, step: int) -> HttpResponse:
         """Return HX-Redirect for HTMX or standard redirect."""
         url = reverse(
@@ -440,7 +465,11 @@ class RegenerateCoverArtView(LoginRequiredMixin, UserPassesTestMixin, View):
     """Trigger cover art regeneration for an episode."""
 
     def test_func(self) -> bool:
-        return self.request.user.is_staff
+        slug = self.kwargs.get("slug")
+        if not slug:
+            return False
+        podcast = get_object_or_404(Podcast, slug=slug)
+        return self.request.user.is_staff or podcast.owner == self.request.user
 
     def post(self, request, slug: str, episode_slug: str):
         from apps.podcast.services.publishing import generate_cover_art
@@ -467,23 +496,49 @@ class RegenerateCoverArtView(LoginRequiredMixin, UserPassesTestMixin, View):
 class UploadCoverArtView(LoginRequiredMixin, UserPassesTestMixin, View):
     """Upload custom cover art for an episode."""
 
+    MAX_COVER_SIZE = 5 * 1024 * 1024  # 5MB
+    ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+
     def test_func(self) -> bool:
-        return self.request.user.is_staff
+        slug = self.kwargs.get("slug")
+        if not slug:
+            return False
+        podcast = get_object_or_404(Podcast, slug=slug)
+        return self.request.user.is_staff or podcast.owner == self.request.user
 
     def post(self, request, slug: str, episode_slug: str):
+        import os
+
         from apps.common.services.storage import store_file
 
         podcast = get_object_or_404(Podcast, slug=slug)
         episode = get_object_or_404(Episode, podcast=podcast, slug=episode_slug)
 
+        redirect_url = reverse(
+            "podcast:episode_workflow",
+            kwargs={"slug": slug, "episode_slug": episode_slug, "step": 11},
+        )
+
         cover_file = request.FILES.get("cover_art")
         if not cover_file:
-            return HttpResponseRedirect(
-                reverse(
-                    "podcast:episode_workflow",
-                    kwargs={"slug": slug, "episode_slug": episode_slug, "step": 11},
-                )
+            return HttpResponseRedirect(redirect_url)
+
+        # Validate file extension
+        _, ext = os.path.splitext(cover_file.name.lower())
+        if ext not in self.ALLOWED_IMAGE_EXTENSIONS:
+            logger.warning(
+                "Rejected cover art with extension '%s' for episode %d", ext, episode.pk
             )
+            return HttpResponseRedirect(redirect_url)
+
+        # Validate file size
+        if cover_file.size > self.MAX_COVER_SIZE:
+            logger.warning(
+                "Rejected cover art (%.1f MB) exceeding 5MB limit for episode %d",
+                cover_file.size / (1024 * 1024),
+                episode.pk,
+            )
+            return HttpResponseRedirect(redirect_url)
 
         try:
             file_content = cover_file.read()

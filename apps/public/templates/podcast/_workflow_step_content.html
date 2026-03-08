@@ -105,7 +105,7 @@
            name="title"
            value="{{ episode.title }}"
            class="input-brand w-full"
-           hx-patch="{% url 'podcast:episode_update_field' slug=podcast.slug episode_slug=episode.slug step=1 %}"
+           hx-patch="{% url 'podcast:episode_brief_update' slug=podcast.slug episode_slug=episode.slug step=1 %}"
            hx-trigger="blur changed delay:500ms"
            hx-vals='{"field": "title"}'
            hx-include="[name='title']"
@@ -124,7 +124,7 @@
               rows="6"
               class="input-brand w-full"
               placeholder="Describe what this episode should cover. This becomes the research prompt for the AI pipeline."
-              hx-patch="{% url 'podcast:episode_update_field' slug=podcast.slug episode_slug=episode.slug step=1 %}"
+              hx-patch="{% url 'podcast:episode_brief_update' slug=podcast.slug episode_slug=episode.slug step=1 %}"
               hx-trigger="blur changed delay:500ms"
               hx-vals='{"field": "description"}'
               hx-include="[name='description']"

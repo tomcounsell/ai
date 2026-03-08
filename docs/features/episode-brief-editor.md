@@ -94,7 +94,7 @@ Added new route in `apps/podcast/urls.py`:
 path(
     "<slug:slug>/<slug:episode_slug>/edit/<int:step>/update/",
     EpisodeWorkflowView.as_view(),
-    name="episode_update_field",
+    name="episode_brief_update",
 )
 ```
 

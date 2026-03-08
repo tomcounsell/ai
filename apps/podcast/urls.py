@@ -32,7 +32,7 @@ urlpatterns = [
     path(
         "<slug:slug>/<slug:episode_slug>/edit/<int:step>/update/",
         EpisodeWorkflowView.as_view(),
-        name="episode_update_field",
+        name="episode_brief_update",
     ),
     path(
         "<slug:slug>/<slug:episode_slug>/artifacts/<int:artifact_id>/",

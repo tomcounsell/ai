@@ -10,7 +10,11 @@ class EpisodeUpdateFieldView(LoginRequiredMixin, UserPassesTestMixin, View):
     """Handle inline field updates for episode metadata via HTMX PATCH requests."""
 
     def test_func(self) -> bool:
-        return self.request.user.is_staff
+        slug = self.kwargs.get("slug")
+        if not slug:
+            return False
+        podcast = get_object_or_404(Podcast, slug=slug)
+        return self.request.user.is_staff or podcast.owner == self.request.user
 
     def patch(self, request, slug: str, episode_slug: str):
         podcast = get_object_or_404(Podcast, slug=slug)
@@ -24,7 +28,18 @@ class EpisodeUpdateFieldView(LoginRequiredMixin, UserPassesTestMixin, View):
         if field not in allowed_fields:
             return HttpResponse("Invalid field", status=400)
 
-        setattr(episode, field, value)
+        # Validate required fields are not empty
+        if field in ["title", "description"] and not value.strip():
+            return HttpResponse(
+                f'<span class="text-red-600">{field.title()} cannot be empty</span>',
+                status=400,
+            )
+
+        setattr(
+            episode,
+            field,
+            value.strip() if field in ["title", "description"] else value,
+        )
         episode.save(update_fields=[field])
 
         return HttpResponse(
