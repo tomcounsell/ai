@@ -113,6 +113,9 @@ gh pr diff {pr_number} --name-only
 # Prepare screenshot directory
 mkdir -p generated_images/pr-{pr_number}
 
+# Ensure clean git state before switching branches (aborts in-progress merges/rebases)
+python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; ensure_clean_git_state(Path('.'))"
+
 # Checkout the PR branch locally
 gh pr checkout {pr_number}
 

@@ -418,6 +418,216 @@ def prune_worktrees(repo_root: Path) -> None:
     logger.info("Pruned stale worktree references")
 
 
+def _resolve_git_dir(repo_root: Path) -> Path:
+    """Resolve the actual .git directory for a repo root.
+
+    For regular repos, this is ``repo_root / .git`` (a directory).
+    For worktrees, ``repo_root / .git`` is a file containing a ``gitdir:``
+    pointer to the actual git directory.
+
+    Args:
+        repo_root: Path to the repository root.
+
+    Returns:
+        Path to the actual .git directory.
+
+    Raises:
+        ValueError: If no .git directory or file exists at repo_root.
+    """
+    git_path = repo_root / ".git"
+    if not git_path.exists():
+        raise ValueError(f"Not a git repository: {repo_root} (no .git found)")
+
+    if git_path.is_dir():
+        return git_path
+
+    # .git is a file (worktree pointer): read the gitdir path
+    content = git_path.read_text().strip()
+    if content.startswith("gitdir: "):
+        gitdir = Path(content[len("gitdir: ") :])
+        if not gitdir.is_absolute():
+            gitdir = (repo_root / gitdir).resolve()
+        return gitdir
+
+    raise ValueError(f"Unexpected .git file content at {repo_root}: {content}")
+
+
+def _is_worktree(repo_root: Path) -> bool:
+    """Check if a repo root is a worktree (not the main working tree).
+
+    Worktrees have a .git file (pointer) instead of a .git directory.
+
+    Args:
+        repo_root: Path to check.
+
+    Returns:
+        True if repo_root is a worktree, False if it's the main repo.
+    """
+    git_path = repo_root / ".git"
+    return git_path.exists() and git_path.is_file()
+
+
+def ensure_clean_git_state(repo_root: Path) -> dict:
+    """Detect and resolve dirty git state on the main working tree.
+
+    Checks for in-progress merge, rebase, and cherry-pick operations,
+    aborts them, and stashes any remaining uncommitted changes. This
+    prevents SDLC skills from failing when switching branches or
+    creating worktrees while another branch has unresolved conflicts.
+
+    **Safety**: This function only operates on the main working tree
+    (where ``.git`` is a directory), not on worktree directories (where
+    ``.git`` is a file). If called on a worktree, it returns immediately
+    with ``{"skipped": True}``.
+
+    Args:
+        repo_root: Path to the repository root. Must contain a ``.git``
+            directory (not a worktree pointer file).
+
+    Returns:
+        Dict describing what was cleaned up:
+        - ``skipped``: True if this is a worktree (no action taken)
+        - ``merge_aborted``: True if an in-progress merge was aborted
+        - ``rebase_aborted``: True if an in-progress rebase was aborted
+        - ``cherry_pick_aborted``: True if an in-progress cherry-pick was aborted
+        - ``changes_stashed``: True if uncommitted changes were stashed
+        - ``stash_name``: The stash message if changes were stashed
+        - ``errors``: List of error messages for any failed operations
+        - ``was_clean``: True if no dirty state was detected
+
+    Raises:
+        ValueError: If ``repo_root`` does not contain a ``.git`` directory
+            or file, or if the guard cannot fully clean the state.
+    """
+    result: dict = {
+        "skipped": False,
+        "merge_aborted": False,
+        "rebase_aborted": False,
+        "cherry_pick_aborted": False,
+        "changes_stashed": False,
+        "stash_name": None,
+        "errors": [],
+        "was_clean": False,
+    }
+
+    # Safety check: refuse to operate on worktrees
+    if _is_worktree(repo_root):
+        logger.info(f"Skipping git state guard: {repo_root} is a worktree, not the main repo")
+        result["skipped"] = True
+        return result
+
+    # Resolve the git directory
+    try:
+        git_dir = _resolve_git_dir(repo_root)
+    except ValueError as e:
+        raise ValueError(f"Cannot guard git state: {e}") from e
+
+    dirty = False
+
+    # 1. Check for in-progress merge (MERGE_HEAD exists)
+    if (git_dir / "MERGE_HEAD").exists():
+        dirty = True
+        logger.warning(f"Detected in-progress merge at {repo_root}. Aborting.")
+        try:
+            subprocess.run(
+                ["git", "merge", "--abort"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            result["merge_aborted"] = True
+            logger.info("Successfully aborted in-progress merge")
+        except subprocess.CalledProcessError as e:
+            msg = f"Failed to abort merge: {e.stderr.strip()}"
+            result["errors"].append(msg)
+            logger.warning(msg)
+
+    # 2. Check for in-progress rebase (rebase-merge/ or rebase-apply/ exists)
+    if (git_dir / "rebase-merge").exists() or (git_dir / "rebase-apply").exists():
+        dirty = True
+        logger.warning(f"Detected in-progress rebase at {repo_root}. Aborting.")
+        try:
+            subprocess.run(
+                ["git", "rebase", "--abort"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            result["rebase_aborted"] = True
+            logger.info("Successfully aborted in-progress rebase")
+        except subprocess.CalledProcessError as e:
+            msg = f"Failed to abort rebase: {e.stderr.strip()}"
+            result["errors"].append(msg)
+            logger.warning(msg)
+
+    # 3. Check for in-progress cherry-pick (CHERRY_PICK_HEAD exists)
+    if (git_dir / "CHERRY_PICK_HEAD").exists():
+        dirty = True
+        logger.warning(f"Detected in-progress cherry-pick at {repo_root}. Aborting.")
+        try:
+            subprocess.run(
+                ["git", "cherry-pick", "--abort"],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            )
+            result["cherry_pick_aborted"] = True
+            logger.info("Successfully aborted in-progress cherry-pick")
+        except subprocess.CalledProcessError as e:
+            msg = f"Failed to abort cherry-pick: {e.stderr.strip()}"
+            result["errors"].append(msg)
+            logger.warning(msg)
+
+    # 4. Check for uncommitted changes and stash them
+    status_result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if status_result.stdout.strip():
+        dirty = True
+        stash_msg = "sdlc-auto-stash"
+        logger.warning(f"Detected uncommitted changes at {repo_root}. Stashing as '{stash_msg}'.")
+        try:
+            subprocess.run(
+                ["git", "stash", "push", "-m", stash_msg],
+                cwd=repo_root,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30,
+            )
+            result["changes_stashed"] = True
+            result["stash_name"] = stash_msg
+            logger.info("Successfully stashed uncommitted changes")
+        except subprocess.CalledProcessError as e:
+            msg = f"Failed to stash changes: {e.stderr.strip()}"
+            result["errors"].append(msg)
+            logger.warning(msg)
+
+    if not dirty:
+        result["was_clean"] = True
+        logger.info(f"Git state is clean at {repo_root}")
+
+    # If we detected dirty state but couldn't fully clean it, raise
+    if result["errors"] and not result["was_clean"]:
+        unresolved = "; ".join(result["errors"])
+        raise ValueError(
+            f"Git state guard could not fully clean {repo_root}. "
+            f"Manual intervention needed: {unresolved}"
+        )
+
+    return result
+
+
 def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
     """Clean up worktree and local branch after a PR has been merged.
 

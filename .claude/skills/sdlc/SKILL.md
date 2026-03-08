@@ -60,7 +60,13 @@ python -m tools.session_progress --session-id "$SESSION_ID" --stage ISSUE --stat
 
 ## Step 2: Assess Current State
 
-Check what already exists for this issue:
+First, ensure the main working tree has clean git state (no in-progress merges, rebases, or cherry-picks that would block branch operations):
+
+```bash
+python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; print(ensure_clean_git_state(Path('.')))"
+```
+
+Then check what already exists for this issue:
 
 ```bash
 # Check if a plan doc references this issue

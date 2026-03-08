@@ -124,52 +124,57 @@ Where `$PR_URL` is the full GitHub PR URL returned by `gh pr create`.
    ```bash
    TARGET_REPO=$(git -C "$(dirname "$PLAN_PATH")" rev-parse --show-toplevel)
    ```
-6. **Get or create an isolated worktree** - Get the existing worktree or create `.worktrees/{slug}/` with branch `session/{slug}` in the **target repo** using the worktree manager (handles stale worktrees and session resumption automatically):
+6. **Ensure clean git state** - Before creating a worktree, verify the main working tree has no in-progress merge, rebase, or cherry-pick operations that would block git operations:
+   ```bash
+   python -c "from agent.worktree_manager import ensure_clean_git_state; from pathlib import Path; print(ensure_clean_git_state(Path('$TARGET_REPO')))"
+   ```
+   This aborts any in-progress merge/rebase/cherry-pick and stashes uncommitted changes. See `docs/features/git-state-guard.md` for details.
+7. **Get or create an isolated worktree** - Get the existing worktree or create `.worktrees/{slug}/` with branch `session/{slug}` in the **target repo** using the worktree manager (handles stale worktrees and session resumption automatically):
    ```bash
    python -c "from agent.worktree_manager import get_or_create_worktree; from pathlib import Path; print(get_or_create_worktree(Path('$TARGET_REPO'), '{slug}'))"
    ```
    This is idempotent: if the worktree already exists (e.g., from an interrupted session), it returns the existing path. If not, it creates a fresh one. It also handles stale worktrees from crashed sessions, missing directories with lingering git references, and branch-already-in-use errors. Settings files are copied automatically.
    All subsequent agent work happens inside `$TARGET_REPO/.worktrees/{slug}/`, NOT the orchestrator repo directory.
-7. **Initialize pipeline state** - For fresh builds (no prior state), initialize now:
+8. **Initialize pipeline state** - For fresh builds (no prior state), initialize now:
    ```bash
    python -c "from agent.pipeline_state import initialize; initialize('{slug}', 'session/{slug}', '$TARGET_REPO/.worktrees/{slug}', target_repo='$TARGET_REPO')"
    ```
    Skip this step if state already existed from step 3.
-8. **Advance to branch stage** after worktree is ready:
+9. **Advance to branch stage** after worktree is ready:
    ```bash
    python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'branch')"
    ```
-9. **Parse the Team Members** and Step by Step Tasks sections
-10. **Create all tasks** using `TaskCreate` before starting execution
-11. **Deploy agents** in order, respecting dependencies and parallel flags (agents follow SDLC: Build → Test loop with up to 5 iterations)
-12. **Advance to implement stage** before deploying builder agents:
+10. **Parse the Team Members** and Step by Step Tasks sections
+11. **Create all tasks** using `TaskCreate` before starting execution
+12. **Deploy agents** in order, respecting dependencies and parallel flags (agents follow SDLC: Build → Test loop with up to 5 iterations)
+13. **Advance to implement stage** before deploying builder agents:
     ```bash
     python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'implement')"
     ```
-13. **Monitor progress** and handle any issues
-14. **Advance to test stage** after implementation tasks complete:
+14. **Monitor progress** and handle any issues
+15. **Advance to test stage** after implementation tasks complete:
     ```bash
     python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'test')"
     ```
-15. **Verify Definition of Done** - Ensure all tasks completed with: code working, tests passing, quality checks pass
-16. **Advance to review stage** after tests pass:
+16. **Verify Definition of Done** - Ensure all tasks completed with: code working, tests passing, quality checks pass
+17. **Advance to review stage** after tests pass:
     ```bash
     python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'review')"
     ```
-17. **Advance to document stage** after review passes:
+18. **Advance to document stage** after review passes:
     ```bash
     python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'document')"
     ```
-18. **Run documentation gate** - Validate docs changed, scan related docs, create review issues
-19. **Advance to pr stage** after documentation gate passes:
+19. **Run documentation gate** - Validate docs changed, scan related docs, create review issues
+20. **Advance to pr stage** after documentation gate passes:
     ```bash
     python -c "from agent.pipeline_state import advance_stage; advance_stage('{slug}', 'pr')"
     ```
-20. **Verify commits exist before PR** - Run `git -C $TARGET_REPO/.worktrees/{slug} log --oneline main..HEAD` and count the output lines. If zero commits exist on the session branch, **ABORT with error**: "BUILD FAILED: No commits on session/{slug}. Builder agents produced no code changes." Do NOT proceed to push or PR creation.
-21. **Push and open a PR** - `git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}` then `gh pr create --repo $TARGET_GH_REPO` (use `--repo` only for cross-repo builds)
-22. **Run documentation cascade** - Invoke `/do-docs {PR-number}` to surgically update affected docs
-23. **Migrate completed plan** - Delete plan file and close tracking issue
-24. **Report completion** with PR URL when all tasks are done
+21. **Verify commits exist before PR** - Run `git -C $TARGET_REPO/.worktrees/{slug} log --oneline main..HEAD` and count the output lines. If zero commits exist on the session branch, **ABORT with error**: "BUILD FAILED: No commits on session/{slug}. Builder agents produced no code changes." Do NOT proceed to push or PR creation.
+22. **Push and open a PR** - `git -C $TARGET_REPO/.worktrees/{slug} push -u origin session/{slug}` then `gh pr create --repo $TARGET_GH_REPO` (use `--repo` only for cross-repo builds)
+23. **Run documentation cascade** - Invoke `/do-docs {PR-number}` to surgically update affected docs
+24. **Migrate completed plan** - Delete plan file and close tracking issue
+25. **Report completion** with PR URL when all tasks are done
 
 ## Critical Rules
 
