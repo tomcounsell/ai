@@ -5,6 +5,7 @@ Each work item gets its own worktree under .worktrees/{slug}/.
 """
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -45,9 +46,7 @@ def resolve_repo_root(file_path: str | Path) -> Path:
     search_dir = path if path.is_dir() else path.parent
 
     if not search_dir.exists():
-        raise FileNotFoundError(
-            f"Cannot resolve repo root: directory {search_dir} does not exist"
-        )
+        raise FileNotFoundError(f"Cannot resolve repo root: directory {search_dir} does not exist")
 
     result = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
@@ -126,9 +125,7 @@ def _find_worktree_for_branch(repo_root: Path, branch_name: str) -> str | None:
     return None
 
 
-def _cleanup_stale_worktree(
-    repo_root: Path, branch_name: str, worktree_path: str
-) -> None:
+def _cleanup_stale_worktree(repo_root: Path, branch_name: str, worktree_path: str) -> None:
     """Remove a stale worktree that is blocking branch checkout.
 
     Handles two cases:
@@ -271,9 +268,7 @@ def create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Pa
     return worktree_dir
 
 
-def get_or_create_worktree(
-    repo_root: Path, slug: str, base_branch: str = "main"
-) -> Path:
+def get_or_create_worktree(repo_root: Path, slug: str, base_branch: str = "main") -> Path:
     """Return an existing worktree path or create a new one.
 
     This is the preferred entry point for the ``/do-build`` skill and any
@@ -309,6 +304,10 @@ def get_or_create_worktree(
 def remove_worktree(repo_root: Path, slug: str, delete_branch: bool = True) -> bool:
     """Remove a git worktree and optionally its branch.
 
+    If the current process CWD is inside the worktree being removed,
+    this function changes CWD to repo_root first to prevent the shell
+    from losing its working directory (see issue #301).
+
     Args:
         repo_root: Path to the main repository
         slug: Work item slug
@@ -327,6 +326,23 @@ def remove_worktree(repo_root: Path, slug: str, delete_branch: bool = True) -> b
     if not worktree_dir.exists():
         logger.info(f"Worktree not found: {worktree_dir}")
         return False
+
+    # Guard against CWD death: if the current working directory is inside
+    # the worktree we're about to remove, move to repo_root first.
+    # Without this, the calling process (and Claude Code's persistent shell)
+    # ends up with an invalid CWD and all subsequent commands fail.
+    try:
+        cwd = Path.cwd().resolve()
+        wt_resolved = worktree_dir.resolve()
+        if cwd == wt_resolved or wt_resolved in cwd.parents:
+            logger.warning(
+                f"CWD is inside worktree being removed ({cwd}). Changing to repo root: {repo_root}"
+            )
+            os.chdir(repo_root)
+    except OSError:
+        # CWD already invalid — move to repo root as recovery
+        logger.warning("CWD is already invalid. Changing to repo root.")
+        os.chdir(repo_root)
 
     try:
         subprocess.run(
@@ -476,9 +492,7 @@ def cleanup_after_merge(repo_root: Path, slug: str) -> dict:
             result["branch_deleted"] = True
             logger.info(f"Post-merge: deleted local branch {branch_name}")
         else:
-            msg = (
-                f"Failed to delete branch {branch_name}: {branch_result.stderr.strip()}"
-            )
+            msg = f"Failed to delete branch {branch_name}: {branch_result.stderr.strip()}"
             result["errors"].append(msg)
             logger.warning(f"Post-merge: {msg}")
     else:

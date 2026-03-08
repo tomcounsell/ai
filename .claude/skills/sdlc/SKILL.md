@@ -150,7 +150,10 @@ Execute the merge and clean up the local worktree and branch:
 # 1. Merge the PR (human-initiated)
 gh pr merge {pr_number} --squash --delete-branch
 
-# 2. Clean up local worktree and branch
+# 2. Return to repo root BEFORE cleanup (prevents CWD death if shell is inside worktree)
+cd /Users/valorengels/src/ai
+
+# 3. Clean up local worktree and branch
 python scripts/post_merge_cleanup.py {slug}
 ```
 

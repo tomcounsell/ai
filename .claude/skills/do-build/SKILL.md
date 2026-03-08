@@ -387,9 +387,12 @@ EOF
 
 ### Step 7.5: Worktree Cleanup
 
-After pushing and creating the PR, clean up the worktree using `worktree_manager.py` which handles CWD safely via `subprocess(cwd=repo_root)`:
+After pushing and creating the PR, return to the repo root and clean up the worktree. The `cd` prevents CWD death if the shell is inside the worktree (issue #301):
 
 ```bash
+# Return to repo root BEFORE cleanup (prevents CWD death)
+cd /Users/valorengels/src/ai
+
 python -c "
 from pathlib import Path
 from agent.worktree_manager import remove_worktree, prune_worktrees
