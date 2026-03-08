@@ -318,6 +318,9 @@ _JOB_FIELDS = [
     # Semantic routing fields — must be preserved across delete-and-recreate
     "context_summary",
     "expectations",
+    # Stall retry fields — must be preserved across delete-and-recreate
+    "retry_count",
+    "last_stall_reason",
 ]
 
 # Backward compat alias
