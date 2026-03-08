@@ -126,6 +126,7 @@ def check_sort_order(rows: list[str]) -> tuple[bool, list[tuple[int, str, str]]]
 
 def sort_rows(rows: list[str]) -> list[str]:
     """Sort table rows alphabetically by feature name (case-insensitive)."""
+
     def sort_key(row: str) -> str:
         name = extract_feature_name(row)
         if name is None:
@@ -173,11 +174,13 @@ def check_mode(filepath: str) -> int:
     for _, current, prev in violations:
         error_lines.append(f'  - "{current}" should come before "{prev}"')
 
-    error_lines.extend([
-        "",
-        "Fix by running:",
-        f"  python .claude/hooks/validators/validate_features_readme_sort.py --fix {filepath}",
-    ])
+    error_lines.extend(
+        [
+            "",
+            "Fix by running:",
+            f"  python .claude/hooks/validators/validate_features_readme_sort.py --fix {filepath}",
+        ]
+    )
 
     print("\n".join(error_lines), file=sys.stderr)
     return 2

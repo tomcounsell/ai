@@ -38,10 +38,7 @@ class TestExtractFeatureName:
     """Test feature name extraction from table rows."""
 
     def test_standard_link(self):
-        row = (
-            "| [Agent Session Model](agent-session-model.md)"
-            " | Description | Shipped |"
-        )
+        row = "| [Agent Session Model](agent-session-model.md) | Description | Shipped |"
         assert extract_feature_name(row) == "Agent Session Model"
 
     def test_no_link(self):
@@ -49,10 +46,7 @@ class TestExtractFeatureName:
         assert extract_feature_name(row) is None
 
     def test_complex_name(self):
-        row = (
-            "| [Scale Job Queue (Popoto + Worktrees)]"
-            "(scale-job-queue.md) | Desc | Shipped |"
-        )
+        row = "| [Scale Job Queue (Popoto + Worktrees)](scale-job-queue.md) | Desc | Shipped |"
         name = extract_feature_name(row)
         assert name == "Scale Job Queue (Popoto + Worktrees)"
 
@@ -246,7 +240,8 @@ class TestCheckModeIntegration:
 
     def test_sorted_file_passes(self, tmp_path):
         readme = tmp_path / "README.md"
-        readme.write_text(dedent("""\
+        readme.write_text(
+            dedent("""\
             ## Features
 
             | Feature | Description | Status |
@@ -255,10 +250,10 @@ class TestCheckModeIntegration:
             | [Beta](beta.md) | Second | Shipped |
 
             ## Adding New Entries
-        """))
+        """)
+        )
         result = subprocess.run(
-            [sys.executable, VALIDATOR_SCRIPT,
-             "--check", str(readme)],
+            [sys.executable, VALIDATOR_SCRIPT, "--check", str(readme)],
             capture_output=True,
             text=True,
             timeout=10,
@@ -267,7 +262,8 @@ class TestCheckModeIntegration:
 
     def test_unsorted_file_fails(self, tmp_path):
         readme = tmp_path / "README.md"
-        readme.write_text(dedent("""\
+        readme.write_text(
+            dedent("""\
             ## Features
 
             | Feature | Description | Status |
@@ -276,10 +272,10 @@ class TestCheckModeIntegration:
             | [Alpha](alpha.md) | First | Shipped |
 
             ## Adding New Entries
-        """))
+        """)
+        )
         result = subprocess.run(
-            [sys.executable, VALIDATOR_SCRIPT,
-             "--check", str(readme)],
+            [sys.executable, VALIDATOR_SCRIPT, "--check", str(readme)],
             capture_output=True,
             text=True,
             timeout=10,
@@ -290,7 +286,8 @@ class TestCheckModeIntegration:
 
     def test_fix_mode_sorts_file(self, tmp_path):
         readme = tmp_path / "README.md"
-        readme.write_text(dedent("""\
+        readme.write_text(
+            dedent("""\
             ## Features
 
             | Feature | Description | Status |
@@ -302,10 +299,10 @@ class TestCheckModeIntegration:
             ## Adding New Entries
 
             Instructions here.
-        """))
+        """)
+        )
         result = subprocess.run(
-            [sys.executable, VALIDATOR_SCRIPT,
-             "--fix", str(readme)],
+            [sys.executable, VALIDATOR_SCRIPT, "--fix", str(readme)],
             capture_output=True,
             text=True,
             timeout=10,
@@ -316,16 +313,14 @@ class TestCheckModeIntegration:
         # Verify file is now sorted
         content = readme.read_text()
         lines = content.split("\n")
-        data_rows = [
-            line for line in lines
-            if line.strip().startswith("| [")
-        ]
+        data_rows = [line for line in lines if line.strip().startswith("| [")]
         names = [extract_feature_name(r) for r in data_rows]
         assert names == ["Alpha", "Beta", "Gamma"]
 
     def test_fix_already_sorted(self, tmp_path):
         readme = tmp_path / "README.md"
-        readme.write_text(dedent("""\
+        readme.write_text(
+            dedent("""\
             ## Features
 
             | Feature | Description | Status |
@@ -334,10 +329,10 @@ class TestCheckModeIntegration:
             | [Beta](beta.md) | Second | Shipped |
 
             ## Adding New Entries
-        """))
+        """)
+        )
         result = subprocess.run(
-            [sys.executable, VALIDATOR_SCRIPT,
-             "--fix", str(readme)],
+            [sys.executable, VALIDATOR_SCRIPT, "--fix", str(readme)],
             capture_output=True,
             text=True,
             timeout=10,
@@ -347,12 +342,9 @@ class TestCheckModeIntegration:
 
     def test_missing_features_header_passes(self, tmp_path):
         readme = tmp_path / "README.md"
-        readme.write_text(
-            "# Just a normal markdown file\n\nSome text.\n"
-        )
+        readme.write_text("# Just a normal markdown file\n\nSome text.\n")
         result = subprocess.run(
-            [sys.executable, VALIDATOR_SCRIPT,
-             "--check", str(readme)],
+            [sys.executable, VALIDATOR_SCRIPT, "--check", str(readme)],
             capture_output=True,
             text=True,
             timeout=10,
@@ -378,7 +370,8 @@ class TestHookStdinIntegration:
         """README.md in stdin triggers validation."""
         readme = tmp_path / "docs" / "features" / "README.md"
         readme.parent.mkdir(parents=True)
-        readme.write_text(dedent("""\
+        readme.write_text(
+            dedent("""\
             ## Features
 
             | Feature | Description | Status |
@@ -387,10 +380,9 @@ class TestHookStdinIntegration:
             | [Alpha](alpha.md) | First | Shipped |
 
             ## Adding New Entries
-        """))
-        stdin_json = (
-            f'{{"tool_input":{{"file_path":"{readme}"}}}}'
+        """)
         )
+        stdin_json = f'{{"tool_input":{{"file_path":"{readme}"}}}}'
         result = subprocess.run(
             [sys.executable, VALIDATOR_SCRIPT, str(readme)],
             input=stdin_json,
