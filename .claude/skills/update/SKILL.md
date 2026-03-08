@@ -1,60 +1,33 @@
 ---
 name: update
 description: "Use when deploying updates to this machine. Pulls latest changes, syncs dependencies, verifies environment, and restarts the bridge service. Triggered by 'update', 'deploy', 'pull and restart', or after git pull."
-disable-model-invocation: true
 ---
 
 # Update & Restart
 
 Pull the latest changes from the remote repository, sync dependencies, and restart the bridge service.
 
-## Quick Reference
+## Instructions
+
+Run the full update orchestrator and report the results:
 
 ```bash
-# Run full update
 cd /Users/valorengels/src/ai && .venv/bin/python scripts/update/run.py --full
-
-# Run verification only (no changes)
-cd /Users/valorengels/src/ai && .venv/bin/python scripts/update/run.py --verify
 ```
 
-## Steps
+The orchestrator will:
+- Pull latest changes (with automatic stash/unstash)
+- Sync `.claude` hardlinks and audit skill hooks
+- Check for pending critical dependency upgrades
+- Sync dependencies if pyproject.toml changed
+- Verify critical dependency versions
+- Check/pull Ollama summarizer model
+- Verify CLI tools and SDK authentication
+- Install/restart bridge, caffeinate, and reflections services
+- Set up global calendar hook and generate config
+- Check MCP server configuration
 
-The update system is modular. Each step is implemented in `scripts/update/`:
-
-| Module | Purpose |
-|--------|---------|
-| `git.py` | Git pull, stash handling, upgrade detection |
-| `deps.py` | Dependency sync (uv/pip), version verification |
-| `verify.py` | Environment checks (tools, SDK auth, MCP) |
-| `calendar.py` | Global hook setup, calendar config generation |
-| `service.py` | Bridge restart, caffeinate service |
-| `run.py` | Orchestrator (calls all modules) |
-
-### Running the Update
-
-1. **Run the full update orchestrator**:
-   ```bash
-   cd /Users/valorengels/src/ai
-   .venv/bin/python scripts/update/run.py --full
-   ```
-
-2. **Review the output** - the orchestrator will:
-   - Pull latest changes (with automatic stash/unstash)
-   - Check for pending critical dependency upgrades
-   - Sync dependencies if pyproject.toml changed
-   - Verify critical dependency versions
-   - Check/pull Ollama summarizer model
-   - Verify SDK authentication status
-   - Install/restart bridge and update cron services
-   - Install caffeinate service (prevents sleep)
-   - Install/reload reflections scheduler (daily 6 AM maintenance)
-   - Verify CLI tools are available
-   - Set up global calendar hook if missing
-   - Generate Google Calendar config
-   - Check MCP server configuration
-
-3. **Handle any warnings or errors** reported by the orchestrator.
+After running, report the result. If there are warnings or errors, list each one clearly.
 
 ### Critical Dependency Handling
 
