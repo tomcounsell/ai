@@ -1181,10 +1181,17 @@ async def main():
         # Clean up stale Redis keys with invalid job_id format (e.g. 60-char
         # keys from old data). This silences the popoto "auto key value is length
         # N" validation errors that spam the error log on every query.
+        # Temporarily suppress popoto's "{clean} is for debugging" warning.
         try:
             from models.agent_session import AgentSession
 
-            AgentSession.query.keys(clean=True)
+            _popoto_keys_logger = logging.getLogger("POPOTO.Query")
+            _prev_level = _popoto_keys_logger.level
+            _popoto_keys_logger.setLevel(logging.ERROR)
+            try:
+                AgentSession.query.keys(clean=True)
+            finally:
+                _popoto_keys_logger.setLevel(_prev_level)
             logger.info("Cleaned stale Redis keys for AgentSession")
         except Exception as _clean_err:
             logger.warning(f"Redis key cleanup failed (non-fatal): {_clean_err}")
