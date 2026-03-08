@@ -803,10 +803,20 @@ async def main():
                 try:
                     from models.agent_session import AgentSession
 
-                    active_sessions = AgentSession.query.filter(
-                        session_id=session_id, status="active"
-                    )
-                    if active_sessions:
+                    # Check both "running" and "active" statuses -- "running" is the
+                    # primary status during agent execution (set by _pop_job), while
+                    # "active" is set later by _execute_job for auto-continue deferral.
+                    # Both represent "agent is currently working" for steering purposes.
+                    matching_session = None
+                    for check_status in ("running", "active"):
+                        sessions = AgentSession.query.filter(
+                            session_id=session_id, status=check_status
+                        )
+                        if sessions:
+                            matching_session = sessions[0]
+                            break
+
+                    if matching_session:
                         # Route to steering queue instead of job queue.
                         # push_steering_message auto-detects abort keywords.
                         from agent.steering import ABORT_KEYWORDS
@@ -824,14 +834,37 @@ async def main():
                         from bridge.markdown import send_markdown
 
                         await send_markdown(client, event.chat_id, ack_text, reply_to=message.id)
+                        action = "abort" if is_abort else "steer"
                         logger.info(
-                            f"[{project_name}] Steered message into active session "
-                            f"{session_id} ({'abort' if is_abort else 'steer'})"
+                            f"[{project_name}] Steered message into "
+                            f"{matching_session.status} session "
+                            f"{session_id} ({action})"
                         )
                         return
+                    else:
+                        # No running/active session found -- check for pending (race window)
+                        pending_sessions = AgentSession.query.filter(
+                            session_id=session_id, status="pending"
+                        )
+                        if pending_sessions:
+                            logger.info(
+                                f"[{project_name}] Steering check found session {session_id} "
+                                f"in 'pending' status -- message will queue normally and be "
+                                f"consumed when the job starts via PostToolUse hook"
+                            )
+                except (ConnectionError, OSError) as e:
+                    # Redis/DB connection errors -- log at ERROR with traceback
+                    logger.error(
+                        f"[{project_name}] Steering check failed due to connection error, "
+                        f"falling through to queue: {e}",
+                        exc_info=True,
+                    )
                 except Exception as e:
-                    logger.warning(
-                        f"[{project_name}] Steering check failed, falling through to queue: {e}"
+                    # Unexpected errors -- log at ERROR with traceback for visibility
+                    logger.error(
+                        f"[{project_name}] Steering check failed unexpectedly, "
+                        f"falling through to queue: {e}",
+                        exc_info=True,
                     )
 
             # Lightweight revival check (no SDK agent, just git state)
