@@ -491,6 +491,8 @@ def main() -> int:
             w_count = len(result.warnings)
             plural = "s" if w_count != 1 else ""
             status = f"{detail} ({w_count} warning{plural})"
+            for warn in result.warnings:
+                status += f"\n  ⚠️ {warn}"
         else:
             status = "update successful"
 
