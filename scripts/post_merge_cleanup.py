@@ -55,6 +55,12 @@ def main() -> int:
         format="%(message)s",
     )
 
+    # Ensure CWD is the repo root before cleanup. If the caller's shell is
+    # inside the worktree being removed, this prevents CWD death (issue #301).
+    import os
+
+    os.chdir(REPO_ROOT)
+
     try:
         result = cleanup_after_merge(REPO_ROOT, args.slug)
     except ValueError as e:
