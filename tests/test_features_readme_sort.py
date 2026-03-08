@@ -14,7 +14,10 @@ from pathlib import Path
 from textwrap import dedent
 
 # Import the validator module directly
-sys.path.insert(0, str(Path(__file__).parent.parent / ".claude" / "hooks" / "validators"))
+sys.path.insert(
+    0,
+    str(Path(__file__).parent.parent / ".claude" / "hooks" / "validators"),
+)
 from validate_features_readme_sort import (
     check_sort_order,
     extract_feature_name,
@@ -22,12 +25,23 @@ from validate_features_readme_sort import (
     sort_rows,
 )
 
+VALIDATOR_SCRIPT = str(
+    Path(__file__).parent.parent
+    / ".claude"
+    / "hooks"
+    / "validators"
+    / "validate_features_readme_sort.py"
+)
+
 
 class TestExtractFeatureName:
     """Test feature name extraction from table rows."""
 
     def test_standard_link(self):
-        row = "| [Agent Session Model](agent-session-model.md) | Description | Shipped |"
+        row = (
+            "| [Agent Session Model](agent-session-model.md)"
+            " | Description | Shipped |"
+        )
         assert extract_feature_name(row) == "Agent Session Model"
 
     def test_no_link(self):
@@ -35,8 +49,12 @@ class TestExtractFeatureName:
         assert extract_feature_name(row) is None
 
     def test_complex_name(self):
-        row = "| [Scale Job Queue (Popoto + Worktrees)](scale-job-queue.md) | Desc | Shipped |"
-        assert extract_feature_name(row) == "Scale Job Queue (Popoto + Worktrees)"
+        row = (
+            "| [Scale Job Queue (Popoto + Worktrees)]"
+            "(scale-job-queue.md) | Desc | Shipped |"
+        )
+        name = extract_feature_name(row)
+        assert name == "Scale Job Queue (Popoto + Worktrees)"
 
     def test_link_with_path(self):
         row = "| [My Feature](path/to/feature.md) | Desc | Shipped |"
@@ -106,7 +124,7 @@ class TestParseTableRows:
         assert len(rows) == 0
 
     def test_no_adding_entries_section(self):
-        """Table extends to end of file when no ## Adding New Entries header."""
+        """Table extends to end of file with no next header."""
         content = dedent("""\
             ## Features
 
@@ -144,7 +162,7 @@ class TestCheckSortOrder:
         assert violations[0][2] == "Beta"
 
     def test_case_insensitive_sorting(self):
-        """Case-insensitive: 'do-patch' and 'Do Test' should compare as lowercase."""
+        """'do-patch' and 'Do Test' compare as lowercase."""
         rows = [
             "| [Do Test](do-test.md) | Desc | Shipped |",
             "| [do-patch Skill](do-patch.md) | Desc | Shipped |",
@@ -153,7 +171,7 @@ class TestCheckSortOrder:
         assert is_sorted
 
     def test_case_insensitive_violation(self):
-        """Reversed case-insensitive order should be detected."""
+        """Reversed case-insensitive order detected."""
         rows = [
             "| [do-patch Skill](do-patch.md) | Desc | Shipped |",
             "| [Do Test](do-test.md) | Desc | Shipped |",
@@ -239,7 +257,7 @@ class TestCheckModeIntegration:
             ## Adding New Entries
         """))
         result = subprocess.run(
-            [sys.executable, str(Path(__file__).parent.parent / ".claude" / "hooks" / "validators" / "validate_features_readme_sort.py"),
+            [sys.executable, VALIDATOR_SCRIPT,
              "--check", str(readme)],
             capture_output=True,
             text=True,
@@ -260,7 +278,7 @@ class TestCheckModeIntegration:
             ## Adding New Entries
         """))
         result = subprocess.run(
-            [sys.executable, str(Path(__file__).parent.parent / ".claude" / "hooks" / "validators" / "validate_features_readme_sort.py"),
+            [sys.executable, VALIDATOR_SCRIPT,
              "--check", str(readme)],
             capture_output=True,
             text=True,
@@ -286,7 +304,7 @@ class TestCheckModeIntegration:
             Instructions here.
         """))
         result = subprocess.run(
-            [sys.executable, str(Path(__file__).parent.parent / ".claude" / "hooks" / "validators" / "validate_features_readme_sort.py"),
+            [sys.executable, VALIDATOR_SCRIPT,
              "--fix", str(readme)],
             capture_output=True,
             text=True,
@@ -298,7 +316,10 @@ class TestCheckModeIntegration:
         # Verify file is now sorted
         content = readme.read_text()
         lines = content.split("\n")
-        data_rows = [l for l in lines if l.strip().startswith("| [")]
+        data_rows = [
+            line for line in lines
+            if line.strip().startswith("| [")
+        ]
         names = [extract_feature_name(r) for r in data_rows]
         assert names == ["Alpha", "Beta", "Gamma"]
 
@@ -315,7 +336,7 @@ class TestCheckModeIntegration:
             ## Adding New Entries
         """))
         result = subprocess.run(
-            [sys.executable, str(Path(__file__).parent.parent / ".claude" / "hooks" / "validators" / "validate_features_readme_sort.py"),
+            [sys.executable, VALIDATOR_SCRIPT,
              "--fix", str(readme)],
             capture_output=True,
             text=True,
@@ -326,9 +347,11 @@ class TestCheckModeIntegration:
 
     def test_missing_features_header_passes(self, tmp_path):
         readme = tmp_path / "README.md"
-        readme.write_text("# Just a normal markdown file\n\nSome text.\n")
+        readme.write_text(
+            "# Just a normal markdown file\n\nSome text.\n"
+        )
         result = subprocess.run(
-            [sys.executable, str(Path(__file__).parent.parent / ".claude" / "hooks" / "validators" / "validate_features_readme_sort.py"),
+            [sys.executable, VALIDATOR_SCRIPT,
              "--check", str(readme)],
             capture_output=True,
             text=True,
@@ -341,9 +364,9 @@ class TestHookStdinIntegration:
     """Test the hook stdin protocol for Claude Code integration."""
 
     def test_non_matching_file_passes_through(self):
-        """When stdin indicates a non-README file, the hook should pass through."""
+        """Non-README file in stdin should pass through."""
         result = subprocess.run(
-            [sys.executable, str(Path(__file__).parent.parent / ".claude" / "hooks" / "validators" / "validate_features_readme_sort.py")],
+            [sys.executable, VALIDATOR_SCRIPT],
             input='{"tool_input":{"file_path":"some/other/file.md"}}',
             capture_output=True,
             text=True,
@@ -352,7 +375,7 @@ class TestHookStdinIntegration:
         assert result.returncode == 0
 
     def test_matching_file_validates(self, tmp_path):
-        """When stdin indicates docs/features/README.md, validation runs on that path."""
+        """README.md in stdin triggers validation."""
         readme = tmp_path / "docs" / "features" / "README.md"
         readme.parent.mkdir(parents=True)
         readme.write_text(dedent("""\
@@ -365,12 +388,12 @@ class TestHookStdinIntegration:
 
             ## Adding New Entries
         """))
-        # Stdin file_path matching docs/features/README.md triggers validation
-        # and overrides the filepath arg to use the stdin value
+        stdin_json = (
+            f'{{"tool_input":{{"file_path":"{readme}"}}}}'
+        )
         result = subprocess.run(
-            [sys.executable, str(Path(__file__).parent.parent / ".claude" / "hooks" / "validators" / "validate_features_readme_sort.py"),
-             str(readme)],
-            input=f'{{"tool_input":{{"file_path":"{readme}"}}}}',
+            [sys.executable, VALIDATOR_SCRIPT, str(readme)],
+            input=stdin_json,
             capture_output=True,
             text=True,
             timeout=10,
