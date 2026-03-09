@@ -55,103 +55,6 @@ MSG_MAX_CHARS = 20_000  # ~5k tokens — reasonable context limit for agent inpu
 MAX_AUTO_CONTINUES = 3  # Max status updates to auto-continue before sending to chat
 MAX_AUTO_CONTINUES_SDLC = 10  # Higher cap for SDLC jobs (stage progress is real signal)
 
-# Planning language patterns — signals that the agent is sharing its approach
-# before executing, not delivering a substantive answer. Used by the non-SDLC
-# auto-continue guard to distinguish "here's my plan" from "here's the answer".
-_PLANNING_PREFIXES = (
-    "i'll ",
-    "i will ",
-    "let me ",
-    "first i need to ",
-    "first, i need to ",
-    "first i'll ",
-    "first, i'll ",
-    "i'm going to ",
-    "i need to ",
-    "let's ",
-)
-
-
-def _is_planning_language(msg: str) -> bool:
-    """Check if an output contains planning language indicating the agent is
-    sharing its approach before executing work.
-
-    Non-SDLC status updates that are "here's my plan" should auto-continue,
-    but informational answers should be delivered to the user. This heuristic
-    checks for planning prefixes in the first 500 chars of the output.
-
-    See issue #232 and docs/plans/fix_chat_cross_wire.md for design rationale.
-    """
-    # Check a reasonable prefix — planning language appears early
-    prefix = msg[:500].lower().strip()
-    return any(prefix.startswith(p) for p in _PLANNING_PREFIXES)
-
-
-class RoutingDecision:
-    """Result of the classifier-based routing decision.
-
-    Encapsulates the decision of whether to auto-continue, deliver to user,
-    or bypass (error guard). Used by both production code and tests to ensure
-    they exercise the same logic.
-    """
-
-    AUTO_CONTINUE = "auto_continue"
-    DELIVER = "deliver"
-    ERROR_BYPASS = "error_bypass"
-
-    def __init__(self, action: str, reason: str):
-        self.action = action
-        self.reason = reason
-
-
-def classify_routing_decision(
-    classification,
-    auto_continue_count: int,
-    effective_max: int,
-    is_sdlc: bool,
-    msg: str,
-) -> RoutingDecision:
-    """Determine routing action based on classification result and context.
-
-    This is the core routing decision extracted from the send_to_chat closure
-    in _execute_job. Tests call this function directly instead of replicating
-    the logic inline, ensuring test and production code stay in sync.
-
-    Args:
-        classification: ClassificationResult from classify_output()
-        auto_continue_count: Current count of auto-continues in this session
-        effective_max: Maximum allowed auto-continues (3 for non-SDLC, 10 for SDLC)
-        is_sdlc: Whether this is an SDLC job
-        msg: The agent output message (used for planning language detection)
-
-    Returns:
-        RoutingDecision with action (AUTO_CONTINUE, DELIVER, or ERROR_BYPASS)
-        and reason string.
-    """
-    from bridge.summarizer import OutputType
-
-    if classification.output_type == OutputType.ERROR:
-        return RoutingDecision(
-            RoutingDecision.ERROR_BYPASS,
-            "Error-classified output bypasses auto-continue",
-        )
-
-    if (
-        classification.output_type == OutputType.STATUS_UPDATE
-        and auto_continue_count < effective_max
-        and (is_sdlc or _is_planning_language(msg))
-    ):
-        return RoutingDecision(
-            RoutingDecision.AUTO_CONTINUE,
-            f"Status update, count {auto_continue_count} < {effective_max}",
-        )
-
-    return RoutingDecision(
-        RoutingDecision.DELIVER,
-        f"Delivering to user: type={classification.output_type.value}, "
-        f"count={auto_continue_count}/{effective_max}",
-    )
-
 
 def should_guard_empty_output(msg: str, is_sdlc: bool, has_remaining_stages: bool) -> bool:
     """Check if empty/whitespace output should be guarded (delivered to user, not auto-continued).
@@ -1026,8 +929,7 @@ async def _enqueue_continuation(
     task_list_id: str,
     auto_continue_count: int,
     output_msg: str,
-    coaching_source: str = "observer",
-    observer_coaching: str | None = None,
+    coaching_message: str = "continue",
 ) -> None:
     """Enqueue a continuation job by reusing the existing AgentSession.
 
@@ -1046,54 +948,11 @@ async def _enqueue_continuation(
         task_list_id: Task list ID for sub-agent isolation.
         auto_continue_count: Current auto-continue count (already incremented).
         output_msg: The agent output that triggered auto-continue.
-        coaching_source: Label for logging ("observer", "stage_aware", or "classifier").
-        observer_coaching: Pre-built coaching message from the Observer agent.
-            When provided, skips the legacy coach.build_coaching_message() path.
+        coaching_message: Steering message from the Observer agent.
     """
-    if observer_coaching:
-        # Observer provides its own coaching message — use it directly
-        coaching_message = observer_coaching
-    else:
-        # Fallback to legacy coaching for backward compatibility
-        from bridge.coach import build_coaching_message
-        from bridge.summarizer import ClassificationResult, OutputType
-
-        classification = ClassificationResult(
-            output_type=OutputType.STATUS_UPDATE,
-            confidence=1.0,
-            reason=f"Auto-continue ({coaching_source})",
-        )
-
-        _plan_file = None
-        if job.workflow_id:
-            try:
-                from agent.workflow_state import WorkflowState
-
-                ws = WorkflowState.load(job.workflow_id)
-                if ws.data and ws.data.plan_file:
-                    _plan_file = ws.data.plan_file
-            except Exception as e:
-                logger.warning(f"Failed to resolve plan_file for workflow {job.workflow_id}: {e}")
-
-        _sdlc_stage_progress = None
-        try:
-            sessions_for_progress = list(AgentSession.query.filter(session_id=job.session_id))
-            if sessions_for_progress:
-                _session = sessions_for_progress[0]
-                if _session.is_sdlc_job():
-                    _sdlc_stage_progress = _session.get_stage_progress()
-        except Exception as e:
-            logger.warning(f"[{job.project_key}] Failed to get stage progress for coaching: {e}")
-
-        coaching_message = build_coaching_message(
-            classification=classification,
-            plan_file=_plan_file,
-            job_message_text=job.message_text,
-            sdlc_stage_progress=_sdlc_stage_progress,
-        )
 
     logger.info(
-        f"[{job.project_key}] Coaching message ({coaching_source}) "
+        f"[{job.project_key}] Coaching message (observer) "
         f"({len(coaching_message)} chars): {coaching_message[:120]!r}"
     )
 
@@ -1364,8 +1223,7 @@ async def _execute_job(job: Job) -> None:
                 task_list_id,
                 chat_state.auto_continue_count,
                 msg,
-                coaching_source="observer",
-                observer_coaching=decision.get("coaching_message", "continue"),
+                coaching_message=decision.get("coaching_message", "continue"),
             )
 
             chat_state.completion_sent = True

@@ -8,7 +8,6 @@ import pytest
 
 from bridge.stage_detector import STAGE_ORDER, detect_stages
 
-
 # ============================================================================
 # Stage Detector Tests (pure function — no Redis, no API)
 # ============================================================================
@@ -424,7 +423,8 @@ class TestStageDetectorApplyTransitions:
         """Applying transitions to None session returns 0."""
         from bridge.stage_detector import apply_transitions
 
-        applied = apply_transitions(None, [{"stage": "BUILD", "status": "in_progress", "reason": "test"}])
+        transition = {"stage": "BUILD", "status": "in_progress", "reason": "test"}
+        applied = apply_transitions(None, [transition])
         assert applied == 0
 
 
@@ -461,7 +461,8 @@ class TestQueuedSteeringMessages:
         session.queued_steering_messages = current
 
         # Simulate pop
-        messages = list(session.queued_steering_messages) if session.queued_steering_messages else []
+        queued = session.queued_steering_messages
+        messages = list(queued) if queued else []
         session.queued_steering_messages = []
 
         assert messages == ["First message", "Second message"]
@@ -549,7 +550,6 @@ class TestObserverFallback:
         )
 
         # Monkeypatch to simulate API failure
-        import bridge.observer as obs_module
         original_fn = None
         try:
             # Save and replace the API key getter

@@ -332,7 +332,8 @@ class Observer:
                 f"{self.worker_output[:3000]}"
             )
             if len(self.worker_output) > 3000:
-                user_message += f"\n\n[...truncated, {len(self.worker_output) - 3000} more chars...]"
+                remaining = len(self.worker_output) - 3000
+                user_message += f"\n\n[...truncated, {remaining} more chars...]"
 
             messages = [{"role": "user", "content": user_message}]
             tools = _build_tools()

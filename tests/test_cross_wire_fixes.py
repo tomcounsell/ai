@@ -127,59 +127,7 @@ class TestSessionIsolation:
 
 
 # === Fix 3: Non-SDLC auto-continue guard ===
-
-
-class TestNonSDLCAutoContinueGuard:
-    """Verify that non-SDLC jobs use planning language heuristic."""
-
-    def test_planning_language_detected(self):
-        """Planning prefixes should be detected."""
-        from agent.job_queue import _is_planning_language
-
-        assert _is_planning_language("I'll check the logs and investigate the error.")
-        assert _is_planning_language("Let me look at the codebase to understand this.")
-        assert _is_planning_language("First I need to understand the current state.")
-        assert _is_planning_language("I'm going to search for the relevant files.")
-        assert _is_planning_language("I need to check the configuration first.")
-        assert _is_planning_language("Let's start by examining the test output.")
-
-    def test_substantive_answers_not_planning(self):
-        """Informational answers should NOT be detected as planning language."""
-        from agent.job_queue import _is_planning_language
-
-        # Q&A answers
-        assert not _is_planning_language(
-            "The summarizer works by classifying output into five categories."
-        )
-        assert not _is_planning_language(
-            "Here's how the routing system handles messages: When a Telegram "
-            "message arrives, the bridge extracts metadata."
-        )
-        assert not _is_planning_language(
-            "The auto-continue logic checks whether the output is a status "
-            "update and re-enqueues the job if so."
-        )
-
-    def test_empty_string_not_planning(self):
-        """Empty string should not be planning language."""
-        from agent.job_queue import _is_planning_language
-
-        assert not _is_planning_language("")
-
-    def test_case_insensitive(self):
-        """Planning detection should be case-insensitive."""
-        from agent.job_queue import _is_planning_language
-
-        assert _is_planning_language("I'LL CHECK the logs first.")
-        assert _is_planning_language("LET ME investigate this issue.")
-
-    def test_planning_prefixes_complete(self):
-        """All documented planning prefixes should work."""
-        from agent.job_queue import _PLANNING_PREFIXES
-
-        # Verify we have a reasonable number of prefixes
-        assert len(_PLANNING_PREFIXES) >= 5, "Should have at least 5 planning prefixes"
-
-        # Each prefix should be lowercase
-        for prefix in _PLANNING_PREFIXES:
-            assert prefix == prefix.lower(), f"Prefix {prefix!r} should be lowercase"
+# Removed: TestNonSDLCAutoContinueGuard — tested _is_planning_language
+# which was part of the old classifier→coach→routing chain.
+# The Observer Agent now handles all routing decisions.
+# See issue #309 and bridge/observer.py.

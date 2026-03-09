@@ -105,7 +105,8 @@ class AgentSession(Model):
     expectations = Field(null=True, max_length=500)  # What the agent needs from the human
 
     # === Observer fields ===
-    queued_steering_messages = ListField(null=True)  # Buffered human replies during active pipelines
+    # Buffered human replies during active pipelines
+    queued_steering_messages = ListField(null=True)
 
     # === Compatibility ===
 
