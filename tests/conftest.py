@@ -3,34 +3,66 @@ Shared test fixtures for Valor AI tests.
 """
 
 import sys
+from unittest.mock import MagicMock
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Centralized claude_agent_sdk mock
+# ---------------------------------------------------------------------------
+# Several test files need ``import agent.*`` which transitively imports
+# ``claude_agent_sdk``.  When the real SDK is not installed the import
+# would fail during pytest collection.  Previously each test file had its
+# own module-level ``sys.modules["claude_agent_sdk"] = MagicMock()`` which
+# persisted across the pytest session and contaminated later tests.
+#
+# Centralizing the mock here (conftest.py is always imported before test
+# modules are collected) means:
+# 1. Only one place manages the mock -- no 7 scattered copies
+# 2. The autouse fixture below restores sys.modules after each test
+# 3. Tests that need the real SDK (e.g. test_cross_wire_fixes.py) get
+#    a clean sys.modules state
+# ---------------------------------------------------------------------------
+_SDK_PRESENT_AT_STARTUP = "claude_agent_sdk" in sys.modules
+_SDK_ORIGINAL_VALUE = sys.modules.get("claude_agent_sdk")
+
+if not _SDK_PRESENT_AT_STARTUP:
+    sys.modules["claude_agent_sdk"] = MagicMock()
 
 
 @pytest.fixture(autouse=True)
 def mock_claude_sdk_cleanup():
-    """Save and restore sys.modules["claude_agent_sdk"] around each test.
+    """Restore sys.modules["claude_agent_sdk"] to pre-collection state after each test.
 
-    Several test files insert a MagicMock into sys.modules at module level so
-    that ``import agent.*`` succeeds even when the real SDK is not installed.
-    Without cleanup the mock persists for the entire pytest session, which
-    contaminates later tests (e.g. test_cross_wire_fixes.py) that expect to
-    import the real SDK or at least a fresh module state.
+    Problem: Seven test files inject a MagicMock into sys.modules at module
+    level (during collection, before any fixture runs) so that ``import
+    agent.*`` succeeds even when the real SDK is not installed.  Without
+    cleanup the mock persists for the entire pytest session, contaminating
+    later tests (e.g. test_cross_wire_fixes.py) that expect the real SDK.
 
-    This fixture snapshots the entry before each test and restores it (or
-    removes it) afterward, preventing cross-test contamination via
-    sys.modules.
+    Solution: At conftest import time (before test files are collected) we
+    snapshot whether the real SDK exists.  After each test function we
+    restore that original state.  This also evicts cached ``agent.*``
+    modules that were loaded against the mock so they get re-imported
+    cleanly if needed by subsequent tests.
     """
-    had_sdk = "claude_agent_sdk" in sys.modules
-    original = sys.modules.get("claude_agent_sdk")
-
     yield
 
-    # Restore original state
-    if had_sdk:
-        sys.modules["claude_agent_sdk"] = original
+    # Restore the SDK entry to its pre-collection state
+    if _SDK_PRESENT_AT_STARTUP:
+        sys.modules["claude_agent_sdk"] = _SDK_ORIGINAL_VALUE
     else:
         sys.modules.pop("claude_agent_sdk", None)
+
+    # Evict any agent.* modules that were imported using the mock SDK.
+    # This forces a fresh import if a later test needs these modules,
+    # ensuring they bind to whatever is in sys.modules at that point
+    # (real SDK or a fresh mock) rather than the stale mock.
+    agent_modules = [
+        key for key in sys.modules if key == "agent" or key.startswith("agent.")
+    ]
+    for mod_key in agent_modules:
+        del sys.modules[mod_key]
 
 
 @pytest.fixture(autouse=True)

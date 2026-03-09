@@ -22,22 +22,11 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Mock claude_agent_sdk before importing agent.sdk_client to avoid
-# dependency issues (mcp.types.ToolAnnotations import error).
-if "claude_agent_sdk" not in sys.modules:
-
-    class _MockSDK(ModuleType):
-        """Auto-mock module: returns a MagicMock for any attribute access."""
-
-        def __getattr__(self, name):
-            return MagicMock()
-
-    sys.modules["claude_agent_sdk"] = _MockSDK("claude_agent_sdk")
+# claude_agent_sdk mock is centralized in tests/conftest.py
 
 from agent.sdk_client import (  # noqa: E402
     SDLC_WORKFLOW,
