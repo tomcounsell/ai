@@ -1026,7 +1026,8 @@ async def _enqueue_continuation(
     task_list_id: str,
     auto_continue_count: int,
     output_msg: str,
-    coaching_source: str = "stage_aware",
+    coaching_source: str = "observer",
+    observer_coaching: str | None = None,
 ) -> None:
     """Enqueue a continuation job by reusing the existing AgentSession.
 
@@ -1045,55 +1046,51 @@ async def _enqueue_continuation(
         task_list_id: Task list ID for sub-agent isolation.
         auto_continue_count: Current auto-continue count (already incremented).
         output_msg: The agent output that triggered auto-continue.
-        coaching_source: Label for logging ("stage_aware" or "classifier").
+        coaching_source: Label for logging ("observer", "stage_aware", or "classifier").
+        observer_coaching: Pre-built coaching message from the Observer agent.
+            When provided, skips the legacy coach.build_coaching_message() path.
     """
-    from bridge.coach import build_coaching_message
-    from bridge.summarizer import ClassificationResult, OutputType
+    if observer_coaching:
+        # Observer provides its own coaching message — use it directly
+        coaching_message = observer_coaching
+    else:
+        # Fallback to legacy coaching for backward compatibility
+        from bridge.coach import build_coaching_message
+        from bridge.summarizer import ClassificationResult, OutputType
 
-    # For stage-aware continuations, build a minimal classification
-    # so the coach can still provide skill-aware coaching
-    classification = ClassificationResult(
-        output_type=OutputType.STATUS_UPDATE,
-        confidence=1.0,
-        reason=f"Stage-aware auto-continue ({coaching_source})",
-    )
+        classification = ClassificationResult(
+            output_type=OutputType.STATUS_UPDATE,
+            confidence=1.0,
+            reason=f"Auto-continue ({coaching_source})",
+        )
 
-    # Resolve plan_file from WorkflowState if available
-    _plan_file = None
-    if job.workflow_id:
-        try:
-            from agent.workflow_state import WorkflowState
+        _plan_file = None
+        if job.workflow_id:
+            try:
+                from agent.workflow_state import WorkflowState
 
-            ws = WorkflowState.load(job.workflow_id)
-            if ws.data and ws.data.plan_file:
-                _plan_file = ws.data.plan_file
-        except Exception as e:
-            logger.warning(f"Failed to resolve plan_file for workflow {job.workflow_id}: {e}")
+                ws = WorkflowState.load(job.workflow_id)
+                if ws.data and ws.data.plan_file:
+                    _plan_file = ws.data.plan_file
+            except Exception as e:
+                logger.warning(f"Failed to resolve plan_file for workflow {job.workflow_id}: {e}")
 
-    # For stage-aware continuations, look up the session's SDLC stage progress
-    # so the coach can build explicit next-step instructions. The session is
-    # re-read from Redis to get fresh stage data written by session_progress.py.
-    _sdlc_stage_progress = None
-    if coaching_source == "stage_aware":
+        _sdlc_stage_progress = None
         try:
             sessions_for_progress = list(AgentSession.query.filter(session_id=job.session_id))
             if sessions_for_progress:
-                agent_session = sessions_for_progress[0]
-                if agent_session.is_sdlc_job():
-                    _sdlc_stage_progress = agent_session.get_stage_progress()
-                    logger.info(
-                        f"[{job.project_key}] SDLC stage progress for coaching: "
-                        f"{_sdlc_stage_progress}"
-                    )
+                _session = sessions_for_progress[0]
+                if _session.is_sdlc_job():
+                    _sdlc_stage_progress = _session.get_stage_progress()
         except Exception as e:
             logger.warning(f"[{job.project_key}] Failed to get stage progress for coaching: {e}")
 
-    coaching_message = build_coaching_message(
-        classification=classification,
-        plan_file=_plan_file,
-        job_message_text=job.message_text,
-        sdlc_stage_progress=_sdlc_stage_progress,
-    )
+        coaching_message = build_coaching_message(
+            classification=classification,
+            plan_file=_plan_file,
+            job_message_text=job.message_text,
+            sdlc_stage_progress=_sdlc_stage_progress,
+        )
 
     logger.info(
         f"[{job.project_key}] Coaching message ({coaching_source}) "
@@ -1284,27 +1281,12 @@ async def _execute_job(job: Job) -> None:
             )
             return
 
-        # === Stage-aware auto-continue for SDLC jobs ===
-        # Decision matrix (see docs/plans/stage_aware_auto_continue.md):
-        #
-        # | Pipeline state      | Output classification | Action            |
-        # |---------------------|-----------------------|-------------------|
-        # | Stages remaining    | (skipped)             | Auto-continue     |
-        # | All stages done     | Completion            | Deliver to user   |
-        # | All stages done     | Status (no evidence)  | Coach + continue  |
-        # | Any stage failed    | Error/blocker         | Deliver to user   |
-        # | No stages (non-SDLC)| Question              | Deliver to user   |
-        # | No stages (non-SDLC)| Status                | Auto-continue     |
-        #
-        # For SDLC jobs, stage progress is the primary termination signal.
-        # The classifier is only consulted when all stages are done or for
-        # non-SDLC jobs.
+        # === Observer-based routing ===
+        # The Observer Agent replaces the fragmented classifier -> coach -> routing
+        # chain with a single Sonnet-powered agent that has full session context.
+        # See bridge/observer.py and docs/plans/observer_agent.md for design.
 
         # Re-read session from Redis for fresh stage data.
-        # The agent_session captured by the closure at job start goes stale
-        # as session_progress.py writes [stage] entries from the agent subprocess.
-        # Without this re-read, is_sdlc_job() and has_remaining_stages() would
-        # evaluate stale in-memory data and make wrong routing decisions.
         if agent_session and agent_session.session_id:
             try:
                 fresh = list(AgentSession.query.filter(session_id=agent_session.session_id))
@@ -1313,113 +1295,9 @@ async def _execute_job(job: Job) -> None:
             except Exception as e:
                 logger.warning(f"Failed to re-read session {agent_session.session_id}: {e}")
 
-        _is_sdlc = False
-        _sdlc_has_remaining = False
-        _sdlc_has_failed = False
-        if agent_session:
-            _is_sdlc = agent_session.is_sdlc_job()
-            if _is_sdlc:
-                _sdlc_has_remaining = agent_session.has_remaining_stages()
-                _sdlc_has_failed = agent_session.has_failed_stage()
-
-        # Determine the effective auto-continue cap for this job
-        effective_max = MAX_AUTO_CONTINUES_SDLC if _is_sdlc else MAX_AUTO_CONTINUES
-
-        if _is_sdlc and _sdlc_has_failed:
-            # SDLC job with a failed stage — deliver to user immediately.
-            # Don't auto-continue; the failure needs human attention.
-            logger.info(f"[{job.project_key}] SDLC stage failed — delivering to user")
-            await send_cb(job.chat_id, msg, job.message_id, agent_session)
-            chat_state.completion_sent = True
-            return
-
-        if _is_sdlc and _sdlc_has_remaining and chat_state.auto_continue_count < effective_max:
-            # Open question gate: before auto-continuing, check if the output
-            # contains an ## Open Questions section with substantive questions.
-            # Only applies during the PLAN stage — that's where open questions
-            # are produced. Checking other stages would cause false positives
-            # from quoted plan content in status reports.
-            from bridge.summarizer import _extract_open_questions
-
-            _current_stage = None
-            if agent_session:
-                stage_progress = agent_session.get_stage_progress()
-                for stage_name in ("PLAN", "BUILD", "TEST", "REVIEW", "DOCS"):
-                    if stage_progress.get(stage_name) == "in_progress":
-                        _current_stage = stage_name
-                        break
-
-            open_questions = _extract_open_questions(msg) if _current_stage == "PLAN" else []
-            if open_questions:
-                logger.info(
-                    f"[{job.project_key}] Open questions detected in output "
-                    f"({len(open_questions)} questions), pausing for human input"
-                )
-                # Fall through to classifier/deliver path below
-            else:
-                # Stage-aware error guard: before auto-continuing, check if the
-                # output looks like an error. Error prose should reach the user
-                # even when stage history says "still in progress".
-                from bridge.summarizer import OutputType, _classify_with_heuristics
-
-                quick_check = _classify_with_heuristics(msg[:500])
-                if quick_check.output_type in (OutputType.ERROR, OutputType.BLOCKER):
-                    logger.warning(
-                        f"[{job.project_key}] Stage-aware path detected "
-                        f"{quick_check.output_type.value} in prose, "
-                        f"routing to classifier instead of auto-continuing"
-                    )
-                    # Fall through to classifier-based routing below
-                else:
-                    # SDLC job with stages remaining — auto-continue without classifier.
-                    # Stage progress is a stronger signal than prose classification.
-                    chat_state.auto_continue_count += 1
-                    progress = agent_session.get_stage_progress()
-                    logger.info(
-                        f"[{job.project_key}] Stage-aware auto-continue "
-                        f"({chat_state.auto_continue_count}/{effective_max}), "
-                        f"progress: {progress}"
-                    )
-
-                    save_session_snapshot(
-                        session_id=job.session_id,
-                        event="auto_continue",
-                        project_key=job.project_key,
-                        branch_name=branch_name,
-                        task_summary=(
-                            f"Stage-aware auto-continue "
-                            f"({chat_state.auto_continue_count}/{effective_max})"
-                        ),
-                        extra_context={
-                            "routing": "stage_aware",
-                            "stage_progress": str(progress),
-                            "message_preview": msg[:200],
-                        },
-                        working_dir=str(working_dir),
-                    )
-
-                    await _enqueue_continuation(
-                        job,
-                        branch_name,
-                        task_list_id,
-                        chat_state.auto_continue_count,
-                        msg,
-                        coaching_source="stage_aware",
-                    )
-
-                    chat_state.completion_sent = True
-                    chat_state.defer_reaction = True
-                    return
-
-        # === Classifier-based routing ===
-        # Used for: non-SDLC jobs, SDLC jobs with all stages done,
-        # SDLC jobs that hit the safety cap, and SDLC jobs where the
-        # stage-aware error guard detected error prose.
-        from bridge.summarizer import OutputType, classify_output
-
-        # Empty output anomaly detection: if output is empty/whitespace-only
-        # AND this is an SDLC job with remaining stages, log a warning and
-        # deliver to user instead of auto-continuing. Prevents silent loops.
+        # Empty output guard: deliver immediately to prevent silent loops
+        _is_sdlc = agent_session.is_sdlc_job() if agent_session else False
+        _sdlc_has_remaining = agent_session.has_remaining_stages() if _is_sdlc else False
         if should_guard_empty_output(msg, _is_sdlc, _sdlc_has_remaining):
             logger.warning(
                 f"[{job.project_key}] Empty output with remaining SDLC stages — "
@@ -1429,124 +1307,78 @@ async def _execute_job(job: Job) -> None:
             chat_state.completion_sent = True
             return
 
-        classification = await classify_output(msg)
-        logger.info(
-            f"[{job.project_key}] Output classified as {classification.output_type.value} "
-            f"(confidence={classification.confidence:.2f}): {classification.reason}"
-        )
+        # Run the Observer Agent for routing decisions
+        from bridge.observer import Observer
 
-        # Use extracted routing decision function — same logic used by tests
-        routing = classify_routing_decision(
-            classification=classification,
+        observer = Observer(
+            session=agent_session,
+            worker_output=msg,
             auto_continue_count=chat_state.auto_continue_count,
-            effective_max=effective_max,
-            is_sdlc=_is_sdlc,
-            msg=msg,
+            send_cb=send_cb,
+            enqueue_fn=_enqueue_continuation,
         )
 
-        if routing.action == RoutingDecision.ERROR_BYPASS:
-            # CRASH GUARD: Error-classified outputs bypass auto-continue entirely.
-            # Without this, SDK crashes would be misclassified as status updates
-            # and re-enqueued indefinitely, creating an infinite crash loop.
-            # See docs/features/coaching-loop.md "Error-Classified Output Bypass".
-            logger.info(f"[{job.project_key}] Error classified — skipping auto-continue")
-            # Fall through to send error to chat
-
-        elif routing.action == RoutingDecision.AUTO_CONTINUE:
-            # Status update -- don't send to chat, re-enqueue job to continue session
-            # For non-SDLC jobs, only auto-continue if the output contains planning
-            # language (agent sharing its approach before executing). Substantive
-            # answers and informational content should be delivered immediately.
-            # See issue #232 for the cross-wire bug this prevents.
-            chat_state.auto_continue_count += 1
-            logger.info(
-                f"[{job.project_key}] Auto-continuing via job re-enqueue "
-                f"({chat_state.auto_continue_count}/{effective_max})"
+        try:
+            decision = await observer.run()
+        except Exception as e:
+            # Observer fallback: deliver raw output to Telegram on any error
+            logger.error(
+                f"[{job.project_key}] Observer failed, delivering raw output: {e}",
+                exc_info=True,
             )
+            await send_cb(job.chat_id, msg, job.message_id, agent_session)
+            chat_state.completion_sent = True
+            return
 
-            # Log a session snapshot for audit trail
+        logger.info(
+            f"[{job.project_key}] Observer decision: {decision.get('action')} "
+            f"(transitions={decision.get('transitions_applied', 0)})"
+        )
+
+        if decision["action"] == "steer":
+            # Observer wants to auto-continue — enqueue continuation with coaching
+            chat_state.auto_continue_count += 1
+            effective_max = MAX_AUTO_CONTINUES_SDLC if _is_sdlc else MAX_AUTO_CONTINUES
+
             save_session_snapshot(
                 session_id=job.session_id,
                 event="auto_continue",
                 project_key=job.project_key,
                 branch_name=branch_name,
-                task_summary=(f"Auto-continued ({chat_state.auto_continue_count}/{effective_max})"),
+                task_summary=(
+                    f"Observer auto-continue "
+                    f"({chat_state.auto_continue_count}/{effective_max})"
+                ),
                 extra_context={
-                    "routing": "classifier",
-                    "classification": classification.output_type.value,
-                    "confidence": classification.confidence,
-                    "reason": classification.reason,
+                    "routing": "observer",
+                    "coaching_message": decision.get("coaching_message", "")[:200],
                     "message_preview": msg[:200],
-                    "coaching_context": "pending",
                 },
                 working_dir=str(working_dir),
             )
 
-            # Build coaching message and re-enqueue via shared helper
+            # Enqueue continuation with Observer's coaching message
             await _enqueue_continuation(
-                job=job,
-                branch_name=branch_name,
-                task_list_id=task_list_id,
-                auto_continue_count=chat_state.auto_continue_count,
-                output_msg=msg,
-                coaching_source="classifier",
+                job,
+                branch_name,
+                task_list_id,
+                chat_state.auto_continue_count,
+                msg,
+                coaching_source="observer",
+                observer_coaching=decision.get("coaching_message", "continue"),
             )
 
-            # Suppress BackgroundTask's final messenger.send(result) call.
-            # Without this, _run_work() re-sends the SDK result through
-            # send_to_chat after we already auto-continued, causing duplicate
-            # messages in chat.
             chat_state.completion_sent = True
-
-            # Signal that this job should NOT set a reaction
-            # (defer to the continuation job)
             chat_state.defer_reaction = True
             return
 
-        # For all other types (question, completion, blocker, error,
-        # or max auto-continues reached), send to chat normally
-        if (
-            chat_state.auto_continue_count >= effective_max
-            and classification.output_type == OutputType.STATUS_UPDATE
-        ):
-            logger.info(
-                f"[{job.project_key}] Max auto-continues reached ({effective_max}), sending to chat"
-            )
-
+        # Observer decided to deliver to Telegram
         await send_cb(job.chat_id, msg, job.message_id, agent_session)
-
-        # After sending a COMPLETION, check for workarounds then close the gate
-        if classification.output_type == OutputType.COMPLETION:
-            if classification.has_workarounds:
-                # Fire one more auto-continue to post GitHub issues for problems
-                logger.info(
-                    f"[{job.project_key}] Completion has workarounds — "
-                    f"enqueuing issue-posting continuation"
-                )
-                issue_prompt = (
-                    "You discovered issues. Post them as GitHub issues! "
-                    "Create one issue per distinct problem you encountered "
-                    "and worked around during this session. Include: what "
-                    "failed, how you worked around it, and what the fix "
-                    "should be."
-                )
-                await enqueue_job(
-                    project_key=job.project_key,
-                    session_id=job.session_id,
-                    working_dir=job.working_dir,
-                    message_text=issue_prompt,
-                    sender_name="System (auto-continue)",
-                    chat_id=job.chat_id,
-                    message_id=job.message_id,
-                    priority="high",
-                    work_item_slug=job.work_item_slug,
-                    task_list_id=job.task_list_id,
-                    auto_continue_count=MAX_AUTO_CONTINUES,  # No further auto-continues
-                )
-                chat_state.defer_reaction = True
-
-            chat_state.completion_sent = True
-            logger.info(f"[{job.project_key}] Completion sent — suppressing further outputs")
+        chat_state.completion_sent = True
+        logger.info(
+            f"[{job.project_key}] Observer delivered to Telegram: "
+            f"{decision.get('reason', 'no reason')}"
+        )
 
     messenger = BossMessenger(
         _send_callback=send_to_chat,
