@@ -23,10 +23,21 @@ import pytest
 # 3. Tests that need the real SDK (e.g. test_cross_wire_fixes.py) get
 #    a clean sys.modules state
 # ---------------------------------------------------------------------------
+# Check if the real SDK is importable (installed), not just loaded.
+# If it's installed, don't inject a mock -- let tests use the real SDK.
+# If it's NOT installed, inject a MagicMock so that ``import agent.*``
+# succeeds during test collection.
+try:
+    import claude_agent_sdk  # noqa: F401
+
+    _SDK_IMPORTABLE = True
+except ImportError:
+    _SDK_IMPORTABLE = False
+
 _SDK_PRESENT_AT_STARTUP = "claude_agent_sdk" in sys.modules
 _SDK_ORIGINAL_VALUE = sys.modules.get("claude_agent_sdk")
 
-if not _SDK_PRESENT_AT_STARTUP:
+if not _SDK_IMPORTABLE:
     sys.modules["claude_agent_sdk"] = MagicMock()
 
 
@@ -34,19 +45,23 @@ if not _SDK_PRESENT_AT_STARTUP:
 def mock_claude_sdk_cleanup():
     """Restore sys.modules["claude_agent_sdk"] to pre-collection state after each test.
 
-    Problem: Seven test files inject a MagicMock into sys.modules at module
-    level (during collection, before any fixture runs) so that ``import
-    agent.*`` succeeds even when the real SDK is not installed.  Without
-    cleanup the mock persists for the entire pytest session, contaminating
+    Problem: Seven test files previously injected a MagicMock into
+    sys.modules at module level (during collection, before any fixture
+    runs).  The mock persisted for the entire pytest session, contaminating
     later tests (e.g. test_cross_wire_fixes.py) that expect the real SDK.
 
     Solution: At conftest import time (before test files are collected) we
     snapshot whether the real SDK exists.  After each test function we
-    restore that original state.  This also evicts cached ``agent.*``
-    modules that were loaded against the mock so they get re-imported
-    cleanly if needed by subsequent tests.
+    restore that original state.  If the SDK entry was swapped during the
+    test (i.e. a mock was injected where the real SDK was, or vice versa),
+    we also evict cached ``agent.*`` modules so they get re-imported
+    cleanly against the restored SDK.
     """
+    sdk_before_test = sys.modules.get("claude_agent_sdk")
+
     yield
+
+    sdk_after_test = sys.modules.get("claude_agent_sdk")
 
     # Restore the SDK entry to its pre-collection state
     if _SDK_PRESENT_AT_STARTUP:
@@ -54,15 +69,17 @@ def mock_claude_sdk_cleanup():
     else:
         sys.modules.pop("claude_agent_sdk", None)
 
-    # Evict any agent.* modules that were imported using the mock SDK.
-    # This forces a fresh import if a later test needs these modules,
-    # ensuring they bind to whatever is in sys.modules at that point
-    # (real SDK or a fresh mock) rather than the stale mock.
-    agent_modules = [
-        key for key in sys.modules if key == "agent" or key.startswith("agent.")
-    ]
-    for mod_key in agent_modules:
-        del sys.modules[mod_key]
+    # Only evict agent.* modules if the SDK entry was swapped during the
+    # test.  Blanket eviction after every test is too aggressive and
+    # breaks module-level state for unrelated tests.
+    if sdk_after_test is not sdk_before_test:
+        agent_modules = [
+            key
+            for key in sys.modules
+            if key == "agent" or key.startswith("agent.")
+        ]
+        for mod_key in agent_modules:
+            del sys.modules[mod_key]
 
 
 @pytest.fixture(autouse=True)
