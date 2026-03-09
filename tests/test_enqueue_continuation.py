@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 # claude_agent_sdk mock is centralized in conftest.py
-
 from agent.job_queue import (
     _JOB_FIELDS,
     SendToChatResult,

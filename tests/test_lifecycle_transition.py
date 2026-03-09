@@ -9,12 +9,10 @@ Covers:
 
 import logging
 import time
-from unittest.mock import MagicMock
 
 import pytest
 
 # claude_agent_sdk mock is centralized in conftest.py
-
 from models.agent_session import AgentSession
 
 # ── AgentSession.last_transition_at field ────────────────────────────────────

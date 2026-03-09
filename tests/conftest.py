@@ -73,11 +73,7 @@ def mock_claude_sdk_cleanup():
     # test.  Blanket eviction after every test is too aggressive and
     # breaks module-level state for unrelated tests.
     if sdk_after_test is not sdk_before_test:
-        agent_modules = [
-            key
-            for key in sys.modules
-            if key == "agent" or key.startswith("agent.")
-        ]
+        agent_modules = [key for key in sys.modules if key == "agent" or key.startswith("agent.")]
         for mod_key in agent_modules:
             del sys.modules[mod_key]
 
