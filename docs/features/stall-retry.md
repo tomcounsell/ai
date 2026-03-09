@@ -57,6 +57,8 @@ With default configuration (base=10s, max=300s):
 | 2 | 40s |
 | 3+ | 300s (capped) |
 
+**Note:** The backoff delay uses `asyncio.sleep()` inside `fix_unhealthy_session()`, which blocks the watchdog from processing other sessions during the wait. With default config and max 3 retries, the longest blocking period is 40s (retry 2), which is acceptable given the 5-minute watchdog interval. A future optimization could schedule retries asynchronously to avoid this.
+
 ## Configuration
 
 All settings are configurable via environment variables with safe defaults:

@@ -671,7 +671,7 @@ async def _notify_stall_failure(session: AgentSession, stall_reason: str) -> Non
         f"Retries: {retry_count}/{STALL_MAX_RETRIES}\n"
         f"Last stall reason: {stall_reason}\n"
         f"Project: {project_key}\n\n"
-        f"The session has been marked as failed. "
+        f"The session has been marked as abandoned. "
         f"Please re-send your request to try again."
     )
 
