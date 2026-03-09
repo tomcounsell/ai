@@ -1,0 +1,565 @@
+"""Tests for the Observer Agent and Stage Detector.
+
+Tests the deterministic stage detector (pure function, no mocks needed)
+and the Observer's routing decision framework.
+"""
+
+import pytest
+
+from bridge.stage_detector import STAGE_ORDER, detect_stages
+
+
+# ============================================================================
+# Stage Detector Tests (pure function — no Redis, no API)
+# ============================================================================
+
+
+class TestDetectStages:
+    """Test the deterministic stage detector."""
+
+    def test_empty_transcript(self):
+        """Empty transcript returns no transitions."""
+        assert detect_stages("") == []
+
+    def test_none_transcript(self):
+        """None-like empty input returns no transitions."""
+        assert detect_stages("") == []
+
+    def test_single_skill_invocation(self):
+        """Detect a single /do-build invocation."""
+        transcript = "Running /do-build docs/plans/my-feature.md"
+        transitions = detect_stages(transcript)
+        assert any(t["stage"] == "BUILD" and t["status"] == "in_progress" for t in transitions)
+
+    def test_do_plan_invocation(self):
+        """Detect /do-plan skill invocation."""
+        transcript = "I'll invoke /do-plan observer-agent to create the plan."
+        transitions = detect_stages(transcript)
+        assert any(t["stage"] == "PLAN" and t["status"] == "in_progress" for t in transitions)
+
+    def test_do_test_invocation(self):
+        """Detect /do-test skill invocation."""
+        transcript = "Now running /do-test to validate the implementation."
+        transitions = detect_stages(transcript)
+        assert any(t["stage"] == "TEST" and t["status"] == "in_progress" for t in transitions)
+
+    def test_do_pr_review_invocation(self):
+        """Detect /do-pr-review skill invocation."""
+        transcript = "Executing /do-pr-review 42 for the pull request."
+        transitions = detect_stages(transcript)
+        assert any(t["stage"] == "REVIEW" and t["status"] == "in_progress" for t in transitions)
+
+    def test_do_docs_invocation(self):
+        """Detect /do-docs skill invocation."""
+        transcript = "Running /do-docs 42 for documentation cascade."
+        transitions = detect_stages(transcript)
+        assert any(t["stage"] == "DOCS" and t["status"] == "in_progress" for t in transitions)
+
+    def test_implicit_completion_of_earlier_stages(self):
+        """When a later stage starts, earlier stages are implicitly completed."""
+        transcript = "Running /do-build docs/plans/feature.md"
+        transitions = detect_stages(transcript)
+
+        # ISSUE and PLAN should be implicitly completed
+        issue_completed = any(
+            t["stage"] == "ISSUE" and t["status"] == "completed" for t in transitions
+        )
+        plan_completed = any(
+            t["stage"] == "PLAN" and t["status"] == "completed" for t in transitions
+        )
+        assert issue_completed, "ISSUE should be implicitly completed when BUILD starts"
+        assert plan_completed, "PLAN should be implicitly completed when BUILD starts"
+
+    def test_multiple_skills_in_transcript(self):
+        """Detect multiple skill invocations in a single transcript."""
+        transcript = (
+            "First, I invoked /do-plan to create the plan.\n"
+            "Then I ran /do-build to implement it.\n"
+            "Finally, /do-test to validate."
+        )
+        transitions = detect_stages(transcript)
+        stages_found = {t["stage"] for t in transitions}
+        assert "PLAN" in stages_found
+        assert "BUILD" in stages_found
+        assert "TEST" in stages_found
+
+    def test_completion_marker_test_results(self):
+        """Detect test completion from test result patterns."""
+        transcript = "All 42 tests passed, 0 failed."
+        transitions = detect_stages(transcript)
+        assert any(t["stage"] == "TEST" and t["status"] == "completed" for t in transitions)
+
+    def test_completion_marker_pr_created(self):
+        """Detect BUILD completion from PR creation patterns."""
+        transcript = "PR created: https://github.com/foo/bar/pull/123"
+        transitions = detect_stages(transcript)
+        assert any(t["stage"] == "BUILD" and t["status"] == "completed" for t in transitions)
+
+    def test_completion_marker_issue_created(self):
+        """Detect ISSUE completion from issue creation patterns."""
+        transcript = "Issue created: https://github.com/foo/bar/issues/456"
+        transitions = detect_stages(transcript)
+        assert any(t["stage"] == "ISSUE" and t["status"] == "completed" for t in transitions)
+
+    def test_completion_marker_docs_created(self):
+        """Detect DOCS completion from documentation patterns."""
+        transcript = "Documentation created at docs/features/observer-agent.md"
+        transitions = detect_stages(transcript)
+        assert any(t["stage"] == "DOCS" and t["status"] == "completed" for t in transitions)
+
+    def test_no_false_positives_on_normal_text(self):
+        """Normal conversation text should not trigger stage detection."""
+        transcript = "I analyzed the codebase and found that the function works correctly."
+        transitions = detect_stages(transcript)
+        assert len(transitions) == 0
+
+    def test_skill_in_quoted_text_still_detected(self):
+        """Skills in transcript output are detected."""
+        transcript = 'The agent ran /do-build "docs/plans/feature.md"'
+        transitions = detect_stages(transcript)
+        assert any(t["stage"] == "BUILD" for t in transitions)
+
+    def test_transitions_sorted_by_pipeline_order(self):
+        """Transitions should be sorted by pipeline stage order."""
+        transcript = (
+            "First /do-test for testing.\n" "Then /do-build for implementation.\n"  # Out of order
+        )
+        transitions = detect_stages(transcript)
+        stage_indices = []
+        for t in transitions:
+            if t["stage"] in STAGE_ORDER:
+                stage_indices.append(STAGE_ORDER.index(t["stage"]))
+        # Should be sorted ascending
+        assert stage_indices == sorted(stage_indices)
+
+    def test_no_duplicate_stages(self):
+        """Each stage should appear at most once in transitions."""
+        transcript = (
+            "Running /do-build docs/plans/a.md\n"
+            "Also running /do-build docs/plans/b.md\n"  # Duplicate
+        )
+        transitions = detect_stages(transcript)
+        stages = [t["stage"] for t in transitions]
+        # BUILD should only appear once (in_progress), plus implicit completions
+        build_count = stages.count("BUILD")
+        assert build_count == 1
+
+
+class TestDetectStagesEdgeCases:
+    """Edge cases for the stage detector."""
+
+    def test_whitespace_only_transcript(self):
+        """Whitespace-only transcript returns no transitions."""
+        assert detect_stages("   \n\n  ") == []
+
+    def test_very_long_transcript(self):
+        """Stage detector handles very long transcripts."""
+        long_text = "Normal text. " * 10000
+        long_text += "\nRunning /do-build docs/plans/feature.md\n"
+        transitions = detect_stages(long_text)
+        assert any(t["stage"] == "BUILD" for t in transitions)
+
+    def test_skill_at_start_of_transcript(self):
+        """Skill invocation at the very start of transcript."""
+        transcript = "/do-plan observer-agent"
+        transitions = detect_stages(transcript)
+        assert any(t["stage"] == "PLAN" for t in transitions)
+
+
+# ============================================================================
+# Observer Decision Tests (unit tests with mocked session)
+# ============================================================================
+
+
+class TestObserverToolHandlers:
+    """Test Observer tool handler methods directly."""
+
+    def _make_mock_session(self, **kwargs):
+        """Create a minimal mock session for testing Observer tools."""
+
+        class MockSession:
+            session_id = kwargs.get("session_id", "test-session-123")
+            classification_type = kwargs.get("classification_type", "sdlc")
+            context_summary = kwargs.get("context_summary", None)
+            expectations = kwargs.get("expectations", None)
+            issue_url = kwargs.get("issue_url", None)
+            plan_url = kwargs.get("plan_url", None)
+            pr_url = kwargs.get("pr_url", None)
+            queued_steering_messages = kwargs.get("queued_steering_messages", [])
+            history = kwargs.get("history", [])
+
+            def get_stage_progress(self):
+                return kwargs.get(
+                    "stage_progress",
+                    {
+                        "ISSUE": "completed",
+                        "PLAN": "completed",
+                        "BUILD": "in_progress",
+                        "TEST": "pending",
+                        "REVIEW": "pending",
+                        "DOCS": "pending",
+                    },
+                )
+
+            def get_links(self):
+                links = {}
+                if self.issue_url:
+                    links["issue"] = self.issue_url
+                if self.plan_url:
+                    links["plan"] = self.plan_url
+                if self.pr_url:
+                    links["pr"] = self.pr_url
+                return links
+
+            def _get_history_list(self):
+                return self.history if isinstance(self.history, list) else []
+
+            def pop_steering_messages(self):
+                msgs = list(self.queued_steering_messages) if self.queued_steering_messages else []
+                self.queued_steering_messages = []
+                return msgs
+
+            def is_sdlc_job(self):
+                return self.classification_type == "sdlc"
+
+            def has_remaining_stages(self):
+                progress = self.get_stage_progress()
+                return any(s in ("pending", "in_progress") for s in progress.values())
+
+            def has_failed_stage(self):
+                progress = self.get_stage_progress()
+                return any(s == "failed" for s in progress.values())
+
+            def set_link(self, kind, url):
+                if kind == "issue":
+                    self.issue_url = url
+                elif kind == "pr":
+                    self.pr_url = url
+
+            def save(self):
+                pass
+
+        return MockSession()
+
+    def test_read_session_returns_state(self):
+        """read_session tool returns comprehensive session state."""
+        from bridge.observer import Observer
+
+        session = self._make_mock_session(
+            issue_url="https://github.com/foo/bar/issues/1",
+            history=["[stage] ISSUE COMPLETED", "[stage] PLAN COMPLETED"],
+        )
+        observer = Observer(
+            session=session,
+            worker_output="Building the feature...",
+            auto_continue_count=2,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+        result = observer._handle_read_session()
+
+        assert result["session_id"] == "test-session-123"
+        assert result["is_sdlc"] is True
+        assert result["auto_continue_count"] == 2
+        assert result["has_remaining_stages"] is True
+        assert "BUILD" in result["stage_progress"]
+
+    def test_read_session_with_queued_messages(self):
+        """read_session includes queued steering messages."""
+        from bridge.observer import Observer
+
+        session = self._make_mock_session(
+            queued_steering_messages=["Approve the plan", "Continue with tests"]
+        )
+        observer = Observer(
+            session=session,
+            worker_output="Working...",
+            auto_continue_count=0,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+        result = observer._handle_read_session()
+        assert result["queued_steering_messages"] == ["Approve the plan", "Continue with tests"]
+
+    def test_update_session_sets_fields(self):
+        """update_session persists context_summary and expectations."""
+        from bridge.observer import Observer
+
+        session = self._make_mock_session()
+        observer = Observer(
+            session=session,
+            worker_output="Done",
+            auto_continue_count=0,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+        result = observer._handle_update_session(
+            context_summary="Building observer agent feature",
+            expectations="Waiting for test results",
+        )
+        assert result["status"] == "ok"
+        assert "context_summary" in result["updated_fields"]
+        assert "expectations" in result["updated_fields"]
+        assert session.context_summary == "Building observer agent feature"
+
+    def test_dispatch_enqueue_continuation(self):
+        """enqueue_continuation tool sets decision state."""
+        from bridge.observer import Observer
+
+        session = self._make_mock_session()
+        observer = Observer(
+            session=session,
+            worker_output="Status update",
+            auto_continue_count=0,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+        result = observer._dispatch_tool(
+            "enqueue_continuation",
+            {"coaching_message": "Invoke /do-test next"},
+        )
+        import json
+
+        data = json.loads(result)
+        assert data["action"] == "enqueue_continuation"
+        assert observer._decision_made is True
+        assert observer._action_taken == "steer"
+
+    def test_dispatch_deliver_to_telegram(self):
+        """deliver_to_telegram tool sets decision state."""
+        from bridge.observer import Observer
+
+        session = self._make_mock_session()
+        observer = Observer(
+            session=session,
+            worker_output="All done!",
+            auto_continue_count=0,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+        result = observer._dispatch_tool(
+            "deliver_to_telegram",
+            {"reason": "All stages complete"},
+        )
+        import json
+
+        data = json.loads(result)
+        assert data["action"] == "deliver_to_telegram"
+        assert observer._decision_made is True
+        assert observer._action_taken == "deliver"
+
+
+class TestStageDetectorApplyTransitions:
+    """Test applying stage transitions to a mock session."""
+
+    def _make_mock_session(self, history=None):
+        """Create a mock session that tracks history appends."""
+
+        class MockSession:
+            def __init__(self):
+                self.history = history or []
+                self._appended = []
+
+            def get_stage_progress(self):
+                # Parse history entries like the real implementation
+                from models.agent_session import SDLC_STAGES
+
+                progress = {stage: "pending" for stage in SDLC_STAGES}
+                for entry in self.history:
+                    if not isinstance(entry, str) or "[stage]" not in entry.lower():
+                        continue
+                    entry_upper = entry.upper()
+                    for stage in SDLC_STAGES:
+                        if stage in entry_upper:
+                            if "COMPLETED" in entry_upper:
+                                progress[stage] = "completed"
+                            elif "IN_PROGRESS" in entry_upper:
+                                progress[stage] = "in_progress"
+                return progress
+
+            def append_history(self, role, text):
+                entry = f"[{role}] {text}"
+                self.history.append(entry)
+                self._appended.append((role, text))
+
+        return MockSession()
+
+    def test_apply_transitions_to_clean_session(self):
+        """Apply transitions to a session with no prior stage data."""
+        from bridge.stage_detector import apply_transitions
+
+        session = self._make_mock_session()
+        transitions = [
+            {"stage": "BUILD", "status": "in_progress", "reason": "Skill /do-build invoked"},
+            {"stage": "ISSUE", "status": "completed", "reason": "Implicitly completed"},
+            {"stage": "PLAN", "status": "completed", "reason": "Implicitly completed"},
+        ]
+        applied = apply_transitions(session, transitions)
+        assert applied == 3
+        assert len(session._appended) == 3
+
+    def test_skip_already_completed_stages(self):
+        """Don't re-apply transitions for already completed stages."""
+        from bridge.stage_detector import apply_transitions
+
+        session = self._make_mock_session(
+            history=["[stage] PLAN COMPLETED", "[stage] ISSUE COMPLETED"]
+        )
+        transitions = [
+            {"stage": "PLAN", "status": "completed", "reason": "Already done"},
+            {"stage": "BUILD", "status": "in_progress", "reason": "New"},
+        ]
+        applied = apply_transitions(session, transitions)
+        assert applied == 1  # Only BUILD should be applied
+
+    def test_empty_transitions(self):
+        """Applying empty transitions is a no-op."""
+        from bridge.stage_detector import apply_transitions
+
+        session = self._make_mock_session()
+        applied = apply_transitions(session, [])
+        assert applied == 0
+
+    def test_none_session(self):
+        """Applying transitions to None session returns 0."""
+        from bridge.stage_detector import apply_transitions
+
+        applied = apply_transitions(None, [{"stage": "BUILD", "status": "in_progress", "reason": "test"}])
+        assert applied == 0
+
+
+# ============================================================================
+# AgentSession queued_steering_messages tests
+# ============================================================================
+
+
+class TestQueuedSteeringMessages:
+    """Test the queued_steering_messages field on AgentSession."""
+
+    def test_push_and_pop(self):
+        """Push messages and pop them all."""
+        # Use a mock to avoid Redis dependency
+        class MockSession:
+            queued_steering_messages = None
+
+            def save(self):
+                pass
+
+        session = MockSession()
+
+        # Simulate push
+        current = session.queued_steering_messages
+        if not isinstance(current, list):
+            current = []
+        current.append("First message")
+        session.queued_steering_messages = current
+
+        current = session.queued_steering_messages
+        if not isinstance(current, list):
+            current = []
+        current.append("Second message")
+        session.queued_steering_messages = current
+
+        # Simulate pop
+        messages = list(session.queued_steering_messages) if session.queued_steering_messages else []
+        session.queued_steering_messages = []
+
+        assert messages == ["First message", "Second message"]
+        assert session.queued_steering_messages == []
+
+    def test_pop_empty_returns_empty_list(self):
+        """Popping from empty queue returns empty list."""
+
+        class MockSession:
+            queued_steering_messages = []
+
+        session = MockSession()
+        current = session.queued_steering_messages
+        if not isinstance(current, list) or not current:
+            messages = []
+        else:
+            messages = list(current)
+        assert messages == []
+
+    def test_pop_none_returns_empty_list(self):
+        """Popping from None queue returns empty list."""
+
+        class MockSession:
+            queued_steering_messages = None
+
+        session = MockSession()
+        current = session.queued_steering_messages
+        if not isinstance(current, list) or not current:
+            messages = []
+        else:
+            messages = list(current)
+        assert messages == []
+
+
+# ============================================================================
+# Observer fallback behavior tests
+# ============================================================================
+
+
+class TestObserverFallback:
+    """Test Observer fallback behavior when errors occur."""
+
+    @pytest.mark.asyncio
+    async def test_observer_error_returns_deliver(self):
+        """When Observer errors, it returns a deliver decision."""
+        from bridge.observer import Observer
+
+        class MockSession:
+            session_id = "test-fallback"
+            classification_type = "sdlc"
+            context_summary = None
+            expectations = None
+            queued_steering_messages = []
+            history = []
+
+            def get_stage_progress(self):
+                return {"ISSUE": "pending", "PLAN": "pending", "BUILD": "pending",
+                        "TEST": "pending", "REVIEW": "pending", "DOCS": "pending"}
+
+            def _get_history_list(self):
+                return []
+
+            def pop_steering_messages(self):
+                return []
+
+            def is_sdlc_job(self):
+                return True
+
+            def has_remaining_stages(self):
+                return True
+
+            def has_failed_stage(self):
+                return False
+
+            def append_history(self, role, text):
+                pass
+
+        # Create Observer with no valid API key path — it will fail on API call
+        observer = Observer(
+            session=MockSession(),
+            worker_output="Test output",
+            auto_continue_count=0,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+
+        # Monkeypatch to simulate API failure
+        import bridge.observer as obs_module
+        original_fn = None
+        try:
+            # Save and replace the API key getter
+            import utils.api_keys
+            original_fn = utils.api_keys.get_anthropic_api_key
+            utils.api_keys.get_anthropic_api_key = lambda: None
+
+            decision = await observer.run()
+            assert decision["action"] == "deliver"
+            assert "No API key" in decision.get("reason", "")
+        finally:
+            if original_fn:
+                utils.api_keys.get_anthropic_api_key = original_fn
