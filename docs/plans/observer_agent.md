@@ -74,7 +74,7 @@ This is the culmination of 20+ issues attempting to fix the same root cause:
 - **Interface changes**: `send_to_chat()` routing logic replaced by Observer dispatch; `_enqueue_continuation()` reused by Observer
 - **Coupling**: Significantly **decreases** coupling — replaces 3 tightly-coupled systems (classifier→coach→routing) with 1 unified decision-maker
 - **Data ownership**: AgentSession remains the single source of truth; Observer reads and writes it atomically
-- **Reversibility**: `USE_OBSERVER=true` env var allows instant rollback; shadow mode enables comparison
+- **Reversibility**: Git revert if needed — old system is broken anyway, no value preserving it
 
 ## Appetite
 
@@ -83,8 +83,8 @@ This is the culmination of 20+ issues attempting to fix the same root cause:
 **Team:** Solo dev, PM
 
 **Interactions:**
-- PM check-ins: 1-2 (architecture validation, shadow mode results review)
-- Review rounds: 2+ (architecture review, integration review after shadow mode)
+- PM check-ins: 1-2 (architecture validation, initial rollout review)
+- Review rounds: 2+ (architecture review, post-rollout review)
 
 ## Prerequisites
 
@@ -112,14 +112,14 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/observer_agent
 - **Observer runs synchronously inside `send_to_chat()`** — replaces the classifier→coach→routing chain at the same call site. No new process, no new hook mechanism. The Observer is called where `classify_output()` + `classify_routing_decision()` + `build_coaching_message()` are called today.
 - **Stage detector is a pure function** — takes transcript text, returns list of completed stages. Called before Observer so it always sees current state.
 - **Observer uses Claude API directly** — system prompt + tools, invoked via `anthropic.Anthropic().messages.create()` with tool_use. Not a Claude Code subprocess.
-- **Shadow mode via env var** — `USE_OBSERVER=true` activates Observer; when false, existing system runs and Observer logs its decision for comparison.
+- **Direct replacement** — Observer replaces the classifier→coach→routing chain entirely. No feature flag, no shadow mode. The existing system is the problem, not a useful baseline. Git revert is the rollback if needed.
 - **Reuse existing infrastructure** — `_enqueue_continuation()` already handles job re-enqueueing; Observer calls it via its `enqueue_continuation` tool. `send_cb()` already handles Telegram delivery; Observer calls it via `deliver_to_telegram` tool.
 
 ## Failure Path Test Strategy
 
 ### Exception Handling Coverage
 - [ ] Audit all `except Exception: pass` in `agent_session.py` — `append_history()` line 140 and `set_link()` line 161 both silently swallow save errors. Observer path must log these.
-- [ ] Observer agent errors must not crash the pipeline — fallback to existing routing if Observer fails
+- [ ] Observer agent errors must not crash the pipeline — fallback delivers raw output to Telegram
 
 ### Empty/Invalid Input Handling
 - [ ] Stage detector given empty transcript → returns empty list (no stages marked)
@@ -136,17 +136,17 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/observer_agent
 - **Rewriting the summarizer's artifact extraction** — `extract_artifacts()` works fine. Observer uses it as a utility, not as a decision-maker.
 - **Adding more stages to the pipeline** — the stage order is correct; the problem is reliability of progression, not stage design.
 - **Building a custom tool-use framework** — use the `anthropic` SDK's native tool_use support directly. No abstraction layer needed.
-- **Optimizing Observer latency** — premature. Measure first in shadow mode. If needed, switch to Haiku later (but judgment quality matters more than speed here).
+- **Optimizing Observer latency** — premature. Measure in production first. If needed, switch to Haiku later (but judgment quality matters more than speed here).
 
 ## Risks
 
 ### Risk 1: Observer makes worse decisions than the current system
 **Impact:** Pipeline stalls more often or delivers at wrong times
-**Mitigation:** Shadow mode comparison over ~20 real sessions before cutover. Log both decisions side-by-side. Only cut over when Observer matches or exceeds.
+**Mitigation:** Integration tests with real session snapshots validate decisions before rollout. The current system is broken across 20+ issues — the bar to clear is low. Git revert is the rollback.
 
 ### Risk 2: Sonnet API latency adds noticeable delay
 **Impact:** User sees delayed responses after each worker pause
-**Mitigation:** Observer runs at a natural pause point (worker already stopped). User doesn't see the delay because the next action (steer or deliver) happens after. Measure actual latency in shadow mode.
+**Mitigation:** Observer runs at a natural pause point (worker already stopped). User doesn't see the delay because the next action (steer or deliver) happens after. Measure actual latency in production logs.
 
 ### Risk 3: Observer tool-use loop doesn't converge
 **Impact:** Observer calls tools indefinitely, blocking the pipeline
@@ -166,7 +166,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/observer_agent
 **Trigger:** Worker invokes `/do-build` (detected by stage detector) while also calling `session_progress --stage BUILD`
 **Data prerequisite:** History entries must be consistent
 **State prerequisite:** Both writers must see each other's entries
-**Mitigation:** During migration, `session_progress.py` CLI still exists but becomes a no-op when `USE_OBSERVER=true`. Stage detector is the sole writer. After cleanup, CLI is deleted entirely.
+**Mitigation:** `session_progress.py` CLI is deleted as part of this work. Stage detector is the sole writer. No dual-write window.
 
 ## No-Gos (Out of Scope)
 
@@ -178,7 +178,7 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/observer_agent
 
 ## Update System
 
-No update system changes required for the core Observer feature. The `USE_OBSERVER=true` env var is the only new config. Remote machines will get the Observer code via `git pull` and can opt in via `.env`. No new dependencies beyond the already-installed `anthropic` SDK.
+No update system changes required. Remote machines get the Observer code via `git pull`. No new dependencies beyond the already-installed `anthropic` SDK. No new config — Observer replaces the old routing directly.
 
 ## Agent Integration
 
@@ -189,7 +189,7 @@ The bridge (`bridge/telegram_bridge.py`) already calls `send_to_chat()` via the 
 ## Documentation
 
 ### Feature Documentation
-- [ ] Create `docs/features/observer-agent.md` describing the Observer architecture, decision flow, and shadow mode
+- [ ] Create `docs/features/observer-agent.md` describing the Observer architecture and decision flow
 - [ ] Add entry to `docs/features/README.md` index table
 - [ ] Update `docs/features/coaching-loop.md` to note deprecation of coaching tiers (replaced by Observer)
 
@@ -205,7 +205,7 @@ The bridge (`bridge/telegram_bridge.py`) already calls `send_to_chat()` via the 
 - [ ] Human interjections via `queued_steering_messages` are incorporated by Observer
 - [ ] Thumbs-up reaction still completes session without Observer involvement
 - [ ] Calendar hook continues working unchanged alongside Observer
-- [ ] Shadow mode comparison shows Observer decisions match or exceed old system
+- [ ] Old routing code (`classify_output`, `classify_routing_decision`, `build_coaching_message`) removed from routing path
 - [ ] Zero silent failures in stage recording path (no `except: pass` on stage writes)
 - [ ] Observer sets `expectations` and `context_summary` on deliver (ready for #318)
 - [ ] Tests pass (`/do-test`)
@@ -229,7 +229,7 @@ The bridge (`bridge/telegram_bridge.py`) already calls `send_to_chat()` via the 
 
 - **Builder (integration)**
   - Name: integration-builder
-  - Role: Wire Observer into send_to_chat(), add shadow mode, add queued_steering_messages field
+  - Role: Wire Observer into send_to_chat(), replace old routing, add queued_steering_messages field
   - Agent Type: builder
   - Resume: true
 
@@ -241,7 +241,7 @@ The bridge (`bridge/telegram_bridge.py`) already calls `send_to_chat()` via the 
 
 - **Test Engineer**
   - Name: observer-tester
-  - Role: Integration tests with real session snapshots, shadow mode comparison
+  - Role: Integration tests with real session snapshots
   - Agent Type: test-engineer
   - Resume: true
 
@@ -286,7 +286,7 @@ The bridge (`bridge/telegram_bridge.py`) already calls `send_to_chat()` via the 
 - Define tools: `read_session`, `update_session`, `extract_artifacts`, `search_github`, `enqueue_continuation`, `deliver_to_telegram`
 - Implement tool dispatch: each tool calls existing infrastructure (`AgentSession` methods, `summarizer.extract_artifacts()`, `gh` CLI, `_enqueue_continuation()`, `send_cb()`)
 - Invoke via `anthropic.Anthropic().messages.create()` with `model=MODEL_FAST` (Sonnet), tool_use, max 5 tool iterations
-- Add fallback: if Observer errors, log and fall through to existing routing
+- Add fallback: if Observer errors, log the error and deliver raw worker output to Telegram (never silently drop)
 
 ### 4. Wire Observer into send_to_chat()
 - **Task ID**: build-wiring
@@ -294,11 +294,10 @@ The bridge (`bridge/telegram_bridge.py`) already calls `send_to_chat()` via the 
 - **Assigned To**: integration-builder
 - **Agent Type**: builder
 - **Parallel**: false
-- In `job_queue.py:send_to_chat()`, add `USE_OBSERVER` env var check
-- When enabled: call stage detector, then Observer, skip classifier/coach/routing logic
-- When disabled (default): existing behavior unchanged
+- In `job_queue.py:send_to_chat()`, replace the classifier→coach→routing chain with: stage detector → Observer
+- Delete `classify_output()` call, `classify_routing_decision()` call, and `build_coaching_message()` call from the routing path
 - Pass Observer the worker output, session, send_cb, and enqueue function references
-- Shadow mode: when `OBSERVER_SHADOW=true`, run both paths and log comparison
+- Keep the early guards (completed session check, completion_sent check, empty output guard)
 
 ### 5. Validate Architecture
 - **Task ID**: validate-architecture
@@ -307,9 +306,9 @@ The bridge (`bridge/telegram_bridge.py`) already calls `send_to_chat()` via the 
 - **Agent Type**: validator
 - **Parallel**: false
 - Verify Observer replaces: `classify_output()` decisions, `classify_routing_decision()`, `build_coaching_message()`
-- Verify existing code paths still work when `USE_OBSERVER=false`
+- Verify old routing code (`classify_output`, `classify_routing_decision`, `build_coaching_message`) is fully removed from the routing path
 - Verify no orphaned imports or dead code
-- Verify `session_progress.py` CLI becomes no-op when Observer is active
+- Verify `session_progress.py` CLI is deleted or converted to a thin wrapper around stage detector
 
 ### 6. Integration Tests
 - **Task ID**: test-observer
@@ -321,7 +320,7 @@ The bridge (`bridge/telegram_bridge.py`) already calls `send_to_chat()` via the 
 - Test stage detector with real transcripts
 - Test human interjection flow: push message → Observer reads → incorporates
 - Test link accountability: Observer detects missing PR link after BUILD stage
-- Test fallback: Observer API error → existing routing handles it
+- Test fallback: Observer API error → raw output delivered to Telegram (never silently dropped)
 
 ### 7. Documentation
 - **Task ID**: document-feature
@@ -348,7 +347,7 @@ The bridge (`bridge/telegram_bridge.py`) already calls `send_to_chat()` via the 
 - `python -m pytest tests/ -x -q` - Run all tests
 - `python -m ruff check .` - Lint check
 - `python -m ruff format --check .` - Format check
-- `grep -r "USE_OBSERVER" bridge/ agent/` - Verify feature flag wiring
+- `grep -rL "classify_output\|classify_routing_decision\|build_coaching_message" agent/job_queue.py` - Verify old routing removed
 - `python -c "from bridge.observer import Observer; print('Observer importable')"` - Verify module exists
 - `python -c "from bridge.stage_detector import detect_stages; print('Stage detector importable')"` - Verify module exists
 - `python -c "from models.agent_session import AgentSession; assert hasattr(AgentSession, 'queued_steering_messages')"` - Verify field exists
@@ -357,10 +356,6 @@ The bridge (`bridge/telegram_bridge.py`) already calls `send_to_chat()` via the 
 
 ## Open Questions
 
-1. **Shadow mode duration**: How many real sessions should we compare before cutting over? The issue suggests ~20. Is that sufficient, or should we run longer?
+1. **Observer model choice**: Issue specifies Sonnet for judgment quality. Should we start with Sonnet and downgrade to Haiku if latency is acceptable, or commit to Sonnet from the start? The routing decision is judgment-heavy (distinguishing "blocked" from "status update" from "needs human input") which favors Sonnet.
 
-2. **Observer model choice**: Issue specifies Sonnet for judgment quality. Should we start with Sonnet and downgrade to Haiku if latency is acceptable, or commit to Sonnet from the start? The routing decision is judgment-heavy (distinguishing "blocked" from "status update" from "needs human input") which favors Sonnet.
-
-3. **Cleanup timing**: After cutover, when do we delete `classify_output()`, `classify_routing_decision()`, `build_coaching_message()`, and `session_progress.py` CLI? Same PR as cutover, or separate cleanup PR after a soak period?
-
-4. **Interjection source**: The issue says "bridge saves the message text to `queued_steering_messages`." Where exactly in the bridge does this happen? When `telegram_bridge.py` receives a reply-to message for an active session, should it: (a) always queue it, or (b) only queue it when a worker is currently running? Option (b) avoids stale queued messages.
+2. **Interjection source**: The issue says "bridge saves the message text to `queued_steering_messages`." Where exactly in the bridge does this happen? When `telegram_bridge.py` receives a reply-to message for an active session, should it: (a) always queue it, or (b) only queue it when a worker is currently running? Option (b) avoids stale queued messages.
