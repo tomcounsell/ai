@@ -96,6 +96,10 @@ class AgentSession(Model):
     plan_url = Field(null=True)
     pr_url = Field(null=True)
 
+    # === Stall retry fields ===
+    retry_count = Field(type=int, default=0)  # Stall retry attempt count
+    last_stall_reason = Field(null=True)  # Diagnostic context from last stall
+
     # === Semantic routing fields ===
     context_summary = Field(null=True, max_length=200)  # What this session is about
     expectations = Field(null=True, max_length=500)  # What the agent needs from the human

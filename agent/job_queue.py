@@ -318,6 +318,9 @@ _JOB_FIELDS = [
     # Semantic routing fields — must be preserved across delete-and-recreate
     "context_summary",
     "expectations",
+    # Stall retry fields — must be preserved across delete-and-recreate
+    "retry_count",
+    "last_stall_reason",
 ]
 
 # Backward compat alias
@@ -1071,9 +1074,7 @@ async def _enqueue_continuation(
     _sdlc_stage_progress = None
     if coaching_source == "stage_aware":
         try:
-            sessions_for_progress = list(
-                AgentSession.query.filter(session_id=job.session_id)
-            )
+            sessions_for_progress = list(AgentSession.query.filter(session_id=job.session_id))
             if sessions_for_progress:
                 agent_session = sessions_for_progress[0]
                 if agent_session.is_sdlc_job():
@@ -1083,9 +1084,7 @@ async def _enqueue_continuation(
                         f"{_sdlc_stage_progress}"
                     )
         except Exception as e:
-            logger.warning(
-                f"[{job.project_key}] Failed to get stage progress for coaching: {e}"
-            )
+            logger.warning(f"[{job.project_key}] Failed to get stage progress for coaching: {e}")
 
     coaching_message = build_coaching_message(
         classification=classification,
@@ -1348,9 +1347,7 @@ async def _execute_job(job: Job) -> None:
                         _current_stage = stage_name
                         break
 
-            open_questions = (
-                _extract_open_questions(msg) if _current_stage == "PLAN" else []
-            )
+            open_questions = _extract_open_questions(msg) if _current_stage == "PLAN" else []
             if open_questions:
                 logger.info(
                     f"[{job.project_key}] Open questions detected in output "

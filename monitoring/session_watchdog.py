@@ -7,15 +7,18 @@ Monitors active agent sessions for signs of distress:
 - Excessively long sessions
 
 When issues are detected, the watchdog FIXES them automatically:
-- Marks stuck sessions as abandoned
+- Retries stalled sessions with exponential backoff (up to MAX_STALL_RETRIES)
+- Marks stuck sessions as abandoned after retries exhausted
 - Creates GitHub issues for problems that can't be auto-fixed
+- Notifies human via Telegram after max retries exhausted
 
-NO ALERTS ARE SENT TO USERS. Either fix it or create an issue.
+NO ALERTS ARE SENT for recoverable stalls. Either retry, fix, or create an issue.
 """
 
 import asyncio
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -38,13 +41,22 @@ ABANDON_THRESHOLD = 1800  # 30 minutes silent = auto-abandon
 # Stall detection thresholds (seconds)
 STALL_THRESHOLD_PENDING = 300  # 5 minutes
 STALL_THRESHOLD_RUNNING = 2700  # 45 minutes
-STALL_THRESHOLD_ACTIVE = 600  # 10 minutes
+# STALL_TIMEOUT_SECONDS env var overrides the default active session stall threshold
+STALL_THRESHOLD_ACTIVE = int(os.environ.get("STALL_TIMEOUT_SECONDS", 600))  # 10 min default
 
 STALL_THRESHOLDS = {
     "pending": STALL_THRESHOLD_PENDING,
     "running": STALL_THRESHOLD_RUNNING,
     "active": STALL_THRESHOLD_ACTIVE,
 }
+
+# Stall retry configuration (configurable via .env)
+# STALL_MAX_RETRIES: maximum number of automatic retries before abandoning + notifying human
+STALL_MAX_RETRIES = int(os.environ.get("STALL_MAX_RETRIES", 3))
+# STALL_BACKOFF_BASE_SECONDS: base delay for exponential backoff (delay = base * 2^retry_count)
+STALL_BACKOFF_BASE = int(os.environ.get("STALL_BACKOFF_BASE_SECONDS", 10))
+# STALL_BACKOFF_MAX_SECONDS: ceiling on backoff delay to prevent unreasonable waits
+STALL_BACKOFF_MAX = int(os.environ.get("STALL_BACKOFF_MAX_SECONDS", 300))
 
 
 async def watchdog_loop(telegram_client=None) -> None:
@@ -187,10 +199,7 @@ def check_stalled_sessions() -> list[dict]:
 
                 # Determine reference timestamp based on status
                 ref_time = (
-                    session.last_transition_at
-                    or session.started_at
-                    or session.created_at
-                    or now
+                    session.last_transition_at or session.started_at or session.created_at or now
                 )
 
                 # For active sessions, use last_activity as reference
@@ -289,9 +298,7 @@ def assess_session_health(session: AgentSession) -> dict[str, Any]:
             # Check for repetition
             is_looping, repeated_tool, count = detect_repetition(tool_calls)
             if is_looping:
-                issues.append(
-                    f"Looping: {repeated_tool} called {count} times consecutively"
-                )
+                issues.append(f"Looping: {repeated_tool} called {count} times consecutively")
 
             # Check for error cascade
             is_cascading, error_count = detect_error_cascade(tool_calls)
@@ -501,21 +508,211 @@ def _safe_abandon_session(session: AgentSession, reason: str) -> bool:
         return False
 
 
-async def fix_unhealthy_session(
-    session: AgentSession, assessment: dict[str, Any]
+def _compute_stall_backoff(retry_count: int) -> float:
+    """Compute exponential backoff delay for stall retry.
+
+    Formula: min(STALL_BACKOFF_BASE * 2^retry_count, STALL_BACKOFF_MAX)
+
+    Progression with defaults (base=10, max=300):
+        retry 0: 10s
+        retry 1: 20s
+        retry 2: 40s
+        retry 3+: capped at 300s
+
+    Args:
+        retry_count: Current retry attempt (0-based). None is treated as 0.
+
+    Returns:
+        Backoff delay in seconds.
+    """
+    # Treat None as 0 for legacy sessions without retry_count
+    if retry_count is None:
+        retry_count = 0
+    # Guard against negative values
+    retry_count = max(0, retry_count)
+    delay = STALL_BACKOFF_BASE * (2**retry_count)
+    return min(delay, STALL_BACKOFF_MAX)
+
+
+async def _kill_stalled_worker(project_key: str) -> bool:
+    """Kill the worker task for a stalled session's project.
+
+    Cancels the asyncio task from _active_workers, which should terminate
+    the SDK subprocess. Waits briefly for cleanup.
+
+    Args:
+        project_key: The project key whose worker should be killed.
+
+    Returns:
+        True if a worker was found and cancelled, False otherwise.
+    """
+    from agent.job_queue import _active_workers
+
+    worker = _active_workers.get(project_key)
+    if worker is None or worker.done():
+        logger.info(
+            "[stall-retry] No active worker for project %s (already dead/missing)",
+            project_key,
+        )
+        return False
+
+    logger.info("[stall-retry] Cancelling worker task for project %s", project_key)
+    worker.cancel()
+
+    # Wait briefly for the task to clean up
+    try:
+        await asyncio.wait_for(asyncio.shield(worker), timeout=5.0)
+    except (TimeoutError, asyncio.CancelledError, Exception):
+        pass  # Expected -- task was cancelled or timed out
+
+    # Remove from active workers so _ensure_worker creates a fresh one
+    _active_workers.pop(project_key, None)
+    logger.info("[stall-retry] Worker for project %s cancelled and removed", project_key)
+    return True
+
+
+async def _enqueue_stall_retry(
+    session: AgentSession,
+    stall_reason: str,
 ) -> bool:
-    """Fix an unhealthy session. Either resolve it or create an issue.
+    """Re-enqueue a stalled session for retry with context.
+
+    Uses the same delete-and-recreate pattern as _enqueue_continuation()
+    in job_queue.py. Increments retry_count, sets the stall reason, and
+    re-enqueues as pending with high priority.
+
+    Args:
+        session: The stalled AgentSession to retry.
+        stall_reason: Human-readable reason why the session stalled.
+
+    Returns:
+        True if successfully re-enqueued, False on error.
+    """
+    from agent.job_queue import _ensure_worker, _extract_job_fields
+
+    try:
+        retry_count = (session.retry_count or 0) + 1
+        session_id = session.session_id or session.job_id or "unknown"
+
+        # Build retry context message
+        retry_context = (
+            f"[STALL RETRY {retry_count}/{STALL_MAX_RETRIES}] "
+            f"Session stalled: {stall_reason}. "
+            f"Automatically retrying with context preserved. "
+            f"Previous message: {(session.message_text or '')[:200]}"
+        )
+
+        # Extract all fields, delete old record, recreate with retry context
+        fields = _extract_job_fields(session)
+        session.delete()
+
+        fields["status"] = "pending"
+        fields["priority"] = "high"
+        fields["retry_count"] = retry_count
+        fields["last_stall_reason"] = stall_reason
+        fields["message_text"] = retry_context
+        fields["started_at"] = None  # Reset for re-processing
+
+        new_session = AgentSession.create(**fields)
+
+        # Log lifecycle transition on the new session
+        try:
+            new_session.log_lifecycle_transition(
+                "pending",
+                f"stall retry {retry_count}/{STALL_MAX_RETRIES}: {stall_reason}",
+            )
+        except Exception:
+            pass  # Non-fatal
+
+        project_key = fields.get("project_key", "?")
+        _ensure_worker(project_key)
+
+        logger.info(
+            "[stall-retry] Re-enqueued session %s as %s (retry %d/%d, reason: %s)",
+            session_id,
+            new_session.job_id,
+            retry_count,
+            STALL_MAX_RETRIES,
+            stall_reason,
+        )
+        return True
+
+    except Exception as e:
+        logger.error(
+            "[stall-retry] Failed to re-enqueue session %s: %s",
+            getattr(session, "session_id", "?"),
+            e,
+            exc_info=True,
+        )
+        return False
+
+
+async def _notify_stall_failure(session: AgentSession, stall_reason: str) -> None:
+    """Send Telegram notification when stall retries are exhausted.
+
+    Uses the registered send callback from job_queue to route the notification
+    to the original chat where the session was initiated.
+
+    Args:
+        session: The failed AgentSession.
+        stall_reason: The reason for the final stall.
+    """
+    from agent.job_queue import _send_callbacks
+
+    session_id = session.session_id or session.job_id or "unknown"
+    retry_count = session.retry_count or 0
+    chat_id = getattr(session, "chat_id", None)
+    message_id = getattr(session, "message_id", None)
+    project_key = getattr(session, "project_key", "?")
+
+    notification = (
+        f"Session stalled and retries exhausted.\n\n"
+        f"Session: {session_id[:12]}\n"
+        f"Retries: {retry_count}/{STALL_MAX_RETRIES}\n"
+        f"Last stall reason: {stall_reason}\n"
+        f"Project: {project_key}\n\n"
+        f"The session has been marked as abandoned. "
+        f"Please re-send your request to try again."
+    )
+
+    if chat_id and project_key in _send_callbacks:
+        try:
+            send_cb = _send_callbacks[project_key]
+            await send_cb(str(chat_id), notification, message_id, session)
+            logger.info(
+                "[stall-retry] Sent failure notification for session %s to chat %s",
+                session_id,
+                chat_id,
+            )
+        except Exception as e:
+            logger.error(
+                "[stall-retry] Failed to send notification for session %s: %s",
+                session_id,
+                e,
+            )
+    else:
+        logger.warning(
+            "[stall-retry] No send callback for project %s, cannot notify chat %s "
+            "about stall failure for session %s",
+            project_key,
+            chat_id,
+            session_id,
+        )
+
+
+async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any]) -> bool:
+    """Fix an unhealthy session. Retry if possible, otherwise abandon.
 
     Args:
         session: The session with health issues
         assessment: Health assessment dict with issues and severity
 
     Returns:
-        True if the session was fixed, False if an issue was created
+        True if the session was fixed (retried or abandoned), False otherwise
 
     Strategy:
-    - Silent sessions (>30 min): mark as abandoned
-    - Long-running sessions (>2 hours): mark as abandoned
+    - Silent sessions (>30 min): attempt stall retry if retries remain, else abandon
+    - Long-running sessions (>2 hours): attempt stall retry if retries remain, else abandon
     - Looping/error cascades: mark as abandoned, create issue if critical
     """
     issues = assessment["issues"]
@@ -525,36 +722,85 @@ async def fix_unhealthy_session(
     # Calculate silence duration
     silence_duration = now - session.last_activity
 
-    # Most common case: session is stuck/silent - just abandon it
+    # Get current retry count (treat None as 0 for legacy sessions)
+    retry_count = session.retry_count if session.retry_count is not None else 0
+
+    # Most common case: session is stuck/silent
     if silence_duration > ABANDON_THRESHOLD:
-        saved = _safe_abandon_session(
-            session,
-            f"watchdog: silent for {int(silence_duration / 60)}min",
-        )
+        stall_reason = f"silent for {int(silence_duration / 60)}min"
+
+        # Attempt retry if retries remain
+        if retry_count < STALL_MAX_RETRIES:
+            # Kill the stalled worker before retrying
+            await _kill_stalled_worker(session.project_key)
+
+            # Compute and wait for backoff
+            backoff = _compute_stall_backoff(retry_count)
+            logger.info(
+                "[stall-retry] Backing off %.1fs before retry %d/%d for session %s",
+                backoff,
+                retry_count + 1,
+                STALL_MAX_RETRIES,
+                session.session_id,
+            )
+            await asyncio.sleep(backoff)
+
+            # Re-enqueue with retry context
+            retried = await _enqueue_stall_retry(session, stall_reason)
+            if retried:
+                return True
+            # If re-enqueue failed, fall through to abandon
+
+        # Retries exhausted or re-enqueue failed -- abandon and notify
+        saved = _safe_abandon_session(session, f"watchdog: {stall_reason} (retries exhausted)")
         if saved:
             logger.info(
-                "[watchdog] Abandoned stuck session %s (silent for %d min)",
+                "[watchdog] Abandoned stuck session %s (silent for %d min, "
+                "%d/%d retries exhausted)",
                 session.session_id,
                 int(silence_duration / 60),
+                retry_count,
+                STALL_MAX_RETRIES,
             )
+            await _notify_stall_failure(session, stall_reason)
         return True
 
-    # Long-running session - abandon it
+    # Long-running session
     session_duration = now - session.started_at
     if session_duration > DURATION_THRESHOLD:
-        saved = _safe_abandon_session(
-            session,
-            f"watchdog: running for {int(session_duration / 3600)}h",
-        )
+        stall_reason = f"running for {int(session_duration / 3600)}h"
+
+        # Attempt retry if retries remain
+        if retry_count < STALL_MAX_RETRIES:
+            await _kill_stalled_worker(session.project_key)
+            backoff = _compute_stall_backoff(retry_count)
+            logger.info(
+                "[stall-retry] Backing off %.1fs before retry %d/%d for session %s",
+                backoff,
+                retry_count + 1,
+                STALL_MAX_RETRIES,
+                session.session_id,
+            )
+            await asyncio.sleep(backoff)
+            retried = await _enqueue_stall_retry(session, stall_reason)
+            if retried:
+                return True
+
+        saved = _safe_abandon_session(session, f"watchdog: {stall_reason} (retries exhausted)")
         if saved:
             logger.info(
-                "[watchdog] Abandoned long session %s (running for %d hours)",
+                "[watchdog] Abandoned long session %s (running for %d hours, "
+                "%d/%d retries exhausted)",
                 session.session_id,
                 int(session_duration / 3600),
+                retry_count,
+                STALL_MAX_RETRIES,
             )
+            await _notify_stall_failure(session, stall_reason)
         return True
 
     # Critical issues (looping, error cascades) - abandon and maybe create issue
+    # These are not retried because the stall is likely deterministic
     if severity == "critical":
         _safe_abandon_session(
             session,
