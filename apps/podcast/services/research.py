@@ -94,11 +94,24 @@ def run_perplexity_research(episode_id: int, prompt: str) -> EpisodeArtifact:
         verbose=False,
     )
 
-    if content_text is None:
-        content_text = ""
+    if content_text is None or content_text == "":
         logger.warning(
-            "Perplexity research returned no content for episode %s", episode_id
+            "Perplexity research returned no content for episode %s. "
+            "API response: %s",
+            episode_id,
+            response_data if response_data else "empty",
         )
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-perplexity",
+            defaults={
+                "content": "[SKIPPED: Perplexity API returned no content]",
+                "description": "Perplexity Deep Research (skipped - no content returned).",
+                "workflow_context": "Research Gathering",
+                "metadata": {"skipped": True, "reason": "API returned no content"},
+            },
+        )
+        return artifact
 
     metadata: dict = {}
     if response_data:
@@ -159,9 +172,19 @@ def run_gpt_researcher(episode_id: int, prompt: str) -> EpisodeArtifact:
         verbose=False,
     )
 
-    if content_text is None:
-        content_text = ""
+    if content_text is None or content_text == "":
         logger.warning("GPT-Researcher returned no content for episode %s", episode_id)
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-chatgpt",
+            defaults={
+                "content": "[SKIPPED: GPT-Researcher returned no content]",
+                "description": "GPT-Researcher (skipped - no content returned).",
+                "workflow_context": "Research Gathering",
+                "metadata": {"skipped": True, "reason": "No content returned"},
+            },
+        )
+        return artifact
 
     artifact, created = EpisodeArtifact.objects.update_or_create(
         episode=episode,
@@ -383,11 +406,21 @@ def run_together_research(episode_id: int, prompt: str) -> EpisodeArtifact:
         verbose=False,
     )
 
-    if content_text is None:
-        content_text = ""
+    if content_text is None or content_text == "":
         logger.warning(
             "Together research returned no content for episode %s", episode_id
         )
+        artifact, _ = EpisodeArtifact.objects.update_or_create(
+            episode=episode,
+            title="p2-together",
+            defaults={
+                "content": "[SKIPPED: Together research returned no content]",
+                "description": "Together Open Deep Research (skipped - no content returned).",
+                "workflow_context": "Research Gathering",
+                "metadata": {"skipped": True, "reason": "No content returned"},
+            },
+        )
+        return artifact
 
     artifact, created = EpisodeArtifact.objects.update_or_create(
         episode=episode,

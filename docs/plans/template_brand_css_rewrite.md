@@ -1,10 +1,11 @@
 ---
-status: Planning
+status: In Progress
 type: chore
 appetite: Large
 owner: Tom
 created: 2026-02-23
 tracking: https://github.com/yudame/cuttlefish/issues/105
+design-system: pencil-design-system.pen
 ---
 
 # Template Brand CSS Rewrite
@@ -22,6 +23,18 @@ PR #104 created a comprehensive design system in `brand.css` with 30+ component 
 
 **Desired outcome:**
 Every template uses the brand.css design system consistently. Zero custom `<style>` blocks in production templates. All forms use `.input-brand`, all buttons use `.btn-brand`, all headings use Inter.
+
+## Design Source of Truth
+
+The Pencil design system file (`pencil-design-system.pen`) is the visual reference for all template rewrites. It contains:
+
+- **24 reusable components** matching every brand.css class
+- **Design tokens** as variables (`$--background`, `$--accent`, `$--border-dark`, etc.)
+- **Color palette**, **typography samples**, and **spacing scale** reference frames
+
+**Workflow:** Design target layout in Pencil → Screenshot for reference → Implement in templates → Compare live page against .pen mockup.
+
+See `.claude/skills/pencil-design/SKILL.md` for Pencil MCP tool patterns and best practices.
 
 ## Appetite
 
@@ -98,7 +111,11 @@ No update system changes required — this is a frontend-only change within the 
 
 ## Agent Integration
 
-No agent integration required — this is a template/CSS refactoring effort.
+**Pencil MCP** provides the design-to-code bridge:
+- `pencil-design-system.pen` contains all brand components as reusable Pencil nodes
+- Before implementing each template group, create a target mockup in a page-specific .pen file
+- Use `get_screenshot` to compare mockups against live pages (via `agent-browser`)
+- See `.claude/skills/pencil-design/SKILL.md` for tool patterns
 
 ## Documentation
 

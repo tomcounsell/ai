@@ -29,11 +29,14 @@ API Documentation:
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 import requests
 
@@ -413,13 +416,17 @@ def run_perplexity_research(
 
                 return content, result
             else:
-                print("ERROR: Unexpected API response format")
-                print(json.dumps(result, indent=2))
+                logger.error(
+                    "Perplexity API unexpected response format: %s",
+                    json.dumps(result, indent=2)[:1000],
+                )
                 return None, result
 
         except json.JSONDecodeError:
-            print("ERROR: Failed to parse API response as JSON")
-            print(f"Response: {response.text[:500]}")
+            logger.error(
+                "Failed to parse Perplexity API response as JSON: %s",
+                response.text[:500],
+            )
             return None, {}
 
     else:
@@ -429,25 +436,29 @@ def run_perplexity_research(
 
 def _handle_error_response(response):
     """Handle non-200 API responses with helpful messages."""
+    try:
+        error_body = response.json()
+    except Exception:
+        error_body = response.text[:500]
+
     if response.status_code == 401:
-        print("ERROR: Authentication failed (401 Unauthorized)")
-        print("Your API key is invalid or expired")
-        print("Check your key at: https://www.perplexity.ai/settings/api")
+        logger.error(
+            "Perplexity API authentication failed (401). "
+            "API key may be invalid or expired. Response: %s",
+            error_body,
+        )
     elif response.status_code == 429:
-        print("ERROR: Rate limit exceeded (429 Too Many Requests)")
-        print("Wait 60 seconds and try again")
-        print("Check your usage at: https://www.perplexity.ai/settings/api")
+        logger.error(
+            "Perplexity API rate limit exceeded (429). Response: %s", error_body
+        )
     elif response.status_code == 500:
-        print("ERROR: Perplexity API server error (500)")
-        print("The service may be experiencing issues")
-        print("Try again in 30 seconds")
+        logger.error("Perplexity API server error (500). Response: %s", error_body)
     else:
-        print(f"ERROR: API returned status {response.status_code}")
-        try:
-            error_data = response.json()
-            print(f"Error details: {json.dumps(error_data, indent=2)}")
-        except Exception:
-            print(f"Response: {response.text[:500]}")
+        logger.error(
+            "Perplexity API returned status %d. Response: %s",
+            response.status_code,
+            error_body,
+        )
 
 
 # ---------------------------------------------------------------------------

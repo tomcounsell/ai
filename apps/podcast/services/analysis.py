@@ -279,18 +279,25 @@ def discover_questions(episode_id: int) -> EpisodeArtifact:
 
     episode = Episode.objects.get(pk=episode_id)
 
-    # Prefer p2-perplexity; fall back to any p2-* artifact
+    # Prefer p2-perplexity; fall back to any p2-* artifact with real content
+    # (exclude skipped artifacts whose content starts with "[SKIPPED:")
     research_artifact = None
     try:
-        research_artifact = EpisodeArtifact.objects.get(
-            episode=episode, title="p2-perplexity"
-        )
+        candidate = EpisodeArtifact.objects.get(episode=episode, title="p2-perplexity")
+        if candidate.content and not candidate.content.startswith("[SKIPPED:"):
+            research_artifact = candidate
     except EpisodeArtifact.DoesNotExist:
-        research_artifact = EpisodeArtifact.objects.filter(
-            episode=episode, title__startswith="p2-"
-        ).first()
+        pass
 
-    if research_artifact is None or not research_artifact.content:
+    if research_artifact is None:
+        research_artifact = (
+            EpisodeArtifact.objects.filter(episode=episode, title__startswith="p2-")
+            .exclude(content="")
+            .exclude(content__startswith="[SKIPPED:")
+            .first()
+        )
+
+    if research_artifact is None:
         raise ValueError(
             f"No p2-* research artifact with content found for episode {episode_id}."
         )
@@ -445,8 +452,10 @@ def cross_validate(episode_id: int) -> EpisodeArtifact:
 
     episode = Episode.objects.get(pk=episode_id)
 
-    research_artifacts = EpisodeArtifact.objects.filter(
-        episode=episode, title__startswith="p2-"
+    research_artifacts = (
+        EpisodeArtifact.objects.filter(episode=episode, title__startswith="p2-")
+        .exclude(content="")
+        .exclude(content__startswith="[SKIPPED:")
     )
 
     research_texts: dict[str, str] = {}
