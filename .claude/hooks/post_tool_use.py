@@ -34,18 +34,6 @@ CODE_EXTENSIONS = {".py", ".js", ".ts"}
 # Quality commands to track in the SDLC state
 QUALITY_COMMANDS = ("pytest", "ruff", "ruff-format")
 
-# Map SDLC skill names to their pipeline stage
-SKILL_TO_STAGE = {
-    "sdlc": "ISSUE",
-    "do-plan": "PLAN",
-    "do-build": "BUILD",
-    "do-test": "TEST",
-    "do-pr-review": "REVIEW",
-    "do-patch": None,  # Patch doesn't have its own stage
-    "do-docs": "DOCS",
-    "do-docs-audit": None,
-}
-
 
 def is_code_file(file_path: str) -> bool:
     """Return True if the file path has a code extension (.py, .js, .ts)."""
@@ -251,17 +239,6 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
         )
 
 
-def update_stage_progress_for_skill(hook_input: dict) -> None:
-    """No-op: stage progress is now handled by the Observer Agent's stage detector.
-
-    The deterministic stage detector in bridge/stage_detector.py parses
-    worker transcripts for /do-* skill invocations and updates AgentSession
-    stages directly. This hook previously called tools/session_progress.py
-    which was deleted as part of the Observer Agent work (issue #309).
-    """
-    pass
-
-
 def check_file_reminders(hook_input: dict) -> None:
     """Print reminders when specific files are modified."""
     tool_name = hook_input.get("tool_name", "")
@@ -287,7 +264,6 @@ def main():
     # Update SDLC session state based on tool type
     update_sdlc_state_for_file_write(hook_input)
     update_sdlc_state_for_bash(hook_input)
-    update_stage_progress_for_skill(hook_input)
 
     session_id = get_session_id(hook_input)
     session_dir = ensure_session_log_dir(session_id)

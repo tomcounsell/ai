@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hook: PreToolUse - Log before tool execution and mark SDLC stages in_progress."""
+"""Hook: PreToolUse - Log before tool execution."""
 
 import subprocess
 import sys
@@ -16,29 +16,6 @@ from utils.constants import (
     get_session_id,
     read_hook_input,
 )
-
-# Map SDLC skill names to their pipeline stage
-SKILL_TO_STAGE = {
-    "sdlc": "ISSUE",
-    "do-plan": "PLAN",
-    "do-build": "BUILD",
-    "do-test": "TEST",
-    "do-pr-review": "REVIEW",
-    "do-patch": None,
-    "do-docs": "DOCS",
-    "do-docs-audit": None,
-}
-
-
-def mark_stage_in_progress(hook_input: dict) -> None:
-    """No-op: stage progress is now handled by the Observer Agent's stage detector.
-
-    The deterministic stage detector in bridge/stage_detector.py parses
-    worker transcripts for /do-* skill invocations and updates AgentSession
-    stages directly. This hook previously called tools/session_progress.py
-    which was deleted as part of the Observer Agent work (issue #309).
-    """
-    pass
 
 
 def capture_git_baseline_once(hook_input: dict) -> None:
@@ -85,9 +62,6 @@ def main():
 
     # Capture git baseline on first tool call (for stop hook comparison)
     capture_git_baseline_once(hook_input)
-
-    # Mark SDLC stages in_progress when skills start
-    mark_stage_in_progress(hook_input)
 
     session_id = get_session_id(hook_input)
     session_dir = ensure_session_log_dir(session_id)
