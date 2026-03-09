@@ -321,6 +321,8 @@ _JOB_FIELDS = [
     # Stall retry fields — must be preserved across delete-and-recreate
     "retry_count",
     "last_stall_reason",
+    # Observer fields — must be preserved across delete-and-recreate
+    "queued_steering_messages",
 ]
 
 # Backward compat alias
