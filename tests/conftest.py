@@ -2,7 +2,35 @@
 Shared test fixtures for Valor AI tests.
 """
 
+import sys
+
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def mock_claude_sdk_cleanup():
+    """Save and restore sys.modules["claude_agent_sdk"] around each test.
+
+    Several test files insert a MagicMock into sys.modules at module level so
+    that ``import agent.*`` succeeds even when the real SDK is not installed.
+    Without cleanup the mock persists for the entire pytest session, which
+    contaminates later tests (e.g. test_cross_wire_fixes.py) that expect to
+    import the real SDK or at least a fresh module state.
+
+    This fixture snapshots the entry before each test and restores it (or
+    removes it) afterward, preventing cross-test contamination via
+    sys.modules.
+    """
+    had_sdk = "claude_agent_sdk" in sys.modules
+    original = sys.modules.get("claude_agent_sdk")
+
+    yield
+
+    # Restore original state
+    if had_sdk:
+        sys.modules["claude_agent_sdk"] = original
+    else:
+        sys.modules.pop("claude_agent_sdk", None)
 
 
 @pytest.fixture(autouse=True)
