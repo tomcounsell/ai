@@ -2,7 +2,6 @@
 """Hook: PostToolUse - Log after tool execution and track SDLC session state."""
 
 import json
-import os
 import re
 import subprocess
 import sys
@@ -17,7 +16,6 @@ from utils.constants import (
     append_to_log,
     ensure_session_log_dir,
     get_data_sessions_dir,
-    get_project_dir,
     get_session_id,
     read_hook_input,
 )
@@ -188,9 +186,7 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
     command = tool_input.get("command", "")
 
     # Detect branch switch to a session/* branch (fixes stale modified_on_branch)
-    branch_match = re.search(
-        r"\bgit\s+(?:checkout\s+-b|switch\s+-c)\s+(session/\S+)", command
-    )
+    branch_match = re.search(r"\bgit\s+(?:checkout\s+-b|switch\s+-c)\s+(session/\S+)", command)
     if branch_match:
         session_id = hook_input.get("session_id", "unknown")
         state_path = get_sdlc_state_path(session_id)
@@ -256,78 +252,14 @@ def update_sdlc_state_for_bash(hook_input: dict) -> None:
 
 
 def update_stage_progress_for_skill(hook_input: dict) -> None:
-    """Update SDLC stage progress when a Skill tool completes an SDLC skill.
+    """No-op: stage progress is now handled by the Observer Agent's stage detector.
 
-    Detects Skill tool calls for SDLC skills (sdlc, do-plan, do-build, etc.)
-    and calls session_progress.py to mark the stage as completed. This runs
-    deterministically in the hook — no agent cooperation needed.
+    The deterministic stage detector in bridge/stage_detector.py parses
+    worker transcripts for /do-* skill invocations and updates AgentSession
+    stages directly. This hook previously called tools/session_progress.py
+    which was deleted as part of the Observer Agent work (issue #309).
     """
-    tool_name = hook_input.get("tool_name", "")
-    if tool_name != "Skill":
-        return
-
-    tool_input = hook_input.get("tool_input", {})
-    skill_name = tool_input.get("skill", "")
-
-    # Only track SDLC skills
-    if skill_name not in SKILL_TO_STAGE:
-        return
-
-    stage = SKILL_TO_STAGE[skill_name]
-    if stage is None:
-        return  # do-patch etc. don't have their own stage
-
-    session_id = hook_input.get("session_id", "")
-    if not session_id:
-        return
-
-    # Extract links from tool output if present
-    tool_output = str(hook_input.get("tool_output", ""))
-    link_args = []
-
-    # Try to find PR URL in output
-    pr_match = re.search(r"https://github\.com/[^/]+/[^/]+/pull/\d+", tool_output)
-    if pr_match and stage == "BUILD":
-        link_args.extend(["--pr-url", pr_match.group(0)])
-
-    issue_match = re.search(r"https://github\.com/[^/]+/[^/]+/issues/\d+", tool_output)
-    if issue_match and stage == "ISSUE":
-        link_args.extend(["--issue-url", issue_match.group(0)])
-
-    # Determine status - check if output suggests failure
-    output_lower = tool_output.lower()
-    if any(
-        kw in output_lower
-        for kw in ["failed", "stuck", "error", "blocker", "changes requested"]
-    ):
-        status = "failed" if stage in ("TEST",) else "in_progress"
-    else:
-        status = "completed"
-
-    # Call session_progress.py - fire and forget
-    project_dir = get_project_dir()
-    cmd = [
-        sys.executable,
-        "-m",
-        "tools.session_progress",
-        "--session-id",
-        session_id,
-        "--stage",
-        stage,
-        "--status",
-        status,
-    ] + link_args
-
-    try:
-        subprocess.run(
-            cmd,
-            cwd=str(project_dir),
-            capture_output=True,
-            timeout=5,
-            env={**os.environ, "PYTHONPATH": str(project_dir)},
-        )
-    except Exception:
-        pass  # Fire and forget - never block the agent
+    pass
 
 
 def check_file_reminders(hook_input: dict) -> None:

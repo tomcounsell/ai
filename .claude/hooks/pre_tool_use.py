@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Hook: PreToolUse - Log before tool execution and mark SDLC stages in_progress."""
 
-import os
 import subprocess
 import sys
 import time
@@ -32,48 +31,14 @@ SKILL_TO_STAGE = {
 
 
 def mark_stage_in_progress(hook_input: dict) -> None:
-    """Mark an SDLC stage as in_progress when its skill starts."""
-    tool_name = hook_input.get("tool_name", "")
-    if tool_name != "Skill":
-        return
+    """No-op: stage progress is now handled by the Observer Agent's stage detector.
 
-    tool_input = hook_input.get("tool_input", {})
-    skill_name = tool_input.get("skill", "")
-
-    if skill_name not in SKILL_TO_STAGE:
-        return
-
-    stage = SKILL_TO_STAGE[skill_name]
-    if stage is None:
-        return
-
-    session_id = hook_input.get("session_id", "")
-    if not session_id:
-        return
-
-    project_dir = get_project_dir()
-    cmd = [
-        sys.executable,
-        "-m",
-        "tools.session_progress",
-        "--session-id",
-        session_id,
-        "--stage",
-        stage,
-        "--status",
-        "in_progress",
-    ]
-
-    try:
-        subprocess.run(
-            cmd,
-            cwd=str(project_dir),
-            capture_output=True,
-            timeout=5,
-            env={**os.environ, "PYTHONPATH": str(project_dir)},
-        )
-    except Exception:
-        pass  # Fire and forget
+    The deterministic stage detector in bridge/stage_detector.py parses
+    worker transcripts for /do-* skill invocations and updates AgentSession
+    stages directly. This hook previously called tools/session_progress.py
+    which was deleted as part of the Observer Agent work (issue #309).
+    """
+    pass
 
 
 def capture_git_baseline_once(hook_input: dict) -> None:

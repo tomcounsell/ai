@@ -11,9 +11,7 @@ Tests use real Redis (db=1 via redis_test_db fixture) for integration
 validation. Mock-based tests are used only where SDK imports are needed.
 """
 
-import os
 import time
-from unittest.mock import patch
 
 import pytest
 
@@ -174,9 +172,7 @@ class TestCompleteTranscriptFieldPreservation:
         from bridge.session_transcript import complete_transcript
 
         # Complete with same status (running -> running)
-        complete_transcript(
-            running_session.session_id, status="running", summary="Still going"
-        )
+        complete_transcript(running_session.session_id, status="running", summary="Still going")
 
         found = list(AgentSession.query.filter(session_id=running_session.session_id))
         assert len(found) == 1
@@ -261,81 +257,10 @@ class TestNoDualSessionCreation:
 # ── Fix 4: VALOR_SESSION_ID env var ──────────────────────────────────────────
 
 
-class TestValorSessionIdEnvVar:
-    """Fix 4: _find_session uses VALOR_SESSION_ID env var for session resolution."""
-
-    def test_finds_session_via_env_var(self, running_session):
-        """_find_session resolves via VALOR_SESSION_ID env var (priority 1)."""
-        from tools.session_progress import _find_session
-
-        # Set VALOR_SESSION_ID to the bridge session_id
-        with patch.dict(os.environ, {"VALOR_SESSION_ID": running_session.session_id}):
-            # Pass a UUID that doesn't match any session_id
-            result = _find_session("claude-code-uuid-that-doesnt-match")
-
-        assert result is not None
-        assert result.session_id == running_session.session_id
-
-    def test_falls_back_to_session_id_when_env_not_set(self, running_session):
-        """_find_session falls back to direct session_id match (priority 2)."""
-        from tools.session_progress import _find_session
-
-        # Ensure VALOR_SESSION_ID is NOT set
-        env = os.environ.copy()
-        env.pop("VALOR_SESSION_ID", None)
-        with patch.dict(os.environ, env, clear=True):
-            result = _find_session(running_session.session_id)
-
-        assert result is not None
-        assert result.session_id == running_session.session_id
-
-    def test_falls_back_to_task_list_id(self, running_session):
-        """_find_session falls back to task_list_id match (priority 3)."""
-        from tools.session_progress import _find_session
-
-        env = os.environ.copy()
-        env.pop("VALOR_SESSION_ID", None)
-        with patch.dict(os.environ, env, clear=True):
-            # Pass the task_list_id as session_id
-            result = _find_session(running_session.task_list_id)
-
-        assert result is not None
-        assert result.task_list_id == running_session.task_list_id
-
-    def test_env_var_takes_priority_over_session_id(self, redis_test_db):
-        """VALOR_SESSION_ID env var takes priority over direct session_id match."""
-        from tools.session_progress import _find_session
-
-        # Create two sessions
-        AgentSession.create(
-            session_id="bridge-session-target",
-            project_key="test",
-            status="running",
-            created_at=time.time(),
-        )
-        AgentSession.create(
-            session_id="claude-code-uuid",
-            project_key="test",
-            status="running",
-            created_at=time.time(),
-        )
-
-        with patch.dict(os.environ, {"VALOR_SESSION_ID": "bridge-session-target"}):
-            result = _find_session("claude-code-uuid")
-
-        # Should find the target (via env var), not the decoy (via session_id)
-        assert result.session_id == "bridge-session-target"
-
-    def test_returns_none_when_nothing_matches(self, redis_test_db):
-        """_find_session returns None when no resolution path works."""
-        from tools.session_progress import _find_session
-
-        env = os.environ.copy()
-        env.pop("VALOR_SESSION_ID", None)
-        with patch.dict(os.environ, env, clear=True):
-            result = _find_session("nonexistent-id")
-
-        assert result is None
+# TestValorSessionIdEnvVar removed — tested _find_session from
+# tools/session_progress.py which was deleted (Observer Agent, issue #309).
+# Session resolution for stage progress is now handled by the deterministic
+# stage detector in bridge/stage_detector.py.
 
 
 # ── Fix 4a: SDK client env var injection ─────────────────────────────────────
@@ -374,9 +299,7 @@ class TestSdkClientEnvVar:
             if found_condition and "VALOR_SESSION_ID" in line:
                 found_env_var = True
                 break
-        assert (
-            found_env_var
-        ), "VALOR_SESSION_ID should be set inside if session_id: block"
+        assert found_env_var, "VALOR_SESSION_ID should be set inside if session_id: block"
 
 
 # ── Fix 5: Full chain integration ────────────────────────────────────────────
@@ -428,43 +351,7 @@ class TestFullChainIntegration:
         assert "PR #210" in result
         assert "Fixed connectivity gaps" in result
 
-    def test_task_list_id_enables_hook_lookup(self, redis_test_db):
-        """task_list_id on session allows hooks to resolve via fallback path."""
-        from tools.session_progress import _find_session
-
-        # Session created with task_list_id (as Fix 1 ensures)
-        AgentSession.create(
-            session_id="tg_valor_-5051_hook_test",
-            project_key="valor",
-            status="running",
-            created_at=time.time(),
-            task_list_id="thread--5051-hook_test",
-        )
-
-        # Hook has Claude Code UUID, not the bridge session_id
-        env = os.environ.copy()
-        env.pop("VALOR_SESSION_ID", None)
-        with patch.dict(os.environ, env, clear=True):
-            result = _find_session("thread--5051-hook_test")
-
-        assert result is not None
-        assert result.session_id == "tg_valor_-5051_hook_test"
-
-    def test_valor_session_id_enables_hook_lookup(self, redis_test_db):
-        """VALOR_SESSION_ID env var allows hooks to resolve with Claude Code UUID."""
-        from tools.session_progress import _find_session
-
-        AgentSession.create(
-            session_id="tg_valor_-5051_env_test",
-            project_key="valor",
-            status="running",
-            created_at=time.time(),
-        )
-
-        # Hook receives Claude Code's internal UUID as session_id
-        # but VALOR_SESSION_ID env var points to the bridge session_id
-        with patch.dict(os.environ, {"VALOR_SESSION_ID": "tg_valor_-5051_env_test"}):
-            result = _find_session("some-claude-code-uuid-abcdef")
-
-        assert result is not None
-        assert result.session_id == "tg_valor_-5051_env_test"
+    # test_task_list_id_enables_hook_lookup and
+    # test_valor_session_id_enables_hook_lookup removed —
+    # tested _find_session from tools/session_progress.py which was deleted
+    # (Observer Agent, issue #309).

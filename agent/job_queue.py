@@ -1205,8 +1205,7 @@ async def _execute_job(job: Job) -> None:
                 project_key=job.project_key,
                 branch_name=branch_name,
                 task_summary=(
-                    f"Observer auto-continue "
-                    f"({chat_state.auto_continue_count}/{effective_max})"
+                    f"Observer auto-continue ({chat_state.auto_continue_count}/{effective_max})"
                 ),
                 extra_context={
                     "routing": "observer",

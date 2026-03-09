@@ -121,7 +121,7 @@ class TestDetectStages:
     def test_transitions_sorted_by_pipeline_order(self):
         """Transitions should be sorted by pipeline stage order."""
         transcript = (
-            "First /do-test for testing.\n" "Then /do-build for implementation.\n"  # Out of order
+            "First /do-test for testing.\nThen /do-build for implementation.\n"  # Out of order
         )
         transitions = detect_stages(transcript)
         stage_indices = []
@@ -438,6 +438,7 @@ class TestQueuedSteeringMessages:
 
     def test_push_and_pop(self):
         """Push messages and pop them all."""
+
         # Use a mock to avoid Redis dependency
         class MockSession:
             queued_steering_messages = None
@@ -519,8 +520,14 @@ class TestObserverFallback:
             history = []
 
             def get_stage_progress(self):
-                return {"ISSUE": "pending", "PLAN": "pending", "BUILD": "pending",
-                        "TEST": "pending", "REVIEW": "pending", "DOCS": "pending"}
+                return {
+                    "ISSUE": "pending",
+                    "PLAN": "pending",
+                    "BUILD": "pending",
+                    "TEST": "pending",
+                    "REVIEW": "pending",
+                    "DOCS": "pending",
+                }
 
             def _get_history_list(self):
                 return []
@@ -554,6 +561,7 @@ class TestObserverFallback:
         try:
             # Save and replace the API key getter
             import utils.api_keys
+
             original_fn = utils.api_keys.get_anthropic_api_key
             utils.api_keys.get_anthropic_api_key = lambda: None
 

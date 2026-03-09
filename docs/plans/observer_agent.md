@@ -282,8 +282,8 @@ The bridge (`bridge/telegram_bridge.py`) already calls `send_to_chat()` via the 
 - **Parallel**: false
 - Create `bridge/observer.py` with Observer class
 - Define system prompt (SDLC pipeline definition, decision guidelines)
-- Define tools: `read_session`, `extract_artifacts`, `search_github`, `enqueue_continuation`, `deliver_to_telegram`
-- Implement tool dispatch: each tool calls existing infrastructure (`AgentSession` methods, `summarizer.extract_artifacts()`, `gh` CLI, `_enqueue_continuation()`, `send_cb()`)
+- Define tools: `read_session`, `update_session`, `enqueue_continuation`, `deliver_to_telegram`
+- Implement tool dispatch: each tool calls existing infrastructure (`AgentSession` methods, `_enqueue_continuation()`, `send_cb()`)
 - Observer decision and reasoning are short-lived in-memory — not persisted to database. The only durable output is the steering message sent back to the worker (via `enqueue_continuation`) or the summary delivered to Telegram.
 - Invoke via `anthropic.Anthropic().messages.create()` with Sonnet, tool_use, max 5 tool iterations
 - Add fallback: if Observer errors, log the error and deliver raw worker output to Telegram (never silently drop)

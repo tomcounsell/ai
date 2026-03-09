@@ -140,8 +140,8 @@ class AgentSession(Model):
         self.history = current
         try:
             self.save()
-        except Exception:
-            pass  # Non-fatal: don't break callers on save errors
+        except Exception as e:
+            logger.warning(f"append_history save failed for session {self.session_id}: {e}")
 
     def set_link(self, kind: str, url: str) -> None:
         """Set a tracked link on this session.
@@ -161,8 +161,8 @@ class AgentSession(Model):
             setattr(self, field_name, url)
             try:
                 self.save()
-            except Exception:
-                pass  # Non-fatal: don't break callers on save errors
+            except Exception as e:
+                logger.warning(f"set_link save failed for session {self.session_id}: {e}")
 
     def log_lifecycle_transition(self, new_status: str, context: str = "") -> None:
         """Log a structured lifecycle transition and update session state.

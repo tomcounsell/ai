@@ -193,12 +193,8 @@ def apply_transitions(session, transitions: list[dict[str, str]]) -> int:
         try:
             session.append_history("stage", entry)
             applied += 1
-            logger.info(
-                f"[stage-detector] Applied {stage} -> {new_status}: {t['reason']}"
-            )
+            logger.info(f"[stage-detector] Applied {stage} -> {new_status}: {t['reason']}")
         except Exception as e:
-            logger.error(
-                f"[stage-detector] Failed to apply {stage} -> {new_status}: {e}"
-            )
+            logger.error(f"[stage-detector] Failed to apply {stage} -> {new_status}: {e}")
 
     return applied
