@@ -222,6 +222,39 @@ class HealthChecker:
                 details={"error": str(e)},
             )
 
+    def check_observer_telemetry(self) -> HealthCheckResult:
+        """Check observer health via telemetry metrics."""
+        try:
+            from monitoring.telemetry import check_observer_health
+
+            result = check_observer_health()
+            status_map = {
+                "ok": HealthStatus.HEALTHY,
+                "degraded": HealthStatus.DEGRADED,
+                "unhealthy": HealthStatus.UNHEALTHY,
+                "unknown": HealthStatus.UNKNOWN,
+            }
+            health_status = status_map.get(result["status"], HealthStatus.UNKNOWN)
+            violations = result.get("violations", [])
+            message = (
+                violations[0]
+                if violations
+                else f"Observer healthy ({result['total_decisions']} decisions)"
+            )
+            return HealthCheckResult(
+                component="observer_telemetry",
+                status=health_status,
+                message=message,
+                details=result,
+            )
+        except Exception as e:
+            return HealthCheckResult(
+                component="observer_telemetry",
+                status=HealthStatus.UNKNOWN,
+                message=f"Could not check observer telemetry: {e}",
+                details={"error": str(e)},
+            )
+
     def get_overall_health(self) -> OverallHealth:
         """Run all health checks and return overall status.
 
@@ -234,6 +267,7 @@ class HealthChecker:
         checks.append(self.check_database())
         checks.append(self.check_telegram_connection())
         checks.append(self.check_disk_space())
+        checks.append(self.check_observer_telemetry())
 
         # Add API key checks
         api_results = self.check_api_keys()

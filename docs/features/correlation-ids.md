@@ -59,3 +59,4 @@ grep -r "abc123def456" logs/sessions/*/
 
 - Issue: [#334](https://github.com/valorengels/ai/issues/334)
 - Plan: `docs/plans/correlation_ids.md`
+- Next layer: [Structured Logging & Telemetry](structured-logging-telemetry.md) — Redis-backed metrics built on correlation IDs

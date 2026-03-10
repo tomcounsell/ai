@@ -59,6 +59,7 @@ Completed feature documentation for the Valor AI system. Each document describes
 | [Skills Reorganization](skills-reorganization.md) | Canonical SKILL.md template, progressive disclosure, command consolidation, hardlink scoping | Shipped |
 | [Stall Retry](stall-retry.md) | Automatic retry of stalled agent sessions with exponential backoff, process cleanup, and Telegram notification on final failure | Shipped |
 | [Steering Queue](steering-queue.md) | Mid-execution course correction via Telegram reply threads | Shipped |
+| [Structured Logging & Telemetry](structured-logging-telemetry.md) | Redis-backed telemetry for Observer decisions, stage transitions, tool usage, and interjections with health check integration | Shipped |
 | [Summarizer Format](summarizer-format.md) | Structured bullet-point output with SDLC stage progress and markdown links for Telegram delivery | Shipped |
 | [System Overview](system-overview.md) | High-level architecture and design principles | Archived |
 | [Task List Isolation Experiment](task-list-isolation.md) | Experiment results validating CLAUDE_CODE_TASK_LIST_ID behavior | Archived |

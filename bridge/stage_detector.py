@@ -215,6 +215,15 @@ def apply_transitions(session, transitions: list[dict[str, str]]) -> int:
             session.append_history("stage", entry)
             applied += 1
             logger.info(f"[stage-detector] Applied {stage} -> {new_status}: {t['reason']}")
+            # Record telemetry for stage transition
+            try:
+                from monitoring.telemetry import record_stage_transition
+
+                cid = getattr(session, "correlation_id", None) or "unknown"
+                sid = getattr(session, "session_id", "unknown")
+                record_stage_transition(sid, cid, stage, current_status, new_status)
+            except Exception:
+                pass  # telemetry must never break stage detection
         except Exception as e:
             logger.error(f"[stage-detector] Failed to apply {stage} -> {new_status}: {e}")
 
