@@ -954,9 +954,7 @@ async def main():
                                 # Record as processed and return
                                 from bridge.dedup import record_message_processed
 
-                                await record_message_processed(
-                                    event.chat_id, message.id
-                                )
+                                await record_message_processed(event.chat_id, message.id)
                                 return
                             else:
                                 logger.info(
@@ -967,10 +965,7 @@ async def main():
 
                         elif intent == "acknowledgment":
                             # Only acknowledge dormant sessions with expectations
-                            if (
-                                target_session.status == "dormant"
-                                and target_session.expectations
-                            ):
+                            if target_session.status == "dormant" and target_session.expectations:
                                 target_session.status = "completed"
                                 target_session.log_lifecycle_transition(
                                     "completed",
@@ -990,9 +985,7 @@ async def main():
                                 )
                                 from bridge.dedup import record_message_processed
 
-                                await record_message_processed(
-                                    event.chat_id, message.id
-                                )
+                                await record_message_processed(event.chat_id, message.id)
                                 return
                             else:
                                 logger.info(

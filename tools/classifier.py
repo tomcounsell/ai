@@ -24,7 +24,8 @@ Usage:
         session_context="Working on UI redesign",
         session_expectations="Waiting for color preference",
     )
-    # Returns: {"intent": "interjection", "confidence": 0.92, "reason": "Course correction for active work"}
+    # Returns: {"intent": "interjection", "confidence": 0.92,
+    #           "reason": "Course correction for active work"}
 """
 
 import json
@@ -269,7 +270,8 @@ Session status: {session_status}
 4. Keep your response concise.
 
 Respond with JSON only:
-{{"intent": "interjection"|"new_work"|"acknowledgment", "confidence": 0.0-1.0, "reason": "brief explanation"}}"""
+{{"intent": "interjection"|"new_work"|"acknowledgment", \
+"confidence": 0.0-1.0, "reason": "brief explanation"}}"""
 
 
 def classify_message_intent(
