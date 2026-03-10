@@ -286,8 +286,7 @@ async def _recover_stalled_pending(stalled: list[dict]) -> None:
 
         if project_key == "?":
             logger.warning(
-                "[watchdog] Cannot recover stalled pending session %s — "
-                "no project_key available",
+                "[watchdog] Cannot recover stalled pending session %s — no project_key available",
                 session_id,
             )
             continue

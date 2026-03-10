@@ -391,6 +391,5 @@ class TestStaleSaveGuardCodePath:
 
         source = inspect.getsource(watchdog_loop)
         assert "_recover_stalled_pending" in source, (
-            "watchdog_loop() should call _recover_stalled_pending() "
-            "after check_stalled_sessions()"
+            "watchdog_loop() should call _recover_stalled_pending() after check_stalled_sessions()"
         )

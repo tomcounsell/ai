@@ -1347,9 +1347,7 @@ async def _execute_job(job: Job) -> None:
                 # Re-read session from Redis to avoid operating on stale data.
                 # The session may have been modified by _enqueue_continuation()
                 # or another process since we captured agent_session at job start.
-                fresh_session = AgentSession.query.filter(
-                    session_id=job.session_id
-                )
+                fresh_session = AgentSession.query.filter(session_id=job.session_id)
                 fresh_sessions = list(fresh_session)
                 if fresh_sessions:
                     agent_session = fresh_sessions[0]
