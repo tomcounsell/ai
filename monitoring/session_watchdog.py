@@ -776,7 +776,7 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
     silence_duration = now - session.last_activity
 
     # Get current retry count (treat None as 0 for legacy sessions)
-    retry_count = int(session.retry_count) if session.retry_count is not None else 0
+    retry_count = int(session.retry_count or 0)
 
     # Most common case: session is stuck/silent
     if silence_duration > ABANDON_THRESHOLD:
