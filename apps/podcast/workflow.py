@@ -110,6 +110,24 @@ def _compute_button_state(episode: Episode, step: int) -> dict:
 
     # Current step — show button based on status
     if wf.status == "running":
+        # Detect stuck Targeted Research: all automated artifacts have content
+        # but workflow never transitioned to paused (e.g. old code, killed worker).
+        if wf.current_step == "Targeted Research":
+            from apps.podcast.signals import _check_targeted_research_complete
+
+            if _check_targeted_research_complete(episode.pk):
+                return {
+                    "show": True,
+                    "label": "Resume Pipeline",
+                    "color": "blue",
+                    "icon": "check",
+                    "disabled": False,
+                    "blocked_reason": (
+                        "Automated research complete. Add Grok or manual "
+                        "research, or resume to continue."
+                    ),
+                    "error": "",
+                }
         return {
             "show": True,
             "label": "Running...",
