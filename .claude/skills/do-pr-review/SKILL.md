@@ -2,6 +2,7 @@
 name: do-pr-review
 description: "Use when reviewing a pull request. Analyzes code changes, validates against plan requirements, and captures visual proof via screenshots. Triggered by 'review this PR', 'check the pull request', 'do a PR review', or a PR URL."
 context: fork
+context_fidelity: compact
 ---
 
 # PR Review

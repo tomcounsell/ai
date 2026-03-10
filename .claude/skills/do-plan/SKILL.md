@@ -2,6 +2,7 @@
 name: do-plan
 description: "Use when creating or updating a feature plan document. Triggered by 'make a plan', 'plan this', 'flesh out the idea', or any request to scope and plan work before implementation."
 allowed-tools: Read, Write, Edit, Glob, Bash, AskUserQuestion
+context_fidelity: compact
 ---
 
 # Make a Plan (Shape Up Methodology)

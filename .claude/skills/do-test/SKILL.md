@@ -2,6 +2,7 @@
 name: do-test
 description: "Use when running the test suite. Parses arguments, dispatches test runners (potentially in parallel), and aggregates results. Triggered by 'run tests', 'test this', or any request about testing."
 argument-hint: "[test-path-or-filter]"
+context_fidelity: compact
 ---
 
 # Do Test

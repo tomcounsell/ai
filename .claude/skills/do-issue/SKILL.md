@@ -3,6 +3,7 @@ name: do-issue
 description: "Use when creating a new GitHub issue. Ensures issues are self-contained, define domain terms, and provide enough context for the /do-plan skill to produce a quality plan. Triggered by 'create an issue', 'file an issue', or automatically by /sdlc at Step 1."
 allowed-tools: Read, Write, Edit, Glob, Grep, Bash
 argument-hint: "<title or description>"
+context_fidelity: full
 ---
 
 # Create Issue (Quality Issue Creator)

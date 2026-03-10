@@ -3,6 +3,7 @@ name: do-build
 description: "Use when executing a plan document to ship a feature. Triggered by 'build this', 'execute the plan', 'implement the plan', or any request to run/ship a plan."
 argument-hint: "<plan-path-or-issue-number>"
 context: fork
+context_fidelity: compact
 ---
 
 # Build (Plan Execution)
