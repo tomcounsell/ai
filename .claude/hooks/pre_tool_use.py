@@ -51,8 +51,11 @@ def capture_git_baseline_once(hook_input: dict) -> None:
         baseline_dir.mkdir(parents=True, exist_ok=True)
         with open(baseline_path, "w") as fh:
             json.dump(dirty, fh)
-    except Exception:
-        pass  # Fire and forget
+    except Exception as e:
+        print(
+            f"HOOK WARNING: Failed to capture git baseline for {session_id}: {e}",
+            file=sys.stderr,
+        )
 
 
 def main():
