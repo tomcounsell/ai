@@ -1338,19 +1338,8 @@ async def _execute_job(job: Job) -> None:
         try:
             from bridge.session_transcript import complete_transcript
 
-            final_status = (
-                "active"
-                if chat_state.defer_reaction
-                else ("completed" if not task.error else "failed")
-            )
             if not chat_state.defer_reaction:
-                # Re-read session from Redis to avoid operating on stale data.
-                # The session may have been modified by _enqueue_continuation()
-                # or another process since we captured agent_session at job start.
-                fresh_session = AgentSession.query.filter(session_id=job.session_id)
-                fresh_sessions = list(fresh_session)
-                if fresh_sessions:
-                    agent_session = fresh_sessions[0]
+                final_status = "completed" if not task.error else "failed"
                 complete_transcript(job.session_id, status=final_status)
             else:
                 # STALE SAVE GUARD: Do NOT call agent_session.save() here.
