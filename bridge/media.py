@@ -449,7 +449,10 @@ async def process_incoming_media(
         # Try to extract and inline document text content
         extracted = extract_document_text(downloaded)
         if extracted:
-            description = f"[User sent a document: {downloaded.name}]\n\nDocument content:\n{extracted}"
+            description = (
+                f"[User sent a document: {downloaded.name}]"
+                f"\n\nDocument content:\n{extracted}"
+            )
         else:
             description = f"[User sent a document - saved to {downloaded.name}]"
 

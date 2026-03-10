@@ -941,7 +941,10 @@ async def get_agent_response_sdk(
         github_config = project.get("github", {}) if project else {}
         github_org = github_config.get("org", "")
         github_repo = github_config.get("repo", "")
-        enriched_message += f"\nWORK REQUEST for project {project_name}.\nTARGET REPO: {project_working_dir}"
+        enriched_message += (
+            f"\nWORK REQUEST for project {project_name}."
+            f"\nTARGET REPO: {project_working_dir}"
+        )
         if github_org and github_repo:
             enriched_message += f"\nGITHUB: {github_org}/{github_repo}"
         enriched_message += "\nInvoke /sdlc immediately."

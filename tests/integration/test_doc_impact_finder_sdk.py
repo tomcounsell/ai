@@ -454,7 +454,10 @@ class TestFullPipelineLive:
             with patch(
                 "tools.impact_finder_core._embed_openai", side_effect=smart_embed
             ):
-                change_desc = "Refactored session isolation to use slug-based worktrees instead of thread IDs"
+                change_desc = (
+                    "Refactored session isolation to use"
+                    " slug-based worktrees instead of thread IDs"
+                )
                 results = find_affected_docs(
                     change_desc,
                     repo_root=tmp_path,
