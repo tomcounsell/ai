@@ -1282,6 +1282,32 @@ async def _execute_job(job: Job) -> None:
             return
 
         # Observer decided to deliver to Telegram
+        # Completion guard: check goal gates for SDLC sessions
+        if _is_sdlc and agent_session:
+            try:
+                from agent.goal_gates import check_all_gates
+
+                slug = getattr(agent_session, "work_item_slug", None)
+                if slug:
+                    gate_wd = getattr(agent_session, "working_dir", None) or "."
+                    gate_results = check_all_gates(slug, gate_wd, agent_session)
+                    unsatisfied = [
+                        f"  - {stage}: {r.missing or r.evidence}"
+                        for stage, r in gate_results.items()
+                        if not r.satisfied
+                    ]
+                    if unsatisfied:
+                        gate_warning = "\n\n⚠️ **Incomplete pipeline gates:**\n" + "\n".join(
+                            unsatisfied
+                        )
+                        msg = msg + gate_warning
+                        logger.info(
+                            f"[{job.project_key}] Gate completion guard: "
+                            f"{len(unsatisfied)} unsatisfied gates for slug {slug}"
+                        )
+            except Exception as e:
+                logger.warning(f"[{job.project_key}] Gate completion guard failed: {e}")
+
         await send_cb(job.chat_id, msg, job.message_id, agent_session)
         chat_state.completion_sent = True
         logger.info(

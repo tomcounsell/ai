@@ -26,6 +26,7 @@ from bridge.stage_detector import apply_transitions, detect_stages
 from bridge.summarizer import extract_artifacts
 from config.models import SONNET
 from models.agent_session import AgentSession
+from monitoring.telemetry import record_decision, record_interjection, record_tool_use
 
 logger = logging.getLogger(__name__)
 
@@ -237,10 +238,38 @@ class Observer:
         # Peek at queued messages without clearing — pop happens in update_session
         raw = self.session.queued_steering_messages
         queued = list(raw) if isinstance(raw, list) else []
+        if queued:
+            cid = getattr(self.session, "correlation_id", None) or "unknown"
+            logger.info(
+                f"{self._log_prefix} INTERJECTION session={self.session.session_id} "
+                f"correlation={cid} count={len(queued)} action=read"
+            )
         is_sdlc = self.session.is_sdlc_job()
 
         # Extract artifacts from worker output
         artifacts = extract_artifacts(self.worker_output)
+
+        # Add gate status for SDLC sessions
+        gate_status: dict[str, Any] = {}
+        if is_sdlc:
+            try:
+                from agent.goal_gates import check_all_gates
+
+                slug = getattr(self.session, "work_item_slug", None)
+                if slug:
+                    working_dir = getattr(self.session, "working_dir", None) or "."
+                    gate_results = check_all_gates(slug, working_dir, self.session)
+                    gate_status = {
+                        stage: {
+                            "satisfied": result.satisfied,
+                            "evidence": result.evidence,
+                            "missing": result.missing,
+                        }
+                        for stage, result in gate_results.items()
+                    }
+            except Exception as e:
+                logger.warning(f"{self._log_prefix} Gate check failed: {e}")
+                gate_status = {"error": str(e)}
 
         return {
             "session_id": self.session.session_id,
@@ -248,6 +277,7 @@ class Observer:
             "is_sdlc": is_sdlc,
             "classification_type": self.session.classification_type,
             "stage_progress": progress,
+            "gate_status": gate_status,
             "links": links,
             "history": history[-10:],  # Last 10 entries for context
             "queued_steering_messages": queued,
@@ -282,6 +312,12 @@ class Observer:
         cleared_messages = False
         queued = self.session.queued_steering_messages
         if isinstance(queued, list) and queued:
+            cid = getattr(self.session, "correlation_id", None) or "unknown"
+            logger.info(
+                f"{self._log_prefix} INTERJECTION session={self.session.session_id} "
+                f"correlation={cid} count={len(queued)} action=cleared"
+            )
+            record_interjection(self.session.session_id, cid, len(queued), "cleared")
             self.session.queued_steering_messages = []
             cleared_messages = True
 
@@ -422,6 +458,8 @@ class Observer:
                         f"{self._log_prefix} Iteration {iteration + 1}/{MAX_TOOL_ITERATIONS}: "
                         f"tool={tool_use.name}, result={result_preview}"
                     )
+                    cid = getattr(self.session, "correlation_id", None) or "unknown"
+                    record_tool_use(self.session.session_id, cid, tool_use.name)
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -457,9 +495,11 @@ class Observer:
                     "transitions_applied": transitions_applied,
                 }
 
+            cid = getattr(self.session, "correlation_id", None) or "unknown"
             if self._action_taken == "steer":
                 reason_preview = (coaching_message or "continue")[:120]
                 logger.info(f"{self._log_prefix} Decision: steer (reason: {reason_preview})")
+                record_decision(self.session.session_id, cid, "steer", reason_preview)
                 return {
                     "action": "steer",
                     "coaching_message": coaching_message or "continue",
@@ -468,6 +508,7 @@ class Observer:
             else:
                 reason_preview = (deliver_reason or "Observer decided to deliver")[:120]
                 logger.info(f"{self._log_prefix} Decision: deliver (reason: {reason_preview})")
+                record_decision(self.session.session_id, cid, "deliver", reason_preview)
                 return {
                     "action": "deliver",
                     "reason": deliver_reason or "Observer decided to deliver",
@@ -475,7 +516,9 @@ class Observer:
                 }
 
         except Exception as e:
+            cid = getattr(self.session, "correlation_id", None) or "unknown"
             logger.error(f"{self._log_prefix} Observer failed: {e}", exc_info=True)
+            record_decision(self.session.session_id, cid, "error", str(e))
             return {
                 "action": "deliver",
                 "reason": f"Observer error: {e}",
