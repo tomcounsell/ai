@@ -36,18 +36,6 @@ _PUBLISHING_ASSET_TITLES = {
 }
 
 
-def _prefix_for_step(step: str) -> str | None:
-    """Return the artifact title prefix associated with a fan-in step.
-
-    Returns ``None`` for steps that do not use signal-based fan-in.
-    """
-    if step == "Targeted Research":
-        return "p2-"
-    if step == "Publishing Assets":
-        return None  # Publishing uses explicit title checks, not prefix
-    return None
-
-
 def _check_targeted_research_complete(episode_id: int) -> bool:
     """Check whether all targeted research artifacts have content.
 
@@ -126,13 +114,19 @@ def _try_enqueue_next_step(episode_id: int, current_step: str) -> bool:
 
     # Outside the lock -- enqueue the next step.
     # Import here to avoid circular imports.
-    from apps.podcast.tasks import step_publish, step_research_digests
+    from apps.podcast.tasks import step_publish
 
     if current_step == "Targeted Research":
-        step_research_digests.enqueue(episode_id=episode_id)
+        from apps.podcast.services import workflow as wf_service
+
+        wf_service.pause_for_human(
+            episode_id,
+            "Automated research complete. Add Grok or manual research, "
+            "or resume to continue.",
+        )
         logger.info(
-            "Fan-in signal: all targeted research complete for episode %d, "
-            "enqueued step_research_digests",
+            "Fan-in signal: all automated targeted research complete for "
+            "episode %d, paused for manual research",
             episode_id,
         )
         return True

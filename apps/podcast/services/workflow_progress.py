@@ -10,6 +10,8 @@ class SubStep:
     label: str
     complete: bool
     detail: str = ""
+    optional: bool = False
+    artifact_key: str = ""
 
 
 @dataclass
@@ -138,12 +140,12 @@ def compute_workflow_progress(
 
     # -- Phase 4: Targeted Research --
     targeted_sources = [
-        ("Grok research", "p2-grok"),
-        ("ChatGPT research", "p2-chatgpt"),
-        ("Gemini research", "p2-gemini"),
-        ("Claude research", "p2-claude"),
-        ("Together research", "p2-together"),
-        ("Manual research", "p2-manual"),
+        ("ChatGPT research", "p2-chatgpt", False),
+        ("Gemini research", "p2-gemini", False),
+        ("Claude research", "p2-claude", False),
+        ("Together research", "p2-together", False),
+        ("Grok research", "p2-grok", True),
+        ("Manual research", "p2-manual", True),
     ]
     phase_4 = Phase(
         number=4,
@@ -153,8 +155,10 @@ def compute_workflow_progress(
             SubStep(
                 label=label,
                 complete=_has_artifact(artifact_titles, needle),
+                optional=is_optional,
+                artifact_key=needle.replace("p2-", ""),
             )
-            for label, needle in targeted_sources
+            for label, needle, is_optional in targeted_sources
         ],
     )
 

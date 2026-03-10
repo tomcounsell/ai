@@ -1,5 +1,6 @@
 from apps.podcast.workflow import (
     EpisodeWorkflowView,
+    PasteResearchView,
     RegenerateCoverArtView,
     UploadCoverArtView,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "PodcastDetailView",
     "PodcastEditView",
     "PodcastFeedView",
+    "PasteResearchView",
     "PodcastListView",
     "RegenerateCoverArtView",
     "UploadCoverArtView",

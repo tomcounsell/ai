@@ -300,11 +300,18 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
                 from apps.podcast.services import workflow as wf_service
 
                 wf_service.resume_workflow(episode.pk)
-                # Enqueue the current step's tasks
-                task_paths = STEP_TASK_MAP.get(step_name, [])
-                for path in task_paths:
-                    task_fn = _resolve_task(path)
+
+                # Targeted Research pause means automated research is done;
+                # resuming should advance to digests, not re-run research.
+                if step_name == "Targeted Research":
+                    task_fn = _resolve_task("apps.podcast.tasks.step_research_digests")
                     task_fn.enqueue(episode_id=episode.pk)
+                else:
+                    # Enqueue the current step's tasks
+                    task_paths = STEP_TASK_MAP.get(step_name, [])
+                    for path in task_paths:
+                        task_fn = _resolve_task(path)
+                        task_fn.enqueue(episode_id=episode.pk)
                 logger.info(
                     "Workflow action: Resume Pipeline at '%s' for episode %d",
                     step_name,
@@ -554,6 +561,57 @@ class WorkflowPollView(LoginRequiredMixin, UserPassesTestMixin, View):
             response.status_code = 286
 
         return response
+
+
+class PasteResearchView(LoginRequiredMixin, UserPassesTestMixin, View):
+    """Accept pasted research content for Grok or manual research."""
+
+    def test_func(self) -> bool:
+        slug = self.kwargs.get("slug")
+        if not slug:
+            return False
+        podcast = get_object_or_404(Podcast, slug=slug)
+        return self.request.user.is_staff or podcast.owner == self.request.user
+
+    def post(self, request, slug: str, episode_slug: str):
+        from apps.podcast.services.research import add_manual_research
+
+        podcast = get_object_or_404(Podcast, slug=slug)
+        episode = get_object_or_404(Episode, podcast=podcast, slug=episode_slug)
+
+        research_key = request.POST.get("research_key", "").strip()
+        content = request.POST.get("content", "").strip()
+
+        allowed_keys = {"grok", "manual"}
+        if research_key not in allowed_keys or not content:
+            logger.warning(
+                "Invalid paste research: key=%r, content_len=%d, episode=%d",
+                research_key,
+                len(content),
+                episode.pk,
+            )
+            return self._redirect(slug, episode_slug)
+
+        add_manual_research(episode.pk, research_key, content)
+        logger.info(
+            "Pasted %s research (%d chars) for episode %d",
+            research_key,
+            len(content),
+            episode.pk,
+        )
+
+        return self._redirect(slug, episode_slug)
+
+    def _redirect(self, slug: str, episode_slug: str) -> HttpResponse:
+        url = reverse(
+            "podcast:episode_workflow",
+            kwargs={"slug": slug, "episode_slug": episode_slug, "step": 4},
+        )
+        if getattr(self.request, "htmx", False):
+            response = HttpResponse(status=204)
+            response["HX-Redirect"] = url
+            return response
+        return HttpResponseRedirect(url)
 
 
 class RegenerateCoverArtView(LoginRequiredMixin, UserPassesTestMixin, View):

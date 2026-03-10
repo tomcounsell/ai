@@ -8,6 +8,7 @@ from apps.podcast.views import (
     EpisodeSourcesView,
     EpisodeUpdateFieldView,
     EpisodeWorkflowView,
+    PasteResearchView,
     PodcastDetailView,
     PodcastEditView,
     PodcastFeedView,
@@ -64,6 +65,11 @@ urlpatterns = [
         "<slug:slug>/<slug:episode_slug>/update-field/",
         EpisodeUpdateFieldView.as_view(),
         name="episode_update_field",
+    ),
+    path(
+        "<slug:slug>/<slug:episode_slug>/paste-research/",
+        PasteResearchView.as_view(),
+        name="paste_research",
     ),
     path(
         "<slug:slug>/<slug:episode_slug>/regenerate-cover/",
