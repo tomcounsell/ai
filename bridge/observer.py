@@ -21,6 +21,7 @@ from typing import Any
 
 import anthropic
 
+from agent.job_queue import MAX_AUTO_CONTINUES, MAX_AUTO_CONTINUES_SDLC
 from bridge.stage_detector import apply_transitions, detect_stages
 from bridge.summarizer import extract_artifacts
 from config.models import SONNET
@@ -245,7 +246,7 @@ class Observer:
             "history": history[-10:],  # Last 10 entries for context
             "queued_steering_messages": queued,
             "auto_continue_count": self.auto_continue_count,
-            "max_auto_continues": 10 if is_sdlc else 3,
+            "max_auto_continues": MAX_AUTO_CONTINUES_SDLC if is_sdlc else MAX_AUTO_CONTINUES,
             "has_remaining_stages": self.session.has_remaining_stages(),
             "has_failed_stage": self.session.has_failed_stage(),
             "worker_output_preview": self.worker_output[:500] if self.worker_output else "",
@@ -286,10 +287,10 @@ class Observer:
             self.session.expectations = expectations
             updated.append("expectations")
         if issue_url is not None:
-            self.session.set_link("issue", issue_url)
+            self.session.issue_url = issue_url
             updated.append("issue_url")
         if pr_url is not None:
-            self.session.set_link("pr", pr_url)
+            self.session.pr_url = pr_url
             updated.append("pr_url")
 
         if updated or cleared_messages:

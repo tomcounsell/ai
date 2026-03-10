@@ -1100,19 +1100,11 @@ async def _execute_job(job: Job) -> None:
     )
 
     async def send_to_chat(msg: str) -> None:
-        """Route agent output to the user or auto-continue the pipeline.
+        """Route agent output via the Observer Agent.
 
-        Decision tree for SDLC jobs:
-        1. Failed stage -> deliver immediately
-        2. Stages remaining + PLAN stage + open questions -> deliver (pause for input)
-        3. Stages remaining + error prose -> fall through to classifier
-        4. Stages remaining + no issues -> auto-continue
-        5. All stages done -> classifier-based routing
-
-        The open question gate (step 2) extracts questions from '## Open Questions'
-        sections and pauses the pipeline so the human can answer design decisions
-        before BUILD proceeds. Only active during the PLAN stage to avoid false
-        positives from quoted plan content in later stages.
+        The Observer reads the full AgentSession state (stages, links, history,
+        queued steering messages) and decides to either steer the worker back
+        to work or deliver the output to Telegram. See bridge/observer.py.
         """
         nonlocal agent_session  # Re-read from Redis for fresh stage data
 
@@ -1167,6 +1159,14 @@ async def _execute_job(job: Job) -> None:
             return
 
         # Run the Observer Agent for routing decisions
+        if not agent_session:
+            logger.warning(
+                f"[{job.project_key}] No AgentSession available — delivering raw output to Telegram"
+            )
+            await send_cb(job.chat_id, msg, job.message_id, None)
+            chat_state.completion_sent = True
+            return
+
         from bridge.observer import Observer
 
         observer = Observer(
