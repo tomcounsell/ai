@@ -1,0 +1,66 @@
+# Issue Template
+
+Use this template when writing the issue body. Delete any sections marked CONDITIONAL if they don't apply.
+
+---
+
+```markdown
+> **Context:** [1-3 sentences explaining the project-specific background a reader needs.
+> If the issue references a named system, library, spec, or internal concept, define it
+> here with a link. Example: "This issue relates to the [Observer Agent](docs/features/observer-agent.md),
+> a Sonnet-powered routing component in our SDLC pipeline that decides whether to steer
+> the worker agent forward or deliver output to the human on Telegram."]
+
+## Problem
+
+[State the problem from a reader's perspective. Assume they have general software
+engineering experience but know nothing about this codebase.]
+
+**Current behavior:**
+[What happens now — be specific, include observable symptoms]
+
+**Desired outcome:**
+[What success looks like — measurable, not vague]
+
+## Definitions
+
+<!-- CONDITIONAL: Include if the issue uses 2+ terms that aren't common software
+     engineering knowledge. Delete this section if all terms are self-evident. -->
+
+| Term | Definition | Reference |
+|------|-----------|-----------|
+| [Term] | [One-sentence definition] | [Link to source: repo, docs, file, RFC] |
+| [Term] | [One-sentence definition] | [Link to source] |
+
+## Prior Context
+
+<!-- CONDITIONAL: Include if related issues or PRs exist. Delete if greenfield. -->
+
+Related work:
+- #[N]: [Title] — [One-line summary of what it did and its outcome]
+- #[N]: [Title] — [One-line summary]
+
+## Solution Sketch
+
+[Brief description of the intended approach. Not a full plan — that's `/do-plan`'s job.
+Enough that the planner knows the direction and constraints.]
+
+- [Key element 1]
+- [Key element 2]
+- [Key element 3]
+
+## Acceptance Criteria
+
+- [ ] [Specific, verifiable criterion]
+- [ ] [Specific, verifiable criterion]
+- [ ] [Specific, verifiable criterion]
+
+## Downstream
+
+This issue feeds into `/do-plan`, which will produce a plan document at
+`docs/plans/{slug}.md`. The plan is then executed by `/do-build`.
+
+[If there are known constraints the planner should be aware of, state them here.
+Example: "The solution must not add new dependencies" or "This must be backward
+compatible with the existing API."]
+```

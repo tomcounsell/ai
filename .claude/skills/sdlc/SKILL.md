@@ -46,10 +46,7 @@ If an issue number was provided, fetch it:
 gh issue view {number}
 ```
 
-If NO issue number was provided (just a feature description), create one first:
-```bash
-gh issue create --title "Brief title" --body "Description from the user's request"
-```
+If NO issue number was provided (just a feature description), **invoke `/do-issue`** to create a quality issue. The `/do-issue` skill ensures the issue is self-contained, defines domain terms, and provides enough context for `/do-plan` to produce a precise plan.
 
 **Do not proceed without an issue number.**
 
@@ -144,7 +141,7 @@ If both counts are 0, re-invoke `/do-pr-review`. A review that only exists in ag
 ## Pipeline Stages (Ground Truth)
 
 ```
-1. ISSUE  — gh issue create (or already exists)
+1. ISSUE  — /do-issue (or already exists)
 2. PLAN   — /do-plan {slug}
 3. BUILD  — /do-build {plan or issue}
 4. TEST   — /do-test
