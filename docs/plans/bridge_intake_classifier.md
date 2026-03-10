@@ -4,7 +4,7 @@ type: feature
 appetite: Medium
 owner: Valor Engels
 created: 2026-03-10
-tracking:
+tracking: https://github.com/tomcounsell/ai/issues/320
 ---
 
 # Bridge Intake Classifier: Haiku Triage on Every Incoming Message
