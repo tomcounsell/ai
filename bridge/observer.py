@@ -22,6 +22,7 @@ from typing import Any
 import anthropic
 
 from agent.job_queue import MAX_AUTO_CONTINUES, MAX_AUTO_CONTINUES_SDLC
+from agent.skill_outcome import parse_outcome_from_text
 from bridge.stage_detector import apply_transitions, detect_stages
 from bridge.summarizer import extract_artifacts
 from config.models import SONNET
@@ -400,6 +401,94 @@ class Observer:
             logger.info(
                 f"{self._log_prefix} Stage detector applied {transitions_applied} transitions "
                 f"for session {self.session.session_id}"
+            )
+
+        # Phase 1.5: Check for typed SkillOutcome (deterministic routing)
+        outcome = parse_outcome_from_text(self.worker_output)
+        if outcome is not None:
+            logger.info(
+                f"{self._log_prefix} Typed outcome found: "
+                f"status={outcome.status}, stage={outcome.stage}"
+            )
+            cid = getattr(self.session, "correlation_id", None) or "unknown"
+
+            # Store outcome artifacts in session metadata
+            if outcome.artifacts:
+                try:
+                    if outcome.artifacts.get("pr_url"):
+                        self.session.pr_url = outcome.artifacts["pr_url"]
+                    if outcome.artifacts.get("issue_url"):
+                        self.session.issue_url = outcome.artifacts["issue_url"]
+                    self.session.save()
+                except Exception as e:
+                    logger.warning(f"{self._log_prefix} Failed to save outcome artifacts: {e}")
+
+            if outcome.status == "success" and self.session.has_remaining_stages():
+                # Success with remaining stages: steer to next stage (skip LLM)
+                next_skill = outcome.next_skill or "the next pipeline stage"
+                coaching = (
+                    f"{outcome.stage} completed successfully. "
+                    f"{outcome.notes} Continue with {next_skill}."
+                )
+                logger.info(
+                    f"{self._log_prefix} Typed outcome routing: steer (success, remaining stages)"
+                )
+                record_decision(
+                    self.session.session_id,
+                    cid,
+                    "steer",
+                    f"typed-outcome: {outcome.stage} success",
+                )
+                return {
+                    "action": "steer",
+                    "coaching_message": coaching,
+                    "transitions_applied": transitions_applied,
+                    "typed_outcome": outcome.to_dict(),
+                }
+
+            if outcome.status == "success" and not self.session.has_remaining_stages():
+                # Success with no remaining stages: deliver to human
+                logger.info(
+                    f"{self._log_prefix} Typed outcome routing: deliver "
+                    f"(success, all stages complete)"
+                )
+                record_decision(
+                    self.session.session_id,
+                    cid,
+                    "deliver",
+                    f"typed-outcome: {outcome.stage} success, pipeline complete",
+                )
+                return {
+                    "action": "deliver",
+                    "reason": f"Pipeline complete. {outcome.notes}",
+                    "transitions_applied": transitions_applied,
+                    "typed_outcome": outcome.to_dict(),
+                }
+
+            if outcome.status == "fail":
+                # Failure: deliver to human with failure context
+                reason = f"{outcome.stage} failed: {outcome.failure_reason or outcome.notes}"
+                logger.info(
+                    f"{self._log_prefix} Typed outcome routing: deliver "
+                    f"(fail, reason: {reason[:120]})"
+                )
+                record_decision(
+                    self.session.session_id,
+                    cid,
+                    "deliver",
+                    f"typed-outcome: {outcome.stage} fail",
+                )
+                return {
+                    "action": "deliver",
+                    "reason": reason,
+                    "transitions_applied": transitions_applied,
+                    "typed_outcome": outcome.to_dict(),
+                }
+
+            # For partial/retry/skipped/unknown: fall through to LLM Observer
+            logger.info(
+                f"{self._log_prefix} Typed outcome status={outcome.status} "
+                f"is ambiguous, falling through to LLM Observer"
             )
 
         # Phase 2: Run the Observer LLM for judgment calls
