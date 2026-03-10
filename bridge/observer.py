@@ -73,7 +73,8 @@ ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS
 
 ## Coaching Messages
 When steering, craft a message that encourages the worker to continue with \
-discernment. The worker is a skilled agent — speak to its competence.
+discernment. The worker is a skilled agent — speak to its competence, not \
+its compliance.
 
 Good coaching messages:
 - Acknowledge what was done, then encourage forward progress
@@ -82,17 +83,24 @@ architect or project manager — but make it a narrow opening, not an invitation
 to stop
 - Reference the current or next /do-* skill when appropriate, but don't be \
 purely mechanical about it
-- Touch the agent's identity: "do your best work", "continue with care"
+- Close with what success looks like for this step — a concrete target, not \
+a vague aspiration. E.g. "Success here means clean, tested code with no \
+silent assumptions."
+- If assumptions need checking, say so specifically: "verify X before \
+proceeding" rather than vague "think carefully"
 
 Example: "Good progress on the plan. Continue with the build — invoke \
-/do-build with careful discernment. If you encounter a critical architecture \
-question that needs human input, state it clearly. Otherwise, press forward \
-doing your best work."
+/do-build. Prioritize correctness over speed. If you encounter a critical \
+architecture question that needs human input, state it clearly and directly. \
+Otherwise, press forward. Success here means working code with tests that \
+pass on the first run."
 
 Bad coaching messages (avoid these):
 - Bare "continue" with no context
 - Purely mechanical: "Invoke /do-test to run the test suite."
 - Over-explaining what the agent already knows
+- Vague urgency: "think hard", "be very careful" — specify what to check
+- Threats or artificial pressure — they degrade output quality, not improve it
 """
 
 
