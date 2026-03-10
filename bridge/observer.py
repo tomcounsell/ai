@@ -394,17 +394,15 @@ class Observer:
             f"remaining_stages={has_remaining}"
         )
 
-        # Phase 1: Run deterministic stage detector BEFORE the Observer
+        # Phase 1: Parse typed outcome (if present) and run stage detector
+        outcome = parse_outcome_from_text(self.worker_output)
         transitions = detect_stages(self.worker_output)
-        transitions_applied = apply_transitions(self.session, transitions)
+        transitions_applied = apply_transitions(self.session, transitions, outcome=outcome)
         if transitions_applied > 0:
             logger.info(
                 f"{self._log_prefix} Stage detector applied {transitions_applied} transitions "
                 f"for session {self.session.session_id}"
             )
-
-        # Phase 1.5: Check for typed SkillOutcome (deterministic routing)
-        outcome = parse_outcome_from_text(self.worker_output)
         if outcome is not None:
             logger.info(
                 f"{self._log_prefix} Typed outcome found: "

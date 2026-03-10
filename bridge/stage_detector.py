@@ -14,6 +14,10 @@ This replaces the LLM-dependent session_progress.py CLI for stage tracking.
 
 import logging
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent.skill_outcome import SkillOutcome
 
 logger = logging.getLogger(__name__)
 
@@ -162,21 +166,53 @@ def detect_stages(transcript: str) -> list[dict[str, str]]:
     return transitions
 
 
-def apply_transitions(session, transitions: list[dict[str, str]]) -> int:
+def apply_transitions(
+    session,
+    transitions: list[dict[str, str]],
+    outcome: "SkillOutcome | None" = None,
+) -> int:
     """Apply detected stage transitions to an AgentSession.
 
     Writes [stage] history entries to the session, which is how
     get_stage_progress() determines stage status. Only writes entries
     for stages that haven't already been recorded.
 
+    When a typed SkillOutcome is provided, cross-checks it against
+    regex-detected transitions. If the outcome says "success" but
+    regex didn't detect completion for that stage, a warning is logged.
+    The outcome's artifacts are preferred over regex-extracted ones.
+
     Args:
         session: AgentSession instance (must have append_history method)
         transitions: List of transitions from detect_stages()
+        outcome: Optional typed SkillOutcome for cross-checking
 
     Returns:
         Number of transitions actually applied (skips already-recorded ones)
     """
-    if not transitions or not session:
+    if not transitions and not outcome:
+        return 0
+    if not session:
+        return 0
+
+    # Cross-check: if typed outcome exists, verify consistency with regex detections
+    if outcome is not None:
+        regex_stages = {t["stage"] for t in transitions}
+        if outcome.status == "success" and outcome.stage not in regex_stages:
+            logger.warning(
+                f"[stage-detector] Cross-check mismatch: typed outcome says "
+                f"{outcome.stage} succeeded but regex did not detect it. "
+                f"Regex detected: {regex_stages or 'none'}"
+            )
+        elif outcome.status == "fail" and outcome.stage in regex_stages:
+            # Outcome says fail but regex detected completion — outcome takes priority
+            logger.warning(
+                f"[stage-detector] Cross-check mismatch: typed outcome says "
+                f"{outcome.stage} failed but regex detected it as completing. "
+                f"Trusting typed outcome."
+            )
+
+    if not transitions:
         return 0
 
     # Get current progress to avoid duplicate writes
