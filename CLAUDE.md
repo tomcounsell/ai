@@ -408,7 +408,7 @@ If optional keys are missing, the pipeline logs a warning, creates a "[SKIPPED: 
 | Service | ID | Type | Plan | Region |
 |---------|-----|------|------|--------|
 | cuttlefish | `srv-d3ho96p5pdvs73feafhg` | Web Service | Starter | Oregon |
-| cuttlefish-worker | _(pending creation)_ | Background Worker | Starter | Oregon |
+| cuttlefish-worker | `srv-d6b8dlrh46gs73939asg` | Background Worker | Starter | Oregon |
 
 The background worker runs `python manage.py db_worker` to process tasks enqueued via Django 6.0's `@task` framework. It shares the same database, environment group, and build as the web service.
 
