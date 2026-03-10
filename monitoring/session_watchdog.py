@@ -528,6 +528,8 @@ def _compute_stall_backoff(retry_count: int) -> float:
     # Treat None as 0 for legacy sessions without retry_count
     if retry_count is None:
         retry_count = 0
+    # Coerce to plain int (Popoto Field objects break arithmetic)
+    retry_count = int(retry_count)
     # Guard against negative values
     retry_count = max(0, retry_count)
     delay = STALL_BACKOFF_BASE * (2**retry_count)
@@ -591,7 +593,7 @@ async def _enqueue_stall_retry(
     from agent.job_queue import _ensure_worker, _extract_job_fields
 
     try:
-        retry_count = (session.retry_count or 0) + 1
+        retry_count = int(session.retry_count or 0) + 1
         session_id = session.session_id or session.job_id or "unknown"
 
         # Build retry context message
@@ -660,7 +662,7 @@ async def _notify_stall_failure(session: AgentSession, stall_reason: str) -> Non
     from agent.job_queue import _send_callbacks
 
     session_id = session.session_id or session.job_id or "unknown"
-    retry_count = session.retry_count or 0
+    retry_count = int(session.retry_count or 0)
     chat_id = getattr(session, "chat_id", None)
     message_id = getattr(session, "message_id", None)
     project_key = getattr(session, "project_key", "?")
@@ -723,7 +725,7 @@ async def fix_unhealthy_session(session: AgentSession, assessment: dict[str, Any
     silence_duration = now - session.last_activity
 
     # Get current retry count (treat None as 0 for legacy sessions)
-    retry_count = session.retry_count if session.retry_count is not None else 0
+    retry_count = int(session.retry_count) if session.retry_count is not None else 0
 
     # Most common case: session is stuck/silent
     if silence_duration > ABANDON_THRESHOLD:

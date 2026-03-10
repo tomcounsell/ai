@@ -81,7 +81,7 @@ Both fields are preserved across the delete-and-recreate pattern via `_JOB_FIELD
 
 ### Functions (`monitoring/session_watchdog.py`)
 
-- `_compute_stall_backoff(retry_count)`: Computes exponential backoff delay. Handles None (pre-existing sessions without retry_count) and negative values gracefully.
+- `_compute_stall_backoff(retry_count)`: Computes exponential backoff delay. Handles None (pre-existing sessions without retry_count), negative values, and Popoto Field objects (coerced to int) gracefully.
 - `_kill_stalled_worker(project_key)`: Cancels the asyncio worker task for a project, removing it from `_active_workers`. Returns False if no worker exists or it's already dead.
 - `_enqueue_stall_retry(session, stall_reason)`: Re-enqueues a stalled session using the delete-and-recreate pattern with incremented retry_count, stall reason context, and high priority.
 - `_notify_stall_failure(session, stall_reason)`: Sends a Telegram notification via the bridge's registered send callback when retries are exhausted.
