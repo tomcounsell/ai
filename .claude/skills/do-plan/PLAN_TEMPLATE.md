@@ -329,12 +329,18 @@ When this plan is executed, the lead agent orchestrates work using Task tools. T
 - Verify all success criteria met (including documentation)
 - Generate final report
 
-## Validation Commands
+## Verification
 
-[Commands to verify the work is complete - used by validators]
+[Machine-readable checks that `/do-build` executes automatically after the build.
+Each row is a named check with an executable command and expected result.
+Supported expectations: "exit code N", "output > N", "output contains X".]
 
-- `[command 1]` - [what it validates]
-- `[command 2]` - [what it validates]
+| Check | Command | Expected |
+|-------|---------|----------|
+| Tests pass | `pytest tests/ -x -q` | exit code 0 |
+| Lint clean | `python -m ruff check .` | exit code 0 |
+| Format clean | `python -m ruff format --check .` | exit code 0 |
+| [Feature-specific check] | `[command]` | [expected] |
 
 ---
 
