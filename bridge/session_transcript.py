@@ -234,9 +234,7 @@ def append_tool_result(
             s.last_activity = time.time()
             s.save()
     except Exception as e:
-        logger.debug(
-            f"Failed to update SessionLog tool_call_count for {session_id}: {e}"
-        )
+        logger.debug(f"Failed to update SessionLog tool_call_count for {session_id}: {e}")
 
 
 def complete_transcript(
