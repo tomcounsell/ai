@@ -1344,10 +1344,29 @@ async def _execute_job(job: Job) -> None:
                 else ("completed" if not task.error else "failed")
             )
             if not chat_state.defer_reaction:
+                # Re-read session from Redis to avoid operating on stale data.
+                # The session may have been modified by _enqueue_continuation()
+                # or another process since we captured agent_session at job start.
+                fresh_session = AgentSession.query.filter(
+                    session_id=job.session_id
+                )
+                fresh_sessions = list(fresh_session)
+                if fresh_sessions:
+                    agent_session = fresh_sessions[0]
                 complete_transcript(job.session_id, status=final_status)
             else:
-                agent_session.last_activity = time.time()
-                agent_session.save()
+                # STALE SAVE GUARD: Do NOT call agent_session.save() here.
+                # When defer_reaction is True, _enqueue_continuation() has already
+                # deleted the old session and created a fresh pending continuation.
+                # Saving the stale in-memory agent_session reference would resurrect
+                # a ghost record in Redis, causing the pending continuation to become
+                # invisible to the worker's _pop_job() query (Redis index corruption).
+                # See: https://github.com/tomcounsell/ai/issues/342
+                logger.debug(
+                    f"[{job.project_key}] Skipping stale agent_session.save() — "
+                    f"session was already recreated by _enqueue_continuation() "
+                    f"(defer_reaction=True, session={job.session_id})"
+                )
         except Exception as e:
             logger.warning(
                 f"AgentSession update failed for job {job.job_id} "

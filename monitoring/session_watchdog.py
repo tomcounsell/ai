@@ -78,7 +78,9 @@ async def watchdog_loop(telegram_client=None) -> None:
             logger.error("[watchdog] Error in watchdog loop: %s", e, exc_info=True)
 
         try:
-            check_stalled_sessions()
+            stalled = check_stalled_sessions()
+            if stalled:
+                await _recover_stalled_pending(stalled)
         except Exception as e:
             logger.error("[watchdog] Error in stall check: %s", e, exc_info=True)
 
@@ -257,6 +259,56 @@ def check_stalled_sessions() -> list[dict]:
         )
 
     return stalled
+
+
+async def _recover_stalled_pending(stalled: list[dict]) -> None:
+    """Recover stalled pending sessions by ensuring a worker exists.
+
+    When a pending session is stalled, the most likely cause is that the worker
+    exited before picking up the continuation (Race 2 in issue #342). The fix
+    is to call _ensure_worker() which starts a new worker if none is running.
+
+    For non-pending stalled sessions, this function is a no-op — those are
+    handled by fix_unhealthy_session() in check_all_sessions().
+
+    Args:
+        stalled: List of stalled session dicts from check_stalled_sessions().
+    """
+    from agent.job_queue import _ensure_worker
+
+    pending_stalls = [s for s in stalled if s["status"] == "pending"]
+    if not pending_stalls:
+        return
+
+    for stall_info in pending_stalls:
+        project_key = stall_info.get("project_key", "?")
+        session_id = stall_info.get("session_id", "unknown")
+
+        if project_key == "?":
+            logger.warning(
+                "[watchdog] Cannot recover stalled pending session %s — "
+                "no project_key available",
+                session_id,
+            )
+            continue
+
+        try:
+            _ensure_worker(project_key)
+            logger.info(
+                "[watchdog] Ensured worker exists for stalled pending session %s "
+                "(project=%s, stalled %.0fs)",
+                session_id,
+                project_key,
+                stall_info.get("duration", 0),
+            )
+        except Exception as e:
+            logger.error(
+                "[watchdog] Failed to ensure worker for stalled pending session %s "
+                "(project=%s): %s",
+                session_id,
+                project_key,
+                e,
+            )
 
 
 def assess_session_health(session: AgentSession) -> dict[str, Any]:
