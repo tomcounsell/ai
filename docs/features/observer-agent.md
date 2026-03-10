@@ -77,6 +77,7 @@ The Observer uses Claude API directly (`anthropic.Anthropic().messages.create()`
 - Maximum 5 tool-use iterations per Observer invocation
 - Maximum 10 auto-continues for SDLC jobs, 3 for non-SDLC
 - **Hard guard** in `agent/job_queue.py`: cap is enforced regardless of Observer decision — if `auto_continue_count > effective_max`, output is delivered to Telegram
+- Each auto-continue increment is logged at INFO level (`Auto-continue {n}/{max} for session {id}`) for full sequence traceability
 - If Observer doesn't converge on a decision, defaults to deliver
 
 ## Coaching Philosophy
