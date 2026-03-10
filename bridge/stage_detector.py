@@ -251,6 +251,9 @@ def apply_transitions(
             session.append_history("stage", entry)
             applied += 1
             logger.info(f"[stage-detector] Applied {stage} -> {new_status}: {t['reason']}")
+            # Save checkpoint on stage completion
+            if new_status == "completed":
+                _save_stage_checkpoint(session, stage)
             # Record telemetry for stage transition
             try:
                 from monitoring.telemetry import record_stage_transition
@@ -264,3 +267,41 @@ def apply_transitions(
             logger.error(f"[stage-detector] Failed to apply {stage} -> {new_status}: {e}")
 
     return applied
+
+
+def _save_stage_checkpoint(session, stage: str) -> None:
+    """Save checkpoint after stage completion. Only for sessions with work_item_slug."""
+    slug = getattr(session, "work_item_slug", None)
+    if not slug:
+        return
+
+    try:
+        from agent.checkpoint import (
+            PipelineCheckpoint,
+            load_checkpoint,
+            record_stage_completion,
+            save_checkpoint,
+        )
+
+        checkpoint = load_checkpoint(slug) or PipelineCheckpoint(
+            session_id=getattr(session, "session_id", "unknown"),
+            slug=slug,
+        )
+
+        # Extract artifacts from session
+        artifacts = {}
+        for attr, key in [
+            ("issue_url", "issue_url"),
+            ("pr_url", "pr_url"),
+            ("plan_url", "plan_path"),
+            ("branch_name", "branch"),
+        ]:
+            val = getattr(session, attr, None)
+            if val:
+                artifacts[key] = str(val)
+
+        record_stage_completion(checkpoint, stage, artifacts=artifacts or None)
+        save_checkpoint(checkpoint)
+        logger.info(f"[stage-detector] Saved checkpoint for {slug} at stage {stage}")
+    except Exception as e:
+        logger.warning(f"[stage-detector] Failed to save checkpoint for {slug}: {e}")

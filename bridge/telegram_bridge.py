@@ -1024,7 +1024,10 @@ async def main():
             revival_info = check_revival(project_key, working_dir_str, telegram_chat_id)
             if revival_info:
                 revival_msg = f"Unfinished work detected on branch `{revival_info['branch']}`"
-                if revival_info.get("plan_context"):
+                checkpoint_ctx = revival_info.get("checkpoint_context", "")
+                if checkpoint_ctx:
+                    revival_msg += f"\n\n{checkpoint_ctx}"
+                elif revival_info.get("plan_context"):
                     revival_msg += f"\n\n> {revival_info['plan_context']}"
                 revival_msg += "\n\nReply to this message to resume."
                 from bridge.markdown import send_markdown
