@@ -46,8 +46,7 @@ grep -r "abc123def456" logs/sessions/*/
 | `agent/job_queue.py` | Added parameter to `enqueue_job()`, `_push_job()`, `Job.correlation_id` property, `_JOB_FIELDS` entry; use as log prefix in `_execute_job()` |
 | `agent/sdk_client.py` | Added parameter to `get_agent_response_sdk()`; use as log prefix with local fallback |
 | `bridge/observer.py` | Read from session, use in all observer log lines |
-| `bridge/session_transcript.py` | Added parameter to `start_transcript()`; include in header |
-| `bridge/session_logs.py` | Included via `extra_context` dict in snapshots |
+| `bridge/session_transcript.py` | Added parameter to `start_transcript()`; include in header when provided |
 
 ## Design Decisions
 
