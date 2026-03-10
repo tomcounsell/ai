@@ -128,7 +128,7 @@ The Observer replaces three interleaved systems that shared responsibility for r
 | `build_coaching_message()` | `bridge/coach.py` | 5-tier fallback chain -- overly complex, often produced generic coaching |
 | `session_progress.py` | `tools/session_progress.py` | CLI tool the worker LLM had to call -- silently failed, stages got skipped |
 
-These were removed from the routing path. See [Coaching Loop](coaching-loop.md) for historical documentation of the old system (now deprecated).
+These were removed from the routing path. See [Coaching Loop](coaching-loop.md) for historical context on the old system (no longer in use).
 
 ## Key Files
 
