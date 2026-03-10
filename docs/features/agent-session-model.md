@@ -18,7 +18,7 @@ Unified Redis model tracking agent work from enqueue through completion. Replace
 
 ## History Tracking
 
-`append_history(role, text)` records lifecycle events capped at 20 entries:
+`append_history(role, text)` records lifecycle events capped at 20 entries. When truncation occurs, a `WARNING`-level log is emitted with the original length and number of dropped entries:
 - `[user]` - Original request
 - `[classify]` - Auto-classification result
 - `[stage]` - SDLC stage transitions (e.g., `BUILD ☑`)
@@ -103,6 +103,7 @@ This ensures hooks can resolve sessions via `task_list_id` even if `VALOR_SESSIO
 - `_find_session()` catches Redis connection errors and returns `None`
 - `main()` exits 0 when no session is found (fire-and-forget)
 - Debug logging on `append_history()`, `set_link()`, `get_stage_progress()` via `logging.getLogger(__name__)`
+- WARNING-level logging on `append_history()` and `set_link()` save failures, including operation context (role, field name)
 
 ## Session Lifecycle Integrity
 

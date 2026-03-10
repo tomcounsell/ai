@@ -328,12 +328,21 @@ async def _pop_job(project_key: str) -> Job | None:
     pending.sort(key=sort_key)
     chosen = pending[0]
 
-    # Delete-and-recreate to avoid KeyField index corruption
+    # Delete-and-recreate to avoid KeyField index corruption.
+    # Both sides are logged so a crash between delete and create is diagnosable.
     fields = _extract_job_fields(chosen)
+    logger.info(
+        f"[{project_key}] Deleting job {chosen.job_id} (session {chosen.session_id}) "
+        f"for status change pending->running"
+    )
     await chosen.async_delete()
     fields["status"] = "running"
     fields["started_at"] = time.time()
     new_job = await AgentSession.async_create(**fields)
+    logger.info(
+        f"[{project_key}] Recreated job as {new_job.job_id} (session {new_job.session_id}) "
+        f"with status=running"
+    )
 
     # Log lifecycle transition for job starting execution
     try:
@@ -468,6 +477,13 @@ def _recover_orphaned_jobs(project_key: str) -> int:
             # gracefully. Corrupted bytes get replaced with U+FFFD rather than
             # crashing the recovery loop.
             key_str = key.decode(errors="replace") if isinstance(key, bytes) else key
+
+            # Log when UTF-8 replacement occurred so corrupted keys are
+            # diagnosable from logs without needing to inspect Redis directly.
+            if isinstance(key, bytes) and "\ufffd" in key_str:
+                logger.warning(
+                    f"[{project_key}] Corrupted UTF-8 in Redis key: {key_str!r} (hex: {key.hex()})"
+                )
 
             # Load the object data from Redis hash
             data = POPOTO_REDIS_DB.hgetall(key_str)
@@ -1199,6 +1215,14 @@ async def _execute_job(job: Job) -> None:
             chat_state.auto_continue_count += 1
             effective_max = MAX_AUTO_CONTINUES_SDLC if _is_sdlc else MAX_AUTO_CONTINUES
 
+            # Log every auto-continue increment so operators can trace
+            # the full sequence, not just the cap-reached event.
+            logger.info(
+                f"[{job.project_key}] Auto-continue "
+                f"{chat_state.auto_continue_count}/{effective_max} "
+                f"for session {job.session_id}"
+            )
+
             # Hard guard: enforce auto-continue cap regardless of Observer decision
             if chat_state.auto_continue_count > effective_max:
                 logger.warning(
@@ -1325,7 +1349,11 @@ async def _execute_job(job: Job) -> None:
                 agent_session.last_activity = time.time()
                 agent_session.save()
         except Exception as e:
-            logger.debug(f"AgentSession update failed (non-fatal): {e}")
+            logger.warning(
+                f"AgentSession update failed for job {job.job_id} "
+                f"session {job.session_id} (operation: finalize status to "
+                f"{'completed' if not task.error else 'failed'}): {e}"
+            )
 
     # Save session snapshot for error cases
     if task.error:
@@ -1349,7 +1377,8 @@ async def _execute_job(job: Job) -> None:
 
         leftover = pop_all_steering_messages(job.session_id)
         if leftover:
-            texts = [f"  [{m.get('sender', '?')}]: {m.get('text', '')[:120]}" for m in leftover]
+            # Use 500-char limit (not 120) to preserve enough intent for forensics
+            texts = [f"  [{m.get('sender', '?')}]: {m.get('text', '')[:500]}" for m in leftover]
             logger.warning(
                 f"[{job.project_key}] {len(leftover)} unconsumed steering "
                 f"message(s) dropped for session {job.session_id}:\n" + "\n".join(texts)
