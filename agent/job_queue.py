@@ -1262,6 +1262,7 @@ async def _execute_job(job: Job) -> None:
                     "routing": "observer",
                     "coaching_message": decision.get("coaching_message", "")[:200],
                     "message_preview": msg[:200],
+                    "correlation_id": cid,
                 },
                 working_dir=str(working_dir),
             )
@@ -1390,6 +1391,7 @@ async def _execute_job(job: Job) -> None:
                 "job_id": job.job_id,
                 "error": str(task.error),
                 "sender": job.sender_name,
+                "correlation_id": cid,
             },
             working_dir=str(working_dir),
         )
@@ -1453,6 +1455,7 @@ async def _execute_job(job: Job) -> None:
             extra_context={
                 "job_id": job.job_id,
                 "sender": job.sender_name,
+                "correlation_id": cid,
             },
             working_dir=str(working_dir),
         )
