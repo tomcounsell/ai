@@ -340,6 +340,16 @@ class Observer:
             - reason: str (if action is "deliver")
             - transitions_applied: int (stage transitions detected)
         """
+        # Log session context at start of run
+        is_sdlc = self.session.is_sdlc_job()
+        max_continues = MAX_AUTO_CONTINUES_SDLC if is_sdlc else MAX_AUTO_CONTINUES
+        has_remaining = self.session.has_remaining_stages()
+        logger.info(
+            f"[observer] Session {self.session.session_id}: "
+            f"is_sdlc={is_sdlc}, auto_continue={self.auto_continue_count}/{max_continues}, "
+            f"remaining_stages={has_remaining}"
+        )
+
         # Phase 1: Run deterministic stage detector BEFORE the Observer
         transitions = detect_stages(self.worker_output)
         transitions_applied = apply_transitions(self.session, transitions)
@@ -400,6 +410,12 @@ class Observer:
                 tool_results = []
                 for tool_use in tool_uses:
                     result_str = self._dispatch_tool(tool_use.name, tool_use.input)
+                    # Log each iteration with tool name and result preview
+                    result_preview = result_str[:120] if result_str else ""
+                    logger.info(
+                        f"[observer] Iteration {iteration + 1}/{MAX_TOOL_ITERATIONS}: "
+                        f"tool={tool_use.name}, result={result_preview}"
+                    )
                     tool_results.append(
                         {
                             "type": "tool_result",
@@ -436,12 +452,16 @@ class Observer:
                 }
 
             if self._action_taken == "steer":
+                reason_preview = (coaching_message or "continue")[:120]
+                logger.info(f"[observer] Decision: steer (reason: {reason_preview})")
                 return {
                     "action": "steer",
                     "coaching_message": coaching_message or "continue",
                     "transitions_applied": transitions_applied,
                 }
             else:
+                reason_preview = (deliver_reason or "Observer decided to deliver")[:120]
+                logger.info(f"[observer] Decision: deliver (reason: {reason_preview})")
                 return {
                     "action": "deliver",
                     "reason": deliver_reason or "Observer decided to deliver",
