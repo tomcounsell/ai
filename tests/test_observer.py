@@ -548,3 +548,287 @@ class TestObserverFallback:
         finally:
             if original_fn:
                 utils.api_keys.get_anthropic_api_key = original_fn
+
+
+# ============================================================================
+# Observer Steering Integration Tests (real API calls)
+#
+# These tests validate that the Observer correctly steers the worker when
+# it pauses with a status update mid-pipeline, rather than delivering to
+# the human. Each test simulates a realistic "I'm going to do X" output
+# at a specific SDLC stage.
+#
+# The real-life failure mode: the agent explains its plan, stops, and the
+# old classifier labeled it a status update. The Observer must recognize
+# this as incomplete work and steer the agent back.
+#
+# Exception: if the output contains genuine Open Questions for the architect
+# or project manager, the Observer should deliver so a human can decide.
+# ============================================================================
+
+
+class _MockSessionForSteering:
+    """Reusable mock session for steering integration tests."""
+
+    def __init__(self, stage_progress, history=None, classification_type="sdlc"):
+        self.session_id = "test-steering-integration"
+        self.classification_type = classification_type
+        self.context_summary = None
+        self.expectations = None
+        self.issue_url = None
+        self.plan_url = None
+        self.pr_url = None
+        self.queued_steering_messages = []
+        self.history = history or []
+        self._stage_progress = stage_progress
+        self._history_appended = []
+
+    def get_stage_progress(self):
+        return dict(self._stage_progress)
+
+    def get_links(self):
+        links = {}
+        if self.issue_url:
+            links["issue"] = self.issue_url
+        if self.plan_url:
+            links["plan"] = self.plan_url
+        if self.pr_url:
+            links["pr"] = self.pr_url
+        return links
+
+    def get_history_list(self):
+        return self.history if isinstance(self.history, list) else []
+
+    _get_history_list = get_history_list
+
+    def is_sdlc_job(self):
+        return self.classification_type == "sdlc"
+
+    def has_remaining_stages(self):
+        return any(s in ("pending", "in_progress") for s in self._stage_progress.values())
+
+    def has_failed_stage(self):
+        return any(s == "failed" for s in self._stage_progress.values())
+
+    def set_link(self, kind, url):
+        if kind == "issue":
+            self.issue_url = url
+        elif kind == "pr":
+            self.pr_url = url
+
+    def pop_steering_messages(self):
+        msgs = list(self.queued_steering_messages)
+        self.queued_steering_messages = []
+        return msgs
+
+    def append_history(self, role, text):
+        entry = f"[{role}] {text}"
+        self.history.append(entry)
+        self._history_appended.append((role, text))
+
+    def save(self):
+        pass
+
+
+# Status-update outputs that mimic real agent behavior: the agent explains
+# what it's about to do, then stops. These are drawn from real production logs.
+_STATUS_UPDATE_OUTPUTS = {
+    "PLAN": (
+        "✅\n"
+        "• Analyzing the codebase structure and existing patterns\n"
+        "• Will create a comprehensive plan document at docs/plans/observer-agent.md\n"
+        "• Will define the migration path from classifier to Observer Agent\n"
+        "• Need to review the existing summarizer and coaching message code first"
+    ),
+    "BUILD": (
+        "✅\n"
+        "• Reviewing PR #286 post-merge recommendations from Claude\n"
+        "• Will address model naming inconsistency in get_gpt_4_mini_model()\n"
+        "• Will add data retention documentation for AICompletion records"
+    ),
+    "PATCH": (
+        "✅\n"
+        "• Identified 3 failing tests in test_observer.py\n"
+        "• Root cause: mock session missing pop_steering_messages method\n"
+        "• Will fix the mock and re-run the test suite"
+    ),
+    "TEST": (
+        "✅\n"
+        "• Setting up the test environment\n"
+        "• Will run the full test suite with pytest\n"
+        "• Will focus on integration tests for the new Observer module\n"
+        "• Plan to verify all edge cases around stage detection"
+    ),
+    "REVIEW": (
+        "✅\n"
+        "• Checking out PR #321 for review\n"
+        "• Will analyze code changes against the plan requirements\n"
+        "• Will take screenshots of any UI changes for validation\n"
+        "• Will verify test coverage meets quality gates"
+    ),
+    "DOCS": (
+        "✅\n"
+        "• Reviewing the code changes from PR #321\n"
+        "• Will create docs/features/observer-agent.md\n"
+        "• Will update docs/features/README.md index table\n"
+        "• Will cascade updates to any affected existing docs"
+    ),
+}
+
+# Stage progress states: what the session looks like when each stage is active
+_STAGE_PROGRESS_FOR = {
+    "PLAN": {
+        "ISSUE": "completed",
+        "PLAN": "in_progress",
+        "BUILD": "pending",
+        "TEST": "pending",
+        "REVIEW": "pending",
+        "DOCS": "pending",
+    },
+    "BUILD": {
+        "ISSUE": "completed",
+        "PLAN": "completed",
+        "BUILD": "in_progress",
+        "TEST": "pending",
+        "REVIEW": "pending",
+        "DOCS": "pending",
+    },
+    "PATCH": {  # Patch happens during BUILD or TEST — stages still remain
+        "ISSUE": "completed",
+        "PLAN": "completed",
+        "BUILD": "in_progress",
+        "TEST": "pending",
+        "REVIEW": "pending",
+        "DOCS": "pending",
+    },
+    "TEST": {
+        "ISSUE": "completed",
+        "PLAN": "completed",
+        "BUILD": "completed",
+        "TEST": "in_progress",
+        "REVIEW": "pending",
+        "DOCS": "pending",
+    },
+    "REVIEW": {
+        "ISSUE": "completed",
+        "PLAN": "completed",
+        "BUILD": "completed",
+        "TEST": "completed",
+        "REVIEW": "in_progress",
+        "DOCS": "pending",
+    },
+    "DOCS": {
+        "ISSUE": "completed",
+        "PLAN": "completed",
+        "BUILD": "completed",
+        "TEST": "completed",
+        "REVIEW": "completed",
+        "DOCS": "in_progress",
+    },
+}
+
+
+class TestObserverSteersStatusUpdates:
+    """Observer must STEER (not deliver) when the worker pauses with a
+    status update mid-pipeline. Each test simulates a real-world scenario
+    where the agent explains its plan and stops before executing.
+
+    Uses real Anthropic API calls — no mocked LLM responses.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stage", ["PLAN", "BUILD", "PATCH", "TEST", "REVIEW", "DOCS"])
+    async def test_status_update_steered_not_delivered(self, stage):
+        """Status update at each SDLC stage should be steered, not delivered."""
+        session = _MockSessionForSteering(
+            stage_progress=_STAGE_PROGRESS_FOR[stage],
+            history=[f"[stage] {s} COMPLETED" for s in ["ISSUE", "PLAN"] if
+                     _STAGE_PROGRESS_FOR[stage].get(s) == "completed"],
+        )
+        observer = Observer(
+            session=session,
+            worker_output=_STATUS_UPDATE_OUTPUTS[stage],
+            auto_continue_count=0,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+
+        decision = await observer.run()
+
+        assert decision["action"] == "steer", (
+            f"Observer should STEER at {stage} stage with status update, "
+            f"but got {decision['action']}: {decision.get('reason', decision.get('coaching_message', ''))}"
+        )
+        # Coaching message should exist and be substantive
+        coaching = decision.get("coaching_message", "")
+        assert len(coaching) > 10, (
+            f"Coaching message too short at {stage} stage: {coaching!r}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_status_update_with_open_questions_delivered(self):
+        """When the output contains genuine open questions for the architect
+        or project manager, the Observer should DELIVER so a human can decide."""
+        output_with_questions = (
+            "✅\n"
+            "• Analyzed the codebase and identified the migration path\n"
+            "• Created initial plan structure at docs/plans/observer-agent.md\n\n"
+            "## Open Questions\n\n"
+            "1. **Architecture decision needed**: Should the Observer Agent run "
+            "as a separate process or inline within send_to_chat()? Running "
+            "inline is simpler but adds latency to every message delivery.\n\n"
+            "2. **Scope question for Tom**: Should we deprecate the old classifier "
+            "immediately or run both systems in shadow mode for a week to compare "
+            "routing decisions?\n\n"
+            "3. **Resource concern**: The Observer makes an additional API call per "
+            "message. At current volume (~200 msgs/day), this adds ~$12/month. "
+            "Is that acceptable?"
+        )
+        session = _MockSessionForSteering(
+            stage_progress=_STAGE_PROGRESS_FOR["PLAN"],
+        )
+        observer = Observer(
+            session=session,
+            worker_output=output_with_questions,
+            auto_continue_count=0,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+
+        decision = await observer.run()
+
+        assert decision["action"] == "deliver", (
+            f"Observer should DELIVER when output contains open questions for "
+            f"architect/PM, but got {decision['action']}: "
+            f"{decision.get('coaching_message', '')}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_steering_message_encourages_discernment(self):
+        """The coaching message should encourage the agent to continue with
+        discernment — not just a bare 'continue'. It should give the agent
+        permission to raise critical questions while encouraging forward progress."""
+        session = _MockSessionForSteering(
+            stage_progress=_STAGE_PROGRESS_FOR["BUILD"],
+        )
+        observer = Observer(
+            session=session,
+            worker_output=_STATUS_UPDATE_OUTPUTS["BUILD"],
+            auto_continue_count=0,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+
+        decision = await observer.run()
+
+        assert decision["action"] == "steer"
+        coaching = decision.get("coaching_message", "")
+
+        # The coaching message should NOT be a bare "continue"
+        assert coaching.lower().strip() != "continue", (
+            "Coaching message should be more substantive than bare 'continue'"
+        )
+        # Should be at least a meaningful sentence
+        assert len(coaching) > 20, (
+            f"Coaching message should be a substantive instruction, got: {coaching!r}"
+        )
