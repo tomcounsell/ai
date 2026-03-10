@@ -70,6 +70,8 @@ async def enrich_message(
     """
     enriched_text = message_text
     failed_steps: list[str] = []
+    youtube_count = 0
+    link_count = 0
 
     # --- 1. Media processing ---
     if has_media and telegram_client and raw_media_message_id and chat_id:
@@ -101,6 +103,7 @@ async def enrich_message(
             from tools.link_analysis import process_youtube_urls_in_text
 
             parsed_urls = json.loads(youtube_urls)
+            youtube_count = len(parsed_urls)
             if parsed_urls:
                 # process_youtube_urls_in_text works on raw text containing URLs,
                 # so we pass the enriched_text which should contain the URLs.
@@ -128,6 +131,7 @@ async def enrich_message(
             from bridge.context import format_link_summaries, get_link_summaries
 
             parsed_urls = json.loads(non_youtube_urls)
+            link_count = len(parsed_urls)
             if parsed_urls:
                 # get_link_summaries expects the raw text to extract URLs from.
                 # Since we already have the URLs, we construct a text with them.
@@ -176,8 +180,6 @@ async def enrich_message(
 
     # Log a single enrichment summary line
     has_media_result = "yes" if (has_media and telegram_client) else "no"
-    youtube_count = len(json.loads(youtube_urls)) if youtube_urls else 0
-    link_count = len(json.loads(non_youtube_urls)) if non_youtube_urls else 0
     summary = (
         f"[enrichment] Summary: media={has_media_result}, "
         f"youtube={youtube_count}, links={link_count}, "
