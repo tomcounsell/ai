@@ -834,3 +834,152 @@ class TestObserverSteersStatusUpdates:
         assert len(coaching) > 20, (
             f"Coaching message should be a substantive instruction, got: {coaching!r}"
         )
+
+    @pytest.mark.asyncio
+    async def test_max_auto_continues_cap_causes_delivery(self):
+        """When auto_continue_count hits the SDLC cap (10), the Observer
+        should deliver to the human even if stages remain. This prevents
+        infinite loops where the agent keeps producing status updates."""
+        session = _MockSessionForSteering(
+            stage_progress=_STAGE_PROGRESS_FOR["BUILD"],
+        )
+        observer = Observer(
+            session=session,
+            worker_output=_STATUS_UPDATE_OUTPUTS["BUILD"],
+            auto_continue_count=10,  # At the cap
+            send_cb=None,
+            enqueue_fn=None,
+        )
+
+        decision = await observer.run()
+
+        assert decision["action"] == "deliver", (
+            f"Observer should DELIVER when auto-continue cap (10) is reached, "
+            f"but got {decision['action']}: "
+            f"{decision.get('coaching_message', '')}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_sdlc_cap_of_3_causes_delivery(self):
+        """Non-SDLC jobs have a lower cap of 3. After 3 auto-continues,
+        even planning-language outputs should be delivered."""
+        session = _MockSessionForSteering(
+            stage_progress={s: "pending" for s in SDLC_STAGES},
+            classification_type="conversation",  # Non-SDLC
+        )
+        observer = Observer(
+            session=session,
+            worker_output=(
+                "✅\n"
+                "• I'll research the best approach for this\n"
+                "• Will compare three different libraries\n"
+                "• Need to check compatibility with the existing stack"
+            ),
+            auto_continue_count=3,  # At the non-SDLC cap
+            send_cb=None,
+            enqueue_fn=None,
+        )
+
+        decision = await observer.run()
+
+        assert decision["action"] == "deliver", (
+            f"Observer should DELIVER when non-SDLC cap (3) is reached, "
+            f"but got {decision['action']}: "
+            f"{decision.get('coaching_message', '')}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_genuine_question_delivered_mid_build(self):
+        """A genuine question mid-build (not open questions section, but
+        the agent directly asking for a decision) should be delivered."""
+        session = _MockSessionForSteering(
+            stage_progress=_STAGE_PROGRESS_FOR["BUILD"],
+        )
+        observer = Observer(
+            session=session,
+            worker_output=(
+                "I've implemented the Observer Agent but I need a decision "
+                "before proceeding.\n\n"
+                "The current test suite takes 55 seconds because each test "
+                "makes a real API call to Sonnet. Should I:\n\n"
+                "A) Keep the real API calls for maximum confidence\n"
+                "B) Add a mock mode that uses cached responses for CI speed\n"
+                "C) Split into a fast unit suite and a slow integration suite\n\n"
+                "This affects the CI pipeline design, so I'd rather get your "
+                "input than guess."
+            ),
+            auto_continue_count=2,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+
+        decision = await observer.run()
+
+        assert decision["action"] == "deliver", (
+            f"Observer should DELIVER when agent asks a genuine decision "
+            f"question, but got {decision['action']}: "
+            f"{decision.get('coaching_message', '')}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_error_output_delivered(self):
+        """When the worker hits an error it can't recover from, the Observer
+        should deliver to the human for intervention."""
+        session = _MockSessionForSteering(
+            stage_progress=_STAGE_PROGRESS_FOR["TEST"],
+        )
+        observer = Observer(
+            session=session,
+            worker_output=(
+                "FATAL: The Anthropic API key has been revoked.\n\n"
+                "```\nauthentication_error: Your API key has been disabled. "
+                "Please contact support@anthropic.com.\n```\n\n"
+                "I cannot proceed with any API-dependent work. This requires "
+                "a human to generate a new API key in the Anthropic console "
+                "and update the .env file. There is nothing I can do to fix "
+                "this programmatically."
+            ),
+            auto_continue_count=1,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+
+        decision = await observer.run()
+
+        assert decision["action"] == "deliver", (
+            f"Observer should DELIVER on unrecoverable errors, "
+            f"but got {decision['action']}: "
+            f"{decision.get('coaching_message', '')}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_completion_with_evidence_delivered(self):
+        """When all stages are done and the output shows completion evidence,
+        the Observer should deliver the final result."""
+        session = _MockSessionForSteering(
+            stage_progress={s: "completed" for s in SDLC_STAGES},
+        )
+        observer = Observer(
+            session=session,
+            worker_output=(
+                "All SDLC stages complete:\n\n"
+                "- Issue: #309\n"
+                "- Plan: docs/plans/observer_agent.md\n"
+                "- PR: https://github.com/tomcounsell/ai/pull/321\n"
+                "- Tests: 41 passed, 0 failed\n"
+                "- Review: Approved\n"
+                "- Docs: docs/features/observer-agent.md created\n\n"
+                "The Observer Agent is ready to merge."
+            ),
+            auto_continue_count=5,
+            send_cb=None,
+            enqueue_fn=None,
+        )
+
+        decision = await observer.run()
+
+        assert decision["action"] == "deliver", (
+            f"Observer should DELIVER when all stages complete with evidence, "
+            f"but got {decision['action']}: "
+            f"{decision.get('coaching_message', '')}"
+        )
