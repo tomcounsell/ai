@@ -86,11 +86,15 @@ class TestLoadSystemPromptInjection:
         prompt = load_system_prompt()
         assert "Worker Safety Rails" in prompt
 
-    def test_no_pipeline_orchestration_in_prompt(self):
-        """load_system_prompt() must NOT contain pipeline orchestration."""
-        prompt = load_system_prompt()
-        assert "/sdlc" not in prompt.lower()
-        assert "MANDATORY Development Pipeline" not in prompt
+    def test_no_pipeline_orchestration_in_worker_rules(self):
+        """WORKER_RULES portion of prompt must NOT contain pipeline orchestration.
+
+        Note: SOUL.md and CLAUDE.md may reference /sdlc as part of project
+        architecture docs -- those are intentionally preserved (see plan No-Gos).
+        This test validates only the WORKER_RULES constant itself.
+        """
+        assert "/sdlc" not in WORKER_RULES
+        assert "MANDATORY Development Pipeline" not in WORKER_RULES
 
     def test_worker_rules_before_soul_and_criteria(self):
         """WORKER_RULES must appear before SOUL.md and before completion criteria."""
