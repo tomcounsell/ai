@@ -6,13 +6,11 @@ Validates:
 3. Integration: auto-continue flow doesn't leave ghost sessions
 """
 
-import asyncio
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -114,7 +112,6 @@ class TestStaleSaveGuard:
         """
         agent_session = _make_agent_session()
         chat_state = _make_chat_state(defer_reaction=True)
-        job = _make_job()
 
         # Simulate the epilogue logic from _execute_job() lines 1337-1356
         # This mirrors the actual code path after the fix
@@ -319,8 +316,8 @@ class TestWatchdogLoopIntegration:
             side_effect=lambda **kw: [pending_session] if kw.get("status") == "pending" else []
         )
 
-        with patch("monitoring.session_watchdog.AgentSession") as MockAS:
-            MockAS.query = mock_query
+        with patch("monitoring.session_watchdog.AgentSession") as mock_as:
+            mock_as.query = mock_query
             result = check_stalled_sessions()
 
         pending_stalls = [s for s in result if s["status"] == "pending"]
@@ -345,8 +342,8 @@ class TestWatchdogLoopIntegration:
             side_effect=lambda **kw: [fresh_session] if kw.get("status") == "pending" else []
         )
 
-        with patch("monitoring.session_watchdog.AgentSession") as MockAS:
-            MockAS.query = mock_query
+        with patch("monitoring.session_watchdog.AgentSession") as mock_as:
+            mock_as.query = mock_query
             result = check_stalled_sessions()
 
         pending_stalls = [s for s in result if s["status"] == "pending"]
