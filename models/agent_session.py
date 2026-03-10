@@ -139,12 +139,23 @@ class AgentSession(Model):
         current = self._get_history_list()
         current.append(entry)
         if len(current) > HISTORY_MAX_ENTRIES:
+            dropped = len(current) - HISTORY_MAX_ENTRIES
+            # Warn when history entries are silently lost so operators can
+            # diagnose long-running sessions without reproducing the issue.
+            logger.warning(
+                f"Session {self.session_id} history truncated from "
+                f"{len(current)} to {HISTORY_MAX_ENTRIES}, "
+                f"{dropped} oldest entries lost"
+            )
             current = current[-HISTORY_MAX_ENTRIES:]
         self.history = current
         try:
             self.save()
         except Exception as e:
-            logger.warning(f"append_history save failed for session {self.session_id}: {e}")
+            logger.warning(
+                f"append_history save failed for session {self.session_id} "
+                f"(role={role!r}, history_len={len(current)}): {e}"
+            )
 
     def set_link(self, kind: str, url: str) -> None:
         """Set a tracked link on this session.
@@ -165,7 +176,10 @@ class AgentSession(Model):
             try:
                 self.save()
             except Exception as e:
-                logger.warning(f"set_link save failed for session {self.session_id}: {e}")
+                logger.warning(
+                    f"set_link save failed for session {self.session_id} "
+                    f"(kind={kind!r}, field={field_name}): {e}"
+                )
 
     def log_lifecycle_transition(self, new_status: str, context: str = "") -> None:
         """Log a structured lifecycle transition and update session state.
