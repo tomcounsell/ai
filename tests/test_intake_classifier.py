@@ -18,7 +18,6 @@ from tools.classifier import (
     classify_message_intent,
 )
 
-
 # =============================================================================
 # UNIT TESTS: Fast path (no API call)
 # =============================================================================
@@ -347,9 +346,7 @@ class TestRealHaikuClassification:
             ),
         ],
     )
-    def test_intent_classification_accuracy(
-        self, message, session_context, expected_intent
-    ):
+    def test_intent_classification_accuracy(self, message, session_context, expected_intent):
         """Verify Haiku classifies representative messages correctly."""
         result = classify_message_intent(
             message=message,
