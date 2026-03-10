@@ -563,6 +563,45 @@ If a task fails:
 3. For validators: if validation fails, report what's wrong
 4. Don't proceed past blocking failures
 
+## Outcome Contract
+
+When the build completes (successfully or not), emit a typed `SkillOutcome` block as the **last line** of your output. This enables deterministic routing by the Observer without LLM classification.
+
+### Status Values
+
+| Status | Meaning |
+|--------|---------|
+| `success` | Build complete, PR created, all checks passed |
+| `fail` | Build failed, unrecoverable error |
+| `partial` | Some tasks completed but build is incomplete |
+| `retry` | Transient failure, worth retrying |
+
+### Expected Artifacts (on success)
+
+| Key | Description | Example |
+|-----|-------------|---------|
+| `pr_url` | GitHub PR URL | `https://github.com/org/repo/pull/42` |
+| `branch` | Session branch name | `session/my-feature` |
+| `plan_path` | Path to the plan document | `docs/plans/my-feature.md` |
+| `issue_number` | Tracking issue number | `42` |
+| `commits` | Number of commits on branch | `5` |
+
+### Emission Template
+
+After your final report, emit this block (replace values):
+
+```
+<!-- OUTCOME {"status":"success","stage":"BUILD","artifacts":{"pr_url":"https://github.com/org/repo/pull/42","branch":"session/my-feature","plan_path":"docs/plans/my-feature.md"},"notes":"PR created with 5 commits, all tests passing","next_skill":"/do-test"} -->
+```
+
+On failure:
+
+```
+<!-- OUTCOME {"status":"fail","stage":"BUILD","artifacts":{},"notes":"Build failed","failure_reason":"3 tasks failed: build-api, build-frontend, validate-api"} -->
+```
+
+**Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output.
+
 ## Notes
 
 - The plan document is the source of truth

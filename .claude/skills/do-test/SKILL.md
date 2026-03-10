@@ -367,6 +367,45 @@ grep -rn "def .*(" --include="*.py" agent/ bridge/ | grep "^.*:.*def .*:$" | hea
 
 Closures that replicate logic already tested elsewhere (e.g., inline routing logic that should call a shared function) are a test smell. Note them in the report.
 
+## Outcome Contract
+
+When tests complete, emit a typed `SkillOutcome` block as the **last line** of your output. This enables deterministic routing by the Observer without LLM classification.
+
+### Status Values
+
+| Status | Meaning |
+|--------|---------|
+| `success` | All tests passed, lint clean |
+| `fail` | One or more tests failed |
+| `partial` | Some suites passed, some failed |
+| `skipped` | No tests found to run |
+
+### Expected Artifacts (on success)
+
+| Key | Description | Example |
+|-----|-------------|---------|
+| `total_passed` | Total tests passed | `42` |
+| `total_failed` | Total tests failed | `0` |
+| `total_skipped` | Total tests skipped | `2` |
+| `suites_run` | List of suites executed | `["unit", "integration"]` |
+| `lint_clean` | Whether lint passed | `true` |
+
+### Emission Template
+
+After your test results summary, emit this block (replace values):
+
+```
+<!-- OUTCOME {"status":"success","stage":"TEST","artifacts":{"total_passed":42,"total_failed":0,"total_skipped":2,"suites_run":["unit"],"lint_clean":true},"notes":"42 passed, 0 failed, 2 skipped. Lint clean.","next_skill":"/do-pr-review"} -->
+```
+
+On failure:
+
+```
+<!-- OUTCOME {"status":"fail","stage":"TEST","artifacts":{"total_passed":38,"total_failed":4,"total_skipped":0,"suites_run":["unit","integration"],"lint_clean":true},"notes":"38 passed, 4 failed","failure_reason":"4 failures in test_auth.py and test_api.py"} -->
+```
+
+**Important**: The outcome block uses HTML comment syntax (`<!-- ... -->`) so it's invisible in rendered markdown but parseable by the pipeline. Always emit it as the very last line of output.
+
 ## Notes
 
 - No temporary files in the repo -- use `/tmp` for any scratch work
