@@ -142,7 +142,9 @@ async def enrich_message(
                 )
                 link_summary_text = format_link_summaries(link_summaries)
                 if link_summary_text:
-                    enriched_text = f"{enriched_text}\n\n--- LINK SUMMARIES ---\n{link_summary_text}"
+                    enriched_text = (
+                        f"{enriched_text}\n\n--- LINK SUMMARIES ---\n{link_summary_text}"
+                    )
                     logger.info(
                         f"Enrichment: added {len(link_summaries)} link summaries"
                     )

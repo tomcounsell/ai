@@ -39,9 +39,7 @@ When the guard triggers, the empty output is delivered to the user with a "(empt
 
 ### Gap 3: Routing Decision Extraction (agent/job_queue.py)
 
-Extracted the 3-branch routing logic from `_execute_job`'s closure into a standalone pure function `classify_routing_decision()` with a `RoutingDecision` result type. The function takes classification, auto_continue_count, effective_max, is_sdlc, and msg as inputs and returns one of three actions: `AUTO_CONTINUE`, `DELIVER`, or `ERROR_BYPASS`.
-
-**Tests:** `TestClassifyRoutingDecision` in `tests/test_auto_continue.py` with 10 test cases covering all branches, boundary conditions, and edge cases.
+> **Updated**: `classify_routing_decision()` and `RoutingDecision` were removed in PR #321 (Observer Agent). Routing decisions are now made by the [Observer Agent](observer-agent.md) with full session context. The `TestClassifyRoutingDecision` test class was removed from `tests/test_auto_continue.py`. Observer decision quality is now validated by 13 integration tests in `tests/test_observer.py` using real API calls with Haiku as a robustness floor.
 
 ### Gap 4: Error State Rendering (bridge/summarizer.py)
 

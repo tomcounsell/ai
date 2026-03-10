@@ -104,6 +104,10 @@ class AgentSession(Model):
     context_summary = Field(null=True, max_length=200)  # What this session is about
     expectations = Field(null=True, max_length=500)  # What the agent needs from the human
 
+    # === Observer fields ===
+    # Buffered human replies during active pipelines
+    queued_steering_messages = ListField(null=True)
+
     # === Compatibility ===
 
     @property
@@ -113,12 +117,15 @@ class AgentSession(Model):
 
     # === History helpers ===
 
-    def _get_history_list(self) -> list:
+    def get_history_list(self) -> list:
         """Safely get history as a Python list."""
         h = self.history
         if isinstance(h, list):
             return h
         return []
+
+    # Keep private alias for internal callers
+    _get_history_list = get_history_list
 
     def append_history(self, role: str, text: str) -> None:
         """Append a lifecycle event to history, capped at HISTORY_MAX_ENTRIES.
@@ -136,8 +143,8 @@ class AgentSession(Model):
         self.history = current
         try:
             self.save()
-        except Exception:
-            pass  # Non-fatal: don't break callers on save errors
+        except Exception as e:
+            logger.warning(f"append_history save failed for session {self.session_id}: {e}")
 
     def set_link(self, kind: str, url: str) -> None:
         """Set a tracked link on this session.
@@ -157,8 +164,8 @@ class AgentSession(Model):
             setattr(self, field_name, url)
             try:
                 self.save()
-            except Exception:
-                pass  # Non-fatal: don't break callers on save errors
+            except Exception as e:
+                logger.warning(f"set_link save failed for session {self.session_id}: {e}")
 
     def log_lifecycle_transition(self, new_status: str, context: str = "") -> None:
         """Log a structured lifecycle transition and update session state.
@@ -275,6 +282,47 @@ class AgentSession(Model):
         """
         progress = self.get_stage_progress()
         return any(status == "failed" for status in progress.values())
+
+    # === Queued steering message helpers ===
+
+    def push_steering_message(self, text: str) -> None:
+        """Buffer a human reply for the Observer to read during active pipelines.
+
+        The bridge intake classifier (#320) populates this when a human replies
+        while the pipeline is running. The Observer reads and clears it.
+
+        Args:
+            text: The human's message text to buffer.
+        """
+        current = self.queued_steering_messages
+        if not isinstance(current, list):
+            current = []
+        current.append(text)
+        self.queued_steering_messages = current
+        try:
+            self.save()
+        except Exception as e:
+            logger.warning(f"Failed to save steering message for session {self.session_id}: {e}")
+
+    def pop_steering_messages(self) -> list[str]:
+        """Pop all buffered steering messages, clearing the queue.
+
+        Returns the list of buffered message texts and resets the field to empty.
+        The Observer calls this to incorporate human replies into its decision.
+
+        Returns:
+            List of message text strings, or empty list if none buffered.
+        """
+        current = self.queued_steering_messages
+        if not isinstance(current, list) or not current:
+            return []
+        messages = list(current)
+        self.queued_steering_messages = []
+        try:
+            self.save()
+        except Exception as e:
+            logger.warning(f"Failed to clear steering messages for session {self.session_id}: {e}")
+        return messages
 
     # === Cleanup ===
 

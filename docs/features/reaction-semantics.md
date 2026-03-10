@@ -46,23 +46,19 @@ Reactions interact with the auto-continue system. When auto-continue is active, 
 
 ### Flow
 
-1. Agent completes a turn. Output is classified into an `OutputType` (defined in `bridge/response.py`).
-2. If `STATUS_UPDATE` and `auto_continue_count < MAX_AUTO_CONTINUES` (3):
-   - Suppress the status update (do not send to user).
-   - Re-enqueue a new job with a "continue" message and incremented counter.
-   - Defer reaction -- no emoji until the final job resolves.
-3. If `COMPLETION`, `QUESTION`, `BLOCKER`, or `ERROR`: send the response and set the appropriate reaction.
+1. Agent completes a turn. The [Observer Agent](observer-agent.md) decides whether to **STEER** (auto-continue) or **DELIVER** (send to Telegram).
+2. If Observer decides **STEER**: suppress the output, re-enqueue with coaching message, defer reaction.
+3. If Observer decides **DELIVER**: send the response and set the appropriate reaction based on content.
 4. The auto-continue counter resets when the human sends a new message.
 
-### Output Type to Reaction Mapping
+### Observer Decision to Reaction Mapping
 
-| OutputType | Action | Reaction |
-|------------|--------|----------|
-| `COMPLETION` | Send to user | `REACTION_COMPLETE` (verified via `has_communicated()`) |
-| `STATUS_UPDATE` | Auto-continue or send | Deferred during auto-continue; `REACTION_SUCCESS` if sent |
-| `QUESTION` | Send to user | None (awaiting human reply) |
-| `BLOCKER` | Send to user | `REACTION_ERROR` |
-| `ERROR` | Send to user | `REACTION_ERROR` |
+| Observer Decision | Content Signal | Reaction |
+|-------------------|---------------|----------|
+| DELIVER | Completion with evidence | `REACTION_COMPLETE` (verified via `has_communicated()`) |
+| STEER | Status update, stages remain | Deferred (no emoji until final resolution) |
+| DELIVER | Question for human | None (awaiting human reply) |
+| DELIVER | Error/blocker | `REACTION_ERROR` |
 
 ### Why Job Re-Enqueue Instead of Steering Queue
 
@@ -99,7 +95,7 @@ Three paths to silent text loss have been identified and guarded:
 | `bridge/response.py` | Reaction constants, OutputType enum, MAX_AUTO_CONTINUES, filter_tool_logs |
 | `agent/job_queue.py` | Reaction selection logic, auto-continue re-enqueue, has_communicated() check |
 | `agent/messenger.py` | BossMessenger with `has_communicated()` tracking, BackgroundTask with internal health watchdog |
-| `bridge/summarizer.py` | Output classification (classify_output) |
+| `bridge/observer.py` | Observer Agent: unified routing decisions (replaced classify_output) |
 | `tests/test_reply_delivery.py` | Tests for steering drain, reaction selection, filter fallback |
 
 ## See Also
