@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 
 from django.contrib.auth.mixins import LoginRequiredMixin, UserPassesTestMixin
@@ -216,6 +217,11 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
         phase_artifact = self._get_phase_artifact(episode, step)
         auto_expand = step in [6, 8]  # Quality gates
 
+        # Check if workflow is actively running (for polling)
+        workflow_is_running = False
+        with contextlib.suppress(EpisodeWorkflow.DoesNotExist):
+            workflow_is_running = episode.workflow.status == "running"
+
         self.context["podcast"] = podcast
         self.context["episode"] = episode
         self.context["phases"] = phases
@@ -225,6 +231,7 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
         self.context["button_state"] = _compute_button_state(episode, step)
         self.context["phase_artifact"] = phase_artifact
         self.context["auto_expand_artifact"] = auto_expand
+        self.context["workflow_is_running"] = workflow_is_running
 
         return podcast, episode
 
@@ -459,6 +466,94 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
             response["HX-Redirect"] = url
             return response
         return HttpResponseRedirect(url)
+
+
+class WorkflowPollView(LoginRequiredMixin, UserPassesTestMixin, View):
+    """Lightweight polling endpoint that returns OOB swaps for sidebar + step content.
+
+    Returns 286 (stop polling) when workflow is no longer running, which tells
+    HTMX to stop the polling trigger. When running, returns the sidebar and
+    step content as out-of-band swaps so both update simultaneously.
+    """
+
+    def test_func(self) -> bool:
+        slug = self.kwargs.get("slug")
+        if not slug:
+            return False
+        podcast = get_object_or_404(Podcast, slug=slug)
+        return self.request.user.is_staff or podcast.owner == self.request.user
+
+    def get(self, request, slug: str, episode_slug: str, step: int):
+        from django.template.loader import render_to_string
+
+        podcast = get_object_or_404(Podcast, slug=slug)
+        episode = get_object_or_404(Episode, podcast=podcast, slug=episode_slug)
+
+        # Check workflow status
+        try:
+            wf = episode.workflow
+            is_running = wf.status == "running"
+        except EpisodeWorkflow.DoesNotExist:
+            is_running = False
+
+        # Build context
+        artifact_titles = list(episode.artifacts.values_list("title", flat=True))
+        phases = compute_workflow_progress(episode, artifact_titles)
+        current_phase = phases[step - 1]
+
+        # Get artifact for current phase (same logic as main view)
+        artifact_map = {
+            1: "p1-brief",
+            2: "p2-research",
+            3: "p3-questions",
+            4: "p4-digest",
+            5: "p5-validation",
+            6: "p6-briefing",
+            7: "p7-report",
+            8: "p8-plan",
+        }
+        title = artifact_map.get(step)
+        phase_artifact = (
+            episode.artifacts.filter(title=title).first() if title else None
+        )
+
+        ctx = {
+            "podcast": podcast,
+            "episode": episode,
+            "phases": phases,
+            "current_phase": current_phase,
+            "current_step": step,
+            "total_steps": 12,
+            "button_state": _compute_button_state(episode, step),
+            "phase_artifact": phase_artifact,
+            "auto_expand_artifact": step in [6, 8],
+            "workflow_is_running": is_running,
+        }
+
+        # Render sidebar with OOB swap
+        sidebar_html = render_to_string(
+            "podcast/_workflow_sidebar.html", ctx, request=request
+        )
+        # Render step content
+        content_html = render_to_string(
+            "podcast/_workflow_step_content.html", ctx, request=request
+        )
+
+        # Combine with OOB: both elements swap by matching their IDs
+        response_html = (
+            f'<div id="workflow-sidebar" hx-swap-oob="innerHTML">'
+            f"{sidebar_html}</div>"
+            f'<div id="workflow-step-content" hx-swap-oob="innerHTML">'
+            f"{content_html}</div>"
+        )
+
+        response = HttpResponse(response_html)
+
+        # Tell HTMX to stop polling when workflow is no longer running
+        if not is_running:
+            response.status_code = 286
+
+        return response
 
 
 class RegenerateCoverArtView(LoginRequiredMixin, UserPassesTestMixin, View):

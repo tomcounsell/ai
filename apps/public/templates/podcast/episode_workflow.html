@@ -18,24 +18,16 @@
 {% endblock %}
 
 {% block content %}
-<div class="flex gap-6">
+<div class="flex gap-6"
+     {% if workflow_is_running %}
+     hx-get="{% url 'podcast:episode_workflow_poll' slug=podcast.slug episode_slug=episode.slug step=current_step %}"
+     hx-trigger="every 5s"
+     hx-swap="none"
+     {% endif %}>
   <!-- Sidebar: Phase list -->
   <nav class="w-64 flex-shrink-0">
-    <div class="space-y-1">
-      {% for phase in phases %}
-      <a href="{% url 'podcast:episode_workflow' slug=podcast.slug episode_slug=episode.slug step=phase.number %}"
-         hx-get="{% url 'podcast:episode_workflow' slug=podcast.slug episode_slug=episode.slug step=phase.number %}"
-         hx-target="#workflow-step-content"
-         hx-swap="innerHTML"
-         hx-push-url="true"
-         class="block px-3 py-2 text-sm font-mono {% if phase.number == current_step %}bg-gray-100 text-gray-900{% else %}text-gray-600 hover:bg-gray-50{% endif %}">
-        <span class="inline-block w-2 h-2 rounded-full mr-2
-          {% if phase.status == 'complete' %}bg-green-500
-          {% elif phase.status == 'in_progress' %}bg-amber-500
-          {% else %}bg-gray-300{% endif %}"></span>
-        {{ phase.number }}. {{ phase.name }}
-      </a>
-      {% endfor %}
+    <div id="workflow-sidebar" class="space-y-1">
+      {% include "podcast/_workflow_sidebar.html" %}
     </div>
   </nav>
 
