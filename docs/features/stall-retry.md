@@ -96,11 +96,40 @@ Now checks `retry_count < STALL_MAX_RETRIES` before abandoning silent or long-ru
 - **Error cascades**: High error rate suggests a systemic issue
 - **User-initiated cancellations**: Only stall-detected retries, not manual cancels
 
+## Pending Session Recovery
+
+Added in #342. When a pending session is stalled (exceeds `STALL_THRESHOLD_PENDING` of 5 minutes), the watchdog now spawns a worker to process it. This handles the case where:
+
+1. `_enqueue_continuation()` creates a pending continuation
+2. The worker exits before picking up the continuation (Race 2)
+3. No new worker is spawned because `_ensure_worker()` saw the old worker was still alive at call time
+
+### Recovery Flow
+
+```
+Pending session stalled > 5 min
+  -> check_stalled_sessions() detects stall
+  -> _recover_stalled_pending() filters for pending stalls
+  -> _ensure_worker(project_key) spawns worker if none running
+  -> Worker picks up the pending continuation
+  -> Session progresses normally
+```
+
+### Stale Save Guard
+
+Also added in #342. The `_execute_job()` epilogue previously called `agent_session.save()` when `defer_reaction=True` (auto-continue deferred). This resurrected a ghost session record in Redis because `_enqueue_continuation()` had already deleted the old session and created a fresh pending one. The stale save is now skipped entirely with a debug log.
+
+### Function: `_recover_stalled_pending(stalled)`
+
+In `monitoring/session_watchdog.py`. Called from the watchdog loop after `check_stalled_sessions()`. Filters for pending stalls and calls `_ensure_worker()` for each project. Handles missing project keys and `_ensure_worker` exceptions gracefully.
+
 ## Race Condition Mitigations
 
 - Watchdog operates on `active` sessions; job health monitor operates on `running` sessions with dead workers. Different status categories prevent overlap.
 - The delete-and-recreate pattern is atomic at the Redis level.
 - `_safe_abandon_session()` catches `ModelException` for concurrent modification.
+- **Stale save guard** (#342): When `defer_reaction=True`, the epilogue skips `agent_session.save()` to prevent resurrecting deleted sessions.
+- **Pending recovery** (#342): `_recover_stalled_pending()` calls `_ensure_worker()` which is a no-op if a worker already exists, preventing duplicate workers.
 
 ## Related Features
 

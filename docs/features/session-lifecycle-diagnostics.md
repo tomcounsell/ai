@@ -50,6 +50,11 @@ For active sessions, `last_activity` is checked first — if recent activity exi
 When a stall is detected:
 - A `LIFECYCLE_STALL` warning is logged with session ID, status, duration, and last history entry
 - The stalled session info is returned for potential alerting
+- **Pending stalls** (#342): `_recover_stalled_pending()` calls `_ensure_worker()` to spawn a worker if none is running, recovering sessions stuck after auto-continue
+
+### Stale Save Guard (#342)
+
+The `_execute_job()` epilogue in `agent/job_queue.py` previously saved a stale in-memory `agent_session` reference when `defer_reaction=True` (auto-continue). Since `_enqueue_continuation()` already deleted and recreated the session, this save resurrected a ghost record in Redis, causing the pending continuation to become invisible to the worker. The fix skips the save entirely and logs a debug message explaining why.
 
 ### CLI Status Report
 
@@ -92,6 +97,7 @@ Constants in `monitoring/session_watchdog.py`:
 | `monitoring/session_status.py` | CLI session status report |
 | `tests/test_lifecycle_transition.py` | Integration tests for lifecycle logging |
 | `tests/unit/test_stall_detection.py` | Unit tests for stall detection |
+| `tests/test_session_stuck_pending.py` | Tests for stale save guard and pending recovery (#342) |
 | `tests/unit/test_session_status.py` | Unit tests for CLI report |
 
 ## Related
