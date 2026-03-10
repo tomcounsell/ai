@@ -67,6 +67,7 @@ from bridge.media import (  # noqa: E402
 )
 from bridge.response import (  # noqa: E402
     FILE_MARKER_PATTERN,  # noqa: F401
+    REACTION_COMPLETE,
     REACTION_ERROR,
     REACTION_RECEIVED,
     REACTION_SUCCESS,
@@ -802,6 +803,8 @@ async def main():
                     logger.debug(f"Revival reply check error: {e}")
 
             # === STEERING CHECK: Reply to running session → inject, don't queue ===
+            # This is the FAST PATH for direct Telegram replies to running sessions.
+            # The intake classifier (below) handles non-reply interjections.
             if is_reply_to_valor and message.reply_to_msg_id:
                 try:
                     from models.agent_session import AgentSession
@@ -868,6 +871,145 @@ async def main():
                         f"[{project_name}] Steering check failed unexpectedly, "
                         f"falling through to queue: {e}",
                         exc_info=True,
+                    )
+
+            # === INTAKE CLASSIFIER: Haiku triage for non-reply messages (#320) ===
+            # Runs on messages that didn't hit the reply-to fast path above.
+            # Classifies intent as interjection/new_work/acknowledgment to decide routing.
+            # This catches follow-up messages sent WITHOUT using Telegram's reply feature.
+            if not (is_reply_to_valor and message.reply_to_msg_id):
+                try:
+                    from models.agent_session import AgentSession
+
+                    # Find active/running/dormant sessions in this chat
+                    active_sessions = []
+                    for check_status in ("running", "active", "dormant"):
+                        sessions = AgentSession.query.filter(
+                            chat_id=telegram_chat_id, status=check_status
+                        )
+                        if sessions:
+                            active_sessions.extend(sessions)
+
+                    if active_sessions:
+                        # Pick the most recent session (by last_activity or created_at)
+                        target_session = max(
+                            active_sessions,
+                            key=lambda s: s.last_activity or s.created_at or 0,
+                        )
+
+                        # Classify message intent with Haiku
+                        from tools.classifier import classify_message_intent_async
+
+                        intent_result = await classify_message_intent_async(
+                            message=clean_text,
+                            session_context=target_session.context_summary or "",
+                            session_expectations=target_session.expectations or "",
+                            session_status=target_session.status or "",
+                        )
+
+                        intent = intent_result.get("intent", "new_work")
+                        confidence = intent_result.get("confidence", 0.0)
+                        reason = intent_result.get("reason", "")
+
+                        logger.info(
+                            f"[{project_name}] Intake classifier: intent={intent} "
+                            f"confidence={confidence:.2f} reason={reason!r} "
+                            f"target_session={target_session.session_id}"
+                        )
+
+                        if intent == "interjection":
+                            # Re-check session status (Race 1 mitigation: session may
+                            # have completed during classification)
+                            fresh_session = None
+                            for check_status in ("running", "active"):
+                                sessions = AgentSession.query.filter(
+                                    session_id=target_session.session_id,
+                                    status=check_status,
+                                )
+                                if sessions:
+                                    fresh_session = sessions[0]
+                                    break
+
+                            if fresh_session:
+                                # Push to AgentSession's queued_steering_messages
+                                # for Observer to read
+                                fresh_session.push_steering_message(clean_text)
+                                from bridge.markdown import send_markdown
+
+                                await send_markdown(
+                                    client,
+                                    event.chat_id,
+                                    "Adding to current task",
+                                    reply_to=message.id,
+                                )
+                                logger.info(
+                                    f"[{project_name}] Intake classifier routed "
+                                    f"interjection to session "
+                                    f"{fresh_session.session_id}"
+                                )
+                                # Also push to Redis steering queue so the
+                                # PostToolUse hook picks it up immediately
+                                push_steering_message(
+                                    fresh_session.session_id,
+                                    clean_text,
+                                    sender_name,
+                                )
+                                # Record as processed and return
+                                from bridge.dedup import record_message_processed
+
+                                await record_message_processed(event.chat_id, message.id)
+                                return
+                            else:
+                                logger.info(
+                                    f"[{project_name}] Intake classifier: session "
+                                    f"{target_session.session_id} no longer "
+                                    f"running/active, falling through to enqueue"
+                                )
+
+                        elif intent == "acknowledgment":
+                            # Only acknowledge dormant sessions with expectations
+                            if target_session.status == "dormant" and target_session.expectations:
+                                target_session.status = "completed"
+                                target_session.log_lifecycle_transition(
+                                    "completed",
+                                    f"Acknowledged by {sender_name}: {clean_text[:80]}",
+                                )
+                                target_session.save()
+                                await set_reaction(
+                                    client,
+                                    event.chat_id,
+                                    message.id,
+                                    REACTION_COMPLETE,
+                                )
+                                logger.info(
+                                    f"[{project_name}] Intake classifier: "
+                                    f"acknowledged session "
+                                    f"{target_session.session_id} as complete"
+                                )
+                                from bridge.dedup import record_message_processed
+
+                                await record_message_processed(event.chat_id, message.id)
+                                return
+                            else:
+                                logger.info(
+                                    f"[{project_name}] Intake classifier: "
+                                    f"acknowledgment but session is "
+                                    f"{target_session.status} (not dormant with "
+                                    f"expectations), falling through to enqueue"
+                                )
+
+                        # intent == "new_work" or fallthrough: continue to enqueue
+
+                except (ConnectionError, OSError) as e:
+                    logger.error(
+                        f"[{project_name}] Intake classifier failed due to "
+                        f"connection error, falling through to enqueue: {e}",
+                        exc_info=True,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[{project_name}] Intake classifier failed, "
+                        f"falling through to enqueue: {e}"
                     )
 
             # Lightweight revival check (no SDK agent, just git state)

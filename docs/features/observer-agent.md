@@ -97,7 +97,7 @@ Example coaching message:
 
 The Observer reads from and writes to `AgentSession` (Redis-backed via Popoto ORM):
 
-- **`queued_steering_messages`**: Human reply-to messages injected by the bridge. Observer checks these first -- human input always takes priority over automated steering.
+- **`queued_steering_messages`**: Human messages injected by the bridge via two paths: (1) the reply-to fast path for direct Telegram replies to running sessions, and (2) the [intake classifier](intake-classifier.md) for non-reply follow-up messages classified as interjections. Observer checks these first -- human input always takes priority over automated steering.
 - **`context_summary`** and **`expectations`**: Set by Observer on deliver, enabling semantic session routing for future messages.
 - **Stage progress**: Read via `get_stage_progress()`, written by `apply_transitions()` as `[stage]` history entries.
 - **Links**: Issue URL, PR URL, plan path -- extracted from worker output and persisted via `set_link()`.
