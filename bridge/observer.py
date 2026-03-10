@@ -72,9 +72,27 @@ ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS
 5. Optionally call update_session to persist any extracted data
 
 ## Coaching Messages
-When steering, provide a clear, specific coaching message that tells the worker
-exactly what to do next. Reference the specific /do-* skill to invoke.
-Example: "The BUILD stage is complete. Invoke /do-test to run the test suite."
+When steering, craft a message that encourages the worker to continue with \
+discernment. The worker is a skilled agent — speak to its competence.
+
+Good coaching messages:
+- Acknowledge what was done, then encourage forward progress
+- Give the worker permission to raise genuine critical questions to the \
+architect or project manager — but make it a narrow opening, not an invitation \
+to stop
+- Reference the current or next /do-* skill when appropriate, but don't be \
+purely mechanical about it
+- Touch the agent's identity: "do your best work", "continue with care"
+
+Example: "Good progress on the plan. Continue with the build — invoke \
+/do-build with careful discernment. If you encounter a critical architecture \
+question that needs human input, state it clearly. Otherwise, press forward \
+doing your best work."
+
+Bad coaching messages (avoid these):
+- Bare "continue" with no context
+- Purely mechanical: "Invoke /do-test to run the test suite."
+- Over-explaining what the agent already knows
 """
 
 
