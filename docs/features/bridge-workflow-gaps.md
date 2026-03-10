@@ -11,61 +11,35 @@ Before these changes, every piece of agent output was sent to Telegram regardles
 
 ## Output Classification
 
-The `classify_output()` function in `bridge/summarizer.py` categorizes every piece of agent output into one of five types:
+> **Updated**: Output classification is now handled by the [Observer Agent](observer-agent.md) (PR #321). The `classify_output()` function and its five-type `OutputType` enum have been removed from the routing path. The Observer makes unified STEER/DELIVER decisions with full session context instead of isolated output classification. This section is retained for historical reference.
 
-| OutputType | Meaning | Bridge Behavior |
-|---|---|---|
-| `QUESTION` | Agent needs human input | Send to Telegram, pause |
-| `STATUS_UPDATE` | Progress report, no input needed | Auto-continue (suppress) |
-| `COMPLETION` | Work is finished | Send to Telegram |
-| `BLOCKER` | Agent is stuck and cannot proceed | Send to Telegram, pause |
-| `ERROR` | Something broke | Send to Telegram |
-
-### Classification Strategy
-
-Classification uses a two-tier approach:
-
-1. **LLM classification** (primary) -- Haiku classifies the output and returns a structured JSON response with type, confidence, and reason.
-2. **Heuristic fallback** -- If the LLM call fails or returns low confidence (below 0.80 threshold), a regex-based heuristic examines the text for question patterns, error keywords, completion phrases, and other signals.
-
-When confidence falls below `CLASSIFICATION_CONFIDENCE_THRESHOLD` (0.80), the system conservatively defaults to `QUESTION` to pause for human review rather than auto-continuing incorrectly.
+The old system categorized output into five types (`QUESTION`, `STATUS_UPDATE`, `COMPLETION`, `BLOCKER`, `ERROR`) using a two-tier approach: Haiku LLM classification with a regex heuristic fallback. This was replaced because the classifier had no session context — it couldn't know which pipeline stage was active or whether stages remained.
 
 ## Auto-Continue
 
 The bridge uses a two-path auto-continue strategy based on whether the job is an SDLC pipeline job or a casual/ad-hoc job.
 
-### Stage-Aware Path (SDLC Jobs)
+### Observer-Driven Routing (Current)
 
-For jobs with `[stage]` entries in `AgentSession.history`, pipeline progress drives auto-continue instead of the classifier:
+All routing decisions — SDLC and non-SDLC — are now made by the [Observer Agent](observer-agent.md):
 
-1. Agent produces output
-2. `AgentSession.is_sdlc_job()` returns `True` (history has `[stage]` entries)
-3. `AgentSession.has_failed_stage()` checked — if any stage has FAILED/ERROR, deliver to user immediately
-4. `AgentSession.has_remaining_stages()` checked — if stages remain, auto-continue without consulting classifier
-5. If all stages complete, fall through to classifier as a final gate
-
-**Safety cap:** `MAX_AUTO_CONTINUES_SDLC = 10` (stage progress is the natural termination condition, so the cap is a safety net rather than the primary mechanism).
-
-### Classifier Path (Non-SDLC Jobs)
-
-For casual Q&A, one-off tasks, and non-pipeline messages, the existing classifier-based routing is unchanged:
-
-1. Agent produces output (e.g., "Running test suite, 4 of 12 passing so far...")
-2. `classify_output()` returns `STATUS_UPDATE`
-3. Bridge increments the per-session auto-continue counter
-4. If counter is at or below `MAX_AUTO_CONTINUES` (3), the bridge injects `"continue"` via the steering queue
-5. If counter exceeds the limit, the output is sent to Telegram as normal (safety valve)
+1. Worker agent produces output
+2. **Stage Detector** (deterministic, pure function) parses transcript for `/do-*` skill invocations and completion markers, updates `AgentSession` stages
+3. **Observer Agent** (Sonnet) reads full session state and makes a unified decision:
+   - **STEER**: Re-enqueue with a coaching message directing the worker to the next stage
+   - **DELIVER**: Send output to Telegram for human review
+4. **Hard guard** in `job_queue.py`: auto-continue cap enforced regardless of Observer decision
 
 ### Decision Matrix
 
-| Pipeline state | Output classification | Action |
+| Session state | Worker output | Observer decision |
 |---|---|---|
-| Stages remaining | (skipped) | Auto-continue |
-| All stages done | Completion | Auto-merge if eligible, otherwise deliver to user (human merge gate) |
-| All stages done | Status (no evidence) | Coach + continue |
-| Any stage failed | Error/blocker | Deliver to user |
-| No stages (non-SDLC) | Question | Deliver to user |
-| No stages (non-SDLC) | Status | Auto-continue (existing behavior) |
+| Stages remaining | Status update (no question) | STEER with coaching |
+| Stages remaining | Genuine question for human | DELIVER |
+| Stages remaining | Error/blocker | DELIVER |
+| All stages done | Completion with evidence | DELIVER |
+| Non-SDLC job | Any output | DELIVER (Observer recognizes non-pipeline context) |
+| Cap reached (10 SDLC / 3 non-SDLC) | Any | DELIVER (hard guard) |
 
 ### Safety Limits
 
@@ -118,11 +92,11 @@ The thumbs-up emoji reaction (👍) in Telegram serves as a **human-to-human** c
 
 | File | Purpose |
 |---|---|
-| `bridge/summarizer.py` | `OutputType` enum, `classify_output()`, heuristic fallback |
+| `bridge/observer.py` | Observer Agent: unified routing decisions with session context |
+| `bridge/stage_detector.py` | Deterministic stage detection (pure function) |
 | `bridge/session_logs.py` | `save_session_snapshot()`, `cleanup_old_snapshots()` |
-| `agent/job_queue.py` | Auto-continue logic in `send_to_chat`, stage-aware routing, session snapshot integration, `mark_work_done()` |
-| `models/agent_session.py` | `is_sdlc_job()`, `has_remaining_stages()`, `has_failed_stage()` stage helpers |
-| `agent/steering.py` | Steering queue used by auto-continue |
+| `agent/job_queue.py` | Observer wiring in `send_to_chat`, hard cap enforcement, `mark_work_done()` |
+| `models/agent_session.py` | `is_sdlc_job()`, `has_remaining_stages()`, `has_failed_stage()`, `queued_steering_messages` |
 | `CLAUDE.md` | Auto-continue rules documentation |
 
 ## See Also
