@@ -1289,8 +1289,8 @@ async def _execute_job(job: Job) -> None:
 
                 slug = getattr(agent_session, "work_item_slug", None)
                 if slug:
-                    working_dir = getattr(agent_session, "working_dir", None) or "."
-                    gate_results = check_all_gates(slug, working_dir, agent_session)
+                    gate_wd = getattr(agent_session, "working_dir", None) or "."
+                    gate_results = check_all_gates(slug, gate_wd, agent_session)
                     unsatisfied = [
                         f"  - {stage}: {r.missing or r.evidence}"
                         for stage, r in gate_results.items()
