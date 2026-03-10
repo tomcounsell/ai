@@ -1,7 +1,7 @@
 # Plan: Summarizer Auto-Link PR/Issue References
 
 **Issue**: #353
-**Status**: Draft
+**Status**: Complete
 **Branch**: `session/summarizer-auto-link-pr-issue`
 
 ## Problem
@@ -114,13 +114,13 @@ Add a new test class `TestLinkifyReferences` with these test cases:
 
 ## Success Criteria
 
-- [ ] Any `PR #N` or `Issue #N` in a delivered Telegram message becomes a clickable markdown link
-- [ ] Links are derived from the project's repo config via `get_project_config()`, not dependent on session progress tracking
-- [ ] Existing `_render_link_footer` still works as before (additive change, not breaking)
-- [ ] Already-linked references (inside markdown `[...]` syntax) are not double-linked
-- [ ] Graceful fallback: missing project_key, missing GitHub config, or no session → text unchanged
-- [ ] All existing summarizer tests continue to pass
-- [ ] New tests cover: basic linkification, multiple refs, already-linked refs, missing config fallbacks, integration with `_compose_structured_summary`
+- [x] Any `PR #N` or `Issue #N` in a delivered Telegram message becomes a clickable markdown link
+- [x] Links are derived from the project's repo config via `get_project_config()`, not dependent on session progress tracking
+- [x] Existing `_render_link_footer` still works as before (additive change, not breaking)
+- [x] Already-linked references (inside markdown `[...]` syntax) are not double-linked
+- [x] Graceful fallback: missing project_key, missing GitHub config, or no session → text unchanged
+- [x] All existing summarizer tests continue to pass (151/151)
+- [x] New tests cover: basic linkification, multiple refs, already-linked refs, missing config fallbacks, empty text/project_key edge cases (10 tests)
 
 ## No-Gos
 
@@ -139,8 +139,8 @@ No agent integration required. This change is internal to the summarizer module.
 
 ## Documentation
 
-- [ ] Update `docs/features/summarizer-format.md` to document the auto-linkification behavior
-- [ ] Add inline docstring to the new function (included in the implementation above)
+- [x] Update `docs/features/summarizer-format.md` to document the auto-linkification behavior
+- [x] Add inline docstring to the new function
 
 ## Testing Strategy
 
