@@ -20,25 +20,12 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
-from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Mock claude_agent_sdk before importing agent.sdk_client to avoid
-# dependency issues (mcp.types.ToolAnnotations import error).
-if "claude_agent_sdk" not in sys.modules:
-
-    class _MockSDK(ModuleType):
-        """Auto-mock module: returns a MagicMock for any attribute access."""
-
-        def __getattr__(self, name):
-            return MagicMock()
-
-    sys.modules["claude_agent_sdk"] = _MockSDK("claude_agent_sdk")
-
+# claude_agent_sdk mock is centralized in tests/conftest.py
 from agent.sdk_client import (  # noqa: E402
     SDLC_WORKFLOW,
     _check_no_direct_main_push,
@@ -110,9 +97,9 @@ class TestLoadSystemPromptInjection:
         # Completion criteria section starts with 'Work is DONE'
         criteria_pos = prompt.find("Work is DONE")
         if criteria_pos > 0:
-            assert (
-                sdlc_pos < criteria_pos
-            ), "SDLC_WORKFLOW must appear before Work Completion Criteria"
+            assert sdlc_pos < criteria_pos, (
+                "SDLC_WORKFLOW must appear before Work Completion Criteria"
+            )
 
     def test_prompt_contains_separator_between_sdlc_and_soul(self):
         """load_system_prompt() must use --- separator between SDLC and SOUL sections."""
@@ -373,9 +360,7 @@ class TestCheckNoDirectMainPush:
         )
         # Ensure SKIP_SDLC is not set in env (default)
         with patch.dict(os.environ, {"SKIP_SDLC": "true"}, clear=False):
-            result = _check_no_direct_main_push(
-                "wrong-skip-session", repo_root=tmp_path
-            )
+            result = _check_no_direct_main_push("wrong-skip-session", repo_root=tmp_path)
         # "true" is not "1", so it should still check and find violation
         # (depends on whether state file exists and has uncommitted changes)
         # This test just ensures "true" != "1" bypass

@@ -7,17 +7,11 @@ pausing for human input.
 Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
 """
 
-import sys
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-# Mock the claude_agent_sdk before agent package tries to import it
-# This prevents the ImportError from mcp.types.ToolAnnotations
-if "claude_agent_sdk" not in sys.modules:
-    _mock_sdk = MagicMock()
-    sys.modules["claude_agent_sdk"] = _mock_sdk
-
+# claude_agent_sdk mock is centralized in conftest.py
 from agent.job_queue import (
     MAX_AUTO_CONTINUES,
     should_guard_empty_output,

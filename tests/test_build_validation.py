@@ -15,13 +15,8 @@ the bug, not the absence of commits per se."
 
 import logging
 import subprocess
-import sys
-from unittest.mock import MagicMock
 
-# Mock the claude_agent_sdk before agent package tries to import it
-if "claude_agent_sdk" not in sys.modules:
-    _mock_sdk = MagicMock()
-    sys.modules["claude_agent_sdk"] = _mock_sdk
+# claude_agent_sdk mock is centralized in conftest.py
 
 
 class TestBuildOutputVerification:

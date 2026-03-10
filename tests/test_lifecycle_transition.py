@@ -8,16 +8,11 @@ Covers:
 """
 
 import logging
-import sys
 import time
-from unittest.mock import MagicMock
 
 import pytest
 
-# Mock claude_agent_sdk before any agent imports to avoid SDK dependency
-if "claude_agent_sdk" not in sys.modules:
-    sys.modules["claude_agent_sdk"] = MagicMock()
-
+# claude_agent_sdk mock is centralized in conftest.py
 from models.agent_session import AgentSession
 
 # ── AgentSession.last_transition_at field ────────────────────────────────────

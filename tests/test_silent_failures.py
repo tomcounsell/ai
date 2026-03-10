@@ -19,15 +19,11 @@ file path, etc.) — NOT exact message text, per risk mitigation in the plan.
 """
 
 import logging
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# Mock the claude_agent_sdk before agent package tries to import it
-if "claude_agent_sdk" not in sys.modules:
-    _mock_sdk = MagicMock()
-    sys.modules["claude_agent_sdk"] = _mock_sdk
+# claude_agent_sdk mock is centralized in conftest.py
 
 
 class TestPushJobLogging:

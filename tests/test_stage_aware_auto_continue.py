@@ -17,13 +17,7 @@ Decision matrix:
 Tests use Redis db=1 via the autouse redis_test_db fixture in conftest.py.
 """
 
-import sys
-from unittest.mock import MagicMock
-
-# Mock the claude_agent_sdk before agent package tries to import it
-if "claude_agent_sdk" not in sys.modules:
-    _mock_sdk = MagicMock()
-    sys.modules["claude_agent_sdk"] = _mock_sdk
+# claude_agent_sdk mock is centralized in conftest.py
 
 from agent.job_queue import MAX_AUTO_CONTINUES, MAX_AUTO_CONTINUES_SDLC
 from models.agent_session import AgentSession
