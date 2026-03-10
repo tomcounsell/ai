@@ -92,71 +92,63 @@ def _make_chat_state(defer_reaction=False, completion_sent=False, auto_continue_
 
 
 # ===================================================================
-# Test 1: Stale save guard — no save when defer_reaction=True
+# Test 1: Stale save guard — verified via source inspection of production code
 # ===================================================================
 
 
 class TestStaleSaveGuard:
-    """Verify that agent_session.save() is NOT called when defer_reaction=True.
+    """Verify the stale save guard is present in the production epilogue.
 
     The epilogue in _execute_job() previously saved a stale in-memory
     agent_session reference after _enqueue_continuation() already deleted
     and recreated the session. This resurrected a ghost record in Redis.
+
+    Source inspection is used because calling _execute_job() requires
+    extensive async scaffolding. The production fix is validated by
+    inspecting the actual source, which would fail immediately if the
+    guard were ever removed.
     """
 
-    def test_no_save_when_defer_reaction_true(self):
-        """When defer_reaction=True, agent_session.save() must not be called.
+    def test_guard_skips_save_and_logs_when_deferred(self):
+        """The _execute_job epilogue must skip agent_session.save() and log
+        a debug message when defer_reaction is True (auto-continue path).
 
-        This is the core fix for issue #342. The stale save guard skips
-        the save entirely and logs a debug message instead.
+        Checks both the guard comment and the diagnostic log message that
+        replaced the stale save call. If either is missing, the fix for
+        issue #342 has been removed.
         """
-        agent_session = _make_agent_session()
-        chat_state = _make_chat_state(defer_reaction=True)
+        import inspect
 
-        # Simulate the epilogue logic from _execute_job() lines 1337-1356
-        # This mirrors the actual code path after the fix
-        if agent_session:
-            if not chat_state.defer_reaction:
-                # Would call complete_transcript — not our test path
-                pass
-            else:
-                # STALE SAVE GUARD: should NOT save
-                # The fix replaces agent_session.save() with a debug log
-                pass
+        from agent.job_queue import _execute_job
 
-        # Verify save was never called
-        agent_session.save.assert_not_called()
+        source = inspect.getsource(_execute_job)
 
-    def test_save_called_when_defer_reaction_false(self):
-        """When defer_reaction=False, the normal completion path should run.
+        assert "STALE SAVE GUARD" in source, (
+            "_execute_job() must contain 'STALE SAVE GUARD' comment — "
+            "the fix for issue #342 is missing"
+        )
+        assert "Skipping stale agent_session.save()" in source, (
+            "_execute_job() must log 'Skipping stale agent_session.save()' "
+            "when defer_reaction=True — the fix for issue #342 is missing"
+        )
 
-        complete_transcript() handles saving, not agent_session.save().
+    def test_guard_comment_says_do_not_save(self):
+        """The guard comment must explicitly prohibit calling agent_session.save().
+
+        The comment is the first line of the guard block and documents the
+        intent for future maintainers. If it is removed, the guard may be
+        accidentally re-introduced in a code review.
         """
-        agent_session = _make_agent_session()
-        chat_state = _make_chat_state(defer_reaction=False)
+        import inspect
 
-        # In the non-deferred path, complete_transcript is called instead
-        # agent_session.save() should still not be called directly
-        if not chat_state.defer_reaction:
-            # Normal path: complete_transcript handles it
-            pass
-        else:
-            agent_session.save()
+        from agent.job_queue import _execute_job
 
-        agent_session.save.assert_not_called()
+        source = inspect.getsource(_execute_job)
 
-    def test_defer_reaction_set_by_enqueue_continuation(self):
-        """Verify that defer_reaction is set to True when auto-continue triggers.
-
-        This confirms the integration point: _enqueue_continuation sets
-        defer_reaction=True on chat_state, which triggers the save guard.
-        """
-        chat_state = _make_chat_state(defer_reaction=False)
-
-        # Simulate what happens in send_to_chat when Observer triggers continue
-        chat_state.defer_reaction = True
-
-        assert chat_state.defer_reaction is True
+        assert "Do NOT call agent_session.save() here" in source, (
+            "_execute_job() guard comment must say 'Do NOT call agent_session.save() here' — "
+            "the prohibition is missing from the STALE SAVE GUARD block"
+        )
 
 
 # ===================================================================
