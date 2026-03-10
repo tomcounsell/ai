@@ -226,6 +226,8 @@ _JOB_FIELDS = [
     "last_stall_reason",
     # Observer fields — must be preserved across delete-and-recreate
     "queued_steering_messages",
+    # Tracing fields — must be preserved across delete-and-recreate
+    "correlation_id",
 ]
 
 # Backward compat alias
