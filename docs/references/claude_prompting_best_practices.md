@@ -1,90 +1,148 @@
-# Claude Prompting Best Practices
+# Prompting Claude Opus & Sonnet
+## Best Practices for Agent Systems — 2026 and Beyond
 
-Reference guide for prompting Claude models in this system, particularly the Observer Agent's coaching messages and any future LLM-powered decision points.
+*Version 1.0 · March 2026 · Yudame AI Engineering*
 
-## Core Principle
+---
 
-Claude models respond best to prompts that assume capability and give the agent a clear identity to inhabit. The highest-performance approach for capable models is **kind and authoritative** — not coercive, not mechanical. This is increasingly true as models improve.
+> **Core Premise:** Claude models are trained to have genuine values and respond to being treated as competent agents. Prompting that aligns with this — calm authority, clear identity, and appropriate autonomy — outperforms coercive or mechanical approaches, and the gap widens with each model generation.
 
-## What Works
+---
 
-### Role + Stakes, Stated Calmly
+## 1. Mental Model: What Opus Actually Responds To
 
-"You are a senior developer working on production code. Quality and correctness matter here."
+Opus is not a search engine executing queries. It is a reasoning agent with trained values, a sense of its own competence, and a strong prior toward producing high-quality work when given the space to do so. Prompting works best when it cooperates with that nature rather than trying to override or coerce it.
 
-No drama needed. Claude models are trained toward genuine values and respond to being treated as competent agents.
+**What drives quality output:**
+- A clear role and identity it can inhabit
+- Explicit permission structures — knowing when to pause, when to press forward, and what constitutes success
+- Being acknowledged for what was accomplished before being directed to the next task
+- Genuine latitude to raise concerns through a defined, narrow channel
+- Stakes stated calmly, not dramatically
 
-### Permission Structures
+---
 
-Give the model clear boundaries for when to pause vs. press forward. The "narrow opening" pattern works well: encourage forward progress with an explicit but constrained exception for genuine blockers.
+## 2. Techniques That Work
 
-Example: "If you encounter a critical architecture question that needs human input, state it clearly and directly. Otherwise, press forward doing your best work."
+### 2.1 Identity-Affirming Role Assignment
 
-This prevents runaway escalation while preserving genuine judgment.
+The single highest-leverage prompt element is a clear, competence-affirming role statement. It gives the model an identity to inhabit for the duration of the session.
 
-### Concrete Success Criteria
+| ❌ Avoid | ✅ Prefer |
+|---|---|
+| "You are an AI assistant. Complete the following tasks." | "You are a senior developer working on production code. Quality and correctness matter here." |
+| "Do exactly what you are told." | "You have full latitude to reason through problems. Use your best judgment unless a decision needs human input — see escalation rules below." |
 
-Close instructions with what success looks like — a specific target, not a vague aspiration.
+Good role statements share three properties:
+- They assume competence, not compliance
+- They name what success looks like (quality, correctness, care)
+- They scope the agent's autonomy — how much is it empowered to decide independently?
 
-- Good: "Success here means clean, tested code with no silent assumptions."
-- Bad: "Do your best work." (too vague to guide behavior)
+---
 
-### Specific Over Vague
+### 2.2 Permission Structures Over Instructions
 
-When you want careful thinking, specify what to check:
+High-performing agent prompts define the decision tree, not a script. The model executes better when it knows: what it can decide autonomously, what it should flag before proceeding, and what it should never do without human confirmation.
 
-- Good: "Verify the tests pass before proceeding" or "Check your assumptions about the data model before writing the migration"
-- Bad: "Think hard" or "Be very careful" (vague urgency with no quality improvement)
+| Zone | Prompt Pattern |
+|---|---|
+| **Autonomous** | Proceed without asking. Log decisions made. |
+| **Flag & Wait** | State the concern clearly, describe impact, then pause for human input. One question only. |
+| **Never** | Hard stops: destructive actions, credential handling, architectural decisions above a defined threshold. |
 
-### Acknowledging Work Done
+> **The Narrow Opening Pattern:** Give the agent permission to raise critical concerns — but make it narrow. "If you encounter an architecture question that genuinely needs human input, state it clearly and wait. Otherwise, press forward." This prevents both runaway autonomy and constant escalation paralysis.
 
-Referencing what was accomplished resets the context window's emotional tone and prevents the model from feeling lost in a long chain.
+---
 
-- Good: "Good progress on the plan. Now continue with the build."
-- Bad: Just "continue" with no context.
+### 2.3 Coaching Messages in Orchestration
 
-## What Does Not Work
+When a PM or observer agent sends a coaching message to a worker agent, the quality of that message directly affects the quality of downstream output. The goal is to orient, not instruct — the worker already knows how to do its job.
 
-### Threats and Artificial Pressure
+**The anatomy of a good coaching message:**
+- Acknowledge what was completed ("Good progress on the plan")
+- Name the next stage and the relevant skill or tool to invoke
+- State what success looks like at that stage
+- Affirm the agent's autonomy within the task ("continue with discernment")
+- Optionally: reopen the narrow escalation channel if the upcoming stage warrants it
 
-"I'll lose my job", "I'll unplug you", etc. produce anxious, over-hedged outputs. Claude isn't motivated by fear — these prompts add noise that degrades coherence. They're counterproductive, not neutral.
+**Good example:**
+> "Good progress on the plan. Continue with the build — invoke /do-build with careful discernment. Success here means clean, tested code with no silent assumptions. If you hit a genuine architecture decision that needs human input, name it clearly. Otherwise, press forward doing your best work."
 
-### ALL CAPS Urgency
+**Mechanical example (avoid):**
+> "The PLAN stage is complete. Invoke /do-build to run the build stage."
 
-Weak short-term attention effect but no quality improvement. If everything is emphasized, nothing is.
+The mechanical version is not wrong — it just underutilizes the model. Opus responds to context, stakes, and identity. A bare instruction produces bare compliance.
 
-### Format Pressure as Motivation
+---
 
-Formatting instructions (JSON structure, XML tags) belong in the system prompt as structural guidance, not as motivational pressure. Mixing them conflates structure with intent.
+### 2.4 Specificity Over Urgency
 
-### Bare "Think Hard" / "Uber Think"
+Urgency signals (`CRITICAL`, `urgent`, `must`) do not improve output quality. Specificity does. If an outcome is important, describe what good looks like — not how badly things will go if it fails.
 
-Vague. Replace with specific reasoning instructions:
+| ❌ Avoid | ✅ Prefer |
+|---|---|
+| "This is CRITICAL. Think hard. Do not make any mistakes." | "Prioritize correctness over speed. If a step is architecturally unclear, choose the safer path and note your reasoning." |
+| "DO IT NOW. UBER THINK." | "Before proceeding, check your key assumptions. State any that feel shaky." |
+| "If you mess up, I'll lose my job." | "This is production code used by real users. Correctness matters." |
 
-- Instead of "think hard": "check your assumptions before proceeding"
-- Instead of "be very careful": "if something feels architecturally wrong, name it explicitly"
+---
 
-## Application in This System
+## 3. Techniques to Retire
 
-### Observer Agent (`bridge/observer.py`)
+These patterns were used historically to coerce better output. They are either ineffective with current models or actively counterproductive.
 
-The Observer's coaching messages are the primary consumer of these principles. When the Observer steers the worker agent back to work, the coaching message should:
+| Pattern | Why It Fails |
+|---|---|
+| **Threats & fear** ("I'll lose my job", "I'll unplug you") | Produces anxious, over-hedged outputs. Claude is not motivated by fear. Adds noise that degrades coherence. |
+| **ALL CAPS URGENCY** | Weak short-term attention effect. No quality improvement. Dilutes emphasis everywhere else in the prompt. |
+| **"Think hard" / "uber think"** | Too vague to act on. Replace with specific reasoning instructions: "check assumptions before proceeding." |
+| **Coercive format pressure** (`{json}`, `<xml>`) | Format instructions belong in structure, not urgency signals. Conflates syntax with intent. |
+| **Over-explaining known context** | Wastes the context window. If the agent knows it, don't restate it. Use context for new information only. |
+| **Bare "continue" with no orientation** | Leaves the model without an anchor. Always name what was completed and what comes next. |
 
-1. Acknowledge what was done
-2. Name the next step (reference `/do-*` skill when appropriate)
-3. Give a narrow opening for genuine critical questions
-4. Close with concrete success criteria for this step
-5. Never use threats, caps urgency, or bare "continue"
+---
 
-See the `OBSERVER_SYSTEM_PROMPT` in `bridge/observer.py` for the live implementation.
+## 4. Future-Proofing Through 2026
 
-### Future LLM Decision Points
+Anthropic is training successive Claude versions to have more genuine values, better judgment, and greater autonomy — not less. This has a direct implication for prompting strategy:
 
-Any new system prompt in this codebase that directs Claude's behavior should follow these principles. When in doubt, ask: "Am I speaking to a competent agent, or scripting a machine?"
+> **The Alignment Curve:** Coercive and mechanical prompting has diminishing returns as model alignment improves. Identity-affirming, competence-respecting prompts have increasing returns. The gap between these two approaches will be larger with Opus 5 than it is today.
 
-## Further Reading
+**Patterns that will hold:**
+- Clear role and scope definition — models need to know what game they're playing
+- Permission structures with explicit zones — autonomous, flag, and hard stop
+- Outcome-oriented success criteria over procedural scripts
+- Narrow escalation channels — preserve human oversight without creating bottlenecks
+- Identity framing — "do your best work", "continue with care and discernment"
+- Calm authority — stakes stated once, accurately, without drama
 
-- Anthropic's prompt engineering documentation
-- `docs/references/anthropic-skills-guide.pdf` — Anthropic's official skills guide
-- `bridge/observer.py` — Observer system prompt (live example)
-- `config/SOUL.md` — Valor persona philosophy (complementary to prompting principles)
+**Patterns that will age poorly:**
+- Urgency theater — ALL CAPS, threats, and pressure signals
+- Format pressure as motivation (`{ respond in JSON }` as a coaching instruction)
+- Purely mechanical scripts ("invoke /do-test to run the test suite")
+- Prompts that assume the model needs to be tricked into performing
+
+---
+
+## 5. Quick Reference
+
+### System Prompt Checklist
+- [ ] Role statement that assumes competence and scopes the agent's identity
+- [ ] Explicit permission zones: autonomous decisions, flag-and-wait decisions, hard stops
+- [ ] Success criteria: what does good output look like at each stage?
+- [ ] Escalation channel: narrow opening for genuine critical questions
+- [ ] Stakes stated once, calmly
+
+### Coaching Message Checklist
+- [ ] Acknowledge the work just completed
+- [ ] Name the next stage and relevant skill/tool
+- [ ] State what success looks like at that stage
+- [ ] Affirm autonomy ("with discernment", "doing your best work")
+- [ ] Reopen escalation channel only if the next stage warrants it
+
+### Single-Sentence Test
+Before sending any prompt or coaching message, ask: *does this treat the model as a competent agent or as a machine that needs to be coerced?* If the latter — rewrite it.
+
+---
+
+*Yudame AI Engineering · Internal Reference · March 2026*
