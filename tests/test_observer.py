@@ -10,6 +10,7 @@ import pytest
 
 from bridge.observer import Observer
 from bridge.stage_detector import STAGE_ORDER, apply_transitions, detect_stages
+from config.models import HAIKU
 from models.agent_session import SDLC_STAGES
 
 # ============================================================================
@@ -733,8 +734,13 @@ class TestObserverSteersStatusUpdates:
     status update mid-pipeline. Each test simulates a real-world scenario
     where the agent explains its plan and stops before executing.
 
-    Uses real Anthropic API calls — no mocked LLM responses.
+    Uses real Anthropic API calls with Haiku — if decisions are correct at
+    lower intelligence, they'll be even more robust with Sonnet in production.
     """
+
+    # All integration tests use Haiku as a floor test for decision quality.
+    # Production runs Sonnet for better nuance with real-world edge cases.
+    MODEL = HAIKU
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("stage", ["PLAN", "BUILD", "PATCH", "TEST", "REVIEW", "DOCS"])
@@ -754,6 +760,7 @@ class TestObserverSteersStatusUpdates:
             auto_continue_count=0,
             send_cb=None,
             enqueue_fn=None,
+            model=self.MODEL,
         )
 
         decision = await observer.run()
@@ -795,6 +802,7 @@ class TestObserverSteersStatusUpdates:
             auto_continue_count=0,
             send_cb=None,
             enqueue_fn=None,
+            model=self.MODEL,
         )
 
         decision = await observer.run()
@@ -819,6 +827,7 @@ class TestObserverSteersStatusUpdates:
             auto_continue_count=0,
             send_cb=None,
             enqueue_fn=None,
+            model=self.MODEL,
         )
 
         decision = await observer.run()
@@ -849,6 +858,7 @@ class TestObserverSteersStatusUpdates:
             auto_continue_count=10,  # At the cap
             send_cb=None,
             enqueue_fn=None,
+            model=self.MODEL,
         )
 
         decision = await observer.run()
@@ -878,6 +888,7 @@ class TestObserverSteersStatusUpdates:
             auto_continue_count=3,  # At the non-SDLC cap
             send_cb=None,
             enqueue_fn=None,
+            model=self.MODEL,
         )
 
         decision = await observer.run()
@@ -911,6 +922,7 @@ class TestObserverSteersStatusUpdates:
             auto_continue_count=2,
             send_cb=None,
             enqueue_fn=None,
+            model=self.MODEL,
         )
 
         decision = await observer.run()
@@ -942,6 +954,7 @@ class TestObserverSteersStatusUpdates:
             auto_continue_count=1,
             send_cb=None,
             enqueue_fn=None,
+            model=self.MODEL,
         )
 
         decision = await observer.run()
@@ -974,6 +987,7 @@ class TestObserverSteersStatusUpdates:
             auto_continue_count=5,
             send_cb=None,
             enqueue_fn=None,
+            model=self.MODEL,
         )
 
         decision = await observer.run()

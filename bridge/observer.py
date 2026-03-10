@@ -211,12 +211,15 @@ class Observer:
         auto_continue_count: int,
         send_cb,
         enqueue_fn,
+        *,
+        model: str | None = None,
     ):
         self.session = session
         self.worker_output = worker_output
         self.auto_continue_count = auto_continue_count
         self.send_cb = send_cb
         self.enqueue_fn = enqueue_fn
+        self.model = model or SONNET
         self._decision_made = False
         self._action_taken: str | None = None
 
@@ -378,7 +381,7 @@ class Observer:
             # Tool-use loop with iteration cap
             for iteration in range(MAX_TOOL_ITERATIONS):
                 response = client.messages.create(
-                    model=SONNET,
+                    model=self.model,
                     max_tokens=1024,
                     system=OBSERVER_SYSTEM_PROMPT,
                     messages=messages,
