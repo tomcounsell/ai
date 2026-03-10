@@ -90,6 +90,8 @@ def start_transcript(
                 s.classification_type = classification_type
             if chat_id is not None:
                 s.chat_id = str(chat_id)
+            if correlation_id:
+                s.correlation_id = correlation_id
             s.save()
             # Log lifecycle transition
             try:
@@ -114,6 +116,7 @@ def start_transcript(
                 branch_name=branch_name,
                 work_item_slug=work_item_slug,
                 classification_type=classification_type,
+                correlation_id=correlation_id,
             )
             # Log lifecycle transition
             try:
