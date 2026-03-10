@@ -397,6 +397,15 @@ def _recover_interrupted_jobs(project_key: str) -> int:
     """
     running_jobs = list(AgentSession.query.filter(project_key=project_key, status="running"))
     if not running_jobs:
+        # Even with no running jobs, clean up stale checkpoints on startup
+        try:
+            from agent.checkpoint import cleanup_old_checkpoints
+
+            cleaned = cleanup_old_checkpoints(max_age_days=7)
+            if cleaned:
+                logger.info(f"[{project_key}] Startup: cleaned {len(cleaned)} stale checkpoint(s)")
+        except Exception as e:
+            logger.warning(f"[{project_key}] Stale checkpoint cleanup failed: {e}")
         return 0
 
     count = len(running_jobs)
@@ -412,6 +421,16 @@ def _recover_interrupted_jobs(project_key: str) -> int:
         fields["priority"] = "high"
         new_job = AgentSession.create(**fields)
         logger.info(f"[{project_key}] Recovered job {old_id} -> {new_job.job_id}")
+
+    # Clean up stale checkpoints on startup
+    try:
+        from agent.checkpoint import cleanup_old_checkpoints
+
+        cleaned = cleanup_old_checkpoints(max_age_days=7)
+        if cleaned:
+            logger.info(f"[{project_key}] Startup: cleaned {len(cleaned)} stale checkpoint(s)")
+    except Exception as e:
+        logger.warning(f"[{project_key}] Stale checkpoint cleanup failed: {e}")
 
     logger.warning(f"[{project_key}] Recovered {count} interrupted job(s)")
     return count
@@ -1465,6 +1484,17 @@ async def _execute_job(job: Job) -> None:
         except Exception as e:
             logger.warning(f"[{job.project_key}] Failed to auto-mark session done: {e}")
 
+        # Clean up checkpoint after successful completion
+        slug = job.work_item_slug
+        if slug:
+            try:
+                from agent.checkpoint import delete_checkpoint
+
+                delete_checkpoint(slug)
+                logger.info(f"[{job.project_key}] Deleted checkpoint for completed slug {slug!r}")
+            except Exception as e:
+                logger.warning(f"[{job.project_key}] Checkpoint cleanup failed for {slug!r}: {e}")
+
         # Save session snapshot on successful completion
         save_session_snapshot(
             session_id=job.session_id,
@@ -1579,11 +1609,33 @@ def check_revival(project_key: str, working_dir: str, chat_id: str) -> dict | No
     if state.active_plan:
         plan_context = get_plan_context(state.active_plan)
 
+    # Load checkpoint if available for richer revival context
+    checkpoint_context = ""
+    try:
+        from agent.checkpoint import build_compact_context, load_checkpoint
+
+        # Try to extract slug from branch name (session/{slug})
+        branch_name = branches[0]
+        slug_candidate = (
+            branch_name.replace("session/", "", 1) if branch_name.startswith("session/") else None
+        )
+        if slug_candidate:
+            checkpoint = load_checkpoint(slug_candidate)
+            if checkpoint:
+                checkpoint_context = build_compact_context(checkpoint)
+                logger.info(
+                    f"[{project_key}] Loaded checkpoint for revival: "
+                    f"slug={slug_candidate}, completed={checkpoint.completed_stages}"
+                )
+    except Exception as e:
+        logger.warning(f"[{project_key}] Checkpoint load during revival check failed: {e}")
+
     return {
         "branch": branches[0],
         "all_branches": branches,
         "has_uncommitted": state.has_uncommitted_changes,
         "plan_context": plan_context[:200] if plan_context else "",
+        "checkpoint_context": checkpoint_context,
     }
 
 
@@ -1605,10 +1657,22 @@ async def queue_revival_job(
     Returns queue depth.
     """
     revival_text = f"Continue the unfinished work on branch `{revival_info['branch']}`."
+
+    # Include checkpoint context if available (provides completed stages and artifacts)
+    checkpoint_ctx = revival_info.get("checkpoint_context", "")
+    if checkpoint_ctx:
+        revival_text += f"\n\n{checkpoint_ctx}"
+
     if additional_context:
         revival_text += (
             f"\n\nAsked user whether to resume and user responded with: {additional_context}"
         )
+
+    # Extract slug from branch name for work_item_slug propagation
+    branch = revival_info.get("branch", "")
+    work_item_slug = None
+    if branch.startswith("session/"):
+        work_item_slug = branch.replace("session/", "", 1)
 
     return await enqueue_job(
         project_key=revival_info["project_key"],
@@ -1620,6 +1684,7 @@ async def queue_revival_job(
         message_id=message_id,
         priority="low",
         revival_context=additional_context,
+        work_item_slug=work_item_slug,
     )
 
 

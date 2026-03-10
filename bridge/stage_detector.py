@@ -169,6 +169,10 @@ def apply_transitions(session, transitions: list[dict[str, str]]) -> int:
     get_stage_progress() determines stage status. Only writes entries
     for stages that haven't already been recorded.
 
+    When a stage transitions to "completed" and the session has a
+    work_item_slug, a checkpoint is saved automatically so interrupted
+    sessions can resume from the last completed stage.
+
     Args:
         session: AgentSession instance (must have append_history method)
         transitions: List of transitions from detect_stages()
@@ -224,7 +228,65 @@ def apply_transitions(session, transitions: list[dict[str, str]]) -> int:
                 record_stage_transition(sid, cid, stage, current_status, new_status)
             except Exception:
                 logger.debug(f"[stage-detector] Telemetry recording failed for {stage}")
+
+            # Save checkpoint on stage completion for sessions with a slug
+            if new_status == "completed":
+                _save_stage_checkpoint(session, stage)
+
         except Exception as e:
             logger.error(f"[stage-detector] Failed to apply {stage} -> {new_status}: {e}")
 
     return applied
+
+
+def _save_stage_checkpoint(session, stage: str) -> None:
+    """Save a pipeline checkpoint after a stage completes.
+
+    Only fires for sessions with a work_item_slug. Loads the existing
+    checkpoint (or creates a new one), records the stage completion with
+    any relevant artifacts extracted from the session, and persists it.
+
+    Args:
+        session: AgentSession instance.
+        stage: The stage that just completed.
+    """
+    slug = getattr(session, "work_item_slug", None)
+    if not slug:
+        return
+
+    try:
+        from agent.checkpoint import (
+            PipelineCheckpoint,
+            load_checkpoint,
+            record_stage_completion,
+            save_checkpoint,
+        )
+
+        checkpoint = load_checkpoint(slug)
+        if checkpoint is None:
+            checkpoint = PipelineCheckpoint(
+                session_id=getattr(session, "session_id", "unknown"),
+                slug=slug,
+            )
+
+        # Extract artifacts from session links
+        artifacts: dict[str, str] = {}
+        for attr, key in [
+            ("issue_url", "issue_url"),
+            ("pr_url", "pr_url"),
+            ("plan_url", "plan_path"),
+            ("branch_name", "branch"),
+        ]:
+            val = getattr(session, attr, None)
+            if val:
+                artifacts[key] = str(val)
+
+        record_stage_completion(checkpoint, stage, artifacts=artifacts or None)
+        save_checkpoint(checkpoint)
+        logger.info(
+            f"[stage-detector] Saved checkpoint for slug {slug!r} "
+            f"after {stage} completion (completed: {checkpoint.completed_stages})"
+        )
+    except Exception as e:
+        # Checkpoint save is best-effort — never block stage detection
+        logger.warning(f"[stage-detector] Failed to save checkpoint for slug {slug!r}: {e}")
