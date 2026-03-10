@@ -1,9 +1,5 @@
 ---
-<<<<<<< HEAD
 status: Completed
-=======
-status: Ready
->>>>>>> c823aa9c (Restore prompt-summary logging with correlation_id prefix)
 type: bug
 appetite: Small
 owner: Valor
