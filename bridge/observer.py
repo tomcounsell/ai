@@ -21,6 +21,7 @@ from typing import Any
 
 import anthropic
 
+from agent.context_modes import build_steering_context
 from agent.job_queue import MAX_AUTO_CONTINUES, MAX_AUTO_CONTINUES_SDLC
 from bridge.stage_detector import apply_transitions, detect_stages
 from bridge.summarizer import extract_artifacts
@@ -266,6 +267,7 @@ class Observer:
             "artifacts": artifacts,
             "context_summary": self.session.context_summary,
             "expectations": self.session.expectations,
+            "steering_context": build_steering_context(self.session),
         }
 
     def _handle_update_session(

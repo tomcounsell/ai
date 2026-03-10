@@ -39,6 +39,29 @@ Extract the session ID for progress tracking. The bridge injects a line like `SE
 
 **Pass SESSION_ID to every sub-skill invocation** by including `SESSION_ID: $SESSION_ID` in the prompt text when invoking sub-skills (do-plan, do-build, do-test, etc.). This ensures progress tracking flows through the entire pipeline.
 
+## Step 0.75: Context Fidelity
+
+Before invoking each sub-skill, build right-sized context using `agent/context_modes.py`. Each skill declares its `context_fidelity` in its SKILL.md frontmatter. Use the following to generate compressed context:
+
+```bash
+# Read the next skill's context fidelity mode
+python -c "from agent.context_modes import get_context_mode; print(get_context_mode('.claude/skills/{next_skill}/SKILL.md'))"
+```
+
+Then build context for the skill:
+```bash
+# For compact mode (most skills): includes plan summary, links, stage progress
+python -c "
+from agent.context_modes import build_compact_context
+from models.agent_session import AgentSession
+sessions = list(AgentSession.query.filter(session_id='$SESSION_ID'))
+if sessions:
+    print(build_compact_context(sessions[0], plan_path='docs/plans/{slug}.md'))
+"
+```
+
+Include the generated context in the prompt when invoking each sub-skill. This ensures sub-agents receive only the context they need (~800 tokens for compact vs 50k+ for full). If context generation fails, fall back to passing the issue URL and plan path directly.
+
 ## Step 1: Ensure a GitHub Issue Exists
 
 If an issue number was provided, fetch it:
