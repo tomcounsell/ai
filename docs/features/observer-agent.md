@@ -8,14 +8,25 @@ The Observer Agent replaces the fragmented classifier/coach/routing chain with a
 Worker stops
     |
     v
+Typed Outcome Parser (deterministic, no LLM)
+    |  extracts <!-- OUTCOME {...} --> block if present
+    |  returns SkillOutcome or None
+    v
 Stage Detector (deterministic, no LLM)
     |  parses transcript for /do-* skill invocations
     |  marks stages in_progress or completed
+    |  cross-checks against typed outcome if available
+    v
+Typed Outcome Routing (deterministic, no LLM)
+    |  if outcome.status == "success" + stages remain → STEER
+    |  if outcome.status == "success" + all done → DELIVER
+    |  if outcome.status == "fail" → DELIVER with failure context
+    |  if no outcome or ambiguous status → fall through to Observer
     v
 Observer Agent (Sonnet in production, configurable for testing)
     |  reads AgentSession state
     |  reads queued steering messages
-    |  makes judgment call
+    |  makes judgment call (LLM-based)
     |
     +-- STEER: enqueue continuation with coaching message
     |          (identity-affirming, with concrete success criteria)
@@ -35,6 +46,8 @@ The stage detector (`bridge/stage_detector.py`) is a pure function with no side 
 
 2. **Completion markers** (secondary signal): Regex matches for stage-specific evidence (e.g., `github.com/.../issues/123` for ISSUE, `42 passed` for TEST).
 
+3. **Typed outcome cross-check** (validation signal): When a `SkillOutcome` is available (see [Typed Skill Outcomes](typed-skill-outcomes.md)), `apply_transitions()` cross-checks it against regex detections. If the outcome says "success" but regex didn't detect completion, a warning is logged. If the outcome says "fail" but regex detected completion, the typed outcome takes priority.
+
 ### Pipeline Order
 
 ```
@@ -46,7 +59,7 @@ ISSUE -> PLAN -> BUILD -> TEST -> REVIEW -> DOCS
 | Function | Purpose |
 |----------|---------|
 | `detect_stages(transcript)` | Pure function: returns list of `{stage, status, reason}` transitions |
-| `apply_transitions(session, transitions)` | Writes transitions to `AgentSession.history` entries, skipping duplicates |
+| `apply_transitions(session, transitions, outcome=None)` | Writes transitions to `AgentSession.history` entries, skipping duplicates. When a `SkillOutcome` is provided, cross-checks it against regex detections and logs warnings on mismatches. |
 
 ## Observer Decision Framework
 
@@ -119,11 +132,13 @@ These were removed from the routing path. See [Coaching Loop](coaching-loop.md) 
 
 | File | Purpose |
 |------|---------|
-| `bridge/observer.py` | Observer Agent class, system prompt, tool definitions |
-| `bridge/stage_detector.py` | Deterministic stage detection (pure function) |
-| `agent/job_queue.py` | `send_to_chat()` wiring -- invokes stage detector then Observer |
+| `bridge/observer.py` | Observer Agent class, system prompt, tool definitions, typed outcome routing |
+| `bridge/stage_detector.py` | Deterministic stage detection (pure function) with typed outcome cross-check |
+| `agent/skill_outcome.py` | `SkillOutcome` dataclass, `parse_outcome_from_text()`, `format_outcome()` — see [Typed Skill Outcomes](typed-skill-outcomes.md) |
+| `agent/job_queue.py` | `send_to_chat()` wiring -- invokes outcome parser, stage detector, then Observer |
 | `models/agent_session.py` | `AgentSession` with stage progress, steering queue, links |
 | `tests/test_observer.py` | 46 tests: 33 unit (stage detector, Observer tools, fallback) + 13 integration (real API with Haiku floor test) |
+| `tests/unit/test_skill_outcome.py` | 34 unit tests for SkillOutcome parsing, serialization, and edge cases |
 
 ## Testing Strategy
 
