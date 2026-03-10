@@ -63,9 +63,26 @@ Stages are rendered as plain text names joined with ` → `. Position relative t
 
 No checkbox icons are used. The ISSUE stage label includes the issue number when available from session links (e.g., `ISSUE 243`). Plan links are excluded from the link footer — only issue and PR links are rendered.
 
+## Auto-Linkification of PR/Issue References
+
+`_linkify_references(text, session)` converts plain `PR #N` and `Issue #N` patterns in the composed summary into clickable markdown links. This acts as a safety net that ensures links always appear, regardless of whether session progress tracking stored the URLs first.
+
+**How it works:**
+1. Reads `project_key` from the session object
+2. Looks up the GitHub org/repo from the registered project config via `get_project_config()`
+3. Applies regex replacement: `PR #123` becomes `[PR #123](https://github.com/org/repo/pull/123)`
+4. Similarly for `Issue #N` patterns
+
+**Safeguards:**
+- Negative lookbehind `(?<!\[)` prevents double-linking text already inside markdown `[...]` syntax
+- Graceful fallback: missing project_key, missing GitHub config, or no session returns text unchanged
+- This is additive -- `_render_link_footer()` continues to work as the canonical link source for SDLC jobs
+
+**Called from:** `_compose_structured_summary()`, applied to the final joined text just before return.
+
 ## Implementation
 
-- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer), `_parse_summary_and_questions()` (question extractor), `_render_stage_progress()`, `_render_link_footer()`
+- `bridge/summarizer.py`: `summarize_response()` (always-summarize entry point), `_strip_process_narration()` (pre-summarization cleanup), `_compose_structured_summary()` (template renderer), `_parse_summary_and_questions()` (question extractor), `_render_stage_progress()`, `_render_link_footer()`, `_linkify_references()` (auto-link PR/Issue refs)
 - `bridge/response.py`: Always calls summarizer for non-empty text, passes `AgentSession` via `session=` kwarg
 - `bridge/telegram_bridge.py`: `_send` callback accepts and forwards `session` parameter
 - `agent/job_queue.py`: `SendCallback` type includes session parameter, `send_to_chat()` passes `agent_session`
