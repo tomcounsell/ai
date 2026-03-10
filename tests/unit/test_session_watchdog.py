@@ -10,6 +10,7 @@ import pytest
 from popoto.exceptions import ModelException
 
 from monitoring.session_watchdog import (
+    _compute_stall_backoff,
     assess_session_health,
     check_all_sessions,
     detect_error_cascade,
@@ -402,3 +403,68 @@ class TestCheckAllSessionsModelException:
         assert session.status == "active"
         # Error should have been logged
         assert any("Error handling session" in e for e in logged_errors)
+
+
+# ---------------------------------------------------------------------------
+# _compute_stall_backoff tests
+# ---------------------------------------------------------------------------
+
+
+class TestComputeStallBackoff:
+    """Tests for _compute_stall_backoff, including non-int input handling."""
+
+    def test_plain_int_input(self):
+        """Normal int input returns expected backoff."""
+        result = _compute_stall_backoff(0)
+        assert result == 10.0  # STALL_BACKOFF_BASE * 2^0 = 10
+
+        result = _compute_stall_backoff(1)
+        assert result == 20.0  # 10 * 2^1 = 20
+
+        result = _compute_stall_backoff(2)
+        assert result == 40.0  # 10 * 2^2 = 40
+
+    def test_none_input(self):
+        """None is treated as 0."""
+        result = _compute_stall_backoff(None)
+        assert result == 10.0
+
+    def test_negative_input(self):
+        """Negative values are clamped to 0."""
+        result = _compute_stall_backoff(-3)
+        assert result == 10.0
+
+    def test_field_like_object(self):
+        """Popoto Field-like object that supports int() is coerced correctly.
+
+        This is the bug case: session.retry_count may return a Field object
+        instead of a plain int. The Field object must be coercible via int().
+        """
+
+        class FakeField:
+            """Mimics a Popoto Field(type=int, default=0) that wraps a value."""
+
+            def __init__(self, value):
+                self._value = value
+
+            def __int__(self):
+                return self._value
+
+            def __eq__(self, other):
+                return self._value == other
+
+            def __bool__(self):
+                return bool(self._value)
+
+        # Passes a Field-like object wrapping 2 -- previously caused TypeError
+        result = _compute_stall_backoff(FakeField(2))
+        assert result == 40.0  # 10 * 2^2
+
+        # Field wrapping 0
+        result = _compute_stall_backoff(FakeField(0))
+        assert result == 10.0
+
+    def test_backoff_capped_at_max(self):
+        """Large retry counts are capped at STALL_BACKOFF_MAX."""
+        result = _compute_stall_backoff(100)
+        assert result == 300.0  # STALL_BACKOFF_MAX
