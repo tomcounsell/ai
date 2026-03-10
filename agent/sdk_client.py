@@ -111,7 +111,7 @@ WORKER_RULES = """\
 ## Worker Safety Rails
 
 Execute the task given to you. The Observer Agent controls pipeline progression — \
-you do not need to manage stages or invoke /sdlc yourself.
+you do not need to manage stages or orchestrate the pipeline yourself.
 
 ### Hard rules:
 
