@@ -76,13 +76,42 @@ git branch -a | grep session/
 gh pr list --search "#{issue_number}" --state open
 ```
 
+## Step 2.5: Check Goal Gates Before Advancing
+
+Before dispatching a sub-skill (Step 3), run a gate check to verify the previous stage actually completed. Gates are deterministic — file existence, PR existence, exit codes. No LLM judgment.
+
+```bash
+# Run gate check for the stage you're about to leave
+python -c "
+from agent.goal_gates import check_gate
+from pathlib import Path
+result = check_gate('{STAGE}', '{slug}', Path('.'))
+print(f'Gate {\"PASSED\" if result.satisfied else \"FAILED\"}: {result.evidence}')
+if result.missing:
+    print(f'Missing: {result.missing}')
+"
+```
+
+| Previous Stage | Gate Check | What it verifies |
+|----------------|-----------|-----------------|
+| PLAN | `check_gate('PLAN', slug, .)` | Plan doc exists at `docs/plans/{slug}.md` |
+| BUILD | `check_gate('BUILD', slug, .)` | PR exists for `session/{slug}` branch |
+| TEST | `check_gate('TEST', slug, ., session)` | TEST COMPLETED in session history |
+| REVIEW | `check_gate('REVIEW', slug, .)` | Review or review comment exists on PR |
+| DOCS | `check_gate('DOCS', slug, .)` | Feature doc exists or plan explicitly skips |
+
+**If a gate fails:**
+1. Re-invoke the sub-skill for that stage (e.g., gate PLAN fails → re-invoke `/do-plan`)
+2. After the sub-skill completes, re-check the gate
+3. Maximum 2 retries per gate — if still failing after 2 retries, escalate to human with the evidence
+
 ## Step 3: Pick Up From the Right Stage
 
 Based on the assessment, invoke ONE sub-skill and let it run:
 
 | State | What to invoke | Why |
 |-------|---------------|-----|
-| No plan exists | `/do-plan {slug}` referencing the issue | Can't build without a plan |
+| No plan exists | `/do-plan {slug}` referencing the issue | Can't build without a plan (gate: PLAN must pass before BUILD) |
 | Plan exists, no branch/PR | `/do-build` with the plan path or issue number | Plan is ready, time to implement |
 | Branch exists, tests failing | `/do-patch` then `/do-test` | Fix what's broken |
 | Branch exists, tests passing, no PR | `/do-pr-review` | Code is ready for review |
