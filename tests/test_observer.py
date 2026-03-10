@@ -742,8 +742,11 @@ class TestObserverSteersStatusUpdates:
         """Status update at each SDLC stage should be steered, not delivered."""
         session = _MockSessionForSteering(
             stage_progress=_STAGE_PROGRESS_FOR[stage],
-            history=[f"[stage] {s} COMPLETED" for s in ["ISSUE", "PLAN"] if
-                     _STAGE_PROGRESS_FOR[stage].get(s) == "completed"],
+            history=[
+                f"[stage] {s} COMPLETED"
+                for s in ["ISSUE", "PLAN"]
+                if _STAGE_PROGRESS_FOR[stage].get(s) == "completed"
+            ],
         )
         observer = Observer(
             session=session,
@@ -757,13 +760,12 @@ class TestObserverSteersStatusUpdates:
 
         assert decision["action"] == "steer", (
             f"Observer should STEER at {stage} stage with status update, "
-            f"but got {decision['action']}: {decision.get('reason', decision.get('coaching_message', ''))}"
+            f"but got {decision['action']}: "
+            f"{decision.get('reason', decision.get('coaching_message', ''))}"
         )
         # Coaching message should exist and be substantive
         coaching = decision.get("coaching_message", "")
-        assert len(coaching) > 10, (
-            f"Coaching message too short at {stage} stage: {coaching!r}"
-        )
+        assert len(coaching) > 10, f"Coaching message too short at {stage} stage: {coaching!r}"
 
     @pytest.mark.asyncio
     async def test_status_update_with_open_questions_delivered(self):
