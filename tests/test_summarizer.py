@@ -12,6 +12,7 @@ from bridge.summarizer import (
     _classify_with_heuristics,
     _compose_structured_summary,
     _get_status_emoji,
+    _linkify_references,
     _parse_classification_response,
     _parse_summary_and_questions,
     _render_link_footer,
@@ -1912,3 +1913,99 @@ class TestErrorStateRendering:
         assert "☑ PLAN" in result
         # Pending stages still show
         assert "☐ TEST" in result
+
+
+class TestLinkifyReferences:
+    """Unit tests for _linkify_references — converting plain PR/Issue refs to markdown links."""
+
+    def _make_session(self, project_key="valor"):
+        """Create a mock session with the given project_key."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.project_key = project_key
+        return session
+
+    def _register_config(self, project_key="valor", org="tomcounsell", repo="ai"):
+        """Register a project config with GitHub org/repo for testing."""
+        from agent.job_queue import register_project_config
+
+        register_project_config(
+            project_key,
+            {"github": {"org": org, "repo": repo}},
+        )
+
+    def test_pr_reference_linkified(self):
+        """PR #N is converted to a markdown link."""
+        self._register_config("psyoptimal", org="yudame", repo="psyoptimal")
+        session = self._make_session("psyoptimal")
+        result = _linkify_references("PR #323", session)
+        assert result == "[PR #323](https://github.com/yudame/psyoptimal/pull/323)"
+
+    def test_issue_reference_linkified(self):
+        """Issue #N is converted to a markdown link."""
+        self._register_config("valor", org="tomcounsell", repo="ai")
+        session = self._make_session("valor")
+        result = _linkify_references("Issue #309", session)
+        assert result == "[Issue #309](https://github.com/tomcounsell/ai/issues/309)"
+
+    def test_multiple_references(self):
+        """Multiple PR references in the same text are all linkified."""
+        self._register_config("valor", org="tomcounsell", repo="ai")
+        session = self._make_session("valor")
+        result = _linkify_references("PR #322 and PR #323", session)
+        assert "[PR #322](https://github.com/tomcounsell/ai/pull/322)" in result
+        assert "[PR #323](https://github.com/tomcounsell/ai/pull/323)" in result
+
+    def test_already_linked_not_doubled(self):
+        """Already-linked references inside markdown syntax are not double-linked."""
+        self._register_config("valor", org="tomcounsell", repo="ai")
+        session = self._make_session("valor")
+        text = "[PR #323](https://github.com/tomcounsell/ai/pull/323)"
+        result = _linkify_references(text, session)
+        assert result == text
+
+    def test_no_session_returns_unchanged(self):
+        """With session=None, text is returned unchanged."""
+        result = _linkify_references("PR #323", None)
+        assert result == "PR #323"
+
+    def test_no_project_key_returns_unchanged(self):
+        """Session without project_key returns text unchanged."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.project_key = None
+        result = _linkify_references("PR #323", session)
+        assert result == "PR #323"
+
+    def test_no_github_config_returns_unchanged(self):
+        """project_key exists but no GitHub config registered returns unchanged."""
+        from agent.job_queue import register_project_config
+
+        register_project_config("no-github", {"name": "No GitHub"})
+        session = self._make_session("no-github")
+        result = _linkify_references("PR #323", session)
+        assert result == "PR #323"
+
+    def test_mixed_pr_and_issue(self):
+        """Both PR #N and Issue #N in the same text are both linkified."""
+        self._register_config("valor", org="tomcounsell", repo="ai")
+        session = self._make_session("valor")
+        result = _linkify_references("Fixed PR #100 for Issue #200", session)
+        assert "[PR #100](https://github.com/tomcounsell/ai/pull/100)" in result
+        assert "[Issue #200](https://github.com/tomcounsell/ai/issues/200)" in result
+
+    def test_empty_text_returns_unchanged(self):
+        """Empty text is returned as-is."""
+        session = self._make_session("valor")
+        assert _linkify_references("", session) == ""
+
+    def test_empty_project_key_string_returns_unchanged(self):
+        """Session with empty string project_key returns text unchanged."""
+        from unittest.mock import MagicMock
+
+        session = MagicMock()
+        session.project_key = "   "
+        result = _linkify_references("PR #323", session)
+        assert result == "PR #323"
