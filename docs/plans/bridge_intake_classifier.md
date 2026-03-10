@@ -1,5 +1,5 @@
 ---
-status: Planning
+status: Ready
 type: feature
 appetite: Medium
 owner: Valor Engels
@@ -116,8 +116,9 @@ Run all checks: `python scripts/check_prerequisites.py docs/plans/bridge_intake_
 
 - **Classifier call is blocking (awaited)**: Unlike the current fire-and-forget `classify_request_async()`, the intake classifier must complete before routing. Cost: ~100-200ms (Haiku). This is acceptable because the reaction emoji is already set (👀) and the user knows the message was received.
 - **Session matching for interjections**: For non-reply interjections, find the most recent running/active session in the same chat. If multiple sessions exist, use recency. If no session exists, treat as `new_work`.
-- **Existing steering preserved**: The current reply-to-running-session check (line 802) stays as a fast path. The intake classifier runs only for messages that don't hit the fast path.
-- **Classification prompt includes context**: Pass the last few messages from the conversation to give Haiku context about whether this is a follow-up or new work.
+- **Runs on ALL messages**: The intake classifier runs on every message that passes `should_respond_async()`, not just replies. This catches the common pattern of sharing from other apps (no reply-to) or sending an image followed by a text message that should be grouped together.
+- **Existing steering preserved**: The current reply-to-running-session check (line 802) stays as a fast path. The intake classifier runs for messages that don't hit the fast path.
+- **Classification prompt includes context**: Pass session context_summary and expectations only. Do NOT include message history — keep the prompt lean.
 
 ## Failure Path Test Strategy
 
@@ -299,6 +300,8 @@ The bridge (`bridge/telegram_bridge.py`) calls the new classifier function direc
 - Test acknowledgment routing: "looks good" to dormant session → session marked complete
 - Test classifier failure: mock API error → message enqueued as normal
 - Test race condition: session completes during classification → message enqueued as normal
+- Test back-to-back messages: image sent, then text message seconds later → both routed to same active session as interjections
+- Test non-reply interjection: message sent without Telegram reply feature (e.g., shared from another app) → classified as interjection if active session exists
 
 ### 5. Documentation
 - **Task ID**: document-feature
@@ -331,10 +334,13 @@ The bridge (`bridge/telegram_bridge.py`) calls the new classifier function direc
 
 ---
 
-## Open Questions
+## Open Questions (Resolved)
 
-1. **Should the intake classifier run for ALL messages or only replied messages?** The issue says "every incoming message" but the practical value is mainly for replies to active sessions. Running on every message adds ~100-200ms latency to all message handling. Proposal: Run on all messages that pass `should_respond_async()`, but only route to interjection if an active session exists in the same chat. Otherwise, fast-path to `new_work`.
+1. **Should the intake classifier run for ALL messages or only replied messages?**
+   **Answer: Run on ALL messages.** The human often forgets to use the reply feature, or can't when sharing from other apps into Telegram. A common pattern: sending an image and then a text message back-to-back — these should go together and possibly be inserted into an existing session. Run on all messages that pass `should_respond_async()`, route to interjection if an active session exists in the same chat, otherwise fast-path to `new_work`.
 
-2. **What context to include in the classifier prompt?** Options range from just the message text (fast, cheap) to including the active session's context_summary + expectations + last few history entries (more accurate but larger prompt). Proposal: Include session context_summary and expectations if an active session exists. Skip conversation history for v1.
+2. **What context to include in the classifier prompt?**
+   **Answer: Session context_summary and expectations only. Do NOT include message history.** Keep the classifier prompt lean — summary + expectations is enough for intent classification.
 
-3. **Should acknowledgment handle thumbs-up reactions too?** Currently 👍 reactions are handled separately in the bridge. Should the intake classifier also catch text-based acknowledgments ("done", "looks good", "approved")? Proposal: Yes, classify text-based acknowledgments but only act on them for dormant sessions with expectations set.
+3. **Should acknowledgment handle thumbs-up reactions too?**
+   **Answer: No — reactions don't push through the bridge.** They can only be pulled. Disregard reaction handling until a polling system for reactions is built. Text-based acknowledgments ("done", "looks good") are still classified — but reactions are out of scope.
