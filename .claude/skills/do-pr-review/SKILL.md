@@ -142,6 +142,26 @@ For each requirement/acceptance criterion in the plan:
 4. Verify any "No-Gos" from the plan are respected
 5. If the plan has an Agent Integration section, verify integration points exist in the codebase (e.g., grep for expected tool calls, imports, or MCP references)
 
+### 4.5. Verification Checks (if plan has ## Verification table)
+
+If the plan document has a `## Verification` section with a machine-readable table, run each check automatically on the PR branch:
+
+```bash
+python -c "
+from agent.verification_parser import parse_verification_table, run_checks, format_results
+from pathlib import Path
+plan = Path('{PLAN_PATH}').read_text()
+checks = parse_verification_table(plan)
+if checks:
+    results = run_checks(checks)
+    print(format_results(results))
+else:
+    print('No verification table in plan.')
+"
+```
+
+Include the verification results in the review comment under a "Verification Results" section. If any check fails, classify it as a **blocker**.
+
 ### 5. Issue Identification & Classification
 
 **Severity Guidelines:**

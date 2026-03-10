@@ -293,6 +293,30 @@ If any criterion is not met, report the issue and do NOT proceed to the Document
 
 **Note**: Documentation validation happens AFTER review passes — see Step 6. The canonical pipeline order is: Plan → Branch → Implement → Test → Review → Document → PR. The patch loop re-enters at Test (for test failures) or Review (for review failures).
 
+### Step 5.1: Run Verification Checks from Plan
+
+If the plan has a `## Verification` section with a machine-readable table, extract and run each check automatically. This replaces manual validation judgment with deterministic pass/fail:
+
+```bash
+(cd .worktrees/{slug} && python -c "
+from agent.verification_parser import parse_verification_table, run_checks, format_results
+from pathlib import Path
+plan = Path('{PLAN_PATH}').read_text()
+checks = parse_verification_table(plan)
+if checks:
+    results = run_checks(checks)
+    print(format_results(results))
+    if not all(r.passed for r in results):
+        raise SystemExit(1)
+else:
+    print('No verification table found in plan -- skipping automated checks.')
+")
+```
+
+- **Exit 0**: All verification checks passed, proceed
+- **Exit 1**: Some checks failed -- trigger `/do-patch` with the specific failure context (check name, command, expected vs actual)
+- If the plan has no `## Verification` section, this step is a no-op
+
 ### Step 5.5: CWD Safety Reset
 
 Before running any orchestrator bash commands, verify the shell CWD is the main repo root (not inside a worktree). Run this as a sanity check:
