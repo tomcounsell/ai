@@ -473,6 +473,7 @@
 {% endif %}
 
 <!-- Navigation: Prev / Next -->
+<!-- preventDefault: Safari iPad races href navigation against HTMX XHR swap -->
 <div class="flex justify-between mt-8 pt-4 border-t border-gray-200">
   {% if current_step > 1 %}
   <a href="{% url 'podcast:episode_workflow' slug=podcast.slug episode_slug=episode.slug step=current_step|add:"-1" %}"
@@ -480,6 +481,7 @@
      hx-target="#workflow-step-content"
      hx-swap="innerHTML"
      hx-push-url="true"
+     hx-on:click="event.preventDefault()"
      class="inline-flex items-center gap-2 text-sm font-mono text-gray-600 hover:text-gray-900">
     <i class="fas fa-arrow-left"></i> Previous
   </a>
@@ -493,6 +495,7 @@
      hx-target="#workflow-step-content"
      hx-swap="innerHTML"
      hx-push-url="true"
+     hx-on:click="event.preventDefault()"
      class="inline-flex items-center gap-2 text-sm font-mono text-gray-600 hover:text-gray-900">
     Next <i class="fas fa-arrow-right"></i>
   </a>

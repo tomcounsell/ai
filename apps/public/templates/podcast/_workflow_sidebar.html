@@ -4,6 +4,7 @@
    hx-target="#workflow-step-content"
    hx-swap="innerHTML"
    hx-push-url="true"
+   hx-on:click="event.preventDefault()"
    class="block px-3 py-2 text-sm font-mono {% if phase.number == current_step %}bg-gray-100 text-gray-900{% else %}text-gray-600 hover:bg-gray-50{% endif %}">
   <span class="inline-block w-2 h-2 rounded-full mr-2
     {% if phase.status == 'complete' %}bg-green-500

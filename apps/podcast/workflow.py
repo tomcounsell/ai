@@ -274,9 +274,28 @@ class EpisodeWorkflowView(LoginRequiredMixin, UserPassesTestMixin, MainContentVi
         self._load_context(request, slug, episode_slug, step)
 
         if getattr(request, "htmx", False):
-            return self.render(
-                request, template_name="podcast/_workflow_step_content.html"
+            # Return step content + sidebar OOB swap so both update together.
+            # The sidebar needs to update its active-phase highlight when
+            # navigating between steps via HTMX partial swaps.
+            from django.template.loader import render_to_string
+
+            content_html = render_to_string(
+                "podcast/_workflow_step_content.html",
+                self.context,
+                request=request,
             )
+            sidebar_html = render_to_string(
+                "podcast/_workflow_sidebar.html",
+                self.context,
+                request=request,
+            )
+            combined = (
+                content_html
+                + '<div id="workflow-sidebar" hx-swap-oob="innerHTML">'
+                + sidebar_html
+                + "</div>"
+            )
+            return HttpResponse(combined)
 
         return self.render(request)
 
