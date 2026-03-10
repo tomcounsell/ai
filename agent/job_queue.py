@@ -174,6 +174,10 @@ class Job:
     def auto_continue_count(self) -> int:
         return self._rj.auto_continue_count or 0
 
+    @property
+    def correlation_id(self) -> str | None:
+        return self._rj.correlation_id
+
 
 # Fields to extract from AgentSession for delete-and-recreate pattern.
 # Excludes job_id (AutoKeyField, auto-generated on create).
@@ -267,6 +271,7 @@ async def _push_job(
     chat_id_for_enrichment: str | None = None,
     classification_type: str | None = None,
     auto_continue_count: int = 0,
+    correlation_id: str | None = None,
 ) -> int:
     """Create a job in Redis and return the pending queue depth for this project."""
     await AgentSession.async_create(
@@ -294,6 +299,7 @@ async def _push_job(
         chat_id_for_enrichment=chat_id_for_enrichment,
         classification_type=classification_type,
         auto_continue_count=auto_continue_count,
+        correlation_id=correlation_id,
     )
 
     # Log lifecycle transition for newly created pending job
@@ -806,6 +812,7 @@ async def enqueue_job(
     chat_id_for_enrichment: str | None = None,
     classification_type: str | None = None,
     auto_continue_count: int = 0,
+    correlation_id: str | None = None,
 ) -> int:
     """
     Add a job to Redis and ensure worker is running.
@@ -838,9 +845,11 @@ async def enqueue_job(
         chat_id_for_enrichment=chat_id_for_enrichment,
         classification_type=classification_type,
         auto_continue_count=auto_continue_count,
+        correlation_id=correlation_id,
     )
     _ensure_worker(project_key)
-    logger.info(f"[{project_key}] Enqueued job (priority={priority}, depth={depth})")
+    log_prefix = f"[{correlation_id}]" if correlation_id else f"[{project_key}]"
+    logger.info(f"{log_prefix} Enqueued job (priority={priority}, depth={depth})")
     return depth
 
 
@@ -1056,8 +1065,12 @@ async def _execute_job(job: Job) -> None:
         root_id = parts[-1] if "_" in job.session_id else job.message_id
         task_list_id = f"thread-{job.chat_id}-{root_id}"
 
+    # Read correlation_id from job for end-to-end tracing
+    cid = job.correlation_id
+    log_prefix = f"[{cid}]" if cid else f"[{job.project_key}]"
+
     logger.info(
-        f"[{job.project_key}] Executing job {job.job_id} "
+        f"{log_prefix} Executing job {job.job_id} "
         f"(session={job.session_id}, branch={branch_name}, cwd={working_dir})"
     )
 
@@ -1072,6 +1085,7 @@ async def _execute_job(job: Job) -> None:
             "job_id": job.job_id,
             "sender": job.sender_name,
             "message_preview": job.message_text[:200] if job.message_text else "",
+            "correlation_id": cid,
         },
         working_dir=str(working_dir),
     )

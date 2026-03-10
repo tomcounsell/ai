@@ -25,6 +25,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -913,6 +914,13 @@ async def main():
             yt_urls_json = json.dumps(youtube_urls) if youtube_urls else None
             non_yt_urls_json = json.dumps(non_youtube_urls) if non_youtube_urls else None
 
+            # Generate correlation ID for end-to-end request tracing
+            correlation_id = uuid.uuid4().hex[:12]
+            logger.info(
+                f"[{correlation_id}] Message received from {sender_name} "
+                f"in {chat_title or 'DM'} (session={session_id})"
+            )
+
             # Build and enqueue the job (HIGH priority — top of FILO stack)
             depth = await enqueue_job(
                 project_key=project_key,
@@ -933,6 +941,7 @@ async def main():
                 reply_to_msg_id=message.reply_to_msg_id,
                 chat_id_for_enrichment=telegram_chat_id,
                 classification_type=classification_result.get("type"),
+                correlation_id=correlation_id,
             )
             if depth > 1:
                 from bridge.markdown import send_markdown
