@@ -117,6 +117,16 @@ Now, `_has_prior_session(session_id)` queries the AgentSession Redis model to ch
 
 The check fails safe: if Redis is unavailable, `_has_prior_session()` returns False (don't continue), ensuring fresh sessions never accidentally inherit stale context.
 
+## History Truncation Warning
+
+Session history is capped at `HISTORY_MAX_ENTRIES` (currently 20) entries via `AgentSession.append_history()`. When a session exceeds this cap, the oldest entries are silently dropped to stay within the limit. A `WARNING`-level log message is emitted each time truncation occurs, including the original length and number of entries lost:
+
+```
+WARNING Session abc123 history truncated from 25 to 20, 5 oldest entries lost
+```
+
+This is particularly relevant for long-running SDLC sessions that may accumulate many lifecycle events. The warning enables operators to diagnose issues where early history (e.g., initial classification or stage transitions) is no longer available, without needing to reproduce the session.
+
 ## Auto-Continue and Session Scope
 
 The auto-continue system uses job re-enqueue rather than steering queue injection. When a status update triggers auto-continue, a new job is enqueued through the normal job queue with the same session context:
