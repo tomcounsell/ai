@@ -139,7 +139,7 @@ No agent integration required. This change is internal to the summarizer module.
 
 ## Documentation
 
-- [ ] Update `docs/features/telegram-summarizer.md` (if it exists) to document the auto-linkification behavior
+- [ ] Update `docs/features/summarizer-format.md` to document the auto-linkification behavior
 - [ ] Add inline docstring to the new function (included in the implementation above)
 
 ## Testing Strategy
