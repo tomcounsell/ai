@@ -831,6 +831,7 @@ async def get_agent_response_sdk(
     sender_id: int | None = None,
     workflow_id: str | None = None,
     task_list_id: str | None = None,
+    correlation_id: str | None = None,
 ) -> str:
     """
     Get agent response using Claude Agent SDK.
@@ -848,14 +849,19 @@ async def get_agent_response_sdk(
         sender_id: Telegram user ID (for permission checking)
         workflow_id: Optional 8-char workflow identifier for tracked work
         task_list_id: Optional task list ID to scope sub-agent Task storage
+        correlation_id: Optional end-to-end tracing ID from the bridge
 
     Returns:
         The assistant's response text
     """
     import time
+    import uuid
 
     start_time = time.time()
-    request_id = f"{session_id}_{int(start_time)}"
+    # Use correlation_id as primary log prefix; fall back to request_id
+    if not correlation_id:
+        correlation_id = uuid.uuid4().hex[:12]
+    request_id = correlation_id
 
     # Determine working directory based on work request classification
     project_name = project.get("name", "Valor") if project else "Valor"
