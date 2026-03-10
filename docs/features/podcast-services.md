@@ -320,7 +320,7 @@ result = produce_episode.enqueue(episode_id=42)
 |------|------------|-----------|
 | `produce_episode` | `setup.setup_episode` | `step_perplexity_research` |
 | `step_perplexity_research` | `research.run_perplexity_research` | `step_question_discovery` |
-| `step_question_discovery` | `analysis.discover_questions` | `step_gpt_research` + `step_gemini_research` + `step_together_research` + `step_claude_research` (parallel) |
+| `step_question_discovery` | auto-retries `research.run_perplexity_research` if no usable p2-* artifacts exist, then `analysis.discover_questions` | `step_gpt_research` + `step_gemini_research` + `step_together_research` + `step_claude_research` (parallel) |
 | `step_gpt_research` | `research.run_gpt_researcher` | _(signal fan-in)_ |
 | `step_gemini_research` | `research.run_gemini_research` | _(signal fan-in)_ |
 | `step_together_research` | `research.run_together_research` | _(signal fan-in)_ |

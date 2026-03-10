@@ -337,7 +337,7 @@ Django `@task`-per-step pipeline for autonomous episode production.
 
 **Entry point:** `produce_episode.enqueue(episode_id=42)`
 
-**Graceful degradation:** All research steps except OpenAI (GPT-Researcher) degrade gracefully. If API keys are missing or calls fail, the pipeline logs a warning, creates a "[SKIPPED: ...]" artifact, and continues with other research sources. Gemini quota errors (HTTP 429) are detected specifically with an actionable upgrade message. Claude research catches validation and API errors. Perplexity and Together AI skip when keys are missing.
+**Graceful degradation:** All research steps except OpenAI (GPT-Researcher) degrade gracefully. If API keys are missing or calls fail, the pipeline logs a warning, creates a "[SKIPPED: ...]" artifact, and continues with other research sources. Gemini quota errors (HTTP 429) are detected specifically with an actionable upgrade message. Claude research catches validation and API errors. Perplexity and Together AI skip when keys are missing. Additionally, `step_question_discovery` auto-retries Perplexity research if no usable p2-* artifacts exist (all empty or SKIPPED), so Phase 3 self-heals without manual intervention.
 
 ### Models
 

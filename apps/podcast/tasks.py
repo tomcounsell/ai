@@ -191,6 +191,24 @@ def step_question_discovery(episode_id: int) -> None:
     """
     _acquire_step_lock(episode_id, "Question Discovery")
     try:
+        # If no usable p2-* research exists, re-run Perplexity first
+        has_research = (
+            EpisodeArtifact.objects.filter(
+                episode_id=episode_id, title__startswith="p2-"
+            )
+            .exclude(content="")
+            .exclude(content__startswith="[SKIPPED:")
+            .exists()
+        )
+        if not has_research:
+            logger.info(
+                "step_question_discovery: no usable p2-* research for episode %d, "
+                "re-running Perplexity research first",
+                episode_id,
+            )
+            artifact = analysis.craft_research_prompt(episode_id, "perplexity")
+            research.run_perplexity_research(episode_id, prompt=artifact.content)
+
         analysis.discover_questions(episode_id)
         # Generate targeted prompts and create placeholder artifacts
         # before advancing, so prompts are available as artifacts

@@ -64,6 +64,148 @@ class _BaseTestCase(TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Phase 3: Question Discovery — auto-retry when no usable research
+# ---------------------------------------------------------------------------
+
+
+class TestStepQuestionDiscoveryAutoRetry(_BaseTestCase):
+    """Tests for the auto-retry path in step_question_discovery.
+
+    When no usable p2-* research artifacts exist (all empty or SKIPPED),
+    the step should re-run Perplexity research before proceeding.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.workflow = _make_workflow(
+            self.episode, "Question Discovery", prev_step="Perplexity Research"
+        )
+
+    @patch("apps.podcast.tasks.step_claude_research")
+    @patch("apps.podcast.tasks.step_together_research")
+    @patch("apps.podcast.tasks.step_gemini_research")
+    @patch("apps.podcast.tasks.step_gpt_research")
+    @patch("apps.podcast.services.analysis.craft_targeted_research_prompts")
+    @patch("apps.podcast.services.analysis.discover_questions")
+    @patch("apps.podcast.services.research.run_perplexity_research")
+    @patch("apps.podcast.services.analysis.craft_research_prompt")
+    def test_reruns_perplexity_when_only_skipped_research(
+        self,
+        mock_craft_prompt,
+        mock_perplexity,
+        mock_discover,
+        mock_targeted,
+        mock_gpt,
+        mock_gemini,
+        mock_together,
+        mock_claude,
+    ):
+        """When only SKIPPED p2-* artifacts exist, re-runs Perplexity first."""
+        # Create a skipped artifact — should not count as usable
+        EpisodeArtifact.objects.create(
+            episode=self.episode,
+            title="p2-perplexity",
+            content="[SKIPPED: Perplexity returned no content]",
+        )
+
+        mock_craft_prompt.return_value = MagicMock(content="research prompt text")
+        mock_perplexity.return_value = MagicMock()
+        mock_discover.return_value = MagicMock()
+        mock_targeted.return_value = None
+        for m in (mock_gpt, mock_gemini, mock_together, mock_claude):
+            m.enqueue = MagicMock()
+
+        from apps.podcast.tasks import step_question_discovery
+
+        step_question_discovery.call(self.episode.id)
+
+        # Should have called craft_research_prompt + run_perplexity_research
+        mock_craft_prompt.assert_called_once_with(self.episode.id, "perplexity")
+        mock_perplexity.assert_called_once_with(
+            self.episode.id, prompt="research prompt text"
+        )
+        mock_discover.assert_called_once_with(self.episode.id)
+
+    @patch("apps.podcast.tasks.step_claude_research")
+    @patch("apps.podcast.tasks.step_together_research")
+    @patch("apps.podcast.tasks.step_gemini_research")
+    @patch("apps.podcast.tasks.step_gpt_research")
+    @patch("apps.podcast.services.analysis.craft_targeted_research_prompts")
+    @patch("apps.podcast.services.analysis.discover_questions")
+    @patch("apps.podcast.services.research.run_perplexity_research")
+    def test_skips_retry_when_usable_research_exists(
+        self,
+        mock_perplexity,
+        mock_discover,
+        mock_targeted,
+        mock_gpt,
+        mock_gemini,
+        mock_together,
+        mock_claude,
+    ):
+        """When a valid p2-* artifact exists, does NOT re-run Perplexity."""
+        # Create a real artifact with content
+        EpisodeArtifact.objects.create(
+            episode=self.episode,
+            title="p2-perplexity",
+            content="Real research content about the topic.",
+        )
+
+        mock_discover.return_value = MagicMock()
+        mock_targeted.return_value = None
+        for m in (mock_gpt, mock_gemini, mock_together, mock_claude):
+            m.enqueue = MagicMock()
+
+        from apps.podcast.tasks import step_question_discovery
+
+        step_question_discovery.call(self.episode.id)
+
+        # Should NOT have called run_perplexity_research
+        mock_perplexity.assert_not_called()
+        mock_discover.assert_called_once_with(self.episode.id)
+
+    @patch("apps.podcast.tasks.step_claude_research")
+    @patch("apps.podcast.tasks.step_together_research")
+    @patch("apps.podcast.tasks.step_gemini_research")
+    @patch("apps.podcast.tasks.step_gpt_research")
+    @patch("apps.podcast.services.analysis.craft_targeted_research_prompts")
+    @patch("apps.podcast.services.analysis.discover_questions")
+    @patch("apps.podcast.services.research.run_perplexity_research")
+    @patch("apps.podcast.services.analysis.craft_research_prompt")
+    def test_reruns_perplexity_when_only_empty_research(
+        self,
+        mock_craft_prompt,
+        mock_perplexity,
+        mock_discover,
+        mock_targeted,
+        mock_gpt,
+        mock_gemini,
+        mock_together,
+        mock_claude,
+    ):
+        """When only empty-content p2-* artifacts exist, re-runs Perplexity."""
+        EpisodeArtifact.objects.create(
+            episode=self.episode,
+            title="p2-perplexity",
+            content="",
+        )
+
+        mock_craft_prompt.return_value = MagicMock(content="prompt")
+        mock_perplexity.return_value = MagicMock()
+        mock_discover.return_value = MagicMock()
+        mock_targeted.return_value = None
+        for m in (mock_gpt, mock_gemini, mock_together, mock_claude):
+            m.enqueue = MagicMock()
+
+        from apps.podcast.tasks import step_question_discovery
+
+        step_question_discovery.call(self.episode.id)
+
+        mock_craft_prompt.assert_called_once_with(self.episode.id, "perplexity")
+        mock_perplexity.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
 # Phase 6: Cross-Validation
 # ---------------------------------------------------------------------------
 
