@@ -78,9 +78,7 @@ def load_config() -> dict:
         if project_key not in projects:
             continue
         project = projects[project_key]
-        working_dir = project.get("working_directory") or defaults.get(
-            "working_directory"
-        )
+        working_dir = project.get("working_directory") or defaults.get("working_directory")
         if not working_dir:
             logger.error(
                 f"Project '{project_key}' has no working_directory and no default set. "
@@ -114,14 +112,10 @@ def build_group_to_project_map(config: dict) -> dict:
         for group in groups:
             group_lower = group.lower()
             if group_lower in group_map:
-                logger.warning(
-                    f"Group '{group}' is mapped to multiple projects, using first"
-                )
+                logger.warning(f"Group '{group}' is mapped to multiple projects, using first")
                 continue
             group_map[group_lower] = project
-            logger.info(
-                f"Mapping group '{group}' -> project '{project.get('name', project_key)}'"
-            )
+            logger.info(f"Mapping group '{group}' -> project '{project.get('name', project_key)}'")
 
     return group_map
 
@@ -360,26 +354,29 @@ def classify_work_request(message: str) -> str:
     # Fast path: already routed (slash commands)
     for prefix in _PASSTHROUGH_PREFIXES:
         if text_lower.startswith(prefix):
+            logger.info(f"[routing] Classified as passthrough (slash command): {text[:120]}")
             return "passthrough"
 
     # Fast path: short acknowledgments / continuation commands
     first_word = text_lower.split()[0] if text_lower.split() else ""
-    if (
-        first_word in _PASSTHROUGH_EXACT
-        or text_lower.rstrip("!.,") in _PASSTHROUGH_EXACT
-    ):
+    if first_word in _PASSTHROUGH_EXACT or text_lower.rstrip("!.,") in _PASSTHROUGH_EXACT:
+        logger.info(f"[routing] Classified as passthrough (acknowledgment): {text[:120]}")
         return "passthrough"
 
     # Fast path: issue references like "issue 123" or "#123"
     if re.match(r"^(?:issue\s+#?\d+|#\d+)$", text_lower):
+        logger.info(f"[routing] Classified as sdlc (issue reference): {text[:120]}")
         return "sdlc"
 
     # Use Ollama for nuanced classification with Haiku fallback
     try:
-        return _classify_work_request_llm(text)
+        result = _classify_work_request_llm(text)
+        logger.info(f"[routing] Classified as {result}: {text[:120]}")
+        return result
     except Exception as e:
         logger.warning(f"Work request classification failed: {e}")
         # Conservative default: treat as question (no SDLC overhead)
+        logger.info(f"[routing] Classified as question (fallback): {text[:120]}")
         return "question"
 
 
@@ -537,9 +534,7 @@ async def should_respond_async(
     # Must run before any early returns so is_reply_to_valor is set correctly
     if message.reply_to_msg_id:
         try:
-            replied_msg = await client.get_messages(
-                event.chat_id, ids=message.reply_to_msg_id
-            )
+            replied_msg = await client.get_messages(event.chat_id, ids=message.reply_to_msg_id)
             if replied_msg and replied_msg.out:  # .out means sent by us (Valor)
                 logger.debug("Reply to Valor detected - continuing session")
                 return True, True

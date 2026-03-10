@@ -680,7 +680,7 @@ async def main():
         if is_reply_to_valor and message.reply_to_msg_id:
             # Continue the session from the replied message
             session_id = f"tg_{project_key}_{event.chat_id}_{message.reply_to_msg_id}"
-            logger.debug(f"Session ID: {session_id} (continuation: True)")
+            logger.info(f"[routing] Session {session_id} (continuation=True)")
         else:
             # No reply-to: try semantic routing before creating a fresh session
             session_id = None
@@ -700,9 +700,11 @@ async def main():
                     if matched_id:
                         session_id = matched_id
                         logger.info(
-                            f"Semantic routing: matched session {session_id} "
+                            f"[routing] Semantic routing: matched session {session_id} "
                             f"(confidence: {confidence:.2f})"
                         )
+                    else:
+                        logger.info("[routing] Semantic routing: no_match")
             except Exception as e:
                 # Semantic routing failures are non-fatal — fall through
                 # to fresh session creation
@@ -711,7 +713,7 @@ async def main():
             if not session_id:
                 # Fresh session - use this message's ID as unique identifier
                 session_id = f"tg_{project_key}_{event.chat_id}_{message.id}"
-                logger.debug(f"Session ID: {session_id} (continuation: False)")
+                logger.info(f"[routing] Session {session_id} (continuation=False)")
 
         # === REACTION WORKFLOW ===
         # 1. 👀 Eyes = Message received/acknowledged

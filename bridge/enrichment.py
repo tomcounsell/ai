@@ -69,6 +69,9 @@ async def enrich_message(
         The enriched message text string.
     """
     enriched_text = message_text
+    failed_steps: list[str] = []
+    youtube_count = 0
+    link_count = 0
 
     # --- 1. Media processing ---
     if has_media and telegram_client and raw_media_message_id and chat_id:
@@ -77,9 +80,7 @@ async def enrich_message(
 
             # Fetch the original message object so we can process its media
             chat_id_int = int(chat_id)
-            msg_obj = await telegram_client.get_messages(
-                chat_id_int, ids=raw_media_message_id
-            )
+            msg_obj = await telegram_client.get_messages(chat_id_int, ids=raw_media_message_id)
             if msg_obj and msg_obj.media:
                 media_description, _media_files = await process_incoming_media(
                     telegram_client, msg_obj
@@ -94,6 +95,7 @@ async def enrich_message(
                     )
         except Exception as e:
             logger.warning(f"Enrichment: media processing failed: {e}")
+            failed_steps.append("media")
 
     # --- 2. YouTube URL transcription ---
     if youtube_urls:
@@ -101,12 +103,11 @@ async def enrich_message(
             from tools.link_analysis import process_youtube_urls_in_text
 
             parsed_urls = json.loads(youtube_urls)
+            youtube_count = len(parsed_urls)
             if parsed_urls:
                 # process_youtube_urls_in_text works on raw text containing URLs,
                 # so we pass the enriched_text which should contain the URLs.
-                yt_enriched, youtube_results = await process_youtube_urls_in_text(
-                    enriched_text
-                )
+                yt_enriched, youtube_results = await process_youtube_urls_in_text(enriched_text)
                 successful = sum(1 for r in youtube_results if r.get("success"))
                 if successful > 0:
                     enriched_text = yt_enriched
@@ -122,6 +123,7 @@ async def enrich_message(
                             )
         except Exception as e:
             logger.warning(f"Enrichment: YouTube processing failed: {e}")
+            failed_steps.append("youtube")
 
     # --- 3. Link summaries ---
     if non_youtube_urls:
@@ -129,6 +131,7 @@ async def enrich_message(
             from bridge.context import format_link_summaries, get_link_summaries
 
             parsed_urls = json.loads(non_youtube_urls)
+            link_count = len(parsed_urls)
             if parsed_urls:
                 # get_link_summaries expects the raw text to extract URLs from.
                 # Since we already have the URLs, we construct a text with them.
@@ -145,13 +148,13 @@ async def enrich_message(
                     enriched_text = (
                         f"{enriched_text}\n\n--- LINK SUMMARIES ---\n{link_summary_text}"
                     )
-                    logger.info(
-                        f"Enrichment: added {len(link_summaries)} link summaries"
-                    )
+                    logger.info(f"Enrichment: added {len(link_summaries)} link summaries")
         except Exception as e:
             logger.warning(f"Enrichment: link summary processing failed: {e}")
+            failed_steps.append("links")
 
     # --- 4. Reply chain context ---
+    reply_chain_count = 0
     if reply_to_msg_id and telegram_client and chat_id:
         try:
             from bridge.context import fetch_reply_chain, format_reply_chain
@@ -164,15 +167,27 @@ async def enrich_message(
                 max_depth=20,
             )
             if reply_chain:
+                reply_chain_count = len(reply_chain)
                 reply_chain_context = format_reply_chain(reply_chain)
                 if reply_chain_context:
-                    enriched_text = (
-                        f"{reply_chain_context}\n\nCURRENT MESSAGE:\n{enriched_text}"
-                    )
+                    enriched_text = f"{reply_chain_context}\n\nCURRENT MESSAGE:\n{enriched_text}"
                     logger.info(
-                        f"Enrichment: fetched reply chain with {len(reply_chain)} messages"
+                        f"Enrichment: fetched reply chain with {reply_chain_count} messages"
                     )
         except Exception as e:
             logger.warning(f"Enrichment: reply chain fetch failed: {e}")
+            failed_steps.append("reply_chain")
+
+    # Log a single enrichment summary line
+    has_media_result = "yes" if (has_media and telegram_client) else "no"
+    summary = (
+        f"[enrichment] Summary: media={has_media_result}, "
+        f"youtube={youtube_count}, links={link_count}, "
+        f"reply_chain={reply_chain_count} messages, "
+        f"result_length={len(enriched_text)}"
+    )
+    if failed_steps:
+        summary += f", failed_steps={','.join(failed_steps)}"
+    logger.info(summary)
 
     return enriched_text

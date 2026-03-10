@@ -147,6 +147,18 @@ def detect_stages(transcript: str) -> list[dict[str, str]]:
         )
     )
 
+    # Log detection summary
+    total_patterns = len(SKILL_TO_STAGE) + len(_COMPLETION_PATTERNS)
+    matched_list = [f"{t['stage']}={t['status']}" for t in transitions]
+    if transitions:
+        logger.info(f"[stage-detector] Checked {total_patterns} patterns, matched: {matched_list}")
+    # Log implicit completions specifically
+    for t in transitions:
+        if "Implicitly completed" in t.get("reason", ""):
+            logger.info(
+                f"[stage-detector] Implicitly completing {t['stage']} (reason: {t['reason'][:120]})"
+            )
+
     return transitions
 
 
@@ -178,10 +190,19 @@ def apply_transitions(session, transitions: list[dict[str, str]]) -> int:
 
         # Skip if already at or past the proposed status
         if current_status == "completed":
+            logger.info(
+                f"[stage-detector] Skipping {stage}->{new_status} (current: {current_status})"
+            )
             continue
         if current_status == "in_progress" and new_status == "in_progress":
+            logger.info(
+                f"[stage-detector] Skipping {stage}->{new_status} (current: {current_status})"
+            )
             continue
         if current_status == "failed":
+            logger.info(
+                f"[stage-detector] Skipping {stage}->{new_status} (current: {current_status})"
+            )
             continue
 
         # Write the stage entry
